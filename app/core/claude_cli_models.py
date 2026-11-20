@@ -71,19 +71,20 @@ _pin: contextvars.ContextVar[Any] = contextvars.ContextVar("claude_cli_models_pi
 
 @contextlib.contextmanager
 def pinned():
-    """Serve one Claude auth mode and one :func:`catalog` read for the block.
+    """Serve one Claude auth mode, sign-in and :func:`catalog` read for the block.
 
     A projection that reads them several times (the registry payload) would
     otherwise mix two accounts' lists, or a subscription's list with Cloud's
     metadata, if the owner switched midway. Yields the list (None when no
     list is served)."""
-    from app.core import claude_auth_mode
+    from app.core import claude_auth_mode, claude_cli_status
 
     current = _pin.get()
     if current is not _UNPINNED:
         yield current
         return
-    with claude_auth_mode.pinned_mode():
+    # The sign-in too: the list's account check and the payload's plan.
+    with claude_auth_mode.pinned_mode(), claude_cli_status.pinned_peek():
         snap = catalog()
         token = _pin.set(snap)
         try:

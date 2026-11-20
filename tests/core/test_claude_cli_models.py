@@ -12,6 +12,7 @@ import pytest
 
 from app.core import claude_auth_mode as _auth_mode
 from app.core import claude_cli_models as cm
+from app.core import claude_cli_status as _cli_status
 from app.core import model_registry as m
 from app.core.model_effort import effort_capabilities
 
@@ -19,6 +20,7 @@ _ALL = ["low", "medium", "high", "xhigh", "max"]
 # The unpatched functions, for tests that need the real pin-aware path.
 _REAL_CURRENT_MODE = _auth_mode.current_mode
 _REAL_CLAUDE_PAYLOAD = m._claude_payload
+_REAL_PEEK = _cli_status.peek
 
 
 def _entry(value, label, resolved, levels=_ALL, supports=True):
@@ -337,6 +339,35 @@ def test_a_mode_switch_mid_payload_never_mixes_subscription_rows_with_cloud(cli,
     payload = m.registry_payload()
     assert not any(e["value"].startswith("claude-") for e in payload["models"])
     assert payload["claude"]["auth_kind"] != "subscription"
+
+
+def test_an_account_switch_mid_payload_keeps_the_plan_and_list_together(cli, monkeypatch):
+    """Review R9-S1: the plan in the payload is the listed account's."""
+    from app.core import claude_cli_status
+
+    account_a = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="a@example.invalid",
+                                                  cli_version="2.1.325", plan="max")
+    account_b = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid",
+                                                  cli_version="2.1.325", plan="pro")
+    # The real pin-aware peek, over the module's cache.
+    monkeypatch.setattr(claude_cli_status, "peek", _REAL_PEEK)
+    monkeypatch.setattr(claude_cli_status, "_cached", account_a)
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        monkeypatch.setattr(claude_cli_status, "_cached", account_b)  # a saved-login switch lands
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    payload = m.registry_payload()
+    assert "claude-mythos-5-1" in {e["value"] for e in payload["models"]}
+    assert payload["claude"]["plan_type"] == "max"
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    payload = m.registry_payload()
+    assert "claude-mythos-5-1" not in {e["value"] for e in payload["models"]}
+    assert payload["claude"]["plan_type"] == "pro"
 
 
 def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch):
