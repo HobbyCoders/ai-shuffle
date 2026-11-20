@@ -17,15 +17,15 @@
 # the installer update the app runs itself, writes nothing.
 
 !include LogicLib.nsh
-!define NSIS_STARTUP_STAMP "resources\login-item-uninstall-v3"
-!define NSIS_STARTUP_GUARD_DIR "$LOCALAPPDATA\${APP_PACKAGE_NAME}"
-!define NSIS_STARTUP_GUARD "${NSIS_STARTUP_GUARD_DIR}\login-item-lock"
+!define NSIS_STARTUP_STAMP "resources\login-item-uninstall-v4"
+!define NSIS_STARTUP_MUTEX "Global\AIShuffle.Startup."
 # Private environment of the installer and its child uninstaller, never a user setting.
 !define NSIS_STARTUP_REPLACEMENT "AI_SHUFFLE_NSIS_STARTUP_REPLACEMENT"
 !define NSIS_STARTUP_RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 !define NSIS_STARTUP_APPROVAL_KEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
-!define NSIS_STARTUP_VALUE_NAME "com.hobbycoders.aishuffle.desktop"
+!define NSIS_STARTUP_VALUE_NAME "${APP_ID}"
 
+# The receipt is a brace-wrapped install GUID (38 characters) + LocalAppData.
 !macro shuffleReadStartupOwner DIRECTORY
   StrCpy $1 ""
   ClearErrors
@@ -34,6 +34,8 @@
     FileReadUTF16LE $0 $1
     FileClose $0
   ${endif}
+  StrCpy $2 $1 38
+  StrCpy $1 $1 "" 38
 !macroend
 
 !macro shuffleStartupRefuse MESSAGE
@@ -184,20 +186,24 @@
       Pop $0
     ${endif}
 
-    # Provision in app-owned LocalAppData, not the roaming profile root.
-    # Stamp only this user's installs, and only if opening the guard works.
     ${if} $installMode == "CurrentUser"
-      CreateDirectory "${NSIS_STARTUP_GUARD_DIR}"
-      System::Call 'kernel32::CreateFileW(w "${NSIS_STARTUP_GUARD}", i 0x80000000, i 7, p 0, i 4, i 0x80, p 0) p .r0'
-      ${if} $0 != -1
-        System::Call 'kernel32::CloseHandle(p r0)'
-        ClearErrors
-        FileOpen $0 "$INSTDIR\${NSIS_STARTUP_STAMP}" w
-        ${ifNot} ${Errors}
-          FileWriteUTF16LE $0 "$LOCALAPPDATA"
-          FileClose $0
+      # A surviving desktop from a removed/replaced install must never borrow
+      # the capability of a new install, even at the exact same path.
+      System::Alloc 16
+      Pop $0
+      System::Call 'ole32::CoCreateGuid(p r0) i .r1'
+      ${if} $1 == 0
+        System::Call 'ole32::StringFromGUID2(p r0, w .r2, i 39) i .r1'
+        ${if} $1 == 39
+          ClearErrors
+          FileOpen $3 "$INSTDIR\${NSIS_STARTUP_STAMP}" w
+          ${ifNot} ${Errors}
+            FileWriteUTF16LE $3 "$2$LOCALAPPDATA"
+            FileClose $3
+          ${endif}
         ${endif}
       ${endif}
+      System::Free $0
       ClearErrors
     ${endif}
   !macroend
@@ -211,24 +217,22 @@
       ${orIf} $1 != "$LOCALAPPDATA"
         !insertmacro shuffleStartupRefuse "Uninstall this per-user copy of AI Shuffle from the Windows account that installed it."
       ${endif}
+      # Own the same Win32 mutex as the desktop writer until process exit, on
+      # success *or* rollback. Also drain writers before same-target upgrades;
+      # a new install will get a different mutex and receipt.
+      System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${NSIS_STARTUP_MUTEX}$2") p .r0'
+      ${if} $0 == 0
+        !insertmacro shuffleStartupRefuse "AI Shuffle could not open its start-at-sign-in coordinator. Retry from the account that installed it."
+      ${endif}
+      System::Call 'kernel32::WaitForSingleObject(p r0, i 20000) i .r4'
+      # WAIT_ABANDONED also means we acquired ownership.
+      ${if} $4 != 0
+      ${andIf} $4 != 128
+        !insertmacro shuffleStartupRefuse "AI Shuffle is changing its start-at-sign-in setting. Close Settings and retry."
+      ${endif}
       ReadEnvStr $2 "${NSIS_STARTUP_REPLACEMENT}"
       ${ifNot} ${isUpdated}
       ${orIf} $2 != "$INSTDIR"
-        # After the close prompt, exclude the managed app's startup writes.
-        # GENERIC_READ / no sharing / OPEN_EXISTING. Hold through removal or
-        # rollback; Windows closes the handle when the uninstaller exits.
-        System::Call 'kernel32::CreateFileW(w "${NSIS_STARTUP_GUARD}", i 0x80000000, i 0, p 0, i 3, i 0x80, p 0) p .r0 ?e'
-        Pop $4
-        ${if} $0 == -1
-          ${if} $4 == 32
-            !insertmacro shuffleStartupRefuse "AI Shuffle is changing its start-at-sign-in setting. Close Settings and retry."
-          ${elseif} $4 != 2
-          ${andIf} $4 != 3
-            !insertmacro shuffleStartupRefuse "AI Shuffle could not access its local start-at-sign-in data. Check this Windows account's Local AppData permissions and retry."
-          ${endif}
-          # FILE_NOT_FOUND / PATH_NOT_FOUND: the app also uses OPEN_EXISTING,
-          # so it cannot enter the guarded write path without a new install.
-        ${endif}
         StrCpy $shuffleRetireStartup "1"
       ${endif}
     ${endif}
@@ -249,9 +253,6 @@
             ${if} ${Errors}
               !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Windows Startup Apps."
             ${endif}
-            StrCpy $3 ""
-          ${endif}
-          ${if} $3 == ""
             DeleteRegValue HKCU "${NSIS_STARTUP_APPROVAL_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
             ClearErrors
           ${endif}

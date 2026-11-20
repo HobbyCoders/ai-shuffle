@@ -230,8 +230,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx electron-builder --win nsis --x64 --publish never
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify the Windows startup guard using disposable files
-        run: node --test --test-name-pattern 'Windows guard' test/login-item.test.mjs
+      - name: Verify native startup lifecycle on a disposable Windows profile
+        run: |
+          node test/helpers/fetch-electron.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test --test-name-pattern 'Windows desktop writer' test/login-item.test.mjs
       - name: Silent installs write the channel file only when asked, and never overwrite it
         run: |
           $ErrorActionPreference = 'Stop'
@@ -257,16 +260,6 @@ jobs:
               return $process.ExitCode
             } finally { $process.Dispose() }
           }
-          function Invoke-UninstallerFixture([string]$label, [string]$directory, [string[]]$arguments) {
-            $uninstaller = @(Get-ChildItem -LiteralPath $directory -Filter 'Uninstall*.exe' -File)
-            if ($uninstaller.Count -ne 1) { throw "${label}: expected a single uninstaller" }
-            $copy = Join-Path $env:RUNNER_TEMP "startup-check-$([guid]::NewGuid()).exe"
-            Copy-Item -LiteralPath $uninstaller[0].FullName -Destination $copy
-            try {
-              # Match the builder: run a temp copy and put the unquoted _?= path last.
-              return Invoke-InstallerFixture $label $copy (@('/S', '/currentuser') + $arguments + "_?=$directory")
-            } finally { Remove-Item -LiteralPath $copy }
-          }
           function Install([string]$label, [string[]]$arguments) {
             $exitCode = Invoke-InstallerFixture $label $installer $arguments
             if ($exitCode -ne 0) { throw "${label}: the installer exited with $exitCode" }
@@ -283,58 +276,24 @@ jobs:
           }
 
           if (Test-Path -LiteralPath (Split-Path $updates)) { throw 'The runner already has an AI Shuffle profile' }
-          $guardDir = Join-Path $env:LOCALAPPDATA 'ai-shuffle-desktop'
-          if (Test-Path -LiteralPath $guardDir) { throw 'The runner already has AI Shuffle local data' }
-          [IO.File]::WriteAllText($guardDir, 'deliberately prevents guard creation')
-          try {
-            Install 'unavailable startup storage' @('/S', '/currentuser')
-            $unprovisioned = @(Get-ChildItem "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe" -File)
-            if ($unprovisioned.Count -ne 1) { throw 'expected a working install even when startup storage is unavailable' }
-            $noGuardStamp = Join-Path $unprovisioned[0].DirectoryName 'resources\login-item-uninstall-v3'
-            if (Test-Path -LiteralPath $noGuardStamp) { throw 'unavailable storage must not grant startup support' }
-            $removed = Invoke-UninstallerFixture 'uninstall with unavailable startup storage' $unprovisioned[0].DirectoryName @()
-            if ($removed -ne 0 -or (Test-Path -LiteralPath $unprovisioned[0].FullName)) { throw 'unavailable storage blocked uninstall' }
-          } finally { Remove-Item -LiteralPath $guardDir }
           Check '1. default install' @('/S', '/currentuser') $null
           $perUserExe = @(Get-ChildItem "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe" -File)
           if ($perUserExe.Count -ne 1) { throw '1. default install: expected one per-user AI Shuffle.exe' }
-          $stamp = Join-Path $perUserExe[0].DirectoryName 'resources\login-item-uninstall-v3'
-          $guard = Join-Path $env:LOCALAPPDATA 'ai-shuffle-desktop\login-item-lock'
-          if ([IO.File]::ReadAllText($stamp, [Text.Encoding]::Unicode) -ne $env:LOCALAPPDATA) { throw '1. default install: missing or wrong startup capability owner' }
+          $stamp = Join-Path $perUserExe[0].DirectoryName 'resources\login-item-uninstall-v4'
+          $receipt = [IO.File]::ReadAllText($stamp, [Text.Encoding]::Unicode)
+          if ($receipt.Length -le 38 -or $receipt.Substring(38) -ne $env:LOCALAPPDATA) { throw '1. default install: missing or wrong startup capability owner' }
           if (Test-Path -LiteralPath $updates) { throw '1. default install: Stable created the updates folder' }
           Check '2. nightly install' @('/S', '/currentuser', '/CHANNEL=nightly') $nightly
           [IO.File]::WriteAllText($file, $stable)
           Check '3. existing choice kept' @('/S', '/CHANNEL=nightly') $stable
           Check '4. installer update' @('/S', '--updated') $stable
           if (-not (Test-Path -LiteralPath $stamp)) { throw '4. installer update: per-user startup capability missing' }
-          if ((Get-Item -LiteralPath $guard).Length -ne 0) { throw '4. installer update: missing or nonempty guard' }
-          # Exercise the pinned uninstaller's atomic rename/restore path directly.
-          # The parent installer deliberately displays a dialog when its child fails,
-          # even when /S is set. Its successful all-users path is tested below.
-          # These installer checks never write Run or StartupApproved values.
-          $payload = Join-Path $perUserExe[0].DirectoryName 'resources\test-held-payload'
-          [IO.File]::WriteAllText($payload, 'cannot be renamed while held')
-          $removalArgs = @('/KEEP_APP_DATA', '--updated')
-          $held = [IO.File]::Open($payload, 'Open', 'Read', 'Read')
-          try {
-            $failed = Invoke-UninstallerFixture 'locked-payload rollback' $perUserExe[0].DirectoryName $removalArgs
-            if ($failed -eq 0) { throw 'locked payload file did not abort replacement' }
-            if (-not (Test-Path -LiteralPath $stamp) -or -not (Test-Path -LiteralPath $perUserExe[0].FullName)) { throw 'failed replacement did not restore the old capable install' }
-          } finally { $held.Dispose() }
-
-          # Same install, input file, and arguments; only the open handle changed.
-          $unlocked = Invoke-UninstallerFixture 'unlocked-payload control' $perUserExe[0].DirectoryName $removalArgs
-          if ($unlocked -ne 0) { throw 'removal failed even without the lock' }
-          foreach ($removed in @($stamp, $perUserExe[0].FullName, $payload)) {
-            if (Test-Path -LiteralPath $removed) { throw "unlocked removal left $removed" }
-          }
-          Check 'reinstall per-user before scope switch' @('/S', '/currentuser') $stable
-          if (-not (Test-Path -LiteralPath $stamp)) { throw 'scope switch fixture lacks per-user startup capability' }
           Remove-Item -LiteralPath $file
           Check '5. all-users nightly install' @('/S', '/allusers', '/CHANNEL=nightly') $nightly
           if (-not (Test-Path "$env:ProgramFiles\*\AI Shuffle.exe")) { throw '5. all-users nightly install: AI Shuffle.exe was not installed for all users' }
           if (Test-Path -LiteralPath $stamp) { throw '5. all-users nightly install: the per-user capability survived removal' }
-          if ((Get-Item -LiteralPath $guard).Length -ne 0) { throw '5. all-users nightly install: the app-owned guard was modified' }
+          $machineStamps = @(Get-ChildItem "$env:ProgramFiles\*\resources\login-item-uninstall-v4" -File)
+          if ($machineStamps.Count -ne 0) { throw '5. all-users nightly install: granted a per-user startup capability' }
           if (Test-Path -LiteralPath $machineFile) { throw "5. all-users nightly install: wrote $machineFile instead of the user's profile" }
 
           $results | ForEach-Object { Write-Host $_ }
