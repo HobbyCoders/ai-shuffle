@@ -1,8 +1,13 @@
 import httpx
 import pytest
 
-from app.api.model_registry import list_claude_api_models
-from app.core import claude_accounts, claude_api_models
+from app.api.model_registry import (
+    ClaudeApiModelEntry,
+    SaveClaudeApiModelsRequest,
+    list_claude_api_models,
+    save_claude_api_models,
+)
+from app.core import claude_accounts, claude_api_models, claude_api_provider
 from fastapi import HTTPException, Response
 
 
@@ -62,7 +67,7 @@ async def test_catalog_rejects_repeated_cursor_without_partial_results():
 
 
 @pytest.mark.asyncio
-async def test_route_uses_only_the_named_account(monkeypatch):
+async def test_route_uses_only_the_named_account(mock_db, monkeypatch):
     keys = {"selected": "selected-test-key", "inactive": "inactive-test-key"}
     monkeypatch.setattr(claude_accounts, "_keys", lambda: {
         "active_id": "selected", "accounts": [{"id": aid, "key": key} for aid, key in keys.items()],
@@ -75,12 +80,77 @@ async def test_route_uses_only_the_named_account(monkeypatch):
 
     monkeypatch.setattr(claude_api_models, "list_models", list_models)
     response = Response()
-    assert await list_claude_api_models("inactive", response, "admin") == {"models": []}
+    first = await list_claude_api_models("inactive", response, "admin")
+    assert first["models"] == []
+    assert first["curated"] is None
+    assert isinstance(first["fetched_at"], str) and first["fetched_at"]
     assert response.headers["Cache-Control"] == "no-store"
+    # Second call serves the cached empty catalog without re-contacting Anthropic.
+    second = await list_claude_api_models("inactive", Response(), "admin")
+    assert second == first
     with pytest.raises(HTTPException) as exc:
         await list_claude_api_models("deleted", Response(), "admin")
     assert exc.value.status_code == 404
     assert looked_up == ["inactive-test-key"]
+
+
+@pytest.mark.asyncio
+async def test_route_serves_cached_catalog_unless_refresh_and_saves_curation(mock_db, monkeypatch):
+    keys = {"selected": "selected-test-key"}
+    monkeypatch.setattr(claude_accounts, "_keys", lambda: {
+        "active_id": "selected", "accounts": [{"id": "selected", "key": "selected-test-key"}],
+    })
+    fetches = []
+
+    async def list_models(key):
+        fetches.append(key)
+        return [
+            {"id": "claude-sonnet-5", "label": "Sonnet 5"},
+            {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
+        ]
+
+    monkeypatch.setattr(claude_api_models, "list_models", list_models)
+    first = await list_claude_api_models("selected", Response(), "admin", refresh=False)
+    assert len(fetches) == 1
+    assert first["curated"] is None
+    assert first["fetched_at"] is not None
+
+    # Second call with refresh=False uses cache without upstream fetch.
+    second = await list_claude_api_models("selected", Response(), "admin", refresh=False)
+    assert len(fetches) == 1
+    assert second == first
+
+    # Explicit refresh=True contacts upstream again and advances fetched_at even when unchanged,
+    # while a follow-up refresh=False serves the updated timestamp with zero DB writes (no loop).
+    from app.db import database
+
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
+    third = await list_claude_api_models("selected", Response(), "admin", refresh=True)
+    assert len(fetches) == 2
+    assert third["models"] == first["models"]
+    assert third["fetched_at"] is not None and third["fetched_at"] != first["fetched_at"]
+    assert len(writes) == 1 and writes[0].startswith(claude_api_provider.MODELS_FETCHED_AT_PREFIX)
+
+    after_refresh = await list_claude_api_models("selected", Response(), "admin", refresh=False)
+    assert len(fetches) == 2
+    assert len(writes) == 1
+    assert after_refresh == third
+
+    # Save curated list and confirm GET returns it.
+    saved = await save_claude_api_models(
+        "selected",
+        SaveClaudeApiModelsRequest(models=[ClaudeApiModelEntry(id="claude-haiku-5-5", label="Haiku 5.5")]),
+        "admin",
+    )
+    assert saved == {"models": [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]}
+    fourth = await list_claude_api_models("selected", Response(), "admin", refresh=False)
+    assert len(fetches) == 2
+    assert fourth["curated"] == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    assert claude_api_provider.curated_models("selected-test-key") == [
+        {"id": "claude-haiku-5-5", "label": "Haiku 5.5"}
+    ]
 
 
 def test_real_credentials_cannot_be_sent_to_fake(monkeypatch):

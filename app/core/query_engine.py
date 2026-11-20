@@ -1283,8 +1283,14 @@ async def _stream_query_turn(
         )
     except (WorktreeUnavailableError, ValueError) as e:
         # Worktree unrecoverable, or the resolved working directory doesn't
-        # exist (e.g. a project path from another install) — surface a clear
-        # error instead of an opaque subprocess spawn failure.
+        # exist (e.g. a project path from another install), or no models are
+        # enabled — surface a clear error instead of an opaque spawn failure.
+        from app.core import credential_gate
+
+        if isinstance(e, credential_gate.AgentSetupRequired):
+            logger.warning(f"[Query] Turn refused for session {session_id}: {e}")
+            yield credential_gate.refusal_event(str(e))
+            return
         logger.error(f"[Query] Cannot build session options for {session_id}: {e}")
         yield {
             "type": "error", "message": str(e),

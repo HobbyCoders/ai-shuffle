@@ -54,6 +54,9 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _FILE_NAME = "claude-cli-models.json"
+# Per-model opt-out keys: ``claude_subscription_model_disabled:<model_id>`` = "1"
+# (disabled) or "0" (enabled, keeping a newer revision for LWW sync).
+DISABLED_MODEL_PREFIX = "claude_subscription_model_disabled:"
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
 # The CLI's "Default (recommended)" entry duplicates one of the aliases.
 _SKIPPED_VALUES = frozenset({"default"})
@@ -61,6 +64,7 @@ ALIASES = ("haiku", "sonnet", "opus", "fable")
 
 _lock = threading.Lock()
 _refresh_lock = threading.Lock()
+_disabled_lock = threading.Lock()
 _snapshot: Optional[Dict[str, Any]] = None
 _loaded = False
 
@@ -190,7 +194,24 @@ def _same(a: Optional[Dict[str, Any]], b: Dict[str, Any]) -> bool:
     return bool(a) and all(a.get(k) == b.get(k) for k in ("cli_version", "account", "models"))
 
 
-def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
+def _write_snapshot(snapshot: Dict[str, Any]) -> None:
+    path = _path()
+    if path is None:
+        return
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("Could not save the Claude Code model list", exc_info=True)
+
+
+def store(
+    snapshot: Dict[str, Any],
+    *,
+    verified_status=None,
+    touch_timestamp: bool = False,
+) -> Optional[bool]:
     """Keep ``snapshot``; True when it differs from the saved list, None when
     it is not the active sign-in's.
 
@@ -199,7 +220,9 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
     write; an unknown sign-in refuses. A saved-login switch drops that status
     first, so a capture started under the previous account cannot land.
     A changed list is written to the data directory and announced, so open
-    pickers re-read the registry.
+    pickers re-read the registry. When ``touch_timestamp=True`` (explicit
+    manual refresh) and the model list is unchanged, updates ``captured_at``
+    in memory and on disk without announcing an account change.
     """
     global _snapshot
     from app.core import claude_cli_status, claude_subscriptions
@@ -229,16 +252,12 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
                         snapshot["cli_version"], status.cli_version)
             return None
         if _same(_snapshot, snapshot):
+            if touch_timestamp and _snapshot is not None and snapshot.get("captured_at"):
+                _snapshot = {**_snapshot, "captured_at": snapshot["captured_at"]}
+                _write_snapshot(_snapshot)
             return False
         _snapshot = snapshot
-        path = _path()
-        if path is not None:
-            try:
-                tmp = path.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
-                os.replace(tmp, path)
-            except OSError:
-                logger.warning("Could not save the Claude Code model list", exc_info=True)
+        _write_snapshot(snapshot)
     logger.info("Claude Code %s reports %d models", snapshot.get("cli_version") or "", len(snapshot["models"]))
     claude_cli_status.announce_account_change()
     return True
@@ -301,6 +320,89 @@ def versioned_entries() -> List[Dict[str, Any]]:
     if not snap:
         return []
     return [m for m in snap["models"] if m.get("value") not in ALIASES]
+
+
+# ─── Disabled-model curation (opt-out) ──────────────────────────────────────
+
+
+def disabled_models() -> List[str]:
+    """Claude subscription model ids hidden from pickers (default: none).
+
+    Stored as one ``system_settings`` row per model id
+    (``claude_subscription_model_disabled:<model_id>`` = ``"1"`` or ``"0"``)
+    so independent edits on paired workers never overwrite each other.
+    """
+    try:
+        from app.db import database
+
+        rows = database.get_system_settings_by_prefix(DISABLED_MODEL_PREFIX)
+    except Exception:  # noqa: BLE001 — early boot or unreadable DB offers all models
+        return []
+    out: List[str] = []
+    for key in sorted(rows):
+        if rows[key] != "1":
+            continue
+        value = key.removeprefix(DISABLED_MODEL_PREFIX).strip()
+        if value and len(value) <= 300:
+            out.append(value)
+    return out
+
+
+def set_model_enabled(model_id: str, enabled: bool) -> List[str]:
+    """Enable or disable a single Claude subscription model for pickers.
+
+    Writes ``"1"`` (disabled) or ``"0"`` (enabled — keeping a revision so
+    re-enabling beats an older ``"1"`` across LWW sync). Suppresses DB writes
+    when the model is already in the requested state.
+    """
+    value = model_id.strip() if isinstance(model_id, str) else ""
+    if not value or len(value) > 300:
+        raise ValueError("Model id must be a non-empty string of at most 300 characters.")
+    from app.db import database
+
+    setting_key = f"{DISABLED_MODEL_PREFIX}{value}"
+    target = "0" if enabled else "1"
+    with _disabled_lock:
+        current = database.get_system_setting(setting_key)
+        if enabled and current in (None, "0"):
+            return disabled_models()
+        if not enabled and current == "1":
+            return disabled_models()
+        database.set_system_setting(setting_key, target)
+        return disabled_models()
+
+
+def subscription_catalog_rows() -> Dict[str, Any]:
+    """Full (unfiltered) subscription model list for Settings > Claude > Models."""
+    from app.core.model_registry import MODELS, get_model
+
+    with pinned():
+        snapshot = catalog()
+        listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
+        disabled = set(disabled_models())
+        rows: List[Dict[str, Any]] = []
+        for m in MODELS:
+            option = (get_model(m.value) if m.value in listed else None) or m
+            rows.append({
+                "id": m.value,
+                "label": option.label,
+                "enabled": m.value not in disabled,
+            })
+        for item in versioned_entries():
+            option = get_model(item["value"])
+            if option is None:
+                continue
+            rows.append({
+                "id": item["value"],
+                "label": option.label,
+                "enabled": item["value"] not in disabled,
+            })
+        return {
+            "models": rows,
+            "captured": snapshot is not None,
+            "cli_version": snapshot.get("cli_version") if snapshot else None,
+            "captured_at": snapshot.get("captured_at") if snapshot else None,
+        }
 
 
 # ─── Capture ────────────────────────────────────────────────────────────────
@@ -421,7 +523,7 @@ def refresh() -> Dict[str, Any]:
         snapshot = parse_initialize(payload)
         if snapshot is None:
             raise RuntimeError("Claude Code did not list any models. Update it and try again.")
-        if not subscription_mode() or store(snapshot, verified_status=status) is None:
+        if not subscription_mode() or store(snapshot, verified_status=status, touch_timestamp=True) is None:
             raise RuntimeError("The Claude sign-in changed while Claude Code listed its models. Try again.")
         return snapshot
 
