@@ -81,28 +81,26 @@ async function readPlan(page, id) {
 
 async function diagnosticEvents(page, id) {
  return page.evaluate(async id => {
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), 3000);
+  const feed = new EventSource(`/api/v1/sessions/${id}/events?from_seq=0`);
   const out = [];
+  let timer;
   try {
-   const response = await fetch(`/api/v1/sessions/${id}/events?from_seq=0`, { signal: abort.signal });
-   const reader = response.body.getReader();
-   let text = '';
-   while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    text += new TextDecoder().decode(value);
-    const lines = text.split('\n'); text = lines.pop();
-    for (const line of lines) {
-     if (!line.startsWith('data:')) continue;
-     const data = JSON.parse(line.slice(5));
-     if (data.type === 'caught_up') return out;
-     if (['tool.use', 'tool.result', 'plan.updated', 'turn.aborted'].includes(data.type)) out.push(data);
+   return await new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out waiting for caught_up in session event replay')), 3000);
+    feed.addEventListener('error', () => reject(new Error('Session event replay ended or failed before caught_up')));
+    // The replay boundary is a named SSE event, not a type in its JSON data.
+    feed.addEventListener('caught_up', () => resolve(out));
+    for (const type of ['tool.use', 'tool.result', 'plan.updated', 'turn.aborted']) {
+     feed.addEventListener(type, event => {
+      try { out.push(JSON.parse(event.data)); }
+      catch (error) { reject(error); }
+     });
     }
-   }
-  } catch (error) { out.push({ diagnostic: String(error) }); }
-  finally { clearTimeout(timer); abort.abort(); }
-  return out;
+   });
+  } finally {
+   clearTimeout(timer);
+   feed.close();
+  }
  }, id);
 }
 
@@ -237,7 +235,8 @@ const lifecycle = {
   } catch (error) {
    log(`lifecycle session: ${id}`);
    log(`lifecycle API state: ${JSON.stringify(await readPlan(page, id))}`);
-   log(`lifecycle events: ${JSON.stringify(await diagnosticEvents(page, id)).slice(-14000)}`);
+   const events = await diagnosticEvents(page, id).catch(error => ({ diagnostic: String(error) }));
+   log(`lifecycle events: ${JSON.stringify(events).slice(-14000)}`);
    log(`lifecycle visible state: ${(await page.locator('body').innerText()).slice(-4000)}`);
    throw error;
   }
