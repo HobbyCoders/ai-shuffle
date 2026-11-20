@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { once } from 'node:events';
-import { closeSync, mkdtempSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import os from 'node:os';
-import path from 'node:path';
-import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { loginItemControl } from '../dist/main/login-item.js';
 
@@ -135,118 +131,12 @@ test('Windows rechecks install authority inside the guard and never writes if it
 	assert.equal(writes, 1);
 });
 
-const windowsGuardCase = (name, root) => test(`Windows guard excludes native no-share handles in both directions (${name})`, { skip: process.platform !== 'win32' }, async t => {
-	const dir = mkdtempSync(path.join(root(), 'shuffle-startup-guard-'));
-	try {
-		const installedExecutable = path.join(dir, 'AI Shuffle.exe');
-		const resources = path.join(dir, 'resources');
-		const host = { ...win, installedExecutable, localAppData: dir };
-		const guard = path.join(dir, 'ai-shuffle-desktop', 'login-item-lock');
-		mkdirSync(path.dirname(guard));
-		writeFileSync(guard, '');
-		writeFileSync(installedExecutable, '');
-		mkdirSync(resources);
-		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
-		const powershell = script => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-		const psPath = file => `'${file.replaceAll("'", "''")}'`;
-		const openExclusive = `[IO.File]::Open(${psPath(guard)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)`;
-		let reads = 0;
-		let writes = 0;
-		const control = loginItemControl({
-			setLoginItemSettings() { writes++; },
-			getLoginItemSettings() {
-				reads++;
-				const probe = spawnSync('powershell.exe', powershell(`try { (${openExclusive}).Dispose(); exit 1 } catch [IO.IOException] { if ((($_.Exception.GetBaseException()).HResult -band 65535) -ne 32) { throw }; exit 0 }`), {
-					encoding: 'utf8', timeout: 15_000
-				});
-				assert.ifError(probe.error);
-				assert.equal(probe.status, 0, probe.stdout + probe.stderr);
-				return { openAtLogin: false };
-			}
-		}, host);
-		assert.deepEqual(control.set(false), { state: 'disabled', failed: false });
-		assert.deepEqual([writes, reads], [1, 1]);
-
-		// Redirected PowerShell stdin can reach EOF in the Windows test shard.
-		// Acknowledge the lock on stdout and wait for an explicit release file.
-		const release = path.join(dir, 'release');
-		const holder = spawn('powershell.exe', powershell(`
-			$ErrorActionPreference = 'Stop'
-			$lock = ${openExclusive}
-			try {
-				[Console]::WriteLine('held')
-				while (-not [IO.File]::Exists(${psPath(release)})) { Start-Sleep -Milliseconds 25 }
-			} finally { $lock.Dispose() }
-		`), { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
-		const closed = new Promise(resolve => {
-			holder.once('error', error => resolve({ error }));
-			holder.once('close', (status, signal) => resolve({ status, signal }));
-		});
-		let stderr = '';
-		holder.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
-		const lines = createInterface({ input: holder.stdout });
-		try {
-			const held = await Promise.race([once(lines, 'line').then(([line]) => line), closed.then(() => stderr)]);
-			assert.equal(held, 'held', 'native holder must acknowledge opening the guard');
-			const nativeReader = spawnSync('powershell.exe', powershell(`
-				$ErrorActionPreference = 'Stop'
-				$disk = [IO.DriveInfo]::new([IO.Path]::GetPathRoot(${psPath(guard)}))
-				[Console]::WriteLine('driveFormat=' + $disk.DriveFormat + ', driveType=' + $disk.DriveType + ', holderAlive=' + ($null -ne (Get-Process -Id ${holder.pid} -ErrorAction SilentlyContinue)))
-				try {
-					[IO.File]::Open(${psPath(guard)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read).Dispose()
-					[Console]::WriteLine('native reader opened the file')
-				} catch { [Console]::WriteLine('native reader Win32=' + (($_.Exception.GetBaseException()).HResult -band 65535)) }
-				Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class NativeRead {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  static extern IntPtr CreateFile(string file, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
-  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  public static int Probe(string path, uint flags) {
-    IntPtr handle = CreateFile(path, 0x00120089, 7, IntPtr.Zero, 3, flags, IntPtr.Zero);
-    if (handle == new IntPtr(-1)) return Marshal.GetLastWin32Error();
-    CloseHandle(handle);
-    return 0;
-  }
-}
-'@
-				[Console]::WriteLine('CreateFile normal=' + [NativeRead]::Probe(${psPath(guard)}, 128))
-				[Console]::WriteLine('CreateFile libuv flags=' + [NativeRead]::Probe(${psPath(path.toNamespacedPath(guard))}, 33554560))
-			`), { encoding: 'utf8', timeout: 15_000 });
-			const diagnostics = `${dir}: ${nativeReader.stdout.trim()} ${nativeReader.stderr.trim()}`;
-			t.diagnostic(diagnostics);
-			assert.ifError(nativeReader.error);
-			assert.equal(nativeReader.status, 0, diagnostics);
-			const require = createRequire(import.meta.url);
-			const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
-			const script = `
-				const fs = require('node:fs');
-				let direct;
-				try { fs.closeSync(fs.openSync(process.argv[1], 'r')); direct = 'opened'; }
-				catch (e) { direct = e.code; }
-				const { loginItemControl } = require(process.argv[2]);
-				let writes = 0, reads = 0;
-				const control = loginItemControl({setLoginItemSettings() { writes++; }, getLoginItemSettings() { reads++; return {openAtLogin: false}; }}, JSON.parse(process.argv[3]));
-				const result = control.set(true);
-				console.log(JSON.stringify({execPath: process.execPath, node: process.versions.node, uv: process.versions.uv, electron: process.versions.electron, direct, result, writes, reads}));`;
-			for (const [label, exe, extra] of [['Node', process.execPath, {}], ['Electron', require('electron'), { ELECTRON_RUN_AS_NODE: '1' }]]) {
-				const child = spawnSync(exe, ['-e', script, guard, require.resolve('../dist/main/login-item.js'), JSON.stringify(host)], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 10_000 });
-				t.diagnostic(`${label} child status=${child.status}, error=${child.error?.code}: ${child.stdout?.trim()} ${child.stderr?.trim()}`);
-			}
-			assert.throws(() => closeSync(openSync(guard, 'r')), { code: 'EBUSY' }, 'the real guard path must be locked');
-			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
-			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
-		} finally {
-			lines.close();
-			writeFileSync(release, '');
-			const { error, status, signal } = await closed;
-			assert.ifError(error);
-			assert.equal(status, 0, stderr || signal);
-		}
-		assert.deepEqual(control.set(false), { state: 'disabled', failed: false }, 'can write again when the exclusive holder exits');
-		assert.deepEqual([writes, reads], [2, 2]);
-	} finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, () => {
+	const require = createRequire(import.meta.url);
+	const fixture = fileURLToPath(new URL('./helpers/windows-login-item-guard.cjs', import.meta.url));
+	const result = spawnSync(require('electron'), [fixture, JSON.stringify(win)], {
+		env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true
+	});
+	assert.ifError(result.error);
+	assert.equal(result.status, 0, result.stdout + result.stderr);
 });
-
-windowsGuardCase('runner TEMP', () => os.tmpdir());
