@@ -206,11 +206,12 @@ await runJourney({
 				const refreshResp = page.waitForResponse((res) =>
 					res.request().method() === 'GET' && res.url().includes('/api/v1/models/claude/api-key/') && res.url().includes('refresh=true'));
 				await refresh.click();
-				if (!(await refreshResp).ok()) throw new Error('Refreshing the Anthropic model list failed');
-				await page.getByText('claude-haiku-dev-api', { exact: true }).waitFor({ timeout: 10_000 });
-				const afterRefreshTs = await timeEl.getAttribute('datetime');
-				expect(Boolean(afterRefreshTs) && afterRefreshTs !== beforeRefreshTs,
-					`manual refresh must update Last refreshed timestamp (${beforeRefreshTs} -> ${afterRefreshTs})`);
+				const refreshRes = await refreshResp;
+				if (!refreshRes.ok()) throw new Error('Refreshing the Anthropic model list failed');
+				const expectedTs = (await refreshRes.json())?.fetched_at;
+				expect(Boolean(expectedTs) && expectedTs !== beforeRefreshTs,
+					`manual refresh must advance fetched_at (${beforeRefreshTs} -> ${expectedTs})`);
+				await finalPanel.locator(`time[datetime="${expectedTs}"]`).waitFor({ timeout: 10_000 });
 				// Confirm manual refresh updating fetched_at does not trigger a refresh loop.
 				await page.waitForTimeout(1_000);
 				expect(apiGetCount - getsBeforeManualRefresh <= 3,
@@ -232,20 +233,25 @@ await runJourney({
 					res.request().method() === 'GET' && res.url().includes('/api/v1/models/claude/api-key/') && res.url().includes('refresh=true'));
 				await refresh.click();
 				expect((await retryResp).ok(), 'retry after mocked 502 must succeed against real dev endpoint');
-				expect(await page.getByRole('alert').filter({ hasText: rejection }).count() === 0, 'retry clears the alert');
+				await page.getByRole('alert').filter({ hasText: rejection }).waitFor({ state: 'detached', timeout: 10_000 });
 				await page.getByText('claude-haiku-dev-api', { exact: true }).waitFor({ timeout: 10_000 });
 
 				const longModel = { id: `claude-${'long-id-'.repeat(30)}dev`, label: `Claude ${'LongDisplayName'.repeat(16)}` };
-				await page.route('**/api/v1/models/claude/api-key/*', (route) => route.fulfill({
+				const longModelHandler = (route) => route.fulfill({
 					json: { models: [longModel], curated: null, fetched_at: '2026-11-20T00:00:00Z' }
-				}), { times: 1 });
-				await mark('refresh with a long id and display name');
-				await refresh.click();
-				await page.getByText(longModel.id, { exact: true }).waitFor({ timeout: 10_000 });
-				await page.getByText(longModel.label, { exact: true }).waitFor({ timeout: 10_000 });
-				expect(await finalList.evaluate((el) => el.clientWidth >= el.scrollWidth &&
-					[...el.querySelectorAll('.id, .lbl')].every((cell) => cell.clientWidth >= cell.scrollWidth)),
-					'long ids and display names must wrap inside the model list without clipping');
+				});
+				await page.route('**/api/v1/models/claude/api-key/*', longModelHandler);
+				try {
+					await mark('refresh with a long id and display name');
+					await refresh.click();
+					await page.getByText(longModel.id, { exact: true }).waitFor({ timeout: 10_000 });
+					await page.getByText(longModel.label, { exact: true }).waitFor({ timeout: 10_000 });
+					expect(await finalList.evaluate((el) => el.clientWidth >= el.scrollWidth &&
+						[...el.querySelectorAll('.id, .lbl')].every((cell) => cell.clientWidth >= cell.scrollWidth)),
+						'long ids and display names must wrap inside the model list without clipping');
+				} finally {
+					await page.unroute('**/api/v1/models/claude/api-key/*', longModelHandler);
+				}
 			} finally {
 				page.off('request', onRequest);
 				await resetAnthropicApiKeyCuration(status, status._claudeApiKeyId);
