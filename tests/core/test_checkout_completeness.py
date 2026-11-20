@@ -611,15 +611,16 @@ Path("README.md").unlink()
     hook.chmod(0o755)
     materialized, swept, errors = [], [], []
     entered_sweep, sweep_done = threading.Event(), threading.Event()
-    base_resolver = checkout_manager._ensure_base_checkout
+    accept_checkout = checkout_manager._accept_branch_checkout
 
-    def observed_base(*args, **kwargs):
-        result = base_resolver(*args, **kwargs)
-        if threading.current_thread().name == "overlapping-sweep":
+    def observed_accept(candidate, project_id, runner_id, candidate_branch, **kwargs):
+        # Discovery is part of base resolution now. Observe the sweep reaching
+        # the in-flight worktree, just before it tries to take the real lock.
+        if threading.current_thread().name == "overlapping-sweep" and candidate_branch == branch:
             entered_sweep.set()
-        return result
+        return accept_checkout(candidate, project_id, runner_id, candidate_branch, **kwargs)
 
-    monkeypatch.setattr(checkout_manager, "_ensure_base_checkout", observed_base)
+    monkeypatch.setattr(checkout_manager, "_accept_branch_checkout", observed_accept)
 
     def materialize():
         try:

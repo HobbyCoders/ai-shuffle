@@ -216,6 +216,10 @@ def test_retarget_first_link_aligns_both_base_chats(synced_worktree):
     retained = database.get_worktree(worktree['id'])
     assert retained['cleanup_owner'] is not None
     assert {**retained, 'cleanup_owner': None} == worktree
+    # Even if a retained copy still exists, the missing registered folder is
+    # authoritative for both the moved base and its aligned first-link base.
+    for identity in (original_id, current_id):
+        checkouts.upsert_checkout(identity, ME, str(old), status='removed')
     unavailable = new.rename(new.with_name('current-unavailable'))
     for chat in (before, after):
         assert project_resolver.resolve_existing_cwd(chat) is None

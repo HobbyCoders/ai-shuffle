@@ -388,23 +388,37 @@ def _checkout_candidates(cursor, project_id, runner_id, branch=None):
 
 
 def base_checkout_candidates(project_id: str, runner_id: str) -> tuple[List[Dict[str, Any]], bool]:
-    """(Candidates, has live registration), before any filesystem probes.
+    """(Candidates, has authoritative registration), before filesystem probes.
 
-    A live base registration bounds selection even when its folder is missing.
-    A retired folder is a fallback only when there is no live registration.
+    A worker-owned registration bounds selection even when its folder is missing.
+    An ownerless legacy record can provide a clone URL without registering a
+    folder on this worker. It can only bound the legacy (ownerless) fallback.
     """
     with get_db() as conn:
         cursor = conn.cursor()
         registrations = live_base_registrations(cursor, project_id, runner_id)
         rows = _checkout_candidates(cursor, project_id, runner_id)
-    if registrations:
-        keys = {base_folder_key(r['path']) for r in registrations if r['path']}
+    row_keys = {base_folder_key(row['path']) for row in rows if row['path']}
+    legacy_fallback = bool(rows and rows[0]['runner_id'] == '')
+    owned_keys = set()
+    legacy_keys = set()
+    for registration in registrations:
+        if not registration['path'] or not (registration['instance_id'] or legacy_fallback):
+            continue
+        key = base_folder_key(registration['path'])
+        # A first-link alias follows an edit only if its own base was aligned
+        # with the registration. Older edits and later relinks can leave an
+        # independent historical base for chats bound to the original identity.
+        if registration['project_v2_id'] == project_id or key in row_keys:
+            (owned_keys if registration['instance_id'] else legacy_keys).add(key)
+    keys = owned_keys or legacy_keys
+    if keys:
         rows = [r for r in rows if r['path'] and base_folder_key(r['path']) in keys]
     elif any(is_active(r) for r in rows):
         # Self-seeded bases can be live without a legacy project row.
         rows = [r for r in rows if is_active(r)]
     rows.sort(key=lambda r: not is_active(r))
-    return rows, bool(registrations)
+    return rows, bool(keys)
 
 
 def list_active_checkouts(
@@ -664,7 +678,7 @@ def is_active(row: Dict[str, Any]) -> bool:
 def live_base_registrations(cursor: Any, project_id: str, runner_id: str) -> List[Dict[str, Any]]:
     """Actual project registrations, including a still-current proven first link."""
     cursor.execute(
-        "SELECT p.id, p.path FROM projects p JOIN projects_v2 v "
+        "SELECT p.id, p.path, p.instance_id, v.id AS project_v2_id FROM projects p JOIN projects_v2 v "
         "ON v.origin = COALESCE(NULLIF(p.link_group_id, ''), 'local:' || p.id) "
         "LEFT JOIN project_catalog_aliases a ON a.legacy_id = p.id "
         "AND a.replacement_id = v.id AND a.revoked = FALSE "
