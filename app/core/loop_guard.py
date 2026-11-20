@@ -361,11 +361,11 @@ def scheduled_run_guidance(
             if not is_native_claude_model(model):
                 return None
         if model is None:
-            from app.core import claude_auth_mode
+            from app.core.credential_gate import claude_api_is_default
 
             # No model: the run takes the worker's default, which in API key
-            # mode is the saved key, not the subscription.
-            if claude_auth_mode.prefers_claude_api():
+            # mode with a usable key is that key, not the subscription.
+            if claude_api_is_default():
                 return None
         if not _subscription_mode() or not _claude_cli_signed_in():
             return None

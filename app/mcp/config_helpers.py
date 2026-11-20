@@ -60,6 +60,9 @@ def claude_api_choice_error(new: Any, old: Any = None, *, where: str) -> str | N
             if error:
                 return error
         return None
+    # The Task roster reads stored values stripped (normalized_provider_models).
+    new = new.strip() if isinstance(new, str) else new
+    old = old.strip() if isinstance(old, str) else old
     if is_claude_api_model(new) and new != old:
         return (f"Not saved: {new} is a Claude API model, billed to the saved Anthropic API key, "
                 f"and only the owner can choose one for {where} (in the app's settings). "

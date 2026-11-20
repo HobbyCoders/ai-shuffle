@@ -991,23 +991,28 @@ def _accepted_note(model: str, memory_id: str) -> str:
     return f"model {decoded[1] if decoded else model} accepted: owner memory {memory_id}"
 
 
-async def _approval_scope(chat_id: Optional[str]) -> Optional[str]:
-    """The API user an approval belongs to, or a retryable refusal.
+async def _approval_lookup(fn, *args):
+    """``fn(*args)`` off the loop, or a retryable refusal when it fails.
 
     A failed lookup refuses instead of guessing: ``None`` is the owner's own
     scope, so substituting it could reuse the owner's approval for a key's chat.
     """
     import asyncio
 
-    from app.core.api_user_scope import viewer_api_user_id
-
     try:
-        return await asyncio.to_thread(viewer_api_user_id, chat_id)
+        return await asyncio.to_thread(fn, *args)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Model approval scope lookup failed: %s", type(exc).__name__)
+        logger.warning("Model approval lookup failed: %s", type(exc).__name__)
         raise PermissionError(
             "Could not check who approved this model right now; nothing was started. "
             "Try again in a moment.") from exc
+
+
+async def _approval_scope(chat_id: Optional[str]) -> Optional[str]:
+    """The API user an approval belongs to, or a retryable refusal."""
+    from app.core.api_user_scope import viewer_api_user_id
+
+    return await _approval_lookup(viewer_api_user_id, chat_id)
 
 
 async def accept(session_id: str, profile_id: Optional[str], *, model: str,
@@ -1025,7 +1030,7 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
 
     from app.core.model_registry import model_values
 
-    key = (await asyncio.to_thread(chat_of, session_id), model)
+    key = (await _approval_lookup(chat_of, session_id), model)
     if is_claude_api_model(model):
         # Billed to the key: the chat already on it (the owner's own pick) or
         # the owner's Yes in a prompt. No message, memory or saved naming

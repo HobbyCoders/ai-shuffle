@@ -593,6 +593,14 @@ def _claude_api_default(
     return (CLAUDE_API_PROVIDER_ID, fallback) if fallback else None
 
 
+def claude_api_is_default() -> bool:
+    """Whether a run that names no model takes the saved key: the owner chose
+    API key mode and the key is usable (see :func:`_claude_default`)."""
+    from app.core import claude_auth_mode
+
+    return claude_auth_mode.prefers_claude_api() and _claude_api_default() is not None
+
+
 def _claude_default(
     model: str, probe: bool, *, servable_only: bool = False,
 ) -> Optional[Tuple[Optional[str], str]]:

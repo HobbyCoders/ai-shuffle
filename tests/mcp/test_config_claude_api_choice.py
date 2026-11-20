@@ -156,3 +156,32 @@ async def test_update_subagent_keeps_the_owners_saved_api_pin():
     assert kept["success"] is True
     assert moved["success"] is False and "Claude API" in moved["error"]
     assert write.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [API, f"  {API} "])
+async def test_create_subagent_cannot_pin_a_claude_api_model_through_legacy_model(value):
+    """Round 6: the legacy ``model`` also pins the Task roster."""
+    with patch("app.db.database.get_subagent", return_value=None), \
+            patch("app.db.database.create_subagent") as write:
+        result = await _subagent_tool("createSubagent").handler(
+            {"name": "Rev", "description": "d", "prompt": "p", "model": value})
+    payload = tool_result_json(result)
+    assert payload["success"] is False and "Claude API" in payload["error"]
+    write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_subagent_legacy_model_keeps_the_owners_pin_but_cannot_add_one():
+    owners = {**_subagent_row({}), "model": API}
+    with patch("app.db.database.get_subagent", return_value=owners), \
+            patch("app.db.database.update_subagent", return_value=owners) as write:
+        kept = tool_result_json(await _subagent_tool("updateSubagent").handler(
+            {"subagent_id": "rev", "model": API, "prompt": "new"}))
+    with patch("app.db.database.get_subagent", return_value=_subagent_row({})), \
+            patch("app.db.database.update_subagent") as blocked_write:
+        added = tool_result_json(await _subagent_tool("updateSubagent").handler(
+            {"subagent_id": "rev", "model": API}))
+    assert kept["success"] is True and write.call_count == 1
+    assert added["success"] is False and "Claude API" in added["error"]
+    blocked_write.assert_not_called()

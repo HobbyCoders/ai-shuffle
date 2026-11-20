@@ -336,6 +336,29 @@ def test_a_failed_approval_scope_lookup_refuses_without_asking(key, monkeypatch)
                                           action="start a review"))
 
 
+def test_a_failed_first_chat_lookup_refuses_without_asking(key, monkeypatch):
+    """Round 6: the first database read (the chat behind the session) fails
+    the same retryable way."""
+    import asyncio
+
+    from app.core import model_override
+    from app.db import database
+
+    model = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:claude-sonnet-5"
+
+    def broken(*a, **k):
+        raise ConnectionError("database restarting")
+    monkeypatch.setattr(database, "get_session", broken)
+
+    async def approve(*a, **k):
+        raise AssertionError("must not prompt on a failed lookup")
+    monkeypatch.setattr(model_override, "_approve", approve)
+
+    with pytest.raises(PermissionError, match="Try again"):
+        asyncio.run(model_override.accept("chat-1", None, model=model, baseline="sonnet",
+                                          action="start a review"))
+
+
 def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):
     """A slow read for key A that passed the active-key check before the owner
     switched to B must not replace B's saved list."""

@@ -159,7 +159,8 @@ def _create_subagent_tools(is_admin: bool) -> list:
         provider_models, models_error = _provider_models_arg(args.get("provider_models"))
         if models_error:
             return _error(models_error)
-        if api_error := claude_api_choice_error(provider_models or {}, where="a subagent"):
+        if api_error := (claude_api_choice_error(provider_models or {}, where="a subagent")
+                         or claude_api_choice_error(args.get("model"), where="a subagent")):
             return _error(api_error)
 
         import re
@@ -347,6 +348,12 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 api_error = claude_api_choice_error(
                     update_kwargs["provider_models"] or {}, existing.get("provider_models") or {},
                     where="a subagent")
+                if api_error:
+                    return api_error, None, None, None, None
+            if "model" in update_kwargs:
+                # The legacy field also pins the Task roster (normalized_provider_models).
+                api_error = claude_api_choice_error(
+                    update_kwargs["model"], existing.get("model"), where="a subagent")
                 if api_error:
                     return api_error, None, None, None, None
 
