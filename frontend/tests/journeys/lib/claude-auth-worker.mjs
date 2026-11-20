@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const checkout = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -55,6 +56,38 @@ function readStatus(path) {
 	}
 }
 
+function readCleanupStatus(path) {
+	try {
+		return JSON.parse(readFileSync(path, 'utf8'));
+	} catch (error) {
+		if (error.code !== 'ENOENT') throw new Error('Disposable Claude worker left unreadable private status');
+	}
+}
+
+function guardianAlive(guardian) {
+	if (!Number.isInteger(guardian?.pid) || guardian.pid <= 1 || !guardian.pid_identity) return false;
+	try {
+		const stat = readFileSync(`/proc/${guardian.pid}/stat`, 'utf8');
+		const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+		return fields[0] !== 'Z' && fields[19] === guardian.pid_identity;
+	} catch (error) {
+		if (error.code !== 'ENOENT' && error.code !== 'ESRCH') {
+			throw new Error('Could not verify that the disposable Claude worker guardian finished');
+		}
+		return false;
+	}
+}
+
+async function waitForGuardian(guardian) {
+	// guardian.py polls the launcher every 0.5s and allows 10s for killed
+	// services to vanish. It uses both status.json and its sibling log.
+	const stop = performance.now() + 11_500;
+	while (guardianAlive(guardian)) {
+		if (performance.now() >= stop) throw new Error('Disposable Claude worker guardian did not finish');
+		await sleep(50);
+	}
+}
+
 export async function startClaudeAuthWorker({ deferCleanup, log }, { readyMs = 31_000 } = {}) {
 	const directory = mkdtempSync(join(tmpdir(), 'claude-auth-case-'));
 	const statusPath = join(directory, 'status.json');
@@ -63,27 +96,46 @@ export async function startClaudeAuthWorker({ deferCleanup, log }, { readyMs = 3
 		'--no-pause', '--ttl-seconds', '600', '--status', statusPath],
 	{ cwd: checkout, stdio: ['ignore', 'pipe', 'pipe'] });
 	const exited = new Promise((resolve) => child.once('close', resolve));
-	let scratch;
+	let status;
 	deferCleanup(async () => {
+		// Remember the guardian before the launcher can unlink its status on exit.
+		// A startup still in progress can publish status later, so sample again
+		// just before escalation and after reaping. Never let this read stop TERM.
+		const rememberStatus = () => {
+			try { status = readCleanupStatus(statusPath) ?? status; } catch { /* checked again after close */ }
+		};
+		rememberStatus();
+		let stopError;
+		if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
 		try {
-			if (!scratch && existsSync(statusPath)) scratch = readStatus(statusPath).scratch_dir;
-		} finally {
-			if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+			await deadline(exited, 12_000, 'Disposable Claude worker did not stop after SIGTERM');
+		} catch (error) {
+			stopError = error;
+			rememberStatus();
+			child.kill('SIGKILL'); // The devloop guardian reaps orphaned services.
+			child.stdout.destroy();
+			child.stderr.destroy();
+		}
+		try {
+			if (stopError) await deadline(exited, 1_000, 'Disposable Claude worker did not exit after SIGKILL');
+			status = readCleanupStatus(statusPath) ?? status;
+			// Without published status, a not-yet-observed guardian can still
+			// reap its scratch, but has no service record here to consume.
+			await waitForGuardian(status?.guardian);
+			if (existsSync(`${statusPath}.guardian.log`)) log('devloop guardian handled interrupted teardown');
+			const stateLeft = existsSync(statusPath) || (status?.scratch_dir && existsSync(status.scratch_dir));
 			try {
-				await deadline(exited, 12_000, 'Disposable Claude worker did not stop after SIGTERM');
-			} catch (error) {
-				child.kill('SIGKILL'); // The devloop guardian reaps orphaned services.
-				child.stdout.destroy();
-				child.stderr.destroy();
-				await deadline(exited, 1_000, 'Disposable Claude worker did not exit after SIGKILL');
-				throw error;
+				rmSync(directory, { recursive: true }); // only our unique status directory
+			} catch {
+				throw new Error('Could not remove disposable Claude worker private status directory');
 			}
+			if (stateLeft) throw new Error('Disposable Claude worker left state on disk after shutdown');
+			log(`disposed fake Claude worker ${child.pid ?? '(not started)'} and its auth state`);
+		} catch (error) {
+			if (!stopError) throw error;
+			log(`additional fixture cleanup failure: ${error.message}`);
 		}
-		if (existsSync(statusPath) || (scratch && existsSync(scratch))) {
-			throw new Error('Disposable Claude worker left state on disk');
-		}
-		rmSync(directory, { recursive: true }); // only our unique status directory
-		log(`disposed fake Claude worker ${child.pid ?? '(not started)'} and its auth state`);
+		if (stopError) throw stopError;
 	});
 
 	const events = [];
@@ -109,7 +161,7 @@ export async function startClaudeAuthWorker({ deferCleanup, log }, { readyMs = 3
 			});
 		}), readyMs, 'Disposable Claude worker did not become ready');
 		const worker = readStatus(statusPath);
-		scratch = worker.scratch_dir;
+		status = worker;
 		if (worker.pid !== child.pid || worker.claude_cli?.mode !== 'fake' || !worker.app?.local_port) {
 			throw new Error('Expected the private fake Claude worker started for this case');
 		}

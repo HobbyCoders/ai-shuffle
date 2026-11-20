@@ -18,9 +18,10 @@ async function request(page, origin, method, path, data) {
 const statusPath = `${auth}?refresh=true`;
 // Exact retries can request several variants, and a whole-file retry can run
 // all four. Share the work deadline rather than granting a new budget per case.
-// Stop work at 159s of the 180s retry window, reserving 13s for the last fixture
-// shutdown and 8s for browser/context closure and reports.
-const workDeadline = performance.now() + 159_000;
+// Hosted CI only retries this journey with at least 178s left (journey_retry.py).
+// Leave 24.5s for the last fixture (TERM, KILL, guardian) and 8s for browser
+// closure and reports. An earlier case's teardown counts against the work window.
+const workDeadline = performance.now() + 145_000;
 
 await runJourney({
 	name: 'claude-account-switch',
