@@ -496,6 +496,11 @@ def test_a_versioned_default_falls_back_to_its_family_alias(lane, monkeypatch, v
     for mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_CLOUD):
         monkeypatch.setattr(claude_auth_mode, "current_mode", lambda m=mode: m)
         assert subagent_default.read().model == fallback
+        # The same id saved by an older release in both fields reads the same.
+        database.set_system_setting(subagent_default.SETTING_KEY,
+                                    json.dumps({"model": version, "version": version}))
+        assert subagent_default.read().model == fallback
+        database.set_system_setting(subagent_default.SETTING_KEY, json.dumps(stored))
 
 
 def test_a_stored_allowed_list_from_before_1830_is_ignored(lane):

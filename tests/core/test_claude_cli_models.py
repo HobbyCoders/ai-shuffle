@@ -10,11 +10,15 @@ import json
 
 import pytest
 
+from app.core import claude_auth_mode as _auth_mode
 from app.core import claude_cli_models as cm
 from app.core import model_registry as m
 from app.core.model_effort import effort_capabilities
 
 _ALL = ["low", "medium", "high", "xhigh", "max"]
+# The unpatched functions, for tests that need the real pin-aware path.
+_REAL_CURRENT_MODE = _auth_mode.current_mode
+_REAL_CLAUDE_PAYLOAD = m._claude_payload
 
 
 def _entry(value, label, resolved, levels=_ALL, supports=True):
@@ -305,6 +309,34 @@ def test_a_sign_in_switch_mid_payload_never_mixes_two_lists(cli, monkeypatch):
     monkeypatch.setattr(m, "delegated_model_aliases", first_read)
     by = {e["value"]: e for e in m.registry_payload()["models"]}
     assert list(by) == ["haiku", "sonnet", "opus", "fable"]
+
+
+def test_a_mode_switch_mid_payload_never_mixes_subscription_rows_with_cloud(cli, monkeypatch):
+    """Review R8-S1: rows, auth metadata and the legacy map share one mode."""
+    from app.core import claude_auth_mode
+
+    # The real current_mode (pin-aware), reading the mode through _read_mode.
+    monkeypatch.setattr(claude_auth_mode, "current_mode", _REAL_CURRENT_MODE)
+    monkeypatch.setattr(claude_auth_mode, "_read_mode", lambda: cli["mode"])
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        cli["mode"] = claude_auth_mode.MODE_CLOUD  # the owner turns on Cloud mid-projection
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    payload = m.registry_payload()
+    by = {e["value"]: e for e in payload["models"]}
+    assert "claude-mythos-5-1" in by and "claude-opus-4-6" in by
+    assert payload["claude"]["auth_kind"] == "subscription"
+    assert "claude-opus-4-6" not in payload["legacy_map"]  # still means itself
+    # After the payload the switch shows: Cloud, no subscription rows.
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    payload = m.registry_payload()
+    assert not any(e["value"].startswith("claude-") for e in payload["models"])
+    assert payload["claude"]["auth_kind"] != "subscription"
 
 
 def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch):

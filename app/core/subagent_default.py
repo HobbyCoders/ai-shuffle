@@ -78,10 +78,11 @@ def read() -> SubagentDefault:
         # ``model`` always meant an alias: a legacy id there runs today's alias.
         model = LEGACY_MODEL_MAP.get(model, model)
         if model.startswith("claude-") and native_choice(model) is None:
-            # A full id with no alias (Mythos), saved here before ``model``
-            # held only aliases, runs nowhere outside a subscription: unset,
-            # so the owner is asked for a default this worker can run.
-            model = None
+            # A full id saved here before ``model`` held only aliases (main
+            # could store a listed dated Haiku): its family's alias, as a new
+            # save would store. A family with no alias (Mythos) runs nowhere
+            # outside a subscription: unset, so the owner is asked.
+            model = _fallback_alias(model)
     return SubagentDefault(model=model)
 
 
