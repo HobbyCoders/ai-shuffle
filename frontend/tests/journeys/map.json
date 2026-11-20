@@ -272,6 +272,11 @@
 			]
 		},
 		{
+			"why": "update details stay inside the open sidebar and installer actions stay in the notification dock",
+			"journeys": ["desktop-update-popup"],
+			"globs": ["frontend/tests/journeys/desktop-update-popup.journey.mjs", "frontend/src/lib/components/layout/sidebar/DesktopUpdateButton.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [
@@ -781,11 +786,12 @@
 			]
 		},
 		{
-			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",
 				"frontend/src/lib/components/settings/providers/tabs/ClaudeCliModels.svelte",
+				"frontend/src/lib/components/settings/providers/tabs/AvailableModelList.svelte",
 				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
 				"frontend/src/lib/constants/models.svelte.ts",
 				"app/core/claude_cli_models.py",

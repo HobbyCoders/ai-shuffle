@@ -4,7 +4,8 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
 import {
 	getClaudeAuth,
 	getClaudeContextWindow,
-	getClaudeVersionedModels,
+	getModelBadgeClass,
+	getModelFamily,
 	getModels,
 	getNativeModel,
 	hydrateModelRegistry,
@@ -25,11 +26,9 @@ describe('Claude subscription CLI model list', () => {
 				{ value: 'sonnet', label: 'Sonnet 5.5', family: 'sonnet', context_window: 1_000_000 },
 				{ value: 'opus', label: 'Opus 5.5', family: 'opus', context_window: 1_000_000 },
 				{ value: 'fable', label: 'Fable 5.2', family: 'fable', context_window: 1_000_000 },
-				{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', context_window: 1_000_000, effort_levels: levels }
-			],
-			versioned_models: [
-				{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', context_window: 1_000_000, effort_levels: levels, enabled: true, description: '' },
-				{ value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [], enabled: false }
+				{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', context_window: 1_000_000, effort_levels: levels },
+				{ value: 'claude-mythos-5-1', label: 'Mythos 5.1', family: 'mythos', context_window: 1_000_000, effort_levels: levels },
+				{ value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [] }
 			],
 			providers: [],
 			claude: { auth_kind: 'subscription', plan_type: 'max', cli_models: { cli_version: '2.1.325', captured_at: '2026-11-14T00:00:00Z' } }
@@ -37,8 +36,10 @@ describe('Claude subscription CLI model list', () => {
 		await hydrateModelRegistry();
 	});
 
-	it('labels aliases as the CLI names them and offers turned-on versions', () => {
-		expect(getModels().map((m) => m.label)).toEqual(['Haiku 5.5', 'Sonnet 5.5', 'Opus 5.5', 'Fable 5.2', 'Opus 4.6']);
+	it('labels aliases as the CLI names them and offers every listed version', () => {
+		expect(getModels().map((m) => m.label)).toEqual(
+			['Haiku 5.5', 'Sonnet 5.5', 'Opus 5.5', 'Fable 5.2', 'Opus 4.6', 'Mythos 5.1', 'Haiku 4.5']
+		);
 		expect(getClaudeAuth().cli_models?.cli_version).toBe('2.1.325');
 	});
 
@@ -50,11 +51,10 @@ describe('Claude subscription CLI model list', () => {
 		expect(normalizeModel('claude-opus-4-8')).toBe('opus');
 	});
 
-	it('describes a listed version that is off by its own window and effort', () => {
-		expect(getClaudeVersionedModels().map((m) => [m.value, m.enabled])).toEqual([
-			['claude-opus-4-6', true],
-			['claude-haiku-4-5-20251001', false]
-		]);
+	it('describes a listed version by its own family, window and effort', () => {
+		expect(getModelFamily('claude-mythos-5-1')).toBe('mythos');
+		expect(getModelBadgeClass('claude-mythos-5-1')).toBe('card-badge--mythos');
+		expect(isPresetModel('claude-mythos-5-1')).toBe(true);
 		expect(getClaudeContextWindow('claude-haiku-4-5-20251001')).toBe(200_000);
 		expect(getNativeModel('claude-haiku-4-5-20251001')?.label).toBe('Haiku 4.5');
 	});
