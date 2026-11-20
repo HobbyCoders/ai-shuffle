@@ -19,12 +19,24 @@ permissions:
   statuses: read
   actions: read
 
-# One publisher at a time, whatever started it. A started run always finishes;
-# GitHub keeps only the newest waiting run and drops older waiting ones. That
-# is enough: the gate selects the newest attested revision on main when it
-# starts, so a run that waited publishes everything the dropped ones would have.
+# One publisher at a time. A started run always finishes; GitHub keeps only the
+# newest waiting run and drops older waiting ones. That is enough: the gate
+# selects the newest attested revision on main when it starts, so a run that
+# waited publishes everything the dropped ones would have. Only a run the gate
+# accepts joins the shared group (the condition repeats the gate's `if:`), so a
+# failed or pull request CI run cannot drop a waiting publish.
 concurrency:
-  group: desktop-source
+  group: >-
+    ${{ (github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
+    (github.event_name == 'schedule' ||
+     (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
+     (github.event_name == 'workflow_run' && github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.name == 'CI' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.repository.full_name == 'HobbyCoders/ai-shuffle' &&
+      github.event.workflow_run.head_repository.full_name == 'HobbyCoders/ai-shuffle')))
+    && 'desktop-source' || format('desktop-source-skipped-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
