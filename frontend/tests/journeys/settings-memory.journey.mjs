@@ -14,10 +14,13 @@ const seed = () => [
  memory('d', 'Two facts disagree about the staging address.', { needs_review: true }),
 ];
 const workspace = page => page.getByRole('navigation', { name: 'Workspace', exact: true });
-const rows = page => page.locator('.mem-list .st-it').filter({ visible: true });
+// Learned guidance navigates to a separate editor; it is not a saved memory.
+const MEMORY_ROW = '.mem-list [data-settings-item]:not([data-settings-item="learned-guidance"])';
+const rows = page => page.locator(MEMORY_ROW).filter({ visible: true });
 const text = page => page.getByRole('textbox', { name: 'What to remember', exact: true }).filter({ visible: true });
 const button = (page, name) => page.getByRole('button', { name, exact: true }).filter({ visible: true }).first();
-const showing = (page, count) => page.waitForFunction(n => [...document.querySelectorAll('.mem-list .st-it')].filter(el => el.checkVisibility()).length === n, count);
+const showing = (page, count) => page.waitForFunction(([selector, n]) =>
+ [...document.querySelectorAll(selector)].filter(el => el.checkVisibility()).length === n, [MEMORY_ROW, count]);
 const formOffset = page => text(page).evaluate(el => el.getBoundingClientRect().top - el.closest('.st-dwrap').getBoundingClientRect().top);
 const saved = page => page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Save' && b.disabled && b.checkVisibility()));
 // The service worker would answer the memories request before page.route sees it.
