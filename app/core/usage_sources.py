@@ -188,6 +188,13 @@ def _is_openrouter_row(row: Mapping[str, Any] | None) -> bool:
     return (row or {}).get("provider_type") == "openrouter"
 
 
+def _is_claude_api_row(row: Mapping[str, Any] | None) -> bool:
+    """The built-in Claude API row (the saved Anthropic key)."""
+    from app.core.claude_api_provider import is_claude_api_id
+
+    return is_claude_api_id((row or {}).get("id"))
+
+
 def _native_row_on(row: Mapping[str, Any] | None, provider: str, plan: bool, host: str) -> bool:
     """A native Messages row of this credential kind on the vendor's own host."""
     from fluid.providers.compatible import endpoint_root
@@ -531,6 +538,17 @@ _LINKS: tuple[UsageLink, ...] = (
         id="opencode_go", label="OpenCode Go", note="No quota meter for this key",
         dashboard_url="https://opencode.ai/console", subscription=True,
         applies=lambda row: _native_row_on(row, "opencode", True, "opencode.ai"),
+    ),
+    # The saved Anthropic key (the built-in "Claude API" row,
+    # app.core.claude_api_provider). Anthropic shows the prepaid credit balance
+    # only on the Console billing page: no API returns it, and the Admin API's
+    # cost report needs a separate admin key and reports spend, not credit.
+    # Per-turn cost is recorded from responses, apart from the subscription.
+    UsageLink(
+        id="claude_api", label="Claude API (pay as you go)",
+        note="Credit balance is shown only in the Claude Console",
+        dashboard_url="https://platform.claude.com/settings/billing", subscription=False,
+        applies=lambda row: _is_claude_api_row(row),
     ),
     # Per-turn cost is recorded from responses; only a balance is missing.
     UsageLink(

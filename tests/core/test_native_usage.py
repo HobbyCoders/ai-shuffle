@@ -351,6 +351,35 @@ async def test_link_only_rows_are_listed_but_send_and_store_nothing(mock_db, ups
     assert "opencode-plan_key" not in {link.provider_id for link in without_go}
 
 
+CLAUDE_BILLING = "https://platform.claude.com/settings/billing"
+
+
+async def test_saved_anthropic_key_gets_its_own_link_section(mock_db, upstream):
+    """The built-in Claude API row lists beside the subscription, never polled."""
+    from pathlib import Path
+
+    from app.api.usage import _load_usage_links
+    from app.core import claude_api_provider
+
+    api_row = {"id": "claude-api", "name": "Claude API", "provider_type": "anthropic",
+               "auth_mode": "api_key", "base_url": None, "enabled": True}
+    link = usage_sources.usage_link_for(api_row)
+    assert (link.id, link.dashboard_url, link.subscription) == ("claude_api", CLAUDE_BILLING, False)
+    assert link.note == "Credit balance is shown only in the Claude Console"
+    assert usage_sources.polled_sources(api_row) == ()
+    # A stored Anthropic-dialect row is not the saved key.
+    assert usage_sources.usage_link_for({**api_row, "id": "my-anthropic-gateway"}) is None
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "provider-usage-sources.md").read_text(encoding="utf-8")
+    assert CLAUDE_BILLING in doc
+
+    with patch.object(claude_api_provider, "virtual_row", return_value=api_row):
+        links = await _load_usage_links([])
+    assert [(l.provider_id, l.kind, l.provider_type) for l in links] == [("claude-api", "claude_api", "anthropic")]
+    with patch.object(claude_api_provider, "virtual_row", return_value=None):
+        assert await _load_usage_links([]) == []
+    assert upstream.requests == []
+
+
 async def test_poll_failure_logs_never_carry_the_key(kimi, upstream, caplog):
     def boom(request):
         raise httpx.ConnectError(f"refused with {request.headers['authorization']}")

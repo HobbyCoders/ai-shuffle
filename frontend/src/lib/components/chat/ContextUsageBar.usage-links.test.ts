@@ -79,6 +79,12 @@ const LINKS: ProviderUsageLinkEntry[] = [
 		kind: 'opencode_console', note: 'No balance meter for this key', dashboard_url: OPENCODE_CONSOLE, subscription: false },
 ];
 
+const CLAUDE_BILLING = 'https://platform.claude.com/settings/billing';
+const CLAUDE_API_LINK: ProviderUsageLinkEntry = {
+	provider_id: 'claude-api', provider_name: 'Claude API', provider_type: 'anthropic', kind: 'claude_api',
+	note: 'Credit balance is shown only in the Claude Console', dashboard_url: CLAUDE_BILLING, subscription: false,
+};
+
 const KIMI_API: ProviderUsageEntry = {
 	provider_id: 'kimi-api',
 	provider_name: 'Sample Kimi API',
@@ -223,6 +229,25 @@ describe('usage links', () => {
 			await registry([{ id: 'other', name: 'Other', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
 			rateLimit.applySnapshot({ available: false, windows: [], providers: [], usage_links: LINKS });
 			expect(headers(await open())).toEqual(LINK_HEADERS);
+		});
+
+		it('the saved Anthropic key is its own "Claude · API" section beside the Claude plan, sorted with Claude', async () => {
+			await registry([
+				...REGISTRY_ROWS,
+				{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', auth_mode: 'api_key', auth_kind: 'api', models: [] },
+			]);
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [{ type: 'five_hour', utilization: 30, resets_at: new Date(T0 + 3_600_000).toISOString() }],
+				providers: [],
+				usage_links: [...LINKS, CLAUDE_API_LINK],
+			});
+			const container = await open();
+			const all = headers(container);
+			// The plan section stays, and the key adds a second Claude section.
+			expect(all.filter((h) => h.startsWith('Claude'))).toHaveLength(2);
+			expect(all.slice(-3)).toEqual(['Claude · API', 'MiniMax · API', 'OpenCode · API']);
+			expect(metaLines(container)).toContain(`Credit balance is shown only in the Claude Console -> ${CLAUDE_BILLING}`);
 		});
 
 		it('a metered row keeps its registry header', async () => {

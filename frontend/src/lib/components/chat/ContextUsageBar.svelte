@@ -905,6 +905,8 @@
 		const t = (type || '').toLowerCase();
 		if (t === 'chatgpt' || t === 'openai') return 'openai';
 		if (t === 'grok' || t === 'xai') return 'grok';
+		// The saved Anthropic key ("Claude · API") sorts with Claude.
+		if (t === 'anthropic') return 'claude';
 		if (t.startsWith('openrouter')) return 'openrouter';
 		return t;
 	}
