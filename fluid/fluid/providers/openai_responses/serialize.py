@@ -256,15 +256,24 @@ SYSTEM_IN_INPUT_NOTE = (
 )
 
 
+# ``extra`` keys that keep the system prompt in ``instructions``. An ``input``
+# override would drop the moved item and an ``instructions`` override is the
+# caller's own prompt. In stateful mode the backend carries earlier input
+# forward but not ``instructions``, so a moved prompt would pile up in the
+# stored conversation and outlive a later change to it.
+_SYSTEM_STAYS_KEYS = ("input", "instructions", "previous_response_id", "conversation")
+
+
 def system_in_input(request: ProviderRequest) -> str | None:
     """The system prompt when this request sends it as the first input item.
 
     None when it stays in ``instructions``: no system prompt, a model the
-    rule does not cover, or an ``extra`` that replaces ``input`` wholesale
-    (the override would drop the item, so the prompt stays where it survives).
+    rule does not cover, or an ``extra`` that overrides the prompt or the
+    input or turns on stateful mode (see ``_SYSTEM_STAYS_KEYS``).
     """
     version = _GPT_VERSION.match(request.model.lower())
-    if version is None or "input" in request.extra:
+    extra = request.extra
+    if version is None or extra.get("store") or any(k in extra for k in _SYSTEM_STAYS_KEYS):
         return None
     if (int(version[1]), int(version[2] or 0)) < _SYSTEM_IN_INPUT_FROM:
         return None

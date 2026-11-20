@@ -89,8 +89,11 @@ constant amount per session that matched the size of the system prompt
 For models named `gpt-<major>[.<minor>]` at 6.2 or later the serializer now
 sends the system prompt as a `developer` message at the start of `input`,
 which is where the guide says reusable instructions belong, and `instructions`
-carries one fixed line pointing at it. Every other model, and a request whose
-`extra` replaces `input`, keeps the old body byte for byte. The cache probe's
+carries one fixed line pointing at it. Every other model keeps the old body
+byte for byte, and so does a request whose `extra` sets `input` or
+`instructions` or turns on stateful mode (`store`, `previous_response_id`,
+`conversation`), where a prompt in the input would join the stored
+conversation. The cache probe's
 `system` hash covers the prompt in either place and its `mK` hashes cover
 messages only, so fingerprints stay comparable across the upgrade.
 

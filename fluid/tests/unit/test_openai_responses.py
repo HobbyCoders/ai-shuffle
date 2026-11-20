@@ -208,12 +208,28 @@ def test_moved_system_prompt_survives_an_input_override_and_skips_an_empty_promp
     from dataclasses import replace
 
     request = replace(_request_with_history(), model="gpt-6.2-sol")
+    history = build_request_body(replace(request, system=None))["input"]
     # ``extra["input"]`` replaces the input list, so the prompt stays in
     # ``instructions`` where the override cannot drop it.
     override = [{"type": "message", "role": "user", "content": []}]
     body = build_request_body(replace(request, extra={"input": override}))
     assert body["input"] == override
     assert body["instructions"] == "be terse"
+    # A caller's own ``instructions`` replaces the system prompt outright, as
+    # it always did: the prompt is not sent a second way.
+    body = build_request_body(replace(request, extra={"instructions": "be loud"}))
+    assert body["instructions"] == "be loud"
+    assert body["input"] == history
+    # Stateful mode carries earlier input forward but not ``instructions``,
+    # so the prompt stays there and never joins the stored conversation.
+    for stateful in (
+        {"store": True},
+        {"previous_response_id": "resp_1"},
+        {"conversation": "conv_1"},
+    ):
+        body = build_request_body(replace(request, extra=stateful))
+        assert body["instructions"] == "be terse"
+        assert body["input"] == history
     # No prompt means no developer item and no instructions.
     for empty in (None, "", []):
         body = build_request_body(replace(request, system=empty))
@@ -246,6 +262,12 @@ def test_probe_reports_a_moved_system_prompt_as_system_not_history() -> None:
 
     edited = probe(replace(new, system="be verbose"))
     assert [key for key in segments if edited[key] != after[key]] == ["system"]
+
+    # A caller's ``instructions`` override is the prompt that is sent, so an
+    # edit to it is the system change.
+    first = probe(replace(new, extra={"instructions": "be loud"}))
+    second = probe(replace(new, extra={"instructions": "be quiet"}))
+    assert [key for key in segments if first[key] != second[key]] == ["system"]
 
 
 def test_request_body_reasoning_verbatim_and_foreign_dropped() -> None:
