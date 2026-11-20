@@ -1160,7 +1160,17 @@ class HarnessAdapter(ProviderAdapter):
                 "workspace_card": self._workspace_card,
                 "worker": self._worker_identity,
             }
-            compiled_prompt = await run_sync(
+            if (not one_shot and options.extra.get("provider_auth_mode") == "chatgpt"
+                    and options.extra.get("app_session_id") and options.extra.get("provider_id")):
+                from app.core.behavioral_learning import wait_for_matching_review
+
+                await wait_for_matching_review(
+                    options.extra["app_session_id"], options.model, options.extra["provider_id"]
+                )
+            # Review has a separately bounded prompt. Never attach checkout
+            # instructions, memory or the native tool catalog to its request.
+            review_only = bool(options.extra.get("review_account"))
+            compiled_prompt = None if review_only else await run_sync(
                 self._compile_prompt_sections,
                 system, append_system, options,
                 **{k: v for k, v in self._prompt_inputs.items()
@@ -1220,8 +1230,8 @@ class HarnessAdapter(ProviderAdapter):
                 # (security + profile instructions) riding as an extra block,
                 # plus fluid's own instruction-file/skills/env gathering.
                 system=(
-                    compiled_prompt.text
-                    if compiled_prompt is not None
+                    "Return only the requested JSON classification." if review_only
+                    else compiled_prompt.text if compiled_prompt is not None
                     else "\n\n".join(part for part in (
                         system if system is not None else append_system,
                         prompt_block(attribution_enabled),
@@ -1461,6 +1471,9 @@ class HarnessAdapter(ProviderAdapter):
         # delegated leg sends the caller's prompt with no system prompt.
         if getattr(sdk_options, "aih_one_shot", False) is True:
             opts.extra["one_shot"] = True
+            review_account = getattr(sdk_options, "aih_review_account", None)
+            if review_account:
+                opts.extra["review_account"] = review_account
         if getattr(sdk_options, "aih_automatic_workflows", False):
             opts.extra["automatic_workflows"] = True
         profile_id = getattr(sdk_options, "aih_profile_id", None)
@@ -8756,6 +8769,13 @@ def _app_guidance_blocks(
     blocks.extend(_model_guidance_blocks(options.model))
     blocks.extend(_learned_guidance_blocks(options.model))
     if native:
+        if (not options.extra.get("one_shot") and options.extra.get("provider_auth_mode") == "chatgpt"
+                and options.extra.get("app_session_id") and options.extra.get("provider_id")):
+            from app.core.behavioral_learning import prompt_block
+
+            scoped = prompt_block(options.extra["app_session_id"], options.model, options.extra["provider_id"])
+            if scoped:
+                blocks.append(scoped)
         mcp_block = _mcp_instructions_block(registry, permitted)
         if mcp_block:
             blocks.append(mcp_block)
@@ -9926,9 +9946,13 @@ async def _build_provider_client(
     (a ``ValueError``) rather than yielding a client that 401s on first use.
     """
     provider_id = options.extra.get("provider_id")
+    review_account = options.extra.get("review_account")
     creds = None
     if provider_id:
-        creds = await resolve_provider_credentials(kind, str(provider_id))
+        if review_account:
+            creds = await resolve_provider_credentials(kind, str(provider_id), expected_account=review_account)
+        else:
+            creds = await resolve_provider_credentials(kind, str(provider_id))
         provider_id = creds.provider_id or provider_id
         # A switch may happen after SDK options were built but before the lazy
         # HTTP client connects. Headers and usage must name the credential row.
@@ -9955,6 +9979,7 @@ async def _build_provider_client(
                 auth=creds.auth,
                 base_url=base_url,
                 http_client=http_client,
+                retry=RetryPolicy(max_retries=0) if review_account else None,
                 **timeouts,
             )
             return client, http_client

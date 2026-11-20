@@ -278,13 +278,17 @@ class CodexSubscriptionAuth:
     triggering a second, reuse-tripping refresh POST).
     """
 
-    def __init__(self, provider_id: str, account_id: Optional[str] = None) -> None:
+    def __init__(self, provider_id: str, account_id: Optional[str] = None, *,
+                 expected_account: Optional[str] = None) -> None:
         self.provider_id = provider_id
         self.account_id = account_id
+        self._expected_account = expected_account
         self._last_access_token: Optional[str] = None
 
     async def get_access_token(self) -> str:
         access, account_id = await _load_codex_access_token(self.provider_id)
+        if self._expected_account and account_id != self._expected_account:
+            raise ProviderCredentialError("Behavioral review account changed")
         if account_id:
             self.account_id = account_id
         self._last_access_token = access
@@ -292,6 +296,8 @@ class CodexSubscriptionAuth:
 
     async def on_401(self) -> None:
         """Refresh once after an upstream 401 (serialized per provider)."""
+        if self._expected_account:
+            raise ProviderCredentialError("Behavioral review authentication failed")
         from app.core import codex_token_refresh
 
         refreshed = await codex_token_refresh.refresh_on_401_once(
@@ -306,7 +312,7 @@ class CodexSubscriptionAuth:
 
 
 async def resolve_provider_credentials(
-    kind: str, provider_id: str
+    kind: str, provider_id: str, *, expected_account: Optional[str] = None
 ) -> ProviderCredentials:
     """Resolve credentials for the session's bound provider row.
 
@@ -330,11 +336,15 @@ async def resolve_provider_credentials(
             "re-enable it or pick another provider for this session."
         )
 
+    if expected_account and (kind != "openai_responses" or row.get("id") != provider_id
+                             or not _is_codex_subscription(row)
+                             or row.get("codex_account_id") != expected_account):
+        raise ProviderCredentialError("Behavioral review route changed")
     provider_id = row.get("id") or provider_id
     label = _provider_label(row, provider_id)
 
     if kind == "openai_responses" and _is_codex_subscription(row):
-        auth = CodexSubscriptionAuth(provider_id, row.get("codex_account_id"))
+        auth = CodexSubscriptionAuth(provider_id, row.get("codex_account_id"), expected_account=expected_account)
         # Eagerly resolve once so a missing/needs-reauth account surfaces as a
         # clear config error at connect time rather than a 401 mid-turn.
         await auth.get_access_token()

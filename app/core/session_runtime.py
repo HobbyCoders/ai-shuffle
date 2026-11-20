@@ -354,6 +354,9 @@ async def _fire_on_turn_settled(session_id: str, turn_id: str, outcome: str) -> 
     if outcome in ("completed", "aborted"):
         from app.core.lifecycle_events import enqueue
         enqueue(outcome, session_id, turn_id)
+    if outcome == "completed":
+        from app.core.behavioral_learning import enqueue as enqueue_behavioral_review
+        enqueue_behavioral_review(session_id, turn_id)
     hook = _on_turn_settled
     if hook is None:
         return

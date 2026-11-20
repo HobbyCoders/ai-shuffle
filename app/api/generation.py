@@ -196,6 +196,8 @@ async def generate_with_claude(
     prompt: str,
     model: Optional[str] = None,
     timeout_seconds: float = 120.0,
+    *,
+    review_binding: tuple[dict, str] | None = None,
 ) -> str:
     """
     Generate a response using AI, honoring the text-generation setting.
@@ -231,6 +233,8 @@ async def generate_with_claude(
                the adapter is torn down and an HTTP 504 is raised. Latency-
                sensitive callers (branch names) pass a shorter budget so their
                non-AI fallback fires quickly.
+        review_binding: Internal, pre-checked text-generation config and exact
+               ChatGPT account; refuses any credential switch rather than retrying.
 
     Returns:
         Text response from the model.
@@ -248,7 +252,8 @@ async def generate_with_claude(
     # Run them off the event loop: this function sits in front of interactive
     # flows (branch naming, commit messages) and a slow DB round-trip here used
     # to stall every other request in the process.
-    generation_config = await run_sync(text_generation_config)
+    generation_config = (review_binding[0] if review_binding
+                         else await run_sync(text_generation_config))
     if model:
         # A UI selection is a complete run binding, not a bare model on the
         # Settings provider. Native aliases explicitly clear that provider.
@@ -281,6 +286,12 @@ async def generate_with_claude(
     from app.core import credential_gate
 
     leg = await run_sync(credential_gate.leg_for_options, options)
+    if review_binding:
+        if (getattr(options, "aih_provider_id", None) != generation_config["provider"]
+                or getattr(options, "aih_provider_auth_mode", None) != "chatgpt"):
+            raise RuntimeError("Behavioral review route changed")
+        options.aih_review_account = review_binding[1]
+        options.env = {**(options.env or {}), "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "256"}
     if leg == "delegated":
         refusal = await credential_gate.turn_refusal_async(leg)
         if refusal:
@@ -350,6 +361,10 @@ async def generate_with_claude(
                                 f"len={len(block.text)}"
                             )
                         response_text.append(block.text)
+                        if review_binding:
+                            from app.core.behavioral_review import MAX_OUTPUT_CHARS
+                            if sum(map(len, response_text)) > MAX_OUTPUT_CHARS:
+                                raise RuntimeError("Behavioral review response exceeded its limit")
             elif isinstance(message, ResultMessage):
                 # Turn-terminal. A failed turn must not read back as an empty
                 # generation — surface the harness's error text so
