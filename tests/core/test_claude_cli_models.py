@@ -530,3 +530,185 @@ def test_a_preview_never_refreshes_the_cli_list():
     for disposable in (True, False):
         with patch("app.preview_run.disposable_preview_data", return_value=disposable):
             assert _preview_may_change_dev_data(refresh) is False
+
+
+def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(cli, mock_db, monkeypatch, tmp_path):
+    """S1 + S2 + S3: independent per-model keys, hidden_models metadata, and no-enabled-default refusal."""
+    import asyncio
+    from unittest.mock import patch
+
+    from fastapi import Response
+    from starlette.requests import Request
+
+    from app.api import command_context, query as query_api
+    from app.api.auth import _preview_may_change_dev_data
+    from app.api.model_registry import (
+        ToggleClaudeSubscriptionModelRequest,
+        list_claude_subscription_models,
+        toggle_claude_subscription_model,
+    )
+    from app.core import automation_service, credential_gate, generation_options, query_options
+    from app.db import database
+    from app.mcp import config_subagents
+    from app.network.policy import is_shared_setting_key
+
+    # Default: all models enabled.
+    full = cm.subscription_catalog_rows()
+    assert full["captured"] is True
+    assert all(row["enabled"] is True for row in full["models"])
+
+    # S3: disable sonnet and claude-mythos-5-1 -> two independent shared system_settings rows.
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append((k, v)), real_set(k, v))[1])
+    assert cm.set_model_enabled("sonnet", False) == ["sonnet"]
+    assert cm.set_model_enabled("sonnet", False) == ["sonnet"]  # no-op suppressed
+    assert cm.set_model_enabled("claude-mythos-5-1", False) == ["claude-mythos-5-1", "sonnet"]
+    assert writes == [
+        (f"{cm.DISABLED_MODEL_PREFIX}sonnet", "1"),
+        (f"{cm.DISABLED_MODEL_PREFIX}claude-mythos-5-1", "1"),
+    ]
+    assert is_shared_setting_key(f"{cm.DISABLED_MODEL_PREFIX}sonnet") is True
+    assert is_shared_setting_key(f"{cm.DISABLED_MODEL_PREFIX}claude-mythos-5-1") is True
+
+    # Re-enabling writes "0" (preserving LWW revision) and no-op repeat writes nothing.
+    assert cm.set_model_enabled("sonnet", True) == ["claude-mythos-5-1"]
+    assert cm.set_model_enabled("sonnet", True) == ["claude-mythos-5-1"]
+    assert writes[-1] == (f"{cm.DISABLED_MODEL_PREFIX}sonnet", "0")
+    assert len(writes) == 3
+    # Re-disable sonnet for the remaining assertions.
+    assert cm.set_model_enabled("sonnet", False) == ["claude-mythos-5-1", "sonnet"]
+
+    # Pickers & selectable enums hide disabled models; S2 hidden_models retains full live metadata.
+    payload = m.registry_payload()
+    offered = [item["value"] for item in payload["models"]]
+    assert "sonnet" not in offered
+    assert "claude-mythos-5-1" not in offered
+    assert "haiku" in offered and "opus" in offered and "claude-opus-4-6" in offered
+    hidden_by_value = {item["value"]: item for item in payload["hidden_models"]}
+    assert set(hidden_by_value) == {"sonnet", "claude-mythos-5-1"}
+    assert hidden_by_value["sonnet"]["label"] == "Sonnet 5.5"
+    assert hidden_by_value["claude-mythos-5-1"]["label"] == "Mythos 5.1"
+    assert hidden_by_value["claude-mythos-5-1"]["family"] == "mythos"
+    assert hidden_by_value["claude-mythos-5-1"]["context_window"] == 1_000_000
+    assert hidden_by_value["claude-mythos-5-1"]["effort_levels"] == _ALL
+    selectable = m.selectable_model_values()
+    assert "sonnet" not in selectable and "claude-mythos-5-1" not in selectable
+
+    # Metadata/resolution helpers still work on disabled models for existing chats.
+    assert m.get_model("sonnet").label == "Sonnet 5.5"
+    assert m.get_model("claude-mythos-5-1").label == "Mythos 5.1"
+    assert m.get_model_family("claude-mythos-5-1") == "mythos"
+    assert m.get_context_window("claude-mythos-5-1") == 1_000_000
+    assert effort_capabilities("claude-mythos-5-1", route="delegated")["effort_levels"] == _ALL
+    assert m.normalize_model("claude-sonnet-4-6") == "sonnet"
+    assert m.keeps_own_id("claude-mythos-5-1") is True
+    assert m.native_choice("claude-mythos-5-1") == "claude-mythos-5-1"
+    assert m.delegated_model_aliases()["sonnet"] == "claude-sonnet-5-5"
+
+    # Default model falls back to the first enabled model when sonnet is disabled.
+    monkeypatch.setattr(credential_gate, "_claude_ready_for_default", lambda probe: True)
+    monkeypatch.setattr(credential_gate, "_default_candidate_rows", lambda servable_only=False: [])
+    assert credential_gate._claude_default("sonnet", probe=False) == (None, "haiku")
+    assert credential_gate.default_run_selection(probe=False) == "haiku"
+
+    # Unfiltered Settings endpoint still lists every model with its enabled flag.
+    sub_list = asyncio.run(list_claude_subscription_models(Response(), "admin"))
+    by_id = {row["id"]: row for row in sub_list["models"]}
+    assert by_id["sonnet"]["enabled"] is False
+    assert by_id["claude-mythos-5-1"]["enabled"] is False
+    assert by_id["haiku"]["enabled"] is True
+
+    # S1: disable EVERY subscription model on a Claude-only worker -> no fabricated "sonnet" default!
+    for row in sub_list["models"]:
+        asyncio.run(toggle_claude_subscription_model(
+            ToggleClaudeSubscriptionModelRequest(model=row["id"], enabled=False), "admin"
+        ))
+    assert m.selectable_model_values() == []
+    all_disabled_payload = m.registry_payload()
+    assert all_disabled_payload["models"] == []
+    assert len(all_disabled_payload["hidden_models"]) == len(sub_list["models"])
+    assert all_disabled_payload["default"] == ""
+    assert credential_gate._claude_default("sonnet", probe=False) is None
+    assert credential_gate.default_run_model(probe=False) == (None, None)
+    assert credential_gate.default_run_selection(probe=False) == ""
+
+    # S1: implicit new-run paths refuse cleanly while explicit model selections still pass through.
+    implicit_profile = {"id": "p1", "config": {"cwd": str(tmp_path), "tools_preset": "claude_code"}}
+    with patch.object(query_options, "get_security_instructions", return_value=""):
+        with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+            query_options.build_options_from_profile(profile=implicit_profile)
+        explicit_profile = {"id": "p2", "config": {"model": "claude-mythos-5-1", "cwd": str(tmp_path), "tools_preset": "claude_code"}}
+        opts, _ = query_options.build_options_from_profile(profile=explicit_profile)
+        assert opts.model == "claude-mythos-5-1"
+    with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+        generation_options.text_generation_config()
+    monkeypatch.setattr(database, "get_profile", lambda pid: {"id": pid, "config": {}})
+    with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+        query_api._request_binding("default", {}, None)
+    assert query_api._request_binding("default", {"model": "sonnet"}, None) == (None, "sonnet")
+    assert command_context.command_provider_kind(None, None, None, None, None) == "unavailable"
+    auto_model = automation_service.resolve_automation_model({"id": "a1", "profile_id": "default"})
+    assert auto_model["model"] is None and "No models are enabled" in (auto_model["error"] or "")
+
+    tools = {t.name: t for t in config_subagents._create_subagent_tools(True)}
+    for name in ("createSubagent", "updateSubagent"):
+        assert "enum" not in tools[name].input_schema["properties"]["model"]
+
+    # Cloud mode is unaffected by subscription disabled models.
+    cli["mode"] = "cloud"
+    assert [item["value"] for item in m.registry_payload()["models"]] == ["haiku", "sonnet", "opus", "fable"]
+
+    # Disposable preview allows curation PUTs (never on real installs).
+    for path in ("/api/v1/models/claude/subscription/models", "/api/v1/models/claude/api-key/acct-1/models"):
+        req = Request({"type": "http", "method": "PUT", "path": path, "headers": []})
+        with patch("app.preview_run.disposable_preview_data", return_value=True):
+            assert _preview_may_change_dev_data(req) is True
+        with patch("app.preview_run.disposable_preview_data", return_value=False):
+            assert _preview_may_change_dev_data(req) is False
+
+
+def test_manual_refresh_updates_captured_at_without_announcing_when_unchanged(cli, monkeypatch, tmp_path):
+    """Live-QA #2: explicit refresh() advances captured_at in memory and on disk even when models match."""
+    from app.core import claude_cli_status
+
+    disk = tmp_path / "claude-cli-models.json"
+    monkeypatch.setattr(cm, "_path", lambda: disk)
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    old_ts = "2025-01-01T00:00:00+00:00"
+    initial = cm.parse_initialize(REPLY)
+    initial["captured_at"] = old_ts
+    # Seed disk + memory with old timestamp.
+    monkeypatch.setattr(cm, "_snapshot", None)
+    monkeypatch.setattr(cm, "_loaded", False)
+    assert cm.store(initial) is True
+    assert cm.peek()["captured_at"] == old_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == old_ts
+
+    announced = []
+    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: announced.append(True))
+
+    # Passive store (touch_timestamp=False) leaves captured_at untouched.
+    passive = cm.parse_initialize(REPLY)
+    assert passive["captured_at"] != old_ts
+    assert cm.store(passive) is False
+    assert cm.peek()["captured_at"] == old_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == old_ts
+    assert announced == []
+
+    # Explicit refresh() updates captured_at in memory, on disk, and in API projections without announcing.
+    cli["status"] = claude_cli_status.ClaudeCliStatus(
+        installed=True, signed_in=True, email="a@example.invalid",
+        cli_version="2.1.325", binary_path="/fake/claude",
+    )
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False: cli["status"])
+    monkeypatch.setattr(cm, "_handshake", lambda binary, env: REPLY)
+
+    refreshed = cm.refresh()
+    new_ts = refreshed["captured_at"]
+    assert new_ts != old_ts
+    assert cm.peek()["captured_at"] == new_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == new_ts
+    assert cm.subscription_catalog_rows()["captured_at"] == new_ts
+    assert m.registry_payload()["claude"]["cli_models"]["captured_at"] == new_ts
+    assert announced == []

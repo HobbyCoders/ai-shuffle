@@ -47,6 +47,7 @@ from fluid.engine.acp.client import (
     INVALID_PARAMS,
 )
 from fluid.engine.acp.mapping import KIND_TOOL_NAMES, TurnMapper, safe_server_name
+from fluid.context.usage import CATEGORY_COLORS, FREE_SPACE, MESSAGES
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
@@ -84,6 +85,9 @@ PERMISSION_TIMEOUT = 900.0
 UNWATCHED_PERMISSION_TIMEOUT = 10.0
 QUESTION_TIMEOUT = 1800.0
 BUNDLED_SERVER_NAME = "fluid_bundled"
+# The one row of an ACP agent's context reading: its total, which holds the
+# system prompt and tools as well as the conversation.
+CONTEXT_IN_USE = "In use"
 # The only tool names a terminal error may repeat (``AcpLoop._plain_tool_name``):
 # the agent's tools in the kind map, and the bundled tools fluid defines
 # (fluid.tools.builtins, fluid.tools.mcp.call_through). Never read from the
@@ -327,6 +331,9 @@ class AcpLoop:
         self._closed = False
         # Set by ``stop_agent`` while a turn runs: the text that turn ends with.
         self._stop_reason: str | None = None
+        # The agent's latest ``usage_update`` context reading: (used, size,
+        # the model it was taken on). See ``get_context_usage``.
+        self._context_reading: tuple[int, int | None, str] | None = None
         self.last_init: dict[str, Any] | None = None
 
     # ─── ExecutionEngine surface ────────────────────────────────────────
@@ -380,7 +387,56 @@ class AcpLoop:
         return False  # a steer is written to the agent at once
 
     async def get_context_usage(self) -> dict[str, Any] | None:
-        return None
+        """The agent's own context reading, in the base shape, or None.
+
+        ACP's ``usage_update`` carries ``used`` (tokens in the agent's context
+        now) and ``size`` (its window). agy 1.5.13 sends one after every turn
+        (Gemini 4 Argon: ``size`` 1048576). It is one total with no breakdown,
+        so it is a single row (never "Messages", which would claim the system
+        prompt and tools are not in it) and Free space. None before the agent
+        has reported, after a model switch until it reports again (the window
+        belongs to the model it was read on), and once a fresh agent session
+        replaces the one it was read on.
+        """
+        reading = self._context_reading
+        if reading is None:
+            return None
+        used, size, model = reading
+        if model != self._served_model():
+            return None
+        categories: list[dict[str, Any]] = []
+        if used > 0:
+            categories.append({"name": CONTEXT_IN_USE, "tokens": used, "color": CATEGORY_COLORS[MESSAGES]})
+        if size:
+            categories.append({"name": FREE_SPACE, "tokens": max(0, size - used),
+                               "color": CATEGORY_COLORS[FREE_SPACE]})
+        return {
+            "categories": categories,
+            "totalTokens": used,
+            "maxTokens": size,
+            "rawMaxTokens": size,
+            "percentage": round(used / size * 100, 1) if size else None,
+            "model": model,
+            # The agent's own count, not an estimate.
+            "measured": True,
+            # The agent compacts by itself; when is not reported, so no
+            # Autocompact buffer is claimed.
+            "isAutoCompactEnabled": False,
+            "memoryFiles": [], "systemTools": [], "mcpTools": [],
+            "deferredBuiltinTools": [], "agents": [],
+        }
+
+    def _served_model(self) -> str:
+        return self._current_config("model") or self.model or ""
+
+    def _note_context(self, update: Mapping[str, Any]) -> None:
+        """Keep a ``usage_update``'s context reading (``used`` / ``size``)."""
+        used, size = update.get("used"), update.get("size")
+        if not isinstance(used, int) or isinstance(used, bool) or used < 0:
+            return
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            size = None
+        self._context_reading = (used, size, self._served_model())
 
     def fast_waits_for_next_turn(self) -> bool:
         return False
@@ -426,6 +482,7 @@ class AcpLoop:
             fut.set_result(op)
         elif isinstance(op, SetModel):
             self.model = op.model
+            self._context_reading = None  # the window was the previous model's
             await self._apply_config("model", op.model)
             if self.effort:
                 await self._apply_config("thought_level", self.spec.effort_value(self.effort))
@@ -721,6 +778,8 @@ class AcpLoop:
                         logger.warning("ACP agent did not resume session %s (%s); starting a new one",
                                        self.cli_session_id, exc.message)
                 if not self._session_resumed:
+                    # A new conversation: the last one's context reading is not its own.
+                    self._context_reading = None
                     params: dict[str, Any] = {"cwd": self.cwd, "mcpServers": servers}
                     if self.add_dirs and info.session_capability("additionalDirectories"):
                         params["additionalDirectories"] = self.add_dirs
@@ -1157,6 +1216,8 @@ class AcpLoop:
         mapper = self._mapper
         if update is None:
             return
+        if update.get("sessionUpdate") == "usage_update":
+            self._note_context(update)
         if mapper is None:
             # Between turns: keep config / mode changes, drop content.
             kind = update.get("sessionUpdate")

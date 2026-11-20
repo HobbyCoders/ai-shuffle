@@ -31,7 +31,8 @@ vi.mock('$lib/api/git', () => ({
 	generateBranchNameLocal: vi.fn(() => 'local/auto-name'),
 }));
 const post = vi.hoisted(() => vi.fn());
-vi.mock('$lib/api/client', () => ({ api: { post, get: vi.fn(), put: vi.fn(), delete: vi.fn() } }));
+const get = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/client', () => ({ api: { post, get, put: vi.fn(), delete: vi.fn() } }));
 vi.mock('./v2/feed-controller', () => ({
 	feedController: {
 		start: vi.fn(), stop: vi.fn(), isFeeding: vi.fn(() => false),
@@ -258,5 +259,25 @@ describe('the surface only moves forward while a new session binds', () => {
 		expect(await pending).toBeNull();
 		expect(wsConn.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', session_id: 'wt-branch', prompt: 'hello' }));
 		expect(history.every((h) => h.state.sessionId === null)).toBe(true);
+	});
+
+	it('omits overrides.model when server default is empty even if gw:claude-api is ready', async () => {
+		const { hydrateModelRegistry, setReadyProviders } = await import('$lib/constants/models.svelte');
+		const claudeApiRow = {
+			id: 'claude-api', name: 'Claude API', provider_type: 'anthropic',
+			models: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }], default_model: 'claude-sonnet-5', usable: true,
+		};
+		get.mockResolvedValueOnce({ models: [], default: '', legacy_map: {}, providers: [claudeApiRow] });
+		await hydrateModelRegistry();
+		setReadyProviders(['claude', 'gw:claude-api']);
+		try {
+			const { sender, wsConn } = setup({ worktreeIntent: 'local', modelOverride: null });
+			expect(await sender.sendMessage('hello')).toBe(true);
+			expect(wsConn.send).toHaveBeenCalledTimes(1);
+			const sent = (wsConn.send.mock.calls as unknown[][])[0]?.[0] as { overrides?: Record<string, unknown> } | undefined;
+			expect(sent?.overrides?.model).toBeUndefined();
+		} finally {
+			setReadyProviders(null);
+		}
 	});
 });

@@ -83,6 +83,8 @@ NO_PROVIDER_MESSAGE = (
     "Agents cannot start: no AI provider is set up on this worker. "
     "Add one in Settings > Providers."
 )
+# Ready provider(s) exist, but every model has been disabled by curation.
+NO_ENABLED_MODELS_MESSAGE = "No models are enabled. Enable a model in Settings > Providers."
 
 CLAUDE_PROVIDER_ID = "claude"
 
@@ -607,14 +609,16 @@ def claude_api_is_default() -> bool:
 
 
 def _claude_default(
-    model: str, probe: bool, *, servable_only: bool = False,
+    model: str, probe: bool, *, servable_only: bool = False, allow_fallback: bool = True,
 ) -> Optional[Tuple[Optional[str], str]]:
     """Claude's place in the default order, or None when Claude cannot run.
 
     A worker whose owner chose API key mode takes the saved key as its Claude
     default, bound explicitly to the Claude API provider so the picker shows
     it. Otherwise (or once that key is gone) the unbound alias, which always
-    means the Claude subscription on the CLI.
+    means the Claude subscription on the CLI. When the preferred subscription
+    model is disabled for pickers, pick the first enabled one (when
+    ``allow_fallback`` is True) or None so another usable provider can win.
     """
     from app.core import claude_auth_mode
 
@@ -623,7 +627,17 @@ def _claude_default(
         if picked:
             return picked
     if _claude_ready_for_default(probe):
-        return None, model
+        from app.core.model_registry import _disabled_subscription_models, selectable_model_values
+
+        disabled = _disabled_subscription_models()
+        if not disabled or model not in disabled:
+            return None, model
+        if not allow_fallback:
+            return None
+        enabled = selectable_model_values()
+        if enabled:
+            return None, enabled[0]
+        return None
     return None
 
 
@@ -744,7 +758,7 @@ def most_used_model(
             if turns < MOST_USED_MIN_TURNS:
                 break
             if provider_id is None:
-                picked = _claude_default(model, probe, servable_only=servable_only)
+                picked = _claude_default(model, probe, servable_only=servable_only, allow_fallback=False)
                 if picked:
                     return picked
                 continue
@@ -762,10 +776,28 @@ def most_used_model(
     return None
 
 
+def _has_eligible_default_provider(probe: bool, *, servable_only: bool = False) -> bool:
+    """Whether at least one provider eligible for implicit defaults is ready.
+
+    Distinguishes an unconfigured worker (returns False -> legacy DEFAULT_MODEL
+    setup message) from a configured worker where every model on its ready
+    provider(s) has been disabled via curation (returns True -> no enabled default).
+    """
+    from app.core import claude_auth_mode
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+
+    if _claude_ready_for_default(probe):
+        return True
+    rows = _default_candidate_rows(servable_only)
+    if claude_auth_mode.prefers_claude_api():
+        return bool(rows)
+    return any(r.get("id") != CLAUDE_API_PROVIDER_ID for r in rows)
+
+
 def default_run_model(
     *, probe: bool = True, prefer_most_used: bool = True, servable_only: bool = False,
-) -> Tuple[Optional[str], str]:
-    """``(provider row id or None, model id)`` for a run that named no model.
+) -> Tuple[Optional[str], Optional[str]]:
+    """``(provider row id or None, model id or None)`` for a run that named no model.
 
     Every provider counts the same. In order:
 
@@ -774,8 +806,10 @@ def default_run_model(
     2. the oldest usable provider row's own default model
        (:func:`default_provider_model`); Claude is the remaining candidate,
        whose default is the registry default;
-    3. the registry default, so a worker with nothing set up still gets the
-       Claude setup message.
+    3. ``(None, None)`` when at least one eligible provider IS ready/usable
+       but every model on it is disabled by curation;
+    4. the registry default, so an unconfigured worker with nothing set up
+       still gets the Claude setup message.
 
     The saved Anthropic API key (the Claude API provider) is billed per
     token, so it is a default only on a worker whose owner chose API key
@@ -820,6 +854,8 @@ def default_run_model(
                 return picked[0], picked[1]
         # Never the saved key as a last resort: saving a key is not choosing
         # it. Only API key mode (``_claude_default``) makes it the default.
+        if _has_eligible_default_provider(probe, servable_only=servable_only):
+            return None, None
     except Exception:  # noqa: BLE001 — a failed check keeps the registry default
         logger.warning("Could not pick a default model", exc_info=True)
     return None, DEFAULT_MODEL
@@ -828,11 +864,14 @@ def default_run_model(
 def default_run_selection(
     *, probe: bool = True, prefer_most_used: bool = True, servable_only: bool = False,
 ) -> str:
-    """:func:`default_run_model` as a picker value: a native alias, or a
-    ``prov:<providerId>:<modelId>`` composite for a provider row."""
+    """:func:`default_run_model` as a picker value: a native alias, a
+    ``prov:<providerId>:<modelId>`` composite for a provider row, or ``""``
+    when ready provider(s) exist with no enabled models."""
     provider_id, model = default_run_model(
         probe=probe, prefer_most_used=prefer_most_used, servable_only=servable_only,
     )
+    if not model:
+        return ""
     # Same shape as query_options.PROVIDER_MODEL_PREFIX / decode_provider_model.
     return f"prov:{provider_id}:{model}" if provider_id else model
 

@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -39,9 +40,14 @@ CLAUDE_API_PROVIDER_ID = "claude-api"
 CLAUDE_API_NAME = "Claude API"
 ANTHROPIC_API_BASE_URL = "https://api.anthropic.com"
 AUTH_MODE = "api_key"
-# The last model list the saved key's Models tab read from Anthropic, for the
-# active key only (shared, non-secret: model ids and labels plus a key hash).
+# Per-key cached Anthropic catalogs (shared, non-secret: ``{"by_key": {<hash>: [{"id", "label"}, ...]}}``
+# — kept as a plain list per key hash for rolling-update compatibility with previous workers).
 MODELS_CACHE_SETTING = "claude_api_models_cache"
+# Per-key catalog refresh timestamp (separate key so the cache stays a plain list).
+MODELS_FETCHED_AT_PREFIX = "claude_api_models_fetched_at:"
+# Per-key curated enabled models: one row per key hash (``claude_api_models_curated:<hash>``)
+# so offline edits to two different keys never overwrite each other across LWW sync.
+MODELS_CURATED_PREFIX = "claude_api_models_curated:"
 # Sorts before every real row, so "oldest created first" readers keep a stable
 # order; the default model never comes from this row (see credential_gate).
 _CREATED_AT = "1970-01-01T00:00:00+00:00"
@@ -54,9 +60,9 @@ _REFRESH_WAIT = 15.0
 _refresh_tried: Dict[str, float] = {}
 _refresh_inflight: Dict[str, threading.Event] = {}
 _refresh_lock = threading.Lock()
-# remember_models: one read-modify-write of the per-key catalogs at a time.
+# remember_models / save_curated_models: one read-modify-write at a time.
 _cache_lock = threading.Lock()
-_CATALOG_SLOTS = 8
+_CATALOG_SLOTS = 32
 
 
 def is_claude_api_id(provider_id: Optional[str]) -> bool:
@@ -104,8 +110,30 @@ def _default_models() -> List[Dict[str, str]]:
     return [{"id": i, "label": _BY_VALUE[i].label if i in _BY_VALUE else i} for i in ids]
 
 
+def _normalize_models(models: Any) -> List[Dict[str, str]]:
+    """Validate, deduplicate, and normalize ``[{"id", "label"}]`` model rows."""
+    if not isinstance(models, list):
+        return []
+    seen: set[str] = set()
+    cleaned: List[Dict[str, str]] = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        raw_id = m.get("id")
+        if not isinstance(raw_id, str):
+            continue
+        model_id = raw_id.strip()
+        if not model_id or len(model_id) > 300 or model_id in seen:
+            continue
+        seen.add(model_id)
+        raw_label = m.get("label")
+        label = raw_label.strip()[:300] if isinstance(raw_label, str) and raw_label.strip() else model_id
+        cleaned.append({"id": model_id, "label": label})
+    return cleaned
+
+
 def _catalogs() -> Dict[str, Any]:
-    """Saved catalogs by key hash: ``{hash: [model, ...]}``."""
+    """Saved raw catalog slots by key hash."""
     from app.db import database
 
     try:
@@ -119,29 +147,131 @@ def _catalogs() -> Dict[str, Any]:
     return dict(by_key) if isinstance(by_key, dict) else {}
 
 
-def _cached_models(key: str) -> Optional[List[Dict[str, str]]]:
-    models = [m for m in _catalogs().get(_key_hash(key)) or []
-              if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
-    return [{"id": m["id"], "label": str(m.get("label") or m["id"])} for m in models] or None
+def _parse_catalog_models(slot: Any) -> Optional[List[Dict[str, str]]]:
+    """Parse a cached catalog slot into a normalized model list (``[]`` is valid)."""
+    if isinstance(slot, list):
+        return _normalize_models(slot)
+    if isinstance(slot, dict) and isinstance(slot.get("models"), list):
+        return _normalize_models(slot.get("models"))
+    return None
 
 
-def remember_models(key: str, models: List[Dict[str, str]]) -> None:
-    """Keep the list Anthropic returned for the ACTIVE key as this row's models.
+def cached_catalog(key: str) -> Optional[Dict[str, Any]]:
+    """Cached ``{"models": [...], "fetched_at": <iso|None>}`` for ``key``, or None on cache miss.
 
-    Each key has its own slot, so a slow read for a key that is no longer
-    active can never overwrite the new key's list.
+    An empty list ``[]`` is a valid cached catalog (distinct from ``None``).
     """
-    if not models or key != _active_key():
-        return
     from app.db import database
 
     digest = _key_hash(key)
+    by_key = _catalogs()
+    if digest not in by_key:
+        return None
+    models = _parse_catalog_models(by_key[digest])
+    if models is None:
+        return None
+    try:
+        fetched_at = database.get_system_setting(f"{MODELS_FETCHED_AT_PREFIX}{digest}")
+    except Exception:  # noqa: BLE001
+        fetched_at = None
+    return {
+        "models": models,
+        "fetched_at": fetched_at if isinstance(fetched_at, str) and fetched_at else None,
+    }
+
+
+def _cached_models(key: str) -> Optional[List[Dict[str, str]]]:
+    entry = cached_catalog(key)
+    return entry["models"] if entry is not None else None
+
+
+def remember_models(
+    key: str,
+    models: List[Dict[str, str]],
+    *,
+    touch_timestamp: bool = False,
+) -> Optional[str]:
+    """Cache the Anthropic catalog for ``key`` under its own hash slot.
+
+    Stores ``{"by_key": {<hash>: [{"id", "label"}, ...]}}`` (plain list per key
+    hash for rolling-update compatibility) and writes the ISO timestamp to
+    ``claude_api_models_fetched_at:<hash>``. Caches valid empty lists ``[]`` so
+    an empty refresh replaces stale cached models. Suppresses all DB writes
+    when both the model list and timestamp are already present and unchanged
+    (unless ``touch_timestamp=True`` for an explicit manual refresh, which
+    updates only ``fetched_at`` and leaves ``claude_api_models_cache`` untouched).
+    """
+    if not isinstance(models, list):
+        return None
+    cleaned = _normalize_models(models)
+    from app.db import database
+
+    digest = _key_hash(key)
+    ts_key = f"{MODELS_FETCHED_AT_PREFIX}{digest}"
     with _cache_lock:
-        catalogs = {h: m for h, m in _catalogs().items() if h != digest}
-        # The newest last; a handful of saved keys is the most anyone keeps.
-        catalogs = dict(list(catalogs.items())[-(_CATALOG_SLOTS - 1):])
-        catalogs[digest] = [{"id": m["id"], "label": m.get("label") or m["id"]} for m in models]
-        database.set_system_setting(MODELS_CACHE_SETTING, json.dumps({"by_key": catalogs}))
+        existing_map = _catalogs()
+        has_slot = digest in existing_map
+        existing_models = _parse_catalog_models(existing_map.get(digest)) if has_slot else None
+        existing_is_plain_list = isinstance(existing_map.get(digest), list)
+        existing_ts = database.get_system_setting(ts_key)
+        cache_unchanged = has_slot and existing_is_plain_list and existing_models == cleaned
+        if cache_unchanged and existing_ts and not touch_timestamp:
+            return existing_ts
+        if not cache_unchanged:
+            catalogs = {h: slot for h, slot in existing_map.items() if h != digest}
+            catalogs = dict(list(catalogs.items())[-(_CATALOG_SLOTS - 1):])
+            catalogs[digest] = cleaned
+            database.set_system_setting(MODELS_CACHE_SETTING, json.dumps({"by_key": catalogs}))
+        now = datetime.now(timezone.utc).isoformat()
+        database.set_system_setting(ts_key, now)
+        return now
+
+
+def curated_models(key: str) -> Optional[List[Dict[str, str]]]:
+    """Explicitly curated models for ``key``, or ``None`` if never curated.
+
+    Stored per key hash at ``claude_api_models_curated:<hash>`` so edits to
+    independent keys never collide across LWW sync. ``None`` means uncurated
+    (all cached/default models are offered); ``[]`` means every model unchecked.
+    """
+    from app.db import database
+
+    setting_key = f"{MODELS_CURATED_PREFIX}{_key_hash(key)}"
+    try:
+        raw = database.get_system_setting(setting_key)
+    except Exception:  # noqa: BLE001 — unreadable curation falls back to uncurated
+        return None
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return _normalize_models(parsed)
+
+
+def save_curated_models(key: str, models: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Persist the curated enabled models for ``key`` (empty list allowed).
+
+    Suppresses DB writes when the key already stores the exact same list.
+    """
+    cleaned = _normalize_models(models)
+    from app.db import database
+
+    setting_key = f"{MODELS_CURATED_PREFIX}{_key_hash(key)}"
+    with _cache_lock:
+        raw = database.get_system_setting(setting_key)
+        if raw is not None:
+            try:
+                parsed = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                parsed = None
+            if isinstance(parsed, list) and _normalize_models(parsed) == cleaned:
+                return cleaned
+        database.set_system_setting(setting_key, json.dumps(cleaned))
+    return cleaned
 
 
 def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:
@@ -162,7 +292,12 @@ def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:
     base_url = _base_url(key)
     if base_url is None:
         return None
-    models = _cached_models(key) or _default_models()
+    curated = curated_models(key)
+    if curated is not None:
+        models = curated
+    else:
+        cached = _cached_models(key)
+        models = cached if cached is not None else _default_models()
     ids = [m["id"] for m in models]
     from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
 
@@ -210,10 +345,9 @@ def refresh_models_once() -> bool:
 
     For a bound model the row does not list, right after a switch of key: the
     row then shows the built-in list until someone opens the key's Models tab.
-    One read per key per few minutes, and never on an event loop (it blocks).
-    Single-flight: a caller that arrives while the read runs waits for it
-    (bounded) instead of finding the cooldown and refusing. True when the
-    active key now has a saved list, so the caller checks the model again.
+    Skipped when the key already has an explicit curation (never bypasses the
+    owner's checkboxes) or already has a cached catalog. One read per key per
+    few minutes, and never on an event loop (it blocks).
     """
     import asyncio
     import time
@@ -229,6 +363,8 @@ def refresh_models_once() -> bool:
     except Exception:  # noqa: BLE001 — an unreadable key is no refresh
         return False
     if not key:
+        return False
+    if curated_models(key) is not None:
         return False
     if _cached_models(key) is not None:
         return True  # another caller already saved it: check again
@@ -249,14 +385,13 @@ def refresh_models_once() -> bool:
             flight = _refresh_inflight[digest] = threading.Event()
     if not owner:
         flight.wait(_REFRESH_WAIT)
-        return _cached_models(key) is not None
+        return curated_models(key) is None and _cached_models(key) is not None
 
     async def read() -> List[Dict[str, str]]:
         async with httpx.AsyncClient() as client:
             return await claude_api_models.list_models(key, client=client)
 
     try:
-        # Saved only while this key is still the active one (remember_models).
         remember_models(key, asyncio.run(read()))
     except Exception as exc:  # noqa: BLE001 — the caller rejects the model as before
         # CatalogError text is display-safe; never log the request (it has the key).
@@ -265,4 +400,4 @@ def refresh_models_once() -> bool:
         with _refresh_lock:
             _refresh_inflight.pop(digest, None)
         flight.set()
-    return _cached_models(key) is not None
+    return curated_models(key) is None and _cached_models(key) is not None

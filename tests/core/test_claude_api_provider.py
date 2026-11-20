@@ -414,3 +414,137 @@ def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkey
     cap.remember_models(KEY, [{"id": "claude-a-only", "label": "A"}])  # A's late write
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
     assert cap.virtual_row()["models_json"] == [{"id": "claude-b-only", "label": "B"}]
+
+
+def test_remember_models_suppresses_noop_writes_and_keeps_plain_list_format(key, monkeypatch):
+    """Unchanged model lists write neither cache nor fetched_at; cache stays a plain list (S5)."""
+    import json
+
+    from app.network.policy import is_shared_setting_key
+
+    claude_auth_mode.set_mode("subscription")
+    writes = []
+    real_set = database.set_system_setting
+
+    def spy_set(k, v):
+        writes.append((k, v))
+        return real_set(k, v)
+
+    monkeypatch.setattr(database, "set_system_setting", spy_set)
+    first_ts = cap.remember_models(KEY, [{"id": "claude-live-1", "label": "Live One"}])
+    assert first_ts is not None
+    # Initial save writes the plain-list cache slot plus the per-key fetched_at key.
+    assert [k for k, _ in writes] == [
+        cap.MODELS_CACHE_SETTING,
+        f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}",
+    ]
+    assert is_shared_setting_key(f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}") is True
+    # S5: rolling-update compatibility — cache slot MUST be a plain list, not a dict.
+    raw_cache = json.loads(database.get_system_setting(cap.MODELS_CACHE_SETTING))
+    assert raw_cache["by_key"][cap._key_hash(KEY)] == [{"id": "claude-live-1", "label": "Live One"}]
+
+    # Identical refresh suppresses BOTH cache and fetched_at DB writes.
+    second_ts = cap.remember_models(KEY, [{"id": "claude-live-1", "label": "Live One"}])
+    assert second_ts == first_ts
+    assert len(writes) == 2
+
+    # Explicit manual refresh (touch_timestamp=True) with unchanged models updates
+    # ONLY fetched_at and leaves claude_api_models_cache untouched.
+    touched_ts = cap.remember_models(
+        KEY,
+        [{"id": "claude-live-1", "label": "Live One"}],
+        touch_timestamp=True,
+    )
+    assert touched_ts is not None and touched_ts != first_ts
+    assert [k for k, _ in writes] == [
+        cap.MODELS_CACHE_SETTING,
+        f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}",
+        f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}",
+    ]
+    assert cap.cached_catalog(KEY)["fetched_at"] == touched_ts
+
+
+def test_empty_catalog_is_cached_and_replaces_stale_models(key, monkeypatch):
+    """S4: a valid empty [] response caches [] (distinct from None) and hides stale models."""
+    from app.core import claude_api_models
+
+    _api_key_mode()
+    cap.remember_models(KEY, [{"id": "claude-stale", "label": "Stale"}])
+    assert cap.virtual_row()["models_json"] == [{"id": "claude-stale", "label": "Stale"}]
+
+    ts = cap.remember_models(KEY, [])
+    assert ts is not None
+    assert cap.cached_catalog(KEY) == {"models": [], "fetched_at": ts}
+    row = cap.virtual_row()
+    assert row["models_json"] == []
+    assert row["default_model"] is None
+
+    # refresh_models_once sees the cached [] and does NOT refetch upstream.
+    reads = []
+
+    async def fail_if_called(k, *, client=None):
+        reads.append(k)
+        return []
+
+    monkeypatch.setattr(claude_api_models, "list_models", fail_if_called)
+    assert cap.refresh_models_once() is True
+    assert reads == []
+
+
+def test_curated_models_use_per_key_settings_and_override_catalog(key, monkeypatch):
+    """S3 + curation: independent keys write independent system_settings keys; [] disables all."""
+    from app.core import claude_api_models, credential_gate
+    from app.network.policy import is_shared_setting_key
+
+    _api_key_mode()
+    cap.remember_models(KEY, [
+        {"id": "claude-sonnet-5", "label": "Sonnet 5"},
+        {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
+    ])
+    assert cap.curated_models(KEY) is None
+    assert [m["id"] for m in cap.virtual_row()["models_json"]] == ["claude-sonnet-5", "claude-haiku-5-5"]
+
+    # Curate down to one model; no-op save does not rewrite DB.
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
+    saved = cap.save_curated_models(KEY, [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}])
+    assert saved == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    key_setting = f"{cap.MODELS_CURATED_PREFIX}{cap._key_hash(KEY)}"
+    assert writes == [key_setting]
+    assert is_shared_setting_key(key_setting) is True
+    cap.save_curated_models(KEY, [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}])
+    assert len(writes) == 1  # No-op suppressed!
+
+    # S3: curating a second API key writes its own independent setting key.
+    other_key = "sk-ant-second-key"
+    cap.save_curated_models(other_key, [{"id": "claude-opus-5", "label": "Opus 5"}])
+    other_setting = f"{cap.MODELS_CURATED_PREFIX}{cap._key_hash(other_key)}"
+    assert other_setting != key_setting
+    assert writes == [key_setting, other_setting]
+    assert cap.curated_models(KEY) == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    assert cap.curated_models(other_key) == [{"id": "claude-opus-5", "label": "Opus 5"}]
+
+    row = cap.virtual_row()
+    assert row["models_json"] == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    assert row["default_model"] == "claude-haiku-5-5"
+    assert credential_gate._claude_api_default() == (cap.CLAUDE_API_PROVIDER_ID, "claude-haiku-5-5")
+
+    # Explicit curation must not be bypassed by refresh_models_once().
+    reads = []
+
+    async def fail_if_called(k, *, client=None):
+        reads.append(k)
+        return []
+
+    monkeypatch.setattr(claude_api_models, "list_models", fail_if_called)
+    assert cap.refresh_models_once() is False
+    assert reads == []
+
+    # Unchecking every model ([]) yields empty models_json and default_model=None.
+    assert cap.save_curated_models(KEY, []) == []
+    assert cap.curated_models(KEY) == []
+    empty_row = cap.virtual_row()
+    assert empty_row["models_json"] == []
+    assert empty_row["default_model"] is None
+    assert credential_gate._claude_api_default() is None
