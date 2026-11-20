@@ -187,20 +187,41 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always() && inputs.gated_by_caller != true"
-    required = {"backend-shard", "backend-contracts", "backend-security", "backend-postgres"}
+    required = {"backend-select", "backend-shard", "backend-contracts", "backend-security", "backend-postgres"}
     assert set(jobs["backend"]["needs"]) == required
-    assert set(jobs) == required | {"backend"}
+    # backend-map only saves main's test map for pull requests; no verdict waits on it.
+    assert set(jobs) == required | {"backend", "backend-map"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
-    assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
-    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, bs.SHARD_COUNT + 1)]}}
+    assert all("continue-on-error" not in json.dumps(job) for name, job in jobs.items() if name != "backend-map")
+    # The shards are the ones backend-select chose: all of them, except on a
+    # pull request (scripts/ci/backend_gate.py holds every other run to all eight).
+    assert jobs["backend-shard"]["strategy"] == {
+        "fail-fast": "false", "matrix": {"shard": "${{ fromJSON(needs.backend-select.outputs.shards) }}"}}
+    assert jobs["backend-shard"]["needs"] == "backend-select"
+    assert jobs["backend-shard"]["if"] == "needs.backend-select.outputs.shards != '[]'"
+    assert jobs["backend-shard"]["env"]["SHARD_COUNT"] == "${{ strategy.job-total }}"
     for name in ("backend-security", "backend-postgres"):
         assert jobs[name]["if"] == "always()"
         assert "needs" not in jobs[name]
         assert all("if" not in step for step in jobs[name]["steps"][:-1])
+    assert "if" not in jobs["backend-contracts"] and "needs" not in jobs["backend-contracts"]
     for job in ("backend-shard", "backend-contracts"):
-        assert "if" not in jobs[job]
-        assert "needs" not in jobs[job]
         assert jobs[job]["timeout-minutes"] == "35"
+    select = jobs["backend-select"]
+    assert "if" not in select and "needs" not in select
+    choose = next(step for step in select["steps"] if step.get("id") == "choose")
+    assert choose["run"] == ('python scripts/ci/backend_test_map.py ci-select --map backend-test-map.json.gz'
+                             ' >> "$GITHUB_OUTPUT"')
+    restore = next(step for step in select["steps"] if step.get("uses", "").startswith("actions/cache/"))
+    # A pull request reads main's newest map and never writes one.
+    assert restore["uses"] == "actions/cache/restore@v4" and restore["if"] == "github.event_name == 'pull_request'"
+    names = [step.get("name", "") for step in select["steps"]]
+    assert "Selected backend shards: ${{ steps.choose.outputs.shards }}" in names
+    assert "Backend test selection: ${{ steps.choose.outputs.selection }}" in names
+    mapper = jobs["backend-map"]
+    assert mapper["if"] == ("github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all'"
+                            " && needs.backend-shard.result == 'success'")
+    assert "--prefix backend-map-hits --count 8" in json.dumps(mapper)
     text = json.dumps(jobs["backend-shard"])
     for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",
                    "tests/mcp", "tests/services", "tests/unit", "tests/test_*.py"):
@@ -209,10 +230,16 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
         assert exclusion in text
     assert '-n 2' in text and 'scripts.ci.backend_shards' in text
+    run = next(step["run"] for step in jobs["backend-shard"]["steps"] if "backend_shard_run.py" in step.get("run", ""))
+    assert '--backend-shard-count "$SHARD_COUNT" --backend-selection "$SELECTION"' in run
+    # Only a full run records the test map.
+    assert 'if [ "$SELECTION" = all ]; then' in run and "record=(-p tests._test_map)" in run
     # The shard's pytest command reruns its failed tests once, through the
     # runner that records the rerun's pass on the receipt (#1748).
     command = next(step["run"] for step in jobs["backend-shard"]["steps"] if step.get("name") == "Run fast test subset")
-    assert command.lstrip().startswith("python scripts/ci/backend_shard_run.py -- \\\n")
+    # Before it only the targets are chosen (all, or the pull request's files).
+    prelude, runner = command.split("python scripts/ci/backend_shard_run.py -- \\\n", 1)
+    assert runner.lstrip().startswith("python -m pytest ") and "pytest" not in prelude
     assert command.count("python -m pytest") == 1
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
     for job in ("backend-contracts", "backend-security", "backend-postgres"):
@@ -259,7 +286,8 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
             run = step.get("run", "")
             if "python -m pytest" in run:
                 assert "--durations=50" in run and "--junitxml=" in run
-        uploads = [s for s in jobs[name]["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")]
+        uploads = [s for s in jobs[name]["steps"] if s.get("uses", "").startswith("actions/upload-artifact@")
+                   and not s["with"]["name"].startswith("backend-map-hits-")]
         assert len(uploads) == 1 and uploads[0]["if"] == "always()"
 
 
@@ -333,7 +361,7 @@ def test_main_refresh_downloads_and_validates_complete_execution(
                 continue
             receipt = {"shard": index, "head": "head", "count": len(shard), "total": len(nodes),
                        "collection": bs.digest(sorted(nodes)), "partition": bs.digest(shards),
-                       "selected": bs.digest(shard), "workers": 2}
+                       "selected": bs.digest(shard), "workers": 2, "shards": bs.SHARD_COUNT, "selection": "all"}
             timings = {node: 0.5 for node in shard}
             if fault == "wrong-selected" and index == 1:
                 receipt["selected"] = "invalid"

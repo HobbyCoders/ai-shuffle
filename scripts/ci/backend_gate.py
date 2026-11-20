@@ -7,7 +7,10 @@ the shards it chose (none when no test in the shards can reach the change);
 main runs everything after the merge. Either way every chosen shard must leave
 one consistent receipt, and every other backend job must succeed.
 
-    BACKEND_NEEDS=... BACKEND_SHARDS='[1, 2]' python scripts/ci/backend_gate.py --head SHA [--event NAME]
+    BACKEND_NEEDS=... BACKEND_SHARDS='[1, 2]' BACKEND_SELECTION=files-... \
+        python scripts/ci/backend_gate.py --head SHA [--event NAME]
+
+Without BACKEND_SHARDS and BACKEND_SELECTION the run must have tested everything.
 
 Prints ``full=true`` when the run tested everything (the only run whose pass
 can be recorded for later runs to skip backend on), else ``full=false``.
@@ -24,15 +27,21 @@ REQUIRED_JOBS = frozenset({"backend-select", "backend-shard", "backend-contracts
                            "backend-postgres"})
 
 
-def check_gate(needs, receipts, head, shards=None, event="push"):
+def check_gate(needs, receipts, head, shards=None, event="push", selection="all"):
     """Raise ValueError unless the run's backend coverage is complete. Return True for a full run.
 
-    ``shards`` is the list the select job chose; None means a full run.
+    ``shards`` and ``selection`` are what the select job chose; None and
+    ``all`` mean a full run. Every receipt must name that same selection.
     """
     shards = FULL if shards is None else shards
     if not isinstance(shards, list) or shards != list(range(1, len(shards) + 1)) or len(shards) > SHARD_COUNT:
         raise ValueError("the chosen backend shards are not 1..n")
-    if event != "pull_request" and shards != FULL:
+    fits = {"all": shards == FULL, "none": shards == []}.get(
+        selection, isinstance(selection, str) and selection.startswith("files-") and bool(shards))
+    if not fits:
+        raise ValueError(f"backend selection {selection!r} does not fit shards {shards}")
+    full = selection == "all"
+    if event != "pull_request" and not full:
         raise ValueError("only a pull request may run part of the backend suite")
     if set(needs) != REQUIRED_JOBS:
         raise ValueError("required backend job missing or unexpected")
@@ -49,16 +58,12 @@ def check_gate(needs, receipts, head, shards=None, event="push"):
     if len(receipts) != len(shards) or {r.get("shard") for r in receipts} != set(shards):
         raise ValueError("missing/duplicate shard receipt")
     if (any(r["head"] != head or r["count"] <= 0 or r["workers"] != 2 for r in receipts)
-            or any(r.get("shards", SHARD_COUNT) != len(shards) for r in receipts)
-            or len({r.get("selection", "all") for r in receipts}) != 1
+            or any(r.get("shards") != len(shards) or r.get("selection") != selection for r in receipts)
             or len({r["collection"] for r in receipts}) != 1
             or len({r["partition"] for r in receipts}) != 1
             or len({r["total"] for r in receipts}) != 1
             or sum(r["count"] for r in receipts) != receipts[0]["total"]):
         raise ValueError("inconsistent partition receipts")
-    full = shards == FULL and receipts[0].get("selection", "all") == "all"
-    if event != "pull_request" and not full:
-        raise ValueError("only a pull request may run part of the backend suite")
     # A shard whose tests failed counts only when exactly those tests passed
     # their one rerun (scripts/ci/backend_shard_run.py marks the receipt).
     for r in receipts:
@@ -76,7 +81,9 @@ def main():
     args = parser.parse_args()
     receipts = [json.loads(p.read_text()) for p in Path(args.receipts).glob("**/receipt.json")]
     shards = json.loads(os.environ.get("BACKEND_SHARDS") or "null")
-    full = check_gate(json.loads(os.environ["BACKEND_NEEDS"]), receipts, args.head, shards, args.event)
+    # Unset means a full run; set but empty (the choice could not be read) fits no shards.
+    selection = os.environ.get("BACKEND_SELECTION", "all")
+    full = check_gate(json.loads(os.environ["BACKEND_NEEDS"]), receipts, args.head, shards, args.event, selection)
     print("Backend tests: all required coverage succeeded"
           + ("" if full else " (the tests this pull request can reach; main runs every test)"))
     output = os.environ.get("GITHUB_OUTPUT")

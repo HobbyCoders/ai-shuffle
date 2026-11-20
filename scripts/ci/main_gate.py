@@ -313,6 +313,30 @@ def backend_shards(plan, jobs):
     return chosen_values(slot, placed)
 
 
+BACKEND_SELECTION = "Backend test selection: "
+
+
+def backend_selection(plan, jobs):
+    """The backend tests the run's select job chose (``all``, ``none`` or ``files-...``), or None while unknown."""
+    _, placed = layout(plan, jobs)
+    runs = [job for slot, found in placed.items()
+            if (slot.area, slot.key) == ("backend", "backend-select") for job in found]
+    if len(runs) != 1 or runs[0].get("status") != "completed" or runs[0].get("conclusion") != "success":
+        return None
+    names = [step.get("name", "") for step in runs[0].get("steps") or []
+             if step.get("name", "").startswith(BACKEND_SELECTION)]
+    return names[0][len(BACKEND_SELECTION):] if len(names) == 1 else None
+
+
+def backend_ran_everything(plan, jobs):
+    """True when the run's backend select job chose every test (``all``).
+
+    Only such a run may record a backend pass: a pull request that ran the
+    tests its change can reach proves nothing for other changes to these files.
+    """
+    return backend_selection(plan, jobs) == "all"
+
+
 def missing(plan, jobs):
     """Expected jobs that are not listed yet, each matrix member on its own.
 
@@ -461,6 +485,7 @@ def evidence_of(plan, jobs):
         if area == "backend":
             evidence["backend-needs"] = json.dumps(needs, sort_keys=True)
             evidence["backend-shards"] = json.dumps(backend_shards(plan, jobs))
+            evidence["backend-selection"] = backend_selection(plan, jobs) or ""
     return evidence
 
 
@@ -483,6 +508,8 @@ def passed(plan, jobs, area):
                        if name not in ("journey-plan", "journeys"))
         if caller in CALLER_GATED:
             check_inner(plan, jobs, caller, False)
+        if caller == "backend" and not backend_ran_everything(plan, jobs):
+            return False
     except (ValueError, KeyError):
         return False
     return True

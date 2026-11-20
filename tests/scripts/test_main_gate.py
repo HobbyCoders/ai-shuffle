@@ -70,7 +70,10 @@ def test_a_green_run_with_all_required_jobs_passes():
     evidence = gate.verdict(PLAN, jobs, lookup())
     assert evidence["backend"] == evidence["windows"] == "true"
     assert json.loads(evidence["backend-needs"]) == {
-        name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
+        name: {"result": "success"} for name in
+        ("backend-select", "backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
+    assert json.loads(evidence["backend-shards"]) == list(range(1, 9))
+    assert evidence["backend-selection"] == "all"
 
 
 def test_areas_match_the_aggregate_inventory_and_the_called_verdict_jobs():
@@ -747,3 +750,79 @@ def test_waiting_and_reporting_fit_before_github_stops_the_cancelled_gate():
     report = int(steps["Open or update flaky journey issues"]["timeout-minutes"]) * 60
     assert settle + report <= gate.CANCELLED_JOB_LIMIT_SECONDS - 60
     assert gate.SETTLE_SECONDS + gate.POLL_SECONDS < settle
+
+
+# --- The backend tests a pull request chose ----------------------------------------
+
+BACKEND_SHARD_TEMPLATE = next(slot.full for slot in PLAN.slots if slot.key == "backend-shard")
+BACKEND_SHARDS = [f"backend / backend-shard {shard}" for shard in range(1, 9)]
+
+
+def backend_choice(jobs, shards, selection):
+    """Set what backend-select names as its choice (None: no such step)."""
+    select = named(jobs, "backend / backend-select")
+    select["steps"] = [step for step in select["steps"] if not step["name"].startswith(("Selected", "Backend test"))]
+    done = {"status": "completed", "conclusion": "success"}
+    if shards is not None:
+        select["steps"].append({"name": gate.SELECTED[("backend", "backend-shard")][2] + json.dumps(shards), **done})
+    if selection is not None:
+        select["steps"].append({"name": gate.BACKEND_SELECTION + selection, **done})
+    return jobs
+
+
+def test_the_backend_select_job_names_its_choice_in_steps():
+    matrix, chooser, prefix = gate.SELECTED[("backend", "backend-shard")]
+    jobs = workflow("ci-backend.yml")["jobs"]
+    names = [step.get("name", "") for step in jobs[chooser]["steps"]]
+    assert [name for name in names if name.startswith(prefix)] == [prefix + "${{ steps.choose.outputs.shards }}"]
+    assert [name for name in names if name.startswith(gate.BACKEND_SELECTION)] == [
+        gate.BACKEND_SELECTION + "${{ steps.choose.outputs.selection }}"]
+    assert jobs["backend-shard"]["strategy"]["matrix"]["shard"] == matrix
+    # The shards skip only when the choice is empty; main_gate allows that skip on nothing else.
+    assert jobs["backend-shard"]["if"] == "needs.backend-select.outputs.shards != '[]'"
+
+
+def test_the_backend_choice_decides_which_shards_are_expected():
+    jobs = backend_choice([job for job in listing() if job["name"] not in BACKEND_SHARDS[2:]], [1, 2], "files-abc")
+    assert gate.missing(PLAN, jobs) == []
+    evidence = gate.verdict(PLAN, jobs + [SELF], lookup())
+    assert evidence["backend"] == "true"
+    assert json.loads(evidence["backend-shards"]) == [1, 2] and evidence["backend-selection"] == "files-abc"
+    jobs = [job for job in jobs if job["name"] != BACKEND_SHARDS[1]]
+    assert gate.missing(PLAN, jobs) == [BACKEND_SHARDS[1]]
+
+
+def test_backend_shards_skip_only_when_the_choice_was_none():
+    jobs = [job for job in listing() if job["name"] not in BACKEND_SHARDS]
+    jobs.append({"id": 801, "name": BACKEND_SHARD_TEMPLATE, "status": "completed", "conclusion": "skipped"})
+    evidence = gate.verdict(PLAN, backend_choice(jobs, [], "none") + [SELF], lookup())
+    assert json.loads(evidence["backend-shards"]) == [] and evidence["backend-selection"] == "none"
+    # The same skip after a choice of shards, or with no readable choice, fails.
+    for shards in ([1], list(range(1, 9)), None):
+        with pytest.raises(ValueError):
+            gate.verdict(PLAN, backend_choice(copy.deepcopy(jobs), shards, "none") + [SELF], lookup())
+    named(jobs, "backend / backend-select")["conclusion"] = "skipped"
+    with pytest.raises(ValueError):
+        gate.verdict(PLAN, jobs + [SELF], lookup())
+
+
+def test_only_a_run_of_every_backend_test_records_a_backend_pass():
+    assert "backend" in gate.passes(PLAN, listing() + [SELF], planned())
+    for shards, selection in (([1, 2], "files-abc"), (list(range(1, 9)), "files-abc"), (list(range(1, 9)), None)):
+        jobs = backend_choice([job for job in listing() if job["name"] not in BACKEND_SHARDS[len(shards):]],
+                              shards, selection)
+        assert "backend" not in gate.passes(PLAN, jobs + [SELF], planned()), (shards, selection)
+        assert "fluid" in gate.passes(PLAN, jobs + [SELF], planned())
+    jobs = [job for job in listing() if job["name"] not in BACKEND_SHARDS]
+    jobs.append({"id": 801, "name": BACKEND_SHARD_TEMPLATE, "status": "completed", "conclusion": "skipped"})
+    assert "backend" not in gate.passes(PLAN, backend_choice(jobs, [], "none") + [SELF], planned())
+
+
+def test_the_caller_checks_the_receipts_of_the_chosen_shards():
+    steps = workflow("ci.yml")["jobs"]["ci"]["steps"]
+    download = next(step for step in steps if step.get("name") == "Download successful backend shard receipts")
+    assert "steps.verdict.outputs.backend-shards != '[]'" in download["if"]
+    receipts = next(step for step in steps if step.get("id") == "backend-receipts")
+    assert receipts["env"]["BACKEND_SHARDS"] == "${{ steps.verdict.outputs.backend-shards }}"
+    assert receipts["env"]["BACKEND_SELECTION"] == "${{ steps.verdict.outputs.backend-selection }}"
+    assert receipts["run"].rstrip().endswith('python scripts/ci/backend_gate.py --head "$HEAD_SHA"')

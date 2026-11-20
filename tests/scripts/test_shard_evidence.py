@@ -18,7 +18,12 @@ def test_workflows_namespace_attempts_and_select_before_validation() -> None:
         jobs = yaml.load(
             (ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader,
         )["jobs"]
-        assert jobs[producer]["strategy"]["matrix"]["shard"] == [str(i) for i in range(1, count + 1)]
+        if producer == "backend-shard":
+            # backend-select chooses the shards; the gate counts the ones it chose.
+            assert jobs[producer]["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.backend-select.outputs.shards) }}"
+            count = '"$count"'
+        else:
+            assert jobs[producer]["strategy"]["matrix"]["shard"] == [str(i) for i in range(1, count + 1)]
         upload = next(
             s for s in jobs[producer]["steps"] if s.get("uses") == "actions/upload-artifact@v4"
         )
@@ -35,6 +40,8 @@ def test_workflows_namespace_attempts_and_select_before_validation() -> None:
             caller = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
             receipts = next(s for s in caller["jobs"]["ci"]["steps"] if s.get("id") == "backend-receipts")
             assert f"--prefix {prefix} --count {count}" in receipts["run"]
+            for run in (select["run"], receipts["run"]):
+                assert 'count=$(python -c \'import json, os; print(len(json.loads(os.environ["BACKEND_SHARDS"])))\')' in run
 
 
 def artifact(root: Path, name: str, content: str) -> Path:
@@ -115,3 +122,23 @@ def test_unversioned_evidence_is_never_used(tmp_path: Path) -> None:
     artifact(tmp_path / "downloads", "windows-desktop-1", "stale")
     with pytest.raises(ValueError, match="missing"):
         select_evidence(tmp_path / "downloads", tmp_path / "selected", "windows-desktop", 1)
+
+
+def test_a_run_that_chose_no_shards_has_no_evidence_to_select(tmp_path: Path) -> None:
+    from scripts.ci.shard_evidence import select_evidence
+    select_evidence(tmp_path / "never-downloaded", tmp_path / "selected", "backend-shard", 0)
+    assert list((tmp_path / "selected").iterdir()) == []
+
+
+def test_a_missing_download_still_fails_when_shards_were_chosen(tmp_path: Path) -> None:
+    from scripts.ci.shard_evidence import select_evidence
+    with pytest.raises(FileNotFoundError):
+        select_evidence(tmp_path / "never-downloaded", tmp_path / "selected", "backend-shard", 2)
+
+
+def test_a_run_that_chose_two_shards_rejects_a_third(tmp_path: Path) -> None:
+    from scripts.ci.shard_evidence import select_evidence
+    for shard in (1, 2, 3):
+        artifact(tmp_path / "downloads", f"backend-shard-{shard}-a1", "ok")
+    with pytest.raises(ValueError, match="unexpected shard"):
+        select_evidence(tmp_path / "downloads", tmp_path / "selected", "backend-shard", 2)

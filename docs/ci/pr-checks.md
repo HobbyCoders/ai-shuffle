@@ -4,9 +4,13 @@ Tests run on GitHub CI. The local push gate is the offline secret scan (plus the
 update-reach check); it runs no test suites. One workflow, `ci.yml`, checks
 every pull request (drafts and forks included), every push to `main`, and
 everything once a day. A run checks the areas whose files changed and skips an
-area whose files are unchanged since it last passed
-([What a run skips](#what-a-run-skips)); the backend suite reads the whole
-repository, so it runs on every change. The run's one verdict is the `CI`
+area whose files are unchanged since it last passed; a pull request also skips
+the areas none of its files belong to
+([What a run skips](#what-a-run-skips)). The backend reads the whole
+repository, so it runs on every change, but a pull request's backend shards run
+only the tests its change can reach
+([Backend tests on a pull request](#backend-tests-on-a-pull-request)); main
+runs every test after the merge. The run's one verdict is the `CI`
 check: merge requires a green `CI` and review. Edge/nightly publication remains
 separate: a `CI` pass on the exact main revision or the owner's local attested
 full pass authorizes the read-only publication gate.
@@ -29,8 +33,9 @@ push to a pull request starts one workflow run with one verdict. There are no
 draft skips. Which of them a run starts depends on the files the change touches
 ([What a run skips](#what-a-run-skips)):
 
-- `ci-backend.yml`: eight backend shards, parallel real PostgreSQL/boot contracts,
-  unconditional security checks and the stable fail-closed `Backend tests` gate.
+- `ci-backend.yml`: `backend-select`, then up to eight backend shards (all eight
+  off pull requests), parallel real PostgreSQL/boot contracts, unconditional
+  security checks and the stable fail-closed `Backend tests` gate.
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
   plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
   2.1.314). Each contract job fetches its versioned Linux CLI fixture from
@@ -54,8 +59,7 @@ draft skips. Which of them a run starts depends on the files the change touches
   fixture across nine duration-balanced files. Actual executed-file inventories
   must form an exact disjoint union; the aggregate reports runtime test counts
   and verifies the moved test-body snapshot. The full manual Windows matrix is
-  unchanged (Internal tracking: #381). Linux PR checks still run the complete
-  backend suite on every PR. No assertions or failure behavior
+  unchanged (Internal tracking: #381). No assertions or failure behavior
   are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
@@ -121,6 +125,15 @@ failure, the `CI` job uploads a tiny artifact named `pass-<area>-<key>`. The
 `plan` job of a later run (the next push to the pull request, another pull
 request, or main after the merge) finds the record and skips the area.
 
+A pull request also skips an area none of whose files it changes: the `plan`
+job reads the files that differ between main and the pull request's merge
+commit and skips each area that reads none of them (`skipped: this pull
+request changes none of its files` in its summary). Such a skip records
+nothing. A push to main, the daily run and a manual run skip only on a pass
+record, so a gap in an area's file list is caught on main after the merge. When
+the plan cannot read the change (HEAD is not a two-parent merge, or git fails)
+it skips nothing this way.
+
 | Area | Runs when these changed since it last passed |
 | --- | --- |
 | `backend` | anything: its tests read sources all over the repository |
@@ -166,6 +179,37 @@ and which earlier run proved it.
   `supply-chain` and `update-reach` have no record: they always run.
 - The daily scheduled run and a manual run look nothing up: they run
   **everything**, emulators and every journey included, and record what passed.
+- A backend pass is recorded only from a run whose shards ran every test
+  (`Backend test selection: all`), never from a pull request's selected run.
+
+### Backend tests on a pull request
+
+The `backend-select` job of `ci-backend.yml` chooses what the shards run
+(`scripts/ci/backend_test_map.py ci-select`). Contracts, security, policy and
+PostgreSQL safety always run in full.
+
+- Off pull requests the choice is `all`: eight shards, every test. Those shards
+  also record which repository functions each test file runs
+  (`tests/_test_map.py`), and once all eight passed the `backend-map` job merges
+  the records, with each file's measured time, into a test map and saves it in
+  the Actions cache. A pull request reads main's newest map and never writes
+  one; losing a map only makes pull requests run every test.
+- A pull request diffs from the commit the map was recorded on to its own merge
+  commit, so what main changed since the map is chosen too, and picks the test
+  files that ran a changed function (the rules are in the script's docstring).
+  It runs those files in as many shards as their recorded time needs (about
+  five test-minutes a shard, at most eight). Tests the shards never run (the
+  policy suite's `tests/scripts/` and the docs tests) are left out of the
+  choice; their jobs run anyway.
+- Any doubt runs every test: no map, a map whose commit is not on main, a
+  change to the dependencies, the pytest setup or how the shards run and are
+  judged, a change the map cannot place, more than 60% of the test files
+  affected, or any error.
+- When no shard test can reach the change, no shard runs (`none`).
+- `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each
+  naming the same selection and shard count; only a pull request may choose
+  fewer than every test. Main runs every test after the merge and gates the
+  nightly, so a test the map missed fails there, before anything ships.
 
 The file lists are what makes a skip safe, and they have limits:
 

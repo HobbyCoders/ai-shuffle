@@ -60,6 +60,8 @@ FULL_SUITE_PATTERNS = (
     "requirements*.txt", "requirements*.lock", "pytest.ini", "setup.cfg", "pyproject.toml",
     "fluid/pyproject.toml", ".github/workflows/ci-backend.yml",
     "scripts/ci/backend_test_map.py", "tests/_test_map.py", "tests/__init__.py",
+    # How CI Backend splits, reruns and judges its shards.
+    "scripts/ci/backend_shard*.py", "scripts/ci/backend_gate.py", "scripts/ci/record_failures.py",
 )
 SOURCE_DIRS = ("app", "fluid/fluid", "tests", "scripts", "docker")
 ROOT_SCRIPTS = ("run_local.py",)
@@ -276,7 +278,8 @@ def file_seconds(durations_dir: Path | None) -> dict[str, float]:
 
 def merge(hits_dir: Path, out: Path, commit: str, durations_dir: Path | None = None) -> dict:
     contexts: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    for path in sorted(hits_dir.glob("hits-*.json")):
+    # CI keeps each shard's records in its own directory.
+    for path in sorted(hits_dir.glob("**/hits-*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         for context, hits in data["hits"].items():
             contexts[context].update(tuple(hit) for hit in hits)
@@ -667,7 +670,12 @@ def shard_plan(result: str | list[str], test_map: dict | None) -> dict:
 
 
 def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
-    """The shard plan of this CI run. Only a pull request selects; anything else runs everything."""
+    """The shard plan of this CI run. Only a pull request selects; anything else runs everything.
+
+    The change is read from the commit the map was recorded on (a full run on
+    main) to the pull request's merge into main, so the functions compared are
+    the ones the map saw run, and whatever main changed since is chosen too.
+    """
     event = environ.get("GITHUB_EVENT_NAME", "")
     if event != "pull_request":
         return shard_plan("all", None), [f"A {event or 'local'} run tests everything."]
@@ -676,7 +684,13 @@ def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
         # GitHub tests a pull request on its merge into main: main is the first parent.
         if len(parents) != 3:
             return shard_plan("all", None), ["HEAD is not the pull request's merge commit; running everything."]
-        result, reasons, test_map = choose(map_path, parents[1], parents[0])
+        if not map_path.is_file():
+            return shard_plan("all", None), ["No backend test map from a full run on main; running everything."]
+        recorded = str(load_map(map_path).get("commit") or "")
+        if not recorded or subprocess.run(["git", "merge-base", "--is-ancestor", recorded, parents[1]],
+                                          cwd=ROOT, capture_output=True, check=False).returncode != 0:
+            return shard_plan("all", None), [f"The test map's commit {recorded[:12] or '?'} is not on main; running everything."]
+        result, reasons, test_map = choose(map_path, recorded, parents[0])
         return shard_plan(result, test_map), reasons
     except Exception as error:  # noqa: BLE001 - any doubt runs every test
         return shard_plan("all", None), [f"Selection failed, running everything: {type(error).__name__}: {error}"]
