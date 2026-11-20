@@ -294,6 +294,87 @@ def update_project(
     return get_project(project_id)
 
 
+class FolderConflict(Exception):
+    """An unsafe or stale edit to a worker's base registration."""
+
+
+def retarget_folder(
+    snapshot: dict, *, old_path: str, new_path: str, stored_path: str, same_folder: bool,
+    name: Optional[str] = None, description: Optional[str] = None,
+    settings_dict: Optional[Dict[str, Any]] = None,
+) -> ProjectRow:
+    """Update exactly one worker's live base checkout and legacy row together."""
+    from app.core.project_utils import get_project_working_dir, is_absolute_project_path
+
+    project_id = snapshot['id']
+    runner = settings.effective_instance_id
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM projects WHERE id = %s FOR UPDATE', (project_id,))
+        current = _parse_project_row(row_to_dict(cursor.fetchone()))
+        if not current or current != snapshot or current.get('instance_id') != runner:
+            raise FolderConflict('The project folder changed. Close this editor and reopen it.')
+        if not same_folder:
+            pv2_id = _catalog_project_v2_id(cursor, _catalog_origin(current))
+            # Lock chats before inspecting live/queued turns: turn admission
+            # takes the same session row lock. A running chat may still hold
+            # the old cwd while its tools resolve the project again.
+            cursor.execute(
+                'SELECT id FROM sessions WHERE (instance_id = %s OR instance_id IS NULL) '
+                'AND (project_id = %s OR project_v2_id = %s) ORDER BY id FOR UPDATE',
+                (runner, project_id, pv2_id),
+            )
+            if cursor.fetchall():
+                cursor.execute(
+                    'SELECT 1 FROM turns t JOIN sessions s ON s.id = t.session_id '
+                    'WHERE (s.instance_id = %s OR s.instance_id IS NULL) '
+                    'AND (s.project_id = %s OR s.project_v2_id = %s) '
+                    "AND t.state IN ('queued','running','interrupting','draining') LIMIT 1",
+                    (runner, project_id, pv2_id),
+                )
+                if cursor.fetchone():
+                    raise FolderConflict('Wait for queued and running chats on this worker to finish first.')
+            cursor.execute(
+                'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
+                "AND (branch IS NULL OR branch = '') FOR UPDATE", (pv2_id, runner),
+            )
+            bases = cursor.fetchall()
+            # The cwd resolver can also use a retained base if it exists.
+            # Don't guess which row to replace on an ambiguous registration.
+            if not bases or any(
+                (base['status'] or 'active') != 'active'
+                or get_project_working_dir(base['path']) != old_path for base in bases
+            ):
+                raise FolderConflict('This worker does not have a single matching base folder to change.')
+            # Setup can leave a legacy relative row beside its canonical absolute
+            # twin. They name one registration, as in the startup repair.
+            base = next((row for row in bases if is_absolute_project_path(row['path'])), bases[0])
+            for duplicate in bases:
+                if duplicate['id'] != base['id']:
+                    cursor.execute('DELETE FROM checkouts WHERE id = %s', (duplicate['id'],))
+            cursor.execute(
+                'SELECT 1 FROM checkouts WHERE project_id = %s AND runner_id = %s AND path IN (%s, %s) '
+                'AND id <> %s', (pv2_id, runner, new_path, stored_path, base['id']),
+            )
+            if cursor.fetchone():
+                raise FolderConflict('That folder is already registered as a checkout.')
+            cursor.execute(
+                'UPDATE checkouts SET path = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
+                'WHERE id = %s', (new_path, base['id']),
+            )
+        if same_folder and name is None and description is None and settings_dict is None:
+            return current
+        cursor.execute(
+            'UPDATE projects SET path = %s, name = COALESCE(%s, name), '
+            'description = COALESCE(%s, description), settings = COALESCE(%s::jsonb, settings), '
+            'updated_at = %s WHERE id = %s RETURNING *',
+            (current['path'] if same_folder else stored_path, name, description,
+             json.dumps(settings_dict) if settings_dict is not None else None,
+             datetime.now(timezone.utc).isoformat(), project_id),
+        )
+        return _parse_project_row(row_to_dict(cursor.fetchone()))
+
+
 def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Optional[ProjectRow]:
     """Set (or clear, with ``None``) a project's link group id.
 

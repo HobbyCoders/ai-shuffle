@@ -159,7 +159,7 @@
 			{#if nameError}<span class="project-error" role="alert">{nameError}</span>{/if}
 		</SettingRow>
 		{#if project}<SettingRow label="Project ID" hint="Unique identifier (read-only)."><span class="project-muted">{project.id}</span></SettingRow>{/if}
-		<SettingRow label={project ? 'Path' : 'Unsaved path'} hint="Filesystem location of this project.">
+		<SettingRow label={project ? 'Path' : 'Unsaved path'} wrapHint hint="Folder on this worker. Changing it does not move files. New chats and the next turn in chats without worktrees use the new folder. Keep the original checkout for any existing worktrees.">
 			{#snippet expanded()}
 				<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSavePath(); }}>
 					<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSavePath(); } }} bind:value={editPath} oninput={(value) => (editPath = value)} placeholder="Project path" mono pathDisplay width="full" label="Project path" />

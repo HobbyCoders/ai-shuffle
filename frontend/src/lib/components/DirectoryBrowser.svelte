@@ -14,9 +14,10 @@
 	interface Props {
 		onSelect: (path: string) => void;
 		selectedPath?: string;
+		browse?: typeof browseFilesystem;
 	}
 
-	let { onSelect, selectedPath = '' }: Props = $props();
+	let { onSelect, selectedPath = '', browse = browseFilesystem }: Props = $props();
 
 	interface TreeNode {
 		entry: DirectoryEntry;
@@ -38,7 +39,7 @@
 		rootLoading = true;
 		error = null;
 		try {
-			const response = await browseFilesystem();
+			const response = await browse();
 			roots = response.entries
 				.filter(e => e.is_dir)
 				.map(entry => ({
@@ -65,7 +66,7 @@
 		if (node.children === null) {
 			node.loading = true;
 			try {
-				const response = await browseFilesystem(node.entry.path);
+				const response = await browse(node.entry.path);
 				node.children = response.entries
 					.filter(e => e.is_dir)
 					.map(entry => ({
@@ -109,6 +110,7 @@
 {#snippet treeItem(node: TreeNode, depth: number)}
 	<div class="tree-item" style="--depth: {depth}">
 		<button
+			type="button"
 			class="tree-row"
 			class:selected={selectedPath === node.entry.path}
 			onclick={() => selectNode(node)}

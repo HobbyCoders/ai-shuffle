@@ -402,46 +402,27 @@ async def update_project(
     token: str = Depends(require_admin)
 ):
     """Update a project - Admin only"""
+    from app.core.project_folders import retarget, revision
+
     def _update():
-        # Read-decide-write kept atomic: the existence probe gates the UPDATE.
         existing = database.get_project(project_id)
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Project not found: {project_id}"
-            )
+        if not existing or existing.get("instance_id") not in (None, settings.effective_instance_id):
+            raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        metadata = {
+            "name": request.name,
+            "description": request.description,
+            "settings_dict": request.settings.model_dump(exclude_none=True) if request.settings else None,
+        }
+        # Metadata-only clients can resend the stored path even if it no longer
+        # exists. Actual moves share the Workers endpoint's safety checks.
+        if request.path and request.path != existing.get("path"):
+            return retarget(existing, request.path, revision(existing), **metadata), True
+        return database.update_project(project_id=project_id, **metadata), False
 
-        # Validate new path if provided
-        db_path = None
-        if request.path is not None:
-            effective_path = normalize_docker_path(request.path) if request.path else None
-            # Resending a project's stored path is not a move: an existing
-            # nested project stays editable (it is reported at start-up).
-            moved = effective_path != existing.get("path")
-            if effective_path and is_absolute_project_path(effective_path):
-                full_path = validate_project_path(effective_path, allow_create=False)
-                if moved:
-                    refuse_nested_repository(full_path)
-                db_path = effective_path
-            elif effective_path:
-                full_path = validate_project_path(effective_path)
-                if moved:
-                    refuse_nested_repository(full_path)
-                db_path = effective_path
-
-        settings_dict = None
-        if request.settings:
-            settings_dict = request.settings.model_dump(exclude_none=True)
-
-        return database.update_project(
-            project_id=project_id,
-            name=request.name,
-            description=request.description,
-            path=db_path,
-            settings_dict=settings_dict
-        )
-
-    return await run_sync(_update)
+    updated, moved = await run_sync(_update)
+    if moved:
+        _announce_catalog_change()
+    return updated
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
