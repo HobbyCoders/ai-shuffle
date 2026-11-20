@@ -133,7 +133,6 @@
 <div class="app-shell" class:narrow class:with-rail={rail}>
 	<CredentialStorageBanner />
 	<ClaudeReloginBanner />
-	<FirstCopyBanner />
 	<PeerTerminalRequestBanner />
 
 	<div class="app-body">
@@ -186,6 +185,8 @@
 			onToggleSidebar={() => layout.toggleSidebar()}
 		/>
 	</div>
+	<!-- The minimized transcript chip takes its own space below the chat controls. -->
+	<FirstCopyBanner />
 </div>
 
 <style>

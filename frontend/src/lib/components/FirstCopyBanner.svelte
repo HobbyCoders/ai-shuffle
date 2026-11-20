@@ -8,7 +8,8 @@
 	 * while they download the banner counts sessions. Silent on a ready worker
 	 * with nothing left to download; it then stops asking for status.
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { ChevronUp, Download } from 'lucide-svelte';
 	import { getNetworkStatus, type NetworkStatus } from '$lib/api/network';
 	import { firstCopyNotice, transcriptNotice } from '$lib/api/network-status';
 	import Banner from './Banner.svelte';
@@ -25,7 +26,26 @@
 	let status = $state<NetworkStatus | null>(null);
 	let finished = $state(false);
 	let dismissed = $state(false);
-	const notice = $derived(firstCopyNotice(status) ?? transcriptNotice(status));
+	let minimized = $state(false);
+	let chip = $state<HTMLButtonElement>();
+	let copyMessage = $state<HTMLSpanElement>();
+	const firstCopy = $derived(firstCopyNotice(status));
+	const transcripts = $derived(transcriptNotice(status));
+	const notice = $derived(firstCopy ?? transcripts);
+	const canMinimize = $derived(!firstCopy && transcripts !== null);
+	const showChip = $derived(canMinimize && minimized);
+
+	async function minimize() {
+		minimized = true;
+		await tick();
+		chip?.focus();
+	}
+
+	async function restore() {
+		minimized = false;
+		await tick();
+		copyMessage?.focus();
+	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = false;
@@ -53,6 +73,7 @@
 			if (stopped) return;
 			const wasCopying = firstCopyNotice(status) !== null;
 			status = next;
+			if (!transcriptNotice(next)) minimized = false;
 			if (wasCopying && next.network?.bootstrap_state === 'ready') finished = true;
 		} catch {
 			// Keep the last known status; without one there is nothing to show.
@@ -69,15 +90,16 @@
 	});
 </script>
 
-{#if notice}
+{#if notice && !showChip}
 	<NotificationSlot order={DOCK_ORDER.account}>
 		<Banner
 			variant="page"
 			title={notice.title}
 			severity={notice.severity}
 			action={finished && !dismissed ? { label: 'Reload', onClick: () => window.location.reload() } : undefined}
+			secondaryAction={canMinimize ? { label: 'Minimize', onClick: minimize } : undefined}
 		>
-			<span class="copy-message">{notice.message}</span>
+			<span class="copy-message" tabindex="-1" bind:this={copyMessage}>{notice.message}</span>
 			{#if notice.fraction !== null}
 				<progress class="copy-progress" max="1" value={notice.fraction} aria-label="Copy progress"></progress>
 			{/if}
@@ -97,7 +119,52 @@
 	</NotificationSlot>
 {/if}
 
+{#if showChip && transcripts}
+	{@const progress = `${transcripts.severity === 'warning' ? 'Paused · ' : ''}${Math.floor((transcripts.fraction ?? 0) * 100)}%`}
+	<button
+		class="transcript-chip"
+		type="button"
+		aria-label={`${transcripts.title} · ${progress}. Restore details`}
+		bind:this={chip}
+		onclick={restore}
+	>
+		<Download size={14} aria-hidden="true" />
+		<span>{transcripts.title} · {progress}</span>
+		<ChevronUp size={14} aria-hidden="true" />
+	</button>
+{/if}
+
 <style>
+	.transcript-chip {
+		display: inline-flex;
+		align-items: center;
+		align-self: flex-end;
+		flex: none;
+		gap: 6px;
+		min-height: 36px;
+		max-width: calc(100% - 24px);
+		margin: 4px max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) 12px;
+		padding: 4px 10px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--card);
+		color: var(--foreground);
+		font-family: inherit;
+		font-size: 0.75rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.transcript-chip:hover {
+		background: var(--accent);
+	}
+	.transcript-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	.transcript-chip :global(svg) {
+		flex: none;
+	}
+
 	.copy-message {
 		display: block;
 	}
