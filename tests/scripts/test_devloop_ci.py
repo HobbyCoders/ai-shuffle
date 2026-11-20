@@ -244,6 +244,21 @@ def test_a_part_runs_its_assigned_cases_and_bad_parts_fail_closed(tmp_path, monk
             ci.parse_parts(bad)
 
 
+def test_an_aliased_or_repeated_part_key_fails_closed(tmp_path, monkeypatch):
+    """A part 1 alias ("#1/2\\n") must not stand in for part 2, which would then never run."""
+    _cases(monkeypatch, {"big.journey.mjs": 4})
+    ids = [f"big.journey.mjs-{i}@desktop-fast" for i in range(4)]
+    alias = {"big.journey.mjs#1/2": ids[:2], "big.journey.mjs#1/2\n": ids[2:]}
+    with pytest.raises(ValueError, match="--parts must map"):
+        ci.parse_parts(json.dumps(alias))
+    with pytest.raises(ValueError, match="not a name.journey.mjs#k/n part"):
+        ci.check_parts(alias, ["big.journey.mjs"], tmp_path)
+    assert ci.entry_file("big.journey.mjs#1/2\n") == "big.journey.mjs#1/2\n"  # not a part: no file of that name
+    repeated = '{"big.journey.mjs#1/2": ["%s"], "big.journey.mjs#1/2": ["%s"]}' % (ids[0], ids[1])
+    with pytest.raises(ValueError, match="repeats a part entry"):
+        ci.parse_parts(repeated)
+
+
 def test_one_shard_uses_run_all_when_it_exists(tmp_path):
     for name in ("a.journey.mjs", "b.journey.mjs"):
         (tmp_path / name).write_text("")

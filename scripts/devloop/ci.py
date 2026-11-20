@@ -95,7 +95,8 @@ SUMMARY_TOTAL_CHARS = 400_000
 # each part its exact ids ("parts": entry -> ids). Shards run those ids with
 # the runner's --case selection and never re-list or re-slice them.
 PART_SECONDS = 150
-PART = re.compile(r"^(?P<name>[^#]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)$")
+# Matched only with fullmatch: no trailing newline or other alias of a part key.
+PART = re.compile(r"(?P<name>[^#/\s]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)")
 
 
 # ─── plan ──────────────────────────────────────────────────────────────────
@@ -130,7 +131,7 @@ def case_count(path: Path, *, strict: bool = False) -> int:
 
 def entry_file(entry: str) -> str:
     """The journey file a plan entry runs: the entry itself, or a part's file."""
-    match = PART.match(entry)
+    match = PART.fullmatch(entry)
     return match["name"] if match else entry
 
 
@@ -138,9 +139,14 @@ def parse_parts(value: str | None) -> dict[str, list[str]]:
     """A ``--parts`` value (JSON: part entry -> its exact case ids); empty for none."""
     if not value:
         return {}
-    data = json.loads(value)
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("--parts repeats a part entry")
+        return dict(pairs)
+
+    data = json.loads(value, object_pairs_hook=unique)
     if not isinstance(data, dict) or any(
-            PART.match(entry) is None or not isinstance(ids, list) or not ids
+            PART.fullmatch(entry) is None or not isinstance(ids, list) or not ids
             or any(not isinstance(id, str) or not id for id in ids) for entry, ids in data.items()):
         raise ValueError("--parts must map name.journey.mjs#k/n entries to non-empty case id lists")
     return data
@@ -149,14 +155,21 @@ def parse_parts(value: str | None) -> dict[str, list[str]]:
 def check_parts(parts: dict[str, list[str]], files: list[str], directory: Path = JOURNEYS) -> None:
     """Fail closed unless each split file's parts are #1..#n and hold every listed case exactly once."""
     split: dict[str, dict[int, list[str]]] = defaultdict(dict)
+    counts: dict[str, set[int]] = defaultdict(set)
     for entry, ids in parts.items():
-        match = PART.match(entry)
-        split[match["name"]][int(match["index"])] = ids
+        match = PART.fullmatch(entry)
+        if match is None:
+            raise ValueError(f"{entry!r}: not a name.journey.mjs#k/n part")
+        name, index = match["name"], int(match["index"])
+        if index in split[name]:
+            raise ValueError(f"--parts for {name} repeat part {index}")
+        split[name][index] = ids
+        counts[name].add(int(match["parts"]))
         if int(match["parts"]) < 2:
             raise ValueError(f"{entry}: a part needs at least two parts")
     for name, numbered in split.items():
-        counts = {int(PART.match(entry)["parts"]) for entry in parts if entry_file(entry) == name}
-        if name not in files or len(counts) != 1 or sorted(numbered) != list(range(1, counts.pop() + 1)):
+        total = counts[name]
+        if name not in files or len(total) != 1 or sorted(numbered) != list(range(1, min(total) + 1)):
             raise ValueError(f"--parts for {name} are not parts 1..n of a selected file")
         union = [id for ids in numbered.values() for id in ids]
         listed = case_ids(directory / name)
@@ -797,7 +810,7 @@ def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS
     if shard_files and not per_file and shards == 1 and (directory / RUN_ALL).is_file():
         return [["node", str(directory / RUN_ALL)]]
     parts = parts or {}
-    if any(PART.match(entry) and entry not in parts for entry in shard_files):
+    if any(PART.fullmatch(entry) and entry not in parts for entry in shard_files):
         raise ValueError("a planned part has no assigned case ids")
     files = [entry_file(entry) for entry in shard_files]
     if len(files) != len(set(files)):  # their logs and summaries would overwrite each other
