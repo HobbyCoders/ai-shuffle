@@ -220,15 +220,17 @@ export async function openPopup(trigger, popup) {
 }
 
 /**
- * Phone width keeps the selectors in Chat controls, reached from the one line
- * under the composer. Opens the sheet there; does nothing on a wider window.
- * Returns whether it opened one, so the caller can close it again.
+ * Phone width keeps the selectors in Chat controls, reached from the Controls
+ * cell of the composer's quick bar (each name on the context line under the
+ * composer opens its own selector instead). Opens the sheet's list; does
+ * nothing on a wider window. Returns whether it opened one, so the caller can
+ * close it again.
  */
 export async function openChatSetup(page) {
 	if (await page.getByRole('dialog', { name: 'Chat controls' }).isVisible()) return false;
-	const line = page.getByRole('button', { name: /^Chat context:/ });
-	if (!(await line.isVisible())) return false;
-	await line.click();
+	const controls = page.getByRole('button', { name: /^All chat controls/ });
+	if (!(await controls.isVisible())) return false;
+	await controls.click();
 	await page.getByRole('dialog', { name: 'Chat controls' }).waitFor({ timeout: 10_000 });
 	return true;
 }

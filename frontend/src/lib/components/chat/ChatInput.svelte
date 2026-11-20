@@ -2297,7 +2297,7 @@
 		</form>
 
 		{#if phone}
-			<ComposerContextLine newChat={newSession} sheetOpen={mobileControlsOpen} onOpen={() => controlsDockRef?.setMobileSheetOpen(true)} />
+			<ComposerContextLine newChat={newSession} sheetOpen={mobileControlsOpen} onOpen={(row) => controlsDockRef?.setMobileSheetOpen(true, row)} />
 			{#if newSession && ($activeSession.project || $activeSession.projectV2Id)}
 				<!-- The picked worker lacks the project: say so, and that Send sets it up first. -->
 				<NewChatSetupCallout />
