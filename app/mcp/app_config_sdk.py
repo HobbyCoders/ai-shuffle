@@ -294,8 +294,22 @@ def create_app_config_server(
     )
 
     from app.mcp.sdk_compat import patch_sdk_server
-    return patch_sdk_server(create_tool_server(
+    server = patch_sdk_server(create_tool_server(
         name="app-config",
         version="1.0.0",
         tools=all_tools,
     ), all_tools)
+    # Some schemas depend on live state (the subagent model enums follow the
+    # Claude Code list), so a pooled chat must rebuild when they change.
+    server["schema_signature"] = schema_signature(all_tools)
+    return server
+
+
+def schema_signature(tools: list) -> str:
+    """A stable hash of the tools' names and input schemas."""
+    import hashlib
+    import json
+
+    shapes = sorted((getattr(t, "name", ""), json.dumps(getattr(t, "input_schema", None), sort_keys=True,
+                                                         default=str)) for t in tools)
+    return hashlib.sha256(json.dumps(shapes).encode()).hexdigest()[:16]

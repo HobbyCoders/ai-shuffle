@@ -785,7 +785,7 @@
 			]
 		},
 		{
-			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",

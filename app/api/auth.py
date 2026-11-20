@@ -271,8 +271,7 @@ _PREVIEW_DEV_CHANGE = re.compile(
     r"|DELETE /api/v1/projects/workers/[^/]+"
     r"|POST /api/v1/agents"
     r"|PUT /api/v1/agents/[^/]+"
-    r"|PUT /api/v1/away-mode"
-    r"|PUT /api/v1/models/claude/enabled)"
+    r"|PUT /api/v1/away-mode)"
 )
 
 
@@ -288,8 +287,8 @@ def _preview_may_change_dev_data(request: Request) -> bool:
     and same-origin rule still apply.
 
     Only these changes: add a project, set one up on a worker, cancel that
-    setup, remove a worker's copy, create or update an agent, toggle global
-    Away, and turn a Claude Code model on or off in the pickers. Every other owner-only change (deleting or relinking a project;
+    setup, remove a worker's copy, create or update an agent, and toggle
+    global Away. Every other owner-only change (deleting or relinking a project;
     deleting, importing or restoring an agent) stays refused even here.
     """
     if not _PREVIEW_DEV_CHANGE.fullmatch(

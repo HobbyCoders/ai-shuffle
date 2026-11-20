@@ -8,7 +8,7 @@ memory, mcp_servers, system prompt, etc.).
 import logging
 from typing import Any, cast
 
-from app.core.model_registry import model_values
+from app.core.model_registry import selectable_model_values
 from app.core.models import profile_name_error
 from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
@@ -126,7 +126,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 },
                 "model": {
                     "type": "string",
-                    "enum": model_values(),
+                    "enum": selectable_model_values(),
                     "description": "AI model override. Omit to inherit from profile.",
                 },
                 "skills": {
@@ -230,7 +230,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 }),
                 "model": nullable({
                     "type": "string",
-                    "enum": model_values(),
+                    "enum": selectable_model_values(),
                     "description": "AI model override. Pass null to inherit from profile.",
                 }),
                 "skills": {
