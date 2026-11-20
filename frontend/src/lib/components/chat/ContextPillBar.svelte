@@ -427,8 +427,9 @@
 			notify.error(detail);
 			// The confirmation closed the menu. Reopen it with the reason next
 			// to the destinations, so a refusal (busy checkout, unreachable
-			// worker) shows where the move was started.
-			if (sessionId === $activeSession.sessionId) {
+			// worker) shows where the move was started. Not from a bar that has
+			// gone: the shared menu id would open a later sheet on the menu.
+			if (!destroyed && sessionId === $activeSession.sessionId) {
 				runnerActionError = detail;
 				openDropdown('runner');
 				void loadRunnerMenu();
@@ -463,7 +464,7 @@
 					? (e as { detail: string }).detail
 					: 'Could not queue the move';
 			notify.error(detail);
-			if (choice.sessionId === $activeSession.sessionId) {
+			if (!destroyed && choice.sessionId === $activeSession.sessionId) {
 				runnerActionError = detail;
 				openDropdown('runner');
 				void loadRunnerMenu();
@@ -521,7 +522,11 @@
 		}
 	}
 
+	/** Set once this bar is gone (the phone sheet tears its copy down after closing). */
+	let destroyed = false;
+
 	onDestroy(() => {
+		destroyed = true;
 		closeDropdown('runner');
 		if (runnerDoneTimer) clearTimeout(runnerDoneTimer);
 	});
