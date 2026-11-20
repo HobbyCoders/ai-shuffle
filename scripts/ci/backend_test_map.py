@@ -31,9 +31,11 @@ choice on stderr.
     python scripts/ci/backend_test_map.py ci-select --map MAP
 
 ``ci-select`` is CI Backend's choice for a pull request: only the pull
-request's own files decide, each compared with its version at the map's
-commit, plus the test files main added or changed since the map. What main
-alone changed is left to main's full run after the merge (see ``ci_select``).
+request's files decide (its own and where they land in the merge), each
+compared with its version at the map's commit, plus the test files main added
+or changed since the map. A change to code main added or changed since the map
+runs everything. What main alone changed is left to main's full run after the
+merge (see ``ci_select``).
 """
 from __future__ import annotations
 
@@ -465,10 +467,11 @@ def resolve_relative(path: str, level: int, module: str | None) -> str:
 
 
 class Selector:
-    def __init__(self, test_map: dict, files: dict[str, str], base_source):
+    def __init__(self, test_map: dict, files: dict[str, str], base_source, main_source=None):
         self.map = test_map
         self.files = files
         self.base_source = base_source
+        self.main_source = main_source
         self.tests_by_index = test_map["tests"]
         self.selected: set[str] = set()
         self.reasons: list[str] = []
@@ -513,6 +516,8 @@ class Selector:
         head = Blocks(self.files.get(path))
         if not base.valid or not head.valid:
             raise FullSuite(f"{path} does not parse")
+        if self.main_source is not None:
+            self.since_map(path, base, head)
         module = module_name(path)
         for qualname in sorted(differing(base.functions, head.functions)):
             if qualname not in base.functions:
@@ -534,6 +539,27 @@ class Selector:
         if changed_names and PurePosixPath(path).name == "conftest.py":
             raise FullSuite(f"{path}: module-level names changed in a conftest")
         self.name_changes(path, module, changed_names)
+
+    def since_map(self, path: str, base: Blocks, head: Blocks) -> None:
+        """A pull request's change to code main added or changed after the map runs everything.
+
+        The map holds no tests for a block main added since, and may miss the
+        callers main gave a block it changed, so comparing with the map's
+        version alone could choose nothing. Compared at three points: the map's
+        commit (``base``), main, and the merge (``head``). Blocks the pull
+        request adds itself (absent on main) are left to the usual rules.
+        """
+        main = Blocks(self.main_source(path))
+        if not main.valid:
+            raise FullSuite(f"{path} does not parse on main")
+        for kind in ("functions", "classes", "names"):
+            at_map, on_main, merged = getattr(base, kind), getattr(main, kind), getattr(head, kind)
+            for key in sorted(differing(on_main, merged)):
+                if key in on_main and at_map.get(key) != on_main[key]:
+                    since = "added" if key not in at_map else "changed"
+                    raise FullSuite(f"{path}::{key} is changed by the pull request and was {since} on main since the map")
+        if main.loose != head.loose and base.loose != main.loose:
+            raise FullSuite(f"{path}: module-level statements changed by the pull request and on main since the map")
 
     def name_changes(self, path: str, module: str | None, names: set[str]) -> None:
         pending = [(path, module, name, 0) for name in sorted(names)]
@@ -604,14 +630,15 @@ class Selector:
 
 
 def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source,
-           also: list[str] = ()) -> tuple[str | list[str], list[str]]:
+           also: list[str] = (), main_source=None) -> tuple[str | list[str], list[str]]:
     """``("all" | [tests], reasons)``.
 
     ``changed`` drives the choice and every rule that runs everything.
     ``also`` names test files to run as well that decide nothing: on a pull
     request, the tests main added or changed since the map. They are added after
     the share of the suite is judged, and only those of the fast subset that
-    still exist are run.
+    still exist are run. ``main_source`` (a pull request's) gives main's version
+    of a file, for ``Selector.since_map``.
     """
     try:
         if test_map is None:
@@ -630,7 +657,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
             # build at run time; only test modules and helpers are mapped.
             if path.startswith("tests/") and PurePosixPath(path).suffix != ".py":
                 raise FullSuite(f"{path} is test data, read by paths no map can follow")
-        selector = Selector(test_map, files, base_source)
+        selector = Selector(test_map, files, base_source, main_source)
         for path in changed:
             p = PurePosixPath(path)
             tracked = p.suffix == ".py" and (path in ROOT_SCRIPTS or any(path.startswith(d + "/") for d in SOURCE_DIRS))
@@ -680,34 +707,43 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD",
            pull_request: tuple[str, str] | None = None) -> tuple[str | list[str], list[str], dict | None]:
     """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
 
-    With ``pull_request`` as ``(main, pr_head)``, the files that drive the
-    choice are the pull request's own (``main...pr_head``); a changed Python
-    file is still compared with its version at ``base_rev``, the map's commit,
-    since that is the code the map saw run (whatever main changed in that file
-    since is compared too). Files only main changed since ``base_rev`` choose
-    nothing and run nothing in full, except the test files main added or
-    changed, which run as well.
+    With ``pull_request`` as ``(main, pr_head)``, ``head`` is the pull
+    request's merge into main and the files that drive the choice are the pull
+    request's: its own (``main...pr_head``) and where its change lands once
+    merged (``main...head``; a file main moved takes the edit at its new
+    path). A changed Python file is still compared with its version at
+    ``base_rev``, the map's commit, since that is the code the map saw run
+    (whatever main changed in that file since is compared too); a block the
+    pull request changes that main added or changed since the map runs
+    everything (``Selector.since_map``). Files only main changed since
+    ``base_rev`` choose nothing and run nothing in full, except the test files
+    main added or changed, which run as well.
 
     Returns the selection, the reasons and the map it was made from.
     """
     try:
         base = git("rev-parse", base_rev).strip()
         if pull_request:
-            changed = changed_names(*pull_request)
-            main_tests = [name for name in changed_names(base, pull_request[0]) if fast_subset(name)]
+            main = git("rev-parse", pull_request[0]).strip()
+            # merge-base(main, head) is main: three dots read as two here.
+            changed = sorted(set(changed_names(main, pull_request[1])) | set(changed_names(main, head)))
+            main_tests = [name for name in changed_names(base, main) if fast_subset(name)]
         else:
             changed, main_tests = changed_names(base, head), []
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None
 
-    def base_source(path: str) -> str | None:
-        # A file the change adds has no base version; git's "fatal:" line would only mislead the log.
-        shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True, check=False,
-                               text=True, encoding="utf-8", errors="replace")
-        return shown.stdout if shown.returncode == 0 else None
+    def source_at(rev: str):
+        def source(path: str) -> str | None:
+            # A file added since has no version there; git's "fatal:" line would only mislead the log.
+            shown = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=ROOT, capture_output=True, check=False,
+                                   text=True, encoding="utf-8", errors="replace")
+            return shown.stdout if shown.returncode == 0 else None
+        return source
 
-    result, reasons = select(changed, test_map, load_sources(ROOT), base_source, main_tests)
+    result, reasons = select(changed, test_map, load_sources(ROOT), source_at(base), main_tests,
+                             main_source=source_at(main) if pull_request else None)
     if test_map is not None:
         whose = "files the pull request changed" if pull_request else "changed files"
         reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} {whose}.")
@@ -755,13 +791,15 @@ def shard_plan(result: str | list[str], test_map: dict | None) -> dict:
 def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
     """The shard plan of this CI run. Only a pull request selects; anything else runs everything.
 
-    The pull request's own files (main...its head, the merge commit's two
-    parents) choose the tests and decide whether everything runs. Each is
-    compared with its version at the commit the map was recorded on (a full run
-    on main), so the functions compared are the ones the map saw run. What main
-    alone changed since the map is left to main's full run after the merge,
-    except the test files main added or changed, which run too: the map does
-    not know what they need.
+    The pull request's files choose the tests and decide whether everything
+    runs: its own (main...its head, the merge commit's two parents) and where
+    its change lands in the merge (main...the merge). Each is compared with its
+    version at the commit the map was recorded on (a full run on main), so the
+    functions compared are the ones the map saw run; a block it changes that
+    main added or changed since the map runs everything. What main alone
+    changed since the map is left to main's full run after the merge, except
+    the test files main added or changed, which run too: the map does not know
+    what they need.
     """
     event = environ.get("GITHUB_EVENT_NAME", "")
     if event != "pull_request":

@@ -486,6 +486,74 @@ def test_a_pull_request_file_main_also_changed_is_compared_with_the_maps_version
     assert found["tests"] == sorted(A_TESTS + B_TESTS)
 
 
+RULES = "".join(f"rule {n} = on\n" for n in range(12))
+
+
+def test_an_edit_counts_where_it_lands_in_the_merge(pull_request):
+    repo, map_path, commit, merge = pull_request
+    commit("main", "notes/2026/rules.toml", RULES)
+    run_git(repo, "branch", "-f", "pr", "main")
+    # Main moves the file where nothing names it; the pull request edits the old path.
+    (repo / "assets/current").mkdir(parents=True)
+    run_git(repo, "mv", "notes/2026/rules.toml", "assets/current/rules.toml")
+    run_git(repo, "commit", "-q", "-m", "move")
+    commit("pr", "notes/2026/rules.toml", RULES.replace("rule 3 = on", "rule 3 = off"))
+    merge()
+    assert "rule 3 = off" in run_git(repo, "show", "HEAD:assets/current/rules.toml")
+    found, reasons = tm.ci_select(map_path, PR)
+    # Read by its old path alone, NOTES_WALKER would be the whole choice.
+    assert found["selection"] == "all" and "assets/current/rules.toml" in reasons[-1], reasons
+
+
+HELPERS = "app/helpers.py"
+HELPER = "def helper():\n    return 1\n"
+
+
+@pytest.mark.parametrize("pr_text, expected", [
+    ("def helper():\n    return 2\n", "all"),
+    (None, "all"),
+    (HELPER + "\ndef extra():\n    return 3\n", "none"),
+], ids=["changes-it", "deletes-it", "only-adds-to-its-file"])
+def test_a_pull_request_changing_code_main_added_since_the_map_runs_everything(pull_request, pr_text, expected):
+    repo, map_path, commit, merge = pull_request
+    # After the map, main adds a helper and makes a mapped function call it.
+    commit("main", HELPERS, HELPER)
+    commit("main", "app/b.py", "from app.a import LIMIT\nfrom app.helpers import helper\n\n"
+                               "def uses_limit():\n    return LIMIT + helper()\n")
+    run_git(repo, "branch", "-f", "pr", "main")
+    if pr_text is None:
+        run_git(repo, "checkout", "-q", "pr")
+        run_git(repo, "rm", "-q", HELPERS)
+        run_git(repo, "commit", "-q", "-m", "delete")
+    else:
+        commit("pr", HELPERS, pr_text)
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    # Compared with the map's commit alone, the helper is new code and nothing would run.
+    assert found["selection"] == expected, reasons
+    if expected == "all":
+        assert f"{HELPERS}::helper is changed by the pull request and was added on main" in reasons[-1]
+
+
+def test_renaming_a_file_main_changed_since_the_map_runs_everything(pull_request):
+    repo, map_path, commit, merge = pull_request
+    commit("main", "app/a.py", BASE["app/a.py"].replace("def g():\n    return 2", "def g():\n    return 5"))
+    run_git(repo, "checkout", "-q", "pr")
+    run_git(repo, "mv", "app/a.py", "app/a2.py")
+    run_git(repo, "commit", "-q", "-m", "rename")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and "app/a.py::g" in reasons[-1], reasons
+
+
+def test_a_brand_new_module_still_chooses_nothing(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("main", *UNMAPPED_MODULE)
+    commit("pr", "app/brand_new.py", "def fresh():\n    return 1\n\nclass Thing:\n    def go(self):\n        return 2\n")
+    merge()
+    assert tm.ci_select(map_path, PR)[0] == {"selection": "none", "shards": [], "tests": []}
+
+
 def test_tests_main_changed_do_not_count_toward_running_everything():
     chosen, reasons = tm.select(["app/a.py"], fake_map(), head_files(**{"app/a.py": CHANGED_F}), BASE.get,
                                 also=FILLER + ["tests/core/gone.py", "tests/core/helper.py"])
