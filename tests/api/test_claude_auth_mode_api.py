@@ -168,7 +168,7 @@ def _save_with_shipped_writer(first, second):
 @pytest.mark.parametrize("old_pin", [False, True])
 def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, old_pin):
     from app.core import claude_accounts as accounts
-    from app.core.environment import inject_claude_code_auth
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
     from app.db.settings import get_system_setting_snapshots
 
     first, second = "fixture-upgrade-first-ABCD", "fixture-upgrade-second-WXYZ"
@@ -202,7 +202,9 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
             safe(authenticated_client.put(ENDPOINT, json={
                 "mode": "api_key", "api_key_confirmation": settings["api_key_confirmation"],
             }))
-        assert claude_auth_mode.shared_selection()["key_id"] == second_id
+        choice = db.get_system_setting(shared)
+        assert encryption.is_encrypted(choice)
+        assert second_old not in choice
         assert accounts.pinned_api_key(second_old) == second  # A peer can still carry the old pin.
         assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == second
         assert db.get_system_setting_snapshot(scalar) == before[scalar]
@@ -214,7 +216,7 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
         assert rows[first_id]["label"] == "First renamed" and rows[first_id]["active"]
         assert not rows[second_id]["active"]
         choice = db.get_system_setting(shared)
-        assert json.loads(choice)["key_id"] == first_id
+        assert encryption.is_encrypted(choice)
         assert all(value not in choice for value in (first, second, first_old, second_old))
         assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == first
         safe(authenticated_client.delete(path))
@@ -222,6 +224,44 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
         accounts.add_api_key(first, activate=False)
         assert accounts.pinned_api_key(first_old) is None  # A re-save must not revive a deleted pin.
         assert json.loads(db.get_system_setting(shared))["key_id"] is None
+        # Even if the older, encrypted selection wins independently of the list,
+        # re-adding the same credential must not make that deleted pin valid.
+        db.set_system_setting(shared, choice)
+        with pytest.raises(ProviderTurnRefused, match="no Anthropic API key"):
+            inject_claude_code_auth({})
+
+
+def test_offline_rename_preserves_legacy_pin_without_reselection(authenticated_client):
+    from app.core import claude_accounts as accounts
+    from app.core.environment import inject_claude_code_auth
+
+    active, inactive = "fixture-original-A123", "fixture-inactive-B456"
+    old_active, _ = _save_with_shipped_writer(active, inactive)
+    saved, shared = accounts.API_LIST_SETTING, claude_auth_mode.SELECTION_SETTING
+    old_snapshot = db.get_system_setting_snapshot(saved)
+    old_choice = json.dumps({"mode": "api_key", "subscription": None, "key_id": old_active})
+    db.set_system_setting(shared, old_choice)
+    with _probe(True):
+        # A changes only the mode; its resulting shared decision will win.
+        for mode in ("subscription", "api_key"):
+            assert authenticated_client.put(ENDPOINT, json={"mode": mode}).status_code == 200
+        choice_a = db.get_system_setting(shared)
+        assert db.get_system_setting_snapshot(saved) == old_snapshot
+
+        # B is still looking at the shipped list and pin. Its rename wins the
+        # list register independently of A's mode choice. Neither key changed.
+        db.set_system_setting(saved, old_snapshot.value)
+        db.set_system_setting(shared, old_choice)
+        rows = authenticated_client.get(ACCOUNTS).json()["accounts"]["api_key"]
+        row = next(row for row in rows if row["last4"] == "B456")
+        path = f"{ACCOUNTS}/api_key/{row['id']}"
+        assert authenticated_client.patch(path, json={"label": "Renamed offline"}).status_code == 200
+        assert db.get_system_setting(shared) == old_choice
+        db.set_system_setting(shared, choice_a)
+
+        rows = authenticated_client.get(ACCOUNTS).json()["accounts"]["api_key"]
+        assert {row["last4"] for row in rows} == {"A123", "B456"}
+        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == active
 
 
 @pytest.fixture

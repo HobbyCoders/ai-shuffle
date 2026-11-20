@@ -110,17 +110,33 @@ def shared_selection(*, cached: bool = False) -> Optional[dict]:
     return _decode_selection(getter(SELECTION_SETTING))
 
 
-def _decode_selection(raw: Optional[str]) -> Optional[dict]:
+def _decode_selection(raw: Optional[str], *, for_write: bool = False) -> Optional[dict]:
+    from app.core import claude_accounts
+
     if raw is None:
         return None
     try:
-        value = json.loads(raw)
+        value = json.loads(claude_accounts._decode_setting(raw))
         if isinstance(value, dict) and value.get("mode") in MODES:
             return value
+    except claude_accounts.AccountError:
+        if for_write:
+            raise
     except (TypeError, ValueError):
         pass
     # An unreadable shared selection is not permission to use a local default.
     return {"mode": MODE_OFF, "invalid": True}
+
+
+def _encode_selection(selection: dict) -> str:
+    from app.core import claude_accounts
+
+    value = json.dumps(selection, separators=(",", ":"))
+    if claude_accounts.is_shipped_legacy_id(selection.get("key_id")):
+        # Reuse whole-value credential custody and the existing encrypted
+        # system-settings sync path. Do not emit a plaintext legacy pin.
+        return claude_accounts._encrypt(value)
+    return value
 
 
 def _stored_choice(*, cached: bool) -> tuple[Optional[str], Optional[dict]]:
@@ -236,7 +252,7 @@ def is_explicit() -> bool:
 
 def _read_selection() -> tuple[Optional[dict], Optional[database.SystemSettingSnapshot]]:
     snapshot = database.get_system_setting_snapshot(SELECTION_SETTING)
-    return _decode_selection(snapshot.value if snapshot is not None else None), snapshot
+    return _decode_selection(snapshot.value if snapshot is not None else None, for_write=True), snapshot
 
 
 def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str],
@@ -244,33 +260,14 @@ def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str],
              local_choice: tuple[str, str] | None = None) -> None:
     from app.core import claude_accounts
 
-    # One replicated decision. The encrypted key list may lag behind it; a
-    # reader must either find this exact ID there or refuse, never use a scalar.
+    # The list and choice replicate independently. The reader must find this
+    # exact member in the list or refuse, never substitute the scalar.
     selection = {"mode": mode, "subscription": subscription}
-    if claude_accounts.is_shipped_legacy_id(key_id):
-        # An existing pin can still be read, but must not be republished verbatim.
-        saved = claude_accounts.API_LIST_SETTING
-        stored = database.get_system_setting_snapshot(saved)
-        if stored is None:
-            raise _selection_changed()
-        key_id, converted = claude_accounts.prepare_existing_key_pin(key_id, stored)
-        selection["key_id"] = key_id
-        writes = {SELECTION_SETTING: (json.dumps(selection, separators=(",", ":")), snapshot)}
-        if local_choice is not None:
-            local_key, local_value = local_choice
-            writes[local_key] = (local_value, database.get_system_setting_snapshot(local_key))
-        guards = {}
-        if converted is None:
-            guards[saved] = stored
-        else:
-            writes[saved] = (converted, stored)
-        if not db_settings.write_system_settings_if_unchanged(writes, guards=guards):
-            raise _selection_changed()
-        return
     if not defer_key_pin:
         selection["key_id"] = key_id
-    value = json.dumps(selection, separators=(",", ":"))
-    if not database.set_system_setting_if_unchanged(SELECTION_SETTING, value, snapshot, alongside=local_choice):
+    if not database.set_system_setting_if_unchanged(
+        SELECTION_SETTING, _encode_selection(selection), snapshot, alongside=local_choice,
+    ):
         raise _selection_changed()
 
 
@@ -343,9 +340,7 @@ def clear_shared_key_if_selected(account_id: str, legacy_id: str | None) -> None
             and choice.get("key_id") and choice["key_id"] in (account_id, legacy_id)):
         return
     choice["key_id"] = None
-    database.set_system_setting_if_unchanged(
-        SELECTION_SETTING, json.dumps(choice, separators=(",", ":")), snapshot,
-    )
+    database.set_system_setting_if_unchanged(SELECTION_SETTING, _encode_selection(choice), snapshot)
 
 
 def set_mode(mode: str, *, key_id: Optional[str] = None, require_legacy_confirmation: bool = False) -> str:
@@ -451,7 +446,7 @@ def _confirm_legacy_api_key(revision: str) -> None:
     else:
         guards[saved] = rows[saved]
     writes[local] = (MODE_API_KEY, rows.get(local))
-    writes[shared] = (json.dumps(selection, separators=(",", ":")), rows.get(shared))
+    writes[shared] = (_encode_selection(selection), rows.get(shared))
     try:
         committed = db_settings.write_system_settings_if_unchanged(writes, guards=guards)
     except (DeadlockDetected, SerializationFailure):

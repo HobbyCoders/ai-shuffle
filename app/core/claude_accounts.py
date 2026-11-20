@@ -9,7 +9,6 @@ This module is the facade the accounts API calls.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import threading
@@ -95,45 +94,40 @@ def is_shipped_legacy_id(account_id: str | None) -> bool:
     return isinstance(account_id, str) and _SHIPPED_LEGACY_ID.fullmatch(account_id) is not None
 
 
-def _shipped_id(account) -> str | None:
-    if account["id"].startswith(_MIGRATED_ID_PREFIX):
-        # Compatibility only, never returned or newly published. A newly saved
-        # UUID4 account cannot revive a legacy pin after deletion and re-add.
-        return "legacy-" + hashlib.sha256(account["key"].encode()).hexdigest()[:24]
-    return None
+def _pin_id(account) -> str:
+    # This immutable member identity stays with the key through independent
+    # list edits. Only the encrypted list and encrypted choice may carry it.
+    return account.get("legacy_id", account["id"])
+
+
+def _find_pinned_key(bundle, account_id):
+    return next((a for a in bundle["accounts"] if account_id in (a["id"], _pin_id(a))), None)
 
 
 def _find_key(bundle, account_id):
-    if not account_id:
-        return None
-    legacy = is_shipped_legacy_id(account_id)
-    for account in bundle["accounts"]:
-        if account["id"] == account_id or (legacy and _shipped_id(account) == account_id):
-            return account
-    return None
+    return next((a for a in bundle["accounts"] if a["id"] == account_id), None)
 
 
 def _project_saved_keys(stored):
     bundle = _decode_key_bundle(stored.value if stored else None)
-    migrated = False
     for index, account in enumerate(bundle["accounts"]):
         if is_shipped_legacy_id(account["id"]):
             if not stored.revision:
                 _error("storage_unreadable", "Saved Anthropic API keys have no storage revision.", 503)
-            # The row generation + slot identifies this exact snapshot without
-            # hashing any credential. Normal saves persist the projected IDs.
+            account["legacy_id"] = account["id"]
+            # UI handle only, never used as the shared pin. Persist this handle
+            # if the list is edited so Settings keeps the same row open.
             account["id"] = f"{_MIGRATED_ID_PREFIX}{stored.revision}-{index}"
-            migrated = True
-    return bundle, migrated
+    return bundle
 
 
 def _keys():
-    bundle, _ = _project_saved_keys(database.get_system_setting_snapshot(API_LIST_SETTING))
+    bundle = _project_saved_keys(database.get_system_setting_snapshot(API_LIST_SETTING))
     from app.core import claude_auth_mode
 
     mode, choice = claude_auth_mode.runtime_choice()
     if choice is not None and ("key_id" in choice or mode == claude_auth_mode.MODE_API_KEY):
-        account = _find_key(bundle, choice.get("key_id"))
+        account = _find_pinned_key(bundle, choice.get("key_id"))
         bundle["active_id"] = account["id"] if account else None
         return bundle
     scalar = database.get_system_setting_snapshot(API_SETTING)
@@ -156,7 +150,7 @@ def _keys():
 def pinned_api_key(account_id: str) -> str | None:
     """Resolve a pinned ID only from the encrypted list, never the legacy scalar."""
     try:
-        account = _find_key(_decode_key_bundle(database.get_system_setting(API_LIST_SETTING)), account_id)
+        account = _find_pinned_key(_decode_key_bundle(database.get_system_setting(API_LIST_SETTING)), account_id)
         return account["key"] if account else None
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
@@ -182,24 +176,15 @@ def pin_legacy_key() -> str | None:
 
 
 def prepare_legacy_key_pin(key: str, stored: database.SystemSettingSnapshot | None) -> tuple[str, str | None]:
-    """Resolve this exact key without writing; return an encrypted list only for migration."""
+    """Resolve this exact key without writing; prepare a list only if missing."""
     _require_storage()
-    bundle, migrated = _project_saved_keys(stored)
+    bundle = _decode_key_bundle(stored.value if stored else None)
     account = next((entry for entry in bundle["accounts"] if entry["key"] == key), None)
-    if account is None:
-        account = {"id": str(uuid4()), "label": "Anthropic API key", "key": key}
-        bundle["accounts"].append(account)
-        migrated = True
-    return account["id"], _encrypted_bundle(bundle) if migrated else None
-
-
-def prepare_existing_key_pin(account_id: str, stored: database.SystemSettingSnapshot) -> tuple[str, str | None]:
-    """Convert a shipped pin using the exact saved row, with no scalar fallback."""
-    bundle, migrated = _project_saved_keys(stored)
-    account = _find_key(bundle, account_id)
-    if account is None:
-        _error("selection_changed", "The pinned Claude API key is not available yet. Review the choice and try again.")
-    return account["id"], _encrypted_bundle(bundle) if migrated else None
+    if account is not None:
+        return _pin_id(account), None
+    account = {"id": str(uuid4()), "label": "Anthropic API key", "key": key}
+    bundle["accounts"].append(account)
+    return account["id"], _encrypted_bundle(bundle)
 
 
 def saved_api_key(account_id: str) -> str | None:
@@ -253,9 +238,9 @@ def add_api_key(key: str, label: str = "", activate: bool = True, *, for_claude_
         if for_claude_code:
             from app.core import claude_auth_mode
 
-            claude_auth_mode.set_mode(claude_auth_mode.MODE_API_KEY, key_id=account["id"])
+            claude_auth_mode.set_mode(claude_auth_mode.MODE_API_KEY, key_id=_pin_id(account))
         elif activate:
-            _update_shared_key(account["id"])
+            _update_shared_key(_pin_id(account))
         return account["id"]
 
 
@@ -305,11 +290,11 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
             bundle, update_active=action == "activate" or (action == "delete" and was_active)
         )
         if action == "activate":
-            _update_shared_key(account_id)
+            _update_shared_key(_pin_id(account))
         elif action == "delete":
             from app.core import claude_auth_mode
 
-            claude_auth_mode.clear_shared_key_if_selected(account_id, _shipped_id(account))
+            claude_auth_mode.clear_shared_key_if_selected(account_id, _pin_id(account))
 
 
 def deactivate_api_key() -> None:
