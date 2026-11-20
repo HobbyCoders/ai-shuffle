@@ -24,7 +24,7 @@ from app.core.provider.fluid_tool_bridge import ACP_LOADED_TOOLS, BRIDGE_DEFER_E
 from app.core.provider.types import SessionOptions
 from tests.core.test_antigravity_provider import _create, client, fake_agy  # noqa: F401
 from tests.core.test_delegated_bridge_tiers import _isolated, _servers  # noqa: F401
-from tests.core.test_delegated_leg import SEARCH_SURFACES, assert_search_guidance_matches
+from tests.core.test_delegated_leg import SEARCH_SURFACES
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE_MCP = str(ROOT / "fluid" / "tests" / "fixtures" / "fake_mcp_server.py")
@@ -179,17 +179,11 @@ async def test_external_servers_connect_host_side_and_run_through_call_tool(
         await adapter._registry.aclose()
 
 
-def _headings(blocks):
-    return [block.splitlines()[0] for block in blocks]
-
-
 @pytest.mark.asyncio
-async def test_the_append_carries_the_same_app_blocks_as_the_claude_leg(
+async def test_the_append_carries_acp_app_guidance_once(
         tmp_path, client, monkeypatch):  # noqa: F811
-    """``agy acp`` takes only an append, so the app's guidance rides it: the
-    same blocks the claude leg's --system-prompt gets, each once, plus the
-    attribution block the claude CLI renders from --settings instead."""
-    from fluid.context.steering import PROMPT_BLOCK as STEERING
+    """ACP keeps the agent's prompt; only app rules for its actual surface ride the append."""
+    from fluid.context.steering import NOTICE_OPEN, STEER_OPEN
 
     adapter = await _connected(tmp_path, client, monkeypatch)
     engine = adapter._engine
@@ -197,13 +191,14 @@ async def test_the_append_carries_the_same_app_blocks_as_the_claude_leg(
         append = engine.system_append
         registry = adapter._registry
         options = adapter._options
-        ours = ha._app_guidance_blocks(options, leg="antigravity", registry=registry)
-        claude = ha._app_guidance_blocks(options, leg="claude", registry=registry)
-        assert _headings(ours) == ["# Attribution", *_headings(claude)]
-        for block in ours:
+        ours = ha._antigravity_guidance_blocks(options, registry)
+        claude = "\n\n".join(ha._app_guidance_blocks(options, leg="claude", registry=registry))
+        assert STEER_OPEN in claude
+        assert STEER_OPEN not in append
+        assert NOTICE_OPEN in append
+        for block in (*ours, ha.PEER_MESSAGE_BLOCK):
             assert append.count(block) == 1, block.splitlines()[0]
-        for block in (STEERING, ha.SAFETY_BLOCK):
-            assert append.count(block) == 1
+        assert append.count(ha.SAFETY_BLOCK) == 1
         assert append.count("Be brief.") == 1
         headings = [line for line in append.splitlines() if line.startswith("# ")]
         assert len(headings) == len(set(headings)), headings
@@ -600,7 +595,9 @@ async def test_search_guidance_names_only_what_the_acp_bridge_serves(
         for tool in served:
             assert (tool in bridged) is (not defer or tool in ACP_LOADED_TOOLS), tool
         assert served == ({"Glob"} if "Glob" in surface else set())
-        assert_search_guidance_matches(engine.system_append, served)
+        for tool in ("Glob", "Grep"):
+            assert (ha._bundled_cli_name(tool) in engine.system_append) is (tool in served)
+        assert "Claude Code's dedicated tools" not in engine.system_append
     finally:
         await engine.aclose()
         await adapter._registry.aclose()
