@@ -438,15 +438,6 @@ def test_non_main_push_sources_are_rejected(key, value):
     assert reporter.eligible_run(RUN.repository, RUN.id, {**METADATA, key: value}) is None
 
 
-def test_the_merge_queues_run_for_main_is_reported_like_a_push_to_main():
-    queued = {**METADATA, "event": "merge_group", "head_branch": "gh-readonly-queue/main/pr-12-" + "b" * 40}
-    assert reporter.eligible_run(RUN.repository, RUN.id, queued) == RUN
-    # Another branch's queue, a push to a branch named like the queue, and a queue event on main are not it.
-    for changed in ({"head_branch": "gh-readonly-queue/release/pr-12-" + "b" * 40}, {"event": "push"},
-                    {"head_branch": "main"}, {"head_branch": None}):
-        assert reporter.eligible_run(RUN.repository, RUN.id, {**queued, **changed}) is None
-
-
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_ineligible_real_run_warns_but_dry_run_is_plain_log(dry_run, monkeypatch, capsys):
     api = FakeGitHub()

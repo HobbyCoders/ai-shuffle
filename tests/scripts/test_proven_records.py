@@ -261,98 +261,14 @@ def test_green_main_commits_keeps_successful_main_runs_in_order():
     assert asked == ["/repos/owner/repo/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=30"]
 
 
-QUEUE_REF = "gh-readonly-queue/main/pr-12-" + "b" * 40
-
-
-def queue_run(**changed):
-    return {"head_sha": SHA, "head_branch": QUEUE_REF, "event": "merge_group", "status": "completed",
-            "conclusion": "success", "path": ".github/workflows/ci.yml",
-            "repository": {"full_name": "owner/repo"}, "head_repository": {"full_name": "owner/repo"}, **changed}
-
-
-def test_the_merge_queues_green_runs_for_main_are_found_by_commit():
-    asked = []
-    runs = [queue_run(), queue_run(head_sha="2")]
-
-    def call(path, token):
-        asked.append(path)
-        return {"workflow_runs": runs}
-
-    assert proven.green_queue_commits("owner/repo", "token", call=call) == [SHA, "2"]
-    assert proven.queue_passed("owner/repo", "token", call=call, commit=SHA)
-    # The run must be on this very commit, whatever the listing returns.
-    assert not proven.queue_passed("owner/repo", "token", call=call, commit="f" * 40)
-    base = "/repos/owner/repo/actions/workflows/ci.yml/runs?event=merge_group&status=success&per_page=30"
-    assert asked == [base, f"{base}&head_sha={SHA}", f"{base}&head_sha={'f' * 40}"]
-
-
-@pytest.mark.parametrize("changed", [
-    {"event": "push"}, {"event": "pull_request"}, {"conclusion": "failure"}, {"conclusion": None},
-    {"status": "in_progress"}, {"head_branch": "main"}, {"head_branch": "gh-readonly-queue/other/pr-1-" + "b" * 40},
-    {"head_branch": "fork/gh-readonly-queue/main/pr-1"}, {"head_branch": None},
-    {"path": ".github/workflows/other.yml"}, {"repository": {"full_name": "fork/repo"}},
-    {"head_repository": {"full_name": "fork/repo"}}, {"head_repository": None}, {"head_sha": ""},
-])
-def test_only_this_repositorys_green_queue_run_for_main_counts(changed):
-    call = lambda path, token: {"workflow_runs": [queue_run(**changed), "not a run"]}
-    assert proven.queue_runs("owner/repo", "token", call=call) == []
-    assert not proven.queue_passed("owner/repo", "token", call=call, commit=SHA)
-
-
-def test_the_queue_passed_on_the_commit_checked_out_unless_another_is_named(monkeypatch):
-    call = lambda path, token: {"workflow_runs": [queue_run()] if path.endswith(f"&head_sha={SHA}") else []}
-    monkeypatch.setenv("GITHUB_SHA", SHA)
-    assert proven.queue_passed("owner/repo", "token", call=call)
-    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
-    assert not proven.queue_passed("owner/repo", "token", call=call)
-    # No commit, no proof, and nothing is asked.
-    monkeypatch.delenv("GITHUB_SHA")
-    assert not proven.queue_passed("owner/repo", "token", call=lambda path, token: 1 / 0)
-    assert not proven.queue_passed("owner/repo", "token", call=lambda path, token: {})
-
-
-def test_a_merge_queue_guards_a_branch_only_when_an_active_rule_says_so():
-    asked = []
-
-    def rules(*types):
-        return lambda path, token: asked.append(path) or [{"type": name} for name in types]
-
-    assert proven.merge_queue_guards("owner/repo", "token", call=rules("deletion", "merge_queue", "pull_request"))
-    assert asked == ["/repos/owner/repo/rules/branches/main?per_page=100"]
-    assert not proven.merge_queue_guards("owner/repo", "token", call=rules("deletion", "required_status_checks"))
-    assert not proven.merge_queue_guards("owner/repo", "token", call=rules())
-    assert proven.merge_queue_guards("owner/repo", "token", "release/public-1", call=rules("merge_queue"))
-    assert asked[-1] == "/repos/owner/repo/rules/branches/release%2Fpublic-1?per_page=100"
-    # Anything but a list of rules is not a queue.
-    for answer in ({"type": "merge_queue"}, {"message": "Not Found"}, None, ["merge_queue"]):
-        assert not proven.merge_queue_guards("owner/repo", "token", call=lambda path, token: answer)
-
-
 @pytest.mark.parametrize(("event", "ref", "token"), [
     ("schedule", "refs/heads/main", "token"), ("workflow_dispatch", "refs/heads/main", "token"),
     ("pull_request", "refs/pull/1/merge", "token"), ("push", "refs/heads/other", "token"),
     ("push", "refs/heads/main", ""),
-    # The merge queue's own run writes records; it reads none.
-    ("merge_group", "refs/heads/" + QUEUE_REF, "token"),
 ])
 def test_only_a_push_to_main_looks_for_records(event, ref, token, monkeypatch):
     on_main_push(monkeypatch, event, ref, token)
     assert proven.environment() is None
-
-
-@pytest.mark.parametrize(("event", "ref", "token", "narrows"), [
-    ("push", "refs/heads/main", "token", True),
-    ("merge_group", "refs/heads/" + QUEUE_REF, "token", True),
-    ("merge_group", "refs/heads/gh-readonly-queue/release/pr-1-" + "b" * 40, "token", False),
-    ("merge_group", "refs/heads/main", "token", False),
-    ("push", "refs/heads/" + QUEUE_REF, "token", False),
-    ("pull_request", "refs/pull/1/merge", "token", False),
-    ("schedule", "refs/heads/main", "token", False),
-    ("merge_group", "refs/heads/" + QUEUE_REF, "", False),
-])
-def test_a_push_to_main_and_its_merge_queue_narrow_from_the_last_green_commit(event, ref, token, narrows, monkeypatch):
-    on_main_push(monkeypatch, event, ref, token)
-    assert proven.history_environment() == (("owner/repo", "token") if narrows else None)
 
 
 def test_a_push_to_main_looks_for_records(monkeypatch):

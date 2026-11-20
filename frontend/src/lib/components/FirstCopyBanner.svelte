@@ -8,7 +8,8 @@
 	 * while they download the banner counts sessions. Silent on a ready worker
 	 * with nothing left to download; it then stops asking for status.
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { ChevronUp, Download } from 'lucide-svelte';
 	import { getNetworkStatus, type NetworkStatus } from '$lib/api/network';
 	import { firstCopyNotice, transcriptNotice } from '$lib/api/network-status';
 	import Banner from './Banner.svelte';
@@ -22,10 +23,32 @@
 	/** Signed in or invited, waiting for another worker to admit this one. */
 	const JOIN_POLL_MS = 30_000;
 
+	let { completionFocusTarget }: { completionFocusTarget?: HTMLElement } = $props();
+
 	let status = $state<NetworkStatus | null>(null);
 	let finished = $state(false);
 	let dismissed = $state(false);
-	const notice = $derived(firstCopyNotice(status) ?? transcriptNotice(status));
+	let minimized = $state(false);
+	let chip = $state<HTMLButtonElement>();
+	let details = $state<HTMLDivElement>();
+	let copyMessage = $state<HTMLSpanElement>();
+	const firstCopy = $derived(firstCopyNotice(status));
+	const transcripts = $derived(transcriptNotice(status));
+	const notice = $derived(firstCopy ?? transcripts);
+	const canMinimize = $derived(!firstCopy && transcripts !== null);
+	const showChip = $derived(canMinimize && minimized);
+
+	async function minimize() {
+		minimized = true;
+		await tick();
+		chip?.focus();
+	}
+
+	async function restore() {
+		minimized = false;
+		await tick();
+		copyMessage?.focus();
+	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = false;
@@ -51,9 +74,21 @@
 		try {
 			const next = await getNetworkStatus();
 			if (stopped) return;
-			const wasCopying = firstCopyNotice(status) !== null;
+			const wasCopying = firstCopy !== null;
+			const nextTranscripts = transcriptNotice(next);
+			const completing = canMinimize && !nextTranscripts && !firstCopyNotice(next);
+			const focused = completing ? document.activeElement : null;
+			const hadFocus = focused && (focused === chip || details?.contains(focused));
 			status = next;
+			if (!nextTranscripts) minimized = false;
 			if (wasCopying && next.network?.bootstrap_state === 'ready') finished = true;
+			if (hadFocus) {
+				await tick();
+				// Move focus only if the notice was removed and nothing else took focus.
+				if (!stopped && !focused.isConnected && document.activeElement === document.body) {
+					completionFocusTarget?.focus({ preventScroll: true });
+				}
+			}
 		} catch {
 			// Keep the last known status; without one there is nothing to show.
 		}
@@ -69,21 +104,24 @@
 	});
 </script>
 
-{#if notice}
+{#if notice && !showChip}
 	<NotificationSlot order={DOCK_ORDER.account}>
+		<!-- The dock can still read the snippet's props just before it removes the card. -->
 		<Banner
+			bind:element={details}
 			variant="page"
-			title={notice.title}
-			severity={notice.severity}
+			title={notice?.title}
+			severity={notice?.severity}
 			action={finished && !dismissed ? { label: 'Reload', onClick: () => window.location.reload() } : undefined}
+			secondaryAction={canMinimize ? { label: 'Minimize', onClick: minimize } : undefined}
 		>
-			<span class="copy-message">{notice.message}</span>
-			{#if notice.fraction !== null}
-				<progress class="copy-progress" max="1" value={notice.fraction} aria-label="Copy progress"></progress>
+			<span class="copy-message" tabindex="-1" bind:this={copyMessage}>{notice?.message}</span>
+			{#if notice?.fraction != null}
+				<progress class="copy-progress" max="1" value={notice?.fraction ?? 0} aria-label="Copy progress"></progress>
 			{/if}
 		</Banner>
 	</NotificationSlot>
-{:else if finished && !dismissed}
+{:else if !notice && finished && !dismissed}
 	<NotificationSlot order={DOCK_ORDER.account}>
 		<Banner
 			variant="page"
@@ -97,7 +135,52 @@
 	</NotificationSlot>
 {/if}
 
+{#if showChip && transcripts}
+	{@const progress = `${transcripts.severity === 'warning' ? 'Paused · ' : ''}${Math.floor((transcripts.fraction ?? 0) * 100)}%`}
+	<button
+		class="transcript-chip"
+		type="button"
+		aria-label={`${transcripts.title} · ${progress}. Restore details`}
+		bind:this={chip}
+		onclick={restore}
+	>
+		<Download size={14} aria-hidden="true" />
+		<span>{transcripts.title} · {progress}</span>
+		<ChevronUp size={14} aria-hidden="true" />
+	</button>
+{/if}
+
 <style>
+	.transcript-chip {
+		display: inline-flex;
+		align-items: center;
+		align-self: flex-end;
+		flex: none;
+		gap: 6px;
+		min-height: 36px;
+		max-width: calc(100% - 24px);
+		margin: 4px max(12px, env(safe-area-inset-right)) max(6px, env(safe-area-inset-bottom)) 12px;
+		padding: 4px 10px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--card);
+		color: var(--foreground);
+		font-family: inherit;
+		font-size: 0.75rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.transcript-chip:hover {
+		background: var(--accent);
+	}
+	.transcript-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	.transcript-chip :global(svg) {
+		flex: none;
+	}
+
 	.copy-message {
 		display: block;
 	}
