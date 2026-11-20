@@ -454,6 +454,30 @@ def test_write_normalizes_and_validates(lane, monkeypatch):
         subagent_default.write("claude-3-opus")  # not a Claude model the API leg offers
 
 
+def test_an_aliasless_version_stays_on_subscription_workers(lane, monkeypatch):
+    """Mythos has no alias: the shared setting holds it only in ``version``,
+    so an API-key worker (or an older release) sees no default and asks."""
+    import json
+
+    from app.core import claude_auth_mode
+    from app.db import database
+
+    saved = subagent_default.write("claude-mythos-5-1")
+    assert saved == subagent_default.SubagentDefault("claude-mythos-5-1")
+    stored = json.loads(database.get_system_setting(subagent_default.SETTING_KEY))
+    assert stored == {"model": None, "version": "claude-mythos-5-1"}
+    assert subagent_default.read() == saved
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
+    assert subagent_default.read().model is None
+    by_id = {t.id: t for t in apm.available_subagents("caller", None)}
+    assert by_id["plain"].model_source == "unset"
+    # Saved by this branch's first cut, with the full id in ``model`` too.
+    database.set_system_setting(subagent_default.SETTING_KEY,
+                                '{"model": "claude-mythos-5-1", "version": "claude-mythos-5-1"}')
+    assert subagent_default.read().model is None
+    assert subagent_default.payload() == {"model": None}
+
+
 def test_a_stored_allowed_list_from_before_1830_is_ignored(lane):
     from app.db import database
 

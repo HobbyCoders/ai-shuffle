@@ -69,7 +69,7 @@ def read() -> SubagentDefault:
     if not isinstance(data, dict):
         return SubagentDefault()
     version, model = data.get("version"), data.get("model")
-    from app.core.model_registry import LEGACY_MODEL_MAP, keeps_own_id
+    from app.core.model_registry import LEGACY_MODEL_MAP, keeps_own_id, native_choice
 
     if isinstance(version, str) and keeps_own_id(version.strip()):
         return SubagentDefault(model=version.strip())
@@ -77,6 +77,11 @@ def read() -> SubagentDefault:
     if model:
         # ``model`` always meant an alias: a legacy id there runs today's alias.
         model = LEGACY_MODEL_MAP.get(model, model)
+        if model.startswith("claude-") and native_choice(model) is None:
+            # A full id with no alias (Mythos), saved here before ``model``
+            # held only aliases, runs nowhere outside a subscription: unset,
+            # so the owner is asked for a default this worker can run.
+            model = None
     return SubagentDefault(model=model)
 
 
@@ -134,12 +139,15 @@ def write(model: Optional[str]) -> SubagentDefault:
             raise ValueError(f"model: {error}")
     data: Dict[str, Any] = {"model": clean_model}
     if clean_model and clean_model.startswith("claude-"):
-        # The picked version rides in ``version``; ``model`` keeps the alias
-        # because a worker on an older release reads only ``model`` and runs
-        # the alias until it updates.
+        # The picked version rides in ``version``; ``model`` holds only a real
+        # alias, because API-key and cloud workers and workers on an older
+        # release read only ``model``. A version with no alias (Mythos)
+        # leaves it null there: those workers ask for a default they can run.
+        from app.core.model_registry import model_values
         from app.core.model_registry import normalize_model as _alias
 
-        data = {"model": _alias(clean_model), "version": clean_model}
+        alias = _alias(clean_model)
+        data = {"model": alias if alias in model_values() else None, "version": clean_model}
     database.set_system_setting(SETTING_KEY, json.dumps(data))
     if clean_model:
         # A later "no default" state (cleared again) may ask once more.
