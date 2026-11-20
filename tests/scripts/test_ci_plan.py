@@ -412,6 +412,21 @@ def test_the_container_area_reads_the_setup_wizard_its_smoke_script_walks():
         assert (ROOT / prefix).exists(), prefix
     # The rest of the UI stays the JavaScript checks' alone.
     assert not plan.reads("container", "frontend/src/lib/components/chat/ChatInput.svelte")
+    # Every API client, store and service the wizard's screens import directly.
+    import re
+    screens = [ROOT / "frontend/src/routes/setup/+page.svelte", ROOT / "frontend/src/routes/+layout.svelte",
+               ROOT / "frontend/src/lib/components/OwnerAccessGate.svelte",
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.svelte")),
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.ts"))]
+    for screen in screens:
+        for module in re.findall(r"from '\$lib/((?:api|stores|services|constants)/[^']+)'", screen.read_text("utf-8")):
+            found = [ROOT / "frontend/src/lib" / (module + ext) for ext in (".ts", ".svelte.ts", "")]
+            path = next(f for f in found if f.is_file()).relative_to(ROOT).as_posix()
+            assert plan.reads("container", path), (screen.name, path)
+    # The owner password the script creates goes through api/owner.ts: a change to it is a new container key.
+    entries = [("100644", "a" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
 
 
 # --- Did the area pass in a run ----------------------------------------------------

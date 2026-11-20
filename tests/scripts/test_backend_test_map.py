@@ -25,8 +25,8 @@ BASE = {
     "app/prompts/system.md": "hello\n",
     "app/prompt_loader.py": "def load():\n    return open('system.md').read()\n",
     "tests/conftest.py": "def helper():\n    return 1\n",
-    # Reads every file of notes/ without naming one.
-    "tests/core/test_notes_walk.py": "def test_notes():\n    assert list((ROOT / \"notes\").rglob(\"*.md\"))\n",
+    # Reads every file of notes/2026/ without naming one.
+    "tests/core/test_notes_walk.py": "def test_notes():\n    assert list((ROOT / \"notes/2026\").rglob(\"*.md\"))\n",
 }
 NOTES_WALKER = "tests/core/test_notes_walk.py"
 
@@ -90,6 +90,8 @@ def test_a_non_python_file_selects_the_tests_of_code_that_reads_it():
 
 
 GUIDE = "docs/guide.md"
+GUIDE_TEST = "tests/core/test_guide.py"
+GUIDE_TEXT = f"def test_guide():\n    assert (ROOT / '{GUIDE}').read_text()\n"
 
 
 @pytest.mark.parametrize("addition", [
@@ -98,11 +100,13 @@ GUIDE = "docs/guide.md"
     '\nprint(note="Read docs/guide.md before changing LIMIT.")\n',
     '\nclass Note:\n    text = "see docs/guide.md for the rules"\n',
 ], ids=["docstring", "comment", "import-time-prose", "class-prose"])
-def test_a_file_named_only_in_prose_selects_nothing(addition):
+def test_a_file_named_only_in_prose_selects_no_tests_of_that_code(addition):
     # app.a runs in every mapped test: reading it file-wide would be the suite.
-    chosen, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})
-    assert chosen == []
-    assert any("0 of them in code" in reason for reason in reasons)
+    chosen, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition, GUIDE_TEST: GUIDE_TEXT})
+    assert chosen == [GUIDE_TEST]
+    assert any("0 of 1 naming sources read it in code" in reason for reason in reasons)
+    # With no test naming it, prose is no reader either: nothing says what reads it.
+    assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})[0] == "all"
 
 
 def test_a_file_read_in_a_function_selects_only_that_functions_tests():
@@ -145,17 +149,39 @@ def test_any_conftest_runs_everything(changed):
 def test_a_file_nothing_names_runs_everything():
     # Not named by any code or test, nor is any folder of it: nothing says it is safe.
     result, reasons = select(["ops/cron.d/backup"])
-    assert result == "all" and "no code or test names it" in reasons[0]
+    assert result == "all" and "no code reads it by name" in reasons[0]
 
 
-def test_a_file_a_test_lists_by_folder_selects_that_test():
+def test_a_file_a_test_lists_by_its_own_folder_selects_that_test():
     assert select(["notes/2026/today.md"])[0] == [NOTES_WALKER]
 
 
-def test_a_test_listing_the_whole_checkout_reads_every_file():
-    lister = "tests/core/test_tracked.py"
-    files = {lister: "import subprocess\n\ndef test_x():\n    subprocess.run(['git', 'ls-files'])\n"}
-    assert select(["notes/a.md"], **files)[0] == sorted([lister, NOTES_WALKER])
+LISTER = "tests/core/test_tracked.py"
+LISTER_TEXT = "import subprocess\n\ndef test_x():\n    subprocess.run(['git', 'ls-files'])\n"
+
+
+def test_a_test_listing_the_whole_checkout_runs_but_never_narrows():
+    # It reads every file, so it runs whenever a named or folder-listing test narrows the choice.
+    assert select(["notes/2026/a.md"], **{LISTER: LISTER_TEXT})[0] == sorted([LISTER, NOTES_WALKER])
+    # Alone it says nothing about this file: everything runs.
+    assert select(["ops/cron.d/backup"], **{LISTER: LISTER_TEXT})[0] == "all"
+
+
+def test_a_test_listing_a_top_level_folder_never_narrows():
+    # A file outside notes/2026/ is not one NOTES_WALKER lists.
+    result, reasons = select(["notes/a.md"])
+    assert result == "all" and "no code reads it by name" in reasons[0]
+    top = {"tests/core/test_frontend_walk.py": "def test_x():\n    list((ROOT / 'frontend').rglob('*'))\n"}
+    assert select(["frontend/src/a.svelte"], **top)[0] == "all"
+
+
+@pytest.mark.parametrize("path", ["tests/db/fixtures/schema_v88.sql", "tests/fixtures/x.json",
+                                  "tests/core/__snapshots__/a.snap"])
+def test_test_data_runs_everything(path):
+    # A loader builds the name at run time (schema_v{n}.sql): no map follows it.
+    named = {"tests/db/test_schema_lifecycle.py": "def test_x():\n    load('schema_v88.sql')\n"}
+    result, reasons = select([path], **named)
+    assert result == "all" and "test data" in reasons[0]
 
 
 def test_a_name_that_is_not_utf8_runs_everything():
@@ -283,16 +309,16 @@ def test_recorder_attributes_calls_to_the_running_test_file(tmp_path):
 
 
 
-def test_a_source_dir_file_no_code_names_selects_the_code_beside_it():
-    # Code beside a file may load it by folder; a comment naming it is no read.
+def test_a_source_dir_file_no_code_names_runs_everything():
+    # Code beside it may load it by folder, and so may code anywhere else: unknown.
     sibling = "def load():\n    # app/prompts/other.md is read with the rest of the folder\n    return 1\n"
     test_map = fake_map()
     test_map["covered"]["app/prompts/sibling.py"] = {"load": [test_map["tests"].index(B_TESTS[0])]}
     test_map["known"]["app/prompts/sibling.py"] = ["load"]
     chosen, reasons = tm.select(["app/prompts/other.md"], test_map,
                                 head_files(**{"app/prompts/sibling.py": sibling}), BASE.get)
-    assert chosen == B_TESTS
-    assert any("beside" in reason for reason in reasons)
+    assert chosen == "all"
+    assert "no code reads it by name" in reasons[0]
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +398,7 @@ CHANGED_F = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
 def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
-    commit("main", "notes/main.md", "main moved on\n")
+    commit("main", "notes/2026/main.md", "main moved on\n")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
     expected = sorted(A_TESTS + [NOTES_WALKER])
@@ -424,6 +450,14 @@ def test_doubt_runs_everything(pull_request, tmp_path):
     unknown = tmp_path / "unknown.json.gz"
     unknown.write_bytes(gzip.compress(json.dumps({**fake_map(), "commit": "f" * 40}).encode()))
     assert tm.ci_select(unknown, PR)[0]["selection"] == "all"
+
+
+def test_a_file_name_with_a_line_break_runs_everything(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/odd\nname.md", "x\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and "line break" in reasons[0]
 
 
 def test_a_non_ascii_test_file_name_is_read_and_chosen(pull_request):

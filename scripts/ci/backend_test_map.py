@@ -16,7 +16,11 @@ A changed file that is not Python selects the tests that name it and the tests
 of the code that names it in a string literal: the function holding the
 literal, the users of a module constant bound to it, or the whole file when it
 is named in code that runs at import. Docstrings, comments and messages (a
-literal with whitespace) only mention a file; they do not read it.
+literal with whitespace) only mention a file; they do not read it. Tests that
+list a folder below the top level of it count as naming it; tests that list
+the whole checkout or a top-level folder run too, but cannot narrow the
+choice. A file nothing names that way, any conftest, and any file under
+tests/ that is not Python (fixtures, data, snapshots) print ``all``.
 
     python scripts/ci/backend_test_map.py merge --hits DIR --out MAP --commit SHA
     python scripts/ci/backend_test_map.py select --map MAP --base REV [--head REV]
@@ -543,13 +547,16 @@ class Selector:
         needles = {path} | ({p.name} if p.name not in GENERIC_NAMES and len(p.name) >= 6 else set())
         tests = {t for t in self.files if fast_subset(t) and any(n in self.files[t] for n in needles)}
         sources = {f for f in self.files if not fast_subset(f) and any(n in self.files[f] for n in needles)}
-        # Tests that list a folder of it, or the whole checkout, read it unnamed.
-        folders = {str(parent) for parent in p.parents if str(parent) != "."}
-        walkers = {t for t in self.files if fast_subset(t) and WALKS.search(self.files[t])
-                   and (REPO_LISTING.search(self.files[t]) or names_folder(self.files[t], folders))}
-        if not tests and not sources and not walkers:
-            raise FullSuite(f"{path}: no code or test names it or a folder of it")
-        self.selected |= tests | walkers
+        # Tests that list a folder of it, or the whole checkout, read it
+        # unnamed. One naming a folder below the top level narrows the choice
+        # like a test naming the file; a whole-checkout lister or a top-level
+        # folder ("frontend") reads too much to say anything about this file.
+        specific = {str(parent) for parent in p.parents if len(parent.parts) >= 2}
+        top = {p.parts[0]} if len(p.parts) > 1 else set()
+        listers = {t for t in self.files if fast_subset(t) and WALKS.search(self.files[t])}
+        narrow = {t for t in listers if names_folder(self.files[t], specific)}
+        broad = {t for t in listers - narrow
+                 if REPO_LISTING.search(self.files[t]) or names_folder(self.files[t], top)}
         readers = 0
         for source in sorted(sources):
             found = mention_scopes(self.files[source], needles)
@@ -566,15 +573,13 @@ class Selector:
                 if not self._covered(source, qualname):
                     self.file_level(source, f"{qualname} reads changed {path} but the map does not know it")
             self.name_changes(source, module_name(source), names)
-        if not readers and p.parts and p.parts[0] in {"app", "fluid", "docker", "scripts"}:
-            # Nothing names it in code; code beside it may load it by folder.
-            neighbours = {f for f in self.files if f.endswith(".py") and PurePosixPath(f).parent == p.parent}
-            for source in sorted(neighbours):
-                self.file_level(source, f"sits beside changed {path}")
-            self.reasons.append(f"{path}: {len(tests)} tests name it; {len(neighbours)} sources sit beside it")
-            return
-        self.reasons.append(f"{path}: {len(tests)} tests and {len(sources)} sources name it, "
-                            f"{readers} of them in code")
+        if not tests and not narrow and not readers:
+            # Nothing names it in code: whatever reads it (code loading its
+            # folder, a path built at run time) is unknown.
+            raise FullSuite(f"{path}: no code reads it by name and no test names it or its folder")
+        self.selected |= tests | narrow | broad
+        self.reasons.append(f"{path}: {len(tests)} tests name it, {len(narrow)} list its folder, "
+                            f"{len(broad)} list everything; {readers} of {len(sources)} naming sources read it in code")
 
     def subprocess_users(self, path: str) -> None:
         module = module_name(path)
@@ -596,8 +601,12 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
             # Any conftest, the root one too: pytest loads it for every test beneath it.
             if PurePosixPath(path).name == "conftest.py":
                 raise FullSuite(f"{path} is a conftest")
-            if "�" in path:
+            if "\ufffd" in path:
                 raise FullSuite(f"{path!r} is not a UTF-8 file name")
+            # Fixtures, data and snapshots under tests/ are read by paths tests
+            # build at run time; only test modules and helpers are mapped.
+            if path.startswith("tests/") and PurePosixPath(path).suffix != ".py":
+                raise FullSuite(f"{path} is test data, read by paths no map can follow")
         selector = Selector(test_map, files, base_source)
         for path in changed:
             p = PurePosixPath(path)
@@ -627,6 +636,20 @@ def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
+def changed_names(base: str, head: str) -> list[str]:
+    """The files changed from ``base`` to ``head``, read as bytes and split on NUL.
+
+    git quotes an unusual name in its plain output, which then matches no file.
+    A name that is not UTF-8 or holds a line break raises ValueError: run everything.
+    """
+    raw = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"], cwd=ROOT)
+    names = [part.decode("utf-8") for part in raw.split(b"\0") if part]
+    odd = [name for name in names if "\n" in name or "\r" in name]
+    if odd:
+        raise ValueError(f"a changed file name holds a line break: {odd[0]!r}")
+    return names
+
+
 def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | list[str], list[str], dict | None]:
     """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
 
@@ -634,8 +657,7 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | lis
     """
     try:
         base = git("rev-parse", base_rev).strip()
-        # NUL-separated: a quoted name (non-ASCII, a tab) would match no file.
-        changed = [name for name in git("diff", "--name-only", "--no-renames", "-z", f"{base}...{head}").split("\0") if name]
+        changed = changed_names(base, head)
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None

@@ -200,15 +200,19 @@ PostgreSQL safety always run in full.
   commit, so what main changed since the map is chosen too, and picks the test
   files that ran a changed function (the rules are in the script's docstring).
   A file that is not Python chooses the tests that name it or list a folder of
-  it (or the whole checkout), and the tests of the code that reads it.
+  it, and the tests of the code that reads it. Tests that list the whole
+  checkout or a top-level folder (`frontend`) run with them, but alone they
+  say nothing about the file, so everything runs.
   It runs those files in as many shards as their recorded time needs (about
   five test-minutes a shard, at most eight). Tests the shards never run (the
   policy suite's `tests/scripts/` and the docs tests) are left out of the
   choice; their jobs run anyway.
 - Any doubt runs every test: no map, a map whose commit is not on main, a
   change to the dependencies, the pytest setup (any `conftest.py`, the root one
-  too) or how the shards run and are judged, a file that no code or test names,
-  nor any folder of it, a change the map cannot place, more than 60% of the
+  too) or how the shards run and are judged, a file under `tests/` that is not
+  Python (fixtures, data, snapshots, read by names built at run time), a file
+  that no code or test names, nor any folder of it below the top level, a file
+  name with a line break, a change the map cannot place, more than 60% of the
   test files affected, or any error.
 - When no shard test can reach the change, no shard runs (`none`).
 - `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each

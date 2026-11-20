@@ -72,9 +72,15 @@ SETUP_UI = (
     "frontend/src/routes/+layout.svelte", "frontend/src/routes/+layout.ts", "frontend/src/routes/setup/",
     "frontend/src/lib/components/setup/", "frontend/src/lib/components/OwnerAccessGate.svelte",
     "frontend/src/lib/components/settings/providers/", "frontend/src/lib/components/settings/ClaudeCliPanel.svelte",
-    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/model-providers.ts",
-    "frontend/src/lib/api/agent-credentials.ts", "frontend/src/lib/stores/auth.svelte.ts",
-    "frontend/src/lib/stores/providers.svelte.ts", "frontend/src/lib/stores/owner-access.svelte.ts",
+    # The API modules behind each call the script makes or waits for (owner
+    # password, license, Claude pay mode, auth status) and the stores they fill.
+    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/owner.ts", "frontend/src/lib/api/license.ts",
+    "frontend/src/lib/api/auth.ts", "frontend/src/lib/api/claude-auth.ts", "frontend/src/lib/api/claude-cli.ts",
+    "frontend/src/lib/api/network.ts", "frontend/src/lib/api/model-providers.ts",
+    "frontend/src/lib/api/agent-credentials.ts", "frontend/src/lib/api/cli-history.ts",
+    "frontend/src/lib/services/first-agent-run.ts", "frontend/src/lib/constants/models.svelte.ts",
+    "frontend/src/lib/stores/auth.svelte.ts", "frontend/src/lib/stores/providers.svelte.ts",
+    "frontend/src/lib/stores/owner-access.svelte.ts", "frontend/src/lib/stores/platform.svelte.ts",
 )
 # The desktop tests start the real backend, build the app from the checkout
 # and read package files all over it: everything but prose, UI source and the
