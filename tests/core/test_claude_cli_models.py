@@ -148,6 +148,70 @@ def test_record_ignores_other_modes(cli, monkeypatch):
     assert stored and stored[0]["cli_version"] == "2.1.325"
 
 
+@pytest.mark.parametrize("concurrent_change", [
+    "same", "switch", "sign-out", "organization", "folder", "shared-selection", "invalidated",
+])
+def test_refresh_checks_the_logical_sign_in(monkeypatch, tmp_path, concurrent_change):
+    from dataclasses import replace
+
+    from app.core import claude_cli_home, claude_cli_status, claude_subscriptions as subs
+
+    home = "0123456789abcdef"
+    other_home = "fedcba9876543210"
+    monkeypatch.setattr(claude_cli_home, "root", lambda: tmp_path)
+    path = tmp_path / "claude-cli-models.json"
+    monkeypatch.setattr(cm, "_path", lambda: path)
+    monkeypatch.setattr(cm, "_snapshot", None)
+    monkeypatch.setattr(cm, "_loaded", True)
+    monkeypatch.setattr(cm, "subscription_mode", lambda: True)
+    monkeypatch.setattr(claude_cli_status, "_announce_account_change", lambda: None)
+    for attr in ("_cached", "_cached_at", "_last_account"):
+        monkeypatch.setattr(claude_cli_status, attr, getattr(claude_cli_status, attr))
+    current = claude_cli_status.ClaudeCliStatus(
+        installed=True, signed_in=True, auth_method="claude.ai", email="a@example.invalid",
+        org_id="org-a", binary_path="/fake/claude", cli_version="2.1.325",
+    )
+    target = subs._binding(current)
+    current = replace(current, selected_home=(target, home))
+    state = {"status": current, "target": target}
+    monkeypatch.setattr(subs, "shared_target", lambda: state["target"])
+    monkeypatch.setattr(claude_cli_status, "probe", lambda resolver: state["status"])
+
+    def handshake(binary, env):
+        assert binary == current.binary_path
+        assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / home)
+        # Simulate a forced status read completing during this handshake, or a
+        # replicated choice arriving before the next probe has run.
+        observed = replace(current)
+        if concurrent_change == "switch":
+            observed = replace(observed, email="b@example.invalid")
+            state["target"] = subs._binding(observed)
+            observed = replace(observed, selected_home=(state["target"], other_home))
+        elif concurrent_change == "sign-out":
+            observed = replace(observed, signed_in=False)
+        elif concurrent_change == "organization":
+            observed = replace(observed, org_id="org-b")  # same email and display name
+        elif concurrent_change == "folder":
+            observed = replace(observed, selected_home=(target, other_home))
+        elif concurrent_change == "shared-selection":
+            state["target"] = "unresolved"
+        if concurrent_change == "invalidated":
+            claude_cli_status.invalidate()
+        elif concurrent_change != "shared-selection":
+            state["status"] = observed
+            assert claude_cli_status.get_status(force=True) is not current
+        return REPLY
+
+    monkeypatch.setattr(cm, "_handshake", handshake)
+    if concurrent_change == "same":
+        assert cm.refresh()["account"] == cm.account_key(current.email, current.org_name)
+        assert path.is_file()
+    else:
+        with pytest.raises(RuntimeError, match="sign-in changed"):
+            cm.refresh()
+        assert cm.peek() is None and not path.exists()
+
+
 def test_store_writes_once_per_change(cli, monkeypatch, tmp_path):
     from app.core import claude_cli_status
 

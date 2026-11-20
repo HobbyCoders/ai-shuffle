@@ -182,9 +182,17 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
     with _lock:
         _load()
         status = claude_cli_status.peek()
-        if verified_status is not None and status is not verified_status:
-            return None  # invalidated or reprobed while the handshake ran
         selected = status.selected_home if status else None
+        if verified_status is not None:
+            # A forced status read can replace the cache without changing the
+            # sign-in. Compare the billing identity and the folder we launched.
+            if status is None or not status.signed_in or selected != verified_status.selected_home:
+                return None
+            if selected is not None:
+                if claude_subscriptions._binding(status) != selected[0]:
+                    return None
+            elif (_account_of(status), status.org_id) != (_account_of(verified_status), verified_status.org_id):
+                return None
         if (selected[0] if selected else None) != claude_subscriptions.shared_target():
             return None
         if not snapshot.get("account") or snapshot["account"] != _account_of(status):

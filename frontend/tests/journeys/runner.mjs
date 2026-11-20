@@ -172,7 +172,9 @@ function parseArgs(argv) {
  *   name       journey name (output folder)
  *   cases      [{ name, setup?(ctx), act(ctx), verify?(ctx), viewports?, throttles?,
  *                 allow?, expectShift?, knownBug?, recorder? }]
- *              ctx = { page, variant, status, mark?, log, recording? }
+ *              ctx = { page, variant, status, mark?, log, recording?, deferCleanup }
+ *              `deferCleanup(fn)` runs after the case even if setup or act fails.
+ *   isolated   no shared devloop; the case must dispose its own worker
  *              `setup` runs unrecorded (navigate, stage the composer);
  *              `act` runs inside withRecording and must end in a settled UI;
  *              `verify` runs after it with `recording` (the recorder's stop()
@@ -240,10 +242,10 @@ export async function runJourney(spec) {
 	}
 	if (!plan.length) throw new Error(`no case matches --only=${args.only}`);
 
-	const status = readDevloopStatus();
+	const status = spec.isolated ? null : readDevloopStatus();
 	// Hold the private lease for this whole process, including setup, slow
 	// browser actions and long voice waits. PID/start time makes crashes safe.
-	if (status.pause?.enabled) {
+	if (status?.pause?.enabled) {
 		const fields = readFileSync(`/proc/${process.pid}/stat`, 'utf8').split(') ').at(-1).split(' ');
 		const lease = join(status.scratch_dir, `journey-${process.pid}.lease`);
 		writeFileSync(lease, `${process.pid} ${fields[19]}`, { mode: 0o600 });
@@ -265,13 +267,16 @@ export async function runJourney(spec) {
 		args: ['--no-sandbox', ...(extra.args || [])]
 	});
 
-	// Open the one-time access link once; every case starts from its cookie.
-	const bootstrap = await browser.newContext();
-	const bootPage = await bootstrap.newPage();
-	await bootPage.goto(status.access_link);
-	await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
-	const cookies = await bootstrap.cookies();
-	await bootstrap.close();
+	let cookies = [];
+	if (status) {
+		// Open the one-time access link once; every case starts from its cookie.
+		const bootstrap = await browser.newContext();
+		const bootPage = await bootstrap.newPage();
+		await bootPage.goto(status.access_link);
+		await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
+		cookies = await bootstrap.cookies();
+		await bootstrap.close();
+	}
 
 	const results = [];
 	try {
@@ -312,8 +317,9 @@ export async function runJourney(spec) {
 				for (const problem of judged.problems) result.anomalies.push({ kind: 'expect_shift', message: problem });
 				sortAnomalies(judged.anomalies);
 			};
+			const cleanups = [];
 			try {
-				const ctx = { page, variant, status, log };
+				const ctx = { page, variant, status, log, deferCleanup: (fn) => cleanups.push(fn) };
 				if (item.testCase.setup) await item.testCase.setup(ctx);
 				phase = 'act';
 				trace.note('> setup done; act (recorded) starts');
@@ -351,10 +357,24 @@ export async function runJourney(spec) {
 				}
 				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
-				const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
-					.catch((error) => `failed: ${error.message}`);
-				if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
-				await context.close();
+				if (status) {
+					const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
+						.catch((error) => `failed: ${error.message}`);
+					if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
+				}
+				try {
+					await context.close();
+				} finally {
+					for (const cleanup of cleanups.reverse()) {
+						try {
+							await cleanup();
+						} catch (error) {
+							result.ok = false;
+							result.phase = 'cleanup';
+							result.error = [`Fixture cleanup failed: ${error.message}`, result.error].filter(Boolean).join('\n');
+						}
+					}
+				}
 			}
 			result.ms = Date.now() - started;
 			const known = item.testCase.knownBug;
