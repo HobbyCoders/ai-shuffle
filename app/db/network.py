@@ -2183,9 +2183,12 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
     """Read one frontier for a bounded batch and its snapshot-gap check."""
     with get_db() as conn:
         heads = local_watermarks(conn)
-        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
-        if snapshot:
+        if _has_retired_settings_tail(conn.cursor(), watermarks, exclude_origin):
             return [], heads, True
+        # A normal gap still advertises reconciliation, but available deltas
+        # can flow while a peer is unable to serve a snapshot during backfill.
+        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin,
+                                     _conn=conn, _heads=heads, _check_retired_tail=False)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
@@ -2209,9 +2212,29 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
         return _query(conn)
 
 
+def _has_retired_settings_tail(cursor, watermarks: dict, exclude_origin: str | None) -> bool:
+    from app.network import policy
+    retired_keys = policy.RETIRED_SHARED_SETTING_KEYS
+    if not retired_keys:
+        return False
+    # Look up the few retired rows by (collection, record_id). Do not filter a
+    # signed stream in place: peers behind those rows need a snapshot instead.
+    placeholders = ", ".join(["%s"] * len(retired_keys))
+    cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS seq FROM sync_ops "
+                   f"WHERE collection='system_settings' AND record_id IN ({placeholders}) "
+                   "GROUP BY origin_device_id, incarnation", retired_keys)
+    for row in cursor.fetchall():
+        origin = row["origin_device_id"]
+        if origin != exclude_origin and int(row["seq"]) > int(
+                (watermarks.get(origin) or {}).get(str(row["incarnation"]), 0)):
+            return True
+    return False
+
+
 def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
                       check_tail_compatibility: bool = False, _conn=None,
-                      _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
+                      _heads: Optional[Dict[str, Dict[str, int]]] = None,
+                      _check_retired_tail: bool = True) -> bool:
     """Detect log gaps; only cached snapshots need whole-tail compatibility.
 
     Normal exchanges validate just the bounded batch they are about to send.
@@ -2228,19 +2251,8 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
         legacy_recipient = None
         protected = ()
         from app.network import policy
-        retired_keys = policy.RETIRED_SHARED_SETTING_KEYS
-        if retired_keys:
-            # Look up the few retired rows by (collection, record_id). Do not
-            # filter a signed stream in place: peers behind it need a snapshot.
-            placeholders = ", ".join(["%s"] * len(retired_keys))
-            cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS seq FROM sync_ops "
-                           f"WHERE collection='system_settings' AND record_id IN ({placeholders}) "
-                           "GROUP BY origin_device_id, incarnation", retired_keys)
-            for row in cursor.fetchall():
-                origin = row["origin_device_id"]
-                if origin != exclude_origin and int(row["seq"]) > int(
-                        (watermarks.get(origin) or {}).get(str(row["incarnation"]), 0)):
-                    return True
+        if _check_retired_tail and _has_retired_settings_tail(cursor, watermarks, exclude_origin):
+            return True
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue

@@ -9,7 +9,7 @@ from app.api import network as network_api
 from app.core import behavioral_learning as learning
 from app.db import database
 from app.db import network as store
-from app.network import engine, policy
+from app.network import engine, peer_snapshot, policy, transcripts
 from tests.core.network.harness import exchange, join
 
 SETTINGS = "system_settings"
@@ -192,3 +192,88 @@ async def test_upgraded_sender_omits_queued_receipt_ops_and_snapshot_versions(wo
     assert exchange(sender, receiver).rejected == 0
     with receiver.active():
         assert database.get_system_setting(SHARED) == "next delta"
+
+
+@pytest.mark.parametrize("access", ["manifest", "page"])
+def test_upgraded_sender_rejects_persisted_pre_upgrade_transfer(workers, monkeypatch, tmp_path, access):
+    sender, receiver = workers("sender"), workers("receiver")
+    competing = "settings_precedence_for_test"
+    with sender.active():
+        engine.create_network("Test network", device_name="Sender")
+    join(sender, receiver)
+    with receiver.active():
+        marks = store.local_watermarks()
+        assert learning._claim("session", "receiver-turn", "receiver prompt")
+        retained = database.get_system_setting(BUDGET)
+    with sender.active(), monkeypatch.context() as legacy:
+        legacy.setattr(policy, "RETIRED_SHARED_SETTING_KEYS", ())
+        database.set_system_setting(competing, "sender's earlier value")
+        assert engine.scan_collection(SETTINGS, record_ids=[competing]) == 1
+        prefix, _, need_copy = store.exchange_batch(marks, exclude_origin=receiver.device_id)
+        assert not need_copy and [op["record_id"] for op in prefix] == [competing]
+        assert learning._claim("session", "sender-turn", "sender prompt")
+        database.set_system_setting(SHARED, "from the fresh copy")
+        old = peer_snapshot.capture(receiver.device_id)
+        saved = sender.data_dir / "peer-transfers" / old["transfer"] / "manifest.json"
+        old_manifest_bytes = saved.read_bytes()
+        index = next(i for i, page in enumerate(old["pages"]) if page["collection"] == SETTINGS)
+        old_page = json.loads(peer_snapshot.page(receiver.device_id, old["transfer"], index))
+
+    with receiver.active():
+        trusted = peer_snapshot.verify_manifest(old, sender.device_id)
+        assert BUDGET in {item["record_id"] for item in engine.open_snapshot_chunk(old_page, ctx=trusted)["items"]}
+        assert engine.apply_batch(prefix).rejected == 0
+        database.set_system_setting(competing, "receiver's newer value")
+        assert engine.scan_collection(SETTINGS, record_ids=[competing]) == 1
+
+    with sender.active():
+        # Up-to-date frontier, unexpired, same membership and format: only the
+        # retired-key policy makes the already signed transfer unsafe to serve.
+        assert not store.requires_snapshot(old["watermarks"], exclude_origin=receiver.device_id)
+        if access == "page":
+            with pytest.raises(ValueError, match="Peer transfer expired"):
+                peer_snapshot.page(receiver.device_id, old["transfer"], index)
+        fresh = peer_snapshot.capture(receiver.device_id)
+        assert fresh["transfer"] != old["transfer"]
+        assert peer_snapshot.capture(receiver.device_id) == fresh
+        assert saved.read_bytes() == old_manifest_bytes
+        assert database.get_system_setting(BUDGET) is not None
+        for i, page in enumerate(fresh["pages"]):
+            raw = peer_snapshot.page(receiver.device_id, fresh["transfer"], i)
+            peer_snapshot.save_page(tmp_path, i, raw, page)
+
+    # An older peer still verifies and installs a fresh sender's copy; the
+    # sender, not the receiver's upgraded policy, keeps the ledger off the wire.
+    with receiver.active(), monkeypatch.context() as legacy:
+        legacy.setattr(policy, "RETIRED_SHARED_SETTING_KEYS", ())
+        peer_snapshot.apply(fresh, tmp_path, sender.device_id)
+        assert database.get_system_setting(BUDGET) == retained
+        assert database.get_system_setting(SHARED) == "from the fresh copy"
+        assert database.get_system_setting(competing) == "receiver's newer value"
+
+
+def test_unrelated_snapshot_gap_still_exchanges_settings_during_backfill(workers):
+    sender, receiver = workers("sender"), workers("receiver")
+    with sender.active():
+        engine.create_network("Test network", device_name="Sender")
+    join(sender, receiver)
+    with receiver.active():
+        marks = store.local_watermarks()
+    with sender.active():
+        # A deferred copy adopted a frontier but didn't retain the source ops.
+        # This unrelated stream needs reconciliation; our own setting can travel.
+        floor = {"deferred-origin": {"1": 1}}
+        engine.adopt_watermarks(floor)
+        with store.get_db() as conn:
+            store.start_backfill(conn.cursor(), publisher=receiver.device_id, floor=floor, session_ids=["deferred"])
+        assert transcripts.pending()
+        with pytest.raises(ValueError, match="still receiving its transcripts"):
+            peer_snapshot.capture(receiver.device_id)
+        database.set_system_setting(SHARED, "during backfill")
+        assert engine.scan_collection(SETTINGS, record_ids=[SHARED]) == 1
+        ops, heads, needs_snapshot = store.exchange_batch(marks, limit=1, exclude_origin=receiver.device_id)
+        assert needs_snapshot and heads["deferred-origin"] == floor["deferred-origin"]
+        assert [op["record_id"] for op in ops] == [SHARED]
+    with receiver.active():
+        assert engine.apply_batch(ops).rejected == 0
+        assert database.get_system_setting(SHARED) == "during backfill"
