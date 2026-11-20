@@ -72,8 +72,12 @@ def _escape(value: str) -> str:
     return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
-def _whole_file_skip(name: str, remaining: float, weights_path: Path) -> str | None:
-    """No Node/--list fallback: an unmeasured crashed file must stay red and bounded."""
+def _whole_file_skip(name: str, remaining: float, weights_path: Path, share: float | None = 1.0) -> str | None:
+    """No Node/--list fallback: an unmeasured crashed file must stay red and bounded.
+
+    A crashed part (``share`` of its file's cases, 0 < share < 1) is judged by
+    that share of the file's measured runtime; a whole file by all of it.
+    """
     try:
         estimate = json.loads(weights_path.read_text(encoding="utf-8"))["seconds"][name]
     except (OSError, ValueError, KeyError, TypeError):
@@ -81,8 +85,12 @@ def _whole_file_skip(name: str, remaining: float, weights_path: Path) -> str | N
     if (isinstance(estimate, bool) or not isinstance(estimate, (int, float))
             or not math.isfinite(estimate) or estimate <= 0):
         return f"No usable whole-file runtime estimate in {weights_path.name}; leaving journey crashed."
+    if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
+        return "No usable part share; leaving journey crashed."
+    what = "whole-file" if share == 1 else "part"
+    estimate *= share
     if estimate > remaining:
-        return (f"Estimated whole-file runtime {estimate:.1f}s exceeds {remaining:.1f}s remaining; "
+        return (f"Estimated {what} runtime {estimate:.1f}s exceeds {remaining:.1f}s remaining; "
                 "leaving journey crashed.")
     return None
 
@@ -100,7 +108,8 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
     receipt = {"rows": rows, "retried": 0, "retry_seconds": 0.0, "skipped": None,
                "first_attempt_seconds": sum(a["seconds"] for a in first)}
     # A crashed part of a split file (scripts/devloop/ci.py PART) retries only its own cases.
-    selections = {a["name"].removesuffix(".journey.mjs"): a["selection"] for a in first if a.get("selection")}
+    selections = {a["name"].removesuffix(".journey.mjs"): (a["selection"], a.get("share"))
+                  for a in first if a.get("selection")}
     failures = [r for r in rows if r["status"] in BAD]
     if not failures:
         return receipt
@@ -119,7 +128,8 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
             receipt["skipped"] = "No retry headroom before teardown, or the dev instance died."
             break
         whole = failed[0]["status"] == "crashed"
-        ids = selections.get(journey) if whole else [r["case"] for r in failed]
+        selection, share = selections.get(journey, (None, 1.0))
+        ids = selection if whole else [r["case"] for r in failed]
         name = f"{journey}.journey.mjs"
         budget = min(timeout, remaining)
         reason = None
@@ -127,8 +137,8 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
             reason = (f"{journey} needs {CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS}s for work, "
                       f"fixture teardown and reporting; {budget:.1f}s available.")
         elif whole:
-            # A part is judged by its whole file's estimate: never a longer retry than before.
-            reason = _whole_file_skip(name, budget, weights_path)
+            # A part by its share of the file's estimate; the hard budget still caps the run.
+            reason = _whole_file_skip(name, budget, weights_path, share)
         if reason:
             failed[0]["retry_skipped"] = reason
             print(f"[ci] retry skipped {name}: {reason}", flush=True)

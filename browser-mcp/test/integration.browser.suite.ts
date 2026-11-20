@@ -10,7 +10,7 @@
  */
 
 import { expect, onTestFailed, vi } from "vitest";
-import { describe, it, beforeAll, afterAll, beforeEach, afterEach } from "./integration-part.js";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, rootDescribeSkipIf } from "./integration-part.js";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -308,7 +308,7 @@ const browserPath = findBrowser();
 const fixtureUrl = new URL("./fixtures/basic.html", import.meta.url).href;
 const uploadFixtureUrl = new URL("./fixtures/upload.html", import.meta.url).href;
 
-describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
+rootDescribeSkipIf(!browserPath)("integration: core tools over CDP", () => {
   let proc: ChildProcess;
   let userDataDir: string;
   let manager: BrowserManager;

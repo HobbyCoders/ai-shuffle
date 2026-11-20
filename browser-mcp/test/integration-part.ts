@@ -25,6 +25,17 @@ let selected: number | undefined;
 let next = 0;
 let dryRun = false;
 let dryKept = 0;
+// How many suite blocks are being collected (the root gate or a dealt describe).
+let depth = 0;
+
+function within(factory: () => void): void {
+  depth++;
+  try {
+    factory();
+  } finally {
+    depth--;
+  }
+}
 
 /** Call before importing the suite; part is 1-based. */
 export function selectPart(part: number): void {
@@ -54,12 +65,12 @@ partIt.each = <T>(table: readonly T[]) =>
   };
 
 function partDescribe(name: string, factory: () => void): void {
-  if (dryRun) return factory(); // a block inside a block being counted
+  if (dryRun) return within(factory); // a block inside a block being counted
   const start = next;
   dryRun = true;
   dryKept = 0;
   try {
-    factory();
+    within(factory);
   } finally {
     dryRun = false;
   }
@@ -70,7 +81,7 @@ function partDescribe(name: string, factory: () => void): void {
     const resume = next;
     next = start;
     try {
-      factory();
+      within(factory);
     } finally {
       if (next !== end) throw new Error(`${name}: registered ${next - start} units, counted ${end - start}`);
       next = resume;
@@ -78,8 +89,18 @@ function partDescribe(name: string, factory: () => void): void {
   });
 }
 
-/** The suite's outer block is shared by every part, not dealt. */
-partDescribe.skipIf = (condition: unknown) => vitest.describe.skipIf(condition);
+/**
+ * The suite's outer block, gated on a discoverable browser: shared by every
+ * part, not dealt. Root only: a native block nested in a dealt one would
+ * register during the dry pass and again on replay, so that throws.
+ * The wrapped `describe` has no skipIf for the same reason.
+ */
+export function rootDescribeSkipIf(condition: unknown) {
+  return (name: string, factory: () => void): void => {
+    if (depth > 0 || dryRun) throw new Error(`${name}: rootDescribeSkipIf is only for the suite's outer block`);
+    vitest.describe.skipIf(condition)(name, () => within(factory));
+  };
+}
 
 function hook<F extends (...args: any[]) => unknown>(register: F): F {
   return ((...args: unknown[]) => (dryRun ? undefined : register(...args))) as F;

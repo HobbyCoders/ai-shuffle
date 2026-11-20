@@ -28,7 +28,7 @@ def driver(tmp_path, monkeypatch):
     # CI must clear this inherited developer filter, not run a partial shard.
     monkeypatch.setenv("JOURNEY_ONLY", "a developer's substring")
     files = ["flow.journey.mjs", "other.journey.mjs"]
-    monkeypatch.setattr(ci, "plan", lambda _, only=None: [files if only is None else only, [], [], []])
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [files if only is None else only, [], [], []])
     weights = tmp_path / "weights.json"
     weights.write_text(json.dumps({"seconds": {name: 10 for name in files}}))
     monkeypatch.setattr(ci, "WEIGHTS", weights)
@@ -53,7 +53,7 @@ def driver(tmp_path, monkeypatch):
 
     real_command = ci.run_command
 
-    def run(first, second=None, *, opt=True, only=None, real_retry=False, command_timeout=None):
+    def run(first, second=None, *, opt=True, only=None, real_retry=False, command_timeout=None, parts=None):
         def command(argv, env, log, timeout):
             assert not instances[0].stopped  # same live instance on both attempts
             attempt = 2 if "attempt-2" in str(log) else 1
@@ -88,6 +88,8 @@ def driver(tmp_path, monkeypatch):
             argv.extend(["--only", only])
         if command_timeout is not None:
             argv.extend(["--journey-timeout", str(command_timeout)])
+        if parts is not None:
+            argv.extend(["--parts", json.dumps(parts)])
         code = ci.main(argv)
         return code
 
@@ -169,22 +171,37 @@ def test_crashed_journey_is_retried_as_a_whole_file(driver, second, expected):
         assert "attempt 2 process error" in text or "retry case error" in text
 
 
-PART_CASES = ["a@desktop-fast", "b@desktop-fast", "c@phone-slow"]
+# The matrix job's assignment: flow.journey.mjs split in two. This shard runs
+# part 1. Its ids came from the plan job, in whatever order: the shard never
+# re-lists or re-slices them.
+PARTS = {"flow.journey.mjs#1/2": ["c@phone-slow", "a@desktop-fast"], "flow.journey.mjs#2/2": ["b@desktop-fast"]}
+MINE = PARTS["flow.journey.mjs#1/2"]
 
 
 @pytest.fixture
-def part_driver(driver, monkeypatch):
-    # A pull request's plan split flow.journey.mjs; this shard runs part 1 of 2.
-    monkeypatch.setattr(ci, "plan", lambda _, only=None: [["flow.journey.mjs#1/2"], ["flow.journey.mjs#2/2"]])
-    monkeypatch.setattr(ci, "case_ids", lambda path: list(PART_CASES))
-    return driver
+def part_driver(driver, monkeypatch, tmp_path):
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [["flow.journey.mjs#1/2"],
+                                                                      ["flow.journey.mjs#2/2"]])
+    monkeypatch.setattr(ci, "case_ids", lambda path: pytest.fail("a shard must not re-list a part's cases"))
+    # Over the 180s retry budget whole, but this part's 2/3 share (160s) fits.
+    (tmp_path / "weights.json").write_text(json.dumps({"seconds": {"flow.journey.mjs": 240}}))
+    run, *rest = driver
+    return (lambda *a, **k: run(*a, parts=PARTS, **k)), *rest
 
 
-def test_a_part_runs_exactly_its_own_cases(part_driver):
+def test_a_part_runs_exactly_its_assigned_cases(part_driver):
     run, calls, *_ = part_driver
     mine = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
     assert run({"flow.journey.mjs": mine}, {}) == 0
-    assert [(a, n, ids) for a, n, ids, *_ in calls] == [(1, "flow.journey.mjs", ["a@desktop-fast", "c@phone-slow"])]
+    assert [(a, n, ids) for a, n, ids, *_ in calls] == [(1, "flow.journey.mjs", MINE)]
+
+
+def test_a_planned_part_without_assigned_cases_fails_closed(driver, monkeypatch):
+    run, calls, *_ = driver
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [["flow.journey.mjs#1/2"]])
+    with pytest.raises(ValueError, match="no assigned case ids"):
+        run({}, {})
+    assert calls == []
 
 
 @pytest.mark.parametrize("first", [None, [case("a@desktop-fast", "pass"), case("b@desktop-fast", "pass")]],
@@ -194,9 +211,16 @@ def test_a_crashed_or_foreign_part_retries_only_its_own_cases(part_driver, first
     run, calls, _, summary, *_ = part_driver
     own = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
     assert run({"flow.journey.mjs": first}, {"flow.journey.mjs": own if second == "own" else None}) == expected
-    mine = ["a@desktop-fast", "c@phone-slow"]
-    assert [(a, ids) for a, _, ids, *_ in calls] == [(1, mine), (2, mine)]
+    assert [(a, ids) for a, _, ids, *_ in calls] == [(1, MINE), (2, MINE)]
     assert "(whole journey)" in summary.read_text()
+
+
+def test_an_unsplit_crashed_file_keeps_the_whole_file_estimate(driver, tmp_path):
+    run, calls, _, summary, *_ = driver
+    (tmp_path / "weights.json").write_text(json.dumps({"seconds": {"flow.journey.mjs": 240}}))
+    assert run({"flow.journey.mjs": None}, {}) == 1
+    assert all(attempt == 1 for attempt, *_ in calls)
+    assert "Estimated whole-file runtime 240.0s exceeds" in summary.read_text()
 
 
 def test_known_bug_verdict_is_not_retried(driver, capsys):

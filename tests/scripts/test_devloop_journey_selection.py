@@ -206,6 +206,7 @@ def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(
     from scripts.ci import proven
 
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")  # records are read on a push to main
     only = [NAMES[0], NAMES[3]]
     key = ci.selection_key(only)
     monkeypatch.setattr(ci, "selection_for_event", lambda event: (only, "test"))
@@ -295,22 +296,66 @@ def test_a_selection_is_split_exactly_and_the_shards_repeat_it():
     assert ci.plan(ci.HOSTED_SHARDS, only=[]) == [[] for _ in range(ci.HOSTED_SHARDS)]
 
 
+@pytest.mark.parametrize("event", ["push", "pull_request"])
 @pytest.mark.parametrize(("only", "expected_only", "count"), [
     (None, "*", ci.HOSTED_SHARDS), ([], "", 0), ([NAMES[0], NAMES[3]], None, 2),
 ])
-def test_matrix_prints_exactly_the_three_step_outputs(only, expected_only, count, monkeypatch, capsys):
+def test_matrix_prints_exactly_the_four_step_outputs(only, expected_only, count, event, monkeypatch, capsys):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
     monkeypatch.setattr(ci, "selection_for_event", lambda event: (only, "test"))
+    monkeypatch.setattr(ci, "already_proven", lambda key: None)
     assert ci.main(["matrix"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert [line.split("=", 1)[0] for line in lines] == ["only", "shards", "key"]
+    assert [line.split("=", 1)[0] for line in lines] == ["only", "shards", "key", "parts"]
     assert lines[2] == f"key={ci.selection_key(only)}"
     shown, shards = lines[0].split("=", 1)[1], json.loads(lines[1].split("=", 1)[1])
+    parts = ci.parse_parts(lines[3].split("=", 1)[1])
     if expected_only is None:
         expected_only = ",".join(name.removesuffix(ci.SUFFIX) for name in only)
     assert shown == expected_only
     assert ci.parse_only(shown) == only
-    assert len(shards) == count and " " not in lines[1]
-    # The shards a job starts for are exactly those the same selection gives a file.
-    buckets = ci.plan(ci.HOSTED_SHARDS, only=only)
+    assert " " not in lines[1] and " " not in lines[3]
+    # The shards a job starts for are exactly those the same selection and parts give a file.
+    buckets = ci.plan(ci.HOSTED_SHARDS) if only is None else ci.plan(ci.HOSTED_SHARDS, only=only, parts=parts)
     assert shards == [index for index, bucket in enumerate(buckets, 1) if bucket]
+    if event == "push" or not only:
+        # Main never splits, and an empty selection (S1) starts nothing.
+        assert parts == {} and len(shards) == count
+
+
+def _heaviest():
+    seconds = json.loads(ci.WEIGHTS.read_text())["seconds"]
+    name = max((n for n in seconds if (ci.JOURNEYS / n).is_file()), key=seconds.get)
+    assert seconds[name] > ci.PART_SECONDS
+    return name
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+def test_only_a_pull_request_splits_a_heavy_selected_file(event, monkeypatch, capsys):
+    """A main push that selects one heavy file runs it whole (refresh-weights measures those)."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    heavy = _heaviest()
+    monkeypatch.setattr(ci, "selection_for_event", lambda event: ([heavy], "test"))
+    monkeypatch.setattr(ci, "already_proven", lambda key: None)
+    assert ci.main(["matrix"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    parts = ci.parse_parts(lines[3].split("=", 1)[1])
+    shards = json.loads(lines[1].split("=", 1)[1])
+    if event == "push":
+        assert parts == {} and len(shards) == 1
+        return
+    assert len(parts) >= 2 and len(shards) == len(parts)
+    # Every case of the file exactly once, as the matrix job listed it.
+    assert sorted(id for ids in parts.values() for id in ids) == sorted(ci.case_ids(ci.JOURNEYS / heavy))
+    buckets = ci.plan(ci.HOSTED_SHARDS, only=[heavy], parts=parts)
+    assert sorted(entry for bucket in buckets for entry in bucket) == sorted(parts)
+    assert all(len(bucket) <= 1 for bucket in buckets)
+
+
+def test_an_empty_selection_plans_nothing_from_the_command_line(capsys):
+    assert ci.main(["plan", "--shards", "18", "--only", ""]) == 0
+    assert json.loads(capsys.readouterr().out) == [[] for _ in range(18)]
+    assert ci.main(["plan", "--shards", "18", "--only", "", "--parts", "{}"]) == 0
+    assert json.loads(capsys.readouterr().out) == [[] for _ in range(18)]
