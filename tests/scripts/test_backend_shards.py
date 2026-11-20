@@ -192,14 +192,27 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     # backend-map only saves main's test map for pull requests; no verdict waits on it.
     assert set(jobs) == required | {"backend", "backend-map"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
-    assert all("continue-on-error" not in json.dumps(job) for name, job in jobs.items() if name != "backend-map")
+    # Only what saves the map may fail: the backend-map job and the shards'
+    # upload of their records. Test receipts stay mandatory.
+    assert jobs["backend-map"]["continue-on-error"] == "true"
+    hits = [step for step in jobs["backend-shard"]["steps"] if "map-hits" in step.get("name", "")]
+    assert len(hits) == 1 and hits[0]["continue-on-error"] == "true" and hits[0]["if"] == "env.RECORD_MAP == 'true'"
+    assert all("continue-on-error" not in json.dumps(job) for name, job in jobs.items()
+               if name not in ("backend-map", "backend-shard"))
+    assert all("continue-on-error" not in step for step in jobs["backend-shard"]["steps"] if step is not hits[0])
     # The shards are the ones backend-select chose: all of them, except on a
     # pull request (scripts/ci/backend_gate.py holds every other run to all eight).
     assert jobs["backend-shard"]["strategy"] == {
         "fail-fast": "false", "matrix": {"shard": "${{ fromJSON(needs.backend-select.outputs.shards) }}"}}
     assert jobs["backend-shard"]["needs"] == "backend-select"
     assert jobs["backend-shard"]["if"] == "needs.backend-select.outputs.shards != '[]'"
-    assert jobs["backend-shard"]["env"]["SHARD_COUNT"] == "${{ strategy.job-total }}"
+    # The chooser's count: a rerun of only the failed shards has fewer matrix jobs.
+    assert jobs["backend-shard"]["env"]["SHARD_COUNT"] == "${{ needs.backend-select.outputs.count }}"
+    assert "job-total" not in json.dumps(jobs)
+    assert select_outputs(jobs) >= {"shards", "count", "tests", "selection"}
+    # Only a run that publishes the map records it; a pull request never does.
+    assert jobs["backend-shard"]["env"]["RECORD_MAP"] == (
+        "${{ github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' }}")
     for name in ("backend-security", "backend-postgres"):
         assert jobs[name]["if"] == "always()"
         assert "needs" not in jobs[name]
@@ -232,8 +245,8 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert '-n 2' in text and 'scripts.ci.backend_shards' in text
     run = next(step["run"] for step in jobs["backend-shard"]["steps"] if "backend_shard_run.py" in step.get("run", ""))
     assert '--backend-shard-count "$SHARD_COUNT" --backend-selection "$SELECTION"' in run
-    # Only a full run records the test map.
-    assert 'if [ "$SELECTION" = all ]; then' in run and "record=(-p tests._test_map)" in run
+    assert 'if [ "$SELECTION" = all ]; then' in run
+    assert 'if [ "$RECORD_MAP" = true ]; then\n  record=(-p tests._test_map)' in run
     # The shard's pytest command reruns its failed tests once, through the
     # runner that records the rerun's pass on the receipt (#1748).
     command = next(step["run"] for step in jobs["backend-shard"]["steps"] if step.get("name") == "Run fast test subset")
@@ -244,6 +257,39 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
     for job in ("backend-contracts", "backend-security", "backend-postgres"):
         assert "backend_shard_run.py" not in json.dumps(jobs[job])
+
+
+def select_outputs(jobs):
+    return set(jobs["backend-select"]["outputs"])
+
+
+def actions_value(expression, event):
+    """Evaluate ``${{ github.event_name == 'pull_request' && A || B }}`` the way GitHub does.
+
+    A literal is falsy when it is the number 0, '' or false: `&&` returns its
+    left side when that is falsy, `||` its right side when the left is falsy.
+    """
+    import re
+    match = re.fullmatch(r"\$\{\{ github\.event_name == 'pull_request' && (\S+) \|\| (\S+) \}\}", expression)
+    assert match, expression
+
+    def literal(text):
+        return text[1:-1] if text.startswith("'") else float(text)
+
+    left, right = literal(match[1]), literal(match[2])
+    chosen = left if event == "pull_request" else False
+    return chosen if chosen not in (0, "", False) else right
+
+
+def test_a_pull_requests_select_checkout_has_the_history_to_find_the_merge_parents():
+    # A number 0 is falsy in an expression: `&& 0 || 1` always gives 1, a
+    # shallow merge commit without parents, and every pull request running all.
+    checkout = next(step for step in workflow()["jobs"]["backend-select"]["steps"]
+                    if step.get("uses", "").startswith("actions/checkout@"))
+    depth = checkout["with"]["fetch-depth"]
+    assert str(actions_value(depth, "pull_request")) == "0"
+    assert str(actions_value(depth, "push")) == "1"
+    assert actions_value("${{ github.event_name == 'pull_request' && 0 || 1 }}", "pull_request") == 1
 
 
 def test_policy_suite_runs_once_in_the_required_security_job():

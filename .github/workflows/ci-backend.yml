@@ -39,6 +39,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       shards: ${{ steps.choose.outputs.shards }}
+      count: ${{ steps.choose.outputs.count }}
       tests: ${{ steps.choose.outputs.tests }}
       selection: ${{ steps.choose.outputs.selection }}
     steps:
@@ -46,8 +47,9 @@ jobs:
         with:
           persist-credentials: false
           # A pull request diffs from the map's commit, which must be on main's
-          # history; every other run chooses everything without git.
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          # history; every other run chooses everything without git. Strings:
+          # a number 0 is false in an expression, so `&& 0 || 1` is always 1.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -86,7 +88,11 @@ jobs:
       PYTHONPATH: .:fluid
       SELECTION: ${{ needs.backend-select.outputs.selection }}
       SELECTED_TESTS: ${{ needs.backend-select.outputs.tests }}
-      SHARD_COUNT: ${{ strategy.job-total }}
+      # The chooser's count, not the matrix size: a rerun of failed jobs only
+      # runs fewer matrix jobs but must partition the same way.
+      SHARD_COUNT: ${{ needs.backend-select.outputs.count }}
+      # Only a run that publishes the map records it (backend-map below).
+      RECORD_MAP: ${{ github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,17 +151,19 @@ jobs:
         # listed as flaky in the job summary; one that fails twice, a
         # collection error or more than 20 failures fails it. The receipt
         # counts only with the rerun's pass recorded on it (backend_gate.py).
-        # A full run also records which functions each test file runs
-        # (tests/_test_map.py) for the backend-map job; a pull request's
-        # selected run records nothing.
+        # A full run outside pull requests also records which functions each
+        # test file runs (tests/_test_map.py) for the backend-map job; a pull
+        # request records nothing, even when it runs every test.
         run: |
           if [ "$SELECTION" = all ]; then
             targets=(tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/test_*.py)
-            record=(-p tests._test_map)
-            export BACKEND_TEST_MAP_DIR="$RUNNER_TEMP/map-hits"
           else
             mapfile -t targets < <(python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))')
-            record=()
+          fi
+          record=()
+          if [ "$RECORD_MAP" = true ]; then
+            record=(-p tests._test_map)
+            export BACKEND_TEST_MAP_DIR="$RUNNER_TEMP/map-hits"
           fi
           python scripts/ci/backend_shard_run.py -- \
             python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml "${targets[@]}" \
@@ -178,8 +186,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Optional: a lost record only leaves pull requests the previous map.
       - name: Upload backend-map-hits-${{ matrix.shard }}
-        if: needs.backend-select.outputs.selection == 'all'
+        if: env.RECORD_MAP == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: backend-map-hits-${{ matrix.shard }}-a${{ github.run_attempt }}
@@ -189,11 +199,13 @@ jobs:
 
   # Merge the full run's records into the map pull requests choose tests from.
   # Only after every shard passed: a map missing a shard would miss its tests.
-  # Losing a map only makes the next pull requests run every test.
+  # Losing a map only makes the next pull requests run every test, so no
+  # failure here fails the run; no verdict needs this job.
   backend-map:
     name: backend-map
     needs: [backend-select, backend-shard]
     if: github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' && needs.backend-shard.result == 'success'
+    continue-on-error: true
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:

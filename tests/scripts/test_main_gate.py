@@ -459,7 +459,7 @@ def test_an_area_with_a_job_not_listed_yet_is_not_recorded():
 
 def test_the_emulator_its_own_workflow_lets_fail_does_not_lose_the_record():
     advisory = "android / Android emulator verification (API 36)"
-    assert gate.TOLERATED == {advisory}
+    assert gate.TOLERATED == {advisory, MAP_JOB}
     matrix = workflow("android.yml")["jobs"]["android-ui"]["strategy"]["matrix"]["include"]
     assert [item["api"] for item in matrix if item["advisory"] == "true"] == ["36"]
     assert workflow("android.yml")["jobs"]["android-ui"]["continue-on-error"] == "${{ matrix.advisory }}"
@@ -470,6 +470,22 @@ def test_the_emulator_its_own_workflow_lets_fail_does_not_lose_the_record():
     # Still running, it holds both back.
     named(jobs, advisory)["status"], named(jobs, advisory)["conclusion"] = "in_progress", None
     assert "android" not in gate.passes(PLAN, jobs, planned())
+    with pytest.raises(ValueError):
+        gate.verdict(PLAN, jobs, planned())
+
+
+MAP_JOB = "backend / backend-map"
+
+
+def test_a_failed_backend_test_map_save_fails_nothing_and_loses_no_record():
+    # Losing the map only makes the next pull requests run every test.
+    jobs = listing() + [SELF]
+    assert workflow("ci-backend.yml")["jobs"]["backend-map"]["continue-on-error"] == "true"
+    named(jobs, MAP_JOB)["conclusion"] = "failure"
+    assert gate.passes(PLAN, jobs, planned()) == RECORDS
+    gate.verdict(PLAN, jobs, planned())
+    # Still running, the gate waits for it.
+    named(jobs, MAP_JOB)["status"], named(jobs, MAP_JOB)["conclusion"] = "in_progress", None
     with pytest.raises(ValueError):
         gate.verdict(PLAN, jobs, planned())
 

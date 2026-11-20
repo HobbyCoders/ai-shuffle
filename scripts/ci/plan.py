@@ -65,6 +65,17 @@ TEST_HARNESS = ("conftest.py", "pytest.ini", "tests/__init__.py", "tests/conftes
 PROSE = ("docs/", "README.md", "SUPPORT.md", "SECURITY.md", "TRADEMARKS.md", "LOCAL_SETUP.md")
 WEB_UI_SOURCE = ("frontend/src/", "frontend/tests/")
 UI_SOURCE = (*WEB_UI_SOURCE, "mobile/src/")
+# The setup wizard tests/integration/container_ui_smoke.mjs walks offline (owner
+# password, license, the provider step with nothing connected) and the
+# modules it calls directly. Shared UI further out is left to main's run.
+SETUP_UI = (
+    "frontend/src/routes/+layout.svelte", "frontend/src/routes/+layout.ts", "frontend/src/routes/setup/",
+    "frontend/src/lib/components/setup/", "frontend/src/lib/components/OwnerAccessGate.svelte",
+    "frontend/src/lib/components/settings/providers/", "frontend/src/lib/components/settings/ClaudeCliPanel.svelte",
+    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/model-providers.ts",
+    "frontend/src/lib/api/agent-credentials.ts", "frontend/src/lib/stores/auth.svelte.ts",
+    "frontend/src/lib/stores/providers.svelte.ts", "frontend/src/lib/stores/owner-access.svelte.ts",
+)
 # The desktop tests start the real backend, build the app from the checkout
 # and read package files all over it: everything but prose, UI source and the
 # phone apps. Of Android they read only its version resolver (android/ci/).
@@ -77,7 +88,9 @@ DESKTOP = {"include": ("", "android/ci/"), "exclude": (*PROSE, *UI_SOURCE, "ios/
 AREAS = {
     # Python tests read sources all over the repository (docs, workflows, the
     # UI, the Android and desktop shells), so every change is a backend change.
-    "backend": {"jobs": ("backend",), "include": ("",)},
+    # Saving the test map pull requests choose from may fail: they then run
+    # every test (ci-backend.yml `continue-on-error`).
+    "backend": {"jobs": ("backend",), "include": ("",), "advisory": ("backend / backend-map",)},
     "javascript-checks": {
         "jobs": ("javascript",),
         "except": ("javascript / Select UI journeys", "javascript / UI journeys",
@@ -115,9 +128,11 @@ AREAS = {
     "container": {
         "jobs": ("container",),
         # Of the excluded folders its checks read the image's update key and
-        # notices, the buyer's install files and the UI smoke script.
+        # notices, the buyer's install files and the UI smoke script, and the
+        # smoke script drives the setup wizard: its screens and what they call.
         "include": ("", ".github/workflows/container-postgres.yml", "desktop/build/application-update-key.pem",
-                    "THIRD_PARTY_NOTICES.md", "docs/install/compose/", "tests/integration/container_ui_smoke.mjs"),
+                    "THIRD_PARTY_NOTICES.md", "docs/install/compose/", "tests/integration/container_ui_smoke.mjs",
+                    *SETUP_UI),
         "exclude": (*PROSE, *UI_SOURCE, ".github/", "tests/", "android/", "ios/", "desktop/", "fluid/tests/"),
     },
     "identity": {

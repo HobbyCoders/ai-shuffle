@@ -140,7 +140,7 @@ it skips nothing this way.
 | `fluid` | `fluid/`, `scripts/`, and the app's scratch-folder module its test setup loads |
 | `windows`, `desktop`, `desktop-source` | anything but prose, the UI's own source (`frontend/src/`, `frontend/tests/`, `mobile/src/`), `ios/` and `android/` (except `android/ci/`) |
 | `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, `docker/`, `scripts/`, the Python pins, its one test and the helpers every test loads |
-| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`) and its UI smoke script |
+| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`), its UI smoke script and the setup wizard that script walks (`SETUP_UI` in `scripts/ci/plan.py`) |
 | `identity` | `app/`, `fluid/`, `tests/`, `docker/`, `scripts/`, the Python pins |
 | `android`, `android-minified` | `android/`, `mobile/`, and `frontend/` except the web UI's own source (`frontend/src/`, `frontend/tests/`) |
 
@@ -191,19 +191,25 @@ PostgreSQL safety always run in full.
   also record which repository functions each test file runs
   (`tests/_test_map.py`), and once all eight passed the `backend-map` job merges
   the records, with each file's measured time, into a test map and saves it in
-  the Actions cache. A pull request reads main's newest map and never writes
-  one; losing a map only makes pull requests run every test.
+  the Actions cache. A pull request reads main's newest map and never records
+  or writes one, even when it runs every test. Losing a map only makes pull
+  requests run every test, so nothing about saving it can fail a run:
+  `backend-map` and the shards' upload of their records may fail
+  (`continue-on-error`); the test receipts may not.
 - A pull request diffs from the commit the map was recorded on to its own merge
   commit, so what main changed since the map is chosen too, and picks the test
   files that ran a changed function (the rules are in the script's docstring).
+  A file that is not Python chooses the tests that name it or list a folder of
+  it (or the whole checkout), and the tests of the code that reads it.
   It runs those files in as many shards as their recorded time needs (about
   five test-minutes a shard, at most eight). Tests the shards never run (the
   policy suite's `tests/scripts/` and the docs tests) are left out of the
   choice; their jobs run anyway.
 - Any doubt runs every test: no map, a map whose commit is not on main, a
-  change to the dependencies, the pytest setup or how the shards run and are
-  judged, a change the map cannot place, more than 60% of the test files
-  affected, or any error.
+  change to the dependencies, the pytest setup (any `conftest.py`, the root one
+  too) or how the shards run and are judged, a file that no code or test names,
+  nor any folder of it, a change the map cannot place, more than 60% of the
+  test files affected, or any error.
 - When no shard test can reach the change, no shard runs (`none`).
 - `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each
   naming the same selection and shard count; only a pull request may choose

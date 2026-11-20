@@ -390,7 +390,28 @@ def test_the_advisory_job_is_the_one_its_workflow_lets_fail():
     names = [android["name"].replace("${{ matrix.api }}", leg["api"])
              for leg in android["strategy"]["matrix"]["include"] if leg["advisory"] == "true"]
     assert plan.AREAS["android"]["advisory"] == tuple("android / " + name for name in names)
-    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["android"]
+    # The backend test map: a lost map only makes pull requests run every test.
+    backend = workflow("ci-backend.yml")["jobs"]
+    tolerant = [key for key, job in backend.items() if str(job.get("continue-on-error")).lower() == "true"]
+    assert tolerant == ["backend-map"]
+    assert plan.AREAS["backend"]["advisory"] == ("backend / " + backend["backend-map"]["name"],)
+    # No verdict waits on it.
+    assert not any("backend-map" in (job.get("needs") or ()) for job in backend.values())
+    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["backend", "android"]
+
+
+def test_the_container_area_reads_the_setup_wizard_its_smoke_script_walks():
+    smoke = (ROOT / "tests/integration/container_ui_smoke.mjs").read_text(encoding="utf-8")
+    assert "setup-provider-missing" in smoke and "setup-license" in smoke
+    for path in ("frontend/src/routes/setup/+page.svelte", "frontend/src/lib/components/setup/ProviderStep.svelte",
+                 "frontend/src/lib/components/setup/LicenseStep.svelte",
+                 "frontend/src/lib/components/OwnerAccessGate.svelte"):
+        assert (ROOT / path).is_file(), path
+        assert plan.reads("container", path), path
+    for prefix in plan.SETUP_UI:
+        assert (ROOT / prefix).exists(), prefix
+    # The rest of the UI stays the JavaScript checks' alone.
+    assert not plan.reads("container", "frontend/src/lib/components/chat/ChatInput.svelte")
 
 
 # --- Did the area pass in a run ----------------------------------------------------

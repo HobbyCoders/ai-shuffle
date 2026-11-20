@@ -36,6 +36,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 
@@ -72,6 +73,9 @@ MIN_MAPPED_TESTS = 100
 # Names too common to say which file a test means.
 GENERIC_NAMES = {"__init__.py", "README.md", "package.json", "package-lock.json", "index.ts",
                  "index.js", "main.py", "config.py", "utils.py", "base.py", "models.py"}
+# Code that lists files rather than naming them, and code that lists the whole checkout.
+WALKS = re.compile(r"\.(?:rglob|glob|iterdir|walk)\(|os\.(?:walk|listdir|scandir)\(|ls-files|ls-tree")
+REPO_LISTING = re.compile(r"ls-files|ls-tree|ROOT\.rglob\(|ROOT\.walk\(|os\.walk\(\s*ROOT\b")
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 STATEMENT_LISTS = ("body", "orelse", "finalbody", "handlers", "cases")
 MAX_NAME_DEPTH = 3
@@ -97,6 +101,11 @@ def module_name(path: str) -> str | None:
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts) or None
+
+
+def names_folder(text: str, folders: set[str]) -> bool:
+    """Whether ``text`` names one of ``folders`` as a quoted path or the start of one."""
+    return any(f"{quote}{folder}{end}" in text for folder in folders for quote in "\"'" for end in (quote, "/"))
 
 
 def fast_subset(path: str) -> bool:
@@ -534,7 +543,13 @@ class Selector:
         needles = {path} | ({p.name} if p.name not in GENERIC_NAMES and len(p.name) >= 6 else set())
         tests = {t for t in self.files if fast_subset(t) and any(n in self.files[t] for n in needles)}
         sources = {f for f in self.files if not fast_subset(f) and any(n in self.files[f] for n in needles)}
-        self.selected |= tests
+        # Tests that list a folder of it, or the whole checkout, read it unnamed.
+        folders = {str(parent) for parent in p.parents if str(parent) != "."}
+        walkers = {t for t in self.files if fast_subset(t) and WALKS.search(self.files[t])
+                   and (REPO_LISTING.search(self.files[t]) or names_folder(self.files[t], folders))}
+        if not tests and not sources and not walkers:
+            raise FullSuite(f"{path}: no code or test names it or a folder of it")
+        self.selected |= tests | walkers
         readers = 0
         for source in sorted(sources):
             found = mention_scopes(self.files[source], needles)
@@ -578,6 +593,11 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
         for path in changed:
             if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
                 raise FullSuite(f"{path} changes the test setup or dependencies")
+            # Any conftest, the root one too: pytest loads it for every test beneath it.
+            if PurePosixPath(path).name == "conftest.py":
+                raise FullSuite(f"{path} is a conftest")
+            if "�" in path:
+                raise FullSuite(f"{path!r} is not a UTF-8 file name")
         selector = Selector(test_map, files, base_source)
         for path in changed:
             p = PurePosixPath(path)
@@ -614,7 +634,8 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | lis
     """
     try:
         base = git("rev-parse", base_rev).strip()
-        changed = [line for line in git("diff", "--name-only", "--no-renames", f"{base}...{head}").splitlines() if line]
+        # NUL-separated: a quoted name (non-ASCII, a tab) would match no file.
+        changed = [name for name in git("diff", "--name-only", "--no-renames", "-z", f"{base}...{head}").split("\0") if name]
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None
@@ -700,6 +721,8 @@ def write_ci_select(map_path: Path, environ=os.environ, out=sys.stdout) -> dict:
     found, reasons = ci_select(map_path, environ)
     print(f"selection={found['selection']}", file=out)
     print(f"shards={json.dumps(found['shards'])}", file=out)
+    # The partition size; a rerun of only the failed shards must not change it.
+    print(f"count={len(found['shards'])}", file=out)
     print(f"tests={json.dumps(found['tests'])}", file=out)
     lines = ["### Backend tests this run", ""]
     if found["selection"] == "all":

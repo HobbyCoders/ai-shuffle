@@ -25,7 +25,10 @@ BASE = {
     "app/prompts/system.md": "hello\n",
     "app/prompt_loader.py": "def load():\n    return open('system.md').read()\n",
     "tests/conftest.py": "def helper():\n    return 1\n",
+    # Reads every file of notes/ without naming one.
+    "tests/core/test_notes_walk.py": "def test_notes():\n    assert list((ROOT / \"notes\").rglob(\"*.md\"))\n",
 }
+NOTES_WALKER = "tests/core/test_notes_walk.py"
 
 
 def head_files(**changes):
@@ -130,6 +133,33 @@ def test_a_file_read_at_import_runs_every_test_of_the_reader(addition):
 
 def test_a_reader_that_does_not_parse_is_read_file_wide():
     assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + f"\nx = '{GUIDE}'\ndef broken(:\n"})[0] == "all"
+
+
+@pytest.mark.parametrize("changed", ["conftest.py", "fluid/conftest.py", "tests/core/network/conftest.py"])
+def test_any_conftest_runs_everything(changed):
+    # The root conftest is outside the source folders; it reaches every test all the same.
+    result, reasons = select([changed], **{changed: "import os\n"})
+    assert result == "all" and "conftest" in reasons[0]
+
+
+def test_a_file_nothing_names_runs_everything():
+    # Not named by any code or test, nor is any folder of it: nothing says it is safe.
+    result, reasons = select(["ops/cron.d/backup"])
+    assert result == "all" and "no code or test names it" in reasons[0]
+
+
+def test_a_file_a_test_lists_by_folder_selects_that_test():
+    assert select(["notes/2026/today.md"])[0] == [NOTES_WALKER]
+
+
+def test_a_test_listing_the_whole_checkout_reads_every_file():
+    lister = "tests/core/test_tracked.py"
+    files = {lister: "import subprocess\n\ndef test_x():\n    subprocess.run(['git', 'ls-files'])\n"}
+    assert select(["notes/a.md"], **files)[0] == sorted([lister, NOTES_WALKER])
+
+
+def test_a_name_that_is_not_utf8_runs_everything():
+    assert select(["tests/core/test_\ufffd.py"])[0] == "all"
 
 
 @pytest.mark.parametrize("changed, files, reason", [
@@ -342,11 +372,12 @@ CHANGED_F = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
 def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
-    commit("main", "docs/notes.md", "main moved on\n")
+    commit("main", "notes/main.md", "main moved on\n")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
-    assert found["tests"] == sorted(A_TESTS) and found["shards"] == [1]
-    assert found["selection"] == tm.shard_plan(sorted(A_TESTS), None)["selection"]
+    expected = sorted(A_TESTS + [NOTES_WALKER])
+    assert found["tests"] == expected and found["shards"] == [1]
+    assert found["selection"] == tm.shard_plan(expected, None)["selection"]
     assert reasons[0].startswith("Test map from ")
 
 
@@ -395,6 +426,15 @@ def test_doubt_runs_everything(pull_request, tmp_path):
     assert tm.ci_select(unknown, PR)[0]["selection"] == "all"
 
 
+def test_a_non_ascii_test_file_name_is_read_and_chosen(pull_request):
+    # git quotes such a name in its plain output; it would then match no file.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "tests/unit/test_caf\u00e9.py", "def test_x():\n    pass\n")
+    merge()
+    found, _ = tm.ci_select(map_path, PR)
+    assert found["tests"] == ["tests/unit/test_caf\u00e9.py"] and found["shards"] == [1]
+
+
 def test_a_change_to_how_the_shards_run_runs_everything(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "scripts/ci/backend_shards.py", "SHARD_COUNT = 8\n")
@@ -410,7 +450,7 @@ def test_ci_select_writes_the_three_outputs(pull_request, tmp_path, capsys):
     out, summary = io.StringIO(), tmp_path / "summary.md"
     found = tm.write_ci_select(map_path, {**PR, "GITHUB_STEP_SUMMARY": str(summary)}, out)
     assert out.getvalue().splitlines() == [
-        f"selection={found['selection']}", "shards=[1]", f"tests={json.dumps(sorted(A_TESTS))}"]
+        f"selection={found['selection']}", "shards=[1]", "count=1", f"tests={json.dumps(sorted(A_TESTS))}"]
     assert "main runs every test after the merge" in summary.read_text(encoding="utf-8")
 
 
