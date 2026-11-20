@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from contextlib import AbstractContextManager
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -37,7 +38,7 @@ def _error(code: str, detail: str, status: int = 409):
     raise AccountError(code, detail, status)
 
 
-def key_write_lock():
+def key_write_lock() -> AbstractContextManager[bool]:
     """Keep confirmation out of the middle of a same-worker account write."""
     return _lock
 
@@ -91,6 +92,7 @@ def _decode_key_bundle(stored):
 
 
 def is_shipped_legacy_id(account_id: str | None) -> bool:
+    """Identify a key-derived ID persisted by the shipped saved-key writer."""
     return isinstance(account_id, str) and _SHIPPED_LEGACY_ID.fullmatch(account_id) is not None
 
 

@@ -1,4 +1,4 @@
-"""Owner-only saved Anthropic key contract; no app DB, provider or CLI access."""
+"""Owner-only saved Anthropic key contract with isolated storage and no provider or CLI access."""
 import json
 from unittest.mock import AsyncMock
 
@@ -16,13 +16,8 @@ KEY = "example-anthropic-secret-key-1111"
 
 
 @pytest.fixture
-def client(monkeypatch):
-    values = {}
+def client(mock_db, monkeypatch):
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
-    monkeypatch.setattr(accounts.database, "get_system_setting", values.get)
-    monkeypatch.setattr(accounts.database, "get_system_setting_cached", values.get)
-    monkeypatch.setattr(accounts.database, "set_system_setting", values.__setitem__)
-    monkeypatch.setattr(accounts.database, "delete_system_setting", lambda key: values.pop(key, None) is not None)
     from app.core import anthropic_generation
     monkeypatch.setattr(anthropic_generation, "validate_api_key", AsyncMock())
     app = FastAPI()
@@ -38,7 +33,12 @@ def test_key_save_switch_rename_delete_contract(client, caplog):
     first = result.json()["account_id"]
     assert result.json()["accounts"]["api_key"] == [
         {"id": first, "label": "Personal", "active": True, "masked_key": "example...1111", "last4": "1111"}]
-    second = client.post(BASE + "/api-keys", json={"api_key": KEY[:-4] + "2222", "activate": False}).json()["account_id"]
+    saved = client.post(BASE + "/api-keys", json={"api_key": KEY[:-4] + "2222", "activate": False})
+    assert saved.status_code == 200, saved.text
+    rows = {row["last4"]: row for row in client.get(BASE).json()["accounts"]["api_key"]}
+    assert rows["1111"]["id"] == first
+    second = rows["2222"]["id"]
+    assert second == saved.json()["account_id"]
     assert accounts.active_api_key() == KEY
     assert client.post(BASE + f"/api_key/{second}/activate").status_code == 200
     assert accounts.active_api_key().endswith("2222")
