@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { closeSync, mkdtempSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { loginItemControl } from '../dist/main/login-item.js';
 
@@ -133,7 +134,7 @@ test('Windows rechecks install authority inside the guard and never writes if it
 	assert.equal(writes, 1);
 });
 
-test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, () => {
+test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, async () => {
 	const dir = mkdtempSync(path.join(os.tmpdir(), 'shuffle-startup-guard-'));
 	try {
 		const installedExecutable = path.join(dir, 'AI Shuffle.exe');
@@ -145,40 +146,52 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		writeFileSync(installedExecutable, '');
 		mkdirSync(resources);
 		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
-		const runPowerShell = script => {
-			const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
-				encoding: 'utf8', timeout: 15_000, env: {
-					...process.env, SHUFFLE_GUARD_FILE: guard, SHUFFLE_TEST_DIR: dir,
-					SHUFFLE_NODE: process.execPath, SHUFFLE_LOGIN_MODULE: fileURLToPath(new URL('../dist/main/login-item.js', import.meta.url))
-				}
-			});
-			assert.ifError(result.error);
-			assert.equal(result.status, 0, result.stdout + result.stderr);
-		};
+		const powershell = script => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+		const env = { ...process.env, SHUFFLE_GUARD_FILE: guard };
 		const openExclusive = '[IO.File]::Open($env:SHUFFLE_GUARD_FILE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)';
+		let reads = 0;
+		let writes = 0;
 		const control = loginItemControl({
-			setLoginItemSettings() {},
+			setLoginItemSettings() { writes++; },
 			getLoginItemSettings() {
-				runPowerShell(`try { (${openExclusive}).Dispose(); exit 1 } catch [IO.IOException] { if ((($_.Exception.GetBaseException()).HResult -band 65535) -ne 32) { throw }; exit 0 }`);
+				reads++;
+				const probe = spawnSync('powershell.exe', powershell(`try { (${openExclusive}).Dispose(); exit 1 } catch [IO.IOException] { if ((($_.Exception.GetBaseException()).HResult -band 65535) -ne 32) { throw }; exit 0 }`), {
+					encoding: 'utf8', timeout: 15_000, env
+				});
+				assert.ifError(probe.error);
+				assert.equal(probe.status, 0, probe.stdout + probe.stderr);
 				return { openAtLogin: false };
 			}
 		}, host);
 		assert.deepEqual(control.set(false), { state: 'disabled', failed: false });
+		assert.deepEqual([writes, reads], [1, 1]);
 
-		const contender = `
-			const assert = require('node:assert/strict');
-			const path = require('node:path');
-			const { loginItemControl } = require(process.env.SHUFFLE_LOGIN_MODULE);
-			const localAppData = process.env.SHUFFLE_TEST_DIR;
-			const api = () => assert.fail('locked writer must not call Electron');
-			const control = loginItemControl({ setLoginItemSettings: api, getLoginItemSettings: api }, {
-				platform: 'win32', localAppData, appId: 'test', installedExecutable: path.join(localAppData, 'AI Shuffle.exe')
-			});
+		// Keep the native handle open until the actual JS caller has tested it.
+		// The same controller/host exercises both directions on the same file.
+		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::WriteLine('held'); [void][Console]::ReadLine() } finally { $lock.Dispose() }`), {
+			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000, env
+		});
+		const closed = new Promise(resolve => {
+			holder.once('error', error => resolve({ error }));
+			holder.once('close', (status, signal) => resolve({ status, signal }));
+		});
+		let stderr = '';
+		holder.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+		const lines = createInterface({ input: holder.stdout });
+		try {
+			const held = await Promise.race([once(lines, 'line').then(([line]) => line), closed.then(() => stderr)]);
+			assert.equal(held, 'held', 'native holder must acknowledge opening the guard');
+			assert.throws(() => closeSync(openSync(guard, 'r')), { code: 'EBUSY' }, 'the real guard path must be locked');
 			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
-		`;
-		const contenderFile = path.join(dir, 'contender.cjs');
-		writeFileSync(contenderFile, contender);
-		runPowerShell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { & $env:SHUFFLE_NODE (Join-Path $env:SHUFFLE_TEST_DIR 'contender.cjs'); exit $LASTEXITCODE } finally { $lock.Dispose() }`);
+			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
+		} finally {
+			lines.close();
+			holder.stdin.end();
+			const { error, status, signal } = await closed;
+			assert.ifError(error);
+			assert.equal(status, 0, stderr || signal);
+		}
 		assert.deepEqual(control.set(false), { state: 'disabled', failed: false }, 'can write again when the exclusive holder exits');
+		assert.deepEqual([writes, reads], [2, 2]);
 	} finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

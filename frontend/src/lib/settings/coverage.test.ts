@@ -1,6 +1,15 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Component } from 'svelte';
+import { tick, type Component } from 'svelte';
+import type { DesktopLoginItem } from '$lib/services/desktop';
+
+const native = vi.hoisted(() => ({
+	bridge: null as null | { platform: string; loginItem?: DesktopLoginItem }
+}));
+vi.mock('$lib/services/desktop', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/services/desktop')>()),
+	get desktop() { return native.bridge; }
+}));
 
 vi.mock('$lib/stores/theme.svelte', async () => {
 	const { writable } = await import('svelte/store');
@@ -22,7 +31,10 @@ import { CATEGORY_IDS, type CategoryId } from './types';
 import { MODULES } from './registry';
 import { settingsNav } from './navigation.svelte';
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	native.bridge = null;
+});
 
 function el(html: string): HTMLElement {
 	const div = document.createElement('div');
@@ -127,7 +139,31 @@ const COVERED_WITH_DATA: Partial<Record<CategoryId, string>> = {
 };
 
 describe('every category page matches the registry', () => {
+	const startupAnchor = '[data-setting-anchor="general.startAtSignIn"]';
+	const loginItem: DesktopLoginItem = {
+		get: async () => 'disabled',
+		set: async (enabled) => ({ state: enabled ? 'enabled' : 'disabled', failed: false })
+	};
+
+	it.each(['win32', 'darwin'] as const)('general (installed %s with startup support)', async (platform) => {
+		native.bridge = { platform, loginItem };
+		await assertCategoryCoverage('general', () => render(PREFERENCE_PAGES.general));
+	});
+
+	it.each([null, { platform: 'linux' }, { platform: 'win32' }, { platform: 'darwin' }])(
+		'general (no startup support: %j)', async (bridge) => {
+			native.bridge = bridge;
+			await assertCategoryCoverage('general', async () => {
+				const result = render(PREFERENCE_PAGES.general);
+				await tick();
+				expect(result.container.querySelector(startupAnchor)).toBeNull();
+				return result;
+			}, { skip: { 'general.startAtSignIn': 'only when the native startup capability is present' } });
+		}
+	);
+
 	for (const category of CATEGORY_IDS) {
+		if (category === 'general') continue; // Checked above in both capability states.
 		if (COVERED_WITH_DATA[category]) {
 			it.skip(`${category} (covered in ${COVERED_WITH_DATA[category]})`, () => {});
 			continue;
