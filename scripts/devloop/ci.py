@@ -244,20 +244,65 @@ def split_heavy(weights: dict[str, float], shards: int, directory: Path = JOURNE
             for name, count in sorted(parts.items()) if count > 1 for index in range(1, count + 1)}
 
 
+def _fit_partition_budget(buckets: list[list[str]], weights: dict[str, float],
+                          families: dict[str, str]) -> list[list[str]]:
+    from scripts.devloop import journey_retry as retry
+
+    limit = retry.STEP_SECONDS - SETUP_SECONDS - retry.RETRY_SECONDS - retry.TEARDOWN_SECONDS - CALIBRATION_ERROR_SECONDS
+    loads = [sum(weights[name] for name in bucket) for bucket in buckets]
+    if max(loads) <= limit or sum(loads) > len(loads) * limit:
+        return buckets
+
+    # Greedy packing can miss a feasible layout. Try one swap per overloaded
+    # shard, keeping both runners within budget and not adding family collisions.
+    fitted = [bucket.copy() for bucket in buckets]
+    for i in sorted(range(len(loads)), key=lambda i: (-loads[i], i)):
+        if loads[i] <= limit:
+            continue
+        candidates = []
+        for j, load in enumerate(loads):
+            if j == i or load >= limit:
+                continue
+            for outgoing in fitted[i]:
+                for incoming in fitted[j]:
+                    delta = weights[outgoing] - weights[incoming]
+                    peak = max(loads[i] - delta, load + delta)
+                    if peak > limit:
+                        continue
+                    src, dst = families[outgoing], families[incoming]
+                    if src != dst and (any(families[name] == dst for name in fitted[i])
+                                       or any(families[name] == src for name in fitted[j])):
+                        continue
+                    candidates.append((peak, j, outgoing, incoming))
+        if not candidates:
+            return buckets
+        _, j, outgoing, incoming = min(candidates)
+        fitted[i].remove(outgoing)
+        fitted[j].remove(incoming)
+        fitted[i].append(incoming)
+        fitted[j].append(outgoing)
+        delta = weights[outgoing] - weights[incoming]
+        loads[i] -= delta
+        loads[j] += delta
+    return fitted
+
+
 def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
     """Place each journey once, spreading numbered parts within the same time budget."""
     if shards < 1:
         raise ValueError("shards must be at least 1")
     ordered = sorted(weights, key=lambda n: (-weights[n], n))
+    # x.journey.mjs, x-2.journey.mjs, x-3.journey.mjs share a family
+    # even when a filtered run doesn't select the first part.
+    family_of = {name: re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", entry_file(name).removesuffix(SUFFIX))
+                 for name in ordered}
 
     def allocate(limit: float | None = None) -> tuple[list[list[str]], float]:
         buckets: list[list[str]] = [[] for _ in range(shards)]
         loads = [0.0] * shards
         families: list[set[str]] = [set() for _ in range(shards)]
         for name in ordered:
-            # x.journey.mjs, x-2.journey.mjs, x-3.journey.mjs share a family
-            # even when a filtered run doesn't select the first part.
-            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", entry_file(name).removesuffix(SUFFIX))
+            family = family_of[name]
             index = min(range(shards), key=lambda i: (
                 limit is not None and loads[i] + weights[name] > limit,
                 limit is not None and family in families[i],
@@ -273,6 +318,7 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
     # Preferring independent runners must not spend any retry/teardown reserve.
     if spread_max <= limit:
         buckets = spread
+    buckets = _fit_partition_budget(buckets, weights, family_of)
     union = [name for bucket in buckets for name in bucket]
     if sorted(union) != sorted(weights) or len(set(union)) != len(union):
         raise AssertionError("journey shards are not an exact partition")

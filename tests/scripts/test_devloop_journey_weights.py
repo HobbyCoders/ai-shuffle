@@ -32,6 +32,24 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
+def test_partition_can_swap_journeys_to_preserve_full_reserves():
+    weights = {
+        "heavy.journey.mjs": 540,
+        "busy.journey.mjs": 450,
+        "busy-2.journey.mjs": 360,
+        "other.journey.mjs": 360,
+        "small.journey.mjs": 270,
+    }
+    # Greedy loads are 900s and 1080s. A swap fits both into the existing
+    # 990s first-pass budget without putting the numbered parts together.
+    buckets = ci.partition(weights, 2)
+    assert sorted(name for bucket in buckets for name in bucket) == sorted(weights)
+    assert all(sum(name.startswith("busy") for name in bucket) == 1 for bucket in buckets)
+    assert all(ci.planning_budget_seconds(sum(weights[name] for name in bucket))
+               == journey_retry.STEP_SECONDS for bucket in buckets)
+    assert ci.partition(dict(reversed(list(weights.items()))), 2) == buckets
+
+
 def test_split_parts_get_parallel_runners_in_the_hosted_plan():
     weights = ci.estimated_seconds()
     parts = {"queue-while-busy.journey.mjs", "queue-while-busy-2.journey.mjs", "queue-while-busy-3.journey.mjs"}
