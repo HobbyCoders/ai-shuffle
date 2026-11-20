@@ -73,6 +73,43 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### LobeHub Lobe Icons (provider artwork)
+
+Source: LobeHub Lobe Icons, commit 9752d967494e48d8f83f2808feb2b0207bf70997
+https://github.com/lobehub/lobe-icons/tree/9752d967494e48d8f83f2808feb2b0207bf70997/packages/static-svg/icons
+
+Antigravity, Gemini, and MiniMax use the upstream -color SVGs. Kimi, OpenCode,
+and fal.ai use monochrome geometry from kimi.svg, opencode.svg, and fal.svg,
+respectively. Kimi and OpenCode use their designed letterforms, not typeset
+initials.
+
+The upstream artwork distribution is MIT-licensed (see accompanying license).
+The marks identify the respective providers; trademark rights remain with their owners.
+
+```
+MIT License
+
+Copyright (c) 2023 LobeHub
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### tweakcn (theme presets)
 
 The theme presets in `frontend/src/lib/themes/presets.json` are imported from

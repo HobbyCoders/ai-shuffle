@@ -239,7 +239,12 @@ def _table(rows: list[tuple[str, str, str, str]]) -> str:
 def render() -> str:
     header = (HERE / "header.md").read_text(encoding="utf-8")
     t3code = (ROOT / "frontend/src/lib/components/git/t3code.LICENSE").read_text(encoding="utf-8").strip()
-    parts = [header.replace("{{T3CODE_LICENSE}}", t3code).rstrip()]
+    artwork = ROOT / "frontend/src/lib/components/settings/provider-artwork"
+    attribution = (artwork / "ATTRIBUTION.txt").read_text(encoding="utf-8").split("\n\n", 1)[1].strip()
+    artwork_license = (artwork / "LICENSE").read_text(encoding="utf-8").strip()
+    parts = [header.replace("{{T3CODE_LICENSE}}", t3code)
+             .replace("{{PROVIDER_ARTWORK_ATTRIBUTION}}", attribution)
+             .replace("{{PROVIDER_ARTWORK_LICENSE}}", artwork_license).rstrip()]
 
     py_rows, missing = python_packages()
     parts.append(

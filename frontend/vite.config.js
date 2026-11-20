@@ -1,10 +1,10 @@
-import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 import { appVersion } from './app-version.js';
 import { assetsInlineLimit } from './asset-inline.js';
 import { svelteOptions } from './svelte-options.js';
+import { staticAdapter } from './static-adapter.js';
 
 /**
  * The named chunk a module belongs to, or nothing to leave it to Rolldown.
@@ -50,13 +50,7 @@ export default defineConfig({
 		// SvelteKit 3 takes its config here; there is no svelte.config.js.
 		sveltekit({
 			...svelteOptions,
-			adapter: adapter({
-				pages: 'build',
-				assets: 'build',
-				fallback: 'index.html',
-				precompress: false,
-				strict: true
-			}),
+			adapter: staticAdapter(),
 			// SvelteKit 3 dropped the built-in `$lib`; this keeps it.
 			alias: {
 				$lib: 'src/lib'

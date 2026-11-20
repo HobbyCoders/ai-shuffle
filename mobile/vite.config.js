@@ -2,12 +2,12 @@
 // worker can change it (see frontend/src/lib/utils/platform.ts).
 process.env.VITE_SHUFFLE_SHELL ??= 'mobile';
 
-import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 import webConfig from '../frontend/vite.config.js';
 import { svelteOptions } from '../frontend/svelte-options.js';
+import { staticAdapter } from '../frontend/static-adapter.js';
 
 /**
  * The mobile UI: a static, client-only SvelteKit app that every worker serves
@@ -27,14 +27,7 @@ export default defineConfig({
 			// Same compiler options and a11y warning filter as the web build —
 			// the shared components are compiled here too.
 			...svelteOptions,
-			adapter: adapter({
-				pages: 'build',
-				assets: 'build',
-				// Single-page app: every path renders the one route client-side.
-				fallback: 'index.html',
-				precompress: false,
-				strict: true
-			}),
+			adapter: staticAdapter(),
 			// The shared library. `$lib` here is the very same tree the web UI compiles.
 			alias: {
 				$lib: '../frontend/src/lib'

@@ -29,7 +29,7 @@
 {#if size === 'sm'}
 	<span class="pt" class:dashed aria-hidden="true">
 		{#if mark}
-			<ProviderGlyph kind={provider.glyph} size={16} tiled />
+			<ProviderGlyph kind={provider.glyph} size={16} />
 		{:else if provider.media}
 			<Clapperboard size={16} />
 		{:else}
@@ -42,7 +42,7 @@
 {:else}
 	<Tile {size} {status} {ring} {dashed}>
 		{#if mark}
-			<ProviderGlyph kind={provider.glyph} size={19} tiled />
+			<ProviderGlyph kind={provider.glyph} size={19} />
 		{:else if provider.media}
 			<Clapperboard />
 		{:else}
