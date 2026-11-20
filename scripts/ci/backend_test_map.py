@@ -31,7 +31,10 @@ import ast
 from collections import defaultdict
 from fnmatch import fnmatch
 import gzip
+import hashlib
 import json
+import math
+import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
@@ -261,7 +264,17 @@ def differing(old: dict[str, str], new: dict[str, str]) -> set[str]:
 # the map
 # ---------------------------------------------------------------------------
 
-def merge(hits_dir: Path, out: Path, commit: str) -> dict:
+def file_seconds(durations_dir: Path | None) -> dict[str, float]:
+    """Seconds each test file took, summed from the shards' ``durations.json`` (node id -> seconds)."""
+    seconds: dict[str, float] = defaultdict(float)
+    for path in sorted(durations_dir.glob("**/durations.json")) if durations_dir else ():
+        for node, value in json.loads(path.read_text(encoding="utf-8")).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                seconds[node.split("::", 1)[0]] += float(value)
+    return {name: round(value, 3) for name, value in sorted(seconds.items())}
+
+
+def merge(hits_dir: Path, out: Path, commit: str, durations_dir: Path | None = None) -> dict:
     contexts: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for path in sorted(hits_dir.glob("hits-*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -287,6 +300,8 @@ def merge(hits_dir: Path, out: Path, commit: str) -> dict:
         "covered": {file: {q: sorted(set(ids)) for q, ids in quals.items()} for file, quals in covered.items()},
         "shared": {file: sorted(quals) for file, quals in shared.items()},
         "known": known,
+        # Only to size a pull request's shards; never to choose its tests.
+        "seconds": file_seconds(durations_dir),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(out, "wt", encoding="utf-8") as handle:
@@ -589,33 +604,17 @@ def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Backend test map: merge records, select tests.")
-    commands = parser.add_subparsers(dest="command", required=True)
-    merge_cmd = commands.add_parser("merge")
-    merge_cmd.add_argument("--hits", type=Path, required=True)
-    merge_cmd.add_argument("--out", type=Path, required=True)
-    merge_cmd.add_argument("--commit", required=True)
-    select_cmd = commands.add_parser("select")
-    select_cmd.add_argument("--map", type=Path, required=True)
-    select_cmd.add_argument("--base", required=True)
-    select_cmd.add_argument("--head", default="HEAD")
-    args = parser.parse_args(argv)
+def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | list[str], list[str], dict | None]:
+    """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
 
-    if args.command == "merge":
-        result = merge(args.hits, args.out, args.commit)
-        print(f"Test map: {len(result['tests'])} test files, {len(result['covered'])} source files, "
-              f"{sum(len(q) for q in result['shared'].values())} shared functions", file=sys.stderr)
-        return 0
-
+    Returns the selection, the reasons and the map it was made from.
+    """
     try:
-        base = git("rev-parse", args.base).strip()
-        changed = [line for line in git("diff", "--name-only", "--no-renames", f"{base}...{args.head}").splitlines() if line]
-        test_map = load_map(args.map) if args.map.is_file() else None
-    except (subprocess.CalledProcessError, OSError, ValueError, FullSuite) as error:
-        print(f"Running the full suite: {error}", file=sys.stderr)
-        print("all")
-        return 0
+        base = git("rev-parse", base_rev).strip()
+        changed = [line for line in git("diff", "--name-only", "--no-renames", f"{base}...{head}").splitlines() if line]
+        test_map = load_map(map_path) if map_path.is_file() else None
+    except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
+        return "all", [f"Running the full suite: {error}"], None
 
     def base_source(path: str) -> str | None:
         try:
@@ -625,7 +624,117 @@ def main(argv=None) -> int:
 
     result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
     if test_map is not None:
-        print(f"Test map from {test_map.get('commit', '?')[:12]}; {len(changed)} changed files.", file=sys.stderr)
+        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} changed files.")
+    return result, reasons, test_map
+
+
+# ---------------------------------------------------------------------------
+# CI Backend's shards (.github/workflows/ci-backend.yml)
+# ---------------------------------------------------------------------------
+
+# The shards a full run uses; scripts/ci/backend_gate.py's SHARD_COUNT.
+FULL_SHARDS = 8
+# Test files of the fast subset that CI Backend runs outside its shards (the
+# policy step of backend-security runs tests/scripts and the docs tests).
+SHARD_EXCLUDED_DIRS = ("tests/scripts/",)
+SHARD_EXCLUDED = FAST_SUBSET_EXCLUDED | {"tests/core/test_docs_content.py", "tests/test_buyer_docs.py"}
+# Measured test seconds one two-worker shard is given (about two and a half
+# minutes of wall time), and what a file the map has no time for is assumed to take.
+SHARD_SECONDS = 300.0
+UNKNOWN_FILE_SECONDS = 20.0
+
+
+def in_shards(path: str) -> bool:
+    return fast_subset(path) and path not in SHARD_EXCLUDED and not path.startswith(SHARD_EXCLUDED_DIRS)
+
+
+def shard_plan(result: str | list[str], test_map: dict | None) -> dict:
+    """What CI Backend's shards run: {selection, shards, tests}.
+
+    ``selection`` is ``all``, ``none`` or a digest of the chosen files; the
+    receipts carry it, so the gate can tell a full run from a selected one.
+    """
+    if result == "all":
+        return {"selection": "all", "shards": list(range(1, FULL_SHARDS + 1)), "tests": []}
+    tests = sorted(path for path in result if in_shards(path))
+    if not tests:
+        return {"selection": "none", "shards": [], "tests": []}
+    seconds_by_file = (test_map or {}).get("seconds") or {}
+    seconds = sum(float(seconds_by_file.get(path, UNKNOWN_FILE_SECONDS)) for path in tests)
+    count = max(1, min(FULL_SHARDS, len(tests), math.ceil(seconds / SHARD_SECONDS)))
+    digest = hashlib.sha256("\n".join(tests).encode("utf-8")).hexdigest()[:16]
+    return {"selection": f"files-{digest}", "shards": list(range(1, count + 1)), "tests": tests}
+
+
+def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
+    """The shard plan of this CI run. Only a pull request selects; anything else runs everything."""
+    event = environ.get("GITHUB_EVENT_NAME", "")
+    if event != "pull_request":
+        return shard_plan("all", None), [f"A {event or 'local'} run tests everything."]
+    try:
+        parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()
+        # GitHub tests a pull request on its merge into main: main is the first parent.
+        if len(parents) != 3:
+            return shard_plan("all", None), ["HEAD is not the pull request's merge commit; running everything."]
+        result, reasons, test_map = choose(map_path, parents[1], parents[0])
+        return shard_plan(result, test_map), reasons
+    except Exception as error:  # noqa: BLE001 - any doubt runs every test
+        return shard_plan("all", None), [f"Selection failed, running everything: {type(error).__name__}: {error}"]
+
+
+def write_ci_select(map_path: Path, environ=os.environ, out=sys.stdout) -> dict:
+    found, reasons = ci_select(map_path, environ)
+    print(f"selection={found['selection']}", file=out)
+    print(f"shards={json.dumps(found['shards'])}", file=out)
+    print(f"tests={json.dumps(found['tests'])}", file=out)
+    lines = ["### Backend tests this run", ""]
+    if found["selection"] == "all":
+        lines.append(f"Every test, in {len(found['shards'])} shards.")
+    elif found["selection"] == "none":
+        lines.append("No backend test in the shards can reach this change; the shards do not run.")
+    else:
+        lines.append(f"{len(found['tests'])} test files the change can reach, in {len(found['shards'])} shards. "
+                     "main runs every test after the merge.")
+    lines += ["", *[f"- {reason}" for reason in reasons[:50]]]
+    if found["tests"]:
+        lines += ["", "<details><summary>Selected test files</summary>", "",
+                  *[f"- `{path}`" for path in found["tests"]], "", "</details>"]
+    summary = environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    for reason in reasons:
+        print(f"  {reason}", file=sys.stderr)
+    return found
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Backend test map: merge records, select tests.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    merge_cmd = commands.add_parser("merge")
+    merge_cmd.add_argument("--hits", type=Path, required=True)
+    merge_cmd.add_argument("--out", type=Path, required=True)
+    merge_cmd.add_argument("--commit", required=True)
+    merge_cmd.add_argument("--durations", type=Path, help="Shard results holding durations.json files")
+    select_cmd = commands.add_parser("select")
+    select_cmd.add_argument("--map", type=Path, required=True)
+    select_cmd.add_argument("--base", required=True)
+    select_cmd.add_argument("--head", default="HEAD")
+    ci_cmd = commands.add_parser("ci-select", help="CI Backend's shard plan, as $GITHUB_OUTPUT lines")
+    ci_cmd.add_argument("--map", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    if args.command == "merge":
+        result = merge(args.hits, args.out, args.commit, args.durations)
+        print(f"Test map: {len(result['tests'])} test files, {len(result['covered'])} source files, "
+              f"{sum(len(q) for q in result['shared'].values())} shared functions, "
+              f"{len(result['seconds'])} timed test files", file=sys.stderr)
+        return 0
+    if args.command == "ci-select":
+        write_ci_select(args.map)
+        return 0
+
+    result, reasons, _ = choose(args.map, args.base, args.head)
     for reason in reasons:
         print(f"  {reason}", file=sys.stderr)
     if result == "all":

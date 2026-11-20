@@ -7,9 +7,10 @@ name: CI
 # Each area (backend, JavaScript, Android, ...) lists the files its checks read
 # (scripts/ci/plan.py). The "plan" job skips an area whose files are unchanged
 # since that area last passed, on any pull request or on main, so a change runs
-# only the areas it touches: Android runs when Android's files changed. The
-# daily and the manual run skip nothing. The "CI" job gives the one verdict and
-# records each area that passed.
+# only the areas it touches: Android runs when Android's files changed. A pull
+# request also skips every area it changes no file of; main then runs what its
+# records do not prove. The daily and the manual run skip nothing. The "CI" job
+# gives the one verdict and records each area that passed.
 #
 # A manual run on any ref but main fails closed: its jobs do not run.
 on:
@@ -81,6 +82,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # A pull request's merge commit and main, its first parent: the files it changes.
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

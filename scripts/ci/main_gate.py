@@ -193,6 +193,8 @@ RESOLVED = {
 SELECTED = {
     ("javascript", "journeys"): (
         "${{ fromJSON(needs.journey-plan.outputs.shards) }}", "journey-plan", "Selected UI journey shards: "),
+    ("backend", "backend-shard"): (
+        "${{ fromJSON(needs.backend-select.outputs.shards) }}", "backend-select", "Selected backend shards: "),
 }
 
 
@@ -274,8 +276,8 @@ def layout(plan, jobs):
     return skipped, placed
 
 
-def selected_members(plan, slot, placed):
-    """The members an earlier job chose for this matrix, or None while unknown.
+def chosen_values(slot, placed):
+    """The values an earlier job chose for this matrix, or None while unknown.
 
     The choosing job must have finished and succeeded, and name exactly one
     step after its choice: a JSON list of the values.
@@ -295,7 +297,20 @@ def selected_members(plan, slot, placed):
         return None
     if not isinstance(values, list) or not all(isinstance(value, (int, str)) for value in values):
         return None
-    return [slot.member(value) for value in values]
+    return values
+
+
+def selected_members(plan, slot, placed):
+    """The members an earlier job chose for this matrix, or None while unknown."""
+    values = chosen_values(slot, placed)
+    return None if values is None else [slot.member(value) for value in values]
+
+
+def backend_shards(plan, jobs):
+    """The backend shards the run's select job chose, or None while unknown."""
+    _, placed = layout(plan, jobs)
+    (slot,) = [slot for slot in plan.slots if (slot.area, slot.key) == ("backend", "backend-shard")]
+    return chosen_values(slot, placed)
 
 
 def missing(plan, jobs):
@@ -379,8 +394,10 @@ def check_javascript(needs, expected, checks_proven):
             raise ValueError(f"JavaScript checks: {name} {needs[name]['result']}")
 
 
-def check_every_branch(area, needs, expected):
-    if set(needs) != set(expected) or any(needs[name]["result"] != "success" for name in expected):
+def check_every_branch(area, needs, expected, may_skip=()):
+    if set(needs) != set(expected) or any(
+            needs[name]["result"] != "success" and not (name in may_skip and needs[name]["result"] == "skipped")
+            for name in expected):
         raise ValueError(f"{area}: a required job failed, was cancelled, skipped or is missing")
 
 
@@ -390,6 +407,10 @@ def check_inner(plan, jobs, area, checks_proven):
     expected = [expected] if isinstance(expected, str) else list(expected)
     if area == "javascript":
         check_javascript(needs, expected, checks_proven)
+    elif area == "backend":
+        # The shards skip only when the select job chose none of them
+        # (scripts/ci/backend_gate.py allows that on a pull request alone).
+        check_every_branch(area, needs, expected, ("backend-shard",) if backend_shards(plan, jobs) == [] else ())
     else:
         check_every_branch(area, needs, expected)
     return needs
@@ -439,6 +460,7 @@ def evidence_of(plan, jobs):
         evidence[area] = "true"
         if area == "backend":
             evidence["backend-needs"] = json.dumps(needs, sort_keys=True)
+            evidence["backend-shards"] = json.dumps(backend_shards(plan, jobs))
     return evidence
 
 

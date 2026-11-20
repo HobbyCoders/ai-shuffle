@@ -767,6 +767,88 @@ def test_the_plan_step_writes_one_answer_per_area_and_the_record_names(checkout,
     assert "| `backend` | runs | no pass is recorded for these files |" in text
 
 
+def merged(checkout, *paths):
+    """Make HEAD GitHub's merge of a branch that changes ``paths`` into a main that moved on."""
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    for path in paths:
+        (checkout / path).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / path).write_text("changed\n")
+    git("add", "-A")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    # main moved on after the branch started: its own change is not the pull request's.
+    (checkout / "app.py").write_text("main moved\n")
+    git("commit", "-qam", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    return checkout
+
+
+def test_a_pull_request_skips_the_areas_it_changes_no_file_of(checkout):
+    merged(checkout, "android/a.kt")
+    lookups = []
+
+    def call(path, token):
+        lookups.append(path)
+        return {"artifacts": []}
+
+    found = plan.plan(checkout, environment(), call)
+    running = [area for area, state in found.items() if not state["proven"]]
+    # backend reads every file; desktop and the rest read nothing of android/.
+    assert running == ["backend", "android", "android-minified"]
+    assert all(found[area]["by"] == plan.UNTOUCHED for area in plan.AREAS if area not in running)
+    # Only the areas that run are looked up; the others are skipped already.
+    assert sorted({re.search(r"name=pass-(.+)-[0-9a-f]{40}$", path).group(1) for path in lookups}) == sorted(running)
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_only_a_pull_request_skips_an_untouched_area(checkout, event):
+    merged(checkout, "android/a.kt")
+    found = plan.plan(checkout, environment(GITHUB_EVENT_NAME=event), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+
+
+def test_a_pull_request_whose_changes_cannot_be_read_skips_nothing_untouched(checkout, capsys):
+    # HEAD is not a merge commit (a shallow checkout lists no parents): nothing is skipped this way.
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+    assert plan.changed_files(checkout) is None
+    assert plan.changed_files(checkout / "missing") is None
+    assert "could not read the pull request's changed files" in capsys.readouterr().err
+
+
+def test_a_pull_request_names_both_sides_of_a_rename_and_a_deletion(checkout):
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    git("mv", "android/a.kt", "android/b.kt")
+    git("rm", "-q", "app.py")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    (checkout / "other.txt").write_text("main moved\n")
+    git("add", "-A")
+    git("commit", "-qm", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    assert sorted(plan.changed_files(checkout)) == ["android/a.kt", "android/b.kt", "app.py"]
+
+
+def test_the_plan_step_says_why_an_untouched_area_is_skipped(checkout, monkeypatch, capsys, tmp_path):
+    merged(checkout, "docs/guide.md")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    real = plan.plan
+    monkeypatch.setattr(plan, "plan", lambda: real(checkout, environment(), lambda path, token: {"artifacts": []}))
+    assert plan.main(["plan"]) == 0
+    answers = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert answers["container"] == "true" and answers["backend"] == "false"
+    text = summary.read_text()
+    assert "| `container` | skipped | this pull request changes none of its files |" in text
+    assert "| `backend` | runs | no pass is recorded for these files |" in text
+
+
 def test_the_keys_of_this_checkout_are_named_for_every_area(capsys):
     assert plan.main(["keys"]) == 0
     lines = capsys.readouterr().out.splitlines()

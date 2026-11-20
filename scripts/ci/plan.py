@@ -25,6 +25,13 @@ own workflow, so a record can only stand for the same checks. Any doubt or
 error answers "run it". The scheduled run and a manual run look nothing up and
 run everything.
 
+A pull request also skips an area none of its changed files belong to: GitHub
+tests the merge of the branch into main, and the files that merge changes are
+the diff from its first parent (main) to it. The push to main after the merge
+runs every area its records do not prove, so a file an area reads without
+listing it is caught there, before the nightly publishes. A diff that cannot
+be read skips nothing this way.
+
     python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
     python scripts/ci/plan.py keys            # the keys of the checked-out commit
     python scripts/ci/plan.py affected FILE.. # the areas whose files include these
@@ -145,6 +152,8 @@ AREAS = {
 GATE = "CI"
 # Runs that look nothing up.
 EVERYTHING = ("schedule", "workflow_dispatch")
+# What `by` says of an area a pull request skips because it changes none of its files.
+UNTOUCHED = "untouched"
 FINISHED_WELL = ("success", "skipped")
 
 
@@ -341,6 +350,25 @@ def run_passed(area: str, jobs) -> bool:
     return main_gate.passed(gate, main_gate.judged(gate, jobs), area)
 
 
+def changed_files(root: Path = ROOT) -> list[str] | None:
+    """The files a pull request's merge commit changes on main, or None when that cannot be read.
+
+    Both sides of a rename and every deleted file count as changed.
+    """
+    try:
+        parents = subprocess.run(["git", "rev-list", "--parents", "-n", "1", "HEAD"], cwd=root,
+                                 capture_output=True, timeout=60, check=True, text=True).stdout.split()
+        # GitHub's merge of the branch into main: exactly two parents, main first.
+        if len(parents) != 3:
+            return None
+        out = subprocess.run(["git", "diff", "--name-only", "--no-renames", "-z", parents[1], parents[0]],
+                             cwd=root, capture_output=True, timeout=120, check=True).stdout
+    except Exception as error:  # noqa: BLE001 - an unreadable diff skips nothing
+        print(f"[plan] could not read the pull request's changed files: {error}", file=sys.stderr)
+        return None
+    return [path for path in out.decode("utf-8", "surrogateescape").split("\0") if path]
+
+
 def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dict[str, dict]:
     """{area: {key, record, proven, by, error}}. Any doubt or error means not proven: run it."""
     names = list(areas or AREAS)
@@ -353,6 +381,14 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
     for area in names:
         key = key_of(area, entries)
         found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": "", "error": ""}
+    # A pull request runs only the areas its changes belong to (the module
+    # docstring). The skip writes no record: nothing of the area ran.
+    if environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        changed = changed_files(root)
+        if changed is not None:
+            for area in names:
+                if not any(reads(area, path) for path in changed):
+                    found[area].update(proven=True, by=UNTOUCHED)
     repository = environ.get("GITHUB_REPOSITORY", "")
     token = environ.get("GH_TOKEN") or environ.get("GITHUB_TOKEN") or ""
     # The scheduled run proves everything again, so a file an area reads
@@ -362,6 +398,8 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
         return found
     lookup = Lookup(repository, token, call)
     for area in names:
+        if found[area]["proven"]:
+            continue
         try:
             by = proven(area, found[area]["key"], lookup)
         except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
@@ -395,7 +433,9 @@ def main(argv=None) -> int:
     lines = ["### What this run has to check", "", "| Area | This run | Why |", "| --- | --- | --- |"]
     for area, state in found.items():
         print(f"{area}={'true' if state['proven'] else 'false'}")
-        if state["proven"]:
+        if state["proven"] and state["by"] == UNTOUCHED:
+            lines.append(f"| `{area}` | skipped | this pull request changes none of its files |")
+        elif state["proven"]:
             lines.append(f"| `{area}` | skipped | its files are unchanged since it passed in {state['by']} |")
         elif state["error"]:
             # Named apart, so a lookup that breaks does not pass for "nothing recorded" run after run.
