@@ -47,6 +47,7 @@ export function buildIndex(options: BuildIndexOptions = {}): SearchItem[] {
 		const mod = MODULES[id];
 		for (const e of mod.entries) {
 			if (e.platform === 'desktop-app' && !desktopApp) continue;
+			if (e.platform === 'desktop-login-item' && !(desktopApp && desktop?.loginItem)) continue;
 			index.push(entryItem(e));
 		}
 		if (mod.searchSource) {

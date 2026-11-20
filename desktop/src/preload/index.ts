@@ -27,6 +27,7 @@ function subscribe<T>(channel: string, listener: Listener<T>): () => void {
 const info = ipcRenderer.sendSync('desktop:info') as {
 	platform: NodeJS.Platform;
 	version: string;
+	loginItem?: boolean;
 	agentAccess?: { title: string; message: string; points: string[]; footer: string };
 } | null;
 
@@ -54,6 +55,11 @@ const bridge = {
 	worker: {
 		getState: () => ipcRenderer.invoke('desktop:worker-state')
 	},
+
+	...(info?.loginItem ? { loginItem: {
+		get: () => ipcRenderer.invoke('desktop:login-item-get'),
+		set: (enabled: boolean) => ipcRenderer.invoke('desktop:login-item-set', enabled)
+	} } : {}),
 
 	updates: {
 		getState: () => ipcRenderer.invoke('desktop:update-state'),
