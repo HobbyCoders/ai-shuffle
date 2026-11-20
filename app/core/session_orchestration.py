@@ -1189,6 +1189,9 @@ def accept_remote_start(body, from_device, *, readback_only=False):
             # The sender writes the same binding in both places (see the
             # inherited branch of the remote-start body).
             raise ValueError("The inherited model binding does not match the request. Nothing was started.")
+        if inherited and provider_id is not None and _full_claude_id(model):
+            # Replay's rule: a full Claude id travels only as a native binding.
+            raise ValueError("An inherited Claude model id cannot name a provider. Nothing was started.")
         try:
             picked = (_inherited_choice(choice.get("model"), runs_here=True) if inherited
                       else model_override.resolve(choice.get("model"), runs_here=True))

@@ -507,7 +507,7 @@ async def test_legacy_readback_receiver_rechecks_identity(chats, remote_wire, mo
                              from_device="caller-worker" if invalid == "fingerprint" else "unpaired-worker")
 
 
-@pytest.mark.parametrize("tamper", ["overlong", "mismatch", "provider", "no_choice"])
+@pytest.mark.parametrize("tamper", ["overlong", "mismatch", "provider", "both_providers", "no_choice"])
 async def test_remote_inherited_subscription_version_runs_as_itself(chats, remote_wire, monkeypatch, tamper):
     """A chat on a full Claude id (Mythos) starts its paired-worker chat on it,
     through the sender, a replay and the receiver; a malformed binding is refused."""
@@ -536,6 +536,8 @@ async def test_remote_inherited_subscription_version_runs_as_itself(chats, remot
         bad["model_choice"]["model"] = "claude-opus-4-6"
     elif tamper == "provider":
         bad["model_choice"]["provider_id"] = "lane"
+    elif tamper == "both_providers":
+        bad["model_choice"]["provider_id"] = bad["provider_id"] = "lane"
     else:
         del bad["model_choice"]
     member = SimpleNamespace(kind=membership.KIND_WORKER, status=membership.STATUS_ACTIVE, name="Caller worker")
