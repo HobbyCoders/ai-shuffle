@@ -1,4 +1,4 @@
-import { closeSync, constants, existsSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { posix, win32 } from 'node:path';
 import type { App, LoginItemSettingsOptions, Settings } from 'electron';
 
@@ -13,7 +13,7 @@ interface Host {
 	packaged: boolean;
 	preview: boolean;
 	installedExecutable?: string;
-	appData?: string;
+	localAppData?: string;
 	appPath: string;
 	systemVersion: string;
 	appId: string;
@@ -24,7 +24,7 @@ type LoginItemApi = Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>;
 // Matches the per-user path in installer-channel.nsh. No data is stored in it.
 function withWindowsGuard<T>(file: string, change: () => T): T | undefined {
 	let fd: number;
-	try { fd = openSync(file, constants.O_CREAT | constants.O_RDONLY); }
+	try { fd = openSync(file, 'r'); }
 	catch { return; }
 	try { return change(); }
 	finally { closeSync(fd); }
@@ -53,16 +53,17 @@ export function loginItemControl(app: LoginItemApi, host: Host, files: WindowsFi
 		if (!executable || !win32.isAbsolute(executable) || !/\.exe$/i.test(executable) || /["\0]/.test(executable)) return;
 		// Without a per-user installer stamp the uninstaller cannot promise to
 		// clean up this Run entry. An in-app update alone must not enable it.
-		if (!host.appData) return;
-		const appData = host.appData.toLowerCase();
-		const stamp = win32.join(win32.dirname(executable), 'resources', 'login-item-uninstall-v2');
+		if (!host.localAppData) return;
+		const localAppData = host.localAppData.toLowerCase();
+		const stamp = win32.join(win32.dirname(executable), 'resources', 'login-item-uninstall-v3');
 		const stillInstalled = () => {
 			try {
-				return files.readStamp(stamp, 'utf16le').replace(/^\uFEFF/, '').toLowerCase() === appData && files.exists(executable);
+				return files.readStamp(stamp, 'utf16le').replace(/^\uFEFF/, '').toLowerCase() === localAppData && files.exists(executable);
 			} catch { return false; }
 		};
 		if (!stillInstalled()) return;
-		const guardFile = win32.join(host.appData, 'ai-shuffle-desktop.login-item-lock');
+		const guardFile = win32.join(host.localAppData, 'ai-shuffle-desktop', 'login-item-lock');
+		if (!files.exists(guardFile)) return;
 		// Recheck *under* the guard. This Electron process can outlive an uninstall;
 		// an earlier capability check cannot authorize a later registry write.
 		guard = change => files.guard(guardFile, () => stillInstalled() ? change() : undefined);
@@ -71,7 +72,7 @@ export function loginItemControl(app: LoginItemApi, host: Host, files: WindowsFi
 		options = { path: `"${executable}"`, args: [] };
 		writeOptions = { ...options, name: host.appId };
 		get = () => {
-			if (!stillInstalled()) return 'unavailable';
+			if (!stillInstalled() || !files.exists(guardFile)) return 'unavailable';
 			const item = app.getLoginItemSettings(options);
 			// openAtLogin matches the exact command but ignores Task Manager's
 			// Startup Apps setting. Only check approval of our per-user entry.

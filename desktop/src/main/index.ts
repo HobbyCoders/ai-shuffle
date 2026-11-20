@@ -358,7 +358,7 @@ async function main(): Promise<void> {
 	callPopout.register();
 	const loginItem = loginItemControl(app, {
 		platform: process.platform, packaged: app.isPackaged, preview: identity.preview,
-		installedExecutable, appData: app.getPath('appData'), appPath: app.getAppPath(),
+		installedExecutable, localAppData: process.env.LOCALAPPDATA, appPath: app.getAppPath(),
 		systemVersion: process.platform === 'darwin' ? (process.getSystemVersion?.() ?? '') : '',
 		appId: identity.appId
 	});

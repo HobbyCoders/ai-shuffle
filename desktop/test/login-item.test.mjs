@@ -11,13 +11,13 @@ const win = {
 	platform: 'win32', packaged: false, preview: false,
 	installedExecutable: 'C:\\Program Files\\AI Shuffle\\AI Shuffle.exe',
 	appPath: 'C:\\Users\\example\\AI Shuffle\\updates\\versions\\revision\\desktop',
-	appData: 'C:\\Users\\example\\AppData\\Roaming',
+	localAppData: 'C:\\Users\\example\\AppData\\Local',
 	appId: 'com.hobbycoders.aishuffle.desktop'
 };
 const readWinStamp = (stampPath, encoding) => {
-	assert.equal(stampPath, 'C:\\Program Files\\AI Shuffle\\resources\\login-item-uninstall-v2');
+	assert.equal(stampPath, 'C:\\Program Files\\AI Shuffle\\resources\\login-item-uninstall-v3');
 	assert.equal(encoding, 'utf16le');
-	return `\uFEFF${win.appData.toUpperCase()}`;
+	return `\uFEFF${win.localAppData.toUpperCase()}`;
 };
 const windowsFiles = { readStamp: readWinStamp, exists: () => true, guard: (_file, change) => change() };
 const mac = {
@@ -100,7 +100,8 @@ test('only supported installed apps get the native capability; none writes at st
 	]) assert.equal(loginItemControl(app, host), undefined);
 	assert.equal(loginItemControl({}, win), undefined);
 	assert.equal(loginItemControl(app, win, { ...windowsFiles, readStamp() { throw Error('old installer has no stamp'); } }), undefined);
-	assert.equal(loginItemControl(app, win, { ...windowsFiles, readStamp: () => 'C:\\Users\\another-user\\AppData\\Roaming' }), undefined);
+	assert.equal(loginItemControl(app, win, { ...windowsFiles, readStamp: () => 'C:\\Users\\another-user\\AppData\\Local' }), undefined);
+	assert.equal(loginItemControl(app, win, { ...windowsFiles, exists: path => !path.endsWith('login-item-lock') }), undefined);
 	assert.ok(loginItemControl(app, win, windowsFiles));
 	assert.ok(loginItemControl(app, mac));
 });
@@ -116,7 +117,7 @@ test('Windows rechecks install authority inside the guard and never writes if it
 	}, win, {
 		...windowsFiles, exists: () => installed,
 		guard(file, change) {
-			assert.equal(file, `${win.appData}\\ai-shuffle-desktop.login-item-lock`);
+			assert.equal(file, `${win.localAppData}\\ai-shuffle-desktop\\login-item-lock`);
 			if (locked) return;
 			held = true;
 			try { return change(); } finally { held = false; }
@@ -137,11 +138,13 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 	try {
 		const installedExecutable = path.join(dir, 'AI Shuffle.exe');
 		const resources = path.join(dir, 'resources');
-		const host = { ...win, installedExecutable, appData: dir };
-		const guard = path.join(dir, 'ai-shuffle-desktop.login-item-lock');
+		const host = { ...win, installedExecutable, localAppData: dir };
+		const guard = path.join(dir, 'ai-shuffle-desktop', 'login-item-lock');
+		mkdirSync(path.dirname(guard));
+		writeFileSync(guard, '');
 		writeFileSync(installedExecutable, '');
 		mkdirSync(resources);
-		writeFileSync(path.join(resources, 'login-item-uninstall-v2'), `\uFEFF${dir}`, 'utf16le');
+		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
 		const runPowerShell = script => {
 			const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
 				encoding: 'utf8', timeout: 15_000, env: {
@@ -166,10 +169,10 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 			const assert = require('node:assert/strict');
 			const path = require('node:path');
 			const { loginItemControl } = require(process.env.SHUFFLE_LOGIN_MODULE);
-			const appData = process.env.SHUFFLE_TEST_DIR;
+			const localAppData = process.env.SHUFFLE_TEST_DIR;
 			const api = () => assert.fail('locked writer must not call Electron');
 			const control = loginItemControl({ setLoginItemSettings: api, getLoginItemSettings: api }, {
-				platform: 'win32', appData, appId: 'test', installedExecutable: path.join(appData, 'AI Shuffle.exe')
+				platform: 'win32', localAppData, appId: 'test', installedExecutable: path.join(localAppData, 'AI Shuffle.exe')
 			});
 			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
 		`;
