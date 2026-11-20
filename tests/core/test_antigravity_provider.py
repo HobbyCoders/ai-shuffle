@@ -1993,7 +1993,8 @@ def test_old_versions_in_use_are_kept_and_nothing_is_stopped(agy_root, monkeypat
 
 @pytest.fixture
 def startup_check(agy_root, monkeypatch):
-    """An app-installed agy, an empty settings store, and a recording start."""
+    """An app-installed agy 1.5.6, an empty settings store, and no way to start a job."""
+    from app.core import cli_update_check
     from app.db import database
 
     binary = agy_root / "cli" / "1.5.6" / "agy"
@@ -2001,43 +2002,158 @@ def startup_check(agy_root, monkeypatch):
     binary.write_text("agy")
     binary.chmod(0o755)
     (agy_root / "cli" / "current").write_text(str(binary), encoding="utf-8")
-    store, started = {}, []
+    store = {}
     monkeypatch.setattr(database, "get_system_setting", lambda key: store.get(key))
     monkeypatch.setattr(database, "set_system_setting", lambda key, value: store.__setitem__(key, value))
-    monkeypatch.setattr(ag, "start_update", lambda: started.append(1))
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a worker start began an install or update")
+    for job in ("start_install", "start_update", "_run_install", "_download"):
+        monkeypatch.setattr(ag, job, refuse)
     monkeypatch.setattr(ag, "_platform", lambda: ("win32", "AMD64"))
+    monkeypatch.setattr(ag, "_check_task", None)
+    monkeypatch.setattr(cli_update_check, "_found", {})
     monkeypatch.delenv("TESTING", raising=False)
-    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
-    return store, started
+    _versions(monkeypatch, {str(binary): "1.5.6"})
+    return store, binary
 
 
-def test_startup_checks_the_apps_own_install_at_most_every_ten_minutes(startup_check):
-    store, started = startup_check
-    assert ag.update_on_startup() is True and started == [1]
-    assert ag.update_on_startup() is False and started == [1]  # throttled
-    store[ag._setting_key()] = str(float(store[ag._setting_key()]) - ag.STARTUP_CHECK_SECONDS - 1)
-    assert ag.update_on_startup() is True and started == [1, 1]
+async def test_startup_reports_a_newer_release_and_downloads_nothing(startup_check, monkeypatch):
+    from app.core import cli_update_check
+
+    _, binary = startup_check
+    asked = _google(monkeypatch, version="1.5.13",
+                    url="https://storage.googleapis.com/antigravity/windows-x64/cli_windows_x64.exe")
+    assert ag.check_on_startup() is True
+    await ag._check_task
+    assert asked == [ag.manifest_url("windows_amd64")]  # the manifest only, no download
+    assert ag.update_check_state() == {"check_updates": True, "latest_version": "1.5.13"}
+    assert cli_update_check.available() == [{"provider": "antigravity", "name": "Antigravity",
+                                             "installed_version": "1.5.6", "latest_version": "1.5.13"}]
+    assert ag.install_state()["state"] == "idle"
+    assert sorted(p.name for p in binary.parent.parent.iterdir()) == ["1.5.6", "current"]
+    assert ag.locate_binary() == (str(binary), "app")
 
 
-@pytest.mark.parametrize("case", ["testing", "preview", "override", "path", "unsupported"])
-def test_startup_never_checks_tests_previews_or_a_binary_it_did_not_install(
-        startup_check, monkeypatch, tmp_path, case):
-    store, started = startup_check
+@pytest.mark.parametrize("latest", ["1.5.6", "1.5.5", "1.6.0-rc1"])
+async def test_startup_stays_quiet_without_a_newer_plain_release(startup_check, monkeypatch, latest):
+    from app.core import cli_update_check
+
+    _google(monkeypatch, version=latest, url="https://storage.googleapis.com/a/cli.exe")
+    assert ag.check_on_startup() is True
+    await ag._check_task
+    assert ag.update_check_state()["latest_version"] is None and cli_update_check.available() == []
+
+
+async def test_startup_checks_an_agy_on_path_too(startup_check, monkeypatch, tmp_path):
+    """The owner installed it; the app still says when Google has a newer one."""
+    from app.core import cli_update_check
+
+    own = tmp_path / "bin" / "agy"
+    own.parent.mkdir()
+    own.write_text("mine")
+    (ag._root() / "cli" / "current").unlink()
+    monkeypatch.setattr(ag.shutil, "which", lambda name: str(own) if name == "agy" else None)
+    _versions(monkeypatch, {str(own): "1.4.0"})
+    _google(monkeypatch, version="1.5.13", url="https://storage.googleapis.com/a/cli.exe")
+    assert ag.check_on_startup() is True
+    await ag._check_task
+    assert cli_update_check.available()[0]["installed_version"] == "1.4.0"
+    assert own.read_text() == "mine"
+
+
+async def test_startup_names_the_apps_copy_by_its_folder_when_it_will_not_say(startup_check, monkeypatch):
+    _versions(monkeypatch, {})
+    _google(monkeypatch, version="1.5.13", url="https://storage.googleapis.com/a/cli.exe")
+    assert ag.check_on_startup() is True
+    await ag._check_task
+    assert ag.update_check_state()["latest_version"] == "1.5.13"
+
+
+async def test_startup_check_survives_an_offline_worker(startup_check, monkeypatch, caplog):
+    import httpx
+    from app.core import cli_update_check
+
+    async def offline(self, url, **kw):
+        raise httpx.ConnectError("no route to host")
+    monkeypatch.setattr(httpx.AsyncClient, "get", offline)
+    with caplog.at_level("INFO"):
+        assert ag.check_on_startup() is True
+        await ag._check_task
+    assert "could not check for an update" in caplog.text
+    assert cli_update_check.available() == []
+
+
+@pytest.mark.parametrize("case", ["testing", "off", "override", "missing", "unsupported"])
+async def test_startup_check_is_skipped(startup_check, monkeypatch, tmp_path, case):
+    from app.core import cli_update_check
+
+    store, _ = startup_check
     if case == "testing":
         monkeypatch.setenv("TESTING", "1")
-    elif case == "preview":
-        monkeypatch.setenv("AI_SHUFFLE_PREVIEW", "1")
+    elif case == "off":
+        cli_update_check.set_enabled(cli_update_check.ANTIGRAVITY, False)
     elif case == "override":
         override = tmp_path / "custom-agy"
         override.write_text("agy")
         monkeypatch.setenv(ag.BINARY_ENV, str(override))
-    elif case == "path":
+    elif case == "missing":
         (ag._root() / "cli" / "current").unlink()
-        monkeypatch.setattr(ag.shutil, "which", lambda name: str(tmp_path / "agy"))
     else:
         monkeypatch.setattr(ag, "_platform", lambda: ("linux", "riscv64"))
-    assert ag.update_on_startup() is False
-    assert started == [] and store == {}
+    asked = _google(monkeypatch, version="9.9.9", url="https://storage.googleapis.com/a/cli.exe")
+    assert ag.check_on_startup() is False
+    assert ag._check_task is None and asked == []
+    assert cli_update_check.available() == []
+    # Turning Antigravity's check off leaves Claude Code's alone.
+    assert cli_update_check.enabled(cli_update_check.CLAUDE) is True
+
+
+async def test_an_update_the_owner_starts_clears_the_notice(agy_root, mock_db, monkeypatch):
+    from app.core import cli_update_check
+
+    monkeypatch.setattr(cli_update_check, "_found", {})
+    monkeypatch.setattr(ag, "_platform", lambda: ("linux", "aarch64"))
+    old = agy_root / "cli" / "1.5.6" / "agy"
+    old.parent.mkdir(parents=True)
+    old.write_text("old")
+    old.chmod(0o755)
+    (agy_root / "cli" / "current").write_text(str(old), encoding="utf-8")
+    _versions(monkeypatch, {str(old): "1.5.6"})
+    assert cli_update_check.record(cli_update_check.ANTIGRAVITY, "1.5.6", "1.5.7") is True
+    _google(monkeypatch, version="1.5.7", url="https://storage.googleapis.com/a/cli_linux_arm64.tar.gz",
+            payload=_tarball())
+    state = await _run_job("update")
+    assert state["state"] == "succeeded", state
+    assert cli_update_check.available() == []
+    assert ag.update_check_state() == {"check_updates": True, "latest_version": None}
+
+
+def test_update_check_switch_and_notice_through_the_api(client, monkeypatch):
+    from app.core import cli_update_check
+
+    monkeypatch.setattr(cli_update_check, "_found", {})
+    status = client.get(f"{BASE}/status").json()
+    assert status["check_updates"] is True and status["latest_version"] is None
+    assert set(status["install"]) == {"kind", "state", "version", "error", "message"}
+
+    newer = "999.0.0"
+    assert cli_update_check.record(cli_update_check.ANTIGRAVITY, status["version"], newer) is True
+    assert client.get(f"{BASE}/status").json()["latest_version"] == newer
+
+    assert client.put(f"{BASE}/update-check", json={"check_updates": "no"}).status_code == 422
+    saved = client.put(f"{BASE}/update-check", json={"check_updates": False})
+    assert saved.status_code == 200 and saved.json() == {"check_updates": False, "latest_version": None}
+    status = client.get(f"{BASE}/status").json()
+    assert status["check_updates"] is False and status["latest_version"] is None
+    # Only the switch changed: no job started.
+    assert status["install"]["state"] == "idle"
+    assert client.put(f"{BASE}/update-check", json={"check_updates": True}).json()["check_updates"] is True
+
+    # agy updated outside the app: the stale answer is dropped on the next read.
+    cli_update_check.record(cli_update_check.ANTIGRAVITY, "0.0.1", status["version"])
+    assert client.get(f"{BASE}/status").json()["latest_version"] is None
+    assert cli_update_check.available() == []
 
 
 def test_check_for_update_through_the_api(client, monkeypatch):

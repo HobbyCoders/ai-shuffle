@@ -177,6 +177,6 @@ def test_required_available_starts_app(
 def test_entrypoint_validates_before_setup() -> None:
     script = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
     validate = script.index("container_runtime.py validate-isolation")
-    for operation in ('require_bundled_tools "$@"', "if claude_cli_keep_installed",
+    for operation in ('require_bundled_tools "$@"',
                       "container_runtime.py remap-home", "groupmod -o", "usermod -o"):
         assert validate < script.index(operation)

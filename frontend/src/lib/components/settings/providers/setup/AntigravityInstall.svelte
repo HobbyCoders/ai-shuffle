@@ -1,15 +1,17 @@
 <script lang="ts">
 	/**
-	 * Google's Antigravity agent (`agy`) on this worker: version and Check for
-	 * update when installed, otherwise Install (the worker downloads Google's
-	 * own release for its platform from the official manifest), with progress,
-	 * results and errors. Also names peer workers that
-	 * must update before an Antigravity provider can be added.
+	 * Google's Antigravity agent (`agy`) on this worker: version, the switch
+	 * for the start-time update check and Check for update when installed,
+	 * otherwise Install (the worker downloads Google's own release for its
+	 * platform from the official manifest), with progress, results and errors.
+	 * Also names peer workers that must update before an Antigravity provider
+	 * can be added.
 	 */
 	import { onMount } from 'svelte';
 	import '../providers.css';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
+	import Switch from '../../rows/Switch.svelte';
 	import ValueText from '../../rows/ValueText.svelte';
 	import { antigravity } from '../antigravity.svelte';
 
@@ -22,6 +24,8 @@
 		: status?.source === 'override' ? "Google's agent, chosen by AI_SHUFFLE_ANTIGRAVITY_BIN"
 		: "Google's agent, installed by AI Shuffle");
 	const unsupported = $derived(status?.can_install === false);
+	// The newer release the worker found when it started, if any.
+	const newer = $derived(status?.latest_version ?? null);
 
 	// Always re-read on open and when the tab comes back: a job may have run
 	// from another tab, device or the startup check in the meantime.
@@ -45,12 +49,18 @@
 		<SettingRow label="Version" hint={sourceHint}>
 			<ValueText mono status="ok" value={status.version ?? 'Installed'} />
 		</SettingRow>
+		{#if status.check_updates !== undefined && status.source !== 'override' && !unsupported}
+			<SettingRow label="Check for updates at startup" hint="Tells you when a newer version exists"
+				help="When on, this worker asks Google for the current release each time it starts and tells you when yours is older. It never installs anything: you choose when to update.">
+				<Switch checked={status.check_updates} disabled={antigravity.busy} onchange={(v) => antigravity.setUpdateCheck(v)} />
+			</SettingRow>
+		{/if}
 		<SettingRow label="Updates" hint={unsupported ? 'No Google build for this platform; update this agy yourself'
-			: 'Asks Google for a newer release and installs it'}>
-			<button type="button" class="st-btn" disabled={antigravity.busy || unsupported}
+			: newer ? `Version ${newer} is available` : 'Asks Google for a newer release and installs it'}>
+			<button type="button" class="st-btn" class:primary={!!newer && !unsupported} disabled={antigravity.busy || unsupported}
 				aria-describedby={unsupported ? 'antigravity-unsupported' : undefined}
 				aria-busy={antigravity.busy}
-				onclick={() => antigravity.install('update')}>{antigravity.busy ? 'Checking' : 'Check for update'}</button>
+				onclick={() => antigravity.install('update')}>{antigravity.busy ? 'Checking' : newer ? 'Update' : 'Check for update'}</button>
 		</SettingRow>
 	{:else if antigravity.busy}
 		<SettingRow label="Version" hint="Downloading Google's release">

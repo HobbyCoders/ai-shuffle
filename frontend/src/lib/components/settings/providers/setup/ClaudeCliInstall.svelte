@@ -51,8 +51,7 @@
 		<RowGroup title="Claude Code CLI">
 			<SettingRow label="Version"><ValueText mono value="Checking" /></SettingRow>
 			<SettingRow label="Path"><ValueText mono value="Checking" /></SettingRow>
-			<SettingRow id="providers.cliKeepInstalled"><Switch checked={false} disabled /></SettingRow>
-			<p class="cli-helper keep-helper">When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.</p>
+			<SettingRow id="providers.cliCheckUpdates"><Switch checked={false} disabled /></SettingRow>
 			<SettingRow id="providers.cliUpdate" hint={updateHint}><button type="button" class="st-btn" disabled>Check for update</button></SettingRow>
 		</RowGroup>
 		<span class="sr-only" role="status">Checking Claude Code installation</span>
@@ -99,12 +98,11 @@
 			<RowGroup title="Claude Code CLI">
 				<SettingRow label="Version"><ValueText mono value={status.version ?? 'Not reported'} /></SettingRow>
 				<SettingRow label="Path"><ValueText mono value={status.path ?? 'Not reported'} /></SettingRow>
-				<SettingRow id="providers.cliKeepInstalled">
-					<Switch checked={status.keep_installed} disabled={disabled} onchange={(v) => installer.keep(v)} />
+				<SettingRow id="providers.cliCheckUpdates">
+					<Switch checked={status.check_updates} disabled={disabled} onchange={(v) => installer.checkUpdates(v)} />
 				</SettingRow>
-				<p class="cli-helper keep-helper">When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.</p>
-				<SettingRow id="providers.cliUpdate" hint={updateHint}>
-					<button type="button" class="st-btn" disabled={disabled || !status.can_install} onclick={() => installer.start('update')}>Check for update</button>
+				<SettingRow id="providers.cliUpdate" hint={status.latest_version ? `Version ${status.latest_version} is available` : updateHint}>
+					<button type="button" class="st-btn" class:primary={!!status.latest_version} disabled={disabled || !status.can_install} onclick={() => installer.start('update')}>{status.latest_version ? 'Update' : 'Check for update'}</button>
 				</SettingRow>
 				{#if status.can_remove}<SettingRow id="providers.cliRemove">
 					<button type="button" class="st-btn" disabled={disabled} onclick={() => confirming = true}>Remove</button>
@@ -139,7 +137,6 @@
 	.cli-install p { margin: 0; line-height: 1.6; }
 	.cli-helper { color: var(--st-mfg, var(--muted-foreground)); font-size: 12px; }
 	.cli-install > button { justify-self: start; min-height: 44px; }
-	.cli-install .keep-helper { padding: 0 16px 12px; }
 	.cli-peers { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
 	.cli-peers li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; min-width: 0; }
 	.cli-peer-name { overflow-wrap: anywhere; }

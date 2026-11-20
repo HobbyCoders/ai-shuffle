@@ -72,7 +72,7 @@ await runJourney({
 			// Load the real collection first; this case judges history, not lazy-page layout.
 			await page.getByRole('button', { name: 'Providers', exact: true }).click();
 			await page.locator('[data-settings-item="provider:claude"]').click();
-			await page.getByText('Keep Claude Code installed', { exact: true }).waitFor();
+			await page.getByText('Check for updates at startup', { exact: true }).waitFor();
 			if (page.viewportSize().width <= 600) {
 				await page.goBack();
 				await page.waitForFunction(() => document.querySelector('div.settings-shell[data-view]')?.getAttribute('data-view') === 'page');

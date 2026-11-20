@@ -8,6 +8,7 @@ import {
 	getAntigravityMeta,
 	getAntigravityStatus,
 	installAntigravity,
+	setAntigravityUpdateCheck,
 	updateAntigravity,
 	type AntigravityInstallStatus,
 	type AntigravityMeta
@@ -83,6 +84,19 @@ class AntigravityState {
 			this.retry = () => this.install(kind);
 		} finally {
 			this.starting = false;
+		}
+	}
+
+	/** Turn the worker's start-time check for a newer Antigravity on or off. */
+	async setUpdateCheck(value: boolean): Promise<void> {
+		this.error = null;
+		try {
+			const saved = await setAntigravityUpdateCheck(value);
+			if (this.status) this.status = { ...this.status, check_updates: saved.check_updates,
+				latest_version: saved.latest_version };
+		} catch (e) {
+			this.error = getErrorMessage(e, 'Could not save the Antigravity update check');
+			this.retry = () => this.setUpdateCheck(value);
 		}
 	}
 

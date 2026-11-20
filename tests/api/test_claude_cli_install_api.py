@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.api import auth, settings as api
-from app.core import application_updates, claude_cli_install as ci, worker_settings
+from app.core import application_updates, claude_cli_install as ci, cli_update_check, worker_settings
 
 BASE = "/api/v1/settings/claude-cli"
 
@@ -17,8 +17,9 @@ def client():
 
 
 @pytest.mark.parametrize("method,suffix,body", [
-    ("get", "", None), ("put", "", {"keep_installed": True}),
+    ("get", "", None), ("put", "", {"check_updates": True}),
     ("post", "/install", None), ("post", "/update", None), ("post", "/remove", None),
+    ("get", "/../cli-updates", None),
 ])
 def test_owner_required(client, monkeypatch, method, suffix, body):
     monkeypatch.setattr(auth, "get_paired_client_from_token", lambda *a, **kw: {"account_owner_admin": False})
@@ -27,8 +28,8 @@ def test_owner_required(client, monkeypatch, method, suffix, body):
 
 
 def _payload():
-    return {"installed": False, "version": None, "path": None, "keep_installed": False,
-            "installed_by_app": False, "can_install": True, "can_remove": False,
+    return {"installed": False, "version": None, "path": None, "check_updates": True,
+            "latest_version": None, "installed_by_app": False, "can_install": True, "can_remove": False,
             "platform": "desktop", "job": None}
 
 
@@ -37,16 +38,22 @@ def test_get_put_and_actions_share_contract(client, monkeypatch):
     monkeypatch.setattr(application_updates, "all_workers", lambda: False)
     payload = {**_payload(), "update_all_workers": False}
     monkeypatch.setattr(ci, "payload", lambda: dict(payload))
-    monkeypatch.setattr(ci, "set_keep_installed", lambda value: payload.update(keep_installed=value))
+    saved = []
+    monkeypatch.setattr(cli_update_check, "set_enabled",
+                        lambda provider, value: saved.append((provider, value)) or payload.update(check_updates=value))
     def start(kind):
         payload["job"] = {"kind": kind, "state": "running", "started_at": "2026-10-05T12:00:00+00:00",
                           "finished_at": None, "message": None, "output_tail": None}
         return dict(payload)
     monkeypatch.setattr(ci, "start", start)
     assert client.get(BASE).json() == payload
-    response = client.put(BASE, json={"keep_installed": True})
-    assert response.status_code == 200 and response.json()["keep_installed"]
-    assert client.put(BASE, json={"keep_installed": "yes"}).status_code == 422
+    response = client.put(BASE, json={"check_updates": False})
+    assert response.status_code == 200 and response.json()["check_updates"] is False
+    assert saved == [("claude", False)] and payload["job"] is None
+    assert client.put(BASE, json={"check_updates": "yes"}).status_code == 422
+    # The removed setting is not accepted under its old name.
+    assert client.put(BASE, json={"keep_installed": True}).status_code == 422
+    assert saved == [("claude", False)]
     for kind in ("install", "update", "remove"):
         response = client.post(BASE + "/" + kind)
         assert response.status_code == 200 and response.json() == payload
@@ -89,6 +96,42 @@ def test_update_still_starts_here_when_other_workers_cannot_be_asked(client, mon
     assert response.status_code == 200 and response.json()["workers"] is None
 
 
+def test_updates_found_at_start_are_listed_and_nothing_is_started(client, monkeypatch):
+    client.app.dependency_overrides[auth.require_admin] = lambda: "owner"
+    from app.core import antigravity, claude_cli_status
+    monkeypatch.setattr(cli_update_check, "_found", {})
+    start = []
+    monkeypatch.setattr(ci, "start", lambda kind: start.append(kind))
+    monkeypatch.setattr(antigravity, "start_install", lambda *a, **k: start.append("antigravity"))
+    cli = claude_cli_status.ClaudeCliStatus(installed=True, cli_version="2.1.323")
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda **kw: cli)
+    agy = {"binary": "/data/antigravity/cli/1.5.7/agy", "version": "1.5.7"}
+    monkeypatch.setattr(antigravity, "locate_binary", lambda: (agy["binary"], "app" if agy["binary"] else None))
+
+    async def version(binary):
+        return agy["version"]
+    monkeypatch.setattr(antigravity, "binary_version", version)
+    url = "/api/v1/settings/cli-updates"
+    assert client.get(url).json() == {"updates": []}
+
+    cli_update_check.record("claude", "2.1.323", "2.1.330")
+    cli_update_check.record("antigravity", "1.5.7", "1.5.13")
+    assert client.get(url).json() == {"updates": [
+        {"provider": "claude", "name": "Claude Code", "installed_version": "2.1.323", "latest_version": "2.1.330"},
+        {"provider": "antigravity", "name": "Antigravity", "installed_version": "1.5.7", "latest_version": "1.5.13"},
+    ]}
+    # Each one goes away once its install has caught up, however that happened.
+    cli.cli_version = "2.1.330"
+    assert [u["provider"] for u in client.get(url).json()["updates"]] == ["antigravity"]
+    agy["version"] = "1.5.13"
+    assert client.get(url).json() == {"updates": []}
+    # And when the binary was removed outside the app.
+    cli_update_check.record("antigravity", "1.5.7", "1.5.13")
+    agy["binary"] = None
+    assert client.get(url).json() == {"updates": []}
+    assert start == []
+
+
 def test_remove_refusal(client, monkeypatch):
     client.app.dependency_overrides[auth.require_admin] = lambda: "owner"
     def refuse(kind):
@@ -106,20 +149,21 @@ from app.api.auth import hash_api_key
 from app.core import preview_access
 from app.db import database
 
-ROUTES = [("get", ""), ("put", ""), ("post", "/install"), ("post", "/update"), ("post", "/remove")]
+ROUTES = [("get", ""), ("put", ""), ("post", "/install"), ("post", "/update"), ("post", "/remove"),
+          ("get", "/../cli-updates")]
 
 
 @pytest.fixture
 def guarded(monkeypatch):
     start, keep = Mock(), Mock()
     monkeypatch.setattr(ci, "start", start)
-    monkeypatch.setattr(ci, "set_keep_installed", keep)
+    monkeypatch.setattr(cli_update_check, "set_enabled", keep)
     monkeypatch.setattr(ci, "payload", _payload)
     return start, keep
 
 
 def _call(c, method, suffix, **kw):
-    body = {"keep_installed": False} if method == "put" else None
+    body = {"check_updates": False} if method == "put" else None
     return c.request(method, "/api/v1" + BASE.removeprefix("/api/v1") + suffix, json=body, **kw)
 
 

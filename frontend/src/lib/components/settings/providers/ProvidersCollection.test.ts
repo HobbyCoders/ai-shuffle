@@ -651,7 +651,7 @@ describe('Claude Code on the Not connected page', () => {
 			'POST /settings/claude-cli/remove': () => {
 				worker.state.claude = { ...worker.state.claude, cli: { ...worker.state.claude.cli, installed: false } };
 				worker.state.cli = { ...worker.state.cli, installed: false };
-				return { installed: false, version: null, path: null, keep_installed: false, installed_by_app: false,
+				return { installed: false, version: null, path: null, check_updates: true, latest_version: null, installed_by_app: false,
 					can_install: true, can_remove: false, platform: 'docker',
 					job: { kind: 'remove', state: 'succeeded', started_at: '2026-10-06T00:00:00Z',
 						finished_at: '2026-10-06T00:00:05Z', message: removed, output_tail: '' } };

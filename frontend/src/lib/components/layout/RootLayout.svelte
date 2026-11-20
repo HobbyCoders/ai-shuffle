@@ -39,6 +39,7 @@
 	import { initDesktop } from '$lib/services/desktop';
 	import { installFileLinkGuard } from '$lib/utils/file-link-guard';
 	import { appUpdateMonitor, installAppUpdateWatch } from '$lib/services/app-update-watch';
+	import { installCliUpdateNotice } from '$lib/services/cli-update-notice';
 	let teardownLiveSync: (() => void) | undefined;
 	let teardownDesktop: (() => void) | null = null;
 
@@ -103,6 +104,15 @@
 	});
 	$effect(() => {
 		if (authDestination) void goto(authDestination);
+	});
+
+	// A newer Claude Code or Antigravity the worker found when it started: the
+	// owner gets a small banner with Update. The worker itself never installs one.
+	const cliUpdateNotice = $derived(initialized && $auth.status?.authenticated === true
+		&& $auth.status.is_admin === true && !$auth.status.setup_required
+		&& $auth.status.onboarding_complete !== false && !ownerPasswordBlocking);
+	$effect(() => {
+		if (cliUpdateNotice) return installCliUpdateNotice();
 	});
 
 	// Delay protected children until bootstrap has real auth evidence. A failed

@@ -2,8 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AntigravityInstallJob, AntigravityInstallStatus } from '$lib/api/antigravity';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
-vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post },
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn() }));
+vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, put: mocks.put },
 	getErrorMessage: (e: Error, fallback: string) => e?.message ?? fallback }));
 import AntigravityInstall from './AntigravityInstall.svelte';
 import { antigravity } from '../antigravity.svelte';
@@ -37,6 +37,35 @@ it('shows the installed version with Check for update, and says when it is up to
 	expect((screen.getByRole('button', { name: 'Checking' }) as HTMLButtonElement).disabled).toBe(true);
 	expect(await screen.findByText('Antigravity is up to date (1.5.6).', {}, { timeout: 4000 })).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Check for update' })).toBeTruthy();
+});
+
+it('turns the start-time update check off without starting a job', async () => {
+	current = { ...installed, check_updates: true, latest_version: null };
+	mocks.put.mockResolvedValue({ check_updates: false, latest_version: null });
+	render(AntigravityInstall);
+	const control = await screen.findByRole('switch', { name: 'Check for updates at startup' });
+	expect(control.getAttribute('aria-checked')).toBe('true');
+	await fireEvent.click(control);
+	expect(mocks.put).toHaveBeenCalledWith('/antigravity/update-check', { check_updates: false });
+	await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
+	expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it('offers the newer release the worker found, and installs it only on a press', async () => {
+	current = { ...installed, check_updates: true, latest_version: '1.5.13' };
+	render(AntigravityInstall);
+	expect(await screen.findByText('Version 1.5.13 is available')).toBeTruthy();
+	expect(mocks.post).not.toHaveBeenCalled();
+	mocks.post.mockResolvedValue({ kind: 'update', state: 'running', version: null, error: null, message: null });
+	await fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+	expect(mocks.post).toHaveBeenCalledWith('/antigravity/update');
+});
+
+it('has no update-check switch for an agy the owner chose by environment variable', async () => {
+	current = { ...installed, source: 'override', check_updates: true, latest_version: null };
+	render(AntigravityInstall);
+	expect(await screen.findByText('1.5.6')).toBeTruthy();
+	expect(screen.queryByRole('switch')).toBeNull();
 });
 
 it('says what the update did, and shows a failed check as an alert', async () => {

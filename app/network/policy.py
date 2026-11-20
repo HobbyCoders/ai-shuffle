@@ -103,7 +103,10 @@ _LOCAL_SETTING_PATTERNS = [
         r"^claude_auth_mode(:|$)",
         # Saved Claude subscription sign-ins: each worker keeps its own CLI login.
         r"^claude_cli_logins(:|$)",
-        r"^claude_cli_(keep_installed|installed_by_app|startup_check_at)(:|$)",
+        # keep_installed and startup_check_at are no longer written; rows an
+        # older version left behind stay on their worker all the same.
+        r"^claude_cli_(keep_installed|installed_by_app|startup_check_at|update_check)(:|$)",
+        r"^antigravity_cli_(startup_check_at|update_check)(:|$)",
         # The Claude "Cloud provider or gateway" method and its secrets belong
         # to this worker. The legacy per-worker auth-mode setting above is
         # local too; the explicit claude_auth_selection follows the owner.

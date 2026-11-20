@@ -3,7 +3,7 @@ import { api } from './client';
 
 export type WorkerAction =
 	| { operation: 'claude-install' | 'claude-update' }
-	| { operation: 'claude-keep-installed'; keep_installed: boolean }
+	| { operation: 'claude-update-check'; check_updates: boolean }
 	| { operation: 'release-channel'; channel: 'stable' | 'nightly' }
 	| { operation: 'always-on'; always_on: boolean | null };
 
@@ -11,7 +11,8 @@ export interface MachineStatus {
 	claude: {
 		installed: boolean;
 		version: string | null;
-		keep_installed: boolean;
+		/** The worker's start-time check for a newer Claude Code. Missing or null on a worker too old to have it. */
+		check_updates?: boolean | null;
 		installed_by_app: boolean;
 		can_install: boolean;
 		signed_in: boolean | null;

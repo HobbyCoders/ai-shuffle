@@ -31,8 +31,8 @@
 	const allOptions = [
 		{ value: 'claude-install', label: 'Install Claude CLI' },
 		{ value: 'claude-update', label: 'Update Claude CLI' },
-		{ value: 'keep', label: 'Keep Claude CLI installed' },
-		{ value: 'no-keep', label: 'Don’t keep Claude CLI installed' },
+		{ value: 'check', label: 'Check for Claude CLI updates at startup' },
+		{ value: 'no-check', label: 'Don’t check for Claude CLI updates' },
 		{ value: 'stable', label: 'Use stable releases' },
 		{ value: 'nightly', label: 'Use nightly releases' },
 		{ value: 'on', label: 'Worker stays on' },
@@ -48,7 +48,7 @@
 		confirmAll = false;
 		let action: WorkerAction;
 		if (allAction === 'stable' || allAction === 'nightly') action = { operation: 'release-channel', channel: allAction };
-		else if (allAction === 'keep' || allAction === 'no-keep') action = { operation: 'claude-keep-installed', keep_installed: allAction === 'keep' };
+		else if (allAction === 'check' || allAction === 'no-check') action = { operation: 'claude-update-check', check_updates: allAction === 'check' };
 		else if (['on', 'off', 'default'].includes(allAction)) action = { operation: 'always-on', always_on: allAction === 'default' ? null : allAction === 'on' };
 		else action = { operation: allAction as 'claude-install' | 'claude-update' };
 		void model.act('all', action).then(() => {
@@ -76,10 +76,12 @@
 			</SettingRow>
 			{#if cli?.installed && !cli.installed_by_app}<p class="note">This CLI is managed outside AI Shuffle.</p>{/if}
 			{#if cli?.job && !installing}<p class="note" role="status">Claude CLI {cli.job.kind}: {cli.job.state}</p>{/if}
-			<SettingRow label="Keep installed" help="Keep Claude CLI available after this worker restarts. Turning this off does not uninstall it.">
-				<Switch checked={cli?.keep_installed ?? false} disabled={busy || !online || !cli || installing}
-					onchange={(value) => act({ operation: 'claude-keep-installed', keep_installed: value })} />
-			</SettingRow>
+			{#if typeof cli?.check_updates === 'boolean'}
+				<SettingRow label="Check for updates at startup" help="The worker asks Anthropic for the current Claude CLI version each time it starts and tells you when its own is older. It never installs anything.">
+					<Switch checked={cli.check_updates} disabled={busy || !online || installing}
+						onchange={(value) => act({ operation: 'claude-update-check', check_updates: value })} />
+				</SettingRow>
+			{/if}
 			<SettingRow label="Claude sign-in">
 				<span class="status-text">{claudeSignIn}</span>
 			</SettingRow>

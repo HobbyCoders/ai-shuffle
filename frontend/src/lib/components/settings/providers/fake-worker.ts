@@ -216,7 +216,7 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 			return state.rows.find((r) => r.id === id);
 		},
 		'GET /settings/claude-cli': () => ({ installed: state.cli.installed, version: state.cli.cli_version,
-			path: state.cli.binary_path, keep_installed: state.cli.installed, installed_by_app: true,
+			path: state.cli.binary_path, check_updates: true, latest_version: null, installed_by_app: true,
 			can_install: true, can_remove: true, platform: state.cli.login.surface, job: null }),
 		'GET /settings/integrations': () => state.integrations,
 		'PUT /settings/integrations/fal-ai/enabled': (body) => {

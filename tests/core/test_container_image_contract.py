@@ -94,16 +94,16 @@ def test_docker_supervisor_owns_signals_and_persistent_storage():
 def test_image_startup_does_not_require_network_package_installation():
     entrypoint = (ROOT / "entrypoint.sh").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    installer = (ROOT / "docker" / "install-claude-cli.sh").read_text()
     # Updates arrive by pulling a new image: no AUTO_UPDATE switch anywhere and
     # no package-manager upgrades at boot.
     assert "AUTO_UPDATE" not in compose
     assert "AUTO_UPDATE" not in entrypoint
     assert "apt-get" not in entrypoint
-    # The Claude CLI install is bounded and never fails the container.
-    assert "install-claude-cli.sh || true" in entrypoint
-    assert "timeout 600s" in installer
-    assert "https://claude.ai/install.sh" in installer
+    # Container start installs no provider CLI: the owner does, in Settings.
+    assert "install-claude-cli" not in entrypoint
+    assert "claude.ai/install" not in entrypoint
+    assert not (ROOT / "docker" / "install-claude-cli.sh").exists()
+    # The install the owner asked for still survives a new image.
     assert "local-home:/home/appuser/.local" in compose
     assert "DATABASE_URL=${DATABASE_URL:-}" not in compose
     assert "DATABASE_MODE=${DATABASE_MODE:-auto}" not in compose

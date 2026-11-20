@@ -2,7 +2,7 @@
 	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
-	 * Claude also shows its mode and the installed CLI (version, keep installed,
+	 * Claude also shows its mode and the installed CLI (version, update check,
 	 * Remove), so an owner without a Claude sign-in can still change or remove them.
 	 */
 	import { providers } from '$lib/stores/providers.svelte';

@@ -520,7 +520,8 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
 
 
 class ClaudeCliUpdate(BaseModel):
-    keep_installed: StrictBool
+    #: Whether this worker asks at start if a newer Claude Code exists.
+    check_updates: StrictBool
 
 
 def _claude_cli_payload(payload=None):
@@ -537,9 +538,27 @@ async def get_claude_cli(token: str = Depends(require_admin)):
 
 @router.put("/claude-cli")
 async def put_claude_cli(request: ClaudeCliUpdate, token: str = Depends(require_admin)):
-    from app.core import claude_cli_install
-    await run_sync(claude_cli_install.set_keep_installed, request.keep_installed)
+    from app.core import cli_update_check
+    await run_sync(cli_update_check.set_enabled, cli_update_check.CLAUDE, request.check_updates)
     return await run_sync(_claude_cli_payload)
+
+
+@router.get("/cli-updates")
+async def get_cli_updates(token: str = Depends(require_admin)):
+    """Newer Claude Code and Antigravity versions this worker found when it
+    started, for the notice the app shows. Nothing is installed by asking."""
+    from app.core import antigravity, cli_update_check
+    updates = await run_sync(cli_update_check.available)
+    if any(update["provider"] == cli_update_check.ANTIGRAVITY for update in updates):
+        # agy may have been updated or removed outside the app since the check.
+        binary, _ = await run_sync(antigravity.locate_binary)
+        installed = await antigravity.binary_version(binary) if binary else None
+        if installed:
+            await run_sync(cli_update_check.latest_version, cli_update_check.ANTIGRAVITY, installed)
+        elif not binary:
+            await run_sync(cli_update_check.forget, cli_update_check.ANTIGRAVITY)
+        updates = await run_sync(cli_update_check.available)
+    return {"updates": updates}
 
 
 @router.post("/claude-cli/{kind}")

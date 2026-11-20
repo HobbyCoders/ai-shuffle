@@ -1,7 +1,7 @@
 /** Mounted-view state for owner-requested CLI jobs. No work continues after disposal. */
 import { getErrorMessage } from '$lib/api/client';
 import { getClaudeCliInstallation, installClaudeCli, updateClaudeCli, removeClaudeCli,
-	setClaudeCliKeepInstalled, type ClaudeCliInstallation, type ClaudeCliJob,
+	setClaudeCliUpdateCheck, type ClaudeCliInstallation, type ClaudeCliJob,
 	type ClaudeCliPeerResult } from '$lib/api/claude-cli';
 import { auth } from '$lib/stores/auth.svelte';
 import { providers } from '$lib/stores/providers.svelte';
@@ -58,9 +58,9 @@ export class ClaudeCliInstallState {
 		catch (e) { this.error = getErrorMessage(e, 'Could not start the job. Try again.'); }
 		finally { this.busy = false; }
 	}
-	async keep(value: boolean): Promise<boolean> {
+	async checkUpdates(value: boolean): Promise<boolean> {
 		this.busy = true; this.error = '';
-		try { await this.#accept(await setClaudeCliKeepInstalled(value)); return true; }
+		try { await this.#accept(await setClaudeCliUpdateCheck(value)); return true; }
 		catch (e) { this.error = getErrorMessage(e, 'Could not save the setting. Try again.'); return false; }
 		finally { this.busy = false; }
 	}

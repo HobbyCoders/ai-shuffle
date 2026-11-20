@@ -35,6 +35,7 @@ import {
 	setAppUpdateListener,
 	type AppUpdateMonitor
 } from './app-update';
+import { recheckCliUpdates } from './cli-update-notice';
 
 // ── Loop guard and cap ──────────────────────────────────────────────────────
 
@@ -267,7 +268,8 @@ export function installAppUpdateWatch(): () => void {
 	window.addEventListener('vite:preloadError', onPreloadError);
 	window.addEventListener('unhandledrejection', onRejection);
 	setAppUpdateListener({
-		reconnected: () => void current.check('reconnect'),
+		// A worker that restarted also looked for newer provider CLIs again.
+		reconnected: () => { void current.check('reconnect'); recheckCliUpdates(); },
 		chunkFailed: () => void current.check('chunk')
 	});
 

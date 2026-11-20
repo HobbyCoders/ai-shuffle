@@ -44,6 +44,8 @@ from unicodedata import category
 from fluid.engine.acp import antigravity as agy_spec
 from fluid.engine.acp.client import AcpConnection, AcpError
 
+from app.core import cli_update_check
+
 logger = logging.getLogger(__name__)
 
 PROVIDER_TYPE = agy_spec.PROVIDER
@@ -413,32 +415,24 @@ class InstallJob:
 _install = InstallJob()
 _install_task: Optional[asyncio.Task] = None
 JOB_KINDS = ("install", "update")
-#: A worker checks for a newer Antigravity once per start; one restarting in a
-#: loop asks Google at most this often.
-STARTUP_CHECK_SECONDS = 600
 UP_TO_DATE = "Antigravity is up to date ({version})."
-
-
-def _version_key(text: Optional[str]) -> Optional[tuple]:
-    """``1.5.7`` → ``(1, 5, 7)``; None when the text is not a plain dotted version
-    (``1.5.7-rc1`` included: such versions compare by equality only)."""
-    match = re.fullmatch(r"\d+(?:\.\d+)*", (text or "").strip())
-    return tuple(int(part) for part in match.group(0).split(".")) if match else None
-
-
-def _is_current(installed: Optional[str], latest: str) -> bool:
-    """Whether ``installed`` is ``latest`` or newer: a job never downgrades."""
-    if not installed:
-        return False
-    if installed == latest:
-        return True
-    have, want = _version_key(installed), _version_key(latest)
-    return have is not None and want is not None and have >= want
+_CHECK_SECONDS = 15
+# A job never downgrades: "current" means this version or a newer one.
+_version_key = cli_update_check.version_key
+_is_current = cli_update_check.is_current
 
 
 def install_state() -> Dict[str, Any]:
     return {"kind": _install.kind, "state": _install.state, "version": _install.version,
             "error": _install.error, "message": _install.message}
+
+
+def update_check_state(installed: Optional[str] = None) -> Dict[str, Any]:
+    """The start-time update check: whether it is on, and the newer version it
+    found. With ``installed``, an answer that version has caught up with (agy
+    updated outside the app) is dropped."""
+    return {"check_updates": cli_update_check.enabled(cli_update_check.ANTIGRAVITY),
+            "latest_version": cli_update_check.latest_version(cli_update_check.ANTIGRAVITY, installed)}
 
 
 def start_install(kind: str = "install") -> Dict[str, Any]:
@@ -540,8 +534,9 @@ async def _run_install(job: InstallJob, key: str) -> None:
         job.message = job.error
     finally:
         job.finished_at = time.time()
-        # The startup check has nobody watching Settings: the log is its result.
         if job.state == "succeeded":
+            # Installed, updated or found current: the last check's answer is spent.
+            cli_update_check.forget(cli_update_check.ANTIGRAVITY)
             logger.info("[antigravity] %s: %s", job.kind, job.message)
 
 
@@ -602,34 +597,48 @@ def prune_versions(keep: Path, spared: Optional[List[Path]] = None) -> List[str]
     return removed
 
 
-def _setting_key() -> str:
-    from app.core.config import settings
-    return "antigravity_cli_startup_check_at:" + settings.effective_instance_id
-
-
-def update_on_startup() -> bool:
-    """Check for a newer Antigravity when the worker starts. True when it started.
-
-    The same job as "Check for update". Only for the app's own install, never
-    one on PATH or behind the override, and never from the test suite or a
-    branch preview. Throttled so a worker restarting in a loop does not keep
-    asking Google; the job runs in the background and logs what it did.
-    """
-    if os.environ.get("TESTING") == "1" or os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
-        return False
-    if locate_binary()[1] != "app" or manifest_key() is None:
-        return False
-    from app.db import database
-    key = _setting_key()
+async def _check_for_update(binary: str, source: Optional[str], key: str) -> None:
+    import httpx
     try:
-        last = float(database.get_system_setting(key) or 0)
-    except ValueError:
-        last = 0.0
-    now = time.time()
-    if 0 <= now - last < STARTUP_CHECK_SECONDS:
+        installed = await binary_version(binary)
+        if not installed and source == "app":
+            # Our own copy lives in cli/<version>/, which names it.
+            folder = Path(binary).parent.name
+            installed = folder if _version_key(folder) else None
+        async with httpx.AsyncClient(timeout=_CHECK_SECONDS, follow_redirects=True) as client:
+            manifest = (await client.get(manifest_url(key))).raise_for_status().json()
+        latest = str(manifest.get("version") or "")
+        if not re.fullmatch(r"\d[\w.+-]{0,63}", latest):
+            raise RuntimeError("Google's update manifest did not name a version.")
+    except Exception as exc:  # noqa: BLE001 — offline is normal; the worker runs on
+        logger.info("[antigravity] could not check for an update (%s)", exc)
+        return
+    if cli_update_check.record(cli_update_check.ANTIGRAVITY, installed, latest):
+        logger.info("[antigravity] %s is available (installed: %s). Update it in "
+                    "Settings > Providers > Antigravity.", latest, installed)
+    else:
+        logger.info("[antigravity] %s is up to date", installed or "the installed version")
+
+
+_check_task: Optional[asyncio.Task] = None
+
+
+def check_on_startup() -> bool:
+    """Ask whether a newer Antigravity exists when the worker starts. True when asked.
+
+    Only a check: it reads Google's manifest and downloads nothing. The answer
+    becomes a notice with an Update button. Not for a binary the owner pinned
+    with the override, not when the owner turned the check off for this
+    worker, and never from the test suite.
+    """
+    global _check_task
+    if cli_update_check.suppressed() or not cli_update_check.enabled(cli_update_check.ANTIGRAVITY):
         return False
-    database.set_system_setting(key, str(now))
-    start_update()
+    binary, source = locate_binary()
+    key = manifest_key()
+    if not binary or source == "override" or key is None:
+        return False
+    _check_task = asyncio.get_running_loop().create_task(_check_for_update(binary, source, key))
     return True
 
 

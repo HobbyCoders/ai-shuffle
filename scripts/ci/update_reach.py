@@ -16,7 +16,7 @@ reads when it runs this check before a push):
                     Docker image" for this release and keep their version until
                     the image is replaced. Only the owner accepts that.
   image-pin         The image inputs (docker/update_contract.py: IMAGE_INPUTS:
-                    the Dockerfile, the root entrypoint and the CLI installer)
+                    the Dockerfile and the root entrypoint)
                     changed in more than comments and IMAGE_INPUTS_PIN was not
                     updated. Run python docker/update_contract.py --pin to
                     confirm that older images may keep running without it.
