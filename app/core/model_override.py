@@ -400,8 +400,18 @@ def _family_consent(model: str, text: str) -> Optional[bool]:
 def named_by_user(model: str, texts: Iterable[str],
                   catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
     """Whether any of ``texts`` names ``model``."""
+    from app.core.claude_api_provider import is_claude_api_id
     from app.core.model_registry import model_values
+    from app.core.query_options import decode_provider_model
 
+    decoded = decode_provider_model(model)
+    if decoded and is_claude_api_id(decoded[0]):
+        # Its model names are also the Claude subscription's, so naming one is
+        # not consent to bill the key: the text must name the Claude API leg
+        # itself (its exact composite, or "Claude API") as well as the model.
+        texts = [text for text in texts
+                 if model.lower() in str(text or "").lower()
+                 or _mentions(_tokens(text), "claude api")]
     if model in model_values():
         return any(_family_consent(model, text) is True for text in texts)
     full, words = names_for(model, catalog)

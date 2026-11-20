@@ -265,3 +265,28 @@ def test_one_shot_generation_on_the_subscription_stays_delegated(key):
     claude_auth_mode.set_mode("subscription")
     options = build_generation_options({"model": "sonnet"})
     assert options.aih_provider_id is None
+
+
+def test_a_bare_model_name_is_not_consent_to_bill_the_key(key):
+    """Task/StartSession consent: the API model's names are also the
+    subscription's, so the owner must name the Claude API leg itself."""
+    from app.core.model_override import named_by_user
+
+    model = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:claude-sonnet-5"
+    catalog = {model: ("claude-sonnet-5", "Claude Sonnet 5")}
+    assert not named_by_user(model, ["Start the review on claude-sonnet-5."], catalog)
+    assert not named_by_user(model, ["Use Claude Sonnet 5 for this."], catalog)
+    assert named_by_user(model, ["Run it on Claude API with claude-sonnet-5."], catalog)
+    assert named_by_user(model, [f"Use {model}."], catalog)
+
+
+def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):
+    """A slow read for key A that passed the active-key check before the owner
+    switched to B must not replace B's saved list."""
+    claude_auth_mode.set_mode("api_key")
+    monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
+    cap.remember_models("sk-ant-b", [{"id": "claude-b-only", "label": "B"}])
+    monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: KEY)
+    cap.remember_models(KEY, [{"id": "claude-a-only", "label": "A"}])  # A's late write
+    monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
+    assert cap.virtual_row()["models_json"] == [{"id": "claude-b-only", "label": "B"}]

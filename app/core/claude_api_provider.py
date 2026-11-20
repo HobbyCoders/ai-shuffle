@@ -54,6 +54,9 @@ _REFRESH_WAIT = 15.0
 _refresh_tried: Dict[str, float] = {}
 _refresh_inflight: Dict[str, threading.Event] = {}
 _refresh_lock = threading.Lock()
+# remember_models: one read-modify-write of the per-key catalogs at a time.
+_cache_lock = threading.Lock()
+_CATALOG_SLOTS = 8
 
 
 def is_claude_api_id(provider_id: Optional[str]) -> bool:
@@ -89,30 +92,44 @@ def _default_models() -> List[Dict[str, str]]:
     return [{"id": API_MODEL_IDS[m.value], "label": m.label} for m in MODELS if m.value in API_MODEL_IDS]
 
 
-def _cached_models(key: str) -> Optional[List[Dict[str, str]]]:
+def _catalogs() -> Dict[str, Any]:
+    """Saved catalogs by key hash: ``{hash: [model, ...]}``."""
     from app.db import database
 
     try:
         raw = database.get_system_setting(MODELS_CACHE_SETTING)
         value = json.loads(raw) if raw else None
     except Exception:  # noqa: BLE001 — a bad cache falls back to the defaults
-        return None
-    if not isinstance(value, dict) or value.get("key") != _key_hash(key):
-        return None
-    models = [m for m in value.get("models") or []
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    by_key = value.get("by_key")
+    return dict(by_key) if isinstance(by_key, dict) else {}
+
+
+def _cached_models(key: str) -> Optional[List[Dict[str, str]]]:
+    models = [m for m in _catalogs().get(_key_hash(key)) or []
               if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"]]
     return [{"id": m["id"], "label": str(m.get("label") or m["id"])} for m in models] or None
 
 
 def remember_models(key: str, models: List[Dict[str, str]]) -> None:
-    """Keep the list Anthropic returned for the ACTIVE key as this row's models."""
+    """Keep the list Anthropic returned for the ACTIVE key as this row's models.
+
+    Each key has its own slot, so a slow read for a key that is no longer
+    active can never overwrite the new key's list.
+    """
     if not models or key != _active_key():
         return
     from app.db import database
 
-    database.set_system_setting(MODELS_CACHE_SETTING, json.dumps(
-        {"key": _key_hash(key), "models": [{"id": m["id"], "label": m.get("label") or m["id"]}
-                                           for m in models]}))
+    digest = _key_hash(key)
+    with _cache_lock:
+        catalogs = {h: m for h, m in _catalogs().items() if h != digest}
+        # The newest last; a handful of saved keys is the most anyone keeps.
+        catalogs = dict(list(catalogs.items())[-(_CATALOG_SLOTS - 1):])
+        catalogs[digest] = [{"id": m["id"], "label": m.get("label") or m["id"]} for m in models]
+        database.set_system_setting(MODELS_CACHE_SETTING, json.dumps({"by_key": catalogs}))
 
 
 def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:

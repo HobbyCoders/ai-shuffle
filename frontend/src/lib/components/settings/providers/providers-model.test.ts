@@ -409,6 +409,13 @@ describe('claudeGateNotice', () => {
 		);
 	});
 
+	it('names only Claude Cloud when cloud mode is incomplete and a key is saved', () => {
+		const summary = claudeSummary({ mode: 'cloud', gate: { ...gate, mode: 'cloud', claude_credential_ready: false } });
+		expect(claudeGateNotice(summary)).toBe(
+			'Claude Cloud cannot run: no cloud provider or gateway is saved on this worker. Claude API models run on the saved key.'
+		);
+	});
+
 });
 
 

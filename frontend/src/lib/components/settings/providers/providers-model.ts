@@ -938,16 +938,17 @@ export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | nul
 	}
 	const gate = claude.gate;
 	if (!gate || gate.claude_credential_ready !== false) return null;
+	// The saved key is its own provider (Claude API) and still runs without the CLI.
+	const [who, keyNote] = claude.api_key.set
+		? [claude.mode === 'cloud' ? 'Claude Cloud' : 'Claude subscription', ' Claude API models run on the saved key.']
+		: ['Claude', ''];
 	if (claude.mode === 'cloud') {
 		const missing = claude.cloud?.missing ?? [];
 		return claude.cloud?.configured && missing.length
-			? `Claude cannot run: ${claude.cloud.method_label} needs ${missing.join(' and ')}.`
-			: 'Claude cannot run: no cloud provider or gateway is saved on this worker.';
+			? `${who} cannot run: ${claude.cloud.method_label} needs ${missing.join(' and ')}.${keyNote}`
+			: `${who} cannot run: no cloud provider or gateway is saved on this worker.${keyNote}`;
 	}
-	const cli = 'the Claude Code CLI is not signed in on this worker.';
-	return claude.api_key.set
-		? `Claude subscription cannot run: ${cli} Claude API models run on the saved key.`
-		: `Claude cannot run: ${cli}`;
+	return `${who} cannot run: the Claude Code CLI is not signed in on this worker.${keyNote}`;
 }
 
 /** Credentials that need the user: the index badge counts these. */
