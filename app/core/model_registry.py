@@ -32,7 +32,9 @@ if TYPE_CHECKING:  # pragma: no cover — annotation-only, avoids an import cycl
 
 logger = logging.getLogger(__name__)
 
-ModelFamily = Literal["haiku", "sonnet", "opus", "fable"]
+# Mythos has no CLI alias; it appears only as the full ids a subscription CLI lists.
+ModelFamily = Literal["haiku", "sonnet", "opus", "fable", "mythos"]
+_FAMILIES: Tuple[str, ...] = ("haiku", "sonnet", "opus", "fable", "mythos")
 
 
 @dataclass(frozen=True)
@@ -159,7 +161,7 @@ def normalize_model(value: Optional[str]) -> str:
 def _family_of(*texts: Optional[str]) -> Optional[ModelFamily]:
     for text in texts:
         lowered = (text or "").lower()
-        for family in ("haiku", "sonnet", "opus", "fable"):
+        for family in _FAMILIES:
             if family in lowered:
                 return family  # type: ignore[return-value]
     return None
@@ -777,23 +779,19 @@ def registry_payload() -> Dict[str, object]:
             **effort_capabilities(value, route="delegated"),
         }
 
-    enabled = set(claude_cli_models.enabled_models()) if snapshot else set()
     versioned = []
     for item in claude_cli_models.versioned_entries():
         option = get_model(item["value"])
         if option is None:
             continue
-        versioned.append({**entry(item["value"], option), "description": item.get("description") or "",
-                          "enabled": item["value"] in enabled})
+        versioned.append(entry(item["value"], option))
     claude = _claude_payload()
     if snapshot:
         claude["cli_models"] = {"cli_version": snapshot.get("cli_version"),
                                 "captured_at": snapshot.get("captured_at")}
     return {
-        # The four aliases, then the CLI versions the owner turned on.
-        "models": [entry(m.value, m) for m in MODELS] + [v for v in versioned if v["enabled"]],
-        # Every version the subscription CLI lists (Settings > Claude > Models).
-        "versioned_models": versioned,
+        # The four aliases, then every other version the subscription CLI lists.
+        "models": [entry(m.value, m) for m in MODELS] + versioned,
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": legacy_map,

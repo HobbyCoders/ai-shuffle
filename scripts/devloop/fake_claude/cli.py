@@ -89,6 +89,7 @@ FAKE_CLI_MODELS = [
     _cli_model("sonnet", "Sonnet 5.5", "claude-sonnet-5-5", _ALL),
     _cli_model("haiku", "Haiku 5.5", "claude-haiku-5-5", _ALL),
     _cli_model("claude-fable-5-1", "Fable 5.1", "claude-fable-5-1", _ALL),
+    _cli_model("claude-mythos-5-1", "Mythos 5.1", "claude-mythos-5-1", _ALL),
     _cli_model("claude-opus-5", "Opus 5", "claude-opus-5", _ALL),
     _cli_model("claude-opus-4-6", "Opus 4.6", "claude-opus-4-6", ["low", "medium", "high", "max"]),
     _cli_model("claude-sonnet-4-6", "Sonnet 4.6", "claude-sonnet-4-6", ["low", "medium", "high", "max"]),

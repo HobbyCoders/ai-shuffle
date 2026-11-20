@@ -58,7 +58,8 @@ const MODEL_FAMILY_BLURB: Record<ModelFamily, string> = {
 	haiku: 'Fastest, lightest',
 	sonnet: 'Balanced speed and depth',
 	opus: 'Deep reasoning',
-	fable: 'Most capable'
+	fable: 'Most capable',
+	mythos: 'Frontier reasoning'
 };
 
 export interface BuildCatalogOptions {
