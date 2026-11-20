@@ -25,23 +25,29 @@ const disabled = { state: 'disabled', failed: false };
 function session(exe, args, env) {
   const child = spawn(exe, args, { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
-  let stderr = '';
+  let stdout = '', stderr = '', exit;
   child.stdin.on('error', () => {});
-  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-2000); });
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
   const closed = new Promise(resolve => {
     child.once('error', error => resolve(String(error)));
-    child.once('close', code => resolve(code));
-  });
+    child.once('close', (code, signal) => resolve(code ?? signal ?? 'unknown'));
+  }).then(result => { exit = result; });
+  const diagnostic = () => `fixture ${exe} (exit ${exit ?? 'pending'})\nstdout: ${stdout}\nstderr: ${stderr}`;
   return {
+    async waitForFile(file) {
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(file) && exit === undefined && Date.now() < deadline) await delay(50);
+      assert.ok(existsSync(file), `no framed reply from ${diagnostic()}`);
+    },
     async next() {
       const timeout = new AbortController();
       try {
         const result = await Promise.race([lines.next(), closed.then(() => ({ done: true })), delay(20_000, { done: true }, { signal: timeout.signal })]);
-        assert.equal(result.done, false, `fixture ${exe} stopped answering: ${stderr}`);
+        assert.equal(result.done, false, `no reply from ${diagnostic()}`);
         return result.value;
       } finally { timeout.abort(); }
     },
-    send(line) { child.stdin.write(line + '\n'); },
     async stop() { child.kill(); await closed; }
   };
 }
@@ -133,28 +139,54 @@ export async function exerciseWindowsStartup(t) {
     const harness = path.join(root, 'desktop-writer.cjs');
     await fs.writeFile(harness, `
       const { app } = require('electron');
+      const fs = require('node:fs');
+      const path = require('node:path');
       const { loginItemControl } = require(${JSON.stringify(path.join(desktop, 'dist', 'main', 'login-item.js'))});
-      app.setPath('userData', process.env.FIXTURE_PROFILE);
+      const profile = process.env.FIXTURE_PROFILE;
+      app.setPath('userData', profile);
       app.setAppUserModelId(process.env.FIXTURE_ID);
-      app.whenReady().then(async () => {
+      function reply(value) {
+        fs.writeFileSync(path.join(profile, 'response.tmp'), JSON.stringify(value));
+        fs.renameSync(path.join(profile, 'response.tmp'), path.join(profile, 'response'));
+      }
+      function fail(error) { reply({ error: String(error.stack ?? error) }); app.exit(1); }
+      app.whenReady().then(() => {
         const control = loginItemControl(app, { platform: process.platform, preview: false, packaged: false,
           installedExecutable: process.env.FIXTURE_EXE, localAppData: process.env.LOCALAPPDATA, appId: process.env.FIXTURE_ID });
-        console.log(JSON.stringify(control?.get() ?? 'no capability'));
-        for await (const line of require('node:readline').createInterface({ input: process.stdin })) {
-          const result = line === 'get' ? control.get() : await control.set(line === 'on');
-          console.log(JSON.stringify(result));
-        }
-        app.exit(0);
-      }).catch(error => { console.error(error); app.exit(1); });
+        reply(control?.get() ?? 'no capability');
+        const request = path.join(profile, 'request');
+        const receive = async () => {
+          if (fs.existsSync(request)) {
+            const command = fs.readFileSync(request, 'utf8');
+            fs.unlinkSync(request);
+            reply(command === 'get' ? control.get() : await control.set(command === 'on'));
+          }
+          setTimeout(() => receive().catch(fail), 50);
+        };
+        return receive();
+      }).catch(fail);
     `);
     async function writer(folder, expected = 'disabled') {
       const profile = await fs.mkdtemp(path.join(root, 'profile'));
-      const desktopWriter = start(require('electron'), [`--user-data-dir=${profile}`, harness], {
+      // On Windows Electron is a GUI executable. Do not interpret its console
+      // output (including startup blank lines) as a readiness or IPC channel.
+      const desktopWriter = start(require('electron'), [harness], {
         FIXTURE_EXE: executable(folder), FIXTURE_PROFILE: profile
       });
-      const reply = async () => JSON.parse(await desktopWriter.next());
+      const response = path.join(profile, 'response');
+      const reply = async () => {
+        await desktopWriter.waitForFile(response);
+        const value = JSON.parse(await fs.readFile(response, 'utf8'));
+        await fs.unlink(response);
+        assert.equal(value?.error, undefined, value?.error);
+        return value;
+      };
       assert.equal(await reply(), expected);
-      return async command => { desktopWriter.send(command); return reply(); };
+      return async command => {
+        await fs.writeFile(path.join(profile, 'request.tmp'), command);
+        await fs.rename(path.join(profile, 'request.tmp'), path.join(profile, 'request'));
+        return reply();
+      };
     }
 
     await install(target);
