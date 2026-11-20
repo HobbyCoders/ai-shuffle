@@ -192,7 +192,8 @@ def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:
 
 
 def api_model_id(model: Optional[str]) -> Optional[str]:
-    """The Messages API id for a Claude pick (``opus`` → ``claude-opus-5``)."""
+    """The Messages API id for a Claude pick (``opus`` → ``claude-opus-5-5``;
+    a full id such as ``claude-opus-5`` stays that version)."""
     from app.core.model_registry import resolve_api_model_id
 
     return resolve_api_model_id(model)

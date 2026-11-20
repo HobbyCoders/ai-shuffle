@@ -484,8 +484,21 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
 # CLI resolves aliases itself, but fluid's native Anthropic leg sends the model
 # string verbatim to the Messages API, where a bare alias 404s (and never
 # matches the pricing table). Dateless ids on purpose — they track the current
-# model in each family.
+# model in each family. Mirrored by ``model_effort._ALIASES``.
 API_MODEL_IDS: Dict[str, str] = {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-2",
+}
+
+# The ids the aliases named before the API key moved to the 5.5 generation.
+# Two things stay on them: a full id in ``LEGACY_MODEL_MAP`` keeps the API
+# version it already ran (``claude-opus-5`` is still Opus 5, never today's
+# ``opus``), and the delegated route describes an alias with them until a
+# subscription CLI reports its own targets (cloud CLIs pick their model
+# themselves). Mirrored by ``model_effort._DELEGATED_ALIASES``.
+FROZEN_MODEL_IDS: Dict[str, str] = {
     "haiku": "claude-haiku-5-5",
     "sonnet": "claude-sonnet-5",
     "opus": "claude-opus-5",
@@ -498,10 +511,10 @@ def delegated_model_aliases() -> Dict[str, str]:
 
     Cloud/gateway auth runs Haiku 4.5; a subscription CLI that reported its
     list (``claude_cli_models``) names its own targets; otherwise
-    ``API_MODEL_IDS``."""
+    ``FROZEN_MODEL_IDS``."""
     from app.core import claude_auth_mode
 
-    aliases = dict(API_MODEL_IDS)
+    aliases = dict(FROZEN_MODEL_IDS)
     if claude_auth_mode.current_mode() == claude_auth_mode.MODE_CLOUD:
         aliases["haiku"] = "claude-haiku-4-5"
     else:
@@ -515,11 +528,15 @@ def delegated_model_aliases() -> Dict[str, str]:
 def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
     """Anthropic API model id for a stored model value.
 
-    Presets — short aliases, the ``LEGACY_MODEL_MAP`` full ids, and persisted
-    legacy ``[1m]``-suffixed values — resolve to the pinned dateless API id via
-    ``normalize_model``. Anything else (custom models, other providers' ids)
-    passes through verbatim, ``None``/``""`` included.
+    Short aliases and persisted legacy ``[1m]``-suffixed aliases resolve to
+    today's ``API_MODEL_IDS``. A ``LEGACY_MODEL_MAP`` full id resolves to the
+    version it ran before the 5.5 defaults (``FROZEN_MODEL_IDS``), so a picked
+    ``claude-opus-5`` never becomes Opus 5.5. Anything else (custom models,
+    other providers' ids) passes through verbatim, ``None``/``""`` included.
     """
+    folded = LEGACY_MODEL_MAP.get(value) if value else None
+    if folded is not None:
+        return FROZEN_MODEL_IDS[folded]
     resolved = API_MODEL_IDS.get(normalize_model(value))
     return value if resolved is None else resolved
 

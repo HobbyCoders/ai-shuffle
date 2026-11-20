@@ -618,3 +618,18 @@ def test_static_tables_do_not_inherit_codex_ultra():
     for table in (_OPENAI, _CLI, _ANTHROPIC):
         assert all("ultra" not in cap["effort_levels"] for cap in table.values())
     assert _OPENAI["gpt-6-astra"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-2", "claude-mythos-5-2"])
+def test_5_2_effort_on_the_api_key_and_unknown_on_the_cli(model):
+    cap = effort_capabilities(model, route="anthropic")
+    assert cap["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert cap["default_effort"] == "high"
+    # The subscription CLI's levels for these stay whatever its own list says.
+    assert effort_capabilities(model, route="delegated")["effort_levels"] is None
+
+
+def test_api_key_aliases_take_the_5_5_generation_effort():
+    # Bare aliases on the native route read today's API targets.
+    assert effort_capabilities("opus", route="anthropic")["default_effort"] == "medium"  # Opus 5.5
+    assert effort_capabilities("fable", route="anthropic")["default_effort"] == "high"  # Fable 5.2

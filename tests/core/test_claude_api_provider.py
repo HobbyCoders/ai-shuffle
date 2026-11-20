@@ -51,6 +51,35 @@ def test_row_is_an_api_key_anthropic_provider_without_its_secret(key):
     assert all(r["id"] != cap.CLAUDE_API_PROVIDER_ID for r in database.get_all_model_providers())
 
 
+def test_fallback_list_and_default_are_the_5_5_generation(key):
+    # Opus 5.5 and Sonnet 5.5 are the generation Anthropic's CVP covers.
+    claude_auth_mode.set_mode("subscription")
+    row = cap.virtual_row()
+    assert [m["id"] for m in row["models_json"]] == [
+        "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
+    assert row["default_model"] == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize("picked", ["claude-opus-5", "claude-sonnet-5"])
+def test_an_explicit_api_version_runs_itself(monkeypatch, picked):
+    from app.core import credential_gate
+    from app.core.provider.harness_adapter import _native_api_model
+
+    bound = SimpleNamespace(extra={"provider_id": cap.CLAUDE_API_PROVIDER_ID,
+                                   "provider_type": "anthropic"})
+    assert _native_api_model(picked, bound) == picked
+    assert _native_api_model(f"{picked}[1m]", bound) == picked
+    # Unbound, and as the default-run gate reads a pick, it is still itself.
+    assert _native_api_model(picked, None) == picked
+    assert cap.api_model_id(picked) == picked
+    row = {"id": cap.CLAUDE_API_PROVIDER_ID, "default_model": "claude-sonnet-5-5",
+           "models_json": [{"id": i} for i in (picked, "claude-opus-5-5", "claude-sonnet-5-5")]}
+    monkeypatch.setattr(credential_gate, "_default_candidate_rows", lambda servable_only: [row])
+    assert credential_gate._claude_api_default(picked) == (cap.CLAUDE_API_PROVIDER_ID, picked)
+    family = picked.split("-")[1]
+    assert credential_gate._claude_api_default(family) == (cap.CLAUDE_API_PROVIDER_ID, f"{picked}-5")
+
+
 def test_off_mode_hides_the_row(key):
     claude_auth_mode.set_mode("off")
     assert cap.virtual_row() is None

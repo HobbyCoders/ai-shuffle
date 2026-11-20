@@ -196,7 +196,10 @@ async def test_stored_legacy_settings_and_profile_pins_still_start_without_an_ov
         # On a subscription a full id runs as itself; a short form folds.
         assert leg_model_id(None, stored) == (legacy if legacy.startswith("claude-") else expected)
         from app.core.model_registry import resolve_api_model_id
-        assert resolve_api_model_id(stored) == {"opus": "claude-opus-5", "sonnet": "claude-sonnet-5"}[expected]
+        # A stored full id keeps its pre-5.5 version; a short form runs today's.
+        from app.core.model_registry import API_MODEL_IDS, FROZEN_MODEL_IDS
+        targets = FROZEN_MODEL_IDS if legacy.startswith("claude-") else API_MODEL_IDS
+        assert resolve_api_model_id(stored) == targets[expected]
     assert prompts == []
 
 

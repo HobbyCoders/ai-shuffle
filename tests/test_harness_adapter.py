@@ -3480,7 +3480,7 @@ async def test_anthropic_native_leg_canonicalizes_the_model_alias(monkeypatch, t
             extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
-    assert _CapturingLoop.captured["model"] == "claude-opus-5"
+    assert _CapturingLoop.captured["model"] == "claude-opus-5-5"
 
 
 @pytest.mark.asyncio
@@ -3499,7 +3499,7 @@ async def test_anthropic_native_leg_canonicalizes_legacy_1m_values(monkeypatch, 
             extra={"fluid_engine": "native", "fluid_provider": "anthropic"},
         )
     )
-    assert _CapturingLoop.captured["model"] == "claude-opus-5"
+    assert _CapturingLoop.captured["model"] == "claude-opus-5-5"
 
 
 @pytest.mark.asyncio
@@ -3557,7 +3557,7 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
         )
     )
     await adapter.set_model("sonnet")
-    assert adapter.engine.model == "claude-sonnet-5"
+    assert adapter.engine.model == "claude-sonnet-5-5"
 
 
 def _plan_registry(with_plan: bool):
