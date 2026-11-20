@@ -581,7 +581,7 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
     ``off`` turns Claude off on this worker: Claude models leave the pickers
     and Claude runs are refused with the gate's off message (``gate.reason``).
     """
-    from app.core import claude_auth_mode, claude_cloud_auth
+    from app.core import claude_accounts, claude_auth_mode, claude_cloud_auth
 
     if request.mode == claude_auth_mode.MODE_CLOUD:
         if not request.acknowledge_warning:
@@ -592,6 +592,9 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
                                 detail="Save a cloud provider or gateway first.")
     try:
         await run_sync(claude_auth_mode.set_mode, request.mode)
+    except claude_accounts.AccountError as exc:
+        raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
+                            detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return await claude_auth_payload()

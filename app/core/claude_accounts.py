@@ -112,10 +112,7 @@ def pinned_api_key(account_id: str) -> str | None:
 def pin_legacy_key() -> str | None:
     """Snapshot the staged key by ID, persisting any pre-list legacy key first."""
     with _lock:
-        try:
-            bundle = _keys(legacy=True)
-        except AccountError:
-            return None  # a mode choice may be made before storage is unlocked
+        bundle = _keys(legacy=True)
         account_id = bundle["active_id"]
         if account_id and account_id.startswith("legacy-"):
             account = next(a for a in bundle["accounts"] if a["id"] == account_id)
@@ -292,10 +289,12 @@ async def mutate_subscription(function: Callable[..., Any], *args: Any) -> Any:
 
 
 def select_default_login() -> None:
+    """Select the verified account and billing organization in the default CLI folder."""
     return _subscription_call(subscriptions.select_default)
 
 
 def saved_sign_in_commands(account_id: str, terminal: bool = False) -> dict:
+    """Prepare a folder-scoped sign-in without changing the owner selection."""
     return _subscription_call(subscriptions.sign_in_commands, account_id, terminal)
 
 
@@ -310,7 +309,7 @@ async def cancel_login() -> Optional[str]:
     """Stop a pending ``add another`` sign-in and remove its folder.
 
     Returns the new entry's id when the CLI had already finished signing in,
-    in which case the sign-in was kept and made active instead.
+    in which case the sign-in was kept but not selected.
     """
     from app.db.async_database import run_sync
 

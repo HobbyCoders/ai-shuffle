@@ -113,6 +113,37 @@ def test_off_and_cloud_do_not_write_owner_selection(authenticated_client, monkey
         assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) == before
 
 
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_upgrade_pins_legacy_key_after_unlock(authenticated_client, monkeypatch, encrypted):
+    from app.core import claude_accounts
+    from app.core.environment import inject_claude_code_auth
+
+    legacy_key = "fixture-legacy-secret-ABCD"
+    value = encryption.encrypt_value(legacy_key) if encrypted else legacy_key
+    db.set_system_setting(claude_accounts.API_SETTING, value)
+    db.set_system_setting(claude_auth_mode.setting_key(), "subscription")
+
+    with monkeypatch.context() as locked:
+        locked.setattr(encryption, "is_encryption_ready", lambda: False)
+        response = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
+        assert response.status_code == 409, response.text
+        assert legacy_key not in response.text
+        assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) is None
+        assert db.get_system_setting(claude_auth_mode.setting_key()) == "subscription"
+        assert db.get_system_setting(claude_accounts.API_SETTING) == value
+
+        # Subscription choices do not require access to unrelated key storage.
+        response = authenticated_client.put(ENDPOINT, json={"mode": "subscription"})
+        assert response.status_code == 200, response.text
+        assert "key_id" not in claude_auth_mode.shared_selection()
+
+    response = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
+    assert response.status_code == 200, response.text
+    assert response.json()["api_key"] == {"set": True, "last4": "ABCD"}
+    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == legacy_key
+    assert encryption.is_encrypted(db.get_system_setting(claude_accounts.API_LIST_SETTING))
+
+
 def test_put_rejects_unknown_mode(authenticated_client):
     with _probe(False):
         assert authenticated_client.put(ENDPOINT, json={"mode": "auto"}).status_code == 400

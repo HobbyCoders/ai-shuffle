@@ -687,7 +687,7 @@ class TestRegistryPayloadClaude:
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
-        claude_auth_mode.set_mode("api_key")
+        db.set_system_setting(claude_auth_mode.setting_key(), "api_key")
         assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None, "enabled": True}
 
     def test_off_mode_disables_claude_with_no_auth_kind(self, mock_db, monkeypatch):
@@ -704,7 +704,7 @@ class TestRegistryPayloadClaude:
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
-        claude_auth_mode.set_mode("subscription")
+        db.set_system_setting(claude_auth_mode.setting_key(), "subscription")
         assert m.registry_payload()["claude"] == {"auth_kind": "subscription", "plan_type": "max", "enabled": True}
 
     def test_cli_login_reports_subscription_and_the_plan_it_prints(self, mock_db, monkeypatch):

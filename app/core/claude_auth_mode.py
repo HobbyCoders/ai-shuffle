@@ -219,12 +219,29 @@ def is_explicit() -> bool:
         return False
 
 
-def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str]) -> None:
+def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str], defer_key_pin: bool = False) -> None:
     # One replicated decision. The encrypted key list may lag behind it; a
     # reader must either find this exact ID there or refuse, never use a scalar.
-    database.set_system_setting(SELECTION_SETTING, json.dumps({
-        "mode": mode, "subscription": subscription, "key_id": key_id,
-    }, separators=(",", ":")))
+    selection = {"mode": mode, "subscription": subscription}
+    if not defer_key_pin:
+        selection["key_id"] = key_id
+    database.set_system_setting(SELECTION_SETTING, json.dumps(selection, separators=(",", ":")))
+
+
+def _key_pin(mode: str, choice: dict) -> tuple[str | None, bool]:
+    """Keep any explicit pin (including no key); otherwise migrate legacy storage."""
+    from app.core import claude_accounts
+
+    if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
+        return choice.get("key_id"), False
+    try:
+        return claude_accounts.pin_legacy_key(), False
+    except claude_accounts.AccountError:
+        if mode == MODE_API_KEY:
+            raise
+        # A subscription switch does not read a key at run time. Leave the
+        # pin unset so an explicit later API-mode switch can migrate after unlock.
+        return None, True
 
 
 def publish_subscription(target: str) -> None:
@@ -233,11 +250,8 @@ def publish_subscription(target: str) -> None:
     mode = choice.get("mode")
     if mode not in (MODE_SUBSCRIPTION, MODE_API_KEY):
         mode = MODE_API_KEY if current_mode() == MODE_API_KEY else MODE_SUBSCRIPTION
-    if not choice:
-        from app.core import claude_accounts
-
-        choice["key_id"] = claude_accounts.pin_legacy_key()
-    _publish(mode, subscription=target, key_id=choice.get("key_id"))
+    key_id, deferred = _key_pin(mode, choice)
+    _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred)
 
 
 def update_shared_key(account_id: Optional[str]) -> None:
@@ -283,17 +297,16 @@ def set_mode(mode: str, *, key_id: Optional[str] = None) -> str:
     if mode in (MODE_OFF, MODE_CLOUD):
         database.set_system_setting(setting_key(), mode)
     else:
-        from app.core import claude_accounts, claude_subscriptions
+        from app.core import claude_subscriptions
 
         target = claude_subscriptions.shared_target()
         if target is None:
             # A pending choice requires the separate, verified Use this sign-in action.
             target = claude_subscriptions.legacy_binding()
+        deferred = False
         if key_id is None:
-            choice = shared_selection()
-            key_id = (choice["key_id"] if choice and "key_id" in choice
-                      else claude_accounts.pin_legacy_key())
-        _publish(mode, subscription=target, key_id=key_id)
+            key_id, deferred = _key_pin(mode, shared_selection() or {})
+        _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred)
         database.set_system_setting(setting_key(), mode)
         from app.core import claude_cli_status
 
