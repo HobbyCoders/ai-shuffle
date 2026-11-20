@@ -490,8 +490,9 @@ class DevClaude(script.Fake):
     def initialize_extra(self) -> dict:
         """The model list a subscription CLI reports at ``initialize``."""
         # ``account`` matches ``claude auth status``: the list belongs to it.
+        status = auth_status()
         return {"claude_code_version": VERSION.split()[0],
-                "account": {"email": FAKE_EMAIL, "organization": FAKE_ORG,
+                "account": {"email": status.get("email"), "organization": status.get("orgName"),
                             "subscriptionType": f"Claude {fake_plan().capitalize()}"},
                 "models": FAKE_CLI_MODELS, **super().initialize_extra()}
 
@@ -817,7 +818,7 @@ class DevClaude(script.Fake):
         retried = bool(category) and self.refused_once
         self.turn_fast = self.fast_flag and not retried
         log("turn", session_id=self.sid, prompt=fake_ai.visible("\n".join(texts))[:300],
-            compact=bool(command), fast=self.turn_fast)
+            compact=bool(command), fast=self.turn_fast, **auth_route())
         if command:
             if not self.compact("manual", command.group(1)):  # a skip printed its own result
                 self.result_frame("", num_turns=0)
@@ -1253,9 +1254,31 @@ def auth_status() -> dict:
     # only the text form names the tier.
     plan = fake_plan()
     subscription = ("max" if plan == "ultra" else plan) or "fake"
+    # A journey can give a private CLI folder a fake identity, or set it to
+    # signed-out with an empty file. No OAuth or credential file is involved.
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "devloop-account.txt"
+    try:
+        name = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        name = ""
+    else:
+        if not name:
+            return {"loggedIn": False}
     return {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-            "email": FAKE_EMAIL, "orgName": FAKE_ORG,
+            "email": f"{name}@devloop.invalid" if name else FAKE_EMAIL, "orgName": FAKE_ORG, "orgId": "devloop-fake-org",
             "subscriptionType": subscription, "configDirectory": None}
+
+
+def auth_route() -> dict:
+    """Report the fake identity and credential presence, never env values."""
+    return {
+        "subscription_email": auth_status().get("email"),
+        "auth_env": sorted(k for k, v in os.environ.items() if v and k.upper() in {
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        }),
+    }
 
 
 def auth_status_text() -> str:

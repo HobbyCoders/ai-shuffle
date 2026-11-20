@@ -286,7 +286,10 @@ it('warns when cloud is on but its values are missing', async () => {
 	await show();
 	expect(screen.getByText('Not ready')).toBeTruthy();
 	expect(
-		screen.getByText('Claude cannot run: Amazon Bedrock needs AWS access keys or Bedrock API key.')
+		// The fixture has a saved key: Claude API still runs, so only Cloud is named.
+		screen.getByText(
+			'Claude Cloud cannot run: Amazon Bedrock needs AWS access keys or Bedrock API key. Claude API models run on the saved key.'
+		)
 	).toBeTruthy();
 	expect(within(screen.getByRole('region', { name: /^Credentials/ })).getByText('Values missing')).toBeTruthy();
 });

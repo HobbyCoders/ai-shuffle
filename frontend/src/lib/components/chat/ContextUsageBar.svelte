@@ -770,10 +770,11 @@
 		resolvedBucket ? itemsFor(resolvedBucket, claudeNoFiveHour) : []
 	);
 	// Claude plan rows: the 5-hour and weekly windows always hold a row, the
-	// weekly one alone on a plan without a 5-hour window (an API-key login
-	// reports none, so it gets no placeholders).
+	// weekly one alone on a plan without a 5-hour window (an API login, a cloud
+	// provider or gateway, reports none, so it gets no placeholders).
+	const claudeIsApiLogin = $derived(isSelf && getClaudeAuth().auth_kind === 'api');
 	const claudeSlots = $derived.by<RowSlot[]>(() =>
-		withBaseline(items, claudeDisplay.subtext === 'API' ? [] : subscriptionBaselineWindows(claudeNoFiveHour), (item) => ({
+		withBaseline(items, claudeIsApiLogin ? [] : subscriptionBaselineWindows(claudeNoFiveHour), (item) => ({
 			type: item.type,
 			label: item.label,
 			pct: item.pct,

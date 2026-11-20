@@ -105,7 +105,8 @@ _LOCAL_SETTING_PATTERNS = [
         r"^claude_cli_logins(:|$)",
         r"^claude_cli_(keep_installed|installed_by_app|startup_check_at)(:|$)",
         # The Claude "Cloud provider or gateway" method and its secrets belong
-        # to this worker, like the Claude auth mode (claude_auth_mode:<instance>).
+        # to this worker. The legacy per-worker auth-mode setting above is
+        # local too; the explicit claude_auth_selection follows the owner.
         r"^claude_cloud_(config|secrets)$",
         r"^encryption_salt$",
         r"^fcm_service_account$",  # Retired publisher key; reject older peers too.

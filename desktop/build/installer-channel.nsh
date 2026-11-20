@@ -16,8 +16,36 @@
 # Silent installs: /CHANNEL=nightly. Without it a silent install, including
 # the installer update the app runs itself, writes nothing.
 
+!include LogicLib.nsh
+!define NSIS_STARTUP_STAMP "resources\login-item-uninstall-v4"
+!define NSIS_STARTUP_MUTEX "Global\AIShuffle.Startup."
+# Private environment of the installer and its child uninstaller, never a user setting.
+!define NSIS_STARTUP_REPLACEMENT "AI_SHUFFLE_NSIS_STARTUP_REPLACEMENT"
+!define NSIS_STARTUP_RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
+!define NSIS_STARTUP_APPROVAL_KEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+!define NSIS_STARTUP_VALUE_NAME "${APP_ID}"
+
+# The receipt is a brace-wrapped install GUID (38 characters) + LocalAppData.
+!macro shuffleReadStartupOwner DIRECTORY
+  StrCpy $1 ""
+  ClearErrors
+  FileOpen $0 "${DIRECTORY}\${NSIS_STARTUP_STAMP}" r
+  ${ifNot} ${Errors}
+    FileReadUTF16LE $0 $1
+    FileClose $0
+  ${endif}
+  StrCpy $2 $1 38
+  StrCpy $1 $1 "" 38
+!macroend
+
+!macro shuffleStartupRefuse MESSAGE
+  DetailPrint "${MESSAGE}"
+  MessageBox MB_OK|MB_ICONSTOP "${MESSAGE}" /SD IDOK
+  SetErrorLevel 2
+  Quit
+!macroend
+
 !ifndef BUILD_UNINSTALLER
-  !include LogicLib.nsh
   !include nsDialogs.nsh
   !include FileFunc.nsh
 
@@ -40,6 +68,41 @@
     ${if} $installMode == "all"
       SetShellVarContext all
     ${endif}
+  !macroend
+
+  !macro customHeader
+    # The pinned assisted installer runs this after destination selection.
+    # It passes the chosen target to old uninstallers launched by ExecWait.
+    Section "-Identify startup replacement"
+      SectionIn RO
+      # installer.nsi selects all-users in its silent machine-upgrade path.
+      # Resolve that same destination before comparing it below.
+      ${if} ${Silent}
+      ${andIf} $hasPerMachineInstallation == "1"
+        !insertmacro setInstallModePerAllUsers
+      ${endif}
+
+      # Also prevent an explicit destination from overwriting a stamped copy
+      # owned by a different account (including when UAC changed accounts).
+      ${if} ${FileExists} "$INSTDIR\${NSIS_STARTUP_STAMP}"
+        !insertmacro shuffleUserContext
+        !insertmacro shuffleReadStartupOwner "$INSTDIR"
+        StrCpy $2 "$LOCALAPPDATA"
+        !insertmacro shuffleRestoreContext
+        ${if} $1 != $2
+          !insertmacro shuffleStartupRefuse "This folder contains AI Shuffle installed for another account. Choose a different folder."
+        ${endif}
+      ${endif}
+
+      StrCpy $0 ""
+      ${if} $installMode == "CurrentUser"
+        StrCpy $0 "$INSTDIR"
+      ${endif}
+      System::Call 'kernel32::SetEnvironmentVariableW(w "${NSIS_STARTUP_REPLACEMENT}", w r0) i .r1'
+      ${if} $1 == 0
+        !insertmacro shuffleStartupRefuse "AI Shuffle could not pass the installation destination to its uninstaller."
+      ${endif}
+    SectionEnd
   !macroend
 
   !macro customInit
@@ -122,5 +185,79 @@
       !insertmacro shuffleRestoreContext
       Pop $0
     ${endif}
+
+    ${if} $installMode == "CurrentUser"
+      # A surviving desktop from a removed/replaced install must never borrow
+      # the capability of a new install, even at the exact same path.
+      System::Alloc 16
+      Pop $0
+      System::Call 'ole32::CoCreateGuid(p r0) i .r1'
+      ${if} $1 == 0
+        System::Call 'ole32::StringFromGUID2(p r0, w .r2, i 39) i .r1'
+        ${if} $1 == 39
+          ClearErrors
+          FileOpen $3 "$INSTDIR\${NSIS_STARTUP_STAMP}" w
+          ${ifNot} ${Errors}
+            FileWriteUTF16LE $3 "$2$LOCALAPPDATA"
+            FileClose $3
+          ${endif}
+        ${endif}
+      ${endif}
+      System::Free $0
+      ClearErrors
+    ${endif}
+  !macroend
+!else
+  Var shuffleRetireStartup
+
+  !macro customUnInstall
+    ${if} ${FileExists} "$INSTDIR\${NSIS_STARTUP_STAMP}"
+      !insertmacro shuffleReadStartupOwner "$INSTDIR"
+      ${if} $installMode != "CurrentUser"
+      ${orIf} $1 != "$LOCALAPPDATA"
+        !insertmacro shuffleStartupRefuse "Uninstall this per-user copy of AI Shuffle from the Windows account that installed it."
+      ${endif}
+      # Own the same Win32 mutex as the desktop writer until process exit, on
+      # success *or* rollback. Also drain writers before same-target upgrades;
+      # a new install will get a different mutex and receipt.
+      System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${NSIS_STARTUP_MUTEX}$2") p .r0'
+      ${if} $0 == 0
+        !insertmacro shuffleStartupRefuse "AI Shuffle could not open its start-at-sign-in coordinator. Retry from the account that installed it."
+      ${endif}
+      System::Call 'kernel32::WaitForSingleObject(p r0, i 20000) i .r4'
+      # WAIT_ABANDONED also means we acquired ownership.
+      ${if} $4 != 0
+      ${andIf} $4 != 128
+        !insertmacro shuffleStartupRefuse "AI Shuffle is changing its start-at-sign-in setting. Close Settings and retry."
+      ${endif}
+      ReadEnvStr $2 "${NSIS_STARTUP_REPLACEMENT}"
+      ${ifNot} ${isUpdated}
+      ${orIf} $2 != "$INSTDIR"
+        StrCpy $shuffleRetireStartup "1"
+      ${endif}
+    ${endif}
+  !macroend
+
+  !macro customHeader
+    # The builder includes this file before common.nsh defines the executable.
+    # Declare the callback only when the header hook runs, after common.nsh.
+    Function un.onUninstSuccess
+      # NSIS does not call this after Abort, including the builder's failed
+      # atomic rename/restore. Also check the exe in case RMDir was incomplete.
+      ${if} $shuffleRetireStartup == "1"
+        ${ifNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+          ReadRegStr $3 HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
+          ${if} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+            ClearErrors
+            DeleteRegValue HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
+            ${if} ${Errors}
+              !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Windows Startup Apps."
+            ${endif}
+            DeleteRegValue HKCU "${NSIS_STARTUP_APPROVAL_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
+            ClearErrors
+          ${endif}
+        ${endif}
+      ${endif}
+    FunctionEnd
   !macroend
 !endif

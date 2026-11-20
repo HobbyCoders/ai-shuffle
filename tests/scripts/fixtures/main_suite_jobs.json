@@ -1,5 +1,5 @@
 {
- "_source": "Job names of a green push run of main-suite, the workflow ci.yml replaced (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it. The journey shards follow the 18-shard plan: the 16 shards of that run are listed as the 18 names GitHub gave the shards of an 18-shard run (pull request run 42856985149), and the selection names all 18. The plan job carries its name in ci.yml, the record jobs the areas no longer have are gone (the UI journeys keep theirs), and the two Android areas are added with the names their workflows give their jobs: the publishing job skipped, as on every run of ci.yml.",
+ "_source": "Job names of a green push run of main-suite, the workflow ci.yml replaced (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it. The journey shards follow the 18-shard plan: the 16 shards of that run are listed as the 18 names GitHub gave the shards of an 18-shard run (pull request run 42856985149), and the selection names all 18. The plan job carries its name in ci.yml, the record jobs the areas no longer have are gone (the UI journeys keep theirs), and the two Android areas are added with the names their workflows give their jobs (each emulator API level as its four parts): the publishing job skipped, as on every run of ci.yml. The backend's select job is added with the steps that name its choice (every shard, every test, as on main), and the job that saves the test map. The container area's one job is listed as the three groups container-postgres.yml now runs it in.",
  "jobs": [
   {
    "id": 1,
@@ -9,13 +9,49 @@
   },
   {
    "id": 101,
-   "name": "android / Android emulator verification (API 34)",
+   "name": "android / Android emulator verification (API 34, 1/4)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 102,
-   "name": "android / Android emulator verification (API 36)",
+   "name": "android / Android emulator verification (API 34, 2/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 107,
+   "name": "android / Android emulator verification (API 34, 3/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 108,
+   "name": "android / Android emulator verification (API 34, 4/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 109,
+   "name": "android / Android emulator verification (API 36, 1/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 110,
+   "name": "android / Android emulator verification (API 36, 2/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 111,
+   "name": "android / Android emulator verification (API 36, 3/4)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 112,
+   "name": "android / Android emulator verification (API 36, 4/4)",
    "status": "completed",
    "conclusion": "success"
   },
@@ -60,6 +96,35 @@
    "name": "backend / Backend tests",
    "status": "completed",
    "conclusion": "skipped"
+  },
+  {
+   "id": 205,
+   "name": "backend / backend-select",
+   "status": "completed",
+   "conclusion": "success",
+   "steps": [
+    {
+     "name": "Choose the backend tests this run needs",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Selected backend shards: [1,2,3,4,5,6,7,8]",
+     "status": "completed",
+     "conclusion": "success"
+    },
+    {
+     "name": "Backend test selection: all",
+     "status": "completed",
+     "conclusion": "success"
+    }
+   ]
+  },
+  {
+   "id": 206,
+   "name": "backend / backend-map",
+   "status": "completed",
+   "conclusion": "success"
   },
   {
    "id": 7,
@@ -159,7 +224,19 @@
   },
   {
    "id": 20,
-   "name": "container / Single-container PostgreSQL and browser",
+   "name": "container / Container checks (lifecycle)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 207,
+   "name": "container / Container checks (updater)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 208,
+   "name": "container / Container checks (install)",
    "status": "completed",
    "conclusion": "success"
   },

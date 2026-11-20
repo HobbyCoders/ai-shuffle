@@ -93,6 +93,9 @@ await runJourney({
 				for (const wanted of ['Opus 5.5', VERSION_LABEL, VERSION, MYTHOS_LABEL, MYTHOS, UNKNOWN_LABEL, UNKNOWN]) {
 					expect(text.includes(wanted), `the Models tab lists ${wanted}: ${text}`);
 				}
+				const rows = list.locator('.pv-mrow');
+				expect(await rows.filter({ has: page.locator('[data-provider-logo="claude"]:visible') }).count() === await rows.count(),
+					'every model in the read-only roster shows the Claude mark');
 				expect((await page.getByRole('checkbox').count()) === 0, 'no opt-in checkboxes');
 				expect((await page.getByText(/Listed by Claude Code/).count()) === 0, 'no "Listed by Claude Code" section');
 				const registry = await api(page, 'GET', '/models');

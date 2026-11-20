@@ -1604,7 +1604,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('50%');
 	});
 
-	it('subtexts the self Claude header "API" when the registry reports API-key auth', async () => {
+	it('subtexts the self Claude header "Cloud" when the registry reports API auth (a cloud provider or gateway)', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		rateLimit.applySnapshot({
 			available: true,
@@ -1622,8 +1622,9 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		// "API" beats the device-name fallback: it says HOW this install bills.
-		expect(container.querySelector('.section-account')?.textContent).toBe('API');
+		// "Cloud" beats the device-name fallback: it says HOW this install bills.
+		// The saved Anthropic key is its own "Claude · API" provider, not this leg.
+		expect(container.querySelector('.section-account')?.textContent).toBe('Cloud');
 	});
 
 	it("subtexts the self Claude header with the plan the CLI reports", async () => {

@@ -31,6 +31,7 @@ A project's **Workers** tab lists each worker's folder and branch. From there yo
 
 - **Set up** the project on a worker that doesn't have it, or **Set up on all missing**.
 - Choose an existing folder on that worker instead of a new one. A folder that already holds the same repository is used as it is.
+- **Change folder** on a ready, online worker. Enter or browse to an existing directory on that worker. This changes only its project registration; no files are moved or copied. New chats and future turns in chats without worktrees use the new folder. Existing worktrees stay in place and still need their original checkout. After a folder change, AI Shuffle can reopen a removed app-managed worktree only in its original Git checkout, on the branch tip saved by **Keep branch**. For a removed external worktree, use the original Git checkout to check out the kept branch manually; AI Shuffle will not recreate it or reopen the old chat automatically. Leave external worktrees in place if you still need to use their bound chats. If an older worktree’s Git registration cannot be verified, restore it or forget the stale registration in Worktree management before changing folders. Finish any queued or running chats on that worker before changing the folder.
 - Cancel a setup that is still running.
 - **Remove from** a worker. This drops that worker's record of the project; its files stay.
 

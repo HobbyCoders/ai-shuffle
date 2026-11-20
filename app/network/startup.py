@@ -583,6 +583,13 @@ def _on_applied(touched) -> None:
             continue
         if collection == "system_settings":
             database.invalidate_system_setting_memo(record_id)
+            if record_id in ("claude_auth_selection", "claude_subscription_selection"):
+                from app.core import claude_cli_models, claude_cli_status
+
+                claude_cli_status.invalidate()
+                loop = getattr(global_events, "_loop", None)
+                if loop and not loop.is_closed():
+                    loop.call_soon_threadsafe(claude_cli_models.refresh_soon)
             if record_id == "global_away_mode":
                 resources.add("away_mode")
                 loop = getattr(global_events, "_loop", None)

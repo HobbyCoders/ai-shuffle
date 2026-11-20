@@ -659,6 +659,13 @@ async def browse_filesystem(
     Returns directories at the given path for the tree browser UI.
     If no path is given, returns starting points.
     """
+    from app.db.async_database import run_sync
+
+    return await run_sync(browse_directories, path)
+
+
+def browse_directories(path: Optional[str] = None) -> BrowseResponse:
+    """List directories on this worker, applying the normal workspace boundary."""
     import sys
 
     from app.core.config import settings as app_settings

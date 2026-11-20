@@ -77,7 +77,8 @@
 				"frontend/tests/journeys/setup-scroll.journey.mjs",
 				"frontend/src/routes/setup/**",
 				"frontend/src/lib/components/OwnerAccessGate.svelte",
-				"frontend/src/lib/components/setup/**"
+				"frontend/src/lib/components/setup/**",
+				"frontend/src/lib/components/DirectoryBrowser.svelte"
 			]
 		},
 		{
@@ -182,6 +183,11 @@
 			"globs": ["frontend/tests/journeys/settings-learned-guidance.journey.mjs", "frontend/src/lib/components/settings/memory/MemoryCollection.svelte", "frontend/src/lib/components/settings/memory/LearnedGuidance.svelte", "frontend/src/lib/components/settings/memory/GuidanceEditor.svelte", "frontend/src/lib/settings/entries/memory.ts", "app/api/learned_guidance.py", "app/core/guidance_storage.py", "app/core/guidance_surface.py", "fluid/fluid/context/guidance.py"]
 		},
 		{
+			"why": "Desktop startup is discoverable in Settings only with a capable native shell",
+			"journeys": ["desktop-startup"],
+			"globs": ["frontend/tests/journeys/desktop-startup.journey.mjs", "frontend/src/lib/components/settings/pages/DesktopStartup.svelte", "frontend/src/lib/components/settings/pages/GeneralPage.svelte", "frontend/src/lib/settings/entries/general.ts", "frontend/src/lib/settings/search.ts", "frontend/src/lib/services/desktop.ts"]
+		},
+		{
 			"why": "Settings pages keep their loaded row shapes while a reload waits for the worker",
 			"journeys": ["settings-reload"],
 			"globs": ["frontend/tests/journeys/settings-reload.journey.mjs", "frontend/src/lib/components/settings/pages/SecurityPage.svelte", "frontend/src/lib/components/settings/pages/editors/SecurityInstructionsEditor.svelte", "frontend/src/lib/components/settings/pages/SpendingRows.svelte", "frontend/src/lib/components/settings/pages/UsagePage.svelte", "frontend/src/lib/components/settings/rows/ExpandToggle.svelte"]
@@ -209,9 +215,10 @@
 		},
 		{
 			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
-			"journeys": ["model-picker"],
+			"journeys": ["model-picker", "model-picker-provider-artwork"],
 			"globs": [
 				"frontend/tests/journeys/model-picker.journey.mjs",
+					"frontend/tests/journeys/model-picker-provider-artwork.journey.mjs",
 				"frontend/src/lib/components/settings/ModelPicker.svelte",
 				"frontend/src/lib/components/settings/ModelPickerPanel.svelte",
 				"frontend/src/lib/components/settings/model-picker-focus.ts",
@@ -539,9 +546,21 @@
 		},
 		{
 			"why": "cross-worker project sync: worker chips, the Workers tab, New project's worker picker and Set up & send",
-			"journeys": ["project-workers"],
+			"journeys": ["project-workers", "worker-folder-change"],
 			"globs": [
 				"frontend/tests/journeys/project-workers.journey.mjs",
+				"frontend/tests/journeys/worker-folder-change.journey.mjs",
+				"frontend/src/lib/components/DirectoryBrowser*",
+				"frontend/src/lib/components/deck/cards/ProjectGeneralTab.svelte",
+				"app/api/project_workers.py",
+				"app/api/projects.py",
+				"app/api/system.py",
+				"app/core/project_folders.py",
+				"app/core/project_setup.py",
+				"app/core/worktree_manager.py",
+				"app/db/checkouts.py",
+				"app/db/projects.py",
+				"app/db/git.py",
 				"frontend/src/lib/api/project-workers.ts",
 				"frontend/src/lib/stores/projects-overview.ts",
 				"frontend/src/lib/stores/project-setup*",
@@ -799,11 +818,24 @@
 			]
 		},
 		{
+			"why": "a pending Claude subscription can recover only after explicitly choosing a verified default sign-in",
+			"journeys": ["claude-account-switch"],
+			"globs": [
+				"frontend/tests/journeys/claude-account-switch.journey.mjs",
+				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
+				"frontend/src/lib/components/settings/providers/ClaudeModeRow.svelte",
+				"app/core/claude_auth_mode.py",
+				"app/core/claude_subscriptions.py",
+				"app/api/settings_claude_accounts.py"
+			]
+		},
+		{
 			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",
 				"frontend/src/lib/components/settings/providers/tabs/ClaudeCliModels.svelte",
+				"frontend/src/lib/components/settings/providers/tabs/AvailableModelList.svelte",
 				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
 				"frontend/src/lib/constants/models.svelte.ts",
 				"app/core/claude_cli_models.py",

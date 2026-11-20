@@ -551,7 +551,7 @@ def resolve_model(model: Optional[str]) -> dict[str, Any]:
     if provider_id:
         try:
             from app.db import database
-            row = database.get_model_provider(provider_id, include_token=False) or {}
+            row = database.resolve_model_provider(provider_id, include_token=False) or {}
             provider = row.get("name") or row.get("provider_type") or provider_id
         except Exception:  # noqa: BLE001
             provider = str(provider_id)

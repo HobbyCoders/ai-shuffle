@@ -1,4 +1,4 @@
-"""Owner-only saved Anthropic key contract; no app DB, provider or CLI access."""
+"""Owner-only saved Anthropic key contract with isolated storage and no provider or CLI access."""
 import json
 from unittest.mock import AsyncMock
 
@@ -16,12 +16,8 @@ KEY = "example-anthropic-secret-key-1111"
 
 
 @pytest.fixture
-def client(monkeypatch):
-    values = {}
+def client(mock_db, monkeypatch):
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
-    monkeypatch.setattr(accounts.database, "get_system_setting", values.get)
-    monkeypatch.setattr(accounts.database, "set_system_setting", values.__setitem__)
-    monkeypatch.setattr(accounts.database, "delete_system_setting", lambda key: values.pop(key, None) is not None)
     from app.core import anthropic_generation
     monkeypatch.setattr(anthropic_generation, "validate_api_key", AsyncMock())
     app = FastAPI()
@@ -37,7 +33,12 @@ def test_key_save_switch_rename_delete_contract(client, caplog):
     first = result.json()["account_id"]
     assert result.json()["accounts"]["api_key"] == [
         {"id": first, "label": "Personal", "active": True, "masked_key": "example...1111", "last4": "1111"}]
-    second = client.post(BASE + "/api-keys", json={"api_key": KEY[:-4] + "2222", "activate": False}).json()["account_id"]
+    saved = client.post(BASE + "/api-keys", json={"api_key": KEY[:-4] + "2222", "activate": False})
+    assert saved.status_code == 200, saved.text
+    rows = {row["last4"]: row for row in client.get(BASE).json()["accounts"]["api_key"]}
+    assert rows["1111"]["id"] == first
+    second = rows["2222"]["id"]
+    assert second == saved.json()["account_id"]
     assert accounts.active_api_key() == KEY
     assert client.post(BASE + f"/api_key/{second}/activate").status_code == 200
     assert accounts.active_api_key().endswith("2222")
@@ -80,16 +81,30 @@ def sign_ins(client, tmp_path, monkeypatch):
     for name in ("get_system_setting", "get_system_setting_cached"):
         monkeypatch.setattr(claude_subscriptions.database, name, lambda key, *a, **k: values.get(key))
     monkeypatch.setattr(claude_subscriptions.database, "set_system_setting", values.__setitem__)
+    def write_choice(key, value, _expected, *, alongside=None):
+        if alongside is not None:
+            values[alongside[0]] = alongside[1]
+        values[key] = value
+        return True
+
+    monkeypatch.setattr(claude_subscriptions.database, "get_system_setting_snapshot", lambda key: (
+        claude_subscriptions.database.SystemSettingSnapshot(values[key], None) if key in values else None
+    ))
+    monkeypatch.setattr(claude_subscriptions.database, "set_system_setting_if_unchanged", write_choice)
     monkeypatch.setattr(claude_subscriptions, "setting_key", lambda: "claude_cli_logins:test")
     monkeypatch.setattr(claude_subscriptions, "_last_pending_probe", 0.0)
     monkeypatch.setattr(claude_subscriptions, "_identity_cache", {})
+    monkeypatch.setattr(claude_subscriptions, "_identity_generation", 0)
+    monkeypatch.setattr(claude_subscriptions, "_verified", {})
+    monkeypatch.setattr(claude_subscriptions, "_reap_due", False)
     monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: False)
     monkeypatch.setattr(cs, "announce_account_change", lambda: None)
     signed = {}
 
     def probe_home(home_env, resolver=None):
         email = signed.get(home_env.get("CLAUDE_CONFIG_DIR", "default"))
-        return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email, plan="pro")
+        return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email, plan="pro",
+                                  auth_method="claude.ai", org_id="fixture-org" if email else None)
     monkeypatch.setattr(cs, "probe_home", probe_home)
     monkeypatch.setattr(cs, "run_home", lambda args, env: subprocess.CompletedProcess(args, 0, "", ""))
     return signed
@@ -118,7 +133,7 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     claude_subscriptions._last_pending_probe = 0.0  # the next poll asks the CLI again
     rows = client.get(BASE).json()["accounts"]["subscription"]
     assert [(r["kind"], r["active"], r["email"]) for r in rows] == [
-        ("default", False, "me@example.com"), ("saved", True, "work@example.com")]
+        ("default", True, "me@example.com"), ("saved", False, "work@example.com")]
     new_id = rows[1]["id"]
     assert set(rows[1]) == {"id", "label", "kind", "active", "email", "plan", "org_name",
                             "signed_in", "checked_at", "needs_sign_in"}
@@ -135,7 +150,11 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     assert client.post(BASE + f"/subscription/{new_id}/activate").status_code == 200
     assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": folder}
     deleted = client.delete(BASE + f"/subscription/{new_id}").json()["accounts"]
-    assert deleted["default_in_use"] is True and [r["active"] for r in deleted["subscription"]] == [True]
+    assert deleted["default_in_use"] is False and deleted["recovery_required"] is True
+    assert [r["active"] for r in deleted["subscription"]] == [False]
+    with pytest.raises(claude_subscriptions.SubscriptionError, match="selected Claude subscription"):
+        claude_subscriptions.active_home_env()
+    assert client.post(BASE + f"/subscription/{default_id}/activate").status_code == 200
     assert (tmp_path / ".claude" / "projects").is_dir()
     assert client.post(BASE + "/subscription/missing0000000000/activate").status_code == 404
 
@@ -155,8 +174,8 @@ def test_subscription_routes_contract(client, sign_ins, tmp_path):
     body = kept.json()
     assert body["account_id"] == pending["id"] and body["login"] is None
     row = next(r for r in body["accounts"]["subscription"] if r["id"] == pending["id"])
-    assert row["active"] and row["email"] == "late@example.com"
-    assert claude_subscriptions.active_home_env() == {"CLAUDE_CONFIG_DIR": late_folder}
+    assert row["active"] is False and row["email"] == "late@example.com"
+    assert claude_subscriptions.active_home_env() == {}
 
 
 @pytest.mark.parametrize("signed_in", [True, False])
@@ -231,8 +250,11 @@ def test_refresh_write_failure_keeps_rows_and_keys_then_retries(client, sign_ins
 @pytest.fixture
 def pending_sign_in(client, sign_ins, tmp_path, monkeypatch):
     """Produce a saved active login and a second pending login through the API."""
-    from app.core import claude_subscriptions as subs
+    from app.core import claude_auth_mode, claude_subscriptions as subs
 
+    # This is a subscription install with a staged API key, not a legacy
+    # API-mode install that would require explicit confirmation of its key.
+    subs.database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     clock = [100.0]
     monkeypatch.setattr(subs.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(subs, "_verified", {})
@@ -244,6 +266,9 @@ def pending_sign_in(client, sign_ins, tmp_path, monkeypatch):
     clock[0] += subs._PROBE_INTERVAL_SECONDS + 1
     active = client.get(BASE)
     assert active.status_code == 200 and active.json()["accounts"]["subscription"][0]["id"] == first
+    assert active.json()["accounts"]["subscription"][0]["active"] is False
+    selected = client.post(BASE + f"/subscription/{first}/activate")
+    assert selected.status_code == 200, selected.text
     pending = client.post(BASE + "/subscription/add-another").json()["login"]["id"]
     credentials = {}
     for account_id in (first, pending):
@@ -320,7 +345,8 @@ def test_poll_write_failure_preserves_durable_state_and_retries(
     assert subs._identity_generation == generation and subs._verified == verified
     assert subs._reap_due is False
     if outcome == "adopt":
-        assert writes[0]["pending"] is None and writes[0]["active_id"] == pending
+        assert writes[0]["pending"] is None and writes[0]["active_id"] == first
+        assert [a["id"] for a in writes[0]["accounts"]] == [first, pending]
     else:
         assert writes[0]["pending"]["status"] == "failed" and writes[0]["active_id"] == first
     for path, content in setup["credentials"].items():
@@ -334,9 +360,9 @@ def test_poll_write_failure_preserves_durable_state_and_retries(
     assert "subscription_error" not in result and result["api_key"] == setup["keys"]
     durable = subs._load()
     if outcome == "adopt":
-        assert durable["pending"] is None and durable["active_id"] == pending
+        assert durable["pending"] is None and durable["active_id"] == first
         assert [a["id"] for a in durable["accounts"]] == [first, pending]
-        assert [(row["id"], row["active"]) for row in result["subscription"]] == [(first, False), (pending, True)]
+        assert [(row["id"], row["active"]) for row in result["subscription"]] == [(first, True), (pending, False)]
         assert result["login_pending"] is False and result["login"] is None
     else:
         assert durable["pending"]["status"] == "failed" and durable["active_id"] == first
@@ -382,7 +408,8 @@ def test_pool_reap_write_error_does_not_discard_accounts(client, pending_sign_in
     evict = AsyncMock(side_effect=OSError("example teardown write failed"))
     monkeypatch.setattr(session_pool, "get_session_pool", lambda: SimpleNamespace(evict_idle_claude_auth_changed=evict))
     monkeypatch.setattr(subs, "_reap_due", True)
-    response = client.get(BASE)
+    # Save-only polling no longer reaps; subscription mutations still do.
+    response = client.patch(BASE + f"/subscription/{pending_sign_in['active']}", json={"label": "Renamed"})
     assert response.status_code == 200, response.text
     result = response.json()["accounts"]
     assert [(row["id"], row["active"]) for row in result["subscription"]] == [(pending_sign_in["active"], True)]

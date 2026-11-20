@@ -504,8 +504,10 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 //   provider_type 'grok'     → "Grok"   · <plan>   (SuperGrok subscription)
 //   provider_type 'xai'      → "Grok"   · "API"    (xAI API key)
 //   any other row            → <row name> · "API"
+//   provider_type 'anthropic'→ "Claude" · "API"    (the saved Anthropic key,
+//                              the built-in "Claude API" row, run natively)
 //   native Claude            → "Claude" · <plan> for a subscription account,
-//                              "Claude" · "API" for Anthropic API-key auth
+//                              "Claude" · "Cloud" for a cloud provider or gateway
 //
 // Configured OpenAI API rows and ChatGPT subscription rows keep separate
 // groups/sections when present; a subscription does not imply an API billing
@@ -524,6 +526,8 @@ const SUBSCRIPTION_SUBTEXT = 'Subscription';
 /** Brand overrides keyed by `provider_type` — rows whose stored name is not the
  *  brand we want to show (both OpenAI rows display as "OpenAI"). */
 const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
+	// The built-in "Claude API" row (the saved Anthropic key, run natively).
+	anthropic: 'Claude',
 	chatgpt: 'OpenAI',
 	openai: 'OpenAI',
 	grok: 'Grok',
@@ -576,8 +580,9 @@ export function getProviderDisplay(entry: ProviderDisplayInput): ProviderDisplay
 /**
  * Brand name + subtext for the native Claude group/section.
  *
- * `planType` is the subscription tier ("max" / "pro"); pass `authKind: 'api'`
- * when the install runs on an Anthropic API key. With neither known the group
+ * `planType` is the subscription tier ("max" / "pro"); `authKind: 'api'` is a
+ * cloud provider or gateway ("Cloud"), never the saved Anthropic key, which is
+ * its own "Claude · API" provider row. With neither known the group
  * degrades to a bare "Claude" rather than inventing a subtext — the app has no
  * store carrying the Claude plan today (see the PR notes).
  */
@@ -585,7 +590,7 @@ export function getClaudeDisplay(opts?: {
 	planType?: string | null;
 	authKind?: ProviderAuthKind | null;
 }): ProviderDisplay {
-	if (opts?.authKind === 'api') return { name: CLAUDE_BRAND, subtext: API_SUBTEXT };
+	if (opts?.authKind === 'api') return { name: CLAUDE_BRAND, subtext: 'Cloud' };
 	const plan = opts?.planType?.trim();
 	return { name: CLAUDE_BRAND, subtext: plan ? plan.toUpperCase() : null };
 }

@@ -99,6 +99,18 @@ async function mountPage() {
 	};
 }
 
+it('does not write voice settings when the selected engine is picked again', async () => {
+	server.voice_provider_id = 'openai-key';
+	await mountPage();
+	const trigger = screen.getByRole('button', { name: 'Voice engine' });
+	await fireEvent.click(trigger);
+	await fireEvent.click(document.querySelector<HTMLElement>('[data-model-picker-panel] [role="option"][aria-selected="true"]')!);
+	expect(screen.queryByRole('textbox', { name: 'Search models' })).toBeNull();
+	expect(document.activeElement).toBe(trigger);
+	expect(transport.put).not.toHaveBeenCalled();
+	expect(server.voice_provider_id).toBe('openai-key');
+});
+
 it('switches engines, shows xAI funding and server-provided voices without retaining the OpenAI pin', async () => {
  providers.push({ id: 'xai-key', name: 'xAI API key', provider_type: 'xai' });
  transport.put.mockImplementation(async (_path: string, patch: Partial<Settings>) => {
@@ -108,7 +120,10 @@ it('switches engines, shows xAI funding and server-provided voices without retai
   return structuredClone(server);
  });
  await mountPage();
- await fireEvent.change(screen.getByRole('combobox', { name: 'Voice engine' }), { target: { value: 'grok-voice-latest' } });
+ await fireEvent.click(screen.getByRole('button', { name: 'Voice engine' }));
+ const grok = screen.getByRole('option', { name: 'Grok Voice', description: 'xAI API key' });
+ expect(grok.querySelector('[data-provider-logo="grok"]')).toBeTruthy();
+ await fireEvent.click(grok);
  await waitFor(() => expect(transport.put).toHaveBeenCalledWith('/settings/voice', { voice_model: 'grok-voice-latest', voice_provider_id: null }));
  await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('eve'));
  expect(screen.getByRole('option', { name: 'Ara' })).toBeTruthy();

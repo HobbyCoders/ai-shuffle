@@ -231,6 +231,11 @@ async def test_schedule_wakeup_tool_recommends_an_api_key_in_subscription_mode(
     monkeypatch.setattr(claude_cli_status, "peek",
                         lambda: claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True))
     claude_auth_mode.set_mode(mode)
+    # API key mode with a usable key: a model-less wake takes the key.
+    from app.core import credential_gate
+
+    monkeypatch.setattr(credential_gate, "_claude_api_default",
+                        lambda *a, **k: ("claude-api", "claude-sonnet-5"))
     handler = _build_schedule_wakeup_handler("s1", "pr", None)
     payload = _parse_envelope(await handler({"delaySeconds": 120, "prompt": "continue"}))
     assert payload["success"] is True

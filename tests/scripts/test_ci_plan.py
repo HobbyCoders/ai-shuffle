@@ -48,9 +48,11 @@ def workflow(name):
     ("android-minified", ".github/workflows/ci-android-minified.yml", True),
     ("android-minified", ".github/workflows/android.yml", False),
     # The server suites leave the UI's own source to the JavaScript checks.
-    ("fluid", "fluid/fluid/engine.py", True), ("fluid", "scripts/devloop/ci.py", True),
+    ("fluid", "fluid/fluid/engine.py", True), ("fluid", "scripts/devloop/fake_wire.py", True),
     ("fluid", "app/main.py", False), ("fluid", "frontend/src/lib/a.ts", False),
     ("fluid", "app/core/temp_scratch.py", True),
+    # Of scripts/ only what its tests and workflow load: a scripts-only change skips it.
+    ("fluid", "scripts/devloop/ci.py", False), ("fluid", "scripts/ci/proven.py", False),
     ("windows", "app/main.py", True), ("windows", "desktop/main.js", True), ("windows", "frontend/package.json", True),
     ("windows", "frontend/src/lib/a.ts", False), ("windows", "docs/x.md", False), ("windows", "ios/App.swift", False),
     ("windows", "README.md", False), ("windows", "android/app/src/main/AndroidManifest.xml", False),
@@ -238,11 +240,16 @@ ROOT_NAMES = ("ROOT", "REPO", "REPO_ROOT", "root")
 NOT_READ = {
     # android/ci/test-ci-webview.py opens two workflows by name; both are listed.
     ("android", ".github/workflows/x"),
+    # test_delegated_toolmix.py classifies a shell command naming it; nothing opens
+    # it, so the fluid scan does not follow it into the scripts it names in turn.
+    ("fluid", "scripts/ci/test-cost-policy.py"),
 }
 
 
-def module_file(name):
-    for base in PACKAGE_ROOTS:
+def module_file(name, importer=None):
+    # Fluid's suite runs with fluid/ as its rootdir: its `tests` is fluid/tests.
+    inside_fluid = importer is not None and ROOT / "fluid" in importer.parents
+    for base in reversed(PACKAGE_ROOTS) if inside_fluid else PACKAGE_ROOTS:
         path = base / Path(*name.split("."))
         for found in (path.with_suffix(".py"), path / "__init__.py"):
             if found.is_file():
@@ -260,9 +267,24 @@ def package_of(path, level):
     return None
 
 
-def loaded_by(path):
-    """(modules a Python file imports, repository paths it spells out)."""
+def is_main_block(node):
+    """``if __name__ == "__main__":``, which an import or runpy.run_path never runs."""
+    test = node.test if isinstance(node, ast.If) else None
+    return (isinstance(test, ast.Compare) and getattr(test.left, "id", "") == "__name__"
+            and any(getattr(item, "value", None) == "__main__" for item in test.comparators))
+
+
+def parsed(path, main=True):
+    """A Python file's syntax tree; without its ``__main__`` block when ``main`` is False."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    if not main:
+        tree.body = [node for node in tree.body if not is_main_block(node)]
+    return tree
+
+
+def loaded_by(path, main=True):
+    """(modules a Python file imports, repository paths it spells out)."""
+    tree = parsed(path, main)
     modules, paths, inner = set(), set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -317,15 +339,15 @@ def python_named(area):
     return files
 
 
-def imported_by(files):
+def imported_by(files, main=True):
     seen, waiting = set(), list(files)
     while waiting:
         path = waiting.pop()
         if path in seen:
             continue
         seen.add(path)
-        for module in loaded_by(path)[0]:
-            found = module_file(module)
+        for module in loaded_by(path, main)[0]:
+            found = module_file(module, path)
             if found:
                 waiting.append(found)
                 waiting += [folder / "__init__.py" for folder in found.parents
@@ -344,6 +366,80 @@ def test_an_area_reads_every_path_its_scripts_spell_out(area):
     """The buyer-install check opens docs/install/compose; only its script says so."""
     named = {path for script in python_named(area) for path in loaded_by(script)[1]}
     assert sorted(path for path in named if not plan.reads(area, path) and (area, path) not in NOT_READ) == []
+
+
+def scripts_named_by(path):
+    """The scripts/ files a Python file names by a literal path, outside its ``__main__`` block."""
+    found = set()
+    for node in ast.walk(parsed(path, main=False)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            # Path(__file__).parents[3] / "scripts" / "devloop" / "fake_wire.py"
+            parts, current = [], node
+            while (isinstance(current, ast.BinOp) and isinstance(current.op, ast.Div)
+                   and isinstance(current.right, ast.Constant) and isinstance(current.right.value, str)):
+                parts.append(current.right.value)
+                current = current.left
+            text = "/".join(reversed(parts))
+        else:
+            continue
+        if text.startswith("scripts/") and ".." not in text and (ROOT / text).is_file():
+            found.add(text)
+    return found
+
+
+def files_fluid_tests_load():
+    """Every module the fluid suite imports, and the scripts/ files it opens by path.
+
+    Its workflow names a folder of tests, which the scans above do not open, and
+    its fixtures load scripts by a path built from ``__file__``. A script found by
+    its path is followed in turn, into its imports and the scripts it names, until
+    nothing new turns up. The suite loads such scripts with runpy.run_path or
+    exec_module, which never run an ``if __name__ == "__main__":`` block, so the
+    imports there are left out (a test that ran a script as a subprocess would
+    need them).
+    """
+    starts = {ROOT / "conftest.py", ROOT / "fluid" / "conftest.py", *(ROOT / "fluid" / "tests").rglob("*.py")}
+    found, named_from, waiting = set(), set(), {path for path in starts if path.is_file()}
+    while waiting:
+        found |= imported_by(waiting, main=False)
+        scripts = {ROOT / name for name in found if name.startswith("scripts/") and name.endswith(".py")}
+        unread = (waiting | scripts) - named_from
+        named_from |= unread
+        named = {name for name in set().union(*map(scripts_named_by, unread))
+                 if ("fluid", name) not in NOT_READ} - found
+        found |= named
+        waiting = {ROOT / name for name in named if name.endswith(".py")}
+    return found
+
+
+def test_the_fluid_scan_follows_what_a_script_loaded_by_path_loads(tmp_path, monkeypatch):
+    for name, text in {
+        "fluid/tests/unit/test_x.py": 'import runpy\nrunpy.run_path(str(ROOT / "scripts/a.py"))\n',
+        "scripts/__init__.py": "",
+        # A module-level import runs under run_path; the __main__ block does not.
+        "scripts/a.py": ('from scripts import b\nNAMED = "scripts/c.sh"\n'
+                         'if __name__ == "__main__":\n    from scripts import main_only\n'),
+        "scripts/b.py": 'import importlib\nimportlib.import_module("x")\nNEXT = "scripts/d.py"\n',
+        "scripts/c.sh": "", "scripts/d.py": "from scripts import e\n", "scripts/e.py": "",
+        "scripts/main_only.py": "", "scripts/unused.py": "",
+    }.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "PACKAGE_ROOTS", (tmp_path, tmp_path / "fluid"))
+    found = {name for name in files_fluid_tests_load() if name.startswith("scripts/")}
+    assert found == {"scripts/__init__.py", "scripts/a.py", "scripts/b.py", "scripts/c.sh",
+                     "scripts/d.py", "scripts/e.py"}
+
+
+def test_the_fluid_area_reads_every_file_its_tests_load():
+    """The fluid area lists the scripts its tests use, not all of scripts/."""
+    loaded = files_fluid_tests_load()
+    assert {"scripts/ci/test_scratch.py", "scripts/devloop/fake_wire.py",
+            "scripts/ci/fetch_claude_fixture.py", "scripts/measure_learner_yield.py"} <= loaded
+    assert sorted(path for path in loaded if not plan.reads("fluid", path)) == []
 
 
 def test_the_import_scan_follows_the_ways_a_test_loads_a_module():
@@ -387,10 +483,47 @@ def test_the_jobs_left_out_of_the_scan_cannot_run_from_ci():
 def test_the_advisory_job_is_the_one_its_workflow_lets_fail():
     android = workflow("android.yml")["jobs"]["android-ui"]
     assert android["continue-on-error"] == "${{ matrix.advisory }}"
-    names = [android["name"].replace("${{ matrix.api }}", leg["api"])
+    names = [android["name"].replace("${{ matrix.leg }}", leg["leg"])
              for leg in android["strategy"]["matrix"]["include"] if leg["advisory"] == "true"]
+    assert len(names) == 4 and all("(API 36, " in name for name in names)
     assert plan.AREAS["android"]["advisory"] == tuple("android / " + name for name in names)
-    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["android"]
+    # The backend test map: a lost map only makes pull requests run every test.
+    backend = workflow("ci-backend.yml")["jobs"]
+    tolerant = [key for key, job in backend.items() if str(job.get("continue-on-error")).lower() == "true"]
+    assert tolerant == ["backend-map"]
+    assert plan.AREAS["backend"]["advisory"] == ("backend / " + backend["backend-map"]["name"],)
+    # No verdict waits on it.
+    assert not any("backend-map" in (job.get("needs") or ()) for job in backend.values())
+    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["backend", "android"]
+
+
+def test_the_container_area_reads_the_setup_wizard_its_smoke_script_walks():
+    smoke = (ROOT / "tests/integration/container_ui_smoke.mjs").read_text(encoding="utf-8")
+    assert "setup-provider-missing" in smoke and "setup-license" in smoke
+    for path in ("frontend/src/routes/setup/+page.svelte", "frontend/src/lib/components/setup/ProviderStep.svelte",
+                 "frontend/src/lib/components/setup/LicenseStep.svelte",
+                 "frontend/src/lib/components/OwnerAccessGate.svelte"):
+        assert (ROOT / path).is_file(), path
+        assert plan.reads("container", path), path
+    for prefix in plan.SETUP_UI:
+        assert (ROOT / prefix).exists(), prefix
+    # The rest of the UI stays the JavaScript checks' alone.
+    assert not plan.reads("container", "frontend/src/lib/components/chat/ChatInput.svelte")
+    # Every API client, store and service the wizard's screens import directly.
+    import re
+    screens = [ROOT / "frontend/src/routes/setup/+page.svelte", ROOT / "frontend/src/routes/+layout.svelte",
+               ROOT / "frontend/src/lib/components/OwnerAccessGate.svelte",
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.svelte")),
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.ts"))]
+    for screen in screens:
+        for module in re.findall(r"from '\$lib/((?:api|stores|services|constants)/[^']+)'", screen.read_text("utf-8")):
+            found = [ROOT / "frontend/src/lib" / (module + ext) for ext in (".ts", ".svelte.ts", "")]
+            path = next(f for f in found if f.is_file()).relative_to(ROOT).as_posix()
+            assert plan.reads("container", path), (screen.name, path)
+    # The owner password the script creates goes through api/owner.ts: a change to it is a new container key.
+    entries = [("100644", "a" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
 
 
 # --- Did the area pass in a run ----------------------------------------------------
@@ -399,8 +532,9 @@ def job(name, conclusion="success", status="completed"):
     return {"name": name, "status": status, "conclusion": conclusion}
 
 
-ANDROID = [job("android / Build and test Android app"), job("android / Android emulator verification (API 34)"),
-           job("android / Android emulator verification (API 36)"),
+EMULATOR_34 = [job(f"android / Android emulator verification (API 34, {part}/4)") for part in range(1, 5)]
+EMULATOR_36 = [job(f"android / Android emulator verification (API 36, {part}/4)") for part in range(1, 5)]
+ANDROID = [job("android / Build and test Android app"), *EMULATOR_34, *EMULATOR_36,
            job("android / Publish verified Android download", "skipped")]
 OTHER = [job("backend / backend-shard 1"), job("android-minified / Minified releaseSmoke (API 34)"), job("CI", None, "in_progress")]
 
@@ -419,20 +553,22 @@ def test_an_area_passed_when_its_own_jobs_all_finished_without_a_failure():
     assert plan.area_passed("android", ANDROID + OTHER)
     # Another area's failure, or the verdict job still running, takes nothing away.
     assert plan.area_passed("android", ANDROID + [job("backend / backend-shard 1", "failure")] + OTHER[1:])
-    # The emulator its workflow lets fail.
-    assert plan.area_passed("android", [ANDROID[0], ANDROID[1], {**ANDROID[2], "conclusion": "failure"}, ANDROID[3]])
+    # The emulator parts its workflow lets fail.
+    tolerated = EMULATOR_36[2]["name"]
+    assert plan.area_passed("android", [item if item["name"] != tolerated else {**item, "conclusion": "failure"}
+                                        for item in ANDROID])
 
 
 @pytest.mark.parametrize("bad", [
     job("android / Build and test Android app", "failure"),
-    job("android / Android emulator verification (API 34)", "failure"),
-    job("android / Android emulator verification (API 34)", "cancelled"),
-    job("android / Android emulator verification (API 34)", "timed_out"),
-    job("android / Android emulator verification (API 34)", "neutral"),
-    job("android / Android emulator verification (API 34)", None, "in_progress"),
-    job("android / Android emulator verification (API 34)", None, "queued"),
+    job("android / Android emulator verification (API 34, 2/4)", "failure"),
+    job("android / Android emulator verification (API 34, 2/4)", "cancelled"),
+    job("android / Android emulator verification (API 34, 2/4)", "timed_out"),
+    job("android / Android emulator verification (API 34, 2/4)", "neutral"),
+    job("android / Android emulator verification (API 34, 2/4)", None, "in_progress"),
+    job("android / Android emulator verification (API 34, 2/4)", None, "queued"),
     # Still running, even the tolerated emulator holds the record back.
-    job("android / Android emulator verification (API 36)", None, "in_progress"),
+    job("android / Android emulator verification (API 36, 4/4)", None, "in_progress"),
     job("android / A job added later", "failure"),
 ])
 def test_an_area_with_a_failed_or_unfinished_job_did_not_pass(bad):
@@ -446,7 +582,7 @@ def test_an_area_that_ran_nothing_did_not_pass():
     assert not plan.area_passed("android", None)
     assert not plan.area_passed("android", [job(item["name"], "skipped") for item in ANDROID])
     # Only the tolerated emulator succeeded.
-    assert not plan.area_passed("android", [job(ANDROID[0]["name"], "skipped"), ANDROID[2]])
+    assert not plan.area_passed("android", [job(ANDROID[0]["name"], "skipped"), EMULATOR_36[0]])
     # A name that only starts like the area's.
     assert not plan.area_passed("android", [job("android-minified / Minified releaseSmoke (API 34)")])
     assert not plan.area_passed("android", [job("android"), "odd", {}])
@@ -764,6 +900,100 @@ def test_the_plan_step_writes_one_answer_per_area_and_the_record_names(checkout,
     assert all("\n" not in value for value in answers.values())
     text = summary.read_text()
     assert "| `android` | skipped | its files are unchanged since it passed in https://example.invalid/run/7 |" in text
+    assert "| `backend` | runs | no pass is recorded for these files |" in text
+
+
+def merged(checkout, *paths):
+    """Make HEAD GitHub's merge of a branch that changes ``paths`` into a main that moved on."""
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    for path in paths:
+        (checkout / path).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / path).write_text("changed\n")
+    git("add", "-A")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    # main moved on after the branch started: its own change is not the pull request's.
+    (checkout / "app.py").write_text("main moved\n")
+    git("commit", "-qam", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    return checkout
+
+
+def test_a_pull_request_changing_only_the_api_base_runs_the_container_job(checkout):
+    # runtime.ts holds apiBase(), which every call of the container smoke script goes through.
+    path = "frontend/src/lib/api/runtime.ts"
+    assert plan.reads("container", path)
+    merged(checkout, path)
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not found["container"]["proven"]
+    entries = [("100644", "a" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
+
+
+def test_a_pull_request_skips_the_areas_it_changes_no_file_of(checkout):
+    merged(checkout, "android/a.kt")
+    lookups = []
+
+    def call(path, token):
+        lookups.append(path)
+        return {"artifacts": []}
+
+    found = plan.plan(checkout, environment(), call)
+    running = [area for area, state in found.items() if not state["proven"]]
+    # backend reads every file; desktop and the rest read nothing of android/.
+    assert running == ["backend", "android", "android-minified"]
+    assert all(found[area]["by"] == plan.UNTOUCHED for area in plan.AREAS if area not in running)
+    # Only the areas that run are looked up; the others are skipped already.
+    assert sorted({re.search(r"name=pass-(.+)-[0-9a-f]{40}$", path).group(1) for path in lookups}) == sorted(running)
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_only_a_pull_request_skips_an_untouched_area(checkout, event):
+    merged(checkout, "android/a.kt")
+    found = plan.plan(checkout, environment(GITHUB_EVENT_NAME=event), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+
+
+def test_a_pull_request_whose_changes_cannot_be_read_skips_nothing_untouched(checkout, capsys):
+    # HEAD is not a merge commit (a shallow checkout lists no parents): nothing is skipped this way.
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+    assert plan.changed_files(checkout) is None
+    assert plan.changed_files(checkout / "missing") is None
+    assert "could not read the pull request's changed files" in capsys.readouterr().err
+
+
+def test_a_pull_request_names_both_sides_of_a_rename_and_a_deletion(checkout):
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    git("mv", "android/a.kt", "android/b.kt")
+    git("rm", "-q", "app.py")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    (checkout / "other.txt").write_text("main moved\n")
+    git("add", "-A")
+    git("commit", "-qm", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    assert sorted(plan.changed_files(checkout)) == ["android/a.kt", "android/b.kt", "app.py"]
+
+
+def test_the_plan_step_says_why_an_untouched_area_is_skipped(checkout, monkeypatch, capsys, tmp_path):
+    merged(checkout, "docs/guide.md")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    real = plan.plan
+    monkeypatch.setattr(plan, "plan", lambda: real(checkout, environment(), lambda path, token: {"artifacts": []}))
+    assert plan.main(["plan"]) == 0
+    answers = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert answers["container"] == "true" and answers["backend"] == "false"
+    text = summary.read_text()
+    assert "| `container` | skipped | this pull request changes none of its files |" in text
     assert "| `backend` | runs | no pass is recorded for these files |" in text
 
 

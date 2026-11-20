@@ -3,22 +3,20 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.core import claude_accounts as accounts, claude_auth_mode, encryption
+from app.db import database as db
+from app.db.settings import get_system_setting_snapshots
 from app.network.policy import is_shared_setting_key
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch):
-    values = {}
-    monkeypatch.setattr(accounts.database, "get_system_setting", values.get)
-    monkeypatch.setattr(accounts.database, "set_system_setting", values.__setitem__)
-    monkeypatch.setattr(accounts.database, "delete_system_setting", lambda key: values.pop(key, None) is not None)
+def unlocked_storage(mock_db, monkeypatch):
+    # Use the suite's isolated DB for both setting values and write revisions.
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
-    yield values
 
 
-def test_keys_save_activate_rename_delete_and_legacy_migration(isolated):
+def test_keys_save_activate_rename_delete_and_legacy_migration():
     old = "example-anthropic-secret-key-1111"
-    isolated[accounts.API_SETTING] = encryption.encrypt_value(old)
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value(old))
     legacy = accounts.accounts_payload()["api_key"][0]["id"]
     second = accounts.add_api_key("example-anthropic-secret-key-2222", "Work", False)
     assert claude_auth_mode.stored_api_key() == old
@@ -31,51 +29,64 @@ def test_keys_save_activate_rename_delete_and_legacy_migration(isolated):
     accounts.change_account("api_key", second, "delete")
     assert claude_auth_mode.stored_api_key() is None
     assert accounts.accounts_payload()["api_key"] == []
-    assert all(encryption.is_encrypted(value) for value in isolated.values())
+    assert encryption.is_encrypted(db.get_system_setting(accounts.API_LIST_SETTING))
 
 
-def test_key_list_follows_scalar_sync_and_injection_uses_active(isolated):
+def test_key_list_follows_scalar_sync_and_the_active_key_is_native():
     from app.api.settings_crypto import get_decrypted_api_key
     from app.core.environment import _get_decrypted_api_key, inject_claude_code_auth
-    first = accounts.add_api_key("example-anthropic-secret-key-1111")
-    second = accounts.add_api_key("example-anthropic-secret-key-2222")
-    isolated[claude_auth_mode.setting_key()] = "api_key"
+    accounts.add_api_key("example-anthropic-secret-key-1111")
+    accounts.add_api_key("example-anthropic-secret-key-2222")
+    db.set_system_setting(claude_auth_mode.setting_key(), "api_key")
+    assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) is None
     assert get_decrypted_api_key(accounts.API_SETTING).endswith("2222")
     assert _get_decrypted_api_key(accounts.API_SETTING).endswith("2222")
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"].endswith("2222")
-    replica = isolated[accounts.API_SETTING]
-    accounts.change_account("api_key", first, "activate")
-    isolated[accounts.API_SETTING] = replica
+    from app.core import claude_api_provider
+    # The active key runs natively; the Claude Code CLI never receives it.
+    assert "ANTHROPIC_API_KEY" not in inject_claude_code_auth({})
+    assert claude_api_provider._active_key().endswith("2222")
+    replica = db.get_system_setting(accounts.API_SETTING)
+    rows = {row["last4"]: row for row in accounts.accounts_payload()["api_key"]}
+    assert rows.keys() == {"1111", "2222"}
+    first, second = rows["1111"], rows["2222"]
+    assert first["id"] != second["id"] and not first["active"] and second["active"]
+    accounts.change_account("api_key", first["id"], "activate")
+    assert claude_api_provider._active_key().endswith("1111")
+    db.set_system_setting(accounts.API_SETTING, replica)
     assert accounts.active_api_key().endswith("2222")
-    assert len(accounts.accounts_payload()["api_key"]) == 2
+    assert "ANTHROPIC_API_KEY" not in inject_claude_code_auth({})
+    assert [(row["id"], row["active"]) for row in accounts.accounts_payload()["api_key"]] == [
+        (first["id"], False), (second["id"], True),
+    ]
     assert is_shared_setting_key(accounts.API_SETTING)
-    assert first != second
-    # The scalar arriving first still shows the key actually used by the CLI.
-    isolated.pop(accounts.API_LIST_SETTING)
+    # The scalar arriving first still shows the key actually in use.
+    db.delete_system_setting(accounts.API_LIST_SETTING)
     listing = accounts.accounts_payload()["api_key"]
     assert len(listing) == 1 and listing[0]["active"] and listing[0]["last4"] == "2222"
-    assert encryption.decrypt_value(isolated[accounts.API_SETTING]).endswith("2222")
+    assert db.get_system_setting(accounts.API_SETTING) == replica
+    assert encryption.decrypt_value(replica).endswith("2222")
     assert is_shared_setting_key(accounts.API_LIST_SETTING)
 
 
-def test_dedupe_masks_and_locked_storage(isolated, monkeypatch):
+def test_dedupe_masks_and_locked_storage(monkeypatch):
     key = "example-anthropic-secret-key-1111"
     first = accounts.add_api_key(key, "First")
     assert accounts.add_api_key(key, "Updated") == first
     assert len(accounts.accounts_payload()["api_key"]) == 1
     assert key not in str(accounts.accounts_payload())
+    before = get_system_setting_snapshots(accounts.API_SETTING, accounts.API_LIST_SETTING)
     monkeypatch.setattr(encryption, "_encryption_key", None)
     with pytest.raises(accounts.AccountError, match="Unlock"):
         accounts.add_api_key("never-save-plaintext")
     assert accounts.accounts_payload()["storage_locked"] is True
-    assert "never-save" not in str(isolated)
+    assert get_system_setting_snapshots(accounts.API_SETTING, accounts.API_LIST_SETTING) == before
 
 
-def test_legacy_deactivate_preserves_saved_keys(isolated):
+def test_legacy_deactivate_preserves_saved_keys():
     key = "example-anthropic-secret-key-1111"
-    isolated[accounts.API_SETTING] = encryption.encrypt_value(key)
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value(key))
     accounts.deactivate_api_key()
-    assert accounts.API_SETTING not in isolated
+    assert db.get_system_setting(accounts.API_SETTING) is None
     assert accounts.active_api_key() is None
     assert len(accounts.accounts_payload()["api_key"]) == 1
     assert not accounts.accounts_payload()["api_key"][0]["active"]
@@ -107,3 +118,42 @@ def test_subscription_list_shows_while_key_storage_is_locked(monkeypatch):
     assert payload["storage_locked"] is True
     assert payload["subscription"] == [{"id": "x"}]
     assert payload["subscription_support"]["supported"] is True
+
+
+def test_a_local_cloud_override_keeps_the_owners_key_pin():
+    """A worker set to Cloud locally still bills the key the owner pinned on
+    the native Claude API provider, never a stale scalar from a peer."""
+    from app.core import claude_api_provider
+
+    accounts.add_api_key("example-anthropic-secret-key-1111")
+    accounts.add_api_key("example-anthropic-secret-key-2222", for_claude_code=True)
+    assert claude_auth_mode.shared_selection()["key_id"]
+    # A peer's older save lands its scalar after the owner's pin.
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("example-anthropic-secret-key-1111"))
+    db.set_system_setting(claude_auth_mode.setting_key(), "cloud")
+    assert claude_auth_mode.runtime_choice() == ("cloud", None)
+    assert claude_api_provider._active_key().endswith("2222")
+    active = [row["last4"] for row in accounts.accounts_payload()["api_key"] if row["active"]]
+    assert active == ["2222"]
+    # Settings names the same key outside API key mode too.
+    assert claude_auth_mode.summary(cli={})["api_key"]["last4"] == "2222"
+
+
+def test_settings_shows_no_key_while_the_pinned_key_has_not_synced():
+    import json
+
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("example-anthropic-secret-key-1111"))
+    db.set_system_setting(claude_auth_mode.SELECTION_SETTING, json.dumps(
+        {"mode": "subscription", "subscription": None, "key_id": "not-synced-yet"}))
+    assert claude_auth_mode.summary(cli={})["api_key"] == {"set": False, "last4": None}
+
+
+def test_changing_the_pinned_key_does_not_reconnect_cli_sessions():
+    import json
+
+    def fingerprint(key_id):
+        db.set_system_setting(claude_auth_mode.SELECTION_SETTING, json.dumps(
+            {"mode": "api_key", "subscription": None, "key_id": key_id}))
+        return claude_auth_mode.spawn_fingerprint()
+
+    assert fingerprint("key-a") == fingerprint("key-b")

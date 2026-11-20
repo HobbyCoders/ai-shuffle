@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { allJourneys, checkMap, loadMap, selectBeforeQueue, selectForCi, selectJourneys } from './select.mjs';
+import { allJourneys, checkMap, loadMap, selectForCi, selectJourneys, selectNamed } from './select.mjs';
 
 const selector = fileURLToPath(new URL('./select.mjs', import.meta.url));
 const journeys = allJourneys();
@@ -114,7 +114,7 @@ test('--ci --json --files-from reads the listed paths', (t) => {
 	assert.deepEqual([everything.journeys, everything.all], [journeys, true]);
 });
 
-test('before a merge queue a pull request runs only the journeys a rule names', (t) => {
+test('a pull request runs only the journeys a rule names; main runs the rest', (t) => {
 	const mapFile = 'frontend/tests/journeys/map.json';
 	const map = {
 		unmapped_runs_all: { why: 'uncovered UI source', globs: ['frontend/src/**'] },
@@ -122,21 +122,21 @@ test('before a merge queue a pull request runs only the journeys a rule names', 
 		rules: [{ why: 'one surface', journeys: [journeys[0]], globs: ['frontend/src/lib/covered.ts'] }]
 	};
 	const files = ['frontend/src/lib/covered.ts', 'frontend/src/lib/uncovered.ts', 'frontend/tests/journeys/runner.mjs'];
-	// The queue's selection, for comparison: the harness and the uncovered file run everything.
+	// Main's selection, for comparison: the harness and the uncovered file run everything.
 	assert.equal(selectForCi(files, map, journeys).all, true);
-	const before = selectBeforeQueue(files, map, journeys);
-	assert.deepEqual(before.journeys, [journeys[0]]);
-	assert.deepEqual(before.reasons[journeys[0]], ['frontend/src/lib/covered.ts: one surface']);
-	assert.deepEqual(selectBeforeQueue(files.slice(1), map, journeys).journeys, []);
-	// It never names a journey the queue's selection leaves out.
+	const named = selectNamed(files, map, journeys);
+	assert.deepEqual(named.journeys, [journeys[0]]);
+	assert.deepEqual(named.reasons[journeys[0]], ['frontend/src/lib/covered.ts: one surface']);
+	assert.deepEqual(selectNamed(files.slice(1), map, journeys).journeys, []);
+	// It never names a journey main's selection leaves out.
 	for (const each of [files, files.slice(0, 1), ['docs/readme.md'], [mapFile, files[0]]]) {
 		const whole = selectForCi(each, map, journeys).journeys;
-		for (const name of selectBeforeQueue(each, map, journeys).journeys) assert.ok(whole.includes(name), name);
+		for (const name of selectNamed(each, map, journeys).journeys) assert.ok(whole.includes(name), name);
 	}
 	// An edited map still selects what either copy names for the other files.
 	const base = { ...map, rules: [{ why: 'base rule', journeys: [journeys.at(-1)], globs: ['frontend/src/lib/covered.ts'] }] };
 	assert.deepEqual(
-		selectBeforeQueue([mapFile, 'frontend/src/lib/covered.ts'], map, journeys, base).journeys,
+		selectNamed([mapFile, 'frontend/src/lib/covered.ts'], map, journeys, base).journeys,
 		[...new Set([journeys[0], journeys.at(-1)])]
 	);
 	// The caller's maps are not changed.
@@ -144,7 +144,7 @@ test('before a merge queue a pull request runs only the journeys a rule names', 
 	assert.ok(map.unmapped_runs_all);
 
 	// The real CLI, on the checked-in map: the harness alone selects nothing here and everything with --ci.
-	const directory = mkdtempSync(join(tmpdir(), 'shuffle-journey-queue-'));
+	const directory = mkdtempSync(join(tmpdir(), 'shuffle-journey-named-'));
 	t.after(() => rmSync(directory, { recursive: true, force: true }));
 	const listing = join(directory, 'changed.txt');
 	writeFileSync(listing, `frontend/tests/journeys/runner.mjs\nfrontend/src/lib/__no_rule_covers_this__.ts\nfrontend/tests/journeys/${journeys[0]}.journey.mjs\n`);
@@ -154,7 +154,7 @@ test('before a merge queue a pull request runs only the journeys a rule names', 
 		return JSON.parse(result.stdout);
 	};
 	assert.equal(run().all, true);
-	const narrowed = run('--before-queue');
+	const narrowed = run('--named-only');
 	assert.equal(narrowed.all, false);
 	assert.ok(narrowed.journeys.includes(journeys[0]));
 	assert.ok(narrowed.journeys.length < journeys.length);

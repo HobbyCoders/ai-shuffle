@@ -352,8 +352,11 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	const saved = claudeSubscriptionAccounts(claude);
 	if (saved.length) {
 		for (const account of saved) out.push(subscriptionCredential(claude, account));
-		// The CLI's own sign-in, in use but not saved as an entry yet: still a row.
-		if (!saved.some((a) => a.kind === 'default') && claude.accounts?.default_in_use && cli.signed_in) {
+		// Recovery must keep the default detail reachable even if only extra
+		// sign-ins have been saved. The detail verifies before binding it.
+		if (!saved.some((a) => a.kind === 'default') && (
+			claude.accounts?.recovery_required || (claude.accounts?.default_in_use && cli.signed_in)
+		)) {
 			out.unshift(cliCredential(claude));
 		}
 	} else if (cli.signed_in || subActive) {
@@ -910,13 +913,15 @@ export const KEY_CONFIG: Record<
 export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: StatusTone; text: string } {
 	if (!claude) return { status: 'off', text: 'Loading' };
 	if (claude.mode === 'off') return { status: 'off', text: 'Off, not in the picker' };
-	const ready = claude.gate
-		? claude.gate.claude_credential_ready
-		: claude.mode === 'subscription'
-			? !!claude.cli.signed_in
-			: claude.mode === 'cloud'
-				? !!claude.cloud?.ready
-				: claude.api_key.set;
+	// The key runs natively (Claude API), never through the CLI, so the gate's
+	// CLI credential says nothing about it.
+	const ready = claude.mode === 'api_key'
+		? claude.api_key.set
+		: claude.gate
+			? claude.gate.claude_credential_ready
+			: claude.mode === 'subscription'
+				? !!claude.cli.signed_in
+				: !!claude.cloud?.ready;
 	if (!ready) return { status: 'warn', text: 'Not ready' };
 	if (claude.mode === 'cloud') return { status: 'ok', text: `Runs on ${claude.cloud?.method_label || 'cloud provider'}` };
 	return { status: 'ok', text: claude.mode === 'subscription' ? 'Runs on subscription' : 'Runs on API key' };
@@ -926,21 +931,27 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
  * The warning on the Claude provider page, or null. Keys off Claude's own
  * credential (`claude_credential_ready`), not the gate's `ready`: that one
  * says whether any provider can run, so it stays true while Claude alone is
- * not ready.
+ * not ready. That credential is the CLI's (subscription or cloud); the saved
+ * API key is reported on its own, since Claude API runs without the CLI.
  */
 export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | null {
-	const gate = claude?.gate;
-	if (!claude || !gate || claude.mode === 'off') return null;
-	if (gate.claude_credential_ready !== false) return null;
+	if (!claude || claude.mode === 'off') return null;
+	if (claude.mode === 'api_key' && !claude.api_key.set) {
+		return 'Claude API cannot run: no Anthropic API key is stored on this worker.';
+	}
+	const gate = claude.gate;
+	if (!gate || gate.claude_credential_ready !== false) return null;
+	// The saved key is its own provider (Claude API) and still runs without the CLI.
+	const [who, keyNote] = claude.api_key.set
+		? [claude.mode === 'cloud' ? 'Claude Cloud' : 'Claude subscription', ' Claude API models run on the saved key.']
+		: ['Claude', ''];
 	if (claude.mode === 'cloud') {
 		const missing = claude.cloud?.missing ?? [];
 		return claude.cloud?.configured && missing.length
-			? `Claude cannot run: ${claude.cloud.method_label} needs ${missing.join(' and ')}.`
-			: 'Claude cannot run: no cloud provider or gateway is saved on this worker.';
+			? `${who} cannot run: ${claude.cloud.method_label} needs ${missing.join(' and ')}.${keyNote}`
+			: `${who} cannot run: no cloud provider or gateway is saved on this worker.${keyNote}`;
 	}
-	return claude.mode === 'api_key'
-		? 'Claude cannot run: no Anthropic API key is stored on this worker.'
-		: 'Claude cannot run: the Claude Code CLI is not signed in on this worker.';
+	return `${who} cannot run: the Claude Code CLI is not signed in on this worker.${keyNote}`;
 }
 
 /** Credentials that need the user: the index badge counts these. */

@@ -972,10 +972,9 @@ def _provider_for_model_pick(
         return None, False
     try:
         from app.db.model_providers import resolve_model_provider
-        from app.core.provider_agent import curated_model_ids
+        from app.core.provider_agent import keeps_bare_pick
 
-        provider_row = resolve_model_provider(bound, include_token=False)
-        if pick in curated_model_ids(provider_row):
+        if keeps_bare_pick(resolve_model_provider(bound, include_token=False), pick):
             return None, False
     except Exception:  # noqa: BLE001 — never clear a binding on a lookup failure
         logger.debug(

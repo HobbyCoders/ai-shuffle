@@ -227,7 +227,7 @@
 	<RowGroup title="Sign in" bare>
 		<ClaudeCliTerminal {cli} onClose={terminalClosed} />
 	</RowGroup>
-	<p class="pv-note">Becomes active after sign-in; the other subscription turns off. The Claude Code mode does not change.</p>
+	<p class="pv-note">The sign-in is saved but does not switch accounts. Select it after signing in.</p>
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<div class="pv-acts">
 		<button type="button" class="st-btn ghost" disabled={cancelling} onclick={cancel}>Cancel</button>
@@ -252,14 +252,14 @@
 			{/if}
 		</div>
 	</div>
-	<p class="pv-note">Becomes active after sign-in; the other subscription turns off. The Claude Code mode does not change.</p>
+	<p class="pv-note">The sign-in is saved but does not switch accounts. Select it after signing in.</p>
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<div class="pv-acts">
 		<button type="button" class="st-btn ghost" disabled={cancelling} onclick={cancel}>Cancel</button>
 	</div>
 {:else}
 	<RowGroup title="Sign in">
-		<SettingRow label="Sign in with another Claude account" hint="Becomes active after sign-in; the other subscription turns off">
+		<SettingRow label="Sign in with another Claude account" hint="Saved after sign-in; select it when ready">
 			<button type="button" class="st-btn primary" disabled={starting || access.readOnly} onclick={start}
 				><SquareTerminal />{starting ? 'Starting…' : 'Start sign-in'}</button
 			>

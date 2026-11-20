@@ -321,6 +321,22 @@ def curated_model_ids(provider: Optional[Mapping[str, Any]]) -> Tuple[str, ...]:
     return tuple(ids)
 
 
+def keeps_bare_pick(provider: Optional[Mapping[str, Any]], model: Optional[str]) -> bool:
+    """Whether a bare (non-``prov:``) model pick stays on ``provider``, the
+    chat's bound row: the one rebind rule persistence, turn resolution and
+    StartSession share.
+
+    True when the row curates the id. Never for the Claude API provider: it
+    is chosen only by an explicit ``prov:claude-api:<model>`` binding, and a
+    bare Claude name, even one both catalogs list, is the subscription.
+    """
+    from app.core.claude_api_provider import is_claude_api_id
+
+    if not provider or is_claude_api_id(provider.get("id")):
+        return False
+    return model in curated_model_ids(provider)
+
+
 def default_model_for_provider(provider: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The model to use when a caller omits ``model``.
 
@@ -424,6 +440,14 @@ def validate_provider_model(
         )
 
     ids = curated_model_ids(row)
+    from app.core import claude_api_provider
+
+    if mid not in ids and claude_api_provider.is_claude_api_id(pid):
+        # After a switch of key the row lists the built-in models until the new
+        # key's catalog is read: read it once before refusing a bound model.
+        if claude_api_provider.refresh_models_once():
+            row = claude_api_provider.virtual_row() or row
+            ids = curated_model_ids(row)
     if mid not in ids:
         return ModelValidation(
             ok=False,
@@ -1091,6 +1115,8 @@ def worker_session_fields(
     fitted by :func:`worker_speed`) are stamped the same way when set, as the
     pair :func:`app.core.model_speed.stored_pair` makes.
     """
+    from app.core.claude_api_provider import is_claude_api_id
+
     fields: Dict[str, Any] = dict(
         session_id=worker_session_id,
         profile_id=profile_id,
@@ -1105,7 +1131,12 @@ def worker_session_fields(
         worktree_path=worktree_path,
         provider_id=provider_id,
         derive_provider_from_profile=False,
-        model=model_id,
+        # A Claude API worker stores the explicit composite: its bare id is
+        # also a subscription id, which never stays on the key
+        # (:func:`keeps_bare_pick`), so a later turn keeps the key only this way.
+        model=(f"prov:{provider_id}:{model_id}"
+               if model_id and not model_id.startswith("prov:") and is_claude_api_id(provider_id)
+               else model_id),
         effort=effort,
         hidden=True,
         # Materialized flag backing the sidebar's worker filter. `hidden`

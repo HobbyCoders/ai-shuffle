@@ -282,15 +282,13 @@ jobs:
 
   journey-plan:
     name: Select UI journeys
-    # A pull request runs the journeys its changed files need
-    # (frontend/tests/journeys/map.json; an uncovered UI source file, or a diff
-    # that cannot be read, runs them all). When a merge queue guards main, the
-    # pull request runs only the journeys a map rule names and the queue's run
-    # makes the full selection once, on the merged result. A push to main and
-    # the queue's run select what changed since the last commit CI passed on;
-    # the push runs nothing when the queue passed this very commit or a pull
-    # request already passed those journeys on these exact files. A scheduled
-    # or dispatched run always runs every journey.
+    # A pull request runs only the journeys a map rule names for its changed
+    # files (frontend/tests/journeys/map.json; a diff that cannot be read runs
+    # them all). A push to main runs what changed since the last commit CI
+    # passed on, with the `all` rules and every journey for an uncovered UI
+    # source file, and nothing when a pull request already passed those
+    # journeys on these exact files. A scheduled or dispatched run always runs
+    # every journey.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -301,12 +299,12 @@ jobs:
       only: ${{ steps.select.outputs.only }}
       shards: ${{ steps.select.outputs.shards }}
       key: ${{ steps.select.outputs.key }}
+      parts: ${{ steps.select.outputs.parts }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # A pull request needs its merge commit's parents; a push and a
-          # merge in the queue need the history back to the last commit CI
-          # passed on.
+          # A pull request needs its merge commit's parents; a push needs the
+          # history back to the last commit CI passed on.
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       - name: Select the journeys and their shards
         id: select
@@ -334,12 +332,15 @@ jobs:
     timeout-minutes: 35
     env:
       JOURNEY_SELECTION: ${{ needs.journey-plan.outputs.only }}
+      # A pull request's heavy files run as parts, each with the exact case
+      # ids the plan job listed once; main always runs whole files.
+      JOURNEY_PARTS: ${{ github.event_name == 'pull_request' && needs.journey-plan.outputs.parts || '{}' }}
     steps:
       - uses: actions/checkout@v4
       - name: Plan this shard
         id: plan
         run: |
-          plan=$(python3 -m scripts.devloop.ci plan --shards 18 --only "$JOURNEY_SELECTION")
+          plan=$(python3 -m scripts.devloop.ci plan --shards 18 --only "$JOURNEY_SELECTION" --parts "$JOURNEY_PARTS")
           files=$(python3 -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])[int(sys.argv[2]) - 1]))' "$plan" "${{ matrix.shard }}")
           echo "files=$files" >> "$GITHUB_OUTPUT"
           echo "UI journeys shard ${{ matrix.shard }}/18: ${files:-no journey files} (plan: $plan)" >> "$GITHUB_STEP_SUMMARY"
@@ -423,7 +424,7 @@ jobs:
           # The runner's preinstalled, stopped PostgreSQL 16 binaries; the dev
           # instance initializes its own throwaway cluster on a free port.
           export PATH="/usr/lib/postgresql/16/bin:$PATH"
-          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/18" --only "$JOURNEY_SELECTION" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
+          python -m scripts.devloop.ci journeys --shard "${{ matrix.shard }}/18" --only "$JOURNEY_SELECTION" --parts "$JOURNEY_PARTS" --out "$RUNNER_TEMP/ui-journeys" --retry-failures
       - name: Upload journey timelines
         # A green retry is still a bug signal: retain both attempts.
         if: failure() || steps.journeys.outputs.retried == 'true'

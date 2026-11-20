@@ -17,8 +17,10 @@ Path pattern:
   .git/info/exclude. The absolute path is stored in the DB.)
 """
 
+import json
 import logging
 import os
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Dict, Any, List
@@ -38,6 +40,172 @@ from app.db.async_database import run_sync
 from app.db.base import WorktreeStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _inspect_worktree_owner(main_dir: str, worktree_abs_path: str, expected_common: Optional[str] = None):
+    """Verify against a trusted owner checkout, never one inferred from the target."""
+    from app.core.checkout_manager import _require_checkout_root
+    from app.core.worktree_report import _git, _path_key, parse_worktree_list
+    from app.db.checkouts import folder_key
+
+    if not Path(main_dir).is_dir():
+        raise WorktreeError("the original owner checkout is not available")
+    _require_checkout_root(main_dir)
+    main_common = _git(main_dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not main_common:
+        raise WorktreeError("owner Git common directory could not be verified")
+    common_key = folder_key(main_common.strip())
+    if expected_common is not None and common_key != expected_common:
+        raise WorktreeError("the original owner Git directory has changed")
+    target = Path(worktree_abs_path)
+    if target.is_symlink():
+        raise WorktreeError("checkout directory is a symlink; automatic cleanup is unsafe")
+    if target.exists():
+        if not (target / ".git").is_file() or (target / ".git").is_symlink():
+            raise WorktreeError("registered directory is not a linked worktree")
+        target_common = _git(worktree_abs_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if (
+            not target_common
+            or _path_key(main_common.strip()) != _path_key(target_common.strip())
+        ):
+            raise WorktreeError("checkout belongs to another or unverifiable Git repository")
+        admin = _git(worktree_abs_path, "rev-parse", "--absolute-git-dir")
+        try:
+            if not admin:
+                raise ValueError("Git administrative directory is unavailable")
+            admin_path = Path(admin.strip())
+            backlink = Path((admin_path / "gitdir").read_text().strip())
+            if not backlink.is_absolute():
+                backlink = admin_path / backlink
+            if _path_key(str(backlink)) != _path_key(str(target / ".git")):
+                raise ValueError("Git administrative entry points to another checkout")
+        except (OSError, ValueError) as exc:
+            raise WorktreeError("Git worktree back-reference could not be verified") from exc
+    listing = _git(main_dir, "worktree", "list", "--porcelain")
+    if listing is None:
+        raise WorktreeError("Git worktree registration could not be verified")
+    item = next((i for i in parse_worktree_list(listing)
+                 if _path_key(i["path"]) == _path_key(worktree_abs_path)), None)
+    if _path_key(worktree_abs_path) == _path_key(main_dir):
+        raise WorktreeError("cannot remove the project checkout")
+    if target.exists() and item is None:
+        raise WorktreeError("directory is registry-only, not registered with Git")
+    return item, common_key
+
+
+def _worktree_owner_proof(project: dict, main_dir: str, worktree: dict) -> dict:
+    target = get_worktree_working_dir(worktree)
+    item, common_key = _inspect_worktree_owner(main_dir, target)
+    if item is None:
+        raise WorktreeError("the original repository no longer lists this worktree")
+    return _owner_record(project, worktree, main_dir, common_key, target)
+
+
+def _owner_record(project, worktree, main_dir, common_key, target):
+    return {
+        "runner": project["instance_id"], "project": project["id"],
+        "repository": worktree["repository_id"], "target": os.path.normcase(os.path.abspath(target)),
+        "root": str(Path(main_dir).resolve()), "common": common_key,
+    }
+
+
+def _owner_evidence(worktree: dict) -> dict:
+    proof = worktree.get("cleanup_owner")
+    if isinstance(proof, str):
+        try:
+            proof = json.loads(proof)
+        except ValueError:
+            return {}
+    return proof if isinstance(proof, dict) else {}
+
+
+def is_retarget_pinned(worktree: dict) -> bool:
+    # Untagged evidence from earlier builds may already be pinned. Do not
+    # infer that it is safe to rebind just because the project moved back.
+    return worktree.get("cleanup_owner") is not None and _owner_evidence(worktree).get("retargeted") is not False
+
+
+def preserve_worktree_owners(cursor, project: dict, main_dir: str) -> None:
+    """Pin existing worktrees before losing the original registered checkout."""
+    cursor.execute(
+        "SELECT w.* FROM worktrees w JOIN git_repositories r ON r.id = w.repository_id "
+        "WHERE r.project_id = %s AND (w.cleanup_owner IS NULL "
+        "OR w.cleanup_owner->'retargeted' = 'false'::jsonb) FOR UPDATE",
+        (project["id"],),
+    )
+    for row in cursor.fetchall():
+        # Historical rows without proof cannot authorize a reopen or delete
+        # after the base moves, even if a branch has since reused their name.
+        proof = {}
+        evidence = _owner_evidence(row)
+        if row["status"] == WorktreeStatus.COMPLETED and evidence.get("root") == str(Path(main_dir).resolve()):
+            proof = {k: v for k, v in evidence.items() if k != "retargeted"}
+        elif row["status"] not in (WorktreeStatus.COMPLETED, WorktreeStatus.DELETED):
+            try:
+                proof = _worktree_owner_proof(project, main_dir, row)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, WorktreeError) as exc:
+                from app.db.projects import FolderConflict
+
+                raise FolderConflict(
+                    "This folder has a worktree whose original Git checkout cannot be verified. "
+                    "Restore its Git registration or resolve the stale worktree in Worktree management "
+                    "before changing folders. No files were changed."
+                ) from exc
+        cursor.execute("UPDATE worktrees SET cleanup_owner = %s::jsonb WHERE id = %s",
+                       (json.dumps(proof), row["id"]))
+
+
+def _verified_owner(project: dict, worktree: dict) -> dict:
+    proof = _owner_evidence(worktree)
+    if (
+        proof.get("runner") == project.get("instance_id") == settings.effective_instance_id
+        and proof.get("project") == project["id"]
+        and proof.get("repository") == worktree["repository_id"]
+        and proof.get("target") == os.path.normcase(os.path.abspath(get_worktree_working_dir(worktree)))
+        and all(isinstance(proof.get(k), str) and Path(proof[k]).is_absolute() for k in ("root", "common"))
+    ):
+        return proof
+    raise WorktreeError("original owner could not be verified on this worker")
+
+
+def _owned_worktree_project(worktree: dict) -> dict:
+    repo = database.get_git_repository(worktree["repository_id"])
+    project = database.get_project(repo["project_id"]) if repo else None
+    if not project:
+        raise WorktreeError("original owner metadata is missing")
+    return project
+
+
+def owned_active_path(worktree: dict) -> Optional[str]:
+    """Pure read for a session explicitly bound to a pinned legacy worktree."""
+    from app.core.checkout_manager import _require_branch_binding
+
+    if worktree["status"] != WorktreeStatus.ACTIVE:
+        return None
+    try:
+        owner = _verified_owner(_owned_worktree_project(worktree), worktree)
+        path = get_worktree_working_dir(worktree)
+        listing, _ = _inspect_worktree_owner(owner["root"], path, owner["common"])
+        if listing and Path(path).is_dir():
+            _require_branch_binding(path, worktree["branch_name"])
+            return path
+    except (WorktreeError, OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _git_dir_identity(common: str) -> Optional[list[int]]:
+    # A different clone can replace the owner at the exact same path. The
+    # retained ref alone does not prove the original common dir survived.
+    info = os.stat(common)
+    return [info.st_dev, info.st_ino] if info.st_ino else None
+
+
+def _local_branch_tip(root: str, branch: str) -> Optional[str]:
+    from app.core.worktree_report import _git
+
+    tip = _git(root, "show-ref", "--verify", "--hash", f"refs/heads/{branch}")
+    return tip.strip() if tip else None
 
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
@@ -333,26 +501,22 @@ class WorktreeManager:
         Example:
             {project_dir}/.fluid/worktrees/feature-auth
         """
+        main_dir = get_project_working_dir(project_path)
+        worktree_path = self._managed_worktree_path(main_dir, branch)
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_worktrees_ignored(main_dir)
+        return worktree_path
+
+    def _managed_worktree_path(self, main_dir: str, branch: str) -> Path:
+        """Authorize the deterministic path without creating folders or writing Git metadata."""
         sanitized = self._sanitize_branch_name(branch)
         if sanitized in ("", ".", ".."):
             raise WorktreeError(f"Invalid branch name for a worktree: '{branch}'")
-
-        # Place worktrees inside the project's own .fluid/worktrees/ folder.
-        main_dir = get_project_working_dir(project_path)
         worktrees_dir = Path(main_dir) / ".fluid" / "worktrees"
-        # A checked-out repository can carry a symlinked ``.fluid`` (or
-        # ``.fluid/worktrees``). Refuse to follow it out of the checkout before
-        # creating anything, so git never materializes files elsewhere.
         self._require_inside_checkout(main_dir, worktrees_dir)
-        worktrees_dir.mkdir(parents=True, exist_ok=True)
-
-        # Ensure the nested worktree dir is ignored by the main repo so the
-        # git worktrees we create here don't show up as untracked files.
-        self._ensure_worktrees_ignored(main_dir)
-
-        worktree_path = worktrees_dir / sanitized
-        self._require_inside_checkout(main_dir, worktree_path)
-        return worktree_path
+        target = worktrees_dir / sanitized
+        self._require_inside_checkout(main_dir, target)
+        return target
 
     @staticmethod
     def _require_inside_checkout(main_dir: str, path: Path) -> None:
@@ -545,7 +709,7 @@ class WorktreeManager:
                             worktree_path=stored_path,
                             session_id=None,
                             base_branch=None,
-                            status=WorktreeStatus.ACTIVE
+                            status=WorktreeStatus.ACTIVE,
                         )
                         logger.debug(f"Imported external worktree: {stored_path} (branch: {branch_name})")
                         imported += 1
@@ -1019,58 +1183,33 @@ class WorktreeManager:
             return early
 
         try:
-            main_dir = get_project_working_dir(project)
+            pinned = is_retarget_pinned(worktree)
+            owner = _verified_owner(project, worktree) if pinned else None
+            main_dir = owner["root"] if owner else get_project_working_dir(project)
+            expected_common = owner["common"] if owner else None
             worktree_abs_path = get_worktree_working_dir(worktree)
+        except WorktreeError as exc:
+            raise WorktreeError(f"Cleanup refused: {exc}; directory and registry record preserved.") from exc
         except (ValueError, TypeError, KeyError) as exc:
             raise WorktreeError(
                 "Cleanup refused: checkout path could not be resolved; "
                 "directory and registry record preserved."
             ) from exc
 
-        def _validate_cleanup() -> None:
+        def _validate_cleanup() -> Optional[dict]:
             from app.core import streaming_status
-            from app.core.checkout_manager import _require_branch_binding, _require_checkout_root
-            from app.core.worktree_report import _git, _path_key, _sessions_by_path, parse_worktree_list
+            from app.core.checkout_manager import _require_branch_binding
+            from app.core.worktree_report import _git, _path_key, _sessions_by_path
 
             # Refuse before terminating sessions or severing runtime links. A
             # registry row alone is never authority to recursively remove files.
             try:
-                _require_checkout_root(main_dir)
                 target = Path(worktree_abs_path)
-                if target.is_symlink():
-                    raise WorktreeError("checkout directory is a symlink; automatic cleanup is unsafe")
+                item, common = _inspect_worktree_owner(main_dir, worktree_abs_path, expected_common)
+                if expected_common is not None and item is None:
+                    raise WorktreeError("the original repository no longer lists this worktree")
                 if target.exists():
                     _require_branch_binding(worktree_abs_path, worktree["branch_name"])
-                    if not (target / ".git").is_file() or (target / ".git").is_symlink():
-                        raise WorktreeError("registered directory is not a linked worktree")
-                    main_common = _git(main_dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                    target_common = _git(worktree_abs_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-                    if (
-                        not main_common or not target_common
-                        or _path_key(main_common.strip()) != _path_key(target_common.strip())
-                    ):
-                        raise WorktreeError("checkout belongs to another or unverifiable Git repository")
-                    admin = _git(worktree_abs_path, "rev-parse", "--absolute-git-dir")
-                    try:
-                        if not admin:
-                            raise ValueError("Git administrative directory is unavailable")
-                        admin_path = Path(admin.strip())
-                        backlink = Path((admin_path / "gitdir").read_text().strip())
-                        if not backlink.is_absolute():
-                            backlink = admin_path / backlink
-                        if _path_key(str(backlink)) != _path_key(str(target / ".git")):
-                            raise ValueError("Git administrative entry points to another checkout")
-                    except (OSError, ValueError) as exc:
-                        raise WorktreeError("Git worktree back-reference could not be verified") from exc
-                listing = _git(main_dir, "worktree", "list", "--porcelain")
-                if listing is None:
-                    raise WorktreeError("Git worktree registration could not be verified")
-                item = next((i for i in parse_worktree_list(listing)
-                             if _path_key(i["path"]) == _path_key(worktree_abs_path)), None)
-                if _path_key(worktree_abs_path) == _path_key(main_dir):
-                    raise WorktreeError("cannot remove the project checkout")
-                if target.exists() and item is None:
-                    raise WorktreeError("directory is registry-only, not registered with Git")
                 if item and item.get("locked"):
                     raise WorktreeError("worktree is locked")
                 sessions = database.get_sessions_for_worktree(worktree_id) or []
@@ -1092,10 +1231,27 @@ class WorktreeManager:
                                   repo.get("default_branch") or "main")
                     if merged is None or worktree["branch_name"] not in merged.splitlines():
                         raise WorktreeError("missing directory still has unmerged branch history; retry with keep_branch=true")
+
+                proof = dict(owner) if owner else {"retargeted": False}
+                if proof is not None:
+                    proof.pop("retained", None)
+                branch = worktree["branch_name"]
+                if (keep_branch and item and item["branch"] == branch
+                        and project.get("instance_id") == settings.effective_instance_id):
+                    tip = _local_branch_tip(main_dir, branch)
+                    if tip and tip == item["head"] and (identity := _git_dir_identity(common)):
+                        proof.update(_owner_record(project, worktree, main_dir, common, worktree_abs_path))
+                        proof["retained"] = {"branch": branch, "tip": tip, "git_dir": identity}
+                if proof == {"retargeted": False} and worktree.get("cleanup_owner") is None:
+                    return None
+                return proof
             except WorktreeError as exc:
                 raise WorktreeError(f"Cleanup refused: {exc}; directory and registry record preserved.") from exc
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                raise WorktreeError("Cleanup refused: Git ownership could not be verified; "
+                                    "directory and registry record preserved.") from exc
 
-        await run_sync(_validate_cleanup)
+        cleanup_proof = await run_sync(_validate_cleanup)
 
         # Terminate idle pooled sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
@@ -1143,7 +1299,8 @@ class WorktreeManager:
         # the session teardown and the git worktree removal above sit between
         # this write and the reads at the top.
         await run_sync(
-            database.update_worktree, worktree_id, status=WorktreeStatus.COMPLETED
+            database.update_worktree, worktree_id, status=WorktreeStatus.COMPLETED,
+            cleanup_owner=cleanup_proof,
         )
 
         logger.debug(f"Cleaned up worktree {worktree_id} (marked COMPLETED)")
@@ -1255,6 +1412,39 @@ class WorktreeManager:
         if session_id and project_id:
             database.set_session_project(session_id, project_id)
 
+    def _verified_pinned_reopen_root(self, worktree: dict, project: dict) -> str:
+        """Read-only preflight for the ordinary managed-path recreation pipeline."""
+        guidance = (
+            "Reopen refused for this folder-pinned worktree. Use its original Git checkout "
+            "on the original worker to check out the kept branch manually, or keep using "
+            "the existing worktree if it is still available."
+        )
+        try:
+            if worktree["status"] != WorktreeStatus.COMPLETED:
+                raise WorktreeError("no active worktree or completed Keep is available")
+            owner = _verified_owner(project, worktree)
+            root, target = owner["root"], get_worktree_working_dir(worktree)
+            branch = worktree["branch_name"]
+            managed_path = self._managed_worktree_path(root, branch)
+            self._require_inside_checkout(root, Path(target))
+            if checkouts_db.folder_key(target) != checkouts_db.folder_key(str(managed_path)):
+                raise WorktreeError("the registered path is not the app-managed worktree path")
+            listing, _ = _inspect_worktree_owner(root, target, owner["common"])
+            tip = _local_branch_tip(root, branch)
+            identity = _git_dir_identity(owner["common"])
+            if not tip or not identity or owner.get("retained") != {"branch": branch, "tip": tip, "git_dir": identity}:
+                raise WorktreeError("the original Git directory and kept branch tip could not be verified")
+            if listing is not None or os.path.lexists(target):
+                raise WorktreeError("the managed path is occupied or still registered with Git")
+            from app.core.worktree_report import _git, parse_worktree_list
+
+            registered = _git(root, "worktree", "list", "--porcelain")
+            if registered is None or any(item["branch"] == branch for item in parse_worktree_list(registered)):
+                raise WorktreeError("the branch is already checked out or Git could not verify its registration")
+            return root
+        except (WorktreeError, OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            raise WorktreeError(f"{guidance} ({exc})") from exc
+
     def recreate_worktree(
         self, worktree_id: str, rebind_session_id: Optional[str] = None
     ) -> Dict:
@@ -1262,11 +1452,9 @@ class WorktreeManager:
         Recreate a worktree from its branch (last git state) so the user can
         resume the session — regardless of the record's prior status.
 
-        Worktree sessions are never a dead end: this recreates from ANY status
-        (COMPLETED, DELETED, ORPHANED, or ACTIVE-but-invalid-on-disk). It reuses
-        the existing branch if it still exists locally, otherwise creates a new
-        branch off the default branch. The existing DB record is flipped back to
-        ACTIVE with the new path.
+        With ownership proof, only the original owner and exact kept branch
+        can reopen an inactive worktree. Unpinned legacy records retain their
+        branch recovery behavior. Reactivation updates the existing record.
 
         The only fast path: if the record is ACTIVE and still valid on disk, the
         existing worktree is returned unchanged.
@@ -1287,10 +1475,12 @@ class WorktreeManager:
         if not worktree:
             raise WorktreeError(f"Worktree not found: {worktree_id}")
 
+        pinned = is_retarget_pinned(worktree)
         if worktree["status"] == WorktreeStatus.ACTIVE:
-            # Already active — check if valid on disk
-            if self.is_worktree_valid(worktree):
-                path = str(get_worktree_working_dir_as_path(worktree))
+            path = owned_active_path(worktree) if pinned else (
+                str(get_worktree_working_dir_as_path(worktree)) if self.is_worktree_valid(worktree) else None
+            )
+            if path:
                 with repo_worktree_lock(path):
                     self._require_finished_materialization(path)
                     return worktree
@@ -1308,7 +1498,8 @@ class WorktreeManager:
         if not project:
             raise WorktreeError(f"Project not found for repository: {repo['id']}")
 
-        main_dir = get_project_working_dir(project)
+        project_path = self._verified_pinned_reopen_root(worktree, project) if pinned else project["path"]
+        main_dir = get_project_working_dir(project_path) if pinned else get_project_working_dir(project)
         branch_name = worktree["branch_name"]
 
         # Cross-device rebind: on a shared database the worktree's project row
@@ -1319,7 +1510,7 @@ class WorktreeManager:
         rebound = False
         rebound_repo_id: Optional[str] = None
         rebound_project_id: Optional[str] = None
-        if not (Path(main_dir).is_dir() and self.git_service.is_git_repo(main_dir)):
+        if not pinned and not (Path(main_dir).is_dir() and self.git_service.is_git_repo(main_dir)):
             from app.core.project_links import resolve_runnable_local_project
 
             _stored, local_project = resolve_runnable_local_project(project["id"])
@@ -1351,6 +1542,7 @@ class WorktreeManager:
                     project.get("link_group_id"),
                 )
                 project = local_project
+                project_path = project["path"]
                 repo = local_repo
                 main_dir = local_dir
                 rebound = True
@@ -1367,7 +1559,9 @@ class WorktreeManager:
         default_branch = repo.get("default_branch", "main")
 
         # Determine if we need to create a new branch or reuse existing.
-        if rebound:
+        if pinned:
+            create_new, base_branch = False, None
+        elif rebound:
             # On the rebind path we must NOT fabricate a fresh branch off the
             # default — that would silently present an empty branch as the user's
             # unpushed work. The shared helper reuses a local branch, recovers a
@@ -1388,9 +1582,9 @@ class WorktreeManager:
                 base_branch = default_branch
 
         # Generate new worktree path (old path was deleted)
-        worktree_path = self._get_worktree_path(project["path"], branch_name)
-        relative_worktree_path = self._get_relative_worktree_path_from_full(
-            worktree_path, project["path"]
+        worktree_path = self._get_worktree_path(project_path, branch_name)
+        relative_worktree_path = None if pinned else self._get_relative_worktree_path_from_full(
+            worktree_path, project_path
         )
 
         logger.debug(
@@ -1399,7 +1593,8 @@ class WorktreeManager:
         )
 
         # Prune stale worktree entries so git doesn't complain about existing refs
-        self.git_service.prune_worktrees(main_dir)
+        if not pinned:
+            self.git_service.prune_worktrees(main_dir)
 
         # Adopt-if-already-checked-out: prune does NOT remove an entry whose
         # directory still exists on disk, so re-adding the same branch would
@@ -1408,7 +1603,7 @@ class WorktreeManager:
         # makes recreate idempotent and is the common shared-DB-cluster case
         # (the record was flipped ORPHANED/DELETED by another device, but the
         # worktree is healthy locally).
-        adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
+        adopted = None if pinned else self._find_git_worktree_for_branch(main_dir, branch_name)
         if adopted is not None:
             return self._adopt_existing_worktree(
                 worktree_id, branch_name, adopted, project, prior_status=worktree["status"],
@@ -1429,7 +1624,7 @@ class WorktreeManager:
             # Belt-and-suspenders: a concurrent/stale entry can race past the
             # adopt scan above. If git reports the branch is already used by an
             # existing worktree, re-scan and adopt it rather than dead-ending.
-            if error_msg and "already used by worktree" in error_msg.lower():
+            if not pinned and error_msg and "already used by worktree" in error_msg.lower():
                 adopted = self._find_git_worktree_for_branch(main_dir, branch_name)
                 if adopted is not None:
                     return self._adopt_existing_worktree(

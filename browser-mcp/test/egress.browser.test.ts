@@ -1,7 +1,7 @@
 /**
  * Egress proxy against a real Chromium, launched exactly as production does
  * (launchBehindProxy). Gated on a discoverable browser, like
- * integration.browser.test.ts. No public network: 127.0.0.1 plays a public
+ * integration.browser.suite.ts. No public network: 127.0.0.1 plays a public
  * address (allow-listed) and 127.0.0.2 an internal one (default-blocked); both
  * listen on the SAME port so a rebind keeps the page's origin.
  */

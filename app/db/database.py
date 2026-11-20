@@ -339,7 +339,7 @@ def _savepoint(cursor, name: str):
 #     cancels it.
 # 96: durable ad-hoc query terminal receipts, committed before provider work.
 #     Additive only; existing turns remain untouched and never become runnable.
-SCHEMA_VERSION = 96
+SCHEMA_VERSION = 97
 
 
 def _migrate_omni_tables_to_fluid(cursor):
@@ -2856,6 +2856,10 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.project_setup import create_schema as create_project_setup_schema
     create_project_setup_schema(cursor)
 
+    if not column_exists(cursor, "worktrees", "cleanup_owner"):
+        cursor.execute("ALTER TABLE worktrees ADD COLUMN cleanup_owner JSONB")
+        migrations_applied.append("worktrees.cleanup_owner")
+
     # Both tables exist now, including on the bootstrap-only schema path.
     # A legacy remote run predates this snapshot, but its actual launch/resume
     # turn is unknown. Keep that distinction: only a later-admitted successor
@@ -4239,9 +4243,12 @@ from app.db.settings import (  # noqa: F401
     get_all_user_preferences,
     get_system_setting,
     get_system_setting_revision,
+    get_system_setting_snapshot,
+    SystemSettingSnapshot,
     get_system_setting_cached,
     invalidate_system_setting_memo,
     set_system_setting,
+    set_system_setting_if_unchanged,
     delete_system_setting,
     get_or_create_system_setting,
     get_all_system_settings,

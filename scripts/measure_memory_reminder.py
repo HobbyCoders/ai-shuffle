@@ -150,7 +150,10 @@ def _summary(per_request: list[dict]) -> dict:
 def _patches(stack, store, legacy: bool):
     from app.core.provider import harness_adapter as ha
 
-    stack.enter_context(patch("app.core.claude_auth_mode.current_mode", return_value="subscription"))
+    # The benchmark runs without a worker DB and must not inspect the caller's accounts.
+    stack.enter_context(patch("app.core.claude_auth_mode.runtime_choice", return_value=("subscription", None)))
+    stack.enter_context(patch("app.core.claude_subscriptions.shared_target", return_value=None))
+    stack.enter_context(patch("app.core.claude_subscriptions.legacy_home_env", return_value={}))
     stack.enter_context(patch("app.core.fluid_memory.session_memory",
                               return_value=(store, None)))
     stack.enter_context(patch.object(ha.HarnessAdapter, "_resolve_app_session_id",

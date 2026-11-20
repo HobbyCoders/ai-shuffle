@@ -47,8 +47,6 @@ PROVABLE = ("backend", "fluid", "windows", "browser-workspace", "container", "id
             "desktop", "android", "android-minified")
 # Checked on main only: what main has published and the reach of merged pull requests.
 MAIN_ONLY = ("update-reach",)
-# Runs before main moves: a pull request, and the merge queue's run of its merge.
-BEFORE_MAIN = ("pull_request", "merge_group")
 LOOKUP = "plan"
 
 
@@ -62,7 +60,7 @@ def aggregate(results, event=""):
         result = results[name].get("result")
         if result == "skipped" and name in PROVABLE and found.get(name) == "true":
             continue
-        if result == "skipped" and name in MAIN_ONLY and event in BEFORE_MAIN:
+        if result == "skipped" and name in MAIN_ONLY and event == "pull_request":
             continue
         if result != "success":
             raise ValueError(f"CI dependency {name} did not succeed")

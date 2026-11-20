@@ -25,6 +25,7 @@ import posixpath
 import re
 from typing import Any, Dict, List, Optional
 
+from app.core.config import settings
 from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
@@ -57,17 +58,21 @@ def retire_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -
     return cursor.rowcount or 0
 
 
-def restore_removed_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -> int:
-    """Re-activate base checkouts :func:`retire_base_checkouts` removed."""
-    if not runner_ids:
+def restore_removed_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str], path: str) -> int:
+    """Restore only the folder being registered, not other retained copies."""
+    if not runner_ids or not path:
         return 0
     placeholders = ", ".join(["%s"] * len(runner_ids))
     cursor.execute(
-        f"UPDATE checkouts SET status = 'active', updated_at = NOW() "
-        f"WHERE project_id = %s AND runner_id IN ({placeholders}) AND {_BASE} AND status = %s",
+        f"SELECT id, path FROM checkouts WHERE project_id = %s "
+        f"AND runner_id IN ({placeholders}) AND {_BASE} AND status = %s FOR UPDATE",
         (project_id, *runner_ids, REMOVED_STATUS),
     )
-    return cursor.rowcount or 0
+    key = base_folder_key(path)
+    ids = [r["id"] for r in cursor.fetchall() if r["path"] and base_folder_key(r["path"]) == key]
+    for checkout_id in ids:
+        cursor.execute("UPDATE checkouts SET status = 'active', updated_at = NOW() WHERE id = %s", (checkout_id,))
+    return len(ids)
 
 
 def checkout_id_for(project_id: str, runner_id: str, path: str) -> str:
@@ -368,18 +373,52 @@ def _checkouts_for_branch(
 def list_checkouts_with_legacy_fallback(
     project_id: str, runner_id: str, branch: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """All candidates, oldest first, preserving exact-runner precedence.
+    """Branch candidates in exact-runner order, falling back to unowned rows."""
+    if not branch:
+        return base_checkout_candidates(project_id, runner_id)[0]
+    with get_db() as conn:
+        return _checkout_candidates(conn.cursor(), project_id, runner_id, branch)
 
-    A missing directory must not hide another checkout on the same runner.
-    Legacy unowned rows are considered only when the runner has no rows for
-    this branch, matching ``get_checkout_with_legacy_fallback``.
+
+def _checkout_candidates(cursor, project_id, runner_id, branch=None):
+    rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
+    if not rows and runner_id != "":
+        rows = _checkouts_for_branch(cursor, project_id, "", branch)
+    return rows
+
+
+def base_checkout_candidates(project_id: str, runner_id: str) -> tuple[List[Dict[str, Any]], bool]:
+    """(Candidates, has authoritative registration), before filesystem probes.
+
+    A worker-owned registration bounds selection even when its folder is missing.
+    An ownerless legacy record can provide a clone URL without registering a
+    folder on this worker. It can only bound the legacy (ownerless) fallback.
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
-        if not rows and runner_id != "":
-            rows = _checkouts_for_branch(cursor, project_id, "", branch)
-    return rows
+        registrations = live_base_registrations(cursor, project_id, runner_id)
+        rows = _checkout_candidates(cursor, project_id, runner_id)
+    row_keys = {base_folder_key(row['path']) for row in rows if row['path']}
+    legacy_fallback = bool(rows and rows[0]['runner_id'] == '')
+    owned_keys = set()
+    legacy_keys = set()
+    for registration in registrations:
+        if not registration['path'] or not (registration['instance_id'] or legacy_fallback):
+            continue
+        key = base_folder_key(registration['path'])
+        # A first-link alias follows an edit only if its own base was aligned
+        # with the registration. Older edits and later relinks can leave an
+        # independent historical base for chats bound to the original identity.
+        if registration['project_v2_id'] == project_id or key in row_keys:
+            (owned_keys if registration['instance_id'] else legacy_keys).add(key)
+    keys = owned_keys or legacy_keys
+    if keys:
+        rows = [r for r in rows if r['path'] and base_folder_key(r['path']) in keys]
+    elif any(is_active(r) for r in rows):
+        # Self-seeded bases can be live without a legacy project row.
+        rows = [r for r in rows if is_active(r)]
+    rows.sort(key=lambda r: not is_active(r))
+    return rows, bool(keys)
 
 
 def list_active_checkouts(
@@ -618,8 +657,36 @@ def seed_legacy_base_checkout(cursor: Any, legacy_id: str, project_id: str,
     return bool(cursor.rowcount and cursor.rowcount > 0)
 
 
-def _folder_key(path: str) -> str:
+def folder_key(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
+
+
+def base_folder_key(path: str) -> str:
+    """Compare workspace-relative and absolute registrations as startup repair does."""
+    if not os.path.isabs(path) and is_absolute_checkout_path(path):
+        # A foreign Windows path is not relative to a POSIX worker's workspace.
+        return ntpath.normcase(ntpath.normpath(path))
+    if not is_absolute_checkout_path(path):
+        path = os.path.normpath(os.path.join(settings.effective_workspace_dir, path))
+    return folder_key(path)
+
+
+def is_active(row: Dict[str, Any]) -> bool:
+    return (row.get("status") or "active") == "active"
+
+
+def live_base_registrations(cursor: Any, project_id: str, runner_id: str) -> List[Dict[str, Any]]:
+    """Actual project registrations, including a still-current proven first link."""
+    cursor.execute(
+        "SELECT p.id, p.path, p.instance_id, v.id AS project_v2_id FROM projects p JOIN projects_v2 v "
+        "ON v.origin = COALESCE(NULLIF(p.link_group_id, ''), 'local:' || p.id) "
+        "LEFT JOIN project_catalog_aliases a ON a.legacy_id = p.id "
+        "AND a.replacement_id = v.id AND a.revoked = FALSE "
+        "WHERE (v.id = %s OR a.original_id = %s) "
+        "AND (p.instance_id = %s OR p.instance_id IS NULL OR p.instance_id = '')",
+        (project_id, project_id, runner_id),
+    )
+    return cursor.fetchall()
 
 
 def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[str, int]:
@@ -650,9 +717,9 @@ def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[s
             if not path or is_absolute_checkout_path(path):
                 continue
             target = os.path.normpath(os.path.join(workspace, path))
-            key = _folder_key(target)
+            key = folder_key(target)
             twins = [a for a in absolute
-                     if a["project_id"] == row["project_id"] and _folder_key(a["path"]) == key]
+                     if a["project_id"] == row["project_id"] and folder_key(a["path"]) == key]
             same_role = [a for a in twins
                          if _is_base(a) == _is_base(row)
                          and (_is_base(row) or a.get("branch") == row.get("branch"))]

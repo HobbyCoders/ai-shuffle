@@ -23,7 +23,15 @@ describe('automation generation picker',() => {
  it('keeps unpriced and unavailable options unselectable, and reports rejected saves',async () => {
   const onpick=vi.fn(async () => {throw new Error('Worker offline');});
   render(AutomationGenerationPicker,{kind:'image',options:[option,{...option,model:'gone',available:false}],onpick});
-  expect((screen.getAllByRole('option')[1] as HTMLOptionElement).disabled).toBe(true);
+  const trigger = screen.getByRole('button', { name: 'Source and model' });
+  await fireEvent.click(trigger);
+  const search = screen.getByRole('textbox', { name: 'Search models' });
+  const unavailable = screen.getByRole('option', { name: /gone/i });
+  expect(unavailable.getAttribute('aria-disabled')).toBe('true');
+  expect(await fireEvent.mouseDown(unavailable)).toBe(false);
+  await fireEvent.click(unavailable);
+  expect(document.activeElement).toBe(search);
+  await fireEvent.keyDown(search, { key: 'Escape' });
   await fireEvent.click(screen.getByRole('button',{name:'Pin to this job'}));
   expect((await screen.findByRole('alert')).textContent).toContain('Worker offline');
  });

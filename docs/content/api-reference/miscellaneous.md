@@ -550,7 +550,7 @@ Every branch delete is a compare-and-delete against the tip that was checked.
 | `GET` | `/git/worktrees` | `include_status` (default `true`), `focus_worktree_id` | Returns `worktrees` and `total`. With `include_status`, each existing worktree has `git_status` (`is_clean`, `current_branch`, `modified_count`, `staged_count`, `untracked_count`), `status_checked_at` and `status_error`. Statuses come from a server-side cache: only worktrees with recent session activity, the one named in `focus_worktree_id`, and any whose checkout changed (an agent turn ended in it or a Git action ran there) are re-read, so an idle worktree's status can be older than the response. Rows with status `completed`, `archived` or `deleted` are never read. `status_error` is set when the last read failed; that worktree is retried on a back-off of up to 30 minutes |
 | `GET` | `/git/worktrees/{worktree_id}` | | One worktree |
 | `DELETE` | `/git/worktrees/{worktree_id}` | `keep_branch` (default `true`) | Remove the worktree folder; `keep_branch=false` also deletes its branch. Returns `success` and `message` |
-| `POST` | `/git/worktrees/{worktree_id}/reopen` | | Recreate a removed worktree on the same branch (a new branch from the default branch if it was deleted) so its sessions can continue. `400` if it cannot be recreated |
+| `POST` | `/git/worktrees/{worktree_id}/reopen` | | Recreate a removed worktree on the same branch. After a folder change, automatic recreation requires the original app-managed path, original Git checkout and branch tip kept at cleanup. Removed external worktrees must be reopened manually. `400` if it cannot be recreated |
 | `GET` | `/git/worktrees/{worktree_id}/files` | `path` (default root), `show_hidden` (default `false`) | List a folder in the worktree. Returns `files` (each with `name`, `type`, `size`, `path`, `modifiedAt`), `path`, `worktreeId`, `worktreePath` |
 
 Paths in the table are relative to `/api/v1/projects/{project_id}`. A worktree has `id`, `branch_name`, `worktree_path`, `base_branch`, `status`, `created_at`, `exists` (whether the folder is on disk), `sessions`, `session_count` and `active_session`.
@@ -668,7 +668,7 @@ Remove the fal.ai API key.
 
 ### POST /api/v1/settings/integrations/anthropic
 
-Save the Anthropic API key used by Claude Code. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
+Save an Anthropic API key. The active key is the **Claude API** provider (`prov:claude-api:<model>` in `GET /api/v1/models`), which runs on AI Shuffle's own Anthropic client; Claude Code never receives the key. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
 
 The key is checked with a one-token request to Anthropic first. A key Anthropic rejects returns `400` and is not saved; a rate-limited check returns `429`. If Anthropic cannot be reached, the key is saved anyway. Returns `{"success": true, "masked_key": "sk-ant-...wxyz"}`.
 
@@ -1132,6 +1132,8 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
 
+Claude Code never receives the key. Only a model bound to the Claude API provider (`prov:claude-api:<model>`) runs on it; a Claude model chosen without a provider always runs on the subscription through the CLI, in every mode, and fails with a message naming the "Claude · API" models when the CLI is not signed in. In `api_key` mode the default model for new chats is the Claude API provider's, shown in the picker; existing chats keep their model. In other modes the key is never a default: not when the subscription is signed out, and not because Claude API models were used in other chats. An agent cannot start a chat or subagent on a Claude API model, or save one on an automation or agent, unless the owner approves it at a prompt or chose it there. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
+
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 
 ```json
@@ -1180,11 +1182,12 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 | `POST /api_key/{id}/activate` | none | Activate this entry and deactivate its sibling. |
 | `DELETE /api_key/{id}` | none | Delete the entry; deleting the active entry leaves no key active. |
 | `POST /subscription/save-current` | `{"label":"Personal"}` | Save the sign-in in Claude Code's own folder as a `default` entry (one at most; saving again relabels it). Needs that folder signed in: `409 not_signed_in` otherwise. Returns `account_id`. |
-| `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved and made active once the CLI reports it. |
-| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept and made active instead, and its id comes back as `account_id`. |
+| `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved but not selected once the CLI reports it. |
+| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept without selecting it, and its id comes back as `account_id`. |
 | `PATCH /subscription/{id}` | `{"label":"Work"}` | Rename; at most 120 characters. |
 | `POST /subscription/{id}/activate` | none | Make this sign-in the one Claude Code uses; the other subscription turns off. |
-| `POST /subscription/{id}/sign-in` | none | Return `{"login": {...}}` with folder-scoped external terminal commands for a `saved` entry, even when inactive. Does not activate it or start an in-app login; run the returned command on this worker. |
+| `POST /subscription/use-default` | none | Verify and select the default CLI sign-in on this worker, including on macOS. |
+| `POST /subscription/{id}/sign-in` | none | Repair a `saved` entry without selecting it. Returns folder-scoped commands in `login`, or `terminal_run` with `?terminal=true` on an in-app terminal worker. |
 | `DELETE /subscription/{id}` | none | Forget the entry. A `saved` entry is signed out with `claude auth logout` in its folder and its folder is deleted; a `default` entry is only forgotten (Claude Code's own folder and sign-in stay). |
 
 Mutations return `{"accounts":{…}}`; add-key and save-current also return
@@ -1197,20 +1200,21 @@ the change at the next turn, and idle Claude sessions still on the previous
 sign-in are closed when a subscription switch happens.
 
 Both key settings sync encrypted under the existing system-settings policy.
-The active key remains a scalar in `anthropic_api_key`, preserving every
-existing injection path and older-worker compatibility. The shared saved list
-is `claude_saved_api_keys`; active flags are derived from the real active scalar,
-not a separately replicated pointer. If the scalar arrives before the list, a
-masked legacy entry is shown until the list arrives, never another key's active
-label. Concurrent edits use normal settings sync conflict handling.
+Worker-local legacy choices can still use the `anthropic_api_key` scalar. An
+explicit synced choice pins the exact saved key ID in the same row as its mode.
+If that ID is absent from a worker's encrypted `claude_saved_api_keys` list,
+the Claude API provider has no key there and its models cannot run. The scalar
+cannot substitute for a missing key.
+Concurrent decisions use the existing settings sync conflict rules.
 
 #### Saved subscription sign-ins
 
 Each saved subscription is a Claude Code CLI sign-in on **this worker**. The
-list and the active choice are kept per worker in `claude_cli_logins:<instance
-id>` and never sync: every worker keeps its own CLI sign-ins. AI Shuffle never
-reads, copies or stores CLI credentials; email, plan and organization come only
-from running `claude auth status` against an entry's folder. Account listings
+list in `claude_cli_logins:<instance id>` and the sign-in folders never sync.
+The selection syncs to the owner's other workers as an account fingerprint,
+not a credential or folder id. Each worker matches that fingerprint against
+its own `claude auth status` results (account email and organization ID).
+AI Shuffle never reads, copies or stores CLI credentials. Account listings
 refresh that result at most every 30 seconds, and an in-app login completion or
 account switch invalidates the cached result. If deletion cannot remove a saved
 folder, its app-owned id stays in a worker-local cleanup queue and startup retries
@@ -1229,10 +1233,12 @@ it without touching listed accounts, a pending login, or shared link targets.
   only where Windows allows a symbolic link (Developer Mode or administrator),
   otherwise that sign-in keeps its own copy of the file.
 
-`active` is true for the entry Claude Code uses. When no saved entry is active,
-Claude Code uses its own folder: `default_in_use` is then `true` and a saved
-`default` entry shows as active. Deleting the active saved sign-in returns
-Claude Code to its own folder; it never activates another saved entry.
+`active` is true for the local entry that matches the selection. `default_in_use`
+is true when the default folder is selected. If the selected account cannot be
+verified here, `recovery_required` is true and Claude subscription turns are
+refused. Deleting a local sign-in does not change the selection or bill a
+fallback account. Sign in to the same account and organization on this worker,
+or explicitly select a different account.
 `signed_in`, `email`, `plan` and `org_name` are from the last `claude auth
 status` of that entry (`checked_at`, Unix seconds). `needs_sign_in` is true
 when that check found no sign-in or the entry's folder is missing;
@@ -1278,10 +1284,21 @@ Service errors use `detail: {"code":"…","message":"…"}`: `400` invalid key o
 label, `404 not_found`, `409 not_signed_in` (save-current),
 `409 login_busy` (another Claude sign-in is running), `409 cli_missing`,
 `409 folder_unavailable` (a sign-in folder could not be prepared),
+`409 selection_changed` (another request changed the shared Claude choice),
 `501 unsupported` (macOS), and `503 storage_locked`,
-`storage_unreadable` or `storage_unavailable`. Key validation keeps the legacy
-error strings: `400` authentication/API error, `429` rate limit; a transient
-network error still saves the key. Invalid request shapes return `422`.
+`storage_unreadable`, `storage_unavailable` or `key_selection_required`. If
+Claude Code uses an unconfirmed legacy key, open Settings → Providers →
+Claude and select **Confirm API key**. That keeps Claude Code in API key
+mode. Then choose the subscription sign-in again. The confirmation PUT sends
+`{ "mode": "api_key", "api_key_confirmation": "…" }` with the opaque revision
+from the same GET as the displayed key. If the key or mode changed, the
+server returns `409` without pinning or migrating a key. Review the refreshed
+selection and confirm it explicitly.
+A rejected subscription activation leaves both choices untouched by the
+request. For `selection_changed`, review the latest choice and retry.
+Key validation keeps the legacy error strings: `400` authentication/API error,
+`429` rate limit; a transient network error still saves the key. Invalid request
+shapes return `422`.
 
 The legacy `POST /settings/integrations/anthropic` saves and activates a key in
 the same list (mode changes only with `use_for_claude_code:true`). Its `DELETE`
@@ -1290,7 +1307,11 @@ forget a saved key permanently.
 
 ### PUT /api/v1/settings/claude-auth
 
-Choose the mode. Takes effect on the next agent run.
+Subscription and API key choices sync to the owner's workers and take effect
+on new turns as each worker receives the choice. Missing credentials never
+select another account or mode. Cloud and Off are worker-local overrides.
+Update all workers before relying on an owner-wide switch: older workers may
+still use their previous account.
 
 **Auth:** Owner only
 
@@ -1301,7 +1322,7 @@ curl -X PUT http://localhost:8000/api/v1/settings/claude-auth \
   -d '{"mode": "api_key"}'
 ```
 
-`mode` is `subscription`, `api_key` or `cloud` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
+`mode` is `subscription`, `api_key`, `cloud` or `off` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
 
 ### GET /api/v1/settings/claude-auth/cloud
 

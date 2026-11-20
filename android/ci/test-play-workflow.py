@@ -176,10 +176,23 @@ class PlayWorkflowTests(unittest.TestCase):
         self.assertEqual(job["continue-on-error"], "${{ matrix.advisory }}")
         self.assertNotIn("if", job)
         self.assertEqual(job["strategy"]["fail-fast"], "false")
-        matrix = {entry["api"]: entry for entry in job["strategy"]["matrix"]["include"]}
-        self.assertEqual({"34", "36"}, set(matrix))
-        self.assertEqual(matrix["34"]["advisory"], "false")
-        self.assertEqual(matrix["36"]["advisory"], "true")
+        legs = job["strategy"]["matrix"]["include"]
+        self.assertEqual({"34", "36"}, {leg["api"] for leg in legs})
+        for leg in legs:
+            self.assertEqual(leg["advisory"], "true" if leg["api"] == "36" else "false", leg)
+        self.assertEqual(job["name"], "Android emulator verification (${{ matrix.leg }})")
+        # Every API level runs every part of run-android-ui-tests.sh once, under a unique name,
+        # with the same image and guest; the last part carries the host-only checks.
+        runner_env = next(step for step in job["steps"] if step.get("id") == "emulator_tests")["env"]
+        parts = int(runner_env["UI_TEST_PARTS"])
+        self.assertEqual(runner_env["UI_TEST_PART"], "${{ matrix.part }}")
+        for api in ("34", "36"):
+            mine = [leg for leg in legs if leg["api"] == api]
+            self.assertEqual([str(part) for part in range(1, parts + 1)], [leg["part"] for leg in mine])
+            self.assertEqual([f"API {api}, {part}/{parts}" for part in range(1, parts + 1)], [leg["leg"] for leg in mine])
+            self.assertEqual(1, len({(leg["target"], leg["cores"], leg["memory"]) for leg in mine}))
+        checks_step = next(step for step in job["steps"] if step.get("name") == "Check emulator readiness and instrumentation result parsers")
+        self.assertEqual(checks_step["if"], f"matrix.part == {parts}")
         for android_job in workflow["jobs"].values():
             for step in android_job.get("steps", []):
                 if "run" in step:

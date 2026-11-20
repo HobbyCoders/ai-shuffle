@@ -166,11 +166,11 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertEqual(step["if"], jobs["publish"]["if"])
         self.assertEqual(exported["android-download"]["with"]["retention-days"], "1")
         self.assertEqual(jobs["android-ui"]["needs"], "build")
-        legs = {str(leg["api"]): leg for leg in jobs["android-ui"]["strategy"]["matrix"]["include"]}
-        self.assertEqual(set(legs), {"34", "36"})
-        # Preserve release gating: API 34 blocks, API 36 reports its failures.
-        self.assertEqual(legs["34"]["advisory"], "false")
-        self.assertEqual(legs["36"]["advisory"], "true")
+        legs = jobs["android-ui"]["strategy"]["matrix"]["include"]
+        self.assertEqual({leg["api"] for leg in legs}, {"34", "36"})
+        # Preserve release gating: every API 34 part blocks, API 36 reports its failures.
+        self.assertEqual({leg["api"]: leg["advisory"] for leg in legs if leg["api"] == "34"}, {"34": "false"})
+        self.assertEqual({leg["api"]: leg["advisory"] for leg in legs if leg["api"] == "36"}, {"36": "true"})
         self.assertEqual(jobs["android-ui"]["continue-on-error"], "${{ matrix.advisory }}")
         # Only the first emulator attempt continues (single emulator-loss retry);
         # the always-run emulator_result step still fails the job.
@@ -252,7 +252,7 @@ class ArtifactPolicyTests(unittest.TestCase):
 
     def test_emulator_readiness_evidence_survives_success(self):
         step = next(s for s in uploads(workflow("android.yml")["jobs"]["android-ui"])
-                    if s["with"]["name"] == "android-ui-readiness-api-${{ matrix.api }}")
+                    if s["with"]["name"] == "android-ui-readiness-api-${{ matrix.api }}-part-${{ matrix.part }}")
         self.assertEqual(step["if"], "always()")
         self.assertEqual(step["with"]["retention-days"], "3")
         self.assertEqual(step["with"]["path"].splitlines(), [
@@ -275,10 +275,11 @@ class ArtifactPolicyTests(unittest.TestCase):
 
     def test_ci_diagnostics_upload_only_on_failure(self):
         diagnostics = {
-            ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}",
+            # The parts of one API level each keep their own (artifact names must be unique in a run).
+            ("android.yml", "android-ui"): "android-ui-verification-api-${{ matrix.api }}-part-${{ matrix.part }}",
             ("ci-browser-workspace.yml", "workspace"): "browser-workspace-screenshots-${{ matrix.chrome-mode }}",
             ("ci-frontend.yml", "visual"): "visual-regression-${{ github.sha }}",
-            ("container-postgres.yml", "container-postgres"): "container-postgres-${{ github.sha }}",
+            ("container-postgres.yml", "container-postgres"): "container-postgres-${{ matrix.lane }}-${{ github.sha }}",
             ("build-branch.yml", "build"): "container-postgres-${{ github.sha }}",
         }
         for (file, job), name in diagnostics.items():

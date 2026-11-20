@@ -25,6 +25,13 @@ own workflow, so a record can only stand for the same checks. Any doubt or
 error answers "run it". The scheduled run and a manual run look nothing up and
 run everything.
 
+A pull request also skips an area none of its changed files belong to: GitHub
+tests the merge of the branch into main, and the files that merge changes are
+the diff from its first parent (main) to it. The push to main after the merge
+runs every area its records do not prove, so a file an area reads without
+listing it is caught there, before the nightly publishes. A diff that cannot
+be read skips nothing this way.
+
     python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
     python scripts/ci/plan.py keys            # the keys of the checked-out commit
     python scripts/ci/plan.py affected FILE.. # the areas whose files include these
@@ -58,6 +65,25 @@ TEST_HARNESS = ("conftest.py", "pytest.ini", "tests/__init__.py", "tests/conftes
 PROSE = ("docs/", "README.md", "SUPPORT.md", "SECURITY.md", "TRADEMARKS.md", "LOCAL_SETUP.md")
 WEB_UI_SOURCE = ("frontend/src/", "frontend/tests/")
 UI_SOURCE = (*WEB_UI_SOURCE, "mobile/src/")
+# The setup wizard tests/integration/container_ui_smoke.mjs walks offline (owner
+# password, license, the provider step with nothing connected) and the
+# modules it calls directly. Shared UI further out is left to main's run.
+SETUP_UI = (
+    "frontend/src/routes/+layout.svelte", "frontend/src/routes/+layout.ts", "frontend/src/routes/setup/",
+    "frontend/src/lib/components/setup/", "frontend/src/lib/components/OwnerAccessGate.svelte",
+    "frontend/src/lib/components/settings/providers/", "frontend/src/lib/components/settings/ClaudeCliPanel.svelte",
+    # The API modules behind each call the script makes or waits for (owner
+    # password, license, Claude pay mode, auth status) and the stores they fill.
+    # runtime.ts holds apiBase(), which every one of those calls goes through.
+    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/runtime.ts",
+    "frontend/src/lib/api/owner.ts", "frontend/src/lib/api/license.ts",
+    "frontend/src/lib/api/auth.ts", "frontend/src/lib/api/claude-auth.ts", "frontend/src/lib/api/claude-cli.ts",
+    "frontend/src/lib/api/network.ts", "frontend/src/lib/api/model-providers.ts",
+    "frontend/src/lib/api/agent-credentials.ts", "frontend/src/lib/api/cli-history.ts",
+    "frontend/src/lib/services/first-agent-run.ts", "frontend/src/lib/constants/models.svelte.ts",
+    "frontend/src/lib/stores/auth.svelte.ts", "frontend/src/lib/stores/providers.svelte.ts",
+    "frontend/src/lib/stores/owner-access.svelte.ts", "frontend/src/lib/stores/platform.svelte.ts",
+)
 # The desktop tests start the real backend, build the app from the checkout
 # and read package files all over it: everything but prose, UI source and the
 # phone apps. Of Android they read only its version resolver (android/ci/).
@@ -70,7 +96,9 @@ DESKTOP = {"include": ("", "android/ci/"), "exclude": (*PROSE, *UI_SOURCE, "ios/
 AREAS = {
     # Python tests read sources all over the repository (docs, workflows, the
     # UI, the Android and desktop shells), so every change is a backend change.
-    "backend": {"jobs": ("backend",), "include": ("",)},
+    # Saving the test map pull requests choose from may fail: they then run
+    # every test (ci-backend.yml `continue-on-error`).
+    "backend": {"jobs": ("backend",), "include": ("",), "advisory": ("backend / backend-map",)},
     "javascript-checks": {
         "jobs": ("javascript",),
         "except": ("javascript / Select UI journeys", "javascript / UI journeys",
@@ -87,10 +115,16 @@ AREAS = {
     },
     "fluid": {
         "jobs": ("fluid",),
-        # Its tests run and load the repository's scripts, and through
-        # scripts/ci/test_scratch.py the app's scratch-folder module.
-        "include": ("fluid/", "scripts/", "conftest.py", "app/__init__.py", "app/core/__init__.py",
-                    "app/core/temp_scratch.py", ".github/workflows/ci-fluid.yml"),
+        # The repository scripts its tests and workflow load, not all of
+        # scripts/ (test_ci_plan.py checks the list against the tests), and
+        # through scripts/ci/test_scratch.py the app's scratch-folder module.
+        "include": ("fluid/", "conftest.py", "app/__init__.py", "app/core/__init__.py",
+                    "app/core/temp_scratch.py", ".github/workflows/ci-fluid.yml",
+                    "scripts/__init__.py", "scripts/ci/test_scratch.py", "scripts/ci/bounded_apt.py",
+                    "scripts/ci/fetch_claude_fixture.py", "scripts/ci/publication_read_retry.py",
+                    "scripts/devloop/__init__.py", "scripts/devloop/fake_wire.py",
+                    "scripts/benchmark_compaction_target.py", "scripts/measure_learner_yield.py",
+                    "scripts/measure_workflow_learning.py"),
     },
     "windows": {"jobs": ("windows",), **DESKTOP},
     "desktop": {"jobs": ("desktop",), **DESKTOP},
@@ -108,9 +142,11 @@ AREAS = {
     "container": {
         "jobs": ("container",),
         # Of the excluded folders its checks read the image's update key and
-        # notices, the buyer's install files and the UI smoke script.
+        # notices, the buyer's install files and the UI smoke script, and the
+        # smoke script drives the setup wizard: its screens and what they call.
         "include": ("", ".github/workflows/container-postgres.yml", "desktop/build/application-update-key.pem",
-                    "THIRD_PARTY_NOTICES.md", "docs/install/compose/", "tests/integration/container_ui_smoke.mjs"),
+                    "THIRD_PARTY_NOTICES.md", "docs/install/compose/", "tests/integration/container_ui_smoke.mjs",
+                    *SETUP_UI),
         "exclude": (*PROSE, *UI_SOURCE, ".github/", "tests/", "android/", "ios/", "desktop/", "fluid/tests/"),
     },
     "identity": {
@@ -128,8 +164,8 @@ AREAS = {
     # shell or the phone UI itself changes, and in the scheduled run.
     "android": {
         "jobs": ("android",),
-        # android.yml lets this emulator fail (`continue-on-error`) until it is reliable.
-        "advisory": ("android / Android emulator verification (API 36)",),
+        # android.yml lets the API 36 emulator parts fail (`continue-on-error`) until they are reliable.
+        "advisory": tuple(f"android / Android emulator verification (API 36, {part}/4)" for part in range(1, 5)),
         # android/ci/test-ci-webview.py reads both Android workflows.
         "include": ("android/", "mobile/", "frontend/", ".github/workflows/android.yml",
                     ".github/workflows/ci-android-minified.yml"),
@@ -145,6 +181,8 @@ AREAS = {
 GATE = "CI"
 # Runs that look nothing up.
 EVERYTHING = ("schedule", "workflow_dispatch")
+# What `by` says of an area a pull request skips because it changes none of its files.
+UNTOUCHED = "untouched"
 FINISHED_WELL = ("success", "skipped")
 
 
@@ -341,6 +379,25 @@ def run_passed(area: str, jobs) -> bool:
     return main_gate.passed(gate, main_gate.judged(gate, jobs), area)
 
 
+def changed_files(root: Path = ROOT) -> list[str] | None:
+    """The files a pull request's merge commit changes on main, or None when that cannot be read.
+
+    Both sides of a rename and every deleted file count as changed.
+    """
+    try:
+        parents = subprocess.run(["git", "rev-list", "--parents", "-n", "1", "HEAD"], cwd=root,
+                                 capture_output=True, timeout=60, check=True, text=True).stdout.split()
+        # GitHub's merge of the branch into main: exactly two parents, main first.
+        if len(parents) != 3:
+            return None
+        out = subprocess.run(["git", "diff", "--name-only", "--no-renames", "-z", parents[1], parents[0]],
+                             cwd=root, capture_output=True, timeout=120, check=True).stdout
+    except Exception as error:  # noqa: BLE001 - an unreadable diff skips nothing
+        print(f"[plan] could not read the pull request's changed files: {error}", file=sys.stderr)
+        return None
+    return [path for path in out.decode("utf-8", "surrogateescape").split("\0") if path]
+
+
 def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dict[str, dict]:
     """{area: {key, record, proven, by, error}}. Any doubt or error means not proven: run it."""
     names = list(areas or AREAS)
@@ -353,6 +410,14 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
     for area in names:
         key = key_of(area, entries)
         found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": "", "error": ""}
+    # A pull request runs only the areas its changes belong to (the module
+    # docstring). The skip writes no record: nothing of the area ran.
+    if environ.get("GITHUB_EVENT_NAME") == "pull_request":
+        changed = changed_files(root)
+        if changed is not None:
+            for area in names:
+                if not any(reads(area, path) for path in changed):
+                    found[area].update(proven=True, by=UNTOUCHED)
     repository = environ.get("GITHUB_REPOSITORY", "")
     token = environ.get("GH_TOKEN") or environ.get("GITHUB_TOKEN") or ""
     # The scheduled run proves everything again, so a file an area reads
@@ -362,6 +427,8 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
         return found
     lookup = Lookup(repository, token, call)
     for area in names:
+        if found[area]["proven"]:
+            continue
         try:
             by = proven(area, found[area]["key"], lookup)
         except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
@@ -395,7 +462,9 @@ def main(argv=None) -> int:
     lines = ["### What this run has to check", "", "| Area | This run | Why |", "| --- | --- | --- |"]
     for area, state in found.items():
         print(f"{area}={'true' if state['proven'] else 'false'}")
-        if state["proven"]:
+        if state["proven"] and state["by"] == UNTOUCHED:
+            lines.append(f"| `{area}` | skipped | this pull request changes none of its files |")
+        elif state["proven"]:
             lines.append(f"| `{area}` | skipped | its files are unchanged since it passed in {state['by']} |")
         elif state["error"]:
             # Named apart, so a lookup that breaks does not pass for "nothing recorded" run after run.

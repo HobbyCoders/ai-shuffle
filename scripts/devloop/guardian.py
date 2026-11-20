@@ -74,12 +74,14 @@ def alive(pid: int, start: str | None) -> bool:
 # ─── spawning ──────────────────────────────────────────────────────────────
 
 
-def spawn_guardian(status: Path, scratch: Path, *, launcher_pid: int | None = None) -> dict | None:
+def spawn_guardian(status: Path, scratch: Path, *, launcher_pid: int | None = None,
+                   lease_fd: int | None = None) -> dict | None:
     """Start the detached guardian for ``launcher_pid`` (default: this process).
 
-    Returns ``{"pid": ..., "pid_identity": ...}`` of the guardian, or None if
-    it could not start (the instance still works; only the SIGKILL backstop is
-    missing, which is logged).
+    Returns its pid and identity, or None if it could not start. The optional
+    lease fd is inherited at spawn, before the guardian can detach. Even if
+    the launcher dies before collecting the pid, EOF on the harness's end
+    proves neither process can still be using the private status directory.
     """
     pid = launcher_pid or os.getpid()
     start = identity(pid)
@@ -87,13 +89,15 @@ def spawn_guardian(status: Path, scratch: Path, *, launcher_pid: int | None = No
         return None
     env = {key: os.environ[key] for key in ("PATH", "LANG") if key in os.environ}
     read, write = os.pipe()
+    lease_arg = ["--lease-fd", str(lease_fd)] if lease_fd is not None else []
+    inherited = (write, lease_fd) if lease_fd is not None else (write,)
     try:
         intermediate = subprocess.Popen(
             [sys.executable, "-m", "scripts.devloop.guardian", "--launcher-pid", str(pid),
              "--launcher-identity", start, "--status", str(status), "--scratch", str(scratch),
-             "--report-fd", str(write)],
+             "--report-fd", str(write), *lease_arg],
             cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(write,), close_fds=True,
+            stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=inherited, close_fds=True,
         )
     except OSError:
         os.close(read)
@@ -227,7 +231,7 @@ def cleanup(status_path: Path, scratch: Path, launcher_pid: int, launcher_identi
             socket_dir = _private_socket_dir((worker.get("postgres") or {}).get("socket_dir"))
             if socket_dir is not None:
                 shutil.rmtree(socket_dir, ignore_errors=True)
-                done.append(f"removed {socket_dir}")
+                done.append(f"removed private PostgreSQL socket directory {socket_dir}")
         # Re-read right before removing: a newer `up` may have replaced it.
         current = _read_owned_json(status_path)
         if current and current.get("pid") == launcher_pid \
@@ -236,7 +240,8 @@ def cleanup(status_path: Path, scratch: Path, launcher_pid: int, launcher_identi
             done.append(f"removed stale status {status_path}")
     if owned:
         shutil.rmtree(scratch, ignore_errors=True)
-        done.append(f"removed {scratch}")
+        action = "failed to remove owned scratch" if scratch.exists() else "removed owned scratch"
+        done.append(f"{action} {scratch}")
     return done
 
 
@@ -276,10 +281,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scratch", type=Path, required=True)
     parser.add_argument("--report-fd", type=int,
                         help="Detach first and write the guardian's pid here (spawn_guardian)")
+    parser.add_argument("--lease-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.report_fd is not None:
         _detach(args.report_fd)
-    watch(args.status, args.scratch, args.launcher_pid, args.launcher_identity)
+    try:
+        watch(args.status, args.scratch, args.launcher_pid, args.launcher_identity)
+    finally:
+        if args.lease_fd is not None:
+            # The report must be closed before the harness sees EOF.
+            os.close(args.lease_fd)
     return 0
 
 

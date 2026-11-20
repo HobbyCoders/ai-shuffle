@@ -9,9 +9,10 @@ This module is the facade the accounts API calls.
 
 from __future__ import annotations
 
-import hashlib
 import json
+import re
 import threading
+from contextlib import AbstractContextManager
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ from app.db import database
 
 API_SETTING = "anthropic_api_key"
 API_LIST_SETTING = "claude_saved_api_keys"
+_MIGRATED_ID_PREFIX = "saved-"
+_SHIPPED_LEGACY_ID = re.compile(r"legacy-[0-9a-f]{24}")
 _lock = threading.RLock()
 
 
@@ -35,13 +38,21 @@ def _error(code: str, detail: str, status: int = 409):
     raise AccountError(code, detail, status)
 
 
+def key_write_lock() -> AbstractContextManager[bool]:
+    """Keep confirmation out of the middle of a same-worker account write."""
+    return _lock
+
+
 def _require_storage():
     if not encryption.is_encryption_ready():
         _error("storage_locked", "Unlock credential storage before managing Claude accounts.", 503)
 
 
 def _read_setting(key: str):
-    value = database.get_system_setting(key)
+    return _decode_setting(database.get_system_setting(key))
+
+
+def _decode_setting(value):
     if not value:
         return None
     if encryption.is_encrypted(value):
@@ -66,8 +77,8 @@ def _write_setting(key: str, value: dict):
     database.set_system_setting(key, _encrypt(json.dumps(value)))
 
 
-def _keys():
-    raw = _read_setting(API_LIST_SETTING)
+def _decode_key_bundle(stored):
+    raw = _decode_setting(stored)
     bundle = {"accounts": [], "active_id": None}
     if raw:
         try:
@@ -77,14 +88,59 @@ def _keys():
             bundle["accounts"] = value["accounts"]
         except (ValueError, KeyError, TypeError):
             _error("storage_unreadable", "Saved Anthropic API keys could not be read.", 503)
-    active = active_api_key()
+    return bundle
+
+
+def is_shipped_legacy_id(account_id: str | None) -> bool:
+    """Identify a key-derived ID persisted by the shipped saved-key writer."""
+    return isinstance(account_id, str) and _SHIPPED_LEGACY_ID.fullmatch(account_id) is not None
+
+
+def _pin_id(account) -> str:
+    # This immutable member identity stays with the key through independent
+    # list edits. Only the encrypted list and encrypted choice may carry it.
+    return account.get("legacy_id", account["id"])
+
+
+def _find_pinned_key(bundle, account_id):
+    return next((a for a in bundle["accounts"] if account_id in (a["id"], _pin_id(a))), None)
+
+
+def _find_key(bundle, account_id):
+    return next((a for a in bundle["accounts"] if a["id"] == account_id), None)
+
+
+def _project_saved_keys(stored):
+    bundle = _decode_key_bundle(stored.value if stored else None)
+    for index, account in enumerate(bundle["accounts"]):
+        if is_shipped_legacy_id(account["id"]):
+            if not stored.revision:
+                _error("storage_unreadable", "Saved Anthropic API keys have no storage revision.", 503)
+            account["legacy_id"] = account["id"]
+            # UI handle only, never used as the shared pin. Persist this handle
+            # if the list is edited so Settings keeps the same row open.
+            account["id"] = f"{_MIGRATED_ID_PREFIX}{stored.revision}-{index}"
+    return bundle
+
+
+def _keys():
+    bundle = _project_saved_keys(database.get_system_setting_snapshot(API_LIST_SETTING))
+    from app.core import claude_auth_mode
+
+    choice = claude_auth_mode.key_pin()
+    if choice is not None:
+        account = _find_pinned_key(bundle, choice.get("key_id"))
+        bundle["active_id"] = account["id"] if account else None
+        return bundle
+    scalar = database.get_system_setting_snapshot(API_SETTING)
+    active = _decode_setting(scalar.value) if scalar else None
     if active:
         account = next((a for a in bundle["accounts"] if a["key"] == active), None)
         if account is None:
             # A legacy save or peer scalar may arrive before its list. Display
             # the credential actually used by the CLI, not a stale pointer.
             account = {
-                "id": "legacy-" + hashlib.sha256(active.encode()).hexdigest()[:24],
+                "id": "legacy-" + (scalar.revision or "unversioned"),
                 "label": "Anthropic API key",
                 "key": active,
             }
@@ -93,10 +149,50 @@ def _keys():
     return bundle
 
 
+def pinned_api_key(account_id: str) -> str | None:
+    """Resolve a pinned ID only from the encrypted list, never the legacy scalar."""
+    try:
+        account = _find_pinned_key(_decode_key_bundle(database.get_system_setting(API_LIST_SETTING)), account_id)
+        return account["key"] if account else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _encrypted_bundle(bundle) -> str:
+    return _encrypt(json.dumps({"accounts": bundle["accounts"]}))
+
+
+def pin_legacy_key() -> str | None:
+    """Snapshot the staged key by ID, persisting any pre-list legacy key first."""
+    with _lock:
+        key = active_api_key()
+        if not key:
+            return None
+        stored = database.get_system_setting_snapshot(API_LIST_SETTING)
+        account_id, migrated_list = prepare_legacy_key_pin(key, stored)
+        if migrated_list is not None and not database.set_system_setting_if_unchanged(
+            API_LIST_SETTING, migrated_list, stored,
+        ):
+            _error("selection_changed", "The saved Claude keys changed. Review them and try again.")
+        return account_id
+
+
+def prepare_legacy_key_pin(key: str, stored: database.SystemSettingSnapshot | None) -> tuple[str, str | None]:
+    """Resolve this exact key without writing; prepare a list only if missing."""
+    _require_storage()
+    bundle = _decode_key_bundle(stored.value if stored else None)
+    account = next((entry for entry in bundle["accounts"] if entry["key"] == key), None)
+    if account is not None:
+        return _pin_id(account), None
+    account = {"id": str(uuid4()), "label": "Anthropic API key", "key": key}
+    bundle["accounts"].append(account)
+    return account["id"], _encrypted_bundle(bundle)
+
+
 def saved_api_key(account_id: str) -> str | None:
     """Read one saved key, never falling back to a different account."""
     with _lock:
-        account = next((entry for entry in _keys()["accounts"] if entry["id"] == account_id), None)
+        account = _find_key(_keys(), account_id)
         return account["key"] if account else None
 
 
@@ -124,7 +220,7 @@ def _label(value, default=""):
     return value.strip() or default
 
 
-def add_api_key(key: str, label: str = "", activate: bool = True) -> str:
+def add_api_key(key: str, label: str = "", activate: bool = True, *, for_claude_code: bool = False) -> str:
     """Save or relabel a key, optionally select it, and return its account ID."""
     if not isinstance(key, str) or not key.strip():
         _error("invalid_key", "API key cannot be empty.", 400)
@@ -141,7 +237,19 @@ def add_api_key(key: str, label: str = "", activate: bool = True) -> str:
         if activate:
             bundle["active_id"] = account["id"]
         _save_keys(bundle, update_active=activate)
+        if for_claude_code:
+            from app.core import claude_auth_mode
+
+            claude_auth_mode.set_mode(claude_auth_mode.MODE_API_KEY, key_id=_pin_id(account))
+        elif activate:
+            _update_shared_key(_pin_id(account))
         return account["id"]
+
+
+def _update_shared_key(account_id: str | None) -> None:
+    from app.core import claude_auth_mode
+
+    claude_auth_mode.update_shared_key(account_id)
 
 
 def subscription_support() -> dict[str, Any]:
@@ -165,10 +273,14 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
     with _lock:
         _require_storage()
         bundle = _keys()
-        account = next((a for a in bundle["accounts"] if a["id"] == account_id), None)
+        account = _find_key(bundle, account_id)
         if account is None:
             _error("not_found", "Saved Claude account not found.", 404)
+        account_id = account["id"]
         was_active = bundle["active_id"] == account_id
+        # A peer's stale scalar can hold a key other than the pinned active
+        # one; deleting that key must not leave it stored there.
+        in_scalar = action == "delete" and active_api_key() == account["key"]
         if action == "rename":
             account["label"] = _label(label)
         elif action == "activate":
@@ -180,8 +292,14 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
         else:
             _error("invalid_action", "Unknown account action.", 400)
         _save_keys(
-            bundle, update_active=action == "activate" or (action == "delete" and was_active)
+            bundle, update_active=action == "activate" or (action == "delete" and (was_active or in_scalar))
         )
+        if action == "activate":
+            _update_shared_key(_pin_id(account))
+        elif action == "delete":
+            from app.core import claude_auth_mode
+
+            claude_auth_mode.clear_shared_key_if_selected(account_id, _pin_id(account))
 
 
 def deactivate_api_key() -> None:
@@ -190,26 +308,27 @@ def deactivate_api_key() -> None:
         bundle = _keys()
         bundle["active_id"] = None
         _save_keys(bundle, update_active=True)
+        _update_shared_key(None)
 
 
 def accounts_payload() -> dict[str, Any]:
     """Return masked account summaries, selection and safe storage errors."""
     from app.api.settings_crypto import mask_api_key
 
+    result = {
+        "api_key": [],
+        "subscription": [],
+        "subscription_support": subscription_support(),
+        "storage_locked": not encryption.is_encryption_ready(),
+        "error": None,
+        "login_pending": False,
+        "login": None,
+        "recovery_required": False,
+    }
+    if result["subscription_support"]["supported"]:
+        # Plain worker-local data: listed even while key storage is locked.
+        result.update(subscriptions.payload())
     with _lock:
-        result = {
-            "api_key": [],
-            "subscription": [],
-            "subscription_support": subscription_support(),
-            "storage_locked": not encryption.is_encryption_ready(),
-            "error": None,
-            "login_pending": False,
-            "login": None,
-            "recovery_required": False,
-        }
-        if result["subscription_support"]["supported"]:
-            # Plain worker-local data: listed even while key storage is locked.
-            result.update(subscriptions.payload())
         try:
             bundle = _keys()
         except AccountError as exc:
@@ -241,9 +360,14 @@ async def mutate_subscription(function: Callable[..., Any], *args: Any) -> Any:
     return result
 
 
-def saved_sign_in_commands(account_id: str) -> dict:
-    """Let an owner re-sign into an inactive saved folder without activating it."""
-    return _subscription_call(subscriptions.sign_in_commands, account_id)
+def select_default_login() -> None:
+    """Select the verified account and billing organization in the default CLI folder."""
+    return _subscription_call(subscriptions.select_default)
+
+
+def saved_sign_in_commands(account_id: str, terminal: bool = False) -> dict:
+    """Prepare a folder-scoped sign-in without changing the owner selection."""
+    return _subscription_call(subscriptions.sign_in_commands, account_id, terminal)
 
 
 async def start_login(*, external: bool = False) -> dict:
@@ -257,7 +381,7 @@ async def cancel_login() -> Optional[str]:
     """Stop a pending ``add another`` sign-in and remove its folder.
 
     Returns the new entry's id when the CLI had already finished signing in,
-    in which case the sign-in was kept and made active instead.
+    in which case the sign-in was kept but not selected.
     """
     from app.db.async_database import run_sync
 

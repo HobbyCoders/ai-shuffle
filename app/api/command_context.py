@@ -120,7 +120,7 @@ def command_provider_kind(
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
     from app.core.query_options import decode_provider_model, is_native_claude_model
-    from app.core.provider_agent import curated_model_ids
+    from app.core.provider_agent import keeps_bare_pick
 
     config = _command_profile_config(request, session, profile_id)
     if (session or {}).get("mode", mode) == "voice":
@@ -146,7 +146,7 @@ def command_provider_kind(
         provider_id, raw_model = decoded
     elif selected and provider_id and is_native_claude_model(selected):
         row = database.resolve_model_provider(provider_id, include_token=False)
-        if selected not in curated_model_ids(row):
+        if not keeps_bare_pick(row, selected):
             provider_id = None
     options = SessionOptions(model=raw_model)
     if provider_id:

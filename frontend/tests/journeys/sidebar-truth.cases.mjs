@@ -47,12 +47,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-	api, chatIdByToken, chatState, errorRow, expect, openNewChat, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
+	api, chatIdByToken, chatState, errorRow, expect, openNewChat, openPopup, pick, pickAccess, pickProject, PROJECT, scriptTag, showSidebar as showDesktopSidebar, stopButton, typeAndSend, uniq,
 	waitChat, waitTurnSettled, withChatSetup
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const CLAUDE_AGENT = 'Dev (Claude Code)';
+// Only fake Claude scripts the API error; a native model answers [script:api-error] normally.
+const CLAUDE_MODEL = 'sonnet';
 const mobileShell = process.argv.includes('--mobile-shell');
 const inMobileShell = (variant) => mobileShell && variant.viewport === 'phone';
 
@@ -167,7 +169,7 @@ async function watchStaysInLane(page, id, lane) {
 }
 
 /** A real chat with one finished turn, on the given agent, staged from the new-session screen. */
-async function makeChat(ctx, label, { agent = null, first = 'hello', again = false } = {}) {
+async function makeChat(ctx, label, { agent = null, model = null, first = 'hello', again = false } = {}) {
 	const { page } = ctx;
 	if (again) await backToNew(page);
 	else await openNewChat(ctx);
@@ -175,6 +177,15 @@ async function makeChat(ctx, label, { agent = null, first = 'hello', again = fal
 		const hero = page.getByRole('region', { name: 'New chat' });
 		const menu = page.getByRole('menu', { name: 'Agent selection' });
 		await pick(hero.getByRole('button', { name: /^Agent:/ }), menu, menu.getByRole('button', { name: agent, exact: true }), hero.getByRole('button', { name: `Agent: ${agent}` }));
+	}
+	if (model) {
+		// The agent does not choose the model, and an earlier journey on this worker can
+		// leave a native one saved (#1869). The stable id, not a versioned Sonnet.
+		const picker = page.getByRole('dialog', { name: 'Choose model' });
+		await openPopup(page.getByRole('button', { name: /^Model: / }).filter({ visible: true }), picker);
+		await picker.getByRole('option').and(picker.locator(`[data-value="${model}"]`)).click();
+		if (await picker.isVisible()) await page.keyboard.press('Escape');
+		await picker.waitFor({ state: 'hidden' });
 	}
 	await pickAccess(page, 'Bypass');
 	const token = `${label}-${uniq()}`;
@@ -451,7 +462,7 @@ const FAILED_CLAUDE = {
 	// The agent menu is the shared new-session screen's.
 	viewports: mobileShell ? ['desktop'] : undefined,
 	async setup(ctx) {
-		ctx.chat = await makeChat(ctx, 'failed-claude', { agent: CLAUDE_AGENT });
+		ctx.chat = await makeChat(ctx, 'failed-claude', { agent: CLAUDE_AGENT, model: CLAUDE_MODEL });
 	},
 	async act(ctx) {
 		const { page, mark, chat } = ctx;

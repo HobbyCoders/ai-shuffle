@@ -22,7 +22,7 @@ from app.mcp.config_agent_edits import (
     unknown_op_fields,
     validate_profile_fields,
 )
-from app.mcp.config_helpers import _tool_result, _error
+from app.mcp.config_helpers import _tool_result, _error, claude_api_choice_error
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +252,9 @@ def _create_profile_tools(is_admin: bool) -> list:
                     if args.get(key) is not None}
         if "provider_models" in settings:
             settings["provider_models"] = pruned_provider_models(settings["provider_models"])
+            api_error = claude_api_choice_error(settings["provider_models"], where="an agent")
+            if api_error:
+                return _error(api_error)
         settings_error, normalized = validate_profile_fields(settings, settings)
         if settings_error:
             return _error(settings_error)
@@ -426,6 +429,7 @@ def _create_profile_tools(is_admin: bool) -> list:
 
             # Merge updates into existing config
             config = dict(profile.get("config", {}))
+            models_before = dict(config.get("provider_models") or {})
             updated_fields = []
             details: Dict[str, Any] = {}
 
@@ -480,6 +484,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                 mark(field)
             if unmatched:
                 details["not_found_for_remove"] = unmatched
+            if "provider_models" in updated_fields:
+                api_error = claude_api_choice_error(
+                    config.get("provider_models") or {}, models_before, where="an agent")
+                if api_error:
+                    return api_error, None, None, None
 
             # The mode, not list emptiness, decides access
             # (app.core.tool_access): an empty allow list in "allow" mode

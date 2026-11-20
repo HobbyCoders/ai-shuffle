@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,7 +28,7 @@ def driver(tmp_path, monkeypatch):
     # CI must clear this inherited developer filter, not run a partial shard.
     monkeypatch.setenv("JOURNEY_ONLY", "a developer's substring")
     files = ["flow.journey.mjs", "other.journey.mjs"]
-    monkeypatch.setattr(ci, "plan", lambda _, only=None: [files if only is None else only, [], [], []])
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [files if only is None else only, [], [], []])
     weights = tmp_path / "weights.json"
     weights.write_text(json.dumps({"seconds": {name: 10 for name in files}}))
     monkeypatch.setattr(ci, "WEIGHTS", weights)
@@ -49,13 +51,17 @@ def driver(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ci, "DevInstance", Instance)
 
-    def run(first, second=None, *, opt=True, only=None):
+    real_command = ci.run_command
+
+    def run(first, second=None, *, opt=True, only=None, real_retry=False, command_timeout=None, parts=None):
         def command(argv, env, log, timeout):
             assert not instances[0].stopped  # same live instance on both attempts
             attempt = 2 if "attempt-2" in str(log) else 1
             name = Path(argv[1]).name
             selected = [a.removeprefix("--case=") for a in argv[2:]]
             calls.append((attempt, name, selected, timeout, env.copy()))
+            if attempt == 2 and real_retry:
+                return real_command([sys.executable, *argv[1:]], env, log, timeout)
             responses = first if attempt == 1 else second
             rows = responses.get(name, [case("untouched@phone-slow", "pass")])
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +86,10 @@ def driver(tmp_path, monkeypatch):
             argv.append("--retry-failures")
         if only is not None:
             argv.extend(["--only", only])
+        if command_timeout is not None:
+            argv.extend(["--journey-timeout", str(command_timeout)])
+        if parts is not None:
+            argv.extend(["--parts", json.dumps(parts)])
         code = ci.main(argv)
         return code
 
@@ -159,6 +169,58 @@ def test_crashed_journey_is_retried_as_a_whole_file(driver, second, expected):
     assert "attempt 1 process error" in text
     if expected:
         assert "attempt 2 process error" in text or "retry case error" in text
+
+
+# The matrix job's assignment: flow.journey.mjs split in two. This shard runs
+# part 1. Its ids came from the plan job, in whatever order: the shard never
+# re-lists or re-slices them.
+PARTS = {"flow.journey.mjs#1/2": ["c@phone-slow", "a@desktop-fast"], "flow.journey.mjs#2/2": ["b@desktop-fast"]}
+MINE = PARTS["flow.journey.mjs#1/2"]
+
+
+@pytest.fixture
+def part_driver(driver, monkeypatch, tmp_path):
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [["flow.journey.mjs#1/2"],
+                                                                      ["flow.journey.mjs#2/2"]])
+    monkeypatch.setattr(ci, "case_ids", lambda path: pytest.fail("a shard must not re-list a part's cases"))
+    # Over the 180s retry budget whole, but this part's 2/3 share (160s) fits.
+    (tmp_path / "weights.json").write_text(json.dumps({"seconds": {"flow.journey.mjs": 240}}))
+    run, *rest = driver
+    return (lambda *a, **k: run(*a, parts=PARTS, **k)), *rest
+
+
+def test_a_part_runs_exactly_its_assigned_cases(part_driver):
+    run, calls, *_ = part_driver
+    mine = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
+    assert run({"flow.journey.mjs": mine}, {}) == 0
+    assert [(a, n, ids) for a, n, ids, *_ in calls] == [(1, "flow.journey.mjs", MINE)]
+
+
+def test_a_planned_part_without_assigned_cases_fails_closed(driver, monkeypatch):
+    run, calls, *_ = driver
+    monkeypatch.setattr(ci, "plan", lambda _, only=None, parts=None: [["flow.journey.mjs#1/2"]])
+    with pytest.raises(ValueError, match="no assigned case ids"):
+        run({}, {})
+    assert calls == []
+
+
+@pytest.mark.parametrize("first", [None, [case("a@desktop-fast", "pass"), case("b@desktop-fast", "pass")]],
+                         ids=["crashed", "other-cases"])
+@pytest.mark.parametrize("second, expected", [(None, 1), ("own", 0)])
+def test_a_crashed_or_foreign_part_retries_only_its_own_cases(part_driver, first, second, expected):
+    run, calls, _, summary, *_ = part_driver
+    own = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
+    assert run({"flow.journey.mjs": first}, {"flow.journey.mjs": own if second == "own" else None}) == expected
+    assert [(a, ids) for a, _, ids, *_ in calls] == [(1, MINE), (2, MINE)]
+    assert "(whole journey)" in summary.read_text()
+
+
+def test_an_unsplit_crashed_file_keeps_the_whole_file_estimate(driver, tmp_path):
+    run, calls, _, summary, *_ = driver
+    (tmp_path / "weights.json").write_text(json.dumps({"seconds": {"flow.journey.mjs": 240}}))
+    assert run({"flow.journey.mjs": None}, {}) == 1
+    assert all(attempt == 1 for attempt, *_ in calls)
+    assert "Estimated whole-file runtime 240.0s exceeds" in summary.read_text()
 
 
 def test_known_bug_verdict_is_not_retried(driver, capsys):
@@ -309,3 +371,61 @@ def test_skipping_long_crash_does_not_block_short_crash(driver):
     rows = json.loads((out / "summary.json").read_text())["rows"]
     assert [row["status"] for row in rows] == ["crashed", "passed-on-retry"]
     assert "Estimated whole-file runtime 461.7s exceeds" in summary.read_text()
+
+@pytest.mark.parametrize("budget_source", ["earlier-retry", "shard-cutoff", "command-timeout"])
+def test_account_switch_retry_skips_before_provisioning(driver, monkeypatch, budget_source):
+    from scripts.devloop import journey_retry as retry
+
+    run, calls, out, summary, outputs, _ = driver
+    name = "claude-account-switch.journey.mjs"
+    earlier = "other.journey.mjs"
+    files = [earlier, name] if budget_source == "earlier-retry" else [name]
+    monkeypatch.setattr(ci, "plan", lambda _: [files, [], [], []])
+    phase_start = 1318.5 if budget_source == "shard-cutoff" else 0
+    clock = iter([0, phase_start, phase_start, 178.5] if budget_source == "earlier-retry"
+                 else [0, phase_start])
+    monkeypatch.setattr(retry, "time", SimpleNamespace(monotonic=lambda: next(clock, phase_start)))
+    assert run({name: [case(error="original account failure")], earlier: [case()]},
+               {name: [case(status="pass")], earlier: [case(status="pass")]},
+               command_timeout=1.5 if budget_source == "command-timeout" else None) == 1
+    assert not any(attempt == 2 and file == name for attempt, file, *_ in calls)
+    receipt = json.loads((out / "summary.json").read_text())
+    row = next(row for row in receipt["rows"] if row["journey"] == "claude-account-switch")
+    assert row["status"] == "fail" and len(row["attempts"]) == 1
+    assert "1.5s available" in row["retry_skipped"]
+    assert row["retry_skipped"] in summary.read_text()
+    assert "original account failure" in summary.read_text()
+    assert receipt["retried"] == (1 if budget_source == "earlier-retry" else 0)
+    assert outputs.exists() == (budget_source == "earlier-retry")
+
+
+@pytest.mark.parametrize("crashed", [False, True])
+@pytest.mark.parametrize("headroom", [1.5, 180.0])
+def test_account_switch_retry_uses_hosted_timeout(driver, monkeypatch, tmp_path, crashed, headroom):
+    from scripts.devloop import journey_retry as retry
+    run, calls, out, summary, _, _ = driver
+    name = "claude-account-switch.journey.mjs"
+    monkeypatch.setattr(ci, "plan", lambda _: [[name], [], [], []])
+    monkeypatch.setattr(ci, "JOURNEYS", tmp_path)
+    ci.WEIGHTS.write_text(json.dumps({"seconds": {name: 1}}))
+    fake_tmp = tmp_path / "private-status-dir"
+    # If incorrectly admitted under a tiny budget, this launcher is really killed
+    # by CI's timer, without a summary or a chance to clean up the private dir.
+    if headroom < 180:
+        (tmp_path / name).write_text(
+            f"from pathlib import Path\nimport time\nPath({str(fake_tmp)!r}).mkdir()\ntime.sleep(600)\n"
+        )
+    started = 1320 - headroom
+    clock = iter([0, started])
+    monkeypatch.setattr(retry, "time", SimpleNamespace(monotonic=lambda: next(clock, started)))
+    assert run({name: None if crashed else [case()]}, {name: [case(status="pass")]},
+               real_retry=headroom < 180) == (1 if headroom < 180 else 0)
+    receipt = json.loads((out / "summary.json").read_text())
+    row = receipt["rows"][0]
+    if headroom < 180:
+        assert not fake_tmp.exists(), row
+        assert row["status"] == ("crashed" if crashed else "fail") and len(row["attempts"]) == 1
+        assert "1.5s available" in summary.read_text()
+    else:
+        assert row["status"] == "passed-on-retry" and len(row["attempts"]) == 2
+        assert calls[-1][2:4] == ([] if crashed else ["copy@desktop-fast"], 180.0)

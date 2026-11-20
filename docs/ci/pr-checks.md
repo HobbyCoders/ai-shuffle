@@ -4,9 +4,13 @@ Tests run on GitHub CI. The local push gate is the offline secret scan (plus the
 update-reach check); it runs no test suites. One workflow, `ci.yml`, checks
 every pull request (drafts and forks included), every push to `main`, and
 everything once a day. A run checks the areas whose files changed and skips an
-area whose files are unchanged since it last passed
-([What a run skips](#what-a-run-skips)); the backend suite reads the whole
-repository, so it runs on every change. The run's one verdict is the `CI`
+area whose files are unchanged since it last passed; a pull request also skips
+the areas none of its files belong to
+([What a run skips](#what-a-run-skips)). The backend reads the whole
+repository, so it runs on every change, but a pull request's backend shards run
+only the tests its change can reach
+([Backend tests on a pull request](#backend-tests-on-a-pull-request)); main
+runs every test after the merge. The run's one verdict is the `CI`
 check: merge requires a green `CI` and review. Edge/nightly publication remains
 separate: a `CI` pass on the exact main revision or the owner's local attested
 full pass authorizes the read-only publication gate.
@@ -29,9 +33,11 @@ push to a pull request starts one workflow run with one verdict. There are no
 draft skips. Which of them a run starts depends on the files the change touches
 ([What a run skips](#what-a-run-skips)):
 
-- `ci-backend.yml`: eight backend shards, parallel real PostgreSQL/boot contracts,
-  unconditional security checks and the stable fail-closed `Backend tests` gate.
-- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
+- `ci-backend.yml`: `backend-select`, then up to eight backend shards (all eight
+  off pull requests), parallel real PostgreSQL/boot contracts, unconditional
+  security checks and the stable fail-closed `Backend tests` gate.
+- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment
+  (four pytest workers, one test file per worker),
   plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
   2.1.314). Each contract job fetches its versioned Linux CLI fixture from
   `downloads.claude.ai`, verifies the vendor manifest's checksum and size,
@@ -54,8 +60,7 @@ draft skips. Which of them a run starts depends on the files the change touches
   fixture across nine duration-balanced files. Actual executed-file inventories
   must form an exact disjoint union; the aggregate reports runtime test counts
   and verifies the moved test-body snapshot. The full manual Windows matrix is
-  unchanged (Internal tracking: #381). Linux PR checks still run the complete
-  backend suite on every PR. No assertions or failure behavior
+  unchanged (Internal tracking: #381). No assertions or failure behavior
   are weakened.
 - `ci-instance-identity.yml`: native Windows identity contracts; macOS is manual only.
 - `ci-artifact-policy.yml`: inexpensive artifact, runner and publication policy checks.
@@ -65,7 +70,16 @@ draft skips. Which of them a run starts depends on the files the change touches
   `Real browser workspace` aggregate requires smoke and all three cases.
 - `container-postgres.yml`: candidate image lifecycle, isolation and install checks,
   without publishing or signing. This is broader than a small policy check but
-  covers the production container path without requiring secrets.
+  covers the production container path without requiring secrets. Three groups
+  run at once, each on its own build of the image from the shared BuildKit
+  cache: `Container checks (lifecycle)` (boot, UI, restart, backup and restore,
+  PostgreSQL failure, identity and inherited environment), `Container checks
+  (updater)` (the synthetic signed source update and its controlled restart)
+  and `Container checks (install)` (Compose configuration, agent isolation and
+  the buyer compose file). The gate requires all three. Pull requests read
+  main's cache and do not write it; main and the daily run write it. The
+  release workflows still run both phases of `verify_container_postgres.py`
+  (lifecycle and updater) in one job.
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
   and disposable signing are test-only; release keep rules are unchanged.
@@ -103,8 +117,7 @@ records are not reused.
 `ci.yml` groups concurrency by pull request (or ref): a newer push to a pull
 request cancels its running checks. Permissions are `contents: read`, with
 these exceptions: the `plan` and `javascript` jobs read Actions data; the `CI`
-job may cancel its own run and, on a push to main or the merge queue's run for
-it, report journey issues; and
+job may cancel its own run and, on a push to main, report journey issues; and
 the `android` call is allowed `contents: write` because `android.yml` holds the
 owner's publishing job, which never runs from `ci.yml`. None of the workflows
 in the list above references secrets or requires private checkout access.
@@ -121,14 +134,23 @@ failure, the `CI` job uploads a tiny artifact named `pass-<area>-<key>`. The
 `plan` job of a later run (the next push to the pull request, another pull
 request, or main after the merge) finds the record and skips the area.
 
+A pull request also skips an area none of whose files it changes: the `plan`
+job reads the files that differ between main and the pull request's merge
+commit and skips each area that reads none of them (`skipped: this pull
+request changes none of its files` in its summary). Such a skip records
+nothing. A push to main, the daily run and a manual run skip only on a pass
+record, so a gap in an area's file list is caught on main after the merge. When
+the plan cannot read the change (HEAD is not a two-parent merge, or git fails)
+it skips nothing this way.
+
 | Area | Runs when these changed since it last passed |
 | --- | --- |
 | `backend` | anything: its tests read sources all over the repository |
 | `javascript-checks` (every `ci-frontend.yml` job but the journeys) | `frontend/`, `mobile/`, `tools/`, `browser-mcp/`, the docs content, and the backend files those tests read (transcript views, the API contract, the connector catalog, shared fixtures) |
-| `fluid` | `fluid/`, `scripts/`, and the app's scratch-folder module its test setup loads |
+| `fluid` | `fluid/`, the scripts its tests and workflow load (the fake provider wire, the CLI fixture fetcher, the shared scratch helper and three measurement scripts; not the rest of `scripts/`), and the app's scratch-folder module its test setup loads |
 | `windows`, `desktop`, `desktop-source` | anything but prose, the UI's own source (`frontend/src/`, `frontend/tests/`, `mobile/src/`), `ios/` and `android/` (except `android/ci/`) |
 | `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, `docker/`, `scripts/`, the Python pins, its one test and the helpers every test loads |
-| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`) and its UI smoke script |
+| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`), its UI smoke script and the setup wizard that script walks (`SETUP_UI` in `scripts/ci/plan.py`) |
 | `identity` | `app/`, `fluid/`, `tests/`, `docker/`, `scripts/`, the Python pins |
 | `android`, `android-minified` | `android/`, `mobile/`, and `frontend/` except the web UI's own source (`frontend/src/`, `frontend/tests/`) |
 
@@ -166,6 +188,47 @@ and which earlier run proved it.
   `supply-chain` and `update-reach` have no record: they always run.
 - The daily scheduled run and a manual run look nothing up: they run
   **everything**, emulators and every journey included, and record what passed.
+- A backend pass is recorded only from a run whose shards ran every test
+  (`Backend test selection: all`), never from a pull request's selected run.
+
+### Backend tests on a pull request
+
+The `backend-select` job of `ci-backend.yml` chooses what the shards run
+(`scripts/ci/backend_test_map.py ci-select`). Contracts, security, policy and
+PostgreSQL safety always run in full.
+
+- Off pull requests the choice is `all`: eight shards, every test. Those shards
+  also record which repository functions each test file runs
+  (`tests/_test_map.py`), and once all eight passed the `backend-map` job merges
+  the records, with each file's measured time, into a test map and saves it in
+  the Actions cache. A pull request reads main's newest map and never records
+  or writes one, even when it runs every test. Losing a map only makes pull
+  requests run every test, so nothing about saving it can fail a run:
+  `backend-map` and the shards' upload of their records may fail
+  (`continue-on-error`); the test receipts may not.
+- A pull request diffs from the commit the map was recorded on to its own merge
+  commit, so what main changed since the map is chosen too, and picks the test
+  files that ran a changed function (the rules are in the script's docstring).
+  A file that is not Python chooses the tests that name it or list a folder of
+  it, and the tests of the code that reads it. Tests that list the whole
+  checkout or a top-level folder (`frontend`) run with them, but alone they
+  say nothing about the file, so everything runs.
+  It runs those files in as many shards as their recorded time needs (about
+  five test-minutes a shard, at most eight). Tests the shards never run (the
+  policy suite's `tests/scripts/` and the docs tests) are left out of the
+  choice; their jobs run anyway.
+- Any doubt runs every test: no map, a map whose commit is not on main, a
+  change to the dependencies (any package manifest or lockfile, in any folder), the pytest setup (any `conftest.py`, the root one
+  too) or how the shards run and are judged, a file under `tests/` that is not
+  Python (fixtures, data, snapshots, read by names built at run time), a file
+  that no code or test names, nor any folder of it below the top level, a file
+  name with a line break, a change the map cannot place, more than 60% of the
+  test files affected, or any error.
+- When no shard test can reach the change, no shard runs (`none`).
+- `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each
+  naming the same selection and shard count; only a pull request may choose
+  fewer than every test. Main runs every test after the merge and gates the
+  nightly, so a test the map missed fails there, before anything ships.
 
 The file lists are what makes a skip safe, and they have limits:
 
@@ -174,7 +237,10 @@ The file lists are what makes a skip safe, and they have limits:
   `tests/scripts/test_ci_plan.py` fails when a path is outside its area's list
   that a workflow step names, that a Python file named there imports (however
   deep, test helpers and pytest plugins included), or that such a script
-  spells out itself. It cannot see a path a program builds at run time or a
+  spells out itself. For `fluid`, whose workflow names a folder of tests, it
+  also scans every file under `fluid/tests/` for the scripts they import or
+  open by a literal path, and follows those scripts in turn (leaving out their
+  `__main__` blocks, which loading a script by path never runs). It cannot see a path a program builds at run time or a
   file read by JavaScript or a shell script; the daily run checks everything
   on main within a day. When a test starts reading another part of the
   repository, add that part to its area in `scripts/ci/plan.py`.
@@ -196,8 +262,14 @@ time with push turned on for the debug build (`-PpushEnabledDebug=true`, the cod
 path release builds take once Firebase config is present; no `google-services.json`
 is needed or committed), builds the debug and test APKs,
 and exercises the full native instrumentation suite on API 34 and API 36 when
-the `android` area runs: after a change to `android/`, `mobile/`, the
-frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
+the `android` area runs. Each API level runs as four emulator jobs
+(`Android emulator verification (API 34, 1/4)` … `(API 36, 4/4)`): parts 1–3
+each run one AndroidJUnitRunner hash shard (`numShards`/`shardIndex`) of the
+suite, and part 4 runs the fresh-process cold-chat check, the suite's longest
+test, the notification-permission decisions and the host-only parser checks.
+Every test still runs once per API level, on pull requests and on main alike;
+one job running everything took about 17 minutes, a part about 7. The area
+runs after a change to `android/`, `mobile/`, the frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
 `frontend/tests/`), the workflow itself or the files that decide a run, and in
 the daily run. The asset paths matter: the APK's offline demo is built from
 `mobile/` and shared `frontend/` dependencies;
@@ -305,76 +377,24 @@ only: it compares with what main has published.
 
 A dispatch on another ref skips the suites and fails the verdict.
 
-### With a merge queue on main
+### Merging and the run on main
 
-`ci.yml` also starts on `merge_group`, for main's queue only. Nothing sends
-that event until the `main` ruleset has a merge queue rule, so without one this
-section describes nothing that runs. With one, a pull request is not merged
-directly: GitHub builds the commit main would get (the pull request on top of
-main as it is then, and of the pull requests queued ahead of it), runs `ci.yml`
-on that commit, and moves main to exactly that commit when `CI` passes. A red
-run removes the pull request from the queue and main does not move.
+There is no merge queue. A pull request merges as soon as its own `CI` check
+is green. Its run checks only what its changed files affect: the areas whose
+files changed, and only the UI journeys a `map.json` rule names for those
+files. The run on main after the merge adds the rest: every area no pull
+request passed on the same files, and every journey the changes select,
+including the `all` rules and UI files no rule covers
+([UI journeys](#ui-journeys)). The nightly publishes only the newest main
+commit whose run passed all of it.
 
-The queue lets the expensive part run once per pull request instead of once
-per push to it:
-
-- **A pull request's own runs make the narrow journey selection.** The
-  journeys a `map.json` rule names for its changed files still run on every
-  push. What selects *every* journey (an `all` rule, or a UI source file no
-  rule covers) is left to the queue's run. `Select UI journeys` reads GitHub's
-  active rules for main
-  (`GET /repos/{repository}/rules/branches/main`) and narrows only when they
-  include a `merge_queue` rule and the pull request's base is `main`. An
-  unreadable answer, a missing token, another base branch or an unreadable diff
-  keep the full selection. Every other area runs on a pull request as before.
-- **The queue's run makes the full selection once.** It selects like a push to
-  main: the files changed since the nearest earlier commit `ci.yml` passed on,
-  whether main's own run or the queue's run passed there, with every `all` rule
-  and the unmapped fallback. Areas are skipped on pass records as on any run:
-  an area whose files are what the pull request's last run tested (main did
-  not change them since) does not run again. Like a run on main it stops at
-  the first failure.
-- **The push to main repeats nothing.** Main moves to the commit the queue
-  tested, so the push run finds the queue's pass records for every area and,
-  for the journeys, the queue's green `ci.yml` run on that very commit
-  (`queue_passed` in `scripts/ci/proven.py`: this repository's `ci.yml`,
-  event `merge_group`, a `gh-readonly-queue/main/` branch, completed
-  successfully, the same commit). If that run cannot be found (the listing
-  failed, or the push run started first) the push runs its journeys itself.
-  `update-reach` still runs on the push only, and the nightly still follows
-  the push run.
-- **A merge that bypasses the queue is checked on main.** The pull request's
-  journey record carries the narrow selection's key, so it stands for the push
-  only when the narrow and the full selection are the same journeys.
-  Otherwise the push runs the full selection after the merge, as it did before
-  the queue.
-
-A commit the queue passed counts as green for later selections for the same
-reason a green main commit does: its run made the full selection from the
-nearest green commit before it. While main is red the queue's run therefore
-selects everything changed since main was last green, and keeps failing on
-whatever broke main until that is fixed.
-
-The queue's run reports journeys that passed only on retry and can be used to
-refresh the journey weights, like a push to main: with a queue the push run
-starts no journey, so the queue's run is where both show.
-
-To turn the queue on (repository settings, not a file in this repository):
-
-1. Add the **Require merge queue** rule to the `main` ruleset. Merges then go
-   through `gh pr merge` or the merge button as before, but only enqueue; main
-   moves when the queue's run is green.
-2. Let the queue create its branches: a ruleset that restricts branch creation
-   must exclude `refs/heads/gh-readonly-queue/**/*`. The queue's branches are
-   two levels deep (`gh-readonly-queue/main/pr-<N>-<sha>`) and a pattern ending
-   in `/**` reaches one level only: with it GitHub removes every pull request
-   from the queue within seconds (`branch_protection_failure`) and no run
-   starts. Check with
-   `gh api 'repos/<owner>/<repo>/rules/branches/gh-readonly-queue%2Fmain%2Fpr-1'`,
-   which must list no rule of that ruleset.
-
-Turning it off again needs no change here: the pull request selection returns
-to the full one with the next run.
+A started run on main is never cancelled by a later merge. Merges that land
+while it runs wait as one run: GitHub keeps one run going and the newest one
+waiting, and a newer merge replaces the waiting one. That run selects from the
+last commit CI passed on, so it covers every merge it folded in. Apart from
+the dispatch before a stable release (above), nobody starts, dispatches or
+re-runs main's CI by hand: the next merge starts the next run, and the daily
+run checks everything.
 
 **The verdict never waits for a runner.** Runners are shared with every open
 pull request, so a job that starts only after the last test job finishes can
@@ -398,8 +418,9 @@ workflows (`ci-backend.yml`, `ci-frontend.yml`, `windows-suite.yml`,
 job must succeed (or, for the JavaScript checks, be skipped exactly when their
 pass record proved them; the journeys only when the selection chose none), and
 the backend and Windows desktop shard receipts are checked in the gate job
-itself. The one job that may fail is the API 36 emulator of `android.yml`,
-which that workflow already marks advisory. Advisory jobs (`source-ui`, the
+itself. The only jobs that may fail are the four API 36 emulator parts of
+`android.yml`, which that workflow already marks advisory; the gate still waits
+for them to finish. Advisory jobs (`source-ui`, the
 `plan` lookup) never decide.
 
 A started run on main finishes unless a required job fails, is cancelled or
@@ -434,7 +455,7 @@ full test selection and gates remain in force. No test job has signing
 secrets; workflow-default permissions are `contents: read`, using only
 standard free hosted runners. Only the `CI` job can cancel the run
 (`actions: write`) and write issues, for the non-blocking journey
-reporting step of a push to main and of the merge queue's run (see below). Windows calls select the existing
+reporting step of a push to main (see below). Windows calls select the existing
 three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
@@ -569,7 +590,8 @@ tools-only and workflow-only changes. Backend credential-path checks and contrac
 read those trees too, and `docs/content/` is served at runtime. There is no path
 classifier, skip approval, or reduced-coverage lane.
 
-Full coverage runs eight `ubuntu-24.04` shards with two xdist workers apiece and
+Full coverage runs eight `ubuntu-24.04` shards with four xdist workers apiece (one
+per vCPU) and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
@@ -577,7 +599,8 @@ proves exact union, no duplicates and no empty shard. Workers must agree on the
 collection and assignment. Controllers also verify executed node IDs, then upload
 per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
 still run with their stronger real-environment prerequisites. The legacy dispatch
-input remains accepted; shard parallelism is fixed at two workers.
+input remains accepted; shard parallelism is fixed at four workers, and the
+backend gate refuses a receipt from any other count.
 
 A shard whose tests fail reruns only those tests, once, serially
 (`scripts/ci/backend_shard_run.py`, the same `local_ci.run` retry with
@@ -1278,9 +1301,6 @@ Both run in `ci-frontend.yml` on free standard runners and feed the required
 visual comparison runs on every pull request; the journeys a pull request runs
 are selected from its changed files, a push to main runs the journeys for what
 changed since main last passed, and the daily and dispatched runs run all of them.
-With a merge queue on main the pull request makes a narrower selection and the
-queue's run the full one
-([With a merge queue on main](#with-a-merge-queue-on-main)).
 
 ### UI journeys
 
@@ -1305,36 +1325,32 @@ the journey names), `shards` (the shard numbers that got a file) and `key`
 record).
 
 - A scheduled run, a dispatch and any other caller run **every** journey.
-- A push to main, and the merge queue's run of a commit headed for main, run
-  the journeys for the files changed since the nearest earlier commit that
-  `ci.yml` passed on, on main or in its queue (hence the full
-  history, `fetch-depth: 0`), with the same rules as a pull request below and
-  that commit's `map.json` as the base copy. Every journey held at that commit:
-  it ran there, or that run narrowed the same way from an older green commit.
-  When no such commit is found among the last 30 green runs of either kind,
+- A pull request runs the journeys `select.mjs --ci --named-only` names for
+  its changed files: the union of every matching `map.json` rule. The files
+  are the merge commit's own changes (`git diff HEAD^1 HEAD` on GitHub's merge
+  of the branch into its base, hence `fetch-depth: 2`; a rename lists both
+  paths). The `all` rules and the unmapped fallback below are left to the run
+  on main, so a pull request's selection is always a subset of main's.
+- A push to main runs the journeys `select.mjs --ci` names for the files
+  changed since the nearest earlier commit that `ci.yml` passed on (hence the
+  full history, `fetch-depth: 0`), with that commit's `map.json` as the base
+  copy. Besides the rules, a file matching an `all` rule (the harness,
+  `select.mjs`, this workflow, `scripts/devloop/**`, the core chat surface and
+  the session event stream) selects everything. Every journey held at that
+  commit: it ran there, or that run narrowed the same way from an older green
+  commit. When no such commit is found among the last 30 green runs on main,
   every journey runs.
-- A push then starts **no** shard when the merge queue's run passed on this
-  very commit, or when a pull request left a `journeys` record
+- A push then starts **no** shard when a pull request left a `journeys` record
   for the same tree with the same `key` (or with `all`): the same journeys
   already passed on these exact files. A pull request leaves that record when
-  its selection and all its journey shards succeed.
-- A pull request runs the journeys `select.mjs --ci` names for its changed
-  files. The files are the merge commit's own changes (`git diff HEAD^1 HEAD`
-  on GitHub's merge of the branch into its base, hence `fetch-depth: 2`; a
-  rename lists both paths). The union of every matching `map.json` rule is
-  selected; a file matching an `all` rule (the harness, `select.mjs`, this
-  workflow, `scripts/devloop/**`, the core chat surface and the session event
-  stream) selects everything.
-- When a merge queue guards main, a pull request runs `select.mjs --ci
-  --before-queue` instead: the same rules without the `all` rules and without
-  the unmapped fallback below, so always a subset of the full selection. The
-  queue's run makes the full one before main moves.
-- A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
+  its selection and all its journey shards succeed, so it stands for the push
+  only when main's selection is the pull request's.
+- On a push to main, a changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
   `frontend/static/**`) that **no** rule covers also selects everything: the
   map says what a file needs, it does not prove an unlisted UI file needs
   nothing. Files outside those globs that no rule covers (docs, most backend
-  code) select nothing. Only the CI selection widens like this; a local
-  `select.mjs` keeps naming what the rules name.
+  code) select nothing. Only main's selection widens like this; a pull request
+  and a local `select.mjs` keep naming what the rules name.
 - An edit to `map.json` is judged against the base's copy
   (`git show HEAD^1:frontend/tests/journeys/map.json`): the other changed files
   select what **either** copy names, so an edit can add journeys to the run but
@@ -1348,8 +1364,7 @@ each repeats the same split with `--only`. With an empty selection the
 `UI journeys` job is skipped; the aggregate accepts that only when
 `Select UI journeys` succeeded with `shards` equal to `[]`, and requires
 success in every other case. A regression in a journey the pull request did
-not select is caught by the merge queue's run before main moves or, without a
-queue, by the run on main before the nightly is published.
+not select is caught by the run on main before the nightly is published.
 
 `UI journeys (N/18)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
@@ -1362,7 +1377,14 @@ scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
 `down`. The plan step splits the selected journey files across the eighteen shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 18 --only <selection>`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 18 --only <selection>`). On a pull
+request only, the plan job also splits a heavy file into parts of about 2.5
+minutes (`name.journey.mjs#k/n`, every n-th case from k) while that shortens the
+longest shard and no shard holds two parts of one file. It lists each split
+file's cases once and passes every part its exact case ids (the `parts` output,
+`--parts` on the shards, run with `--case`), so each case runs exactly once. A
+failed part retries only its own cases, budgeted by its share of the file's
+runtime. Main's runs, selected or full, never split a file. The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
 use the current count times the measured median seconds per case. For stale measurements the estimate is also at least the
@@ -1432,7 +1454,7 @@ the stronger planning bound address both causes; the frozen historical
 calibration remains unchanged. Continued hosted headroom is tracked in #1197.
 
 Refresh after journey runtime changes, using one or more recent green
-`ci.yml` run IDs of pushes to main (or of the merge queue's runs for main) with authenticated `gh`, in a checkout of the runs'
+`ci.yml` run IDs of pushes to main with authenticated `gh`, in a checkout of the runs'
 revision (for example a detached checkout of the newest run's commit):
 `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
 (`--out` writes elsewhere and leaves the checked-in file alone). A matching
@@ -1511,7 +1533,7 @@ and the CI driver without the flag still run once.
 
 **Main retries too:** on main `ci.yml` calls `ci-frontend.yml` with the same
 retry behavior. A main run that passes only on retry can authorize nightly
-publication. On **push-to-main runs and the merge queue's runs for main only**, the last step of the `CI`
+publication. On **push-to-main runs only**, the last step of the `CI`
 job (after the verdict, so it adds no queued job) reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
 artifacts and opens one issue per recovered journey + full case ID (including
 viewport/throttle). A crashed file without per-case evidence retains the

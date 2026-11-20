@@ -106,7 +106,7 @@ it('warns when the active mode has no credential', async () => {
 	worker.state.integrations.anthropic_api_key_set = false;
 	await show();
 	expect(screen.getByText('Not ready')).toBeTruthy();
-	expect(screen.getByText('Claude cannot run: no Anthropic API key is stored on this worker.')).toBeTruthy();
+	expect(screen.getByText('Claude API cannot run: no Anthropic API key is stored on this worker.')).toBeTruthy();
 	expect(within(credentials()).getByText('No key stored')).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Anthropic API key, No key stored' })).toBeTruthy();
 });
@@ -125,6 +125,54 @@ it('changes the mode only when the owner picks one', async () => {
 	expect(screen.getByText('Runs on API key')).toBeTruthy();
 	expect(within(credentials()).getByText('Active for Claude')).toBeTruthy();
 	expect(mocks.hydrate).toHaveBeenCalled();
+});
+
+it('requires a separate click to confirm a legacy key while already in API key mode', async () => {
+	worker.state.claude = claudeSummary({
+		mode: 'api_key', api_key: { set: true, last4: 'WXYZ' }, api_key_confirmation_required: true,
+		api_key_confirmation: 'rendered-revision'
+	});
+	await show();
+	const action = screen.getByRole('button', { name: 'Confirm API key' });
+	expect(screen.getByText(/Confirm the key ending in WXYZ/)).toBeTruthy();
+	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
+	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+	await fireEvent.click(action);
+	await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirming…' })).toBeNull());
+	expect(worker.sent('PUT', '/settings/claude-auth').map((request) => request.body)).toEqual([
+		{ mode: 'api_key', api_key_confirmation: 'rendered-revision' }
+	]);
+	expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull();
+	expect(within(modes()).getByRole('button', { name: 'API key' }).getAttribute('aria-pressed')).toBe('true');
+});
+
+it('refreshes after a stale confirmation and requires another click for the new key', async () => {
+	const detail = 'The Claude API key or mode changed. Review the current selection before confirming again.';
+	worker.state.claude = claudeSummary({
+		mode: 'api_key', api_key: { set: true, last4: '1111' },
+		api_key_confirmation_required: true, api_key_confirmation: 'old-view'
+	});
+	await show();
+	worker.state.claude = { ...worker.state.claude, api_key: { set: true, last4: '2222' }, api_key_confirmation: 'fresh-view' };
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm API key' }));
+	await screen.findByText(detail);
+	await screen.findByText(/Confirm the key ending in 2222/);
+	expect(worker.sent('PUT', '/settings/claude-auth').map((request) => request.body)).toEqual([
+		{ mode: 'api_key', api_key_confirmation: 'old-view' }
+	]);
+	await fireEvent.click(screen.getByRole('button', { name: 'Confirm API key' }));
+	await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull());
+	expect(worker.sent('PUT', '/settings/claude-auth').at(-1)?.body).toEqual({
+		mode: 'api_key', api_key_confirmation: 'fresh-view'
+	});
+});
+
+it('does not offer legacy key confirmation on a read-only Claude settings page', async () => {
+	worker.state.claude = claudeSummary({ mode: 'api_key', api_key_confirmation_required: true });
+	await show({ readOnly: true });
+	expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull();
+	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 });
 
 it('turns Claude off and says it is out of the picker', async () => {

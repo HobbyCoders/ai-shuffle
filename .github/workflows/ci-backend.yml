@@ -1,8 +1,12 @@
 name: CI Backend
-run-name: "${{ github.workflow }} (8 shards, 2 workers each)"
+run-name: "${{ github.workflow }} (8 shards, 4 workers each)"
 
-# Full backend coverage and security checks on every PR, including drafts.
-# Cross-tree contracts and credential-path checks make path-based skips unsafe.
+# Backend coverage and security checks on every PR, including drafts.
+# A pull request's shards run the tests its change can reach, chosen from the
+# test map of the last full run on main (scripts/ci/backend_test_map.py); any
+# doubt runs them all. Every other run (main, the daily and a manual run) runs
+# every test and records the map. Contracts, security, policy and PostgreSQL
+# safety run in full every time.
 on:
   workflow_call:
     inputs:
@@ -13,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       runner_cpus:
-        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-24.04'
+        description: 'Legacy input (retained for callers); shards use four workers on ubuntu-24.04'
         type: choice
         options: ['2', '4']
         default: '2'
@@ -29,18 +33,66 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  backend-select:
+    name: backend-select
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.choose.outputs.shards }}
+      count: ${{ steps.choose.outputs.count }}
+      tests: ${{ steps.choose.outputs.tests }}
+      selection: ${{ steps.choose.outputs.selection }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # A pull request diffs from the map's commit, which must be on main's
+          # history; every other run chooses everything without git. Strings:
+          # a number 0 is false in an expression, so `&& 0 || 1` is always 1.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The newest map a full run on main saved (backend-map below). A pull
+      # request can read main's caches; it never saves one.
+      - name: Restore the backend test map of the last full run on main
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: backend-test-map.json.gz
+          key: backend-test-map-none
+          restore-keys: backend-test-map-
+      - name: Choose the backend tests this run needs
+        id: choose
+        run: python scripts/ci/backend_test_map.py ci-select --map backend-test-map.json.gz >> "$GITHUB_OUTPUT"
+      # The CI job reads both choices from these step names (scripts/ci/main_gate.py).
+      - name: "Selected backend shards: ${{ steps.choose.outputs.shards }}"
+        run: echo "Shards ${{ steps.choose.outputs.shards }}"
+      - name: "Backend test selection: ${{ steps.choose.outputs.selection }}"
+        run: echo "Selection ${{ steps.choose.outputs.selection }}"
+
   backend-shard:
     name: backend-shard ${{ matrix.shard }}
+    needs: backend-select
+    # A pull request whose change no shard test can reach runs none.
+    if: needs.backend-select.outputs.shards != '[]'
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: ${{ fromJSON(needs.backend-select.outputs.shards) }}
     timeout-minutes: 35
     runs-on: ubuntu-24.04
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
       PYTHONPATH: .:fluid
+      SELECTION: ${{ needs.backend-select.outputs.selection }}
+      SELECTED_TESTS: ${{ needs.backend-select.outputs.tests }}
+      # The chooser's count, not the matrix size: a rerun of failed jobs only
+      # runs fewer matrix jobs but must partition the same way.
+      SHARD_COUNT: ${{ needs.backend-select.outputs.count }}
+      # Only a run that publishes the map records it (backend-map below).
+      RECORD_MAP: ${{ github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,7 +139,8 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the job
         # timeout with no diagnosis.
-        # Eight deterministic partitions of the hermetic collection, two workers each.
+        # Eight deterministic partitions of the hermetic collection, four workers
+        # each: one per vCPU (backend_gate.SHARD_WORKERS checks every receipt).
         # Policy, blocking-DB and serial container tests run in other required jobs.
         # Use --deselect for excluded top-level files: the glob passes them by
         # name, and --ignore does not apply to explicit file arguments. The
@@ -99,16 +152,29 @@ jobs:
         # listed as flaky in the job summary; one that fails twice, a
         # collection error or more than 20 failures fails it. The receipt
         # counts only with the rerun's pass recorded on it (backend_gate.py).
+        # A full run outside pull requests also records which functions each
+        # test file runs (tests/_test_map.py) for the backend-map job; a pull
+        # request records nothing, even when it runs every test.
         run: |
+          if [ "$SELECTION" = all ]; then
+            targets=(tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/test_*.py)
+          else
+            mapfile -t targets < <(python -c 'import json, os; print("\n".join(json.loads(os.environ["SELECTED_TESTS"])))')
+          fi
+          record=()
+          if [ "$RECORD_MAP" = true ]; then
+            record=(-p tests._test_map)
+            export BACKEND_TEST_MAP_DIR="$RUNNER_TEMP/map-hits"
+          fi
           python scripts/ci/backend_shard_run.py -- \
-            python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
-              tests/performance tests/mcp tests/services tests/unit tests/test_*.py \
+            python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml "${targets[@]}" \
               --ignore=tests/scripts --ignore=tests/core/test_docs_content.py \
               --deselect=tests/test_buyer_docs.py --deselect=tests/test_scan_blocking_db.py \
               --ignore=tests/core/test_container_runtime.py \
               --ignore=tests/core/test_container_image_contract.py \
-              -o addopts="" -q -p no:cacheprovider --timeout=120 -n 2 \
-              -p scripts.ci.backend_shards --backend-shard "${{ matrix.shard }}"
+              -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4 "${record[@]}" \
+              -p scripts.ci.backend_shards --backend-shard "${{ matrix.shard }}" \
+              --backend-shard-count "$SHARD_COUNT" --backend-selection "$SELECTION"
 
       - name: Upload backend-shard-${{ matrix.shard }}
         if: always()
@@ -120,6 +186,64 @@ jobs:
             backend-results/
           if-no-files-found: error
           retention-days: 7
+
+      # Optional: a lost record only leaves pull requests the previous map.
+      - name: Upload backend-map-hits-${{ matrix.shard }}
+        if: env.RECORD_MAP == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-map-hits-${{ matrix.shard }}-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/map-hits/
+          if-no-files-found: error
+          retention-days: 3
+
+  # Merge the full run's records into the map pull requests choose tests from.
+  # Only after every shard passed: a map missing a shard would miss its tests.
+  # Losing a map only makes the next pull requests run every test, so no
+  # failure here fails the run; no verdict needs this job.
+  backend-map:
+    name: backend-map
+    needs: [backend-select, backend-shard]
+    if: github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' && needs.backend-shard.result == 'success'
+    continue-on-error: true
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download the shards' records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-map-hits-*-a*
+          path: hit-attempts
+      - name: Download the shards' timings
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-a*
+          path: shard-attempts
+      # A failure here leaves pull requests the previous map, or every test.
+      - name: Merge the backend test map
+        id: merge
+        continue-on-error: true
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python scripts/ci/shard_evidence.py --prefix backend-map-hits --count 8 --source hit-attempts --destination hits
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count 8 --source shard-attempts --destination shards
+          python scripts/ci/backend_test_map.py merge --hits hits --durations shards --out backend-test-map.json.gz --commit "$HEAD_SHA"
+          ls -l backend-test-map.json.gz
+      - name: Save the map for pull requests
+        if: steps.merge.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: backend-test-map.json.gz
+          key: backend-test-map-${{ github.run_id }}-${{ github.run_attempt }}
 
   backend-contracts:
     name: backend-contracts
@@ -381,10 +505,12 @@ jobs:
           tar -xzf "$lint_dir/actionlint.tar.gz" -C "$lint_dir" actionlint
           "$lint_dir/actionlint" -shellcheck=
 
+      # Four workers, each test file on one of them (--dist loadfile): one
+      # serial run took nine minutes.
       - name: Full workflow, publication, security and docs policy regressions
         run: >-
           python -m pytest tests/scripts tests/test_buyer_docs.py tests/core/test_docs_content.py
-          -o addopts="" -q -p no:cacheprovider --timeout=120
+          -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4 --dist loadfile
           --durations=50 --junitxml=reports/policy.xml
 
       - name: Upload backend-security
@@ -507,7 +633,7 @@ jobs:
   backend:
     name: Backend tests
     if: always() && inputs.gated_by_caller != true
-    needs: [backend-shard, backend-contracts, backend-security, backend-postgres]
+    needs: [backend-select, backend-shard, backend-contracts, backend-security, backend-postgres]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -516,15 +642,22 @@ jobs:
         with:
           python-version: "3.12"
       - name: Download successful shard receipts
+        if: needs.backend-select.outputs.shards != '[]'
         uses: actions/download-artifact@v4
         with:
           pattern: backend-shard-*-a*
           path: shard-attempts
       - name: Select latest attempt per backend shard
-        run: python scripts/ci/shard_evidence.py --prefix backend-shard --count 8 --source shard-attempts --destination shard-results
+        env:
+          BACKEND_SHARDS: ${{ needs.backend-select.outputs.shards }}
+        run: |
+          count=$(python -c 'import json, os; print(len(json.loads(os.environ["BACKEND_SHARDS"])))')
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count "$count" --source shard-attempts --destination shard-results
       - name: Fail closed on incomplete coverage
         if: always()
         env:
           BACKEND_NEEDS: ${{ toJSON(needs) }}
+          BACKEND_SHARDS: ${{ needs.backend-select.outputs.shards }}
+          BACKEND_SELECTION: ${{ needs.backend-select.outputs.selection }}
           HEAD_SHA: ${{ github.sha }}
         run: python scripts/ci/backend_gate.py --head "$HEAD_SHA"

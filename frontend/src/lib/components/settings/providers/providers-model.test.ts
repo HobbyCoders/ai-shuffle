@@ -384,13 +384,36 @@ describe('claudeGateNotice', () => {
 	});
 
 	it('warns about Claude even while another provider keeps the gate ready', () => {
-		const summary = claudeSummary({ mode: 'subscription', gate: { ...gate, ready: true, claude_credential_ready: false } });
+		const summary = claudeSummary({
+			mode: 'subscription', api_key: { set: false, last4: null },
+			gate: { ...gate, ready: true, claude_credential_ready: false }
+		});
 		expect(claudeGateNotice(summary)).toBe('Claude cannot run: the Claude Code CLI is not signed in on this worker.');
 	});
 
 	it('names the missing key in API key mode', () => {
+		const summary = claudeSummary({
+			mode: 'api_key', api_key: { set: false, last4: null },
+			gate: { ...gate, mode: 'api_key', claude_credential_ready: false }
+		});
+		expect(claudeGateNotice(summary)).toBe('Claude API cannot run: no Anthropic API key is stored on this worker.');
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not ready' });
+	});
+
+	it('reports a saved key and the CLI sign-in separately', () => {
+		// The gate's credential is the CLI's; the key runs Claude API without it.
 		const summary = claudeSummary({ mode: 'api_key', gate: { ...gate, mode: 'api_key', claude_credential_ready: false } });
-		expect(claudeGateNotice(summary)).toBe('Claude cannot run: no Anthropic API key is stored on this worker.');
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
+		expect(claudeGateNotice(summary)).toBe(
+			'Claude subscription cannot run: the Claude Code CLI is not signed in on this worker. Claude API models run on the saved key.'
+		);
+	});
+
+	it('names only Claude Cloud when cloud mode is incomplete and a key is saved', () => {
+		const summary = claudeSummary({ mode: 'cloud', gate: { ...gate, mode: 'cloud', claude_credential_ready: false } });
+		expect(claudeGateNotice(summary)).toBe(
+			'Claude Cloud cannot run: no cloud provider or gateway is saved on this worker. Claude API models run on the saved key.'
+		);
 	});
 
 });
@@ -498,12 +521,25 @@ describe('saved Claude subscriptions', () => {
 		]);
 	});
 
+	it('keeps default sign-in recovery reachable when no saved subscription resolves as active', () => {
+		const claude = withSubs({
+			default_in_use: false,
+			subscription: [subAccount({ id: 'work', label: 'Work', kind: 'saved', active: false })],
+			recovery_required: true
+		}, { cli: { ...claudeSummary().cli, signed_in: false } });
+		expect(claude.credentials.map((c) => [c.item, c.statusText, c.status, c.on, c.attention])).toEqual([
+			[CLAUDE_SUB_ITEM, 'Not signed in', 'warn', false, true],
+			[claudeSubItem('work'), 'Saved', 'standby', false, false]
+		]);
+		expect(attentionCount([claude])).toBe(1);
+	});
+
 	it('shows a neutral "Sign in again" for a sign-in that lapsed; attention only when it is the active one', () => {
 		const saved = withSubs({
 			default_in_use: false,
 			subscription: [
 				subAccount({ active: true, kind: 'saved', id: 'a', label: 'A', signed_in: false, needs_sign_in: true }),
-				subAccount({ active: false, kind: 'saved', id: 'b', label: 'B', signed_in: false, needs_sign_in: true })
+				subAccount({ active: false, kind: 'default', id: 'b', label: 'B', signed_in: false, needs_sign_in: true })
 			],
 			recovery_required: true
 		}, { cli: { ...claudeSummary().cli, signed_in: false } });

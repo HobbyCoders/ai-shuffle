@@ -18,10 +18,13 @@
 	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, RotateCw, Github } from 'lucide-svelte';
 	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 	import {
+		browseWorkerFolder,
 		cancelProjectSetup,
+		changeWorkerFolder,
 		getProjectWorkers,
 		removeProjectFromWorker,
 		startProjectSetup,
@@ -68,6 +71,7 @@
 	let adopting = $state<Record<string, boolean>>({});
 	/** Request in flight per worker (set up, cancel, remove). */
 	let busy = $state<Record<string, boolean>>({});
+	let editing = $state<{ installId: string; revision: string; folder: string; error: string | null; browsing: boolean } | null>(null);
 	let confirmingRemove = $state<string | null>(null);
 	let githubHelp = $state<string | null>(null);
 	let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -138,6 +142,9 @@
 			data = null;
 			folders = {};
 			lastSignature = '';
+			editing = null;
+			busy = {};
+			confirmingRemove = null;
 			void load();
 		});
 	});
@@ -168,8 +175,8 @@
 	});
 
 	function errMessage(e: unknown, fallback: string): string {
-		const err = e as { detail?: string; message?: string };
-		return err.detail || err.message || fallback;
+		const err = e as { detail?: unknown; message?: string };
+		return typeof err.detail === 'string' ? err.detail : err.message || fallback;
 	}
 
 	async function setUp(w: ProjectWorkerDetail, mode: 'auto' | 'adopt' = 'auto') {
@@ -229,6 +236,47 @@
 			actionError = `Couldn't remove it from ${w.device_name}: ${errMessage(e, 'unknown error')}`;
 		} finally {
 			busy = { ...busy, [w.install_id]: false };
+		}
+	}
+
+	function openFolderEditor(w: ProjectWorkerDetail) {
+		if (!w.folder_revision || !w.folder || !w.online || loadError) return;
+		confirmingRemove = null;
+		editing = { installId: w.install_id, revision: w.folder_revision, folder: w.folder, error: null, browsing: false };
+		void tick().then(() => {
+			const input = document.querySelector<HTMLInputElement>(`#${CSS.escape(`pw-card-${w.install_id}`)} [data-change-folder-input] input`);
+			input?.focus();
+			input?.select();
+		});
+	}
+
+	function closeFolderEditor(id: string) {
+		editing = null;
+		void tick().then(() => document.getElementById(`pw-change-${id}`)?.focus());
+	}
+
+	async function saveFolder(w: ProjectWorkerDetail) {
+		const draft = editing;
+		if (!draft || !w.online || w.state !== 'ready' || loadError || busy[w.install_id]
+			|| w.folder_revision !== draft.revision || !draft.folder.trim() || draft.folder.trim() === w.folder) return;
+		busy = { ...busy, [w.install_id]: true };
+		draft.error = null;
+		const projectKey = refKey;
+		try {
+			const result = await changeWorkerFolder(w.install_id, projectRef, draft.folder.trim(), draft.revision);
+			if (destroyed || projectKey !== refKey) return;
+			++seq; // A read started before the write must not restore the old folder.
+			patchWorker(w.install_id, { ...result, branch: null, dirty: null, changed_files: null });
+			if (editing === draft) closeFolderEditor(w.install_id);
+			if (w.is_self) void appData.loadProjectCatalog(performance.now());
+			onChanged?.();
+			void load();
+		} catch (e) {
+			if (destroyed || projectKey !== refKey || editing !== draft) return;
+			draft.error = errMessage(e, "Couldn't change the folder. Check the current folder before retrying.");
+			void load();
+		} finally {
+			if (!destroyed && projectKey === refKey) busy = { ...busy, [w.install_id]: false };
 		}
 	}
 
@@ -325,11 +373,39 @@
 							{:else if !w.online}<SettingRow label="Worker offline" hint={`Turn ${w.device_name} on to set it up — or queue it and it runs when ${w.device_name} comes back.`} />{/if}
 						{/if}
 						{#if githubHelp === w.install_id}<SettingRow label="GitHub sign-in" hint={`On ${w.device_name}, open AI Shuffle, go to Settings → Integrations → GitHub and sign in. Then press Retry here.`} />{/if}
+						{#if editing?.installId === w.install_id && $isAdmin}
+							{@const draft = editing}
+							{@const stale = w.online && w.state === 'ready' && w.folder_revision !== draft.revision}
+							{@const unavailable = !w.online || w.state !== 'ready' || !!loadError}
+							<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${w.device_name}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
+								{#snippet expanded()}
+									<form class="flex flex-col gap-2" onsubmit={(event) => { event.preventDefault(); void saveFolder(w); }}>
+										<div class="project-controls" data-change-folder-input>
+											<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${w.device_name}`} disabled={busy[w.install_id] || unavailable || stale} />
+											<button type="button" class="st-btn" disabled={busy[w.install_id] || unavailable || stale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>
+										</div>
+										{#if draft.browsing && !unavailable && !stale && !busy[w.install_id]}
+											<DirectoryBrowser browse={(path) => browseWorkerFolder(w.install_id, projectRef, path)} selectedPath={draft.folder} onSelect={(path) => { draft.folder = path; draft.browsing = false; }} />
+										{/if}
+										{#if stale}<p class="project-error" role="alert">The registered folder changed. Cancel and reopen to edit the current folder.</p>
+										{:else if unavailable}<p class="project-error" role="alert">This worker's folder is unavailable. Check its status before saving.</p>{/if}
+										{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
+										<div class="project-controls">
+											<button type="button" class="st-btn" disabled={busy[w.install_id]} onclick={() => closeFolderEditor(w.install_id)}>Cancel</button>
+											<button type="submit" class="st-btn primary" disabled={busy[w.install_id] || unavailable || stale || !draft.folder.trim() || draft.folder.trim() === w.folder}>{busy[w.install_id] ? 'Saving…' : 'Save folder'}</button>
+										</div>
+									</form>
+								{/snippet}
+							</SettingRow>
+						{/if}
 						<SettingRow label="Actions" hint={confirmingRemove === w.install_id ? `Remove from ${w.device_name}? Its files stay.` : undefined}>
 							{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
 							{:else if has}
-								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)}><MessageSquarePlus />New chat here</button>{/if}
-								{#if $isAdmin && !w.is_self && w.online}
+								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)} disabled={busy[w.install_id]}><MessageSquarePlus />New chat here</button>{/if}
+								{#if $isAdmin && editing?.installId !== w.install_id && (w.folder_revision || !w.online)}
+									<button id={`pw-change-${w.install_id}`} class="st-btn" disabled={!!editing || !w.online || !w.folder_revision || busy[w.install_id] || !!loadError} onclick={() => openFolderEditor(w)}>Change folder</button>
+								{/if}
+								{#if $isAdmin && !w.is_self && w.online && editing?.installId !== w.install_id}
 									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
 									{:else}<button class="st-btn danger" onclick={() => (confirmingRemove = w.install_id)}>Remove project and chats from {w.device_name}</button>{/if}
 								{/if}

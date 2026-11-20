@@ -10,6 +10,7 @@ request runs the ones its changed files need.
 """
 from pathlib import Path
 import json
+import re
 import unittest
 from unittest.mock import patch
 
@@ -27,9 +28,7 @@ ANDROID = {"android.yml", "ci-android-minified.yml"}
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
-    # merge_group: a merge queue for main runs the checks once on the merged
-    # result; nothing starts on it until the repository has such a queue.
-    "ci.yml": {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"},
+    "ci.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
 }
@@ -44,6 +43,25 @@ FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "
 
 def workflow(name):
     return yaml.load((WORKFLOWS / name).read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+
+
+def expression(text, github):
+    """Evaluate one `${{ }}` of ==, &&, ||, parentheses, literals, github.* and format()."""
+    body = text.strip()
+    assert body.startswith("${{") and body.endswith("}}"), text
+    body = body[3:-2]
+    tokens = re.findall(r"'[^']*'|&&|\|\||==|[(),]|[A-Za-z_][\w.-]*", body)
+    assert "".join(tokens) == "".join(body.split()), body
+
+    def look(path):
+        value = {"github": github}
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        return value
+
+    words = {"&&": " and ", "||": " or ", "format": "fmt"}
+    python = "".join(words.get(t) or (f"look({t!r})" if t.startswith("github") else t) for t in tokens)
+    return eval(python, {"look": look, "fmt": lambda f, *args: f.format(*args)})
 
 
 def triggers(config):
@@ -133,7 +151,10 @@ class CostPolicyTests(unittest.TestCase):
             self.assertEqual(job.get("permissions", config["permissions"]), {"contents": "read"})
         for job in config["jobs"].values():
             self.assertEqual(job["runs-on"], LINUX_RUNNER)
-        self.assertEqual([leg["api"] for leg in config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]], ["34", "36"])
+        # Each API level runs as four parts on four standard runners, not one larger runner.
+        legs = config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]
+        self.assertEqual([(leg["api"], leg["part"]) for leg in legs],
+                         [(api, part) for api in ("34", "36") for part in ("1", "2", "3", "4")])
         # ci.yml calls it with no input, so it can only build and test.
         inputs = config["on"]["workflow_call"]["inputs"]
         self.assertEqual(inputs["publish_download"]["default"], "false")
@@ -179,7 +200,8 @@ class CostPolicyTests(unittest.TestCase):
             self.assertNotIn(forbidden, plan)
         self.assertEqual(plan["outputs"], {"only": "${{ steps.select.outputs.only }}",
                                            "shards": "${{ steps.select.outputs.shards }}",
-                                           "key": "${{ steps.select.outputs.key }}"})
+                                           "key": "${{ steps.select.outputs.key }}",
+                                           "parts": "${{ steps.select.outputs.parts }}"})
         # Reads earlier CI runs, pass records and the merged pull request; never writes.
         self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read", "pull-requests": "read"})
         # The third step only names the selection for CI's gate (main_gate.py).
@@ -199,7 +221,14 @@ class CostPolicyTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", journeys)
         self.assertEqual(journeys["strategy"]["matrix"]["shard"],
                          "${{ fromJSON(needs.journey-plan.outputs.shards) }}")
-        self.assertEqual(journeys["env"], {"JOURNEY_SELECTION": "${{ needs.journey-plan.outputs.only }}"})
+        # Split parts reach the shards only on a pull request; every other event runs whole files.
+        self.assertEqual(journeys["env"], {
+            "JOURNEY_SELECTION": "${{ needs.journey-plan.outputs.only }}",
+            "JOURNEY_PARTS": "${{ github.event_name == 'pull_request' && needs.journey-plan.outputs.parts || '{}' }}",
+        })
+        for step in journeys["steps"]:
+            if "scripts.devloop.ci" in step.get("run", ""):
+                self.assertIn('--parts "$JOURNEY_PARTS"', step["run"])
         self.assertLessEqual({"journey-plan", "journeys"}, set(gate["needs"]))
         check = gate["steps"][0]["run"]
         expected = json.loads(check.split("const expected = ", 1)[1].split(";", 1)[0])
@@ -227,7 +256,41 @@ class CostPolicyTests(unittest.TestCase):
     def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
         self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch", "workflow_run"})
+        # A started publish is never cancelled; a newer trigger replaces only a waiting one.
+        self.assertEqual(config["concurrency"]["cancel-in-progress"], "false")
         gate = config["jobs"]["gate"]
+        # Only a run the gate accepts joins the shared group, so a skipped
+        # trigger cannot drop a waiting publish.
+        group = config["concurrency"]["group"]
+        shared = f"${{{{ ({gate['if']}) && 'desktop-source' || format('desktop-source-skipped-{{0}}', github.run_id) }}}}"
+        self.assertEqual(group.split(), shared.split())
+        green_ci = {"status": "completed", "name": "CI", "conclusion": "success", "head_branch": "main",
+                    "event": "push", "repository": {"full_name": "HobbyCoders/ai-shuffle"},
+                    "head_repository": {"full_name": "HobbyCoders/ai-shuffle"}}
+        main = {"repository": "HobbyCoders/ai-shuffle", "ref": "refs/heads/main", "run_id": "7"}
+        owner = {"actor_id": "76577322", "actor": "owner", "triggering_actor": "owner"}
+        cases = {
+            "schedule": ({**main, "event_name": "schedule"}, "desktop-source"),
+            "owner dispatch": ({**main, **owner, "event_name": "workflow_dispatch"}, "desktop-source"),
+            "green push CI": ({**main, "event_name": "workflow_run", "event": {"workflow_run": green_ci}}, "desktop-source"),
+            "green dispatched CI": ({**main, "event_name": "workflow_run",
+                                    "event": {"workflow_run": {**green_ci, "event": "workflow_dispatch"}}}, "desktop-source"),
+            "failed CI": ({**main, "event_name": "workflow_run",
+                           "event": {"workflow_run": {**green_ci, "conclusion": "failure"}}}, "desktop-source-skipped-7"),
+            "CI off main": ({**main, "event_name": "workflow_run",
+                             "event": {"workflow_run": {**green_ci, "head_branch": "fix/x"}}}, "desktop-source-skipped-7"),
+            "pull request CI": ({**main, "event_name": "workflow_run",
+                                 "event": {"workflow_run": {**green_ci, "event": "pull_request"}}}, "desktop-source-skipped-7"),
+            "fork CI": ({**main, "event_name": "workflow_run", "event": {"workflow_run": {
+                **green_ci, "head_repository": {"full_name": "someone/ai-shuffle"}}}}, "desktop-source-skipped-7"),
+            "other dispatcher": ({**main, "event_name": "workflow_dispatch", "actor_id": "1",
+                                  "actor": "other", "triggering_actor": "other"}, "desktop-source-skipped-7"),
+            "dispatch off main": ({**main, **owner, "event_name": "workflow_dispatch", "ref": "refs/heads/fix/x"},
+                                  "desktop-source-skipped-7"),
+        }
+        for name, (github, expected) in cases.items():
+            with self.subTest(trigger=name):
+                self.assertEqual(expression(group, github), expected)
         for clause in ("github.event_name == 'schedule'", "github.ref == 'refs/heads/main'",
                        "github.actor_id == '76577322'", "github.triggering_actor == github.actor"):
             self.assertIn(clause, gate["if"])
@@ -309,16 +372,22 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
         self.assertEqual(javascript["on"]["workflow_dispatch"], "")
         shard = backend["jobs"]["backend-shard"]
-        self.assertEqual(shard["strategy"], {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, 9)]}})
+        # Eight shards on every full run; a pull request may choose fewer (scripts/ci/backend_gate.py).
+        self.assertEqual(shard["strategy"], {"fail-fast": "false",
+                                             "matrix": {"shard": "${{ fromJSON(needs.backend-select.outputs.shards) }}"}})
+        self.assertIn("FULL_SHARDS = 8\n", (ROOT / "scripts/ci/backend_test_map.py").read_text())
         self.assertEqual(backend["jobs"]["backend"]["name"], "Backend tests")
         self.assertEqual(backend["jobs"]["backend"]["if"], "always() && inputs.gated_by_caller != true")
-        for config, key, timeout in [(backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
+        for config, key, timeout in [(backend, "backend-select", "10"), (backend, "backend-map", "10"),
+                                     (backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
                                      (backend, "backend-security", "35"), (backend, "backend-postgres", "35"),
                                      (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertEqual(config["jobs"][key]["runs-on"], LINUX_RUNNER)
         command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")
-        self.assertIn('-n 2', command)
+        # One xdist worker per vCPU; backend_gate.py checks each receipt's count.
+        self.assertIn('-n 4 ', command)
+        self.assertIn("SHARD_WORKERS = 4\n", (ROOT / "scripts/ci/backend_gate.py").read_text())
         self.assertIn('-p scripts.ci.backend_shards', command)
 
     def test_public_app_workflows_use_standard_hosted_runners(self):
@@ -406,7 +475,14 @@ class CostPolicyTests(unittest.TestCase):
                 build = next(s for s in steps if s.get("uses") == "docker/build-push-action@v6")
                 options = build["with"]
                 self.assertEqual(options["cache-from"], "type=gha,scope=Dockerfile")
-                self.assertEqual(options["cache-to"], "type=gha,mode=max,scope=Dockerfile")
+                if name == "container-postgres.yml":
+                    # Pull requests read main's cache; one group writes it elsewhere.
+                    self.assertEqual(options["cache-to"],
+                                     "${{ github.event_name != 'pull_request' && matrix.lane == 'install' "
+                                     "&& 'type=gha,mode=max,scope=Dockerfile' || '' }}")
+                    self.assertIn("install", job["strategy"]["matrix"]["lane"])
+                else:
+                    self.assertEqual(options["cache-to"], "type=gha,mode=max,scope=Dockerfile")
                 self.assertEqual(options["load"], "true")
                 self.assertEqual(options["push"], "false")
                 self.assertEqual(options["platforms"], "linux/amd64")

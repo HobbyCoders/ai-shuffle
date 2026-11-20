@@ -173,10 +173,10 @@ def _request_binding(
         provider_id, model = decoded
     elif selected and provider_id and not overrides.get("provider") \
             and is_native_claude_model(selected):
-        from app.core.provider_agent import curated_model_ids
+        from app.core.provider_agent import keeps_bare_pick
 
         row = database.resolve_model_provider(provider_id, include_token=False)
-        if selected not in curated_model_ids(row):
+        if not keeps_bare_pick(row, selected):
             provider_id = None
     if not model and not provider_id:
         # No model named: the same default build_options_from_profile uses.

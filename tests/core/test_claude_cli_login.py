@@ -1,5 +1,6 @@
 """The in-app terminal that runs the stock CLI's `claude auth login`."""
 
+import json
 import os
 import stat
 import sys
@@ -139,12 +140,32 @@ def test_tagged_login_targets_its_folder_and_is_owned_by_its_tag(fake_cli, monke
     assert term.read_for("add:1") is None
 
 
-def test_login_environment_follows_the_active_sign_in(monkeypatch):
-    from app.core import claude_subscriptions
+@pytest.mark.parametrize("selection", ["legacy", "shared-extra", "shared-default"])
+def test_login_environment_follows_the_active_sign_in(monkeypatch, tmp_path, selection):
+    from app.core import claude_auth_mode, claude_cli_home, claude_subscriptions as subs
+    from app.core.claude_cli_status import ClaudeCliStatus
+
+    account_id = "0123456789abcdef"
+    row = {"id": account_id, "kind": subs.KIND_SAVED}
+    state = {"accounts": [row], "active_id": account_id}
+    monkeypatch.setattr(subs.database, "get_system_setting_cached", {subs.setting_key(): json.dumps(state)}.get)
+    monkeypatch.setattr(claude_cli_home, "root", lambda: tmp_path / "claude-logins")
+    monkeypatch.setattr(claude_cli_home, "default_dir", lambda: tmp_path / ".claude")
+    monkeypatch.setattr(claude_cli_home, "platform_support", lambda: (True, None))
+    claude_cli_home.ensure(account_id)
+    folder = str(claude_cli_home.account_dir(account_id))
+    signed_in = ClaudeCliStatus(installed=True, signed_in=True, auth_method="claude.ai",
+                                email="selected@example.invalid", org_id="selected-org")
+    signed_out = ClaudeCliStatus(installed=True, signed_in=False)
+    chosen_home = None if selection == "shared-default" else account_id
+    monkeypatch.setattr(subs, "_current_identity",
+                        lambda home_id, **kw: signed_in if home_id == chosen_home else signed_out)
+    choice = None if selection == "legacy" else {"mode": "subscription", "subscription": subs._binding(signed_in)}
+    monkeypatch.setattr(claude_auth_mode, "shared_selection", lambda **kw: choice)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setattr(claude_subscriptions, "active_home_env",
-                        lambda: {"CLAUDE_CONFIG_DIR": "/data/claude-logins/0123456789abcdef"})
-    assert cl._login_env()["CLAUDE_CONFIG_DIR"] == "/data/claude-logins/0123456789abcdef"
+    if selection != "legacy":
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "wrong-folder"))
+    assert cl._login_env().get("CLAUDE_CONFIG_DIR") == (folder if chosen_home else None)
     assert "CLAUDE_CONFIG_DIR" not in cl._login_env({})
 
 
