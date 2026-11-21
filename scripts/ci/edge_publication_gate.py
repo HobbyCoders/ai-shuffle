@@ -34,6 +34,10 @@ MAIN_SUITE_PATH = ".github/workflows/ci.yml"
 MAIN_SUITE_NAME = "CI"
 MAIN_SUITE_AGGREGATE = "CI"
 COMMAND = "python scripts/local_ci.py full --attest"
+# desktop-source.yml's only schedule: 12:00 AM America/New_York. The schedule
+# event carries the cron; GitHub does not document whether it appends the time
+# zone, so only the five cron fields are compared.
+NIGHTLY_CRON = "0 0 * * *"
 
 
 class GitHub:
@@ -396,18 +400,13 @@ def event_allowed(env, event):
         return False
     kind = env.get("GITHUB_EVENT_NAME")
     if kind == "schedule":
-        return event.get("schedule") == "0 6 * * *"
+        schedule = event.get("schedule")
+        return isinstance(schedule, str) and schedule.split()[:5] == NIGHTLY_CRON.split()
     if kind == "workflow_dispatch":
         return (env.get("GITHUB_ACTOR_ID") == OWNER_ID and bool(env.get("GITHUB_ACTOR"))
                 and env.get("GITHUB_TRIGGERING_ACTOR") == env["GITHUB_ACTOR"])
-    if kind == "workflow_run":
-        run = event.get("workflow_run") or {}
-        return (run.get("name") == MAIN_SUITE_NAME and run.get("status") == "completed"
-                and run.get("conclusion") == "success" and run.get("head_branch") == "main"
-                and run.get("event") in ("push", "workflow_dispatch")
-                and (run.get("repository") or {}).get("full_name") == REPOSITORY
-                and (run.get("head_repository") or {}).get("full_name") == REPOSITORY
-                and type(run.get("id")) is int and run["id"] > 0)
+    # A finished CI run (workflow_run) no longer publishes: the nightly is
+    # scheduled or dispatched by the owner, never started by a merge.
     return False
 
 
@@ -458,14 +457,6 @@ def main(argv=None):
         raise ValueError("Checkout does not match the exact source revision")
     api = GitHub()
     metadata = {}
-    if env.get("GITHUB_EVENT_NAME") == "workflow_run":
-        # The payload is only a trigger, never authorization. Re-read the exact
-        # latest run/attempt even when an independent local pass also exists.
-        trigger = event["workflow_run"]
-        evidence = hosted_status(api, trigger.get("head_sha"), metadata=metadata)
-        if (not evidence or evidence["run_id"] != trigger["id"]
-                or evidence["run_attempt"] != trigger.get("run_attempt")):
-            raise ValueError("Triggering hosted CI run could not be verified")
     published = published_edge_revision()
     if args.select:
         revision, _ = newest_attested(api, unpublished_history(main_history(api, root=args.source_root), published), metadata=metadata)

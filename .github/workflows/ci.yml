@@ -18,7 +18,9 @@ on:
     branches: [main]
   schedule:
     # Everything, nothing skipped, on whatever main is at 08:00 UTC. It never
-    # publishes: the nightly follows push and dispatch runs only.
+    # proves a revision for the nightly: only push and dispatch runs do. No CI
+    # run starts the nightly; it runs at 12:00 AM New York time or on the
+    # owner's dispatch (desktop-source.yml) and ships the newest proven one.
     - cron: '0 8 * * *'
   workflow_dispatch:
 

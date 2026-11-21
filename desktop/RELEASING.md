@@ -37,7 +37,7 @@ wired into that job.
 | `desktop-installer.yml` | latest-stable `release.yml` run, or manual with a `vX.Y.Z` tag | the stable Windows x64 NSIS installer, attached to the GitHub release and served by the hub at `/desktop` | Authenticode when the Windows secrets are set |
 | `desktop-macos-artifact.yml` | manual, `build_macos` ticked | Apple Silicon DMG and ZIP, `SHA256SUMS`, provenance, as a one-day Actions artifact | Developer ID and notarized when the macOS secrets are set |
 | `desktop-linux-artifact.yml` | manual | x64 AppImage and deb, `SHA256SUMS`, provenance, as a one-day Actions artifact | no, by design |
-| `desktop-source.yml` | owner dispatch from `main` | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
+| `desktop-source.yml` | nightly at 12:00 AM New York time, or owner dispatch from `main`; never a merge | the Ed25519-signed source manifest that installed Windows apps update from | always, with `DESKTOP_APPLICATION_SIGNING_KEY` |
 
 Newest final stable releases publish Linux and Android for the new tag. Windows
 builds only when needed (owner decision, 2026-10-19, option c, superseding #242):

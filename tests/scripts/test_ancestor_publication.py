@@ -119,7 +119,7 @@ def test_cli_selects_and_rechecks_exact_ancestor(lane, monkeypatch, tmp_path, ca
     import json
     state, api, git, _, _, first, tip = lane
     event, output = tmp_path / "event.json", tmp_path / "output"
-    event.write_text(json.dumps({"schedule": "0 6 * * *"}))
+    event.write_text(json.dumps({"schedule": gate.NIGHTLY_CRON}))
     for name, value in {"GITHUB_REPOSITORY": gate.REPOSITORY, "GITHUB_REF": "refs/heads/main",
                         "GITHUB_EVENT_NAME": "schedule", "GITHUB_SHA": tip,
                         "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output)}.items():
@@ -144,7 +144,7 @@ def test_cli_refuses_checkout_other_than_selected_ancestor(lane, monkeypatch, tm
     import json
     _, _, _, _, _, first, tip = lane
     event = tmp_path / "event.json"
-    event.write_text(json.dumps({"schedule": "0 6 * * *"}))
+    event.write_text(json.dumps({"schedule": gate.NIGHTLY_CRON}))
     for name, value in {"GITHUB_REPOSITORY": gate.REPOSITORY, "GITHUB_REF": "refs/heads/main",
                         "GITHUB_EVENT_NAME": "schedule", "GITHUB_SHA": tip,
                         "SOURCE_REVISION": first, "GITHUB_EVENT_PATH": str(event)}.items():
