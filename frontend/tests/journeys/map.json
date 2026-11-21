@@ -814,6 +814,7 @@
 				"frontend/src/lib/components/settings/providers/AnthropicKeyDetail.svelte",
 				"app/core/claude_api_models.py",
 				"app/core/claude_accounts.py",
+				"app/core/model_effort.py",
 				"app/api/model_registry.py"
 			]
 		},
