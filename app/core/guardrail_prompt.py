@@ -45,7 +45,7 @@ NO_MODEL_REASON = "no other model to continue on"
 
 # One step down within a Claude family, for a refusal Anthropic gave no
 # category for. Keys are API ids; the app's aliases resolve through
-# ``model_registry.API_MODEL_IDS`` first.
+# ``model_registry.FROZEN_MODEL_IDS`` first.
 _CLAUDE_STEP_DOWN = {
     "claude-fable-5": "claude-opus-5",
     "claude-opus-5-5": "claude-opus-5",
@@ -136,9 +136,11 @@ def next_best_model(
             return others[0]
         after = [m for m in models[index + 1:] if m in others]
         return after[0] if after else others[0]
-    from app.core.model_registry import resolve_api_model_id
+    from app.core.model_registry import FROZEN_MODEL_IDS, normalize_model
 
-    api_id = resolve_api_model_id(requested) or requested
+    # No provider row is the delegated CLI, not the API key: an alias keeps
+    # the targets it had before the API key's 5.5 defaults.
+    api_id = FROZEN_MODEL_IDS.get(normalize_model(requested)) or requested
     return _CLAUDE_STEP_DOWN.get(api_id.split("[", 1)[0])
 
 

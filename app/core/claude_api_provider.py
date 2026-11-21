@@ -99,9 +99,15 @@ def _base_url(key: str) -> Optional[str]:
 
 
 def _default_models() -> List[Dict[str, str]]:
-    from app.core.model_registry import API_MODEL_IDS, MODELS
+    """The built-in list, used until the key's own catalog is read: the
+    aliases' current ids first, then the ids it offered before the 5.5
+    defaults, so a pin made from the old list still validates."""
+    from app.core.model_registry import _BY_VALUE, API_MODEL_IDS, FROZEN_MODEL_IDS, MODELS
 
-    return [{"id": API_MODEL_IDS[m.value], "label": m.label} for m in MODELS if m.value in API_MODEL_IDS]
+    ids = [API_MODEL_IDS[m.value] for m in MODELS if m.value in API_MODEL_IDS]
+    ids += [old for old in FROZEN_MODEL_IDS.values() if old not in ids]
+    # Version labels ("Sonnet 5.5", "Sonnet 5"), so the two generations differ.
+    return [{"id": i, "label": _BY_VALUE[i].label if i in _BY_VALUE else i} for i in ids]
 
 
 def _normalize_models(models: Any) -> List[Dict[str, str]]:
@@ -327,7 +333,8 @@ def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:
 
 
 def api_model_id(model: Optional[str]) -> Optional[str]:
-    """The Messages API id for a Claude pick (``opus`` → ``claude-opus-5``)."""
+    """The Messages API id for a Claude pick (``opus`` → ``claude-opus-5-5``;
+    a full id such as ``claude-opus-5`` stays that version)."""
     from app.core.model_registry import resolve_api_model_id
 
     return resolve_api_model_id(model)
