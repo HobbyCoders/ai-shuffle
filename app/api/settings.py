@@ -562,16 +562,18 @@ async def get_cli_updates(token: str = Depends(require_admin)):
 
 
 @router.post("/claude-cli/{kind}")
-async def manage_claude_cli(kind: Literal["install", "update", "remove"], token: str = Depends(require_admin)):
+async def manage_claude_cli(kind: Literal["install", "update", "remove"], local: bool = False,
+                            token: str = Depends(require_admin)):
     """Start a job on this worker. With "Update all workers" on, an update is
     also sent to every other worker; ``workers`` then holds one result per
-    worker (null when they could not be asked)."""
+    worker (null when they could not be asked). ``local`` keeps an update on
+    this worker: the update notice names this worker only."""
     from app.core import claude_cli_install
     try:
         result = await run_sync(_claude_cli_payload, await run_sync(claude_cli_install.start, kind))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if kind == "update" and result["update_all_workers"]:
+    if kind == "update" and result["update_all_workers"] and not local:
         from app.core import worker_settings
         try:
             result["workers"] = await worker_settings.update_claude_on_peers()

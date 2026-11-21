@@ -5,11 +5,13 @@ const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: { get: mocks.get, post: mocks.post, put: mocks.put },
 	getErrorMessage: (e: Error, fallback: string) => e?.message ?? fallback }));
 vi.mock('$lib/stores/providers.svelte', () => ({ providers: { loadClaude: async () => {} } }));
-vi.mock('$lib/stores/auth.svelte', () => ({ auth: { checkAuth: async () => {} } }));
+vi.mock('$lib/stores/auth.svelte', () => ({ auth: { checkAuth: async () => {} },
+	isAdmin: { subscribe(fn: (v: boolean) => void) { fn(true); return () => {}; } } }));
 
 import { liveBanners, notify } from '$lib/stores/notifications';
 import { antigravity } from '$lib/components/settings/providers/antigravity.svelte';
 import { ClaudeCliInstallState } from '$lib/components/settings/providers/claude-cli-install.svelte';
+import { MachineSettingsModel } from '$lib/components/settings/devices/machine-settings.svelte';
 import { SETTLE_MS, installCliUpdateNotice, recheckCliUpdates } from './cli-update-notice';
 
 const claude = { provider: 'claude', name: 'Claude Code', installed_version: '2.1.323', latest_version: '2.1.330' };
@@ -23,6 +25,12 @@ const messages = () => banners().map((b) => b.message);
 function press(message: RegExp) {
 	const banner = banners().find((b) => message.test(b.message))!;
 	banner.action!.onClick();
+	notify.dismissLive(banner.id);
+}
+/** What the dock does when the owner closes a banner. */
+function close(message: RegExp) {
+	const banner = banners().find((b) => message.test(b.message))!;
+	banner.onDismiss?.();
 	notify.dismissLive(banner.id);
 }
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -95,7 +103,7 @@ describe('cli update notice', () => {
 		updates = [claude];
 		teardown = installCliUpdateNotice();
 		await settle();
-		notify.dismissLive(banners()[0].id);
+		close(/Claude Code 2\.1\.330/);
 		recheckCliUpdates();
 		await settle();
 		expect(banners()).toHaveLength(0);
@@ -111,6 +119,37 @@ describe('cli update notice', () => {
 		expect(messages()).toEqual(['Claude Code 2.1.331 is available. This worker has 2.1.323.']);
 	});
 
+	it('does not count a banner pushed off by newer ones as closed', async () => {
+		updates = [claude];
+		teardown = installCliUpdateNotice();
+		await settle();
+		for (let i = 0; i < 3; i++) notify.banner(`Download ${i}`, { duration_ms: 0 });
+		expect(banners()).toHaveLength(0);
+		expect(localStorage.getItem('ai-shuffle-cli-update-dismissed')).toBeNull();
+		// It comes back on the next ask, here and after a reload.
+		for (const banner of get(liveBanners)) notify.dismissLive(banner.id);
+		recheckCliUpdates();
+		await settle();
+		expect(messages()).toEqual(['Claude Code 2.1.330 is available. This worker has 2.1.323.']);
+	});
+
+	it('takes the Claude Code banner down when Devices switches the check off', async () => {
+		updates = [claude];
+		teardown = installCliUpdateNotice();
+		await settle();
+		expect(banners()).toHaveLength(1);
+
+		updates = [];
+		mocks.get.mockImplementation(async (path: string) => path === '/settings/cli-updates' ? { updates } : { workers: [] });
+		mocks.post.mockResolvedValue({ request_id: 'r', workers: [
+			{ device_id: 'server-one', device_name: 'Server one', outcome: 'accepted', reason: 'saved', status: null }] });
+		const devices = new MachineSettingsModel();
+		expect(await devices.act('server-one', { operation: 'claude-update-check', check_updates: false })).toBe(true);
+		await settle();
+		expect(banners()).toHaveLength(0);
+		expect(localStorage.getItem('ai-shuffle-cli-update-dismissed')).toBeNull();
+	});
+
 	it('runs the Claude Code update only when Update is pressed and reports the result', async () => {
 		updates = [claude];
 		const running = { installed: true, job: { kind: 'update', state: 'running', message: null } };
@@ -121,7 +160,8 @@ describe('cli update notice', () => {
 
 		press(/Claude Code 2\.1\.330/);
 		await settle();
-		expect(mocks.post).toHaveBeenCalledExactlyOnceWith('/settings/claude-cli/update', {});
+		// This worker only, whatever "Update all workers" says: the banner names this worker.
+		expect(mocks.post).toHaveBeenCalledExactlyOnceWith('/settings/claude-cli/update?local=true', {});
 		expect(messages()).toEqual(['Updating Claude Code']);
 
 		mocks.get.mockImplementation(async (path: string) => path === '/settings/claude-cli' ? done : { updates: [] });

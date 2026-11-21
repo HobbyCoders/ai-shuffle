@@ -82,6 +82,9 @@ def test_update_reaches_other_workers_only_when_update_all_is_on(client, monkeyp
     # Installing or removing stays on the connected worker.
     for kind in ("install", "remove"):
         assert "workers" not in client.post(BASE + "/" + kind).json()
+    # So does the update notice's button: it names this worker only.
+    assert "workers" not in client.post(BASE + "/update?local=true").json()
+    assert started == ["update", "install", "remove", "update"]
     assert len(asked) == (1 if all_workers else 0)
 
 
@@ -130,6 +133,22 @@ def test_updates_found_at_start_are_listed_and_nothing_is_started(client, monkey
     agy["binary"] = None
     assert client.get(url).json() == {"updates": []}
     assert start == []
+
+
+def test_a_check_that_answers_after_the_switch_went_off_is_not_published(monkeypatch):
+    """The vendor can still be answering when the owner switches the check off."""
+    monkeypatch.setattr(cli_update_check, "_found", {})
+    assert cli_update_check.record("claude", "2.1.323", "2.1.330") is True
+    cli_update_check.set_enabled("claude", False)
+    try:
+        assert cli_update_check.latest_version("claude") is None
+        assert cli_update_check.record("claude", "2.1.323", "2.1.330") is False
+        assert cli_update_check.latest_version("claude") is None and cli_update_check.available() == []
+        # The other provider's switch is its own.
+        assert cli_update_check.record("antigravity", "1.5.7", "1.5.13") is True
+    finally:
+        cli_update_check.set_enabled("claude", True)
+    assert cli_update_check.record("claude", "2.1.323", "2.1.330") is True
 
 
 def test_remove_refusal(client, monkeypatch):

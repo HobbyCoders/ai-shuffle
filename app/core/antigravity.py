@@ -613,7 +613,8 @@ async def _check_for_update(binary: str, source: Optional[str], key: str) -> Non
     except Exception as exc:  # noqa: BLE001 — offline is normal; the worker runs on
         logger.info("[antigravity] could not check for an update (%s)", exc)
         return
-    if cli_update_check.record(cli_update_check.ANTIGRAVITY, installed, latest):
+    from app.db.async_database import run_sync
+    if await run_sync(cli_update_check.record, cli_update_check.ANTIGRAVITY, installed, latest):
         logger.info("[antigravity] %s is available (installed: %s). Update it in "
                     "Settings > Providers > Antigravity.", latest, installed)
     else:

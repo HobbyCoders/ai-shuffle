@@ -139,8 +139,9 @@ export function getClaudeCliInstallation(): Promise<ClaudeCliInstallation> {
 export function installClaudeCli(): Promise<ClaudeCliInstallation> {
 	return api.post('/settings/claude-cli/install', {});
 }
-export function updateClaudeCli(): Promise<ClaudeCliInstallation> {
-	return api.post('/settings/claude-cli/update', {});
+/** `local` keeps the update on this worker even when "Update all workers" is on. */
+export function updateClaudeCli(local = false): Promise<ClaudeCliInstallation> {
+	return api.post(`/settings/claude-cli/update${local ? '?local=true' : ''}`, {});
 }
 export function removeClaudeCli(): Promise<ClaudeCliInstallation> {
 	return api.post('/settings/claude-cli/remove', {});

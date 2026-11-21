@@ -23,6 +23,8 @@ export interface AppNotification {
 	action?: NotificationAction;
 	/** A second, quieter action next to `action`. */
 	secondaryAction?: NotificationAction;
+	/** Runs when the owner closes the banner. Not when a button is pressed, it times out or newer banners push it off. */
+	onDismiss?: () => void;
 	/** Whether this item is saved remotely; notifications always appear in the bell. */
 	persist: boolean;
 	read: boolean;
@@ -63,6 +65,8 @@ interface NotifyOptions {
 	title?: string;
 	action?: NotificationAction;
 	secondaryAction?: NotificationAction;
+	/** Banner only: runs when the owner closes it (see `AppNotification.onDismiss`). */
+	onDismiss?: () => void;
 	/** Override the default remote persistence. */
 	persist?: boolean;
 	/** Banner auto-dismiss in ms. Pass 0 for a sticky banner. */
@@ -168,6 +172,7 @@ function _emit(
 		message: opts.message ?? '',
 		action: opts.action,
 		secondaryAction: opts.secondaryAction,
+		onDismiss: opts.onDismiss,
 		persist,
 		read: opts.read ?? false,
 		dismissed: false,

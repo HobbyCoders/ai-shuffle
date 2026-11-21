@@ -34,9 +34,12 @@ def enabled(provider: str) -> bool:
 
 def set_enabled(provider: str, value: bool) -> None:
     from app.db import database
-    database.set_system_setting(_key(provider), "1" if value else "0")
-    if not value:
-        forget(provider)
+    # Under the lock record() reads the switch under: a check still waiting on
+    # the vendor when the owner switches it off cannot publish afterwards.
+    with _lock:
+        database.set_system_setting(_key(provider), "1" if value else "0")
+        if not value:
+            _found.pop(provider, None)
 
 
 def suppressed() -> bool:
@@ -62,14 +65,18 @@ def is_current(installed: Optional[str], latest: str) -> bool:
 
 
 def record(provider: str, installed: Optional[str], latest: Optional[str]) -> bool:
-    """Remember what a check found. True when ``latest`` is newer than ``installed``.
+    """Remember what a check found. True when ``latest`` is newer than
+    ``installed`` and the check is still switched on.
 
     A version that cannot be compared (an unknown install, a pre-release tag)
-    is never reported as an update.
+    is never reported as an update. Does a settings read: call it off the
+    event loop.
     """
     newer = bool(installed and latest and version_key(installed) and version_key(latest)
                  and not is_current(installed, latest))
     with _lock:
+        # The owner may have switched the check off while it was asking.
+        newer = newer and enabled(provider)
         if newer:
             _found[provider] = {"installed_version": installed, "latest_version": latest,
                                 "checked_at": time.time()}

@@ -65,7 +65,7 @@
 						action={actionFor(b)}
 						secondaryAction={actionFor(b, 'secondaryAction')}
 						dismissible
-						onDismiss={() => notify.dismissLive(b.id)}
+						onDismiss={() => { b.onDismiss?.(); notify.dismissLive(b.id); }}
 					/>
 				</div>
 			{/each}

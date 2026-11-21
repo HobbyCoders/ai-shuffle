@@ -62,7 +62,9 @@ function show(update: CliUpdate): void {
 		severity: 'info',
 		category: 'cli-update',
 		duration_ms: 0,
-		action: { label: 'Update', onClick: () => void runUpdate(update) }
+		action: { label: 'Update', onClick: () => void runUpdate(update) },
+		// Only the owner's Close hides a version. Newer banners pushing this one off do not.
+		onDismiss: () => rememberDismissed(provider, version)
 	});
 	shown.set(provider, { id, version });
 }
@@ -72,7 +74,8 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 interface JobResult { state: string; message: string | null }
 
 async function claudeJob(): Promise<JobResult> {
-	let status = await updateClaudeCli();
+	// This worker only: the notice names this worker, whatever "Update all workers" says.
+	let status = await updateClaudeCli(true);
 	const until = Date.now() + JOB_LIMIT_MS;
 	while (status.job?.state === 'running' && Date.now() < until) {
 		await sleep(POLL_MS);
@@ -95,7 +98,7 @@ async function antigravityJob(): Promise<JobResult> {
 async function runUpdate(update: CliUpdate): Promise<void> {
 	const { provider, name } = update;
 	if (working.has(provider)) return;
-	working.add(provider); // before the dock closes the banner, so that is not read as "not now"
+	working.add(provider);
 	const failed = `${name} could not be updated. Try again in Settings > Providers.`;
 	const progress = notify.banner(`Updating ${name}`, { severity: 'info', category: 'cli-update', duration_ms: 0 });
 	try {
@@ -148,12 +151,11 @@ export function recheckCliUpdates(): void {
 export function installCliUpdateNotice(): () => void {
 	if (typeof window === 'undefined' || installed) return () => {};
 	installed = true;
-	// A banner that left the screen without this module taking it down was closed by the owner.
+	// Forget a banner that left the screen (closed, pressed, or pushed off by newer
+	// banners), so the next ask can show it again unless the owner closed it.
 	stopWatching = liveBanners.subscribe((live) => {
 		for (const [provider, banner] of [...shown]) {
-			if (live.some((b) => b.id === banner.id)) continue;
-			shown.delete(provider);
-			if (!working.has(provider)) rememberDismissed(provider, banner.version);
+			if (!live.some((b) => b.id === banner.id)) shown.delete(provider);
 		}
 	});
 	recheckCliUpdates();
