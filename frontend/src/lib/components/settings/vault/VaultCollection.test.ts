@@ -514,6 +514,24 @@ describe('vault-model', () => {
 		expect(model.draft).toBeNull();
 	});
 
+	it('keeps a draft started while the list is refreshed after an add', async () => {
+		const model = new VaultModel();
+		await model.load();
+		let refreshed!: () => void;
+		api.get.mockImplementationOnce(() => new Promise((resolve) => { refreshed = () => resolve(listing()); }));
+		model.addDraft();
+		Object.assign(model.draft!, { label: 'First', host: 'first.example', username: 'root', password: SECRET });
+		const first = model.save(DRAFT_ID);
+		// The add has succeeded; only the refresh of the list is still under way.
+		await waitFor(() => expect(api.get).toHaveBeenCalledTimes(2));
+		model.addDraft();
+		Object.assign(model.draft!, { label: 'Second', host: 'second.example', username: 'root', password: SECRET });
+		refreshed();
+		// The owner is not taken to the first sign-in, away from a form holding a typed password.
+		expect(await first).toBeNull();
+		expect(model.draft).toMatchObject({ label: 'Second', host: 'second.example', password: SECRET });
+	});
+
 	it('cannot cancel a sign-in while it is being added', async () => {
 		let finish!: (value: { id: string }) => void;
 		api.post.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

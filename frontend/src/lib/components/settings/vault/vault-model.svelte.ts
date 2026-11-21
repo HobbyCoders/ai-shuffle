@@ -395,12 +395,14 @@ export class VaultModel {
 		clearSecrets(f);
 		try {
 			if (isDraft) {
-				this.submitted = this.draft;
+				const sent = (this.submitted = this.draft);
 				const created = await api.post<{ id: string }>(ENDPOINT, body);
-				const current = this.draft === this.submitted;
-				if (current) this.draft = null;
 				await this.load();
-				return current ? created.id : null;
+				// The owner may have left this draft and started another while the
+				// add or the refresh was under way: that one stays where it is.
+				if (this.draft !== sent) return null;
+				this.draft = null;
+				return created.id;
 			}
 			const result = Object.keys(body).length
 				? await api.patch<EditResult>(`${ENDPOINT}/${encodeURIComponent(id)}`, body)
