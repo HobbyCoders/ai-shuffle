@@ -73,6 +73,21 @@ DEEP_FOLD_FACTOR = 4
 # Code's own summary runs instead. A manual one only has to save something.
 AUTO_MAX_RETAINED = 0.75
 MANUAL_MIN_SAVING = 0.02
+# The working request is never digested, so its calls stay as the model made
+# them, and the long text inside an old call's input (a script, a file's new
+# content, an edit's strings) stayed with them: measured on real chats, about
+# a third of what an over-target answer kept. That text is on disk or one
+# HistoryExpand away, so in every call older than the newest
+# ``KEEP_INPUT_CALLS`` a string longer than ``INPUT_STRING_CHARS`` is cut to
+# its first ``INPUT_HEAD_CHARS``. Keys, short values (a path, a description)
+# and the calls the model is working from stay as they are. Only the tools
+# whose long input is a command or file text, nearly all of that volume: a
+# plan, a brief sent to another agent or a question asked is state the model
+# still works from, and stays whole.
+KEEP_INPUT_CALLS = 6
+CUT_INPUT_TOOLS = frozenset({"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"})
+INPUT_STRING_CHARS = 300
+INPUT_HEAD_CHARS = 160
 
 # A row Fluid builds for stored content it will not rebuild (a call Claude
 # Code holds with blocks Fluid cannot reproduce, a message with nothing it
@@ -728,6 +743,85 @@ def _owner(requests: list[int], position: int) -> int | None:
     return owner
 
 
+def short_input(value: Any, node_id: str) -> Any:
+    """``value`` with every long string cut to its opening, naming the stored
+    node whose ``HistoryExpand`` shows the call whole.
+
+    The shape is kept (same keys, same types), so a row built from it is a
+    tool call like any other. Returns ``value`` itself when nothing is long.
+    """
+    if isinstance(value, str):
+        if len(value) <= INPUT_STRING_CHARS:
+            return value
+        return (f'{value[:INPUT_HEAD_CHARS]}… [+{len(value) - INPUT_HEAD_CHARS} chars cut by '
+                f'compaction; HistoryExpand("{node_id}") shows the whole call]')
+    if isinstance(value, dict):
+        cut = {key: short_input(item, node_id) for key, item in value.items()}
+        return value if all(cut[key] is value[key] for key in value) else cut
+    if isinstance(value, list):
+        cut = [short_input(item, node_id) for item in value]
+        return value if all(a is b for a, b in zip(cut, value)) else cut
+    return value
+
+
+def _cut_old_inputs(
+    out: list[dict[str, Any]], *, refs: dict[Any, str], guarded: set[Any], fixed: set[int],
+    shown: dict[Any, Any],
+) -> int:
+    """Cut the long inputs of the old finished calls in ``out``
+    (:func:`short_input`), in place; the JSON chars this compaction newly cut.
+
+    A call is cut when it is one of ``CUT_INPUT_TOOLS``, is not among the
+    newest ``KEEP_INPUT_CALLS`` calls of the answer (counted call by call, so
+    the older calls of one large parallel group are cut too), its result is in
+    the answer and is not an error (a failed command is read again as it was
+    written) and ``refs`` names its stored node (the caller lists the stored
+    calls before the recency tail). ``guarded`` holds the calls never cut and
+    ``fixed`` the ``id`` of the rows never changed.
+
+    Only a row that is tool calls and nothing else, which is how Claude Code
+    lists a call (7 days of real chats: 45,714 call rows, none with text). A
+    cut row gives up its handle, and the next compaction can then match it,
+    and with it its tool group, to the stored path by tool ids alone; text
+    beside a call has no stored node behind it there and a later rebuild
+    would drop it. So a row with text stays whole, and the caller guards the
+    calls of a tool group that has text in any row.
+
+    Only the input changes: the row keeps its other calls and its place, and
+    Claude Code builds it from what the row says instead of reading its own
+    copy. A row Claude Code already shows cut (an earlier compaction did it)
+    is equal to its cut and stays Claude Code's own; a row rebuilt from the
+    stored message, which has the whole input, is cut again. ``shown`` is the
+    input Claude Code holds for each call, for the count.
+
+    The rows are not marked as compacted: the portable checkpoint ends where
+    the ladder's work ends, as it did. :func:`compact_messages` decides what
+    is archived and whether a checkpoint is written with every input whole.
+    """
+    done = {result["tool_use_id"] for row in out for result in row.get("toolResults", [])
+            if not result.get("isError", False)}
+    order = [use["tool_use_id"] for row in out for use in row["toolUses"]]
+    recent = set(order[-KEEP_INPUT_CALLS:])
+    saved = 0
+    for i, row in enumerate(out):
+        if id(row) in fixed or row["text"]:
+            continue
+        uses = []
+        for use in row["toolUses"]:
+            call = use["tool_use_id"]
+            if (call in refs and call in done and call not in recent and call not in guarded
+                    and use["tool"] in CUT_INPUT_TOOLS):
+                short = short_input(use["input"], refs[call])
+                if short is not use["input"]:
+                    saved += max(0, len(json.dumps(shown.get(call, use["input"])))
+                                 - len(json.dumps(short)))
+                    use = {"tool_use_id": call, "tool": use["tool"], "input": short}
+            uses.append(use)
+        if any(a is not b for a, b in zip(uses, row["toolUses"])):
+            out[i] = {**{k: v for k, v in row.items() if k != "handle"}, "toolUses": uses}
+    return saved
+
+
 def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
     context_window: int | None = None, trigger: str = "manual",
@@ -751,8 +845,12 @@ def compact_messages(
     leave through the note (archived) first, those of the earlier pinned
     request, then the newest request's older additions, never the row that
     opens the newest request. ``report``, when given, is filled with
-    ``target_tokens``, ``after_tokens``, ``met`` and, on a miss, the
-    ``contributors`` still over it (chars/4 tokens by kind).
+    ``target_tokens``, ``after_tokens``, ``met``, ``input_tokens_cut`` and,
+    on a miss, the ``contributors`` still over it (chars/4 tokens by kind).
+
+    Whatever the ladder kept, the long inputs of old finished calls are cut
+    to their opening (:func:`_cut_old_inputs`); the stored call is whole
+    and its ref is in the cut.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
     (for ``trigger="auto"``: small enough to leave the threshold), and
@@ -1002,20 +1100,85 @@ def compact_messages(
             mark(cover, False)
     take(len(view))
     mark(-1, False)
-    _fit_pinned(out, covers, shrunk, dropped, unknown, requests, target, report)
+    # The long inputs of old calls are cut in the rows as they stand, whatever
+    # the ladder did. Not in a tool group with a block only Claude Code holds
+    # (an image, a tool_reference), nor in one with text in any of its rows:
+    # those rows stay exactly Claude Code's own (see :func:`_cut_old_inputs`).
+    guarded: set[Any] = set()
+    for start, end in _group_spans(rows):
+        group = rows[start:end]
+        keys = ([use["tool_use_id"] for row in group for use in row["toolUses"]]
+                + [f"result:{r['tool_use_id']}" for row in group for r in row.get("toolResults", [])])
+        if any(row["text"] for row in group) or any(owners.get(key) in opaque for key in keys):
+            guarded.update(use["tool_use_id"] for row in group for use in row["toolUses"])
+    # What a re-seed on another worker gets must not depend on the cut: which
+    # pinned rows are archived, whether a checkpoint is written and where it
+    # ends are decided on ``whole``, the answer with every input as stored
+    # (also the ones an earlier compaction cut, which Claude Code now posts
+    # as its own rows). The cut only makes the text of those rows shorter.
+    # Otherwise a pinned row the cut made room for stays in the answer, past
+    # the end of the checkpoint and in no archive, and a re-seed loses it; or
+    # a checkpoint is written where the stored path, which has every image,
+    # was replayed before.
+    fixed = {id(row) for _, row in unknown}
+    stored = {block.id: block.input for node in nodes for block in node.message.content
+              if isinstance(block, ToolUseBlock)}
+    whole = _with_stored_inputs(out, stored, fixed)
+    archived = len(dropped)
+    _fit_pinned(whole, covers, shrunk, dropped, unknown, requests, target, None)
+    gone = {id(row) for row in dropped[archived:]}
+    out[:] = [row for row in out if id(row) not in gone]
+    cut_chars = _cut_old_inputs(
+        out,
+        refs={key: nodes[k].node_id for key, k in owners.items() if at.get(k, tail) < tail},
+        guarded=guarded, fixed=fixed,
+        shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},
+    )
+    _fit_report(out, unknown, target, report)
+    if report is not None:
+        report["input_tokens_cut"] = cut_chars // 4
     note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
-    # Content only: a handle is how Claude Code names a row, not context.
-    before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
-                     for side in (rows, final))
-    limit = before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING)
-    if after > limit:
+    # Answered whenever it would be with every input whole, with the same
+    # archive and checkpoint (an earlier cut leaves less to save, and a
+    # refusal here would drop both), and also when only the cut makes it
+    # worth answering; that answer writes no checkpoint, as when refused.
+    limit = AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING
+    as_whole = _retained(_with_stored_inputs(rows, stored, set()),
+                         _alternate(([note] if note else []) + whole)) <= limit
+    retained = _retained(rows, final)
+    if not (retained <= limit or (as_whole and retained < 1)):
         raise NothingToCompact("no safe compaction saving")
     if checkpoint is not None:
         checkpoint.clear()
-        checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes))
+        if as_whole:
+            made = _checkpoint(whole, covers, shrunk, note, nodes)
+            checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes) if made.get("rows") else made)
     return final
+
+
+def _retained(posted: list[dict[str, Any]], final: list[dict[str, Any]]) -> float:
+    """The share of ``posted`` that answering it with ``final`` keeps."""
+    # Content only: a handle is how Claude Code names a row, not context.
+    before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
+                     for side in (posted, final))
+    return after / before
+
+
+def _with_stored_inputs(
+    rows: list[dict[str, Any]], stored: dict[Any, Any], fixed: set[int],
+) -> list[dict[str, Any]]:
+    """``rows`` with every call's input as the stored call has it: the rows
+    had no compaction cut an input. A row with nothing to restore, or whose
+    ``id`` is in ``fixed``, is the same object."""
+    whole = []
+    for row in rows:
+        uses = [use if id(row) in fixed or stored.get(use["tool_use_id"], use["input"]) == use["input"]
+                else {**use, "input": stored[use["tool_use_id"]]} for use in row["toolUses"]]
+        whole.append(row if all(a is b for a, b in zip(uses, row["toolUses"]))
+                     else {**row, "toolUses": uses})
+    return whole
 
 
 def _row_tokens(rows: list[dict[str, Any]]) -> int:
@@ -1072,6 +1235,14 @@ def _fit_pinned(
             out[:] = [out[i] for i in keep]
             covers[:] = [covers[i] for i in keep]
             shrunk[:] = [shrunk[i] for i in keep]
+    _fit_report(out, unknown, target, report)
+
+
+def _fit_report(
+    out: list[dict[str, Any]], unknown: list[tuple[int, dict[str, Any]]],
+    target: int, report: dict[str, Any] | None,
+) -> None:
+    """Say in ``report`` whether ``out`` meets ``target``, and what holds it over."""
     if report is not None:
         after = _row_tokens(out)
         report.update(target_tokens=target, after_tokens=after, met=after <= target)
