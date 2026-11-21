@@ -736,6 +736,7 @@ def test_owner_details_are_checked_in_outgoing_commits_not_the_working_tree(tmp_
 @pytest.mark.parametrize("installed,source_on_main,expected", [
     ("v4", True, "v5"),      # main carries a newer hook: the clone catches up
     ("v4", False, "v4"),     # only this branch has it: the shared hook stays
+    ("v4", "lookalike", "v4"),  # the remote has no main, only a branch whose name ends like it
     ("v5", True, "v5"),      # already current
     ("v6", True, "v6"),      # never a downgrade
     ("foreign", True, "foreign"),  # someone else's hook is left alone
@@ -753,8 +754,13 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     git(tmp_path, "remote", "add", "origin", str(tmp_path))
     on_main = commit(tmp_path)
     git(tmp_path, "checkout", "-q", "-b", "topic")
-    git(tmp_path, "branch", "-f", "main", on_main)
-    if not source_on_main:
+    if source_on_main == "lookalike":
+        # ls-remote answers a query for refs/heads/main with this branch too.
+        git(tmp_path, "branch", "archive/refs/heads/main", on_main)
+        git(tmp_path, "update-ref", "-d", "refs/heads/main")
+    else:
+        git(tmp_path, "branch", "-f", "main", on_main)
+    if source_on_main is False:
         source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n# changed on this branch\n")
         # A tracking ref that already has the change is not the remote's word.
         git(tmp_path, "update-ref", "refs/remotes/origin/main", commit(tmp_path))
@@ -766,8 +772,10 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     monkeypatch.setattr(local_ci, "ROOT", tmp_path)
     monkeypatch.setattr(local_ci, "HOOK_SOURCE", source)
     local_ci.upgrade_installed_hook("origin")
-    upgraded = installed == "v4" and source_on_main
-    assert ("updated the installed hook from v4 to v5" in capsys.readouterr().out) is upgraded
+    upgraded = installed == "v4" and source_on_main is True
+    out = capsys.readouterr().out
+    assert ("updated the installed hook from v4 to v5" in out) is upgraded
+    assert upgraded or not out  # a hook that stays put is no news
     if expected is None:
         assert not hooks.exists()
     elif upgraded:

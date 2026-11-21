@@ -1309,7 +1309,6 @@ def upgrade_installed_hook(remote: str) -> None:
     """
     target = hooks_dir() / "pre-push"
     version = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
-    main = f"{remote}/main"
     try:
         installed = re.search(version, target.read_text(encoding="utf-8", errors="replace"))
         source = re.search(version, HOOK_SOURCE.read_text(encoding="utf-8"))
@@ -1317,16 +1316,20 @@ def upgrade_installed_hook(remote: str) -> None:
             return
         # Ask the remote itself where its main is. A tracking ref can be
         # stale, a configured comparison branch, or written by another remote
-        # whose name overlaps this one.
-        tip = git("ls-remote", "--exit-code", "--", remote, "refs/heads/main").split()[0]
-        if git("rev-parse", f"{tip}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
+        # whose name overlaps this one. ls-remote matches a pattern by its
+        # last path components, so only the exact ref name counts.
+        tips = [fields[0] for fields in map(str.split, git("ls-remote", "--", remote, "refs/heads/main").splitlines())
+                if fields[1:] == ["refs/heads/main"]]
+        if not tips:
+            return  # this remote has no main: nothing here to catch up to
+        if git("rev-parse", f"{tips[0]}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
             return
         install_hook(target.parent)
     except FileNotFoundError:
         return  # no hook installed here: nothing to upgrade
     except (OSError, subprocess.CalledProcessError, Failure):
-        print(f"pre-push: the installed hook is older than {main}'s and could not be updated; "
-              "run `python scripts/local_ci.py install`.")
+        # Not "run install": this checkout's hook may be one main does not have yet.
+        print(f"pre-push: could not check the installed hook against {remote}'s main; the next push tries again.")
         return
     print(f"pre-push: updated the installed hook from v{installed[1]} to v{source[1]} ({target}).")
 
