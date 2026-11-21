@@ -116,8 +116,7 @@
 			{/if}
 			{#if model.loaded && !model.blocked && !model.forbidden}
 				<p class="st-note">
-					Encrypted on this worker; never synced or sent to a model. Using a sign-in still needs your approval in the chat that
-					asks for it.
+					Encrypted on this worker; never synced. Using a sign-in still needs your approval in the chat that asks for it.
 				</p>
 			{/if}
 		</div>
