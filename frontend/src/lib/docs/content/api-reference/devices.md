@@ -20,7 +20,7 @@ no CLI sign-in credential is read, stored, copied or returned.
 
 `GET /api/v1/settings/worker-settings` (**Owner only**) returns `workers` with
 `device_id`, `device_name`, `online`, `is_self`, `outcome`, `reason`, `status`
-and `availability`. Status has the Claude CLI install/version/keep-installed,
+and `availability`. Status has the Claude CLI install/version/startup update check,
 job kind/state and sign-in/email/plan, GitHub CLI sign-in boolean, and release
 channel/editability/restart requirement. Unknown/slow probes stay unknown, not
 signed out. Reads are parallel, bounded, coalesced and cached briefly. No peer
@@ -31,7 +31,7 @@ preview**) accepts a worker `device_id` or `"all"` in `target`, and one typed
 `action`:
 
 - `{"operation":"claude-install"}` or `{"operation":"claude-update"}`
-- `{"operation":"claude-keep-installed","keep_installed":true}`
+- `{"operation":"claude-update-check","check_updates":true}` (the check at worker start; it never installs)
 - `{"operation":"release-channel","channel":"stable"}` (`nightly` also)
 - `{"operation":"always-on","always_on":true}` (`false` or `null` for default)
 

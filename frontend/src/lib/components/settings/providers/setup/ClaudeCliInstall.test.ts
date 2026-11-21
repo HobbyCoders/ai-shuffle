@@ -17,7 +17,7 @@ vi.mock('$lib/stores/auth.svelte', async (original) => ({
 import ClaudeCliInstall from './ClaudeCliInstall.svelte';
 import ClaudeCliPanel from '../../ClaudeCliPanel.svelte';
 
-const base: ClaudeCliInstallation = { installed: false, version: null, path: null, keep_installed: false,
+const base: ClaudeCliInstallation = { installed: false, version: null, path: null, check_updates: true, latest_version: null,
 	installed_by_app: false, can_install: true, can_remove: false, platform: 'docker', job: null };
 const job = (state: ClaudeCliJob['state'], kind: ClaudeCliJob['kind'] = 'install'): ClaudeCliJob => ({
 	kind, state, started_at: new Date().toISOString(), finished_at: state === 'running' ? null : new Date().toISOString(),
@@ -35,7 +35,7 @@ beforeEach(() => {
 			login: { surface: 'docker', terminal: true, command: 'claude auth login' } };
 	});
 	mocks.post.mockImplementation(async () => current);
-	mocks.put.mockImplementation(async (_: string, body: { keep_installed: boolean }) => current = { ...current, ...body });
+	mocks.put.mockImplementation(async (_: string, body: { check_updates: boolean }) => current = { ...current, ...body });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 // Manage mode holds the installed layout while it checks; wait for the real status.
@@ -95,18 +95,29 @@ it('holds the installed layout while it checks, so later sections do not jump', 
 	mocks.get.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
 	render(ClaudeCliInstall, { manage: true });
 	expect(screen.getByText('Claude Code CLI')).toBeTruthy();
-	expect(screen.getByRole('switch', { name: 'Keep Claude Code installed' }).hasAttribute('disabled')).toBe(true);
+	expect(screen.getByRole('switch', { name: 'Check for updates at startup' }).hasAttribute('disabled')).toBe(true);
 	expect((screen.getByRole('button', { name: 'Check for update' }) as HTMLButtonElement).disabled).toBe(true);
 	answer({ ...base, installed: true, version: '2.1.285' }); await loaded();
 	expect(screen.getByText('2.1.285')).toBeTruthy();
 });
-it('sends the keep-installed PUT and reflects the response', async () => {
+it('turns the start-time update check off and reflects the response', async () => {
 	current = { ...base, installed: true, version: '2.1.285', path: '/home/appuser/.local/bin/claude' };
 	render(ClaudeCliInstall, { manage: true }); await loaded();
-	const control = await screen.findByRole('switch', { name: 'Keep Claude Code installed' });
+	const control = await screen.findByRole('switch', { name: 'Check for updates at startup' });
+	expect(control.getAttribute('aria-checked')).toBe('true');
 	await fireEvent.click(control);
-	expect(mocks.put).toHaveBeenCalledWith('/settings/claude-cli', { keep_installed: true });
-	await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+	expect(mocks.put).toHaveBeenCalledWith('/settings/claude-cli', { check_updates: false });
+	await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
+	// The removed "Keep Claude Code installed" has no switch of its own.
+	expect(screen.getAllByRole('switch')).toHaveLength(1);
+});
+it('offers the newer version the worker found, and installs it only on a press', async () => {
+	current = { ...base, installed: true, version: '2.1.285', latest_version: '2.1.330' };
+	render(ClaudeCliInstall, { manage: true }); await loaded();
+	expect(screen.getByText('Version 2.1.330 is available')).toBeTruthy();
+	expect(mocks.post).not.toHaveBeenCalled();
+	await fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+	expect(mocks.post).toHaveBeenCalledWith('/settings/claude-cli/update', {});
 });
 it('hides Remove for an unowned installation', async () => {
 	current = { ...base, installed: true, can_remove: false }; render(ClaudeCliInstall, { manage: true }); await loaded();

@@ -14,10 +14,10 @@ import uuid
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from app.api.auth import require_admin
-from app.core import antigravity
+from app.core import antigravity, cli_update_check
 from app.db import database as db
 from app.db.async_database import run_sync
 from app.core.provider_locks import operation_lock
@@ -49,6 +49,11 @@ class AntigravityProviderCreate(BaseModel):
 
 class GuardUpdate(BaseModel):
     allow_unattended: bool
+
+
+class UpdateCheckUpdate(BaseModel):
+    #: Whether this worker asks at start if a newer Antigravity exists.
+    check_updates: StrictBool
 
 
 class LoginComplete(BaseModel):
@@ -92,11 +97,17 @@ async def install_status(token: str = Depends(require_admin)):
     PATH), ``override`` (``AI_SHUFFLE_ANTIGRAVITY_BIN``) or null. ``can_install``:
     Google publishes a build for this worker's platform; when it does not,
     ``unsupported_message`` says so (else null). ``install``: the
-    install or update job (``kind``, ``state``, ``version``, ``message``, ``error``).
+    install or update job (``kind``, ``state``, ``version``, ``message``, ``error``),
+    with ``check_updates`` (this worker asks at start whether a newer version
+    exists) and ``latest_version`` (the newer version that check found, else null).
     """
     binary, source = await run_sync(antigravity.locate_binary)
     version = await antigravity.binary_version(binary) if binary else None
     can_install = antigravity.manifest_key() is not None
+    # Updated outside the app since the check: the notice no longer applies.
+    check = await run_sync(antigravity.update_check_state, version)
+    if not (binary and version):
+        check["latest_version"] = None
     return {
         "installed": bool(binary and version),
         "version": version,
@@ -105,6 +116,7 @@ async def install_status(token: str = Depends(require_admin)):
         # Why not, said up front: the Install button is disabled there.
         "unsupported_message": None if can_install else antigravity.unsupported_message(),
         "install": antigravity.install_state(),
+        **check,
         "workers_requiring_update": await run_sync(antigravity.workers_requiring_update),
     }
 
@@ -121,6 +133,14 @@ async def update(token: str = Depends(require_admin)):
     """Check for update: the same background job. Says the agent is up to date,
     or installs Google's newer release and switches to it; poll ``GET /status``."""
     return antigravity.start_update()
+
+
+@router.put("/update-check")
+async def set_update_check(request: UpdateCheckUpdate, token: str = Depends(require_admin)):
+    """Turn this worker's start-time check for a newer Antigravity on or off.
+    The check only reads Google's version number; it never installs."""
+    await run_sync(cli_update_check.set_enabled, cli_update_check.ANTIGRAVITY, request.check_updates)
+    return await run_sync(antigravity.update_check_state)
 
 
 @router.get("/providers")

@@ -52,7 +52,9 @@ def row(device="peer", **extra):
     {"operation": "status", "url": "https://example.com"},
     envelope({"operation": "claude-login"}),
     envelope({"operation": "claude-install", "command": "whoami"}),
-    envelope({"operation": "claude-keep-installed", "keep_installed": "false"}),
+    envelope({"operation": "claude-update-check", "check_updates": "false"}),
+    # Removed with "Keep Claude Code installed": no worker accepts it now.
+    envelope({"operation": "claude-keep-installed", "keep_installed": False}),
     envelope({"operation": "release-channel", "channel": "edge"}),
     envelope({"operation": "always-on", "always_on": True}),
     envelope(expires_at=0), envelope(expires_at=float("nan")),
@@ -123,7 +125,8 @@ async def test_status_uses_cli_output_and_discards_private_details(monkeypatch):
                           cli_version="2.1.1", org_id="private-org", config_dir="private-dir")
     monkeypatch.setattr(ws.claude_cli_status, "get_status", lambda: cli)
     monkeypatch.setattr(ws.claude_cli_install, "payload", lambda: {
-        "installed": True, "version": "2.1.1", "keep_installed": True, "installed_by_app": True,
+        "installed": True, "version": "2.1.1", "check_updates": True, "latest_version": "2.1.9",
+        "installed_by_app": True,
         "can_install": True, "path": "private-path", "access_token": "private-token",
         "job": {"kind": "install", "state": "succeeded", "output_tail": "private-output"}})
     monkeypatch.setattr(ws.auth_service, "is_github_authenticated", lambda: True)
@@ -445,12 +448,24 @@ async def test_status_reads_peers_in_parallel_with_bounded_fanout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_keep_installed_uses_target_scoped_local_writer(monkeypatch):
-    keep = Mock()
-    monkeypatch.setattr(ws.claude_cli_install, "set_keep_installed", keep)
-    result = await ws.peer_action(envelope({"operation": "claude-keep-installed", "keep_installed": False}), "sender")
+async def test_update_check_uses_target_scoped_local_writer(monkeypatch):
+    saved, start = Mock(), Mock()
+    monkeypatch.setattr(ws.cli_update_check, "set_enabled", saved)
+    monkeypatch.setattr(ws.claude_cli_install, "start", start)
+    result = await ws.peer_action(envelope({"operation": "claude-update-check", "check_updates": False}), "sender")
     assert result["outcome"] == "accepted"
-    keep.assert_called_once_with(False)
+    saved.assert_called_once_with("claude", False)
+    start.assert_not_called()  # the switch never installs or updates
+
+
+def test_status_from_and_for_workers_of_another_version():
+    # A worker from before the switch existed reports the removed field and no switch.
+    old = ws.ClaudeStatus.model_validate({"installed": True, "keep_installed": True,
+                                          "installed_by_app": True, "can_install": True})
+    assert old.check_updates is None
+    # Such a worker requires the removed field in what this one sends.
+    new = ws.ClaudeStatus(installed=True, check_updates=True, installed_by_app=True, can_install=True).model_dump()
+    assert new["keep_installed"] is False and new["check_updates"] is True
 
 
 @pytest.mark.asyncio

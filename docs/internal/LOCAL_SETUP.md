@@ -30,9 +30,10 @@ installation and protected backups unchanged.
   - macOS/Linux/WSL: `curl -fsSL https://claude.ai/install.sh | bash`
   - Windows (PowerShell): `irm https://claude.ai/install.ps1 | iex`
 
-  The desktop shell does not install anything itself. The worker installs on
-  request on every platform and reinstalls at start only while Keep Claude Code
-  installed is on.
+  The desktop shell does not install anything itself. The worker installs,
+  updates and removes Claude Code only on request, on every platform. At start
+  it only checks for a newer version (Settings > Providers > Claude > Check for
+  updates at startup).
 - **Managed runtime** — Desktop or Docker supplies the database; an external
   PostgreSQL server is not supported.
 

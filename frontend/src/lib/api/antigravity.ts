@@ -41,6 +41,13 @@ export interface AntigravityInstallJob {
 	message?: string | null;
 }
 
+/** The worker's start-time check for a newer Antigravity. It only asks. */
+export interface AntigravityUpdateCheck {
+	check_updates: boolean;
+	/** The newer version that check found, or null. */
+	latest_version: string | null;
+}
+
 export interface AntigravityInstallStatus {
 	installed: boolean;
 	version: string | null;
@@ -51,6 +58,9 @@ export interface AntigravityInstallStatus {
 	/** Why Install is unavailable when `can_install` is false; otherwise null. */
 	unsupported_message?: string | null;
 	install: AntigravityInstallJob;
+	/** The start-time update check. Missing on a worker too old to have it. */
+	check_updates?: boolean;
+	latest_version?: string | null;
 	/** Peer workers that must update before a row can be added. */
 	workers_requiring_update: string[];
 }
@@ -98,6 +108,9 @@ export const getAntigravityStatus = (): Promise<AntigravityInstallStatus> => api
 export const installAntigravity = (): Promise<AntigravityInstallStatus['install']> => api.post(`${BASE}/install`);
 /** Check for update: the same job; installs Google's newer release only when there is one. */
 export const updateAntigravity = (): Promise<AntigravityInstallJob> => api.post(`${BASE}/update`);
+/** Turn the worker's start-time check for a newer Antigravity on or off. */
+export const setAntigravityUpdateCheck = (check_updates: boolean): Promise<AntigravityUpdateCheck> =>
+	api.put(`${BASE}/update-check`, { check_updates });
 export const createAntigravityProvider = (body: AntigravityCreate): Promise<ModelProvider & AntigravityGuardView> =>
 	api.post(`${BASE}/providers`, body);
 export const getAntigravityProviderStatus = (id: string): Promise<AntigravityProviderStatus> =>

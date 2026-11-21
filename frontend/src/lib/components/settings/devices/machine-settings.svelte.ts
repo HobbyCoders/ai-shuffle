@@ -1,5 +1,6 @@
 import { getErrorMessage } from '$lib/api/client';
 import { actOnWorkers, getWorkerSettings, type WorkerAction, type WorkerMachine, type WorkerResult } from '$lib/api/worker-settings';
+import { checkCliUpdates } from '$lib/services/cli-update-notice';
 import { FORBIDDEN_TEXT, isForbidden } from '$lib/settings/access.svelte';
 
 export const OUTCOME_TEXT: Record<string, string> = {
@@ -53,6 +54,8 @@ export class MachineSettingsModel {
 		this.results = [];
 		try {
 			this.results = (await actOnWorkers(target, action)).workers;
+			// The switch may have gone off for the worker this page is on: its notice leaves with it.
+			if (action.operation === 'claude-update-check') void checkCliUpdates();
 			// Never re-send an uncertain action. Refresh the producing worker's status.
 			await this.load();
 			return this.results.every((r) => r.outcome === 'accepted');

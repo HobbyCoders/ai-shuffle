@@ -1,10 +1,11 @@
 /** Mounted-view state for owner-requested CLI jobs. No work continues after disposal. */
 import { getErrorMessage } from '$lib/api/client';
 import { getClaudeCliInstallation, installClaudeCli, updateClaudeCli, removeClaudeCli,
-	setClaudeCliKeepInstalled, type ClaudeCliInstallation, type ClaudeCliJob,
+	setClaudeCliUpdateCheck, type ClaudeCliInstallation, type ClaudeCliJob,
 	type ClaudeCliPeerResult } from '$lib/api/claude-cli';
 import { auth } from '$lib/stores/auth.svelte';
 import { providers } from '$lib/stores/providers.svelte';
+import { checkCliUpdates } from '$lib/services/cli-update-notice';
 
 export class ClaudeCliInstallState {
 	status = $state<ClaudeCliInstallation | null>(null);
@@ -34,6 +35,7 @@ export class ClaudeCliInstallState {
 			this.#timer = setTimeout(() => { void this.load(); }, 2000);
 		} else if (next.job && this.#finished !== next.job.started_at) {
 			this.#finished = next.job.started_at;
+			void checkCliUpdates(); // an update done here takes its notice down
 			await Promise.allSettled([providers.loadClaude(true), auth.checkAuth()]);
 			if (!this.#disposed) await this.#onFinished();
 		}
@@ -58,9 +60,13 @@ export class ClaudeCliInstallState {
 		catch (e) { this.error = getErrorMessage(e, 'Could not start the job. Try again.'); }
 		finally { this.busy = false; }
 	}
-	async keep(value: boolean): Promise<boolean> {
+	async checkUpdates(value: boolean): Promise<boolean> {
 		this.busy = true; this.error = '';
-		try { await this.#accept(await setClaudeCliKeepInstalled(value)); return true; }
+		try {
+			await this.#accept(await setClaudeCliUpdateCheck(value));
+			void checkCliUpdates(); // switched off: the open notice leaves with it
+			return true;
+		}
 		catch (e) { this.error = getErrorMessage(e, 'Could not save the setting. Try again.'); return false; }
 		finally { this.busy = false; }
 	}

@@ -324,28 +324,25 @@ def check_prerequisites() -> None:
     else:
         logger.info("Claude Code CLI: %s", cli.error or "not installed")
     from app.core import claude_cli_install, claude_relogin_notice
-    # Never fatal: a worker that cannot record or act on the setting still boots.
+    # A worker start never installs, updates or removes Claude Code or
+    # Antigravity: only the owner does, in Settings > Providers or outside the
+    # app. Never fatal: a worker that cannot write the file still boots.
     try:
-        marker_was_absent = not (settings.effective_data_dir / claude_cli_install.MARKER).exists()
-        keep = claude_cli_install.ensure_recorded(cli)
-        # Docker's entrypoint installs while the marker is on; before migration
-        # wrote it, it could not know an API key or legacy marker means "on".
-        if keep and not cli.installed and (claude_cli_install.platform() != "docker" or marker_was_absent):
-            claude_cli_install.start("install")
+        claude_cli_install.retire_keep_installed()
     except Exception:
-        logger.warning("Could not apply Keep Claude Code installed", exc_info=True)
-    # Check for a newer Claude Code on every start. Never fatal, never awaited:
-    # the job runs in its own thread and logs what it did.
+        logger.warning("Could not turn off the start-time Claude Code install of older "
+                       "Docker images", exc_info=True)
+    # Ask whether a newer Claude Code exists (a version number, nothing more).
+    # Never fatal, never awaited: the answer becomes a notice in the app.
     try:
-        if claude_cli_install.update_on_startup(cli):
+        if claude_cli_install.check_on_startup(cli):
             logger.info("Claude Code CLI: checking for an update")
     except Exception:
         logger.warning("Could not check for a Claude Code update", exc_info=True)
-    # The same for the Antigravity agent AI Shuffle installed (never one on
-    # PATH): a background task on the loop, never awaited, never fatal.
+    # The same for Antigravity: a background task on the loop.
     try:
         from app.core import antigravity
-        if antigravity.update_on_startup():
+        if antigravity.check_on_startup():
             logger.info("Antigravity: checking for an update")
     except Exception:
         logger.warning("Could not check for an Antigravity update", exc_info=True)

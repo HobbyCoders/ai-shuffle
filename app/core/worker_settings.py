@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field, StrictBool, StrictFloat, StrictInt, TypeAdapter, ValidationError
 
-from app.core import application_updates, claude_cli_install, claude_cli_status, worker_availability
+from app.core import application_updates, claude_cli_install, claude_cli_status, cli_update_check, worker_availability
 from app.core.auth import auth_service
 from app.core.config import settings
 from app.db import database
@@ -30,9 +30,9 @@ class ClaudeInstall(Input):
     operation: Literal["claude-install", "claude-update"]
 
 
-class ClaudeKeep(Input):
-    operation: Literal["claude-keep-installed"]
-    keep_installed: StrictBool
+class ClaudeUpdateCheck(Input):
+    operation: Literal["claude-update-check"]
+    check_updates: StrictBool
 
 
 class ReleaseChannel(Input):
@@ -45,7 +45,7 @@ class AlwaysOn(Input):
     always_on: StrictBool | None = Field(...)
 
 
-Action = Annotated[ClaudeInstall | ClaudeKeep | ReleaseChannel | AlwaysOn, Field(discriminator="operation")]
+Action = Annotated[ClaudeInstall | ClaudeUpdateCheck | ReleaseChannel | AlwaysOn, Field(discriminator="operation")]
 
 
 class Dispatch(Input):
@@ -86,7 +86,13 @@ class Job(BaseModel):
 class ClaudeStatus(BaseModel):
     installed: StrictBool
     version: str | None = None
-    keep_installed: StrictBool
+    # Whether the worker asks at start if a newer Claude Code exists. None from
+    # a worker on a version without the setting.
+    check_updates: StrictBool | None = None
+    # The removed "Keep Claude Code installed": this worker always says off.
+    # Workers on a version that still had it refuse a status without the
+    # field, and may still send their own value.
+    keep_installed: StrictBool = False
     installed_by_app: StrictBool
     can_install: StrictBool
     signed_in: StrictBool | None = None
@@ -164,7 +170,7 @@ def _claude() -> dict[str, Any]:
     install = claude_cli_install.payload()
     cli = claude_cli_status.get_status()
     return ClaudeStatus(**{key: install[key] for key in (
-        "installed", "version", "keep_installed", "installed_by_app", "can_install", "job")},
+        "installed", "version", "check_updates", "installed_by_app", "can_install", "job")},
         signed_in=cli.signed_in, email=cli.email, plan=cli.plan,
         status_available=cli.error is None).model_dump()
 
@@ -191,8 +197,8 @@ def _local_action(action: Action) -> dict[str, Any]:
             application_updates.set_channel(action.channel)
         except ValueError:
             return _result("refused", "channel-refused")
-    elif isinstance(action, ClaudeKeep):
-        claude_cli_install.set_keep_installed(action.keep_installed)
+    elif isinstance(action, ClaudeUpdateCheck):
+        cli_update_check.set_enabled(cli_update_check.CLAUDE, action.check_updates)
     elif isinstance(action, ClaudeInstall):
         state = claude_cli_install.payload()
         if not state["can_install"]:
@@ -213,7 +219,7 @@ def _local_action(action: Action) -> dict[str, Any]:
             return _result("refused", "busy")
     else:
         raise ValueError("Availability is shared data, not a peer operation")
-    return _result("accepted", "saved" if isinstance(action, ClaudeKeep) else "done")
+    return _result("accepted", "saved" if isinstance(action, ClaudeUpdateCheck) else "done")
 
 
 async def apply_once(body: ActionRequest, from_device: str) -> dict[str, Any]:

@@ -28,8 +28,8 @@ public `ghcr.io/hobbycoders/ai-shuffle-server` image at the version pinned by
 
    The first start downloads the image and sets it up, so it can take a few minutes.
    If you choose Claude, install Claude Code from setup or Settings > Providers > Claude.
-   Anthropic's own installer downloads it. It is reinstalled at start only while
-   Keep Claude Code installed is on. `docker compose ps` shows `healthy` when it is ready.
+   Anthropic's own installer downloads it, and only when you ask: starting the
+   container never installs or updates it. `docker compose ps` shows `healthy` when it is ready.
 4. Open <http://localhost:8000> on the same computer and follow the setup
    wizard.
 

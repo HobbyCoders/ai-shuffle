@@ -16,13 +16,19 @@ from pathlib import Path
 
 from fluid.tools.child_env import scrub_child_env
 
-from app.core import claude_auth_mode, claude_cli_status
+from app.core import claude_cli_status, cli_update_check
 from app.core.config import settings
 from app.core.platform import is_docker_mode
 from app.db import database
 
 TIMEOUT_SECONDS = 600
-MARKER = "claude-cli-keep-installed"
+# "Keep Claude Code installed" was removed. Images built before that still
+# read this file when the container starts and install Claude Code while it
+# says 1, or while it is missing and a Claude home exists.
+LEGACY_MARKER = "claude-cli-keep-installed"
+# Anthropic's release channels: each file holds one version number.
+RELEASES_URL = "https://downloads.claude.ai/claude-code-releases/"
+CHECK_TIMEOUT_SECONDS = 15
 # The running job's process, so a job orphaned by a worker restart still
 # blocks a second one (and is stopped once past the time limit).
 JOB_RECORD = "claude-cli-job.json"
@@ -30,9 +36,6 @@ IN_USE_MESSAGE = ("Claude Code is running (a Claude chat or a terminal is using 
                   "Stop it, then remove Claude Code.")
 ORPHAN_MESSAGE = ("A Claude Code install or update started before the worker restarted "
                   "is still running. Try again in a few minutes.")
-# A worker runs the CLI's own updater once per start; one restarting in a loop
-# asks Anthropic at most this often.
-STARTUP_CHECK_SECONDS = 600
 _lock = threading.RLock()
 _job = None
 logger = logging.getLogger(__name__)
@@ -42,43 +45,19 @@ def _key(name):
     return name + ":" + settings.effective_instance_id
 
 
-def keep_installed():
-    return database.get_system_setting(_key("claude_cli_keep_installed")) == "1"
+def retire_keep_installed():
+    """Stop an older Docker image's entrypoint from installing Claude Code.
 
-
-def set_keep_installed(value):
-    database.set_system_setting(_key("claude_cli_keep_installed"), "1" if value else "0")
+    Newer images never read the file. Nothing is installed or removed here.
+    """
+    if platform() != "docker":
+        return
     directory = settings.effective_data_dir
     directory.mkdir(parents=True, exist_ok=True)
-    # Atomic mirror for the entrypoint, which runs before PostgreSQL starts.
     with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as marker:
-        marker.write("1\n" if value else "0\n")
+        marker.write("0\n")
         name = marker.name
-    os.replace(name, directory / MARKER)
-
-
-def _claude_home_in_use():
-    # The entrypoint's own evidence on its first start (before any marker):
-    # an existing Claude home. Docker only; a desktop's leftovers do not count.
-    home = Path.home()
-    for directory in (home / ".claude", home / ".config" / "claude"):
-        try:
-            if directory.is_dir() and any(directory.iterdir()):
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def ensure_recorded(cli):
-    value = database.get_system_setting(_key("claude_cli_keep_installed"))
-    if value is None:
-        legacy = database.get_system_setting(database.CLAUDE_RELOGIN_NEEDED_MARKER) == "1"
-        value = "1" if (cli.installed or cli.signed_in or legacy or
-                        claude_auth_mode.has_stored_api_key() or
-                        (platform() == "docker" and _claude_home_in_use())) else "0"
-    set_keep_installed(value == "1")
-    return value == "1"
+    os.replace(name, directory / LEGACY_MARKER)
 
 
 def platform():
@@ -159,7 +138,10 @@ def payload():
         job = dict(_job) if _job else None
     owned = _owned(cli)
     return {"installed": cli.installed, "version": cli.cli_version, "path": cli.binary_path,
-            "keep_installed": keep_installed(), "installed_by_app": owned,
+            "check_updates": cli_update_check.enabled(cli_update_check.CLAUDE),
+            "latest_version": (cli_update_check.latest_version(cli_update_check.CLAUDE, cli.cli_version)
+                               if cli.installed else None),
+            "installed_by_app": owned,
             "can_install": sys.platform in ("linux", "darwin", "win32"),
             "can_remove": owned, "platform": platform(), "job": job}
 
@@ -257,7 +239,6 @@ def _execute(kind):
                 raise ValueError(IN_USE_MESSAGE)
             # Anthropic's native uninstall: launcher and ~/.local/share/claude.
             # Deliberately never touch ~/.claude or ~/.claude.json.
-            set_keep_installed(False)
             _launcher().unlink(missing_ok=True)
             versions = Path.home() / ".local" / "share" / "claude"
             if versions.is_symlink():
@@ -288,7 +269,6 @@ def _execute(kind):
                 else:
                     if kind == "install":
                         database.set_system_setting(_key("claude_cli_installed_by_app"), "1")
-                        set_keep_installed(True)
                     state = "succeeded"
                     message = (f"Claude Code updated from {before.cli_version or 'unknown'} to {after.cli_version or 'unknown'}."
                                if kind == "update" else "Claude Code installed.")
@@ -296,9 +276,11 @@ def _execute(kind):
         message = str(exc)
     finally:
         claude_cli_status.invalidate()
+        if state == "succeeded":
+            # What the last check found no longer describes this install.
+            cli_update_check.forget(cli_update_check.CLAUDE)
         with _lock:
             _job.update(state=state, finished_at=_now(), message=message, output_tail=tail or None)
-        # The startup check has nobody watching Settings: the log is its result.
         logger.log(logging.INFO if state == "succeeded" else logging.WARNING,
                    "Claude Code %s %s: %s", kind, state, message)
 
@@ -321,24 +303,56 @@ def start(kind):
     return payload()
 
 
-def update_on_startup(cli):
-    """Run the CLI's own updater when the worker starts. True when it started.
-
-    The same job as "Check for update" in Settings > Providers > Claude. Never
-    from the test suite or a branch preview: both share the real install.
-    """
-    if not cli.installed or sys.platform not in ("linux", "darwin", "win32"):
-        return False
-    if os.environ.get("TESTING") == "1" or os.environ.get("AI_SHUFFLE_PREVIEW") == "1":
-        return False
-    key = _key("claude_cli_startup_check_at")
+def _release_channel(env):
+    """The channel the CLI's own updater follows: ``stable`` when the owner
+    chose it in Claude Code's settings, otherwise ``latest``."""
+    home = env.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     try:
-        last = float(database.get_system_setting(key) or 0)
-    except ValueError:
-        last = 0.0
-    now = time.time()
-    if 0 <= now - last < STARTUP_CHECK_SECONDS:
+        chosen = json.loads((Path(home) / "settings.json").read_text(encoding="utf-8")).get("autoUpdatesChannel")
+    except Exception:  # noqa: BLE001 — no settings file, or not JSON
+        chosen = None
+    return "stable" if chosen == "stable" else "latest"
+
+
+def latest_release():
+    """The version Anthropic currently publishes on this install's channel.
+
+    One small download of a version number. Nothing is installed.
+    """
+    import httpx
+    env = _installer_env()
+    response = httpx.get(RELEASES_URL + _release_channel(env), timeout=CHECK_TIMEOUT_SECONDS,
+                         follow_redirects=True)
+    version = response.raise_for_status().text.strip()
+    if not cli_update_check.version_key(version):
+        raise ValueError("Anthropic's release channel did not name a version.")
+    return version
+
+
+def _check(installed):
+    try:
+        latest = latest_release()
+    except Exception as exc:  # noqa: BLE001 — offline is normal; the worker runs on
+        logger.info("Claude Code CLI: could not check for an update (%s)", exc)
+        return
+    if cli_update_check.record(cli_update_check.CLAUDE, installed, latest):
+        logger.info("Claude Code CLI: %s is available (installed: %s). Update it in "
+                    "Settings > Providers > Claude.", latest, installed)
+    else:
+        logger.info("Claude Code CLI: %s is up to date", installed)
+
+
+def check_on_startup(cli):
+    """Ask whether a newer Claude Code exists when the worker starts. True when asked.
+
+    Only a check: the answer becomes a notice with an Update button, and
+    nothing is downloaded until the owner presses it. Off when the owner turned
+    the check off for this worker, and never from the test suite.
+    """
+    if not cli.installed or not cli.cli_version or cli_update_check.suppressed():
         return False
-    database.set_system_setting(key, str(now))
-    start("update")
+    if not cli_update_check.enabled(cli_update_check.CLAUDE):
+        return False
+    threading.Thread(target=_check, args=(cli.cli_version,), daemon=True,
+                     name="claude-cli-update-check").start()
     return True

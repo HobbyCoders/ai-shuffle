@@ -36,26 +36,12 @@ require_bundled_tools() {
 }
 require_bundled_tools "$@"
 
-# PostgreSQL is not up yet. This atomic marker mirrors the worker setting.
-# Until migration writes it, retain only an existing Claude user's install.
-claude_cli_keep_installed() {
-    local marker="${DATA_DIR:-/data}/claude-cli-keep-installed"
-    if [ -f "$marker" ]; then
-        [ "$(cat "$marker")" = "1" ]
-    else
-        PATH="${SHUFFLE_CONTAINER_PATH:-$PATH}" command -v claude >/dev/null 2>&1 ||
-            [ -n "$(find "${HOME}/.claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] ||
-            [ -n "$(find "${HOME}/.config/claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
-    fi
-}
+# Container start never installs, updates or removes a provider CLI (Claude
+# Code, Antigravity). The owner does that in Settings > Providers, or by hand.
 
 # Direct --user launches cannot mutate accounts. The Python runtime validates
 # identity and mount ownership and gives a clear error instead of chowning data.
 if [ "$(/usr/bin/id -u)" != "0" ]; then
-    case "${1:-run}" in
-        dump|restore) ;;
-        *) if claude_cli_keep_installed; then bash /app/docker/install-claude-cli.sh || true; fi ;;
-    esac
     exec /usr/local/bin/python3 -I -B -u /app/docker/container_runtime.py "$@"
 fi
 
@@ -100,17 +86,6 @@ esac
 # Startup creates missing directories only as appuser; no root ownership walk.
 setpriv --reuid=appuser --regid=appuser --init-groups \
     mkdir -p /home/appuser/.fluid /home/appuser/.config/claude /home/appuser/.claude /home/appuser/.config/gh /home/appuser/.local/bin
-
-# =============================================================================
-# Claude Code CLI
-# =============================================================================
-# The delegated Claude leg runs the stock `claude` from PATH and nothing else.
-# Download only while Keep Claude Code installed is on. The CLI then updates
-# itself in ~/.local. Never pinned, patched or wrapped here.
-if HOME=/home/appuser claude_cli_keep_installed; then
-    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
-        bash /app/docker/install-claude-cli.sh || true
-fi
 
 # =============================================================================
 # Provider configuration compatibility

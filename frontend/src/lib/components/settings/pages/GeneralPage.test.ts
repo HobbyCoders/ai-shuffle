@@ -93,7 +93,8 @@ describe('General page', () => {
 
 	it('indexes startup and only changes the switch when the OS confirms the write', async () => {
 		native.bridge = { platform: 'win32', loginItem: native };
-		expect(query('startup')[0].target).toEqual({ category: 'general', anchor: 'general.startAtSignIn' });
+		// Not the first result: "Check for updates at startup" has the word in its title.
+		expect(query('startup').map((i) => i.target)).toContainEqual({ category: 'general', anchor: 'general.startAtSignIn' });
 		render(GeneralPage);
 		const control = await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in' });
 		expect(native.set).not.toHaveBeenCalled();

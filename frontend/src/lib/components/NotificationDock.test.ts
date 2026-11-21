@@ -127,6 +127,26 @@ describe('notification dock', () => {
 		expect(undo).toHaveBeenCalledOnce();
 		expect(screen.queryByText('Archived 1 session')).toBeNull();
 	});
+
+	it('tells a banner it was closed only when the owner closes it', async () => {
+		const closed = vi.fn();
+		render(NotificationDock);
+		// Pressing its button is not closing it.
+		notify.banner('Update ready', { duration_ms: 0, onDismiss: () => closed('pressed'), action: { label: 'Update', onClick: vi.fn() } });
+		await fireEvent.click(await screen.findByRole('button', { name: 'Update' }));
+		// Neither is being pushed off by newer banners.
+		notify.banner('Pushed off', { duration_ms: 0, onDismiss: () => closed('pushed') });
+		for (let i = 0; i < 3; i++) notify.banner(`Newer ${i}`, { duration_ms: 0 });
+		await screen.findByText('Newer 2');
+		expect(screen.queryByText('Pushed off')).toBeNull();
+		expect(closed).not.toHaveBeenCalled();
+
+		notify.banner('Close me', { duration_ms: 0, onDismiss: () => closed('closed') });
+		const card = (await screen.findByText('Close me')).closest('.dock-entry')!;
+		await fireEvent.click(card.querySelector('button[aria-label="Dismiss"]')!);
+		expect(closed.mock.calls).toEqual([['closed']]);
+		expect(screen.queryByText('Close me')).toBeNull();
+	});
 });
 
 describe('every migrated notification renders through the dock', () => {

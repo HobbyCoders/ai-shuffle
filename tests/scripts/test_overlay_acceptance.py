@@ -110,6 +110,24 @@ def test_run_removes_only_its_own_directory_inside_work(
     assert saved.read_bytes() == b"the caller's archive"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="loads the Linux container supervisor")
+def test_the_stand_in_worker_answers_what_the_supervisor_asks_before_a_restart(
+        tmp_path: Path) -> None:
+    args = SimpleNamespace(docker_dir=ROOT / "docker", overlay=tmp_path / "candidate.tar.gz",
+                           capability="python-test", executable="python/bin/python3",
+                           work=tmp_path / "work", keep=False, timeout=5.0)
+    run = harness.Acceptance(args)
+    try:
+        worker = SimpleNamespace(lifecycle=run.lifecycle)
+        token = run.runtime._reserve_restart(worker)
+        assert token, "the stand-in refused or did not understand the restart reservation"
+        assert run.runtime._quiesce(worker, token) is True
+        assert run.lifecycle(f"restart-release?token={token}")
+    finally:
+        run.feed.close()
+        run.remove_work()
+
+
 def postgres_16() -> bool:
     initdb = shutil.which("initdb")
     if not initdb:

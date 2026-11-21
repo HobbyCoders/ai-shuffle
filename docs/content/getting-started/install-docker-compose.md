@@ -99,9 +99,9 @@ services:
       # Provider CLI sign-in (the Claude Code CLI, for a Claude subscription),
       # kept when the container is replaced.
       - claude-home:/home/appuser/.claude
-      # Provider CLI programs (Claude Code installed on demand from Settings
-      # or setup with Anthropic's installer; it updates itself). Reinstalled
-      # at start only while Keep Claude Code installed is on.
+      # Provider CLI programs (Claude Code, installed from Settings or setup
+      # with Anthropic's installer). Container start never installs, updates
+      # or removes them.
       - local-home:/home/appuser/.local
       # GitHub CLI sign-in.
       - gh-auth:/home/appuser/.config/gh

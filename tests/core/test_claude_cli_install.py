@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.core import claude_cli_install as ci, claude_cli_status as cs
+from app.core import claude_cli_install as ci, claude_cli_status as cs, cli_update_check as cuc
 
 
 @pytest.fixture
@@ -19,31 +19,28 @@ def worker(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(ci, "platform", lambda: "desktop")
     monkeypatch.setattr(ci, "_job", None)
-    monkeypatch.setattr(ci.claude_auth_mode, "has_stored_api_key", lambda: False)
+    monkeypatch.setattr(cuc, "_found", {})
     status = cs.ClaudeCliStatus(installed=False)
     monkeypatch.setattr(cs, "get_status", lambda **kw: status)
     return store, status, tmp_path
 
 
-@pytest.mark.parametrize("installed,signed_in,key,legacy,expected", [
-    (True, False, False, False, True),
-    (False, True, False, False, True),
-    (False, False, True, False, True),
-    (False, False, False, True, True),
-    (False, False, False, False, False),
+@pytest.mark.parametrize("where,before,after", [
+    ("docker", None, "0\n"), ("docker", "1\n", "0\n"), ("docker", "0\n", "0\n"),
+    ("desktop", None, None), ("desktop", "1\n", "1\n"),
 ])
-def test_migration_once(worker, monkeypatch, installed, signed_in, key, legacy, expected):
-    store, cli, root = worker
-    cli.installed, cli.signed_in = installed, signed_in
-    monkeypatch.setattr(ci.claude_auth_mode, "has_stored_api_key", lambda: key)
-    if legacy:
-        store[ci.database.CLAUDE_RELOGIN_NEEDED_MARKER] = "1"
-    assert ci.ensure_recorded(cli) is expected
-    assert (root / "data" / ci.MARKER).read_text() == ("1\n" if expected else "0\n")
-    cli.installed, cli.signed_in = not installed, not signed_in
-    assert ci.ensure_recorded(cli) is expected
-    ci.set_keep_installed(not expected)
-    assert ci.ensure_recorded(cli) is not expected
+def test_start_time_install_of_older_images_is_turned_off(worker, monkeypatch, where, before, after):
+    """Images built before the removal install Claude Code at container start
+    while this file says 1, or while it is missing. Docker writes 0; a desktop
+    worker has no entrypoint and leaves the folder alone."""
+    _, _, root = worker
+    marker = root / "data" / ci.LEGACY_MARKER
+    monkeypatch.setattr(ci, "platform", lambda: where)
+    if before is not None:
+        marker.parent.mkdir(parents=True)
+        marker.write_text(before)
+    ci.retire_keep_installed()
+    assert (marker.read_text() if marker.exists() else None) == after
 
 
 def _job(kind="install"):
@@ -51,27 +48,41 @@ def _job(kind="install"):
                "message": None, "output_tail": None}
 
 
-@pytest.mark.parametrize("keep,expected", [(False, False), (True, True)])
-def test_native_worker_start_installs_only_when_enabled(worker, monkeypatch, keep, expected):
-    from app.core import startup, credential_gate, claude_relogin_notice
-    store, _, _ = worker
-    store[ci._key("claude_cli_keep_installed")] = "1" if keep else "0"
+def _startup(monkeypatch):
+    from app.core import startup, credential_gate, claude_auth_mode, claude_relogin_notice
     start = Mock()
     monkeypatch.setattr(ci, "start", start)
-    monkeypatch.setattr(ci.claude_auth_mode, "ensure_mode_recorded", lambda signed_in: "subscription")
+    monkeypatch.setattr(claude_auth_mode, "ensure_mode_recorded", lambda signed_in: "subscription")
     monkeypatch.setattr(claude_relogin_notice, "mark_if_needed", lambda: None)
     monkeypatch.setattr(credential_gate, "record_startup", lambda cli: None)
     monkeypatch.setattr(startup.auth_service, "is_setup_required", lambda: True)
     monkeypatch.setattr(startup, "_check_browser_mcp_prereqs", lambda: None)
     monkeypatch.setattr(startup, "_warn_removed_env_vars", lambda: None)
+    monkeypatch.setattr(startup, "settings", ci.settings)
+    return startup, start
+
+
+@pytest.mark.parametrize("where", ["desktop", "docker"])
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("old_setting", [None, "1"])
+def test_worker_start_never_installs_updates_or_removes(worker, monkeypatch, where, installed, old_setting):
+    """Missing or present, with or without the removed "keep installed" row
+    still saved: starting the worker starts no install, update or removal."""
+    store, cli, _ = worker
+    cli.installed, cli.cli_version = installed, "2.1.1" if installed else None
+    monkeypatch.setattr(ci, "platform", lambda: where)
+    if old_setting:
+        store[ci._key("claude_cli_keep_installed")] = old_setting
+    startup, start = _startup(monkeypatch)
+    run = Mock()
+    monkeypatch.setattr(ci, "_run_command", run)
     startup.check_prerequisites()
-    if expected:
-        start.assert_called_once_with("install")
-    else:
-        start.assert_not_called()
+    start.assert_not_called()
+    run.assert_not_called()
+    assert ci.payload()["job"] is None
 
 
-def test_install_success_sets_marker_and_ownership(worker, monkeypatch):
+def test_install_success_records_ownership(worker, monkeypatch):
     store, cli, root = worker
     def install(command):
         expected = (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
@@ -85,8 +96,10 @@ def test_install_success_sets_marker_and_ownership(worker, monkeypatch):
     ci._execute("install")
     result = ci.payload()
     assert result["job"]["state"] == "succeeded"
-    assert result["keep_installed"] and result["installed_by_app"] and result["can_remove"]
+    assert result["installed_by_app"] and result["can_remove"]
     assert result["version"] == "2.2.1"
+    assert "keep_installed" not in result
+    assert result["check_updates"] is True and result["latest_version"] is None
 
 
 @pytest.mark.parametrize("timeout", [False, True])
@@ -98,7 +111,6 @@ def test_install_failure_reports_output(worker, monkeypatch, timeout):
     assert job["state"] == "failed" and job["finished_at"]
     assert job["output_tail"] == "curl: Could not resolve host"
     assert ("10 minutes" if timeout else "network connection") in job["message"]
-    assert not ci.keep_installed()
 
 
 def test_concurrent_start_returns_current_job(worker, monkeypatch):
@@ -258,13 +270,11 @@ def test_remove_preserves_claude_home(worker):
     (home / "settings.json").write_text("owner settings")
     cli.installed, cli.binary_path = True, str(ci._launcher())
     store[ci._key("claude_cli_installed_by_app")] = "1"
-    ci.set_keep_installed(True)
     _job("remove")
     ci._execute("remove")
     assert ci._job["state"] == "succeeded"
     assert not ci._launcher().exists() and not versions.parent.exists()
     assert (home / "settings.json").read_text() == "owner settings"
-    assert not ci.keep_installed()
 
 
 def test_update_uses_cli_updater_and_reports_versions(worker, monkeypatch):
@@ -285,43 +295,23 @@ def test_update_uses_cli_updater_and_reports_versions(worker, monkeypatch):
     assert "2.1.1 to 2.2.1" in ci._job["message"]
 
 
-@pytest.mark.parametrize("marker,has_data,has_cli,expected", [
-    (None, False, False, False), ("1", False, False, True),
-    ("0", True, True, False), (None, True, False, True), (None, False, True, True),
-])
-@pytest.mark.skipif(sys.platform == "win32", reason="Linux container entrypoint requires POSIX paths and shell")
-def test_entrypoint_decision(tmp_path, marker, has_data, has_cli, expected):
-    entrypoint = (Path(__file__).resolve().parents[2] / "entrypoint.sh").read_text()
-    decision = entrypoint[entrypoint.index("claude_cli_keep_installed() {"):entrypoint.index("# Direct --user")]
-    if marker is not None:
-        (tmp_path / ci.MARKER).write_text(marker + "\n")
-    (tmp_path / ".claude").mkdir()
-    if has_data:
-        (tmp_path / ".claude" / "settings.json").write_text("existing")
-    command = "command() { if [ \"$2\" = claude ]; then return " + ("0" if has_cli else "1") + "; fi; builtin command \"$@\"; }\n"
-    script = command + decision + "\nif claude_cli_keep_installed; then echo INSTALL; fi"
-    result = subprocess.run(["bash", "-c", script], env={**ci.os.environ, "HOME": str(tmp_path), "DATA_DIR": str(tmp_path)}, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert ("INSTALL" in result.stdout) is expected
-    assert entrypoint.count("if claude_cli_keep_installed; then") == 1
-    assert "if HOME=/home/appuser claude_cli_keep_installed; then" in entrypoint
+def test_container_start_has_no_installer():
+    """The image's entrypoint and the files it ships no longer install Claude Code."""
+    root = Path(__file__).resolve().parents[2]
+    entrypoint = (root / "entrypoint.sh").read_text(encoding="utf-8")
+    for gone in ("claude_cli_keep_installed", "install-claude-cli", "claude.ai/install", ci.LEGACY_MARKER):
+        assert gone not in entrypoint
+    assert not (root / "docker" / "install-claude-cli.sh").exists()
+    assert "install-claude-cli" not in (root / "Dockerfile").read_text(encoding="utf-8")
 
 
 # --- Review fixes (#1865) ---------------------------------------------------
 
 def test_cli_settings_stay_on_this_worker():
     from app.network.policy import is_shared_setting_key
-    for name in ("claude_cli_keep_installed", "claude_cli_installed_by_app", "claude_cli_startup_check_at"):
+    for name in ("claude_cli_keep_installed", "claude_cli_installed_by_app", "claude_cli_startup_check_at",
+                 "claude_cli_update_check", "antigravity_cli_update_check", "antigravity_cli_startup_check_at"):
         assert not is_shared_setting_key(name + ":same-instance-id")
-
-
-@pytest.mark.parametrize("where,expected", [("docker", True), ("desktop", False)])
-def test_migration_counts_claude_home_on_docker_only(worker, monkeypatch, where, expected):
-    _, cli, root = worker
-    monkeypatch.setattr(ci, "platform", lambda: where)
-    (root / ".claude").mkdir()
-    (root / ".claude" / ".credentials.json").write_text("{}")
-    assert ci.ensure_recorded(cli) is expected
 
 
 def _owned_install(store, cli, root):
@@ -347,7 +337,6 @@ def _owned_install(store, cli, root):
         ci._launcher().symlink_to(binary)
     cli.installed, cli.binary_path = True, str(ci._launcher())
     store[ci._key("claude_cli_installed_by_app")] = "1"
-    ci.set_keep_installed(True)
     return binary
 
 
@@ -364,7 +353,7 @@ def test_remove_refused_while_cli_runs(worker):
         _job("remove")
         ci._execute("remove")
         assert ci._job["state"] == "failed" and "Claude Code is running" in ci._job["message"]
-        assert ci._launcher().exists() and ci.keep_installed()
+        assert ci._launcher().exists()
     finally:
         import psutil
         children = psutil.Process(running.pid).children(recursive=True)
@@ -410,91 +399,192 @@ def test_job_orphaned_by_restart_blocks_then_is_stopped(worker, monkeypatch):
     assert not (ci.settings.effective_data_dir / ci.JOB_RECORD).exists()
 
 
-def _startup(monkeypatch):
-    from app.core import startup, credential_gate, claude_relogin_notice
-    start = Mock()
-    monkeypatch.setattr(ci, "start", start)
-    monkeypatch.setattr(ci.claude_auth_mode, "ensure_mode_recorded", lambda signed_in: "subscription")
-    monkeypatch.setattr(claude_relogin_notice, "mark_if_needed", lambda: None)
-    monkeypatch.setattr(credential_gate, "record_startup", lambda cli: None)
-    monkeypatch.setattr(startup.auth_service, "is_setup_required", lambda: True)
-    monkeypatch.setattr(startup, "_check_browser_mcp_prereqs", lambda: None)
-    monkeypatch.setattr(startup, "_warn_removed_env_vars", lambda: None)
-    monkeypatch.setattr(startup, "settings", ci.settings)
-    return startup, start
-
-
-@pytest.mark.parametrize("marker,expected", [(False, True), (True, False)])
-def test_docker_first_start_installs_when_migration_turns_on(worker, monkeypatch, marker, expected):
-    store, _, root = worker
-    monkeypatch.setattr(ci, "platform", lambda: "docker")
-    monkeypatch.setattr(ci.claude_auth_mode, "has_stored_api_key", lambda: True)
-    if marker:
-        ci.set_keep_installed(True)
+def test_a_failing_marker_write_never_stops_boot(worker, monkeypatch, caplog):
     startup, start = _startup(monkeypatch)
-    startup.check_prerequisites()
-    assert ci.keep_installed()
-    assert start.called is expected
-
-
-def test_setting_failure_never_stops_boot(worker, monkeypatch):
-    startup, start = _startup(monkeypatch)
-    monkeypatch.setattr(ci, "ensure_recorded", Mock(side_effect=OSError("read-only data dir")))
+    monkeypatch.setattr(ci, "retire_keep_installed", Mock(side_effect=OSError("read-only data dir")))
     startup.check_prerequisites()
     start.assert_not_called()
+    assert "Could not turn off the start-time Claude Code install" in caplog.text
 
 
 # --- Update check when the worker starts --------------------------------------
 
 @pytest.fixture
-def real_start(monkeypatch):
-    # The suite and branch previews share the real install, so both skip the check.
+def asking(monkeypatch):
+    """Let the check run (the suite normally never asks a vendor) on this thread."""
     monkeypatch.delenv("TESTING", raising=False)
-    monkeypatch.delenv("AI_SHUFFLE_PREVIEW", raising=False)
+
+    class Inline:
+        def __init__(self, target, args=(), **kw):
+            self.run = lambda: target(*args)
+
+        def start(self):
+            self.run()
+    monkeypatch.setattr(ci.threading, "Thread", Inline)
     start = Mock()
     monkeypatch.setattr(ci, "start", start)
     return start
 
 
-def test_startup_runs_the_cli_updater_once_per_start(worker, real_start, monkeypatch):
-    store, cli, _ = worker
-    cli.installed = True
-    assert ci.update_on_startup(cli) is True
-    real_start.assert_called_once_with("update")
-    # A worker restarting in a loop does not ask again straight away.
-    assert ci.update_on_startup(cli) is False
-    assert real_start.call_count == 1
-    store[ci._key("claude_cli_startup_check_at")] = str(ci.time.time() - ci.STARTUP_CHECK_SECONDS - 1)
-    assert ci.update_on_startup(cli) is True
-    assert real_start.call_count == 2
-
-
-@pytest.mark.parametrize("installed,env", [(False, None), (True, "TESTING"), (True, "AI_SHUFFLE_PREVIEW")])
-def test_startup_update_check_skips_missing_cli_tests_and_previews(worker, real_start, monkeypatch, installed, env):
+def test_startup_check_reports_a_newer_version_and_installs_nothing(worker, asking, monkeypatch):
     _, cli, _ = worker
-    cli.installed = installed
-    if env:
-        monkeypatch.setenv(env, "1")
-    assert ci.update_on_startup(cli) is False
-    real_start.assert_not_called()
+    cli.installed, cli.cli_version, cli.binary_path = True, "2.1.323", str(ci._launcher())
+    run = Mock()
+    monkeypatch.setattr(ci, "_run_command", run)
+    monkeypatch.setattr(ci, "latest_release", lambda: "2.1.330")
+    assert ci.check_on_startup(cli) is True
+    assert ci.payload()["latest_version"] == "2.1.330"
+    assert cuc.available() == [{"provider": "claude", "name": "Claude Code",
+                                "installed_version": "2.1.323", "latest_version": "2.1.330"}]
+    asking.assert_not_called()
+    run.assert_not_called()
+    assert ci.payload()["job"] is None
+
+
+@pytest.mark.parametrize("latest", ["2.1.323", "2.1.300", "2.2.0-beta.1", ""])
+def test_startup_check_stays_quiet_without_a_newer_plain_version(worker, asking, monkeypatch, latest):
+    _, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    monkeypatch.setattr(ci, "latest_release", lambda: latest)
+    assert ci.check_on_startup(cli) is True
+    assert ci.payload()["latest_version"] is None and cuc.available() == []
+
+
+def test_startup_check_survives_an_offline_worker(worker, asking, monkeypatch, caplog):
+    _, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    monkeypatch.setattr(ci, "latest_release", Mock(side_effect=OSError("no route to host")))
+    with caplog.at_level("INFO"):
+        assert ci.check_on_startup(cli) is True
+    assert "could not check for an update" in caplog.text
+    assert cuc.available() == []
+
+
+@pytest.mark.parametrize("installed,version,testing,switch", [
+    (False, None, False, None),       # nothing installed
+    (True, None, False, None),        # installed, version unknown
+    (True, "2.1.323", True, None),    # the test suite
+    (True, "2.1.323", False, "0"),    # the owner turned the check off
+])
+def test_startup_check_is_skipped(worker, asking, monkeypatch, installed, version, testing, switch):
+    store, cli, _ = worker
+    cli.installed, cli.cli_version = installed, version
+    if testing:
+        monkeypatch.setenv("TESTING", "1")
+    if switch:
+        store[cuc._key(cuc.CLAUDE)] = switch
+    release = Mock(return_value="9.9.9")
+    monkeypatch.setattr(ci, "latest_release", release)
+    assert ci.check_on_startup(cli) is False
+    release.assert_not_called()
+    assert cuc.available() == []
+
+
+def test_the_dev_loop_asks_no_vendor_about_its_scripted_cli(worker, asking, monkeypatch):
+    # Its fake claude has a made-up version: a real answer would put a banner
+    # over every UI journey.
+    _, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    release = Mock(return_value="9.9.9")
+    monkeypatch.setattr(ci, "latest_release", release)
+    monkeypatch.setenv("SHUFFLE_DEV_FAKE_AI_URL", "http://127.0.0.1:4010")
+    monkeypatch.setattr("app.preview_run.disposable_preview_data", lambda: True)
+    assert cuc.suppressed() is True
+    assert ci.check_on_startup(cli) is False
+    release.assert_not_called()
+    # The same variable on a real install changes nothing.
+    monkeypatch.setattr("app.preview_run.disposable_preview_data", lambda: False)
+    assert cuc.suppressed() is False
+
+
+def test_the_switch_is_on_by_default_and_turning_it_off_drops_the_notice(worker, asking, monkeypatch):
+    store, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    monkeypatch.setattr(ci, "latest_release", lambda: "2.1.330")
+    assert ci.payload()["check_updates"] is True
+    ci.check_on_startup(cli)
+    assert cuc.available()
+    cuc.set_enabled(cuc.CLAUDE, False)
+    assert store[cuc._key(cuc.CLAUDE)] == "0"
+    assert ci.payload()["check_updates"] is False and ci.payload()["latest_version"] is None
+    assert cuc.available() == []
+    # The Antigravity switch is its own row.
+    assert cuc.enabled(cuc.ANTIGRAVITY) is True
+    cuc.set_enabled(cuc.CLAUDE, True)
+    assert ci.payload()["check_updates"] is True
+
+
+def test_notice_goes_away_once_the_install_catches_up(worker, asking, monkeypatch):
+    """Updated in the app, by the CLI's own updater, or by hand."""
+    _, cli, _ = worker
+    cli.installed, cli.cli_version, cli.binary_path = True, "2.1.323", str(ci._launcher())
+    monkeypatch.setattr(ci, "latest_release", lambda: "2.1.330")
+    ci.check_on_startup(cli)
+    assert cuc.available()
+    cli.cli_version = "2.1.330"
+    assert cuc.available() == [] and ci.payload()["latest_version"] is None
+
+    cli.cli_version = "2.1.323"
+    ci.check_on_startup(cli)
+    assert cuc.available()
+
+    def update(command):
+        cli.cli_version = "2.1.329"   # an update that lands on any version clears the old answer
+        return 0, "updated", False
+    monkeypatch.setattr(ci, "_run_command", update)
+    _job("update")
+    ci._execute("update")
+    assert ci._job["state"] == "succeeded" and cuc.available() == []
+
+
+def test_a_removed_cli_has_no_notice(worker, asking, monkeypatch):
+    _, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    monkeypatch.setattr(ci, "latest_release", lambda: "2.1.330")
+    ci.check_on_startup(cli)
+    cli.installed, cli.cli_version = False, None
+    assert cuc.available() == [] and ci.payload()["latest_version"] is None
+
+
+@pytest.mark.parametrize("chosen,channel", [("stable", "stable"), ("latest", "latest"), (None, "latest"), ("nightly", "latest")])
+def test_check_follows_the_channel_chosen_in_claude_code(worker, monkeypatch, chosen, channel):
+    import json
+    _, _, root = worker
+    home = root / "claude-home"
+    home.mkdir()
+    if chosen:
+        (home / "settings.json").write_text(json.dumps({"autoUpdatesChannel": chosen}))
+    monkeypatch.setattr(ci, "_installer_env", lambda: {"CLAUDE_CONFIG_DIR": str(home)})
+    asked = []
+
+    def get(url, **kw):
+        asked.append((url, kw))
+        return Mock(text="2.1.330\n", raise_for_status=lambda: Mock(text="2.1.330\n"))
+    import httpx
+    monkeypatch.setattr(httpx, "get", get)
+    assert ci.latest_release() == "2.1.330"
+    assert asked[0][0] == ci.RELEASES_URL + channel
+    assert asked[0][1]["timeout"] == ci.CHECK_TIMEOUT_SECONDS
+
+
+def test_a_channel_that_names_no_version_is_refused(worker, monkeypatch):
+    import httpx
+    monkeypatch.setattr(ci, "_installer_env", lambda: {})
+    monkeypatch.setattr(httpx, "get", lambda url, **kw: Mock(raise_for_status=lambda: Mock(text="<html>not found</html>")))
+    with pytest.raises(ValueError, match="did not name a version"):
+        ci.latest_release()
 
 
 def test_worker_start_checks_for_an_update_and_survives_a_failure(worker, monkeypatch, caplog):
-    from app.core import startup, credential_gate, claude_relogin_notice
     _, cli, _ = worker
     cli.installed = True
+    startup, start = _startup(monkeypatch)
     check = Mock(side_effect=[True, RuntimeError("database unavailable")])
-    monkeypatch.setattr(ci, "update_on_startup", check)
-    monkeypatch.setattr(ci, "start", Mock())
-    monkeypatch.setattr(ci.claude_auth_mode, "ensure_mode_recorded", lambda signed_in: "subscription")
-    monkeypatch.setattr(claude_relogin_notice, "mark_if_needed", lambda: None)
-    monkeypatch.setattr(credential_gate, "record_startup", lambda cli: None)
-    monkeypatch.setattr(startup.auth_service, "is_setup_required", lambda: True)
-    monkeypatch.setattr(startup, "_check_browser_mcp_prereqs", lambda: None)
-    monkeypatch.setattr(startup, "_warn_removed_env_vars", lambda: None)
+    monkeypatch.setattr(ci, "check_on_startup", check)
     with caplog.at_level("INFO"):
         startup.check_prerequisites()
         startup.check_prerequisites()
     assert check.call_count == 2 and check.call_args.args == (cli,)
     assert "checking for an update" in caplog.text
     assert "Could not check for a Claude Code update" in caplog.text
+    start.assert_not_called()

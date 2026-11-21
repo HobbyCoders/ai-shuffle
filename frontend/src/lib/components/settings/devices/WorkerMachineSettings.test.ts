@@ -12,7 +12,7 @@ const worker = (device_id = 'server-one', extra: Partial<WorkerMachine> = {}): W
 	device_id, device_name: device_id === 'server-one' ? 'Server one' : 'Laptop two', is_self: device_id === 'server-one', online: true,
 	outcome: 'ok', reason: 'done', availability: { editable: true, always_on: true, always_on_override: null },
 	status: {
-		claude: { installed: true, version: '2.1.1', keep_installed: true, installed_by_app: true, can_install: true,
+		claude: { installed: true, version: '2.1.1', check_updates: true, installed_by_app: true, can_install: true,
 			signed_in: true, email: 'person@example.com', plan: 'Max', status_available: true, job: null },
 		github_signed_in: false, release_channel: { channel: 'stable', editable: true, restart_required: false },
 		claude_sign_in_supported: false
@@ -58,11 +58,11 @@ it('targets the selected worker, not the worker serving this UI', async () => {
 	}));
 });
 
-it('saves keep-installed and the per-worker release channel', async () => {
+it('saves the start-time update check and the per-worker release channel', async () => {
 	render(WorkerMachineSettings, { self: true });
-	await fireEvent.click(await screen.findByRole('switch', { name: 'Keep installed' }));
+	await fireEvent.click(await screen.findByRole('switch', { name: 'Check for updates at startup' }));
 	await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/settings/worker-settings/action', {
-		target: 'server-one', action: { operation: 'claude-keep-installed', keep_installed: false }
+		target: 'server-one', action: { operation: 'claude-update-check', check_updates: false }
 	}));
 	await waitFor(() => expect(screen.getByRole('combobox', { name: 'Release channel' }).hasAttribute('disabled')).toBe(false));
 	await fireEvent.change(screen.getByRole('combobox', { name: 'Release channel' }), { target: { value: 'nightly' } });
@@ -100,7 +100,26 @@ it('confirms an all-worker operation and reports each target, including uncertai
 	});
 });
 
-it('offers all-worker channel, keep-installed and shared stays-on operations', async () => {
+it('has no update-check switch for a worker too old to report one', async () => {
+	delete workers[0].status!.claude!.check_updates;
+	render(WorkerMachineSettings, { self: true });
+	await screen.findByRole('button', { name: 'Update Claude CLI' });
+	expect(screen.queryByRole('switch')).toBeNull();
+	expect(document.body.textContent).not.toContain('Keep installed');
+});
+
+it('sends the update check to all workers', async () => {
+	render(WorkerMachineSettings, { self: true });
+	await screen.findByRole('button', { name: 'Update Claude CLI' });
+	await fireEvent.change(screen.getByRole('combobox', { name: 'All workers action' }), { target: { value: 'no-check' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply…' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Apply to all workers' }));
+	await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/settings/worker-settings/action', {
+		target: 'all', action: { operation: 'claude-update-check', check_updates: false }
+	}));
+});
+
+it('offers all-worker channel and shared stays-on operations', async () => {
 	render(WorkerMachineSettings, { self: true });
 	await screen.findByRole('button', { name: 'Update Claude CLI' });
 	await fireEvent.change(screen.getByRole('combobox', { name: 'All workers action' }), { target: { value: 'nightly' } });

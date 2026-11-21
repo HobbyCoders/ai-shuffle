@@ -24,6 +24,7 @@ import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
+import { antigravity } from './antigravity.svelte';
 import { chatgptRow, claudeSummary, gatewayRow, grokRow, row } from './fixtures';
 import { cliStatus, fakeWorker } from './fake-worker';
 
@@ -651,7 +652,7 @@ describe('Claude Code on the Not connected page', () => {
 			'POST /settings/claude-cli/remove': () => {
 				worker.state.claude = { ...worker.state.claude, cli: { ...worker.state.claude.cli, installed: false } };
 				worker.state.cli = { ...worker.state.cli, installed: false };
-				return { installed: false, version: null, path: null, keep_installed: false, installed_by_app: false,
+				return { installed: false, version: null, path: null, check_updates: true, latest_version: null, installed_by_app: false,
 					can_install: true, can_remove: false, platform: 'docker',
 					job: { kind: 'remove', state: 'succeeded', started_at: '2026-10-06T00:00:00Z',
 						finished_at: '2026-10-06T00:00:05Z', message: removed, output_tail: '' } };
@@ -680,5 +681,52 @@ describe('Claude Code on the Not connected page', () => {
 		await flush();
 		expect(screen.queryByText(removed)).toBeNull();
 		expect(screen.queryByTestId('claude-cli-install')).toBeNull();
+	});
+});
+
+describe('Antigravity on the Not connected page', () => {
+	const meta = { auth_modes: [], dashboard_url: '', guard_default: true, default_models: [] };
+
+	async function open(status: Record<string, unknown>, routes: Parameters<typeof fakeWorker>[1] = {}) {
+		antigravity.status = null; antigravity.meta = null; antigravity.error = null;
+		worker = fakeWorker({ rows: [row()] }, {
+			'GET /antigravity/meta': () => meta,
+			'GET /antigravity/status': () => status,
+			...routes
+		});
+		vi.stubGlobal('fetch', worker.fetch);
+		await providers.refreshAll();
+		settingsNav.go({ category: 'providers', item: 'provider:antigravity' });
+		render(ProvidersCollection);
+		await flush(10);
+	}
+
+	it('shows the installed agent and saves its update check with nothing connected', async () => {
+		await open({ installed: true, version: '1.5.6', source: 'app', can_install: true, check_updates: true,
+			latest_version: '1.5.13', install: null, workers_requiring_update: [] }, {
+			'PUT /antigravity/update-check': (body) => ({ check_updates: (body as { check_updates: boolean }).check_updates,
+				latest_version: null })
+		});
+		expect(screen.getAllByRole('button', { name: 'Set up' }).length).toBeGreaterThan(0);
+		expect(screen.getByText('Version 1.5.13 is available')).toBeTruthy();
+		const check = screen.getByRole('switch', { name: 'Check for updates at startup' });
+		expect(check.getAttribute('aria-checked')).toBe('true');
+
+		await fireEvent.click(check);
+		await flush();
+
+		expect(worker.sent('PUT', '/antigravity/update-check').map((c) => c.body)).toEqual([{ check_updates: false }]);
+		expect(antigravity.status?.check_updates).toBe(false);
+		// One read from the page and one from the section it mounts: no reload loop.
+		expect(worker.sent('GET', '/antigravity/status').length).toBeLessThanOrEqual(2);
+	});
+
+	it('shows no agent section while Antigravity is not installed', async () => {
+		await open({ installed: false, version: null, source: null, can_install: true, check_updates: true,
+			latest_version: null, install: null, workers_requiring_update: [] });
+		expect(screen.getAllByRole('button', { name: 'Set up' }).length).toBeGreaterThan(0);
+		expect(screen.queryByRole('switch', { name: 'Check for updates at startup' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Install Antigravity' })).toBeNull();
+		expect(worker.sent('GET', '/antigravity/status')).toHaveLength(1);
 	});
 });

@@ -2,9 +2,12 @@
 	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
-	 * Claude also shows its mode and the installed CLI (version, keep installed,
+	 * Claude also shows its mode and the installed CLI (version, update check,
 	 * Remove), so an owner without a Claude sign-in can still change or remove them.
+	 * Antigravity shows its installed agent the same way: the update notice
+	 * appears for any installed agent, so its switch has to be reachable here.
 	 */
+	import { untrack } from 'svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { isNativeProvider } from '$lib/api/model-providers';
 	import { loadNativeOptions, nativeOptions } from './native-options.svelte';
@@ -15,6 +18,8 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import ClaudeModeRow from './ClaudeModeRow.svelte';
+	import AntigravityInstall from './setup/AntigravityInstall.svelte';
+	import { antigravity } from './antigravity.svelte';
 	import { kindsOf, type CredentialFlavor, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
@@ -29,6 +34,10 @@
 	// after the CLI is gone; the section leaves when that is dismissed.
 	let showCli = $state(false);
 	$effect(() => { if (cliInstalled) showCli = true; });
+	const isAntigravity = $derived(provider.id === 'antigravity');
+	// Untracked: load() reads and writes the store's own state, which must not re-run this.
+	$effect(() => { if (isAntigravity && !access.readOnly) untrack(() => void antigravity.load(true)); });
+	const agentInstalled = $derived(isAntigravity && !access.readOnly && !!antigravity.status?.installed);
 	const kinds = $derived(kindsOf(provider.id));
 	/** Routes that are a pasted key; a sign-in route has no key to list from (#1652). */
 	const KEY_FLAVORS = new Set<CredentialFlavor>(['key', 'plan-key', 'agy-key', 'gateway']);
@@ -70,4 +79,5 @@
 	{#if provider.claude && (cliInstalled || showCli)}
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} onDismiss={() => (showCli = false)} />
 	{/if}
+	{#if agentInstalled}<AntigravityInstall />{/if}
 </DetailPane>

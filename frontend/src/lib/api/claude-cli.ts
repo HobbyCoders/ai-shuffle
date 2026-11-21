@@ -109,7 +109,10 @@ export interface ClaudeCliInstallation {
 	installed: boolean;
 	version: string | null;
 	path: string | null;
-	keep_installed: boolean;
+	/** This worker asks at start whether a newer Claude Code exists. It only asks. */
+	check_updates: boolean;
+	/** The newer version that check found, or null. */
+	latest_version: string | null;
 	installed_by_app: boolean;
 	can_install: boolean;
 	can_remove: boolean;
@@ -136,14 +139,26 @@ export function getClaudeCliInstallation(): Promise<ClaudeCliInstallation> {
 export function installClaudeCli(): Promise<ClaudeCliInstallation> {
 	return api.post('/settings/claude-cli/install', {});
 }
-export function updateClaudeCli(): Promise<ClaudeCliInstallation> {
-	return api.post('/settings/claude-cli/update', {});
+/** `local` keeps the update on this worker even when "Update all workers" is on. */
+export function updateClaudeCli(local = false): Promise<ClaudeCliInstallation> {
+	return api.post(`/settings/claude-cli/update${local ? '?local=true' : ''}`, {});
 }
 export function removeClaudeCli(): Promise<ClaudeCliInstallation> {
 	return api.post('/settings/claude-cli/remove', {});
 }
-export function setClaudeCliKeepInstalled(keep_installed: boolean): Promise<ClaudeCliInstallation> {
-	return api.put('/settings/claude-cli', { keep_installed });
+export function setClaudeCliUpdateCheck(check_updates: boolean): Promise<ClaudeCliInstallation> {
+	return api.put('/settings/claude-cli', { check_updates });
+}
+
+/** A newer provider CLI the worker found when it started. */
+export interface CliUpdate {
+	provider: 'claude' | 'antigravity';
+	name: string;
+	installed_version: string;
+	latest_version: string;
+}
+export function getCliUpdates(): Promise<{ updates: CliUpdate[] }> {
+	return api.get('/settings/cli-updates', { cache: 'no-store' });
 }
 
 /** Human name for the plan code the CLI prints, when it prints one. */

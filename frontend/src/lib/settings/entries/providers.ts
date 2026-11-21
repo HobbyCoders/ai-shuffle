@@ -38,11 +38,11 @@ export const NATIVE_IMAGE_HELP =
 
 export const entries: SettingEntry[] = [
 	{
-		id: 'providers.cliKeepInstalled', category: 'providers', section: 'Claude Code CLI',
-		label: 'Keep Claude Code installed', item: CLAUDE_PROVIDER_ITEM,
-		hint: 'Reinstall the CLI at start if it is missing',
-		help: 'When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.',
-		keywords: ['claude cli', 'install', 'startup', 'download']
+		id: 'providers.cliCheckUpdates', category: 'providers', section: 'Claude Code CLI',
+		label: 'Check for updates at startup', item: CLAUDE_PROVIDER_ITEM,
+		hint: 'Tells you when a newer version exists',
+		help: 'When on, this worker asks Anthropic for the current version each time it starts and tells you when yours is older. It never installs anything: you choose when to update.',
+		keywords: ['claude cli', 'update', 'startup', 'notice', 'version']
 	},
 	{
 		id: 'providers.cliUpdate', category: 'providers', section: 'Claude Code CLI',

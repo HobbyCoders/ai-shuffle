@@ -140,9 +140,15 @@ The playbook has the agent read the logs and the update state, back up before an
 
 Without an agent: on Docker, [update the Docker image](#updating-the-docker-image), which replaces a failed update with the image's newer code. On the desktop, install the latest installer from the [downloads page](https://hobbycoders.com/ai-shuffle/downloads) over the existing install; your data is kept.
 
-## The Claude Code CLI
+## Claude Code and Antigravity
 
-If you use Claude, the Claude Code CLI keeps itself up to date, as on any computer. Updating AI Shuffle does not reinstall it.
+AI Shuffle does not install, update or remove the Claude Code CLI or Google's Antigravity agent on its own. You do that in **Settings → Providers**, or by hand outside the app. Updating AI Shuffle does not reinstall either one.
+
+When a worker starts, it asks Anthropic and Google for the current version of whichever of the two is installed. If yours is older, the app shows a small notice with an **Update** button. Close the notice and it stays away until a newer version comes out.
+
+Each provider's page in **Settings → Providers** has a **Check for updates at startup** switch. It is on by default and applies to that worker only. Turning it off stops the check and the notice; **Check for update** on the same page still works.
+
+Claude Code can also update itself. That is Claude Code's own setting, and AI Shuffle leaves it as you set it.
 
 ## What the update check sends
 

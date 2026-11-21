@@ -378,8 +378,10 @@ class Acceptance:
 
     @staticmethod
     def lifecycle(action: str) -> dict:
+        # An idle worker. The supervisor adds its reservation token as a query.
         return {"active-sessions": {"active_sessions": 0}, "stop-sessions": {"stopped": True},
-                "update-policy": {"allow_updates": True}}[action]
+                "update-policy": {"allow_updates": True}, "restart-reserve": {"reserved": True},
+                "restart-release": {"released": True}}[action.partition("?")[0]]
 
     def open_database(self) -> None:
         self.runtime.STOP.clear()
