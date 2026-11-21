@@ -54,7 +54,8 @@ class Model:
             self.confirms.append(doc)
             if self.confirm_raw is not None:
                 return self.confirm_raw
-            return json.dumps({"verdicts": [{"pair": p["pair"], "conflict": self.agree}
+            agree = self.agree if callable(self.agree) else lambda pair: self.agree
+            return json.dumps({"verdicts": [{"pair": p["pair"], "conflict": agree(p)}
                                             for p in doc["pairs"]]})
         if request.system == memory_backfill._SYSTEM:
             return json.dumps({e["id"]: "When planning the work" for e in json.loads(body)})
@@ -434,7 +435,47 @@ def test_a_continued_review_does_not_spend_its_claims_on_pairs_already_compared(
     assert [(x["a"]["id"], x["b"]["id"]) for x in claims] == [("m9", "m1")] and rejected == 3
     # The first call of a scope judges its subjects against each other too.
     first = review.Batch(subjects=[a, b, c], shown=shown)
-    assert len(review.parse(answer, first)[0]) == review.MAX_CONFLICTS_PER_CALL
+    assert len(review.parse(answer, first)[0]) == 4
+
+
+async def test_claims_beyond_one_second_look_wait_for_the_next(tmp_path):
+    store = SkillStore(tmp_path)
+    teams = [rule(store, f"Team {n} code reviews are done by Opus.") for n in (1, 2, 3)]
+    late = rule(store, "Team 1 code reviews are done by Sol.")
+
+    def claims(doc):
+        # Three pairs of rules for different teams first, the real clash last.
+        ids = [alias(doc, f"Team {n} code reviews are done by Opus.") for n in (1, 2, 3)]
+        pairs = [(ids[0], ids[1]), (ids[0], ids[2]), (ids[1], ids[2]),
+                 (ids[0], alias(doc, "Team 1 code reviews are done by Sol."))]
+        text = {r["id"]: r["text"].rstrip(".") for r in doc["rules"]}
+        return [{"a": a, "b": b, "a_quote": text[a], "b_quote": text[b], "why": ""} for a, b in pairs]
+
+    model = Model(claims, agree=lambda pair: "Sol" in pair["first"]["text"] + pair["second"]["text"])
+    synth = learner(store, model, daily_calls=40)
+    result = await review.run(synth)
+    assert (result.calls, result.reviewed, result.found, result.rejected) == (2, 4, 0, 3)
+    assert len(model.confirms[0]["pairs"]) == review.MAX_CONFLICTS_PER_CALL
+    assert waiting(store) == [] and review.pending(store) == 1
+
+    # The claim that had no room gets its second look before any new first look.
+    result = await review.run(synth)
+    assert (result.calls, result.found) == (1, 1) and len(model.reviews) == 1
+    assert [{c["a"]["id"], c["b"]["id"]} for c in waiting(store)] == [{teams[0].id, late.id}]
+    assert review.pending(store) == 0 and (await review.run(synth)).calls == 0
+
+
+def test_one_first_look_keeps_no_more_claims_than_a_day_can_confirm():
+    now = time.time()
+    rows = {f"r{n}": {"id": f"m{n}", "origin": "o", "revision": 1, "protected": True,
+                      "scope": "global", "updated_at": now - n,
+                      "text": f"Team {n} code reviews are done by Opus."} for n in range(5)}
+    names = list(rows)
+    answer = json.dumps({"conflicts": [
+        {"a": x, "b": y, "a_quote": rows[x]["text"], "b_quote": rows[y]["text"]}
+        for i, x in enumerate(names) for y in names[i + 1:]]})
+    claims, rejected = review.parse(answer, review.Batch(subjects=list(rows.values()), shown=rows))
+    assert (len(claims), rejected) == (review.MAX_WAITING_CLAIMS, 1)
 
 
 def test_passages_that_differ_only_in_capitals_are_two_instructions():

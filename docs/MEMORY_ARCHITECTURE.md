@@ -202,9 +202,10 @@ only when it names two shown rules of which one is under review and quotes
 one passage from each that stands in that rule: whole words in the rule's own
 spelling and capitals (only spacing, typographic quote and dash forms and the
 capital of the first letter are forgiven). A second call then looks at the
-claimed pairs alone and must agree; when the budget refuses it, the claim is
-kept and gets its second look in a later pass, and nothing is shown until
-then. Anything else is dropped and counted in the pass log row
+claimed pairs alone, three at a time, and must agree; a claim it has no room
+for, or that the budget refuses, is kept and gets its second look in a later
+pass, and nothing is shown until then. Anything else is dropped and counted
+in the pass log row
 (`memory_conflicts` in `.synthesis-log.jsonl`, which never holds rule text).
 A result is stored only for the wording the model was shown: a rule edited or
 merged from a replica while the model answered is reviewed again.

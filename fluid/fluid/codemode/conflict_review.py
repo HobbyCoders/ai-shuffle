@@ -18,8 +18,8 @@ memory learner. Nothing here compares word lists.
   in one situation and quote the clashing instruction from each. A claim is
   dropped unless both quotes stand in their own rule (:func:`locate`), and a
   second call that sees only the two rules must agree (:func:`confirmed`).
-  A claim the budget leaves unconfirmed waits for the next pass. Silence is
-  the default: most stores have no conflict.
+  A claim that call has no room for, or the budget refuses, waits for the
+  next pass. Silence is the default: most stores have no conflict.
 * Where a verdict lives: ``conflict-review.json`` beside the store, local to
   this worker. It records which exact wording of each rule was reviewed and
   the open conflicts. A conflict stays open only while both rules are live
@@ -61,7 +61,10 @@ SUBJECTS_PER_CALL = 12
 PROMPT_CHARS = 48_000
 # Review calls a day per store, first looks and second looks together.
 MAX_CALLS_PER_DAY = 4
+# Claimed pairs one second look judges, and the claims of one first look
+# that may wait for theirs: what the rest of a day's calls can confirm.
 MAX_CONFLICTS_PER_CALL = 3
+MAX_WAITING_CLAIMS = MAX_CONFLICTS_PER_CALL * (MAX_CALLS_PER_DAY - 1)
 # Conflicts a session is told about at once, and records kept on disk.
 MAX_OPEN_CONFLICTS = 3
 MAX_RECORDS = 64
@@ -469,7 +472,7 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
     seen: set[frozenset] = set()
     rejected = 0
     for item in raw:
-        if len(claims) >= MAX_CONFLICTS_PER_CALL:
+        if len(claims) >= MAX_WAITING_CLAIMS:
             rejected += 1
             continue
         names = [item.get(k) for k in ("a", "b")] if isinstance(item, dict) else []
@@ -938,19 +941,23 @@ async def _step(synth: Any, result: Result) -> None:
             save()
         if claims:
             # A second look at the two rules alone, without the rest of the
-            # store pulling their meaning together.
+            # store pulling their meaning together. Claims beyond one call's
+            # worth keep waiting (``pending`` is these claims, in order): a
+            # later pass takes them before any new first look.
+            asked = claims[:MAX_CONFLICTS_PER_CALL]
             try:
-                agreed = confirmed(await ask(confirm_prompt(claims), _CONFIRM_SYSTEM), claims)
+                agreed = confirmed(await ask(confirm_prompt(asked), _CONFIRM_SYSTEM), asked)
             except (ValueError, SynthesisIncomplete):
                 # A claim whose second look is unreadable, empty or cut off
                 # CONFIRM_TRIES times is no conflict; it must not hold up
                 # every later review. A transport failure only waits.
-                state["pending"] = [c | {"tries": int(c.get("tries") or 0) + 1}
-                                    for c in state["pending"]
-                                    if int(c.get("tries") or 0) + 1 < CONFIRM_TRIES]
+                tried = [c | {"tries": int(c.get("tries") or 0) + 1}
+                         for c in state["pending"][:len(asked)]]
+                state["pending"] = ([c for c in tried if c["tries"] < CONFIRM_TRIES]
+                                    + state["pending"][len(asked):])
                 raise
-            result.rejected += len(claims) - len(agreed)
-            state["pending"] = []
+            result.rejected += len(asked) - len(agreed)
+            state["pending"] = state["pending"][len(asked):]
             result.changed = _apply(state, _visible(store), {},
                                     [_stored_claim(c) for c in agreed], now)
             result.found = len(agreed)
