@@ -795,7 +795,7 @@ Each worker keeps its own list, for the Claude account it came from. After you s
 
 #### GET /api/v1/models/claude/subscription
 
-Returns the full (unfiltered) list of Claude subscription models for **Settings → Providers → Claude → Models**, each with its `id`, `label`, and `enabled` flag (`true` by default unless disabled in pickers), along with `captured`, `cli_version`, and `captured_at`.
+Returns the full (unfiltered) list of Claude subscription models for **Settings → Providers → Claude → Models**, each with its `id` (the value pickers save and the PUT below takes), `slug` (the model it runs: `claude-opus-5-5` for `opus` once Claude Code has listed its models, otherwise the `id`), `label`, and `enabled` flag (`true` by default unless disabled in pickers), along with `captured`, `cli_version`, and `captured_at`.
 
 **Auth:** Owner only
 

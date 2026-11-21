@@ -16,14 +16,15 @@
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import TextField from '../../rows/TextField.svelte';
 
-	type SubscriptionModel = { id: string; label: string; enabled: boolean };
+	type SubscriptionModel = { id: string; slug?: string; label: string; enabled: boolean };
 	type SubscriptionCatalogResponse = {
 		models: SubscriptionModel[];
 		captured: boolean;
 		cli_version?: string | null;
 		captured_at?: string | null;
 	};
-	type Row = { id: string; label: string; checked: boolean };
+	/** `id` is what pickers save and the toggle sends; `slug` is the model it runs. */
+	type Row = { id: string; slug: string; label: string; checked: boolean };
 
 	interface Props {
 		/** Viewer without settings access: the list shows, changes and Refresh do not run. */
@@ -52,7 +53,12 @@
 	const shown = $derived.by(() => {
 		const q = filter.trim().toLowerCase();
 		if (!q) return rows;
-		return rows.filter((r) => r.id.toLowerCase().includes(q) || r.label.toLowerCase().includes(q));
+		return rows.filter(
+			(r) =>
+				r.id.toLowerCase().includes(q) ||
+				r.slug.toLowerCase().includes(q) ||
+				r.label.toLowerCase().includes(q)
+		);
 	});
 	const count = $derived(rows.length ? `${checked} of ${rows.length}` : undefined);
 
@@ -72,6 +78,7 @@
 			if (controller.signal.aborted) return;
 			rows = (res.models ?? []).map((m) => ({
 				id: m.id,
+				slug: m.slug || m.id,
 				label: m.label || m.id,
 				checked: m.enabled !== false
 			}));
@@ -198,9 +205,9 @@
 						/>
 						<span class="id curated-identity">
 							<ProviderGlyph kind="claude" />
-							<span>{r.id}</span>
+							<span>{r.slug}</span>
 						</span>
-						{#if r.label && r.label !== r.id}
+						{#if r.label && r.label !== r.slug}
 							<span class="lbl">{r.label}</span>
 						{:else}
 							<span></span>
