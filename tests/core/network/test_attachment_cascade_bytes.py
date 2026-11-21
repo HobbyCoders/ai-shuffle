@@ -9,6 +9,8 @@ once it is dismissed or expires.
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.db import database, network as store
 from app.network import blobs, engine, peer_files
 from tests.core.network.harness import converge, exchange, join
@@ -123,6 +125,22 @@ def test_snapshot_delivered_note_delete_keeps_the_bytes(workers):
         assert blobs.read_local(DIGEST) == PAYLOAD
 
 
+def test_snapshot_delivered_covered_delete_leaves_no_conflict(workers):
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])
+    _delete_note_winning(a)
+    with a.active():
+        # Dependency order, as a state copy applies them: the note page first.
+        pages = [engine.snapshot_chunk(collection, 0) for collection in ("notes", "note_attachments")]
+    with b.active():
+        for page in pages:
+            engine.apply_snapshot_chunk(page)
+        assert database.get_note("n1") is None
+        assert _attachment_conflicts(b) == []
+        assert blobs.read_local(DIGEST) is None
+
+
 def test_unpublished_and_pre_network_attachments_are_kept_too(workers):
     a, b = _shared_note(workers)
     old = b"attachment from before the network"
@@ -151,6 +169,117 @@ def test_an_attachment_the_deleting_device_published_goes_without_a_conflict(wor
         assert b.sql("SELECT id FROM note_attachments") == []
         assert _attachment_conflicts(b) == []
         assert blobs.read_local(DIGEST) is None
+
+
+@pytest.mark.parametrize("child_first", [False, True], ids=["note-first", "attachment-first"])
+def test_a_delete_that_covered_the_attachment_leaves_no_conflict(workers, child_first):
+    """B uploaded, A synced the attachment and deleted the note: an ordinary delete.
+
+    A's scanner signs a tombstone for each cascaded attachment record, before
+    or after the note's (here forced either way); B ends the same in both.
+    """
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])  # A holds the attachment record now
+    with a.active():
+        for i in range(4):
+            database.update_note("n1", title=f"edit {i}")
+            engine.scan_all()
+        database.delete_note("n1")
+        order = ["note_attachments", "notes"] if child_first else ["notes", "note_attachments"]
+        for collection in order:
+            engine.scan_collection(collection)
+    exchange(a, b)
+    with b.active():
+        assert database.get_note("n1") is None
+        assert b.sql("SELECT id FROM note_attachments") == []
+        assert _attachment_conflicts(b) == []
+        assert b.sql("SELECT id FROM sync_conflicts WHERE kept_blob_hash IS NOT NULL") == []
+        assert blobs.read_local(DIGEST) is None
+
+
+def test_the_deleters_attachment_tombstone_in_a_later_batch_drops_the_kept_copy(workers):
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])
+    with a.active():
+        database.update_note("n1", title="edit")
+        engine.scan_all()
+        database.delete_note("n1")
+        engine.scan_collection("notes")  # the attachment tombstone waits for a later pass
+    exchange(a, b)
+    with b.active():
+        # Until A's own tombstone says its delete covered the attachment, B keeps it.
+        assert [c["record_id"] for c in _attachment_conflicts(b)] == ["att1"]
+        assert blobs.read_local(DIGEST) == PAYLOAD
+    with a.active():
+        engine.scan_collection("note_attachments")
+    with b.active():
+        engine.scan_all()  # B's own retraction too: whichever clock wins, A's tombstone releases
+    converge([a, b])
+    with b.active():
+        assert _attachment_conflicts(b) == []
+        assert blobs.read_local(DIGEST) is None
+
+
+def test_an_attachment_the_restored_deleter_published_but_no_longer_had_is_kept(workers):
+    """A uploaded, B fetched, A went back to a backup from before the upload and deleted the note."""
+    a, b = _shared_note(workers)
+    _attach(a)
+    converge([a, b])
+    with b.active():
+        assert blobs.store_fetched(DIGEST, PAYLOAD)
+    with a.active():
+        # The restored database: neither the row nor its record, so no tombstone.
+        a.sql("DELETE FROM note_attachments WHERE id = 'att1'")
+        a.sql("DELETE FROM sync_records WHERE collection = 'note_attachments' AND record_id = 'att1'")
+    _delete_note_winning(a)
+    converge([a, b])
+    with b.active():
+        assert [c["record_id"] for c in _attachment_conflicts(b)] == ["att1"]
+        assert blobs.read_local(DIGEST) == PAYLOAD
+
+
+def test_a_new_attachment_with_kept_bytes_gets_its_own_copy(workers):
+    a, b = _shared_note(workers)
+    _attach(b)
+    _delete_note_winning(a)  # A never saw att1: B keeps it as a conflict
+    converge([a, b])
+    with b.active():
+        [conflict] = _attachment_conflicts(b)
+    with a.active():
+        # The same file, attached to another note: B mirrors it without bytes.
+        database.create_note(note_id="n2", title="Other", content="")
+        database.create_note_attachment(attachment_id="att2", note_id="n2", filename="y.txt",
+                                        file_path="/tmp/y.txt", size_bytes=len(PAYLOAD), data=PAYLOAD)
+        engine.scan_all()
+    exchange(a, b)
+    with b.active():
+        assert database.get_note_attachment_data("att2") == PAYLOAD
+        assert store.delete_conflict(conflict["id"])
+        assert database.get_note_attachment_data("att2") == PAYLOAD
+        assert blobs.read_local(DIGEST) == PAYLOAD
+
+
+def test_the_deleters_tombstone_after_a_dismissed_conflict_is_harmless(workers):
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])
+    with a.active():
+        database.update_note("n1", title="edit")
+        engine.scan_all()
+        database.delete_note("n1")
+        engine.scan_collection("notes")
+    exchange(a, b)
+    with b.active():
+        [conflict] = _attachment_conflicts(b)
+        assert store.delete_conflict(conflict["id"])
+    with a.active():
+        engine.scan_collection("note_attachments")
+    result = exchange(a, b)
+    assert result.rejected == result.retry == 0
+    with b.active():
+        assert b.sql("SELECT id FROM sync_conflicts") == []
 
 
 def test_local_note_delete_is_unchanged(workers):

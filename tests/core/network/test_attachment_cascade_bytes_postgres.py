@@ -119,3 +119,11 @@ def test_peer_note_delete_keeps_attachment_bytes_on_postgres(cluster, workers, m
             conn.cursor().execute("UPDATE sync_conflicts SET expires_at = NOW() - INTERVAL '1 second' "
                                   "WHERE kept_blob_hash = %s", (DIGEST,))
         assert blobs.read_local(DIGEST) is None
+
+        # A's own tombstone for the attachment would release the copy; B's would not.
+        with pg() as conn:
+            assert blobs.release_covered_attachment(conn.cursor(), "att1", deleted_by=b.device_id) == 0
+            assert blobs.release_covered_attachment(conn.cursor(), "att1", deleted_by=a.device_id) == 1
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM sync_conflicts WHERE record_id = 'att1'")
+            assert c.fetchone() is None

@@ -105,8 +105,21 @@ def read_local_range(hash_value: str, offset: int, length: int) -> Optional[Tupl
 
 
 def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=None) -> None:
-    """A record arrived whose bytes we do not have."""
-    if read_local(hash_value) is not None:
+    """A record arrived whose bytes we do not have.
+
+    Bytes already here (another attachment, a kept conflict) are copied into
+    this hash's empty attachment rows: a row never depends on a copy that can
+    go before it does, such as a kept conflict's (#1693).
+    """
+    data = read_local(hash_value)
+    if data is not None:
+        fill = ("UPDATE note_attachments SET data = %s, size_bytes = %s WHERE blob_hash = %s AND data IS NULL",
+                (data, len(data), hash_value))
+        if _cursor is not None:
+            _cursor.execute(*fill)
+        else:
+            with get_db() as conn:
+                conn.cursor().execute(*fill)
         store.upsert_blob(hash_value, size=size, present=True, holder=holder, _cursor=_cursor)
         return
     store.upsert_blob(hash_value, size=size, present=False, holder=holder, _cursor=_cursor)
@@ -116,14 +129,16 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
     """Before a peer's deletion of a note cascades, keep the attachments it removes (#1693).
 
     ``note_attachments.data`` never travels, so this worker may be the only
-    holder of an attachment the deleting device never saw. Each one becomes a
+    holder of an attachment the deleting device never had. Each one becomes a
     conflict (the losing attachment, the winning note tombstone) that also
     holds its bytes, so ``read_local`` still finds them by hash while the
     conflict is kept; dismissing or expiring it drops them. Same transaction
     as the cascade, so a crash keeps either the row or the conflict.
 
-    An attachment the deleting device itself published was seen by it and is
-    removed without a conflict. A local note deletion never reaches here.
+    Every attachment is kept, whoever published it: a record's origin does not
+    say the deleting device still held it (a restore from an older backup).
+    Its own tombstone for the attachment does, and ``release_covered_attachment``
+    then drops the conflict. A local note deletion never reaches here.
     Returns the number of conflicts recorded.
     """
     # Lock the note before reading its attachments: an upload's FK check
@@ -131,17 +146,17 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
     cursor.execute("SELECT id FROM notes WHERE id = %s FOR UPDATE", (note_id,))
     if cursor.fetchone() is None:
         return 0
-    cursor.execute("SELECT * FROM note_attachments WHERE note_id = %s ORDER BY id", (note_id,))
-    rows = [dict(r) for r in cursor.fetchall()]
-    if not rows:
-        return 0
+    # Then the attachment rows, by id: a fetch filling ``data`` waits for the
+    # cascade instead of landing after this read. Copied one at a time.
+    cursor.execute("SELECT id FROM note_attachments WHERE note_id = %s ORDER BY id FOR UPDATE", (note_id,))
+    ids = [r["id"] for r in cursor.fetchall()]
     coll = policy.collection("note_attachments")
     ctx = engine.cached_context()
     kept = 0
-    for row in rows:
+    for attachment_id in ids:
+        cursor.execute("SELECT * FROM note_attachments WHERE id = %s", (attachment_id,))
+        row = dict(cursor.fetchone())
         version = store.get_record(cursor, coll.name, row["id"])
-        if version is not None and version["origin_device_id"] == deleted_by:
-            continue
         try:
             losing = engine.serialize_row(coll, row, cursor=cursor) or {}
         except engine.ApplyError:
@@ -149,8 +164,11 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
         data = row.get("data")
         if isinstance(data, memoryview):
             data = data.tobytes()
-        # Keyed by the bytes' own hash, also for a row whose blob_hash predates the network.
-        blob = (sha256(bytes(data)), bytes(data)) if data is not None else None
+        # Keyed by the bytes' own hash, also for a row whose blob_hash predates
+        # the network. A row without bytes keeps none, but its hash still marks
+        # the conflict as one this function wrote (release_covered_attachment).
+        blob = ((sha256(bytes(data)), bytes(data)) if data is not None
+                else (row.get("blob_hash") or "", None))
         store.add_conflict(cursor, collection=coll.name, record_id=row["id"],
                            losing_clock=int(version["clock"]) if version is not None else 0,
                            losing_device_id=(version["origin_device_id"] if version is not None
@@ -160,6 +178,23 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
                            kept_blob=blob)
         kept += 1
     return kept
+
+
+def release_covered_attachment(cursor, attachment_id: str, *, deleted_by: Optional[str]) -> int:
+    """A device's own tombstone for an attachment: its note deletion covered it (#1693).
+
+    A device signs an attachment tombstone only for a record it held (its
+    scan of the cascade, or a deliberate attachment delete), so the copy kept
+    when its deletion of the note arrived is not needed: that was an ordinary
+    delete. Drops only conflicts ``keep_cascaded_attachments`` wrote for that
+    device's deletion; each holds its own copy, so no other conflict or row
+    loses bytes. Called for every such tombstone, winning or not.
+    """
+    if not deleted_by:
+        return 0
+    cursor.execute("DELETE FROM sync_conflicts WHERE collection = 'note_attachments' AND record_id = %s "
+                   "AND winning_device_id = %s AND kept_blob_hash IS NOT NULL", (attachment_id, deleted_by))
+    return cursor.rowcount or 0
 
 
 def store_fetched(hash_value: str, data: bytes) -> bool:

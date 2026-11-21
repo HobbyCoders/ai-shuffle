@@ -1752,12 +1752,13 @@ def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> Lis
 
 def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, losing_device_id: str,
                  losing_record: Any, winning_clock: int, winning_device_id: str,
-                 kept_blob: Optional[Tuple[str, bytes]] = None) -> None:
+                 kept_blob: Optional[Tuple[str, Optional[bytes]]] = None) -> None:
     """Keep a losing write for review until it expires or is dismissed.
 
     ``kept_blob`` (hash, bytes) holds bytes the loss would otherwise remove
     from every device (#1693). They live and go with this row: dismissing or
-    expiring the conflict drops them. ``blobs.read_local`` serves them.
+    expiring the conflict drops them. ``blobs.read_local`` serves them. Only
+    ``blobs.keep_cascaded_attachments`` passes it (bytes None when it had none).
     """
     # Apply transactions serialize on the network_state clock row. A replay
     # of the same loss should neither append a row nor renew its retention.

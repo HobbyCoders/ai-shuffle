@@ -1990,6 +1990,11 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if record(cursor, coll.name, env.record_id, local, ctx=ctx, force=True) is None:
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
+    covered = env.op == OP_DELETE and coll.name == "note_attachments"
+    if covered:
+        # Winning or not (this worker's own retraction may outrank it).
+        from app.network import blobs
+        blobs.release_covered_attachment(cursor, env.record_id, deleted_by=env.origin_device_id)
     if coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
         wins = existing is None or env.origin_device_id == existing["origin_device_id"] or \
@@ -2032,7 +2037,10 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         _apply_membership(cursor, ctx, plaintext)
 
     # Keep the local loser (a concurrent local edit) for the conflicts list.
-    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
+    # An attachment is never edited, so its deletion loses no edit: the
+    # deleter held the record it deletes, an ordinary delete (#1693).
+    if (existing is not None and existing["origin_device_id"] != env.origin_device_id
+            and not bool(existing["deleted"]) and not covered):
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
@@ -3221,12 +3229,17 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             item = {**item, "record": projected}
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
+        covered = bool(item["deleted"]) and coll.name == "note_attachments"
+        if covered:
+            from app.network import blobs
+            blobs.release_covered_attachment(cursor, item["record_id"], deleted_by=item["origin_device_id"])
         conflict = None
         if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
             comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
                                               int(existing["clock"]), existing["origin_device_id"])
             incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
-            if incoming_hash != existing["content_hash"]:
+            # As on the stream: a winning attachment deletion loses no edit (#1693).
+            if incoming_hash != existing["content_hash"] and not (covered and comparison > 0):
                 loser, winner = (existing, item) if comparison > 0 else (item, existing)
                 if loser["deleted"]:
                     losing_record = {"_deleted": True}

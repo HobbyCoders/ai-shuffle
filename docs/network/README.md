@@ -116,11 +116,15 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    `/peer/blob/{hash}/parts/{index}` and stored locally after a content-hash
    check. An artifact download on a mirror fetches on demand. Attachment bytes
    (`note_attachments.data`) are never in a record, so before a peer's note
-   deletion cascades, each attachment the deleting device did not publish
-   itself is kept as a conflict that also holds its bytes (`kept_blob`, never
-   listed). `read_local` serves them by hash, to this worker and to peers,
-   until the conflict is dismissed or expires, and they go with the row. A
-   local note deletion keeps nothing.
+   deletion cascades, each attachment is kept as a conflict that also holds
+   its bytes (`kept_blob`, never listed). `read_local` serves them by hash, to
+   this worker and to peers, until the conflict is dismissed or expires, and
+   they go with the row. The deleting device signs a tombstone for every
+   attachment record it held; when that tombstone arrives (before or after the
+   note's, live or in a snapshot) the delete covered the attachment, so its
+   kept conflict is dropped, and an attachment deletion never lists a conflict
+   of its own. A new attachment row with bytes already held here gets its own
+   copy. A local note deletion keeps nothing.
 8. **Plugins.** `network_plugins_desired` carries each plugin's id, version,
    enabled flag and config; binaries never travel. A worker's scan publishes a
    row only for a plugin the table does not have yet or when its enabled flag
@@ -315,6 +319,6 @@ its own database, data directory and identity:
 | Certificate, revocation, key-wrap and device-token refusals (a challenge is spendable only by its device) | `test_verification_refusals.py` |
 | A session an API key places on another worker keeps its owner | `test_remote_session_api_owner.py` |
 | Facts, skills, plugins, blobs, owners | `test_collections.py` |
-| A peer's winning note deletion keeps the attachment bytes it cascades away until the conflict goes | `test_attachment_cascade_bytes.py`, `test_attachment_cascade_bytes_postgres.py` |
+| A peer's winning note deletion keeps the attachment bytes it cascades away until the conflict goes, unless the deleter's own attachment tombstone shows it covered them | `test_attachment_cascade_bytes.py`, `test_attachment_cascade_bytes_postgres.py` |
 | Prose skill folders | `test_prose_skills_sync.py` |
 | Shared-database cluster migration | `test_migrate.py` |
