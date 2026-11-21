@@ -181,7 +181,10 @@ def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tm
     (tmp_path / "test_broken.py").unlink()
     fixture.write_text("def test_x(:\n")
     result = run(tmp_path / "broken")
-    assert result.returncode not in (0, 1), result.stdout + result.stderr
+    # Nothing collects, so each worker fails inside the partition. xdist then
+    # ends with an internal error or with the collection error alone, whichever
+    # its controller reads first: never a pass, and never a receipt.
+    assert result.returncode != 0, result.stdout + result.stderr
     assert not (tmp_path / "broken" / "receipt.json").exists()
 
 
