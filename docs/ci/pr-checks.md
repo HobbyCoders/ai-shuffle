@@ -217,6 +217,14 @@ PostgreSQL safety always run in full.
   five test-minutes a shard, at most eight). Tests the shards never run (the
   policy suite's `tests/scripts/` and the docs tests) are left out of the
   choice; their jobs run anyway.
+- A file only main changed since the map, which the pull request leaves as
+  main has it, was tested by main's own full run. It still chooses tests, but
+  two kinds no longer run everything: how CI Backend runs and judges its
+  shards (`ci-backend.yml`, the shard and map scripts), and a file no code or
+  test names. Neither can change which tests reach the pull request's files.
+  Main's dependency, `conftest.py`, test-data and Python changes count as
+  before. Maps are a run of main behind, so without this most pull requests
+  ran every test after any merge that touched one of those files.
 - Any doubt runs every test: no map, a map whose commit is not on main, a
   change to the dependencies (any package manifest or lockfile, in any folder), the pytest setup (any `conftest.py`, the root one
   too) or how the shards run and are judged, a file under `tests/` that is not

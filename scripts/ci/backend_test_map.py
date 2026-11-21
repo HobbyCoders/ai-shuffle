@@ -22,6 +22,11 @@ the whole checkout or a top-level folder run too, but cannot narrow the
 choice. A file nothing names that way, any conftest, and any file under
 tests/ that is not Python (fixtures, data, snapshots) print ``all``.
 
+In CI a pull request's change starts at the map's commit, so it holds what
+main changed since. Of those files, CI plumbing and files nothing names do not
+print ``all``: main's full run tested them, and they move no test onto or off
+the pull request's files.
+
     python scripts/ci/backend_test_map.py merge --hits DIR --out MAP --commit SHA
     python scripts/ci/backend_test_map.py select --map MAP --base REV [--head REV]
 
@@ -66,6 +71,14 @@ FULL_SUITE_PATTERNS = (
     "fluid/pyproject.toml", ".github/workflows/ci-backend.yml",
     "scripts/ci/backend_test_map.py", "tests/_test_map.py", "tests/__init__.py",
     # How CI Backend splits, reruns and judges its shards.
+    "scripts/ci/backend_shard*.py", "scripts/ci/backend_gate.py", "scripts/ci/record_failures.py",
+)
+# The ones above that decide how CI Backend runs, records and judges tests, not
+# what the code does. A pull request changing one runs everything to prove it;
+# one only main changed since the map was proven by main's own full run, and
+# cannot change which tests reach the pull request's files.
+CI_PLUMBING_PATTERNS = (
+    ".github/workflows/ci-backend.yml", "scripts/ci/backend_test_map.py", "tests/_test_map.py",
     "scripts/ci/backend_shard*.py", "scripts/ci/backend_gate.py", "scripts/ci/record_failures.py",
 )
 # Package manifests and lockfiles anywhere: tests read them by paths built at
@@ -548,7 +561,7 @@ class Selector:
                 else:
                     pending.append((user_file, module_name(user_file), module_level_name, depth + 1))
 
-    def other_change(self, path: str) -> None:
+    def other_change(self, path: str, main_only: bool = False) -> None:
         p = PurePosixPath(path)
         needles = {path} | ({p.name} if p.name not in GENERIC_NAMES and len(p.name) >= 6 else set())
         tests = {t for t in self.files if fast_subset(t) and any(n in self.files[t] for n in needles)}
@@ -580,6 +593,12 @@ class Selector:
                     self.file_level(source, f"{qualname} reads changed {path} but the map does not know it")
             self.name_changes(source, module_name(source), names)
         if not tests and not narrow and not readers:
+            if main_only:
+                # No code names it, so it moved no function the map follows
+                # into or out of a test; main's full run tested it.
+                self.reasons.append(f"{path}: only main changed it and no code reads it by name; "
+                                    f"main's full run tested it")
+                return
             # Nothing names it in code: whatever reads it (code loading its
             # folder, a path built at run time) is unknown.
             raise FullSuite(f"{path}: no code reads it by name and no test names it or its folder")
@@ -596,12 +615,21 @@ class Selector:
                 self.selected.add(test)
 
 
-def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source) -> tuple[str | list[str], list[str]]:
-    """``("all" | [tests], reasons)``."""
+def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source,
+           main_only: frozenset[str] | set[str] = frozenset()) -> tuple[str | list[str], list[str]]:
+    """``("all" | [tests], reasons)``.
+
+    ``main_only`` names the changed files only main changed since the map,
+    which the pull request leaves as main has them. Main's full run tested
+    those, so they count only where they can make the map's view of the
+    pull request's files stale: Python, conftests, dependencies and setup.
+    """
     try:
         if test_map is None:
             raise FullSuite("no test map from a full run on main")
         for path in changed:
+            if path in main_only and any(fnmatch(path, pattern) for pattern in CI_PLUMBING_PATTERNS):
+                continue
             if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
                 raise FullSuite(f"{path} changes the test setup or dependencies")
             if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
@@ -626,7 +654,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 selector.python_change(path)
                 selector.subprocess_users(path)
             else:
-                selector.other_change(path)
+                selector.other_change(path, main_only=path in main_only)
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):
@@ -658,14 +686,19 @@ def changed_names(base: str, head: str) -> list[str]:
     return names
 
 
-def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | list[str], list[str], dict | None]:
+def choose(map_path: Path, base_rev: str, head: str = "HEAD",
+           main_rev: str | None = None) -> tuple[str | list[str], list[str], dict | None]:
     """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
 
+    With ``main_rev`` (main's tip, which ``head`` merges), the files ``head``
+    leaves as main has them are the ones only main changed since ``base_rev``.
     Returns the selection, the reasons and the map it was made from.
     """
     try:
         base = git("rev-parse", base_rev).strip()
         changed = changed_names(base, head)
+        own = set(changed_names(git("rev-parse", main_rev).strip(), head)) if main_rev else set(changed)
+        main_only = frozenset(path for path in changed if path not in own)
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None
@@ -676,9 +709,10 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | lis
                                text=True, encoding="utf-8", errors="replace")
         return shown.stdout if shown.returncode == 0 else None
 
-    result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
+    result, reasons = select(changed, test_map, load_sources(ROOT), base_source, main_only)
     if test_map is not None:
-        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} changed files.")
+        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} changed files, "
+                          f"{len(main_only)} of them only main changed since.")
     return result, reasons, test_map
 
 
@@ -741,7 +775,7 @@ def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
         if not recorded or subprocess.run(["git", "merge-base", "--is-ancestor", recorded, parents[1]],
                                           cwd=ROOT, capture_output=True, check=False).returncode != 0:
             return shard_plan("all", None), [f"The test map's commit {recorded[:12] or '?'} is not on main; running everything."]
-        result, reasons, test_map = choose(map_path, recorded, parents[0])
+        result, reasons, test_map = choose(map_path, recorded, parents[0], main_rev=parents[1])
         return shard_plan(result, test_map), reasons
     except Exception as error:  # noqa: BLE001 - any doubt runs every test
         return shard_plan("all", None), [f"Selection failed, running everything: {type(error).__name__}: {error}"]
