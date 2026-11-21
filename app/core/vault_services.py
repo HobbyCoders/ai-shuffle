@@ -367,7 +367,8 @@ async def perform(
     headers = {
         "Accept": "*/*",
         "Accept-Encoding": "identity",
-        "User-Agent": "ai-shuffle-vault",
+        # Unchanged since this was "private access": services may filter on it.
+        "User-Agent": "ai-shuffle-private-access",
         header[0]: header[1],
     }
     if body:
