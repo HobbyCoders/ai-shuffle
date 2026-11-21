@@ -688,20 +688,12 @@ def _opaque_nodes(nodes: list[SessionNode], owners: dict[str, int]) -> set[int]:
              if isinstance(block, ToolUseBlock)}
     opaque: set[int] = set()
     for i, node in enumerate(nodes):
-        if _holds_image(node) or any(
-                isinstance(block, ToolResultBlock)
-                and names.get(block.tool_use_id) in _OPAQUE_RESULT_TOOLS
-                for block in node.message.content):
-            opaque.add(i)
+        for block in node.message.content:
+            if isinstance(block, Image) or (isinstance(block, ToolResultBlock) and (
+                    names.get(block.tool_use_id) in _OPAQUE_RESULT_TOOLS
+                    or any(isinstance(inner, Image) for inner in block.content or ()))):
+                opaque.add(i)
     return opaque
-
-
-def _holds_image(node: SessionNode) -> bool:
-    """Whether the stored message has an image, its own or in a tool result."""
-    return any(
-        isinstance(block, Image) or (isinstance(block, ToolResultBlock) and any(
-            isinstance(inner, Image) for inner in block.content or ()))
-        for block in node.message.content)
 
 
 # Turns the host starts on the owner's behalf: they continue the request
@@ -803,10 +795,8 @@ def _cut_old_inputs(
     input Claude Code holds for each call, for the count.
 
     The rows are not marked as compacted: the portable checkpoint ends where
-    the ladder's work ends, as it did. A shorter input can still bring a
-    checkpoint under its size limit, or make a compaction worth answering at
-    all; :func:`compact_messages` keeps either from adding a checkpoint that
-    stands for an image as text.
+    the ladder's work ends, as it did. :func:`compact_messages` decides what
+    is archived and whether a checkpoint is written with every input whole.
     """
     done = {result["tool_use_id"] for row in out for result in row.get("toolResults", [])
             if not result.get("isError", False)}
@@ -1121,58 +1111,52 @@ def compact_messages(
                 + [f"result:{r['tool_use_id']}" for row in group for r in row.get("toolResults", [])])
         if any(row["text"] for row in group) or any(owners.get(key) in opaque for key in keys):
             guarded.update(use["tool_use_id"] for row in group for use in row["toolUses"])
+    # What a re-seed on another worker gets must not depend on the cut: which
+    # pinned rows are archived, whether a checkpoint is written and where it
+    # ends are decided on ``whole``, the answer with every input as stored
+    # (also the ones an earlier compaction cut, which Claude Code now posts
+    # as its own rows). The cut only makes the text of those rows shorter.
+    # Otherwise a pinned row the cut made room for stays in the answer, past
+    # the end of the checkpoint and in no archive, and a re-seed loses it; or
+    # a checkpoint is written where the stored path, which has every image,
+    # was replayed before.
     fixed = {id(row) for _, row in unknown}
-    uncut = (list(out), list(covers), list(shrunk), list(dropped))
+    stored = {block.id: block.input for node in nodes for block in node.message.content
+              if isinstance(block, ToolUseBlock)}
+    whole = _with_stored_inputs(out, stored, fixed)
+    archived = len(dropped)
+    _fit_pinned(whole, covers, shrunk, dropped, unknown, requests, target, None)
+    gone = {id(row) for row in dropped[archived:]}
+    out[:] = [row for row in out if id(row) not in gone]
     cut_chars = _cut_old_inputs(
         out,
         refs={key: nodes[k].node_id for key, k in owners.items() if at.get(k, tail) < tail},
         guarded=guarded, fixed=fixed,
         shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},
     )
-
-    def finish(posted, out, covers, shrunk, dropped, archive, report):
-        """The answer made of ``out`` and its note row; raises when it saves
-        too little of ``posted``."""
-        _fit_pinned(out, covers, shrunk, dropped, unknown, requests, target, report)
-        note = _note_row(dropped, notes, archive)
-        final = _alternate(([note] if note else []) + out)
-        validate_rows(final, handles=False)
-        # Content only: a handle is how Claude Code names a row, not context.
-        before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
-                         for side in (posted, final))
-        if after > before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING):
-            raise NothingToCompact("no safe compaction saving")
-        return final, note
-
-    final, note = finish(rows, out, covers, shrunk, dropped, archive, report)
+    _fit_report(out, unknown, target, report)
     if report is not None:
         report["input_tokens_cut"] = cut_chars // 4
+    note = _note_row(dropped, notes, archive)
+    final = _alternate(([note] if note else []) + out)
+    validate_rows(final, handles=False)
+    if not _saves(rows, final, trigger):
+        raise NothingToCompact("no safe compaction saving")
     if checkpoint is not None:
         checkpoint.clear()
-        made = _checkpoint(out, covers, shrunk, note, nodes)
-        if made.get("rows") and _image_through(out, covers, nodes, owners, made["through"]):
-            # The checkpoint's rows are text: it stands for a row Claude Code
-            # keeps with an image as that row's caption, and a replay from it
-            # skips the stored node that has the image. That is as it was,
-            # but cut inputs must not add such a checkpoint: one that only
-            # fits its size limit, or belongs to an answer that only saves
-            # enough, because inputs were cut (now or by an earlier
-            # compaction) is not written. Judged on the same answer with
-            # every input as stored.
-            stored = {block.id: block.input for node in nodes for block in node.message.content
-                      if isinstance(block, ToolUseBlock)}
-            w_out, w_covers, w_shrunk, w_dropped = uncut
-            w_out = _with_stored_inputs(w_out, stored, fixed)
-            try:
-                _, w_note = finish(_with_stored_inputs(rows, stored, set()), w_out, w_covers,
-                                   w_shrunk, w_dropped, None if archive is None else list(archive), None)
-                whole = _checkpoint(w_out, w_covers, w_shrunk, w_note, nodes)
-            except NothingToCompact:
-                whole = {}
-            if not whole.get("rows"):
-                made = whole
-        checkpoint.update(made)
+        if _saves(_with_stored_inputs(rows, stored, set()),
+                  _alternate(([note] if note else []) + whole), trigger):
+            made = _checkpoint(whole, covers, shrunk, note, nodes)
+            checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes) if made.get("rows") else made)
     return final
+
+
+def _saves(posted: list[dict[str, Any]], final: list[dict[str, Any]], trigger: str) -> bool:
+    """Whether answering ``posted`` with ``final`` saves enough to be worth it."""
+    # Content only: a handle is how Claude Code names a row, not context.
+    before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
+                     for side in (posted, final))
+    return after <= before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING)
 
 
 def _with_stored_inputs(
@@ -1188,23 +1172,6 @@ def _with_stored_inputs(
         whole.append(row if all(a is b for a, b in zip(uses, row["toolUses"]))
                      else {**row, "toolUses": uses})
     return whole
-
-
-def _image_through(
-    out: list[dict[str, Any]], covers: list[int], nodes: list[SessionNode],
-    owners: dict[Any, int], through: str,
-) -> bool:
-    """Whether a checkpoint of ``out`` that ends at stored node ``through``
-    holds a row Claude Code keeps (by its handle) with an image."""
-    last = next(i for i, node in enumerate(nodes) if node.node_id == through)
-    for i, row in enumerate(out):
-        if "handle" in row and 0 <= covers[i] <= last:
-            keys = ([use["tool_use_id"] for use in row["toolUses"]]
-                    + [f"result:{result['tool_use_id']}" for result in row.get("toolResults", [])])
-            if any(_holds_image(nodes[k]) for k in {covers[i], *(owners.get(key) for key in keys)}
-                   if k is not None):
-                return True
-    return False
 
 
 def _row_tokens(rows: list[dict[str, Any]]) -> int:
@@ -1261,6 +1228,14 @@ def _fit_pinned(
             out[:] = [out[i] for i in keep]
             covers[:] = [covers[i] for i in keep]
             shrunk[:] = [shrunk[i] for i in keep]
+    _fit_report(out, unknown, target, report)
+
+
+def _fit_report(
+    out: list[dict[str, Any]], unknown: list[tuple[int, dict[str, Any]]],
+    target: int, report: dict[str, Any] | None,
+) -> None:
+    """Say in ``report`` whether ``out`` meets ``target``, and what holds it over."""
     if report is not None:
         after = _row_tokens(out)
         report.update(target_tokens=target, after_tokens=after, met=after <= target)

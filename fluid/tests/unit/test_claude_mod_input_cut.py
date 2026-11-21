@@ -67,8 +67,9 @@ class Chat:
         posted = [dict(r) for r in self.cli]
         report: dict = {}
         self.checkpoint: dict = {}
+        self.archive: list[dict] = []
         out = compact_messages(posted, self.stored, context_window=200_000, trigger=trigger,
-                               report=report, checkpoint=self.checkpoint)
+                               report=report, checkpoint=self.checkpoint, archive=self.archive)
         assert_mod_accepts(out, posted)
         # Claude Code keeps a handled row as it is and builds the rest anew.
         self.cli = [r if "handle" in r else {**r, "handle": f"built{next(self._ids)}"} for r in out]
@@ -398,3 +399,24 @@ def test_a_group_with_an_image_result_is_left_as_claude_code_has_it():
     handles = {row.get("handle") for row in out}
     assert all(row["handle"] in handles for row in rows)
     assert CUT in inputs(out)["t0"]["content"]  # the calls around it are cut as usual
+
+
+def test_a_pinned_row_leaves_the_answer_as_it_did_before_inputs_were_cut():
+    """What leaves through the note is decided with every input whole. The
+    cut makes room for a skill's instructions (a row only Claude Code holds),
+    but kept in the answer they would sit past the end of the checkpoint and
+    in no archive, and a re-seed on another worker would lose them. They are
+    archived as they were, and the checkpoint's note names them."""
+    chat = Chat()
+    big_writes(chat, 4)
+    chat.call("Read", {"file_path": "src/big.py"}, result="x" * 80_000)  # trimmed by the ladder
+    chat.add(Message("user", [Text("/deploy-skill now")]))
+    chat.cli.append({"role": "user", "text": "SKILL-INSTRUCTIONS " + "s" * 60_000,
+                     "toolUses": [], "handle": "claude-only"})
+    chat.write(8)
+    out, report = chat.compact()
+    assert report["input_tokens_cut"] > 4 * 18_000 // 4
+    assert report["after_tokens"] + 60_000 // 4 < report["target_tokens"]  # cut, it would have fit
+    assert not any(row["text"].startswith("SKILL-INSTRUCTIONS") for row in out)
+    [kept] = [entry for entry in chat.archive if entry["text"].startswith("SKILL-INSTRUCTIONS")]
+    assert kept["node_id"] in chat.checkpoint["rows"][0]["text"]
