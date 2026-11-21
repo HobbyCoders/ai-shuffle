@@ -1,7 +1,8 @@
 // Adding an item from a Settings draft form on a phone (#1895): the saved
 // item's page takes the draft's place, so the page's Back and the system Back
 // both return to that collection's list (with the new row), and one more Back
-// reaches the Settings index. Covers MCP servers, hooks and API users. A save
+// reaches the Settings index. Covers MCP servers, hooks and API users, and a
+// server named like the MCP draft's old id (`new-mcp-server`). A save
 // the server refuses keeps the draft open. A desktop guard keeps the split
 // layout's behaviour: the saved item opens beside the list.
 import { runJourney } from './runner.mjs';
@@ -139,6 +140,31 @@ function phoneCase(key, back) {
 // The service worker would answer the stubbed requests before page.route sees them.
 await runJourney({ name: 'settings-draft-save-back', browser: async () => ({ context: { serviceWorkers: 'block' } }), allow: DEV_INSTANCE_NOISE, cases: [
 	...['mcp', 'hooks', 'api'].flatMap(key => [phoneCase(key, 'page'), phoneCase(key, 'system')]),
+	{
+		// A valid server name that was once the draft's own id.
+		name: 'phone-mcp-saved-as-old-draft-id', viewports: ['phone'], throttles: ['fast'],
+		async setup({ page, status }) {
+			await KINDS.mcp.stub(page);
+			await openCategory(page, status, KINDS.mcp.category);
+		},
+		async act({ page, mark }) {
+			const name = 'new-mcp-server';
+			await mark(`add a server named ${name}`);
+			await addItem(page, KINDS.mcp, name);
+			expect(!(await visible(page.getByText(KINDS.mcp.idle, { exact: true })).isVisible()), 'the saved server shows, not the idle page');
+			expect(await button(page, 'Back to MCP servers').isVisible(), 'the saved server offers Back to its list');
+
+			await mark('Back reaches the list with the row');
+			await button(page, 'Back to MCP servers').click();
+			await listRow(page, name).waitFor({ timeout: 10_000 });
+			expect(await listShown(page), `Back shows the MCP servers list (${await where(page)})`);
+
+			await mark('the row opens the server');
+			await listRow(page, name).click();
+			await detailTitle(page, name).waitFor({ timeout: 10_000 });
+			expect(!(await visible(page.getByText(KINDS.mcp.idle, { exact: true })).isVisible()), 'the row opens the server, not the idle page');
+		}
+	},
 	{
 		name: 'phone-mcp-failed-save-keeps-draft', viewports: ['phone'], throttles: ['fast'],
 		allow: [{ kind: 'failed_requests', status: 500, url: /\/api\/v1\/mcp\/servers$/, reason: 'the journey refuses this save on purpose' }],
