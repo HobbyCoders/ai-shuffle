@@ -101,7 +101,9 @@ def read_local_range(hash_value: str, offset: int, length: int) -> Optional[Tupl
 
 def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=None) -> None:
     """A record arrived whose bytes we do not have."""
-    if read_local(hash_value) is not None:
+    # Read on the caller's transaction: an apply must not hold a second pool
+    # connection (or, on a shared one, commit its savepoints away).
+    if read_local(hash_value, _conn=getattr(_cursor, "connection", None)) is not None:
         store.upsert_blob(hash_value, size=size, present=True, holder=holder, _cursor=_cursor)
         return
     store.upsert_blob(hash_value, size=size, present=False, holder=holder, _cursor=_cursor)

@@ -26,6 +26,7 @@ import os
 import random
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
@@ -171,13 +172,20 @@ def _copy_begin(device_id: str, ctx: Any) -> None:
                    "updated_at": time.time()}
 
 
-def _apply_received(manifest: dict, publisher: str) -> tuple[dict, int]:
+def _apply_received(manifest: dict, publisher: str, held_view: Optional[dict] = None) -> tuple[dict, int]:
+    """Apply a downloaded copy. While the outbox is held, ``held_view`` (the
+    publisher's view of our stream, already checked for a rollback) lets this
+    apply sign the local changes it replaces if that view would open the hold
+    (``peer_view_clears_hold``); the hold itself opens only after it applied."""
     from app.network import peer_snapshot
 
     def applied(done: int, total: int) -> None:
         _copy_progress(apply_done=done, apply_total=total)
 
-    return manifest, peer_snapshot.apply_received(manifest, publisher, on_progress=applied)
+    signs = (held_view is not None and engine.outbox_held()
+             and peer_view_clears_hold(publisher, held_view, own_exchange=True))
+    with engine.signing_while_held() if signs else nullcontext():
+        return manifest, peer_snapshot.apply_received(manifest, publisher, on_progress=applied)
 
 
 def _copy_progress(**fields) -> None:
@@ -415,6 +423,9 @@ class PeerLink:
         # tell a peer that is still delivering from one that never answered.
         self.batches = 0
         self.syncing = False
+        # A required state copy from this peer is pending while our outbox is
+        # held; its own exchange opens the hold once it applied.
+        self.copying_held = False
         self._sync_lock = asyncio.Lock()
         self._announced = tuple(self.endpoints)
 
@@ -748,15 +759,29 @@ class PeerLink:
             if target is None:
                 # Catch up to a fixed frontier, not a continuously moving writer.
                 target = {origin: dict(streams) for origin, streams in theirs.items() if origin != ctx.device_id}
+            deferred = False
             if exchange.get("snapshot_required"):
                 summary["snapshot_required"] = True
+                held_view = None
+                if engine.outbox_held():
+                    # The copy may replace a row with an unsigned local change,
+                    # which waits while the outbox is held (``_check_local``).
+                    # Check for a rollback first. The hold stays until the copy
+                    # applied (a scan now could sign a row it deletes); on a
+                    # checked view its apply signs what it can preserve.
+                    if await self._check_rollback(client, ctx, theirs):
+                        ctx = engine.require_context()
+                    held_view = theirs.get(ctx.device_id) or {}
+                    self.copying_held = True
                 try:
-                    summary["received"] += await self.receive_state(client, ctx)
+                    summary["received"] += await self.receive_state(client, ctx, held_view=held_view)
                 except PeerStateUnavailable as exc:
                     # The peer is still filling its own copy (its transcripts,
                     # say). Keep exchanging operations; ask again next pass.
                     logger.info("Peer %s cannot hand out a state copy yet: %s", self.device_id, exc)
-                    summary["snapshot_deferred"] = True
+                    summary["snapshot_deferred"] = deferred = True
+                finally:
+                    self.copying_held = False
                 ctx = engine.require_context()
             ops = exchange.get("ops") or []
             if ops:
@@ -793,20 +818,22 @@ class PeerLink:
             if caught_up:
                 break
             if current == marks:
-                raise PeerError("Peer sync could not fill missing updates")
+                # While the outbox is held, a peer op for a row with an
+                # unsigned local change waits (``engine._check_local``). The
+                # streams were just compared: open the outbox on that view,
+                # as after the pull, and ask for the same batch once more.
+                # Not when a required copy was deferred: a scan now could
+                # sign a row that copy deletes; the next pass asks again.
+                if not engine.outbox_held() or deferred:
+                    raise PeerError("Peer sync could not fill missing updates")
+                ctx, released = await self._compare_streams(client, ctx, theirs)
+                if not released:
+                    raise PeerError("Peer sync could not fill missing updates")
+                continue
             # This is already the next request's committed frontier. A later
             # local write can safely be advertised on the following exchange.
             marks = current
-        if await self._check_rollback(client, ctx, theirs):
-            ctx = engine.require_context()
-        # Do not wait for the scanner's next wake or another network pass.
-        # Existing catalog cursors survive the hold; publish only their tail.
-        if engine.outbox_held():
-            released = await asyncio.to_thread(release_hold_for_peer_view, self.device_id,
-                                               theirs.get(ctx.device_id) or {})
-            if released:
-                self.syncing = True
-                await asyncio.to_thread(catalog.publish_owned)
+        ctx, _ = await self._compare_streams(client, ctx, theirs)
         # Stored addresses follow the same rule as dialed ones (``endpoints``).
         their_endpoints = exchange.get("endpoints")
         their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
@@ -851,6 +878,24 @@ class PeerLink:
         self.contact_kick_used = False
         self.last_error, self.last_error_code = self.sync_warning, None
         return summary
+
+    async def _compare_streams(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                               theirs: Dict[str, Dict[str, int]]) -> tuple[engine.NetworkContext, bool]:
+        """Check the peer's view of our stream for a rollback, then open a
+        held outbox on it. Returns the current context and whether this call
+        opened the outbox."""
+        if await self._check_rollback(client, ctx, theirs):
+            ctx = engine.require_context()
+        # Do not wait for the scanner's next wake or another network pass.
+        # Existing catalog cursors survive the hold; publish only their tail.
+        released = False
+        if engine.outbox_held():
+            released = await asyncio.to_thread(release_hold_for_peer_view, self.device_id,
+                                               theirs.get(ctx.device_id) or {}, own_exchange=True)
+            if released:
+                self.syncing = True
+                await asyncio.to_thread(catalog.publish_owned)
+        return ctx, released
 
     def _note_stalled_pull(self, ctx, before, current, theirs, checked, summary) -> None:
         """Retain head diagnostics without turning ordinary catch-up into bootstrap.
@@ -905,11 +950,14 @@ class PeerLink:
         summary.setdefault("apply", {}).setdefault("reasons", []).append(warning)
 
     async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
-                            *, on_wait=None) -> int:
-        """Copy the peer's full state and apply it; progress shows in ``state_copy_status``."""
+                            *, on_wait=None, held_view: Optional[dict] = None) -> int:
+        """Copy the peer's full state and apply it; progress shows in ``state_copy_status``.
+
+        ``held_view`` is the peer's rollback-checked view of our stream while
+        our outbox is held (see ``_apply_received``)."""
         _copy_begin(self.device_id, ctx)
         try:
-            applied = await self._receive_state(client, ctx, on_wait=on_wait)
+            applied = await self._receive_state(client, ctx, on_wait=on_wait, held_view=held_view)
         except Exception as exc:
             reason = f"{exc}".strip() or type(exc).__name__
             _copy_progress(phase="failed", error=reason[:ERROR_DETAIL_LIMIT])
@@ -918,7 +966,7 @@ class PeerLink:
         return applied
 
     async def _receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
-                             *, on_wait=None) -> int:
+                             *, on_wait=None, held_view: Optional[dict] = None) -> int:
         from app.network import peer_snapshot
         _snapshot_peers.add(self.device_id)
         running = _applying.get(self.device_id)
@@ -943,7 +991,7 @@ class PeerLink:
             # Resume the saved transfer: the peer serves it until its signed
             # expiry, and a new request would usually start a new capture.
             try:
-                return await self._download_state(client, ctx, saved)
+                return await self._download_state(client, ctx, saved, held_view=held_view)
             except _TransferGone:
                 await asyncio.to_thread(peer_snapshot.discard_received, saved["transfer"])
                 logger.info("Peer %s no longer serves the saved state copy; requesting a new one", self.device_id)
@@ -952,7 +1000,7 @@ class PeerLink:
         manifest = await self._request_state(client, ctx, on_wait=on_wait)
         await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
         try:
-            return await self._download_state(client, ctx, manifest)
+            return await self._download_state(client, ctx, manifest, held_view=held_view)
         except _TransferGone as exc:
             await asyncio.to_thread(peer_snapshot.discard_received, manifest["transfer"])
             raise PeerError("Peer transfer interrupted; retrying from a verified state") from exc
@@ -990,7 +1038,8 @@ class PeerLink:
         except TimeoutError as exc:
             raise PeerError("Timed out waiting for peer state capture") from exc
 
-    async def _download_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, manifest: dict) -> int:
+    async def _download_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, manifest: dict,
+                              *, held_view: Optional[dict] = None) -> int:
         """Download the pages missing on disk, then apply the whole copy."""
         from app.network import peer_snapshot
         pages = manifest["pages"]
@@ -1025,7 +1074,7 @@ class PeerLink:
         _copy_progress(phase="applying")
         # The apply runs on in its thread when this task is cancelled; a
         # later attempt then takes its result (see ``_receive_state``).
-        job = asyncio.ensure_future(asyncio.to_thread(_apply_received, manifest, self.device_id))
+        job = asyncio.ensure_future(asyncio.to_thread(_apply_received, manifest, self.device_id, held_view))
         job.add_done_callback(lambda done: done.cancelled() or done.exception())
         _applying[self.device_id] = job
         try:
@@ -1345,7 +1394,7 @@ def _untried_peer(ctx: engine.NetworkContext, peer_device_id: str) -> bool:
     return False
 
 
-def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
+def release_hold_for_peer_view(peer_device_id: str, view: Any, *, own_exchange: bool = False) -> bool:
     """Open the outbox on what an authenticated peer that reached us holds of our stream.
 
     ``view`` is the peer's ``{incarnation: last_seq}`` for this device, the
@@ -1357,12 +1406,32 @@ def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
     behind it. A claim past our log keeps the hold: only an exchange we start
     can fetch the signed op that proves a rollback. Until our own pass has
     tried every other peer we can dial, or while it is comparing streams
-    with one, that comparison decides. Runs in a worker thread. Returns True
-    when this call opened the outbox.
+    with one, that comparison decides; so does our exchange with this peer
+    while it is applying a required state copy (``copying_held``), unless
+    ``own_exchange`` says that exchange is the caller. Runs in a worker
+    thread. Returns True when this call opened the outbox.
     """
+    if not peer_view_clears_hold(peer_device_id, view, own_exchange=own_exchange):
+        return False
+    if not engine.outbox_held():
+        return False
+    engine.hold_outbox(False)
+    logger.info("Publishing resumed: peer %s holds none of this worker's stream past its own log",
+                peer_device_id)
+    request_scan()
+    return True
+
+
+def peer_view_clears_hold(peer_device_id: str, view: Any, *, own_exchange: bool = False) -> bool:
+    """Whether ``view`` would open a held outbox (``release_hold_for_peer_view``)."""
     if not engine.outbox_held() or not isinstance(view, dict):
         return False
     if any(device_id != peer_device_id and link._sync_lock.locked() for device_id, link in list(_links.items())):
+        return False
+    # A state copy from this same peer is pending: a release now would let the
+    # scanner sign rows that copy deletes. Its own exchange decides after it.
+    link = _links.get(peer_device_id)
+    if link is not None and link.copying_held and not own_exchange:
         return False
     ctx = engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
@@ -1385,12 +1454,6 @@ def release_hold_for_peer_view(peer_device_id: str, view: Any) -> bool:
             held = store.own_watermark(conn.cursor(), ctx.device_id, current)
         if claims[current] > held:
             return False
-    if not engine.outbox_held():
-        return False
-    engine.hold_outbox(False)
-    logger.info("Publishing resumed: peer %s holds none of this worker's stream past its own log",
-                peer_device_id)
-    request_scan()
     return True
 
 
