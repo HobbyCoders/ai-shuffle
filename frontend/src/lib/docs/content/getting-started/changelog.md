@@ -8,11 +8,19 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.3.9 (2026-11-21)
+
+1.3.9 contains everything in 1.3.8, plus a fix to how the Windows installer is built. 1.3.8 reached the in-app updater, the macOS download and Play internal testing, but its Windows installer could not be built, which also kept the Docker latest tag and the website's Windows, Linux and Android downloads on 1.3.1. 1.3.9 finishes that rollout.
+
+### Desktop app
+
+- The Windows installer builds again on GitHub's current Windows build machines.
+
 ## 1.3.8 (2026-11-21)
 
 ### Desktop app
 
-- **Start AI Shuffle at sign-in** in **Settings > General > Desktop app** opens the desktop app when you sign in on that computer. It is off by default and set per computer. On Windows it appears after you run the 1.3.8 installer once, installed for your own Windows account (the installer's default, not "for all users"); an in-app update alone does not add it.
+- **Start AI Shuffle at sign-in** in **Settings > General > Desktop app** opens the desktop app when you sign in on that computer. It is off by default and set per computer. On Windows it appears after you run the 1.3.9 installer (or later) once, installed for your own Windows account (the installer's default, not "for all users"); an in-app update alone does not add it.
 - AI Shuffle has a signed and notarized macOS download for Apple Silicon Macs.
 
 ### Vault
