@@ -105,3 +105,18 @@ def test_fable_5_1_cache_reads_bill_at_a_quarter_rate() -> None:
     # Fable 5 and Mythos keep the published 0.1x default.
     assert estimate_cost("claude-fable-5", usage) == pytest.approx(1.0)
     assert estimate_cost("claude-mythos-5-1", usage) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-2[1m]"])
+def test_5_2_lists_below_fable_5_and_5_1(model) -> None:
+    # $8 input, $40 output, cache reads $0.20/MTok.
+    assert estimate_cost(model, {"input_tokens": 1_000_000}) == pytest.approx(8.0)
+    assert estimate_cost(model, {"output_tokens": 1_000_000}) == pytest.approx(40.0)
+    assert estimate_cost(model, {"cache_read_input_tokens": 1_000_000}) == pytest.approx(0.20)
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5", "claude-fable-5-1", "claude-mythos-5",
+                                   "claude-mythos-5-1"])
+def test_earlier_fable_and_mythos_keep_their_list_price(model) -> None:
+    assert estimate_cost(model, {"input_tokens": 1_000_000}) == pytest.approx(10.0)
+    assert estimate_cost(model, {"output_tokens": 1_000_000}) == pytest.approx(50.0)

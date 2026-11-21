@@ -137,6 +137,6 @@ describe('composer opening touch arbitration', () => {
   expect(chat).toContain('open: () => mobileControlsOpen');
   expect(chat).toContain("openDirection: () => compact ? 'up' : 'down'");
   expect(chat).toContain('onOpenChange: (open) => controlsDockRef?.setMobileSheetOpen(open)');
-  expect(dock).toContain('export function setMobileSheetOpen(open: boolean)');
+  expect(dock).toContain('export function setMobileSheetOpen(open: boolean');
  });
 });

@@ -4,8 +4,10 @@
 	 * In a chat, "Dev sandbox · feature/second" with a project and "Dev agent ·
 	 * Local" without. On a new chat the header names the worker, so the line is
 	 * "Dev agent · Dev sandbox" or "Dev agent · No project".
-	 * Tapping it opens Chat controls, which hold the selectors themselves. Under
-	 * a new chat the line is the `New session` region until the sheet takes over.
+	 * Each name is its own button: a tap opens Chat controls straight on that
+	 * name's selector (the agent list, the project picker, Runs on), so changing
+	 * one takes a single tap. The Controls cell above still opens the full list.
+	 * Under a new chat the line is the `New session` region until the sheet takes over.
 	 */
 	import { ChevronDown } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -13,6 +15,7 @@
 	import { gitStatus } from '$lib/stores/git.svelte';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { selfWorkerName, workerDisplayName } from '$lib/components/ui/worker-name';
+	import type { ComposerSetupRow } from '../composer-shell';
 	import { composerContextLine } from './context-line';
 
 	interface Props {
@@ -20,10 +23,19 @@
 		newChat: boolean;
 		/** Chat controls are open, so the sheet is the region now. */
 		sheetOpen: boolean;
-		onOpen: () => void;
+		/** Open Chat controls on the selector for the tapped name. */
+		onOpen: (row: ComposerSetupRow) => void;
 	}
 
 	let { newChat, sheetOpen, onOpen }: Props = $props();
+
+	/** What each name is, for its button's accessible name. */
+	const ROW_LABELS: Record<ComposerSetupRow, string> = {
+		agent: 'Agent',
+		project: 'Project',
+		branch: 'Branch',
+		worker: 'Runs on'
+	};
 
 	const selfName = $derived(selfWorkerName($workerInstalls));
 	// Durable ownership wins over both the connected device and stale compose intent.
@@ -48,7 +60,7 @@
 			pickedWorkerName: !$activeSession.sessionId && intentName !== selfName ? intentName : null
 		})
 	);
-	const label = $derived(parts.join(' · '));
+	const label = $derived(parts.map((part) => part.text).join(' · '));
 
 	// The list names this worker. The new chat's picker that used to load it now
 	// lives in the sheet, which mounts when opened.
@@ -58,20 +70,23 @@
 </script>
 
 <section class="composer-context-line" aria-label={newChat && !sheetOpen ? 'New chat' : undefined}>
-	<button
-		type="button"
-		class="ccl-btn"
-		aria-haspopup="dialog"
-		aria-expanded={sheetOpen}
-		aria-label={`Chat context: ${label}. Open chat controls`}
-		onclick={onOpen}
-	>
-		{#each parts as part, index (index)}
+	<div class="ccl-row" role="group" aria-label={`Chat context: ${label}`}>
+		{#each parts as part, index (part.row)}
 			{#if index > 0}<span class="ccl-sep" aria-hidden="true">·</span>{/if}
-			<span class="ccl-part" class:ccl-last={index === parts.length - 1}>{part}</span>
+			<button
+				type="button"
+				class="ccl-btn"
+				class:ccl-last={index === parts.length - 1}
+				data-row={part.row}
+				aria-haspopup="dialog"
+				aria-label={`${ROW_LABELS[part.row]}: ${part.text}`}
+				onclick={() => onOpen(part.row)}
+			>
+				<span class="ccl-part">{part.text}</span>
+				<ChevronDown size={12} strokeWidth={2} aria-hidden="true" class="ccl-chev" />
+			</button>
 		{/each}
-		<ChevronDown size={14} strokeWidth={2} aria-hidden="true" class="ccl-chev" />
-	</button>
+	</div>
 </section>
 
 <style>
@@ -81,17 +96,24 @@
 		min-width: 0;
 		margin-top: 4px;
 	}
-	/* 44px tall to tap; the text itself is a 13px line. */
+	.ccl-row {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		max-width: 100%;
+		min-width: 0;
+		padding: 0 4px;
+	}
+	/* Each name is its own 44px-tall tap target; the text itself is a 13px line. */
 	.ccl-btn {
 		display: inline-flex;
 		align-items: center;
-		justify-content: center;
-		gap: 5px;
-		max-width: 100%;
-		min-width: 0;
+		gap: 3px;
+		flex: 0 1 auto;
+		min-width: 44px;
 		min-height: 44px;
 		margin-block: -6px;
-		padding: 0 10px;
+		padding: 0 6px;
 		border: 0;
 		border-radius: var(--radius-control);
 		background: transparent;
@@ -103,15 +125,15 @@
 		-webkit-tap-highlight-color: transparent;
 		transition: color 0.15s ease;
 	}
+	/* Whole names first. Only a name too long for the line gives way, the last
+	   one before the others, and it ellipsizes at its end rather than mid-word. */
+	.ccl-btn.ccl-last { flex: 0 10 auto; }
 	@media (hover: hover) {
 		.ccl-btn:hover { color: var(--foreground); }
 	}
 	.ccl-btn:active { color: var(--foreground); }
 	.ccl-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	/* Whole names first. Only a name too long for the line gives way, the last
-	   one before the others, and it ellipsizes at its end rather than mid-word. */
-	.ccl-part { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.ccl-part.ccl-last { flex: 0 10 auto; }
-	.ccl-sep { flex: none; opacity: 0.7; }
-	.ccl-btn :global(.ccl-chev) { flex: none; opacity: 0.8; }
+	.ccl-part { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.ccl-sep { flex: none; opacity: 0.7; color: var(--muted-foreground); font-size: 13px; }
+	.ccl-btn :global(.ccl-chev) { flex: none; opacity: 0.7; }
 </style>

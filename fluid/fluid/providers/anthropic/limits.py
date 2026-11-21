@@ -30,6 +30,8 @@ _MAX_OUTPUT: list[tuple[str, int]] = [
     ("claude-3-5-sonnet", 8_192),
     ("claude-3-7-sonnet", 64_000),
     ("claude-3-sonnet", 4_096),
+    ("claude-fable-5-2", 128_000),
+    ("claude-mythos-5-2", 128_000),
     ("claude-fable-5", 64_000),
     ("claude-mythos", 64_000),
     ("claude-opus-5-5", 128_000),

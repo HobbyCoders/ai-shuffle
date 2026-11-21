@@ -40,6 +40,8 @@ _PRICES: list[tuple[str, float, float]] = [
     ("claude-3-5-sonnet", 3.0, 15.0),
     ("claude-3-sonnet", 3.0, 15.0),
     ("claude-3-opus", 15.0, 75.0),
+    ("claude-fable-5-2", 8.0, 40.0),   # 5.2 lists below Fable 5 / 5.1
+    ("claude-mythos-5-2", 8.0, 40.0),
     ("claude-fable-5", 10.0, 50.0),
     ("claude-mythos", 10.0, 50.0),
     ("claude-opus-5-5", 4.0, 20.0),  # Opus 5.5 lists below Opus 5
@@ -59,10 +61,12 @@ _CACHE_WRITE_1H_MULTIPLIER = 2.0  # 1h ephemeral
 _CACHE_READ_MULTIPLIER = 0.1
 # Families whose published cache-read rate is not the 0.1x default, as a
 # fraction of their input rate. Fable 5.1 lists cache reads at $0.25/MTok
-# against a $10 input rate, and Opus 5.5 at $0.20/MTok against $4. Whether
-# Mythos 5.1 shares Fable 5.1's rate was open at launch, so it keeps the
-# default. Longest prefix first.
+# against a $10 input rate, Fable 5.2 and Mythos 5.2 at $0.20/MTok against $8,
+# and Opus 5.5 at $0.20/MTok against $4. Whether Mythos 5.1 shares Fable
+# 5.1's rate was open at launch, so it keeps the default. Longest prefix first.
 _CACHE_READ_OVERRIDES: list[tuple[str, float]] = [
+    ("claude-fable-5-2", 0.025),
+    ("claude-mythos-5-2", 0.025),
     ("claude-fable-5-1", 0.025),
     ("claude-opus-5-5", 0.05),
 ]

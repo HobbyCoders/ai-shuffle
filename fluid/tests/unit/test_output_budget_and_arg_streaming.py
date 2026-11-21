@@ -60,6 +60,7 @@ def test_anthropic_resolves_a_cap_because_the_api_demands_one() -> None:
 
 @pytest.mark.parametrize("model", [
     "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+    "claude-fable-5-2", "claude-mythos-5-2",
     "claude-opus-5-5[1m]", "claude-sonnet-5-5-latest",
     "claude-opus-5-5-20260601", "claude-sonnet-5-5-20260601",
     "CLAUDE-SONNET-5-5",
@@ -73,6 +74,8 @@ def test_claude_5_5_output_ceiling_on_the_wire(model, requested) -> None:
 
 @pytest.mark.parametrize(("model", "ceiling"), [
     ("claude-opus-5", 64_000), ("claude-sonnet-5", 64_000),
+    ("claude-fable-5-1", 64_000), ("claude-fable-5", 64_000),
+    ("claude-mythos-5-1", 64_000), ("claude-mythos-5", 64_000),
     ("claude-opus-4-8", 64_000), ("claude-opus-4-7", 64_000),
     ("claude-opus-4-6", 64_000), ("claude-opus-4-5", 64_000),
     ("claude-sonnet-4-6", 64_000), ("claude-sonnet-4-5", 64_000),

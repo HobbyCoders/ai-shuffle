@@ -114,4 +114,11 @@
 		color: var(--st-mfg);
 		white-space: nowrap;
 	}
+	/* Phone: a result that names a long folder wraps instead of running off
+	   the row. */
+	:global(.settings-shell[data-stacked]) .st-path-status {
+		min-width: 0;
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
 </style>

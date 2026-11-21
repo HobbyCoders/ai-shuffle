@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import { writable, type Writable } from 'svelte/store';
+import { get, writable, type Writable } from 'svelte/store';
+import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 import ContextPillBar from './ContextPillBar.svelte';
 import { git, gitStatus } from '$lib/stores/git.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
@@ -549,6 +550,27 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Other worker' }));
 		expect(view.queryByRole('dialog')).toBeNull();
 		await waitFor(() => expect(moveSession).toHaveBeenCalledExactlyOnceWith('chat', 'peer'));
+	});
+
+	// The phone sheet closes on a pick from its "Runs on" page and tears its
+	// bar down; a refusal that lands later must not leave the shared menu open.
+	it('does not reopen the worker menu from a bar that has gone when a move fails', async () => {
+		session.store.set({ ...base, sessionId: 'chat', project: null, projectV2Id: null, mode: 'chat' });
+		appSessions.store.set([{ id: 'chat', instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
+			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
+		] });
+		let refuse!: (reason: unknown) => void;
+		vi.mocked(moveSession).mockReturnValue(new Promise((_, reject) => { refuse = reject; }) as any);
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Other worker' }));
+		await waitFor(() => expect(moveSession).toHaveBeenCalledOnce());
+		view.unmount();
+		refuse({ status: 409, detail: 'Worker unreachable' });
+		await new Promise((resolve) => setTimeout(resolve));
+		expect(get(openHeaderDropdown)).toBeNull();
 	});
 
 	// The "No project" mark lives in this row on the desktop; the phone sheet

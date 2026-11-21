@@ -98,7 +98,8 @@ def test_a_listed_version_means_itself_on_the_subscription_leg(cli):
     assert m.get_model("claude-opus-4-6").family == "opus"
     # The API leg and the host rules keep collapsing old ids (out of scope).
     assert m.normalize_model("claude-opus-4-6") == "opus"
-    assert m.resolve_api_model_id("opus") == "claude-opus-5"
+    assert m.resolve_api_model_id("opus") == "claude-opus-5-5"
+    assert m.resolve_api_model_id("claude-opus-4-6") == "claude-opus-5"
 
 
 def test_effort_and_window_follow_the_picked_version(cli):

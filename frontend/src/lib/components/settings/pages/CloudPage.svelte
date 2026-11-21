@@ -209,7 +209,6 @@
 	/* Phone: the account status sits on the title line, not between title and hint. */
 	:global(.settings-shell[data-stacked] [data-setting-anchor='cloud.account']:not(.st-phone-stack) > .st-rc) { align-self: flex-start; }
 	:global(.settings-shell[data-stacked]) [data-testid='cloud-state'] { display: flex; align-items: center; min-height: 21px; }
-	:global(.settings-shell[data-stacked] [data-setting-anchor='cloud.account']:has(.st-rl .st-help)) [data-testid='cloud-state'] { min-height: 44px; }
 	.cl-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 	.cl-msg { margin: 0; min-width: 0; }
 	@media (max-width: 600px) { .cl-foot { flex-direction: column; align-items: flex-start; gap: 6px; } }

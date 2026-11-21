@@ -156,21 +156,44 @@ def test_resolve_api_model_id_maps_each_preset_alias():
     # full API model id.
     assert m.resolve_api_model_id("haiku") == "claude-haiku-5-5"
     assert m.resolve_api_model_id("claude-haiku-4-5") == "claude-haiku-4-5"
-    assert m.resolve_api_model_id("sonnet") == "claude-sonnet-5"
-    assert m.resolve_api_model_id("opus") == "claude-opus-5"
-    assert m.resolve_api_model_id("fable") == "claude-fable-5"
+    # The API key runs the 5.5 generation (Fable 5.2) for a bare short name.
+    assert m.resolve_api_model_id("sonnet") == "claude-sonnet-5-5"
+    assert m.resolve_api_model_id("opus") == "claude-opus-5-5"
+    assert m.resolve_api_model_id("fable") == "claude-fable-5-2"
 
 
 def test_resolve_api_model_id_resolves_legacy_1m_values():
     # The retired [1m] suffix was never a distinct API model — persisted values
     # still carrying it normalize to the base slug, then to the API id.
-    assert m.resolve_api_model_id("opus[1m]") == "claude-opus-5"
+    assert m.resolve_api_model_id("opus[1m]") == "claude-opus-5-5"
 
 
 def test_resolve_api_model_id_resolves_legacy_full_ids():
-    # Legacy stored ids normalize to their alias first, then to the API id.
+    # A stored full id keeps the version it ran before the 5.5 defaults.
     assert m.resolve_api_model_id("claude-opus-4-6") == "claude-opus-5"
     assert m.resolve_api_model_id("claude-sonnet-4-6[1m]") == "claude-sonnet-5"
+
+
+@pytest.mark.parametrize("picked", ["claude-opus-5", "claude-sonnet-5", "claude-fable-5",
+                                    "claude-opus-5[1m]", "claude-sonnet-5[1m]"])
+def test_resolve_api_model_id_keeps_an_explicit_version(picked):
+    # The alias it folds to now means 5.5; the version someone picked does not move.
+    assert m.resolve_api_model_id(picked) == picked.removesuffix("[1m]")
+
+
+def test_api_aliases_moved_and_delegated_fallback_did_not():
+    from app.core import model_effort
+
+    assert m.API_MODEL_IDS == {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5",
+                               "opus": "claude-opus-5-5", "fable": "claude-fable-5-2"}
+    assert m.FROZEN_MODEL_IDS == {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5",
+                                  "opus": "claude-opus-5", "fable": "claude-fable-5"}
+    # model_effort keeps copies (an import cycle stops it reading these).
+    assert model_effort._ALIASES == m.API_MODEL_IDS
+    assert model_effort._DELEGATED_ALIASES == m.FROZEN_MODEL_IDS
+    # Every LEGACY_MODEL_MAP id resolves to its frozen target, never today's.
+    for full, alias in m.LEGACY_MODEL_MAP.items():
+        assert m.resolve_api_model_id(full) == m.FROZEN_MODEL_IDS[alias]
 
 
 def test_resolve_api_model_id_passes_through_non_presets():
@@ -207,7 +230,8 @@ def test_registry_payload_shape():
     assert legacy_map["claude-opus-4-8"] == "opus"
     assert legacy_map["claude-opus-4-8[1m]"] == "opus"
     # Effort uses true current aliases, not the profile version-migration map.
-    assert payload["effort_model_aliases"] == m.API_MODEL_IDS
+    # The delegated route without a CLI list keeps its pre-5.5 targets.
+    assert payload["effort_model_aliases"] == m.FROZEN_MODEL_IDS
     assert payload["effort_model_aliases"]["opus"] == "claude-opus-5"
     assert "claude-opus-4-8" not in payload["effort_model_aliases"]
 

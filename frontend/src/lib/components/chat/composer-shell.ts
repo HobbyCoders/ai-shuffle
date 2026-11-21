@@ -88,9 +88,17 @@ export interface ComposerModelOption extends ComposerControlOption {
 	groupSubtext: string | null;
 }
 
+/** A Setup row in the phone's Chat controls that the composer's context line names. */
+export type ComposerSetupRow = 'agent' | 'project' | 'branch' | 'worker';
+
 /** Props `ControlsDock` hands the mobile controls sheet. */
 export interface ComposerSheetProps {
 	open: boolean;
+	/**
+	 * Opened from one name on the composer's context line: the sheet goes
+	 * straight to that row's selector instead of its main list. Null otherwise.
+	 */
+	setupRow?: ComposerSetupRow | null;
 	/** A new chat, before its first message: Setup is the `New session` region. */
 	newChat?: boolean;
 	onClose: () => void;

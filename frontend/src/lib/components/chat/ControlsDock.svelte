@@ -47,7 +47,7 @@
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
-	import type { TerminalToggle } from './composer-shell';
+	import type { ComposerSetupRow, TerminalToggle } from './composer-shell';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -210,14 +210,18 @@
 	});
 
 	let mobileSheetOpen = $state(false);
+	/** The Setup row the sheet opened on (a name on the composer's context line), else null. */
+	let mobileSheetRow = $state<ComposerSetupRow | null>(null);
 	const mobilePanelId = $props.id();
 	const ControlsSheet = $derived(phoneLayout.ControlsSheet);
 	// A window widened past phone width drops the sheet: its open state goes too.
 	$effect(() => {
 		if (!ControlsSheet && mobileSheetOpen) setMobileSheetOpen(false);
 	});
-	export function setMobileSheetOpen(open: boolean) {
+	/** Open or close the phone's Chat controls; `row` opens it straight on that Setup row's selector. */
+	export function setMobileSheetOpen(open: boolean, row: ComposerSetupRow | null = null) {
 		closePopover();
+		mobileSheetRow = open ? row : null;
 		if (!open && document.activeElement?.closest('.mobile-composer-controls')) {
 			dockRef?.querySelector<HTMLButtonElement>('.mobile-settings-trigger')?.focus({ preventScroll: true });
 		}
@@ -790,6 +794,7 @@
 {#if ControlsSheet}
 <ControlsSheet
 	open={mobileSheetOpen}
+	setupRow={mobileSheetRow}
 	{newChat}
 	panelId={mobilePanelId}
 	{inertToolbar}

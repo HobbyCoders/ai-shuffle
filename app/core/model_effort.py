@@ -88,6 +88,7 @@ def effort_route(provider: Mapping[str, Any] | None) -> str:
 # Exact native API entries, not gateway or subscription inferences.
 # https://platform.claude.com/docs/en/build-with-claude/effort.md
 _ANTHROPIC = {name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "high") for name in (
+    "claude-fable-5-2", "claude-mythos-5-2",
     "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5")}
 _ANTHROPIC.update({name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "medium")
@@ -96,7 +97,10 @@ _ANTHROPIC.update({name: _capability(["low", "medium", "high", "max"], "high")
                    for name in ("claude-mythos-preview", "claude-opus-4-6", "claude-sonnet-4-6")})
 _ANTHROPIC["claude-opus-4-5-20251101"] = _capability(["low", "medium", "high"], "high")
 # Native aliases are resolved by app/core/model_registry.py, not model-name patterns.
-_ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5"}
+# Copies of model_registry.API_MODEL_IDS and FROZEN_MODEL_IDS (that module
+# imports this one, so it cannot be read at import time here).
+_ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "fable": "claude-fable-5-2"}
+_DELEGATED_ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5"}
 # https://code.claude.com/docs/en/model-config.md#adjust-effort-level
 _CLI = {name: dict(_ANTHROPIC[name]) for name in (
     "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
@@ -104,7 +108,10 @@ _CLI = {name: dict(_ANTHROPIC[name]) for name in (
     "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")}
 _CLI["claude-opus-4-7"]["default_effort"] = "xhigh"
 for _name in _ANTHROPIC:
-    _CLI.setdefault(_name, _capability([]))
+    # The 5.2 ids are API-key entries only: on the CLI their levels stay
+    # unknown, as the CLI's own list reports them.
+    if _name not in ("claude-fable-5-2", "claude-mythos-5-2"):
+        _CLI.setdefault(_name, _capability([]))
 for _name in ("claude-haiku-4-5", "claude-haiku-4-5-20251001"):
     _ANTHROPIC[_name] = _capability([])
     _CLI[_name] = _capability([])
@@ -149,7 +156,7 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
 
                 listed = claude_cli_models.entry(model)
                 if listed is not None and listed.get("effort_levels") is not None:
-                    known = cap or table.get(_ALIASES.get(model, model)) or {}
+                    known = cap or table.get(_DELEGATED_ALIASES.get(model, model)) or {}
                     cap = _capability(list(listed["effort_levels"]), known.get("default_effort"))
         elif provider.get("provider_type") == "openai" and provider.get("auth_mode") not in ("chatgpt", "grok"):
             cap = _OPENAI.get(model)
