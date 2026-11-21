@@ -1308,6 +1308,15 @@
           "past_bug": "#379: remembered/job choices had HTTP/card writers but no dedicated conversational read/edit tool."
         },
         {
+          "id": "harness-basics.gpt62-system-prompt-cache",
+          "check": "GPT 6.2 reads the system prompt from the prompt cache",
+          "kind": "owner",
+          "needs": ["provider"],
+          "how": "On the candidate revision, start a disposable native chat on gpt 6.2 sol through a ChatGPT subscription (never an API key). Run one turn with at least five tool calls (for example read five small files). Read the per-call Usage telemetry for the turn: cache_read_input_tokens, the previous call's total prompt tokens and raw.prev_prompt_coverage. Settle the explicitly hidden chat.",
+          "pass_when": "Every call is accepted by the backend. From the second call on, the cache read falls short of the previous call's total prompt by a few hundred tokens at most, not by the size of the system prompt (about 10,000 tokens or more), and prev_prompt_coverage is at least 0.95 on most calls. Unit tests alone do not pass this row.",
+          "past_bug": "GPT 6.2 and later never cache top-level instructions, where the whole system prompt was sent: no call read 95% of the previous prompt from cache, against 85% of calls on gpt 6.1 sol."
+        },
+        {
           "id": "harness-basics.legacy-projectless-upgrade",
           "check": "Legacy projectless owners gain the coordination ceiling and attach action",
           "kind": "owner",

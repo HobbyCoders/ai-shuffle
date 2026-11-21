@@ -126,7 +126,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 },
                 "model": {
                     "type": "string",
-                    "enum": selectable_model_values(),
+                    **({"enum": _selectable} if (_selectable := selectable_model_values()) else {}),
                     "description": "AI model override. Omit to inherit from profile.",
                 },
                 "skills": {
@@ -233,7 +233,7 @@ def _create_subagent_tools(is_admin: bool) -> list:
                 }),
                 "model": nullable({
                     "type": "string",
-                    "enum": selectable_model_values(),
+                    **({"enum": _selectable} if (_selectable := selectable_model_values()) else {}),
                     "description": "AI model override. Pass null to inherit from profile.",
                 }),
                 "skills": {

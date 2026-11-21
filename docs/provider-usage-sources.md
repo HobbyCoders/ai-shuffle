@@ -253,6 +253,18 @@ subscription > Usage links to
 `tests/core/test_claude_cli_no_token_access.py` fails if any app or Fluid
 module names the CLI's credentials file or its `claudeAiOauth` token again.
 
+### Claude API key
+
+The saved Anthropic API key is its own provider ("Claude · API", the built-in
+`claude-api` row), so the usage popover gives it its own section after the
+subscription's, among the API accounts by name. It has no meter. Anthropic shows the
+organization's prepaid credit balance only on the Claude Console
+[Billing page](https://platform.claude.com/settings/billing). No API returns
+it, and the Admin API cost report needs a separate `sk-ant-admin` key and
+reports spend, not credit left. The section says "Credit balance is shown only
+in the Claude Console" and links to that page (link kind `claude_api`). Per-turn
+cost is still recorded from responses.
+
 ## Kimi, MiniMax and OpenCode keys
 
 These native Messages rows record per-turn tokens (input, output, cache read

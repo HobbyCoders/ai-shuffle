@@ -368,7 +368,10 @@ def fingerprint_responses_request(
     settings change.
     """
     from dataclasses import replace
-    from fluid.providers.openai_responses.serialize import build_request_body
+    from fluid.providers.openai_responses.serialize import (
+        build_request_body,
+        system_in_input,
+    )
 
     def digest(value: Any) -> str:
         return _hash_text(_canonical(value))
@@ -377,7 +380,13 @@ def fingerprint_responses_request(
     headers = normalize_routing_headers(routing_headers)
     fingerprint["_version"] = "responses-wire-v3"
     fingerprint["_wire_hash"] = digest(body)
-    fingerprint["system"] = digest(body.get("instructions"))
+    # ``system`` is the system prompt wherever the serializer put it: in
+    # ``instructions``, or (GPT 6.2 and later) in the first input item. Both
+    # hash the same text, so moving it does not read as a changed prompt.
+    moved_system = system_in_input(request)
+    fingerprint["system"] = digest(
+        moved_system if moved_system is not None else body.get("instructions")
+    )
     fingerprint["tools"] = digest(body.get("tools"))
     settings = {
         "provider": "openai_responses", "endpoint": endpoint,
@@ -386,8 +395,12 @@ def fingerprint_responses_request(
     fingerprint["request"] = digest({**settings, "headers": headers})
     fingerprint[REQUEST_SETTINGS_KEY] = digest(settings)
     fingerprint[ROUTING_HEADERS_KEY] = digest(headers)
+    # ``mK`` covers the first K messages only. Serializing without the system
+    # prompt keeps a moved prompt out of them, so a prompt edit is reported as
+    # ``system`` and not as rewritten history.
+    history = replace(request, system=None)
     for count in checkpoint_positions(len(request.messages), (previous_count,)):
-        prefix = build_request_body(replace(request, messages=request.messages[:count]))
+        prefix = build_request_body(replace(history, messages=request.messages[:count]))
         fingerprint[f"m{count}"] = digest(prefix.get("input"))
     if "input" in request.extra:
         # An explicit input override severs the normalized-history denominator.

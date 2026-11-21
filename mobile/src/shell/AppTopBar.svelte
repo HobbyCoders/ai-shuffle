@@ -9,7 +9,7 @@
 	 * shows beside the main panel.
 	 *
 	 * One row carries everything the phone used to stack in three:
-	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic | bell
+	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic
 	 *     | ● worker · parent             |
 	 * The second line is the "Connected to" worker chip (which also tells the
 	 * Android app to hide its own worker bar), plus the parent chat's link in a
@@ -18,11 +18,8 @@
 	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
 	 * MainPanel's header cluster: Vault + the compact Git button.
 	 *
-	 * The moon at the end of the bar is Away for all chats: one tap on any screen.
-	 *
-	 * The notification bell lives in that sidebar's header. This bar adds its own
-	 * only while something is unread, so nothing is said at zero and the count is
-	 * never hidden behind the ☰. The ☰ keeps the unread wording for screen readers.
+	 * Away for all chats and the notification bell live in that sidebar's header,
+	 * so this bar carries neither. The ☰ names the unread count for screen readers.
 	 *
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
@@ -42,11 +39,9 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { unreadCount } from '$lib/stores/notifications';
-	import AwayAllChatsSwitch from '$lib/components/layout/AwayAllChatsSwitch.svelte';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
 	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
-	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { backToChats } from '$lib/services/session-navigation';
@@ -412,8 +407,6 @@
 				<Mic size={18} />
 			</button>
 		{/if}
-		<NotificationCenter bar />
-		<AwayAllChatsSwitch variant="bar" />
 	</div>
 </header>
 

@@ -79,6 +79,12 @@ const LINKS: ProviderUsageLinkEntry[] = [
 		kind: 'opencode_console', note: 'No balance meter for this key', dashboard_url: OPENCODE_CONSOLE, subscription: false },
 ];
 
+const CLAUDE_BILLING = 'https://platform.claude.com/settings/billing';
+const CLAUDE_API_LINK: ProviderUsageLinkEntry = {
+	provider_id: 'claude-api', provider_name: 'Claude API', provider_type: 'anthropic', kind: 'claude_api',
+	note: 'Credit balance is shown only in the Claude Console', dashboard_url: CLAUDE_BILLING, subscription: false,
+};
+
 const KIMI_API: ProviderUsageEntry = {
 	provider_id: 'kimi-api',
 	provider_name: 'Sample Kimi API',
@@ -131,7 +137,7 @@ const REGISTRY_ROWS = [
 	{ id: 'opencode-console', name: 'Sample OpenCode Console', provider_type: 'opencode', auth_mode: null, auth_kind: 'api', models: [] },
 ];
 
-// Plans above API accounts; within each group Kimi before OpenCode, as Settings orders them.
+// Plans above API accounts; within each group alphabetical (Kimi before OpenCode, MiniMax before OpenCode).
 const LINK_HEADERS = ['Kimi · Subscription', 'OpenCode · Subscription', 'MiniMax · API', 'OpenCode · API'];
 
 beforeEach(() => {
@@ -225,10 +231,65 @@ describe('usage links', () => {
 			expect(headers(await open())).toEqual(LINK_HEADERS);
 		});
 
+		it('the saved Anthropic key is its own "Claude · API" section beside the Claude plan, among the API rows by name', async () => {
+			await registry([
+				...REGISTRY_ROWS,
+				{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', auth_mode: 'api_key', auth_kind: 'api', models: [] },
+			]);
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [{ type: 'five_hour', utilization: 30, resets_at: new Date(T0 + 3_600_000).toISOString() }],
+				providers: [],
+				usage_links: [...LINKS, CLAUDE_API_LINK],
+			});
+			const container = await open();
+			const all = headers(container);
+			// The plan section stays, and the key adds a second Claude section.
+			expect(all.filter((h) => h.startsWith('Claude'))).toHaveLength(2);
+			expect(all.slice(-3)).toEqual(['Claude · API', 'MiniMax · API', 'OpenCode · API']);
+			expect(metaLines(container)).toContain(`Credit balance is shown only in the Claude Console -> ${CLAUDE_BILLING}`);
+		});
+
+		it('hiding the Claude plan and the key leaves two restore buttons that name each one', async () => {
+			await registry([
+				{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', auth_mode: 'api_key', auth_kind: 'api', models: [] },
+			]);
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [{ type: 'five_hour', utilization: 30, resets_at: new Date(T0 + 3_600_000).toISOString() }],
+				providers: [],
+				usage_links: [CLAUDE_API_LINK],
+			});
+			const container = await open();
+			const hideLabels = () =>
+				Array.from(container.querySelectorAll('.provider-hide')).map((b) => b.getAttribute('aria-label'));
+			expect(hideLabels()).toEqual(['Hide Claude usage', 'Hide Claude · API usage']);
+			for (const label of hideLabels()) {
+				await fireEvent.click(container.querySelector(`.provider-hide[aria-label="${label}"]`)!);
+			}
+			const restore = Array.from(container.querySelectorAll('.provider-restore'));
+			expect(restore.map((b) => b.getAttribute('aria-label'))).toEqual(['Show Claude usage', 'Show Claude · API usage']);
+			expect(restore.map((b) => b.textContent?.trim())).toEqual(['Claude', 'Claude · API']);
+			// Restoring the key brings back only the key's section.
+			await fireEvent.click(restore[1]);
+			expect(headers(container)).toEqual(['Claude · API']);
+		});
+
 		it('a metered row keeps its registry header', async () => {
 			await registry([{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
 			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API], usage_links: [] });
 			expect(headers(await open())).toEqual(['Kimi · API']);
+		});
+
+		it('group by the header label: an Antigravity sign-in sorts with plans, its key with API rows, each A–Z', async () => {
+			await registry([
+				{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] },
+				{ id: 'agy-signin', name: 'Sample Antigravity', provider_type: 'antigravity', auth_mode: null, auth_kind: 'subscription', plan_type: 'Personal', models: [] },
+				{ id: 'agy-key', name: 'Sample Antigravity Key', provider_type: 'antigravity', auth_mode: null, auth_kind: 'api', models: [] },
+			]);
+			const agy = (id: string) => ({ ...KIMI_API, provider_id: id, provider_name: id, provider_type: 'antigravity', source: 'antigravity', source_info: undefined });
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API, agy('agy-key'), agy('agy-signin')], usage_links: [] });
+			expect(headers(await open())).toEqual(['Antigravity · Personal', 'Antigravity · API', 'Kimi · API']);
 		});
 	});
 

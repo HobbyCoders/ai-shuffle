@@ -3,6 +3,7 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import type { DangerAction } from '../shell/DangerZone.svelte';
@@ -18,6 +19,7 @@
 	import { changeClaudeMode, startSetup } from './provider-actions';
 
 	let { credential, provider }: { credential: CredentialView; provider: ProviderView } = $props();
+	const access = getSettingsAccess();
 	const account = $derived(credential.account);
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 	const masked = $derived(safeKeyHint(account?.masked_key) || safeKeyHint(providers.current.anthropicKeyMasked) || (account || providers.current.anthropicKeySet ? 'Saved' : 'No key selected'));
@@ -67,7 +69,7 @@
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
 			{#if account}
-				{#key account.id}<ClaudeApiModels accountId={account.id} />{/key}
+				{#key account.id}<ClaudeApiModels accountId={account.id} readOnly={access.readOnly} />{/key}
 			{:else}
 				<RowGroup title="Models"><p class="pv-msg">{providers.current.anthropicKeySet ? 'Update this worker to list models for its saved API key.' : 'Save an Anthropic API key to list its models.'}</p></RowGroup>
 			{/if}

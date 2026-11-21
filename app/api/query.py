@@ -151,7 +151,6 @@ def _request_binding(
     pick the bound provider does not curate drops back to native Claude. The
     leg itself comes from the adapter's own decision table.
     """
-    from app.core.model_registry import DEFAULT_MODEL
     from app.core.query_options import decode_provider_model, is_native_claude_model
 
     profile = database.get_profile(profile_id)
@@ -180,12 +179,17 @@ def _request_binding(
             provider_id = None
     if not model and not provider_id:
         # No model named: the same default build_options_from_profile uses.
-        from app.core.credential_gate import default_run_model
+        from app.core.credential_gate import (
+            AgentSetupRequired,
+            NO_ENABLED_MODELS_MESSAGE,
+            default_run_model,
+        )
 
         # An API run is unattended: no most used chat model (query_options
         # gives the REST lane, which carries no typed turn source, the same).
         provider_id, model = default_run_model(prefer_most_used=False)
-        model = model or DEFAULT_MODEL
+        if not model:
+            raise AgentSetupRequired(NO_ENABLED_MODELS_MESSAGE)
     return provider_id, model
 
 
@@ -211,6 +215,12 @@ async def _refuse_unready_leg(
 
     try:
         binding = await asyncio.to_thread(_request_binding, profile_id, overrides, session_id)
+    except credential_gate.AgentSetupRequired as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+            headers={"X-Error-Code": credential_gate.SETUP_CODE},
+        ) from None
     except Exception:  # noqa: BLE001 — the engine's own gate still applies
         logger.debug("Could not work out the leg for the credential gate", exc_info=True)
         return

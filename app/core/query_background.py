@@ -209,9 +209,14 @@ async def _run_background_query_impl(
     except (WorktreeUnavailableError, ValueError) as e:
         # A misconfigured/deleted/disabled model provider raises
         # ProviderConfigError (a ValueError); a flagged worktree raises
-        # WorktreeUnavailableError. Either escaping this create_task'd coroutine
-        # produces a messageless turn.aborted plus an unretrieved-exception log.
-        # Surface it as a turn error and stop — mirror the connect-failure path.
+        # WorktreeUnavailableError; all models disabled raises AgentSetupRequired.
+        from app.core import credential_gate
+
+        if isinstance(e, credential_gate.AgentSetupRequired):
+            logger.warning(f"[Background] Turn refused for session {session_id}: {e}")
+            if recorder:
+                await recorder.on_event(credential_gate.refusal_event(str(e)))
+            return
         logger.error(f"[Background] Cannot build session options for {session_id}: {e}")
         if recorder:
             await recorder.on_event({"type": "error", "message": str(e)})

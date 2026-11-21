@@ -13,8 +13,7 @@
 	 * - Rail: a 300px panel floats just right of the rail, bottom-aligned with
 	 *   the bell, over the list column and canvas. Header instances stay
 	 *   right-anchored under their button.
-	 * - Outside-click + Escape to close. On the mobile shell the panel is
-	 *   `position: fixed` so the right-edge anchor can't clip it.
+	 * - Outside-click + Escape to close.
 	 */
 	import { onDestroy, tick } from 'svelte';
 	import {
@@ -38,15 +37,13 @@
 
 	const history = $derived($notificationHistory);
 	interface Props {
-		/** The phone top bar's copy: shows only while something is unread (or its panel is open). */
-		bar?: boolean;
 		/** Desktop rail: 18px icon and a fixed-position history panel over the list column. */
 		rail?: boolean;
 	}
-	let { bar = false, rail = false }: Props = $props();
+	let { rail = false }: Props = $props();
 
 	const unread = $derived($unreadCount);
-	const dropdownId = $derived(bar ? 'notifications-bar' : 'notifications');
+	const dropdownId = 'notifications';
 	const showPanel = $derived($openHeaderDropdown === dropdownId);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
@@ -220,23 +217,9 @@
 		if (nowOpen && unread > 0) notify.markAllRead();
 	}
 
-	// The phone bar's bell hides once nothing is unread, and opening the panel
-	// marks everything read. Keep it while focus is on it or in its panel, so
-	// closing the history hands focus back to a real control (#1168).
-	let focusInside = $state(false);
-	function handleFocusOut(e: FocusEvent) {
-		if (!rootRef?.contains(e.relatedTarget as Node | null)) focusInside = false;
-	}
-
 	function handleClickOutside(e: MouseEvent) {
 		if (!showPanel) return;
-		if (rootRef && !rootRef.contains(e.target as Node)) {
-			// A click on empty page drops focus to <body>; give it back to the
-			// bell, which is still mounted until this close renders.
-			const focusDropped = !document.activeElement || document.activeElement === document.body;
-			closeDropdown(dropdownId);
-			if (bar && focusDropped) bellRef?.focus();
-		}
+		if (rootRef && !rootRef.contains(e.target as Node)) closeDropdown(dropdownId);
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -279,8 +262,7 @@
 
 <svelte:window onclick={handleClickOutside} onkeydown={handleKeydown} onresize={positionPanel} />
 
-{#if !bar || unread > 0 || showPanel || focusInside}
-<div class="notif-center" class:bar class:rail bind:this={rootRef} onfocusin={() => { focusInside = true; }} onfocusout={handleFocusOut} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`} style:--notif-rail-right={`${railAnchor.railRight}px`}>
+<div class="notif-center" class:rail bind:this={rootRef} style:--notif-left={`${railAnchor.left}px`} style:--notif-bottom={`${railAnchor.bottom}px`} style:--notif-width={`${railAnchor.width}px`} style:--notif-rail-right={`${railAnchor.railRight}px`}>
 	<button
 		bind:this={bellRef}
 		class="notif-btn"
@@ -292,7 +274,7 @@
 		aria-label={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
 		title="Notifications"
 	>
-		<Bell size={bar ? 16 : 18} strokeWidth={bar ? 1.8 : 1.75} />
+		<Bell size={18} strokeWidth={1.75} />
 		{#if unread > 0}
 			<span class="notif-badge" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>
 		{/if}
@@ -372,7 +354,6 @@
 		</div>
 	{/if}
 </div>
-{/if}
 
 <style>
 	/* Rail controls share its 36px rhythm; history opens over the list column. */
@@ -410,24 +391,6 @@
 	}
 	@keyframes notif-scrim-in { from { opacity: 0; } }
 
-	/* Phone top bar: a 44x48 target, a 16px bell and the one 16px count. */
-	.notif-center.bar .notif-btn { width: 44px; height: 48px; border-radius: 8px; opacity: 1; }
-	.notif-center.bar .notif-badge {
-		top: 7px;
-		right: auto;
-		left: 23px;
-		border: 0;
-		box-shadow: 0 0 0 1.5px var(--background);
-	}
-	.notif-center.bar .notif-panel {
-		position: fixed;
-		top: 58px;
-		left: 8px;
-		right: 8px;
-		width: auto;
-		max-height: calc(100dvh - 120px);
-	}
-
 	.notif-center {
 		position: relative;
 		display: flex;
@@ -460,12 +423,12 @@
 	}
 
 	/* In the sidebar header it matches the filter button beside it. */
-	.notif-center:not(.bar) .notif-btn {
+	.notif-center .notif-btn {
 		color: var(--sidebar-muted);
 		opacity: 1;
 	}
-	.notif-center:not(.bar) .notif-btn:hover,
-	.notif-center:not(.bar) .notif-btn.open {
+	.notif-center .notif-btn:hover,
+	.notif-center .notif-btn.open {
 		color: var(--foreground);
 	}
 
@@ -685,22 +648,22 @@
 		word-break: break-word;
 	}
 
-	/* Desktop popover: a title on one line and a body on two; the full text
-	   stays in the row's tooltip and for screen readers. The phone panel keeps full text. */
-	/* Desktop popovers wear the one menu surface the model picker uses; the phone panel keeps its own. */
-	.notif-center:not(.bar) .notif-panel {
+	/* A title on one line and a body on two; the full text stays in the row's
+	   tooltip and for screen readers. The popover wears the one menu surface
+	   the model picker uses. */
+	.notif-center .notif-panel {
 		background: var(--popover);
 		border-color: var(--menu-border);
 		border-radius: var(--menu-radius);
 		box-shadow: var(--menu-shadow);
 	}
-	.notif-center:not(.bar) .item-title {
+	.notif-center .item-title {
 		font-size: 13px;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.notif-center:not(.bar) .item-message {
+	.notif-center .item-message {
 		font-size: 13px;
 		display: -webkit-box;
 		-webkit-box-orient: vertical;
