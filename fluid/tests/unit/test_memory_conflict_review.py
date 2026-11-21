@@ -32,14 +32,17 @@ class Model:
     and the second look with ``agree``; anything else gets NO_CHANGES."""
     name = "fake"
 
-    def __init__(self, claims=None, agree=True, raw=None):
-        self.claims, self.agree, self.raw = claims, agree, raw
+    def __init__(self, claims=None, agree=True, raw=None, confirm_raw=None):
+        self.claims, self.agree, self.raw, self.confirm_raw = claims, agree, raw, confirm_raw
+        self.before = None  # called with each request: what happens while the model answers
         self.requests: list = []
         self.reviews: list[dict] = []
         self.confirms: list[dict] = []
 
     def answer(self, request) -> str:
         body = request.messages[0].content[0].text
+        if self.before is not None:
+            self.before(request)
         if request.system == review._SYSTEM:
             doc = json.loads(body)
             self.reviews.append(doc)
@@ -49,6 +52,8 @@ class Model:
         if request.system == review._CONFIRM_SYSTEM:
             doc = json.loads(body)
             self.confirms.append(doc)
+            if self.confirm_raw is not None:
+                return self.confirm_raw
             return json.dumps({"verdicts": [{"pair": p["pair"], "conflict": self.agree}
                                             for p in doc["pairs"]]})
         if request.system == memory_backfill._SYSTEM:
@@ -85,6 +90,14 @@ def rule(store, text, **kwargs):
 
 def waiting(store):
     return review.open_conflicts(store._facts.snapshot()["entries"], store.root)
+
+
+def state_of(store) -> dict:
+    return json.loads((store.root / review.STATE_FILE).read_text())
+
+
+def retry_now(store) -> None:
+    (store.root / review.STATE_FILE).write_text(json.dumps(state_of(store) | {"retry_at": 0}))
 
 
 def log_rows(store) -> list[dict]:
@@ -253,28 +266,71 @@ def test_a_store_too_large_for_one_prompt_shows_related_rules_first():
     subject = row(1, SOL)
     related = row(50, OPUS)
     entries = [subject, *filler, related]
-    checked = {f"o:{e['id']}": review._coexistence_token(e) for e in [*filler, related]}
+    checked = {f"o:{e['id']}": review._review_token(e) for e in [*filler, related]}
     batch = review.plan(entries, checked, limit_chars=1500)
     assert [e["id"] for e in batch.subjects] == ["m1"]
     shown = [e["id"] for e in batch.shown.values()]
     assert shown[:2] == ["m1", "m50"], "the oldest rule is shown first because it shares the subject"
     assert len(shown) < len(entries) and len(batch.prompt()) <= 1500
+    assert batch.omitted == len(entries) - len(shown)
     # Order of display is all the word overlap decides: with room, all are shown.
-    assert len(review.plan(entries, checked).shown) == len(entries)
+    whole = review.plan(entries, checked)
+    assert len(whole.shown) == len(entries) and whole.omitted == 0
+
+    # The rules left out come next, beside the same subject, until none is left.
+    progress = {"subjects": {"o:m1": batch.tokens["o:m1"]},
+                "seen": {f"o:{i}": batch.tokens[f"o:{i}"] for i in shown[1:]}}
+    turns = 1
+    while True:
+        batch = review.plan(entries, checked, limit_chars=1500, progress=progress)
+        if not batch.subjects:
+            break
+        turns += 1
+        assert [e["id"] for e in batch.subjects] == ["m1"]
+        later = [e["id"] for e in batch.shown.values()][1:]
+        assert later and not set(later) & {i.removeprefix("o:") for i in progress["seen"]}
+        progress["seen"].update({f"o:{i}": batch.tokens[f"o:{i}"] for i in later})
+        if not batch.omitted:
+            break
+    assert turns > 2 and len(progress["seen"]) == len(entries) - 1
+
+
+def test_one_scope_s_rule_too_large_for_any_prompt_is_not_asked_about_forever():
+    now = time.time()
+    rows = [{"id": f"m{n}", "origin": "o", "revision": 1, "text": f"Rule {n}: " + "keep it short. " * 40,
+             "protected": True, "scope": "global", "updated_at": now - n} for n in range(3)]
+    batch = review.plan(rows, {}, limit_chars=400)
+    assert not batch.subjects and not batch.shown
+    assert {e["id"] for e in batch.alone} == {"m0", "m1", "m2"}
 
 
 @pytest.mark.parametrize("quote, found", [
-    ("code reviews are done by sol", "code reviews are done by Sol"),
     ("code   reviews are\ndone by Sol", "code reviews are done by Sol"),
     ('"code reviews are done by Sol..."', "code reviews are done by Sol"),
     ("done by Sol, never by Opus.", "done by Sol, never by Opus."),
+    ("Sol", "Sol"),
+    # Only the capital of the first letter is forgiven: a sentence start.
+    ("Code reviews are done by Sol", "code reviews are done by Sol"),
+    ("from now on", "From now on"),
+    ("code reviews are done by sol", None),
     ("code reviews are done by Sonnet", None),
-    ("Sol", None),
+    ("ode reviews are done by Sol", None),
+    ("code reviews are done by So", None),
+    ("", None),
+    ('""', None),
     (None, None),
     (["code reviews are done by Sol"], None),
 ])
 def test_a_quote_must_be_the_rule_s_own_words(quote, found):
     assert review.locate(quote, SOL) == found
+
+
+def test_a_quote_keeps_the_rule_s_capitals_and_may_be_short():
+    assert review.locate("rsync -R", "Copy with rsync -r to the backup disk.") is None
+    assert review.locate("rsync -r", "Copy with rsync -r to the backup disk.") == "rsync -r"
+    assert review.locate("Use tabs.", "Use tabs.") == "Use tabs."
+    assert review.locate("Use spaces.", "Use spaces.") == "Use spaces."
+    assert review.locate("x" * 500, "x" * 500) is None, "a passage, not the whole rule"
 
 
 def test_typographic_marks_in_a_quote_are_forgiven():
@@ -283,7 +339,190 @@ def test_typographic_marks_in_a_quote_are_forgiven():
     assert review.locate("\"wait for the owner's\"", text) == "wait for the owner’s"
 
 
+GERMAN = "Answer the owner in German."
+ENGLISH = "Always reply in English, whatever language the question is written in."
+
+
+def languages(doc: dict) -> list[dict]:
+    if not {GERMAN, ENGLISH} <= {r["text"] for r in doc["rules"]}:
+        return []
+    return clash(GERMAN, ENGLISH, "Answer the owner in German", "Always reply in English")(doc)
+
+
+async def test_a_scope_too_large_for_one_prompt_is_compared_in_turns(tmp_path, monkeypatch):
+    monkeypatch.setattr(review, "PROMPT_CHARS", 1500)
+    monkeypatch.setattr(review, "MAX_CALLS_PER_DAY", 1000)
+    store = SkillStore(tmp_path)
+    old = rule(store, GERMAN)
+    for n in range(30):
+        rule(store, f"Reply note {n}: whatever the question, keep the written reply in English short.")
+    quiet = Model()
+    synth = learner(store, quiet, daily_calls=4000)
+    for _ in range(200):
+        if not review.pending(store):
+            break
+        await review.run(synth)
+    assert review.pending(store) == 0
+
+    # The new rule shares its words with thirty notes and none with the rule
+    # it contradicts, which no single prompt has room for.
+    new = rule(store, ENGLISH)
+    model = Model(languages)
+    synth = learner(store, model, daily_calls=4000)
+    first = await review.run(synth)
+    assert GERMAN not in json.dumps(model.reviews[0]), "crowded out of the first prompt"
+    assert (first.reviewed, first.found) == (0, 0) and review.pending(store) == 1
+    for _ in range(40):
+        if not review.pending(store):
+            break
+        await review.run(synth)
+    assert review.pending(store) == 0 and len(model.reviews) > 2
+    assert all(doc["subjects"] == [alias(doc, ENGLISH)] for doc in model.reviews)
+    shown = [r["text"] for doc in model.reviews for r in doc["rules"] if r["text"] != ENGLISH]
+    assert len(shown) == len(set(shown)) == 31, "every other rule was shown beside it, once"
+    assert [(c["a"]["id"], c["b"]["id"]) for c in waiting(store)] == [(old.id, new.id)]
+    assert "progress" not in state_of(store)
+
+
+# ─── the store changes while the model answers ─────────────────────────────
+
+async def test_a_rule_reworded_while_the_model_answers_is_reviewed_again(tmp_path):
+    store = SkillStore(tmp_path)
+    kept, edited = rule(store, OPUS), rule(store, DEPLOY)
+    model = Model()
+
+    def reword(request):
+        if len(model.requests) == 1:  # the owner corrects a rule during the first call
+            store.save_memory(SOL, memory_id=edited.id, expected_revision=edited.revision, protected=True)
+    model.before = reword
+    synth = learner(store, model)
+    result = await review.run(synth)
+    assert DEPLOY in json.dumps(model.reviews[0]) and SOL not in json.dumps(model.reviews[0])
+    assert result.reviewed == 1 and review.pending(store) == 1, "the wording nobody read is not marked"
+
+    model.before, model.claims = None, REVIEWERS
+    result = await review.run(synth)
+    doc = model.reviews[1]
+    assert doc["subjects"] == [alias(doc, SOL)]
+    assert result.changed == [kept.id, edited.id] and len(waiting(store)) == 1
+
+
+@pytest.mark.parametrize("during", ["first look", "second look"])
+async def test_a_claim_about_wording_that_changed_meanwhile_is_dropped(tmp_path, during):
+    store = SkillStore(tmp_path)
+    old, _new = rule(store, OPUS), rule(store, SOL)
+    model = Model(REVIEWERS)
+
+    def narrow(request):
+        if request.system == (review._SYSTEM if during == "first look" else review._CONFIRM_SYSTEM):
+            # The quoted passage is still there, but the rule now says something else.
+            store.save_memory("Code reviews are done by Opus when Sol is unavailable.",
+                              memory_id=old.id, expected_revision=old.revision, protected=True)
+            model.before = None
+    model.before = narrow
+    synth = learner(store, model)
+    result = await review.run(synth)
+    assert result.found == (0 if during == "first look" else 1) and result.changed == []
+    assert bool(model.confirms) is (during == "second look")
+    assert waiting(store) == [] and "owner question" not in store.render_memory_section()
+    assert state_of(store)["conflicts"] == [] and state_of(store)["pending"] == []
+    assert review.pending(store) == 1, "the reworded rule is reviewed from the start"
+
+
+async def test_a_when_line_the_backfill_writes_in_the_same_pass_keeps_the_verdict(tmp_path):
+    store = SkillStore(tmp_path)
+    old, new = rule(store, OPUS), rule(store, SOL)
+    assert not any(m.when for m in store.memories())
+    store.journal_append({"kind": "remember", "text": "Keep the release checklist for future work."})
+    model = Model(REVIEWERS)
+    synth = learner(store, model, min_new_entries=1)
+    await synth._run_safe()
+    assert all(m.when == "When planning the work" for m in store.memories()), "the backfill ran"
+    assert [(c["a"]["id"], c["b"]["id"]) for c in waiting(store)] == [(old.id, new.id)]
+    assert f"conflicts with [{new.id}]" in store.render_memory_section()
+    recalled = await recall({"ids": [new.id]}, ToolCtx(extra={"recall_store": store}))
+    assert "- [owner question]" in recalled.text
+    # A generated line is not new wording: nothing is reviewed again.
+    assert review.pending(store) == 0 and (await review.run(synth)).calls == 0
+    # The owner's own when-line is: the rule may now apply somewhere else.
+    revision = next(m.revision for m in store.memories() if m.id == old.id)
+    store.save_memory(OPUS, memory_id=old.id, expected_revision=revision, protected=True,
+                      when="When reviewing documentation only")
+    assert waiting(store) == [] and review.pending(store) == 1
+
+
 # ─── failure, budget and logging ───────────────────────────────────────────
+
+async def test_one_malformed_claim_does_not_cost_the_others(tmp_path):
+    store = SkillStore(tmp_path)
+    for text in (OPUS, SOL, DEPLOY):
+        rule(store, text)
+    model = Model(lambda doc: [
+        {"a": [], "b": alias(doc, OPUS), "a_quote": "Deploys", "b_quote": "Code reviews"},
+        {"a": alias(doc, DEPLOY), "b": {"id": "r1"}, "a_quote": "Deploys", "b_quote": "Code reviews"},
+        {"a": 1, "b": 2}, None] + REVIEWERS(doc))
+    result = await review.run(learner(store, model))
+    assert (result.found, result.rejected, result.reviewed) == (1, 4, 3)
+    assert len(waiting(store)) == 1 and review.review_backoff(store.root) == {}
+
+
+async def test_a_second_look_the_budget_refuses_is_taken_by_a_later_pass(tmp_path):
+    store = SkillStore(tmp_path)
+    old, new = rule(store, OPUS), rule(store, SOL)
+    model = Model(REVIEWERS)
+    # A four-call day: half is the review's share and synthesis took one call.
+    assert store._facts.claim_inference_call(0, 4)
+    result = await review.run(learner(store, model, daily_calls=4))
+    assert (result.calls, result.reviewed, result.found) == (1, 2, 0)
+    assert len(model.reviews) == 1 and not model.confirms
+    assert waiting(store) == [] and "owner question" not in store.render_memory_section()
+    assert review.pending(store) == 1 and len(state_of(store)["pending"]) == 1
+    assert review.review_backoff(store.root) == {}, "waiting for budget is not a failure"
+    assert (await review.run(learner(store, model, daily_calls=4))).calls == 0
+
+    # With budget again the claim gets its second look; the rules are not read anew.
+    result = await review.run(learner(store, model, daily_calls=8))
+    assert (result.calls, result.reviewed, result.found) == (1, 0, 1)
+    assert len(model.reviews) == 1 and len(model.confirms) == 1
+    assert result.changed == [old.id, new.id] and len(waiting(store)) == 1
+    assert review.pending(store) == 0 and state_of(store)["pending"] == []
+    assert state_of(store)["calls"] == 2
+
+
+async def test_first_and_second_looks_share_the_daily_cap(tmp_path):
+    store = SkillStore(tmp_path)
+
+    def newest_pair(doc):
+        a, b = (next(r for r in doc["rules"] if r["id"] == name) for name in doc["subjects"])
+        return [{"a": a["id"], "b": b["id"], "a_quote": a["text"].rstrip("."),
+                 "b_quote": b["text"].rstrip("."), "why": ""}]
+    model = Model(newest_pair)
+    synth = learner(store, model, daily_calls=40)
+    for n in range(review.MAX_CALLS_PER_DAY):
+        rule(store, f"Team {n} code reviews are done by Opus.")
+        rule(store, f"Team {n} code reviews are done by Sol.")
+        await review.run(synth)
+    assert len(model.requests) == review.MAX_CALLS_PER_DAY == state_of(store)["calls"]
+    assert len(model.reviews) == len(model.confirms) == review.MAX_CALLS_PER_DAY // 2
+    assert len(waiting(store)) == review.MAX_CALLS_PER_DAY // 2
+    assert review.pending(store) == review.MAX_CALLS_PER_DAY
+
+
+async def test_a_claim_no_second_look_can_read_is_given_up(tmp_path):
+    store = SkillStore(tmp_path)
+    for text in (OPUS, SOL):
+        rule(store, text)
+    model = Model(REVIEWERS, confirm_raw="I am not sure.")
+    synth = learner(store, model, daily_calls=40)
+    for tries in range(1, review.CONFIRM_TRIES + 1):
+        result = await review.run(synth)
+        assert result.found == 0 and review.review_backoff(store.root)["failures"] == tries
+        assert len(model.reviews) == 1 and len(model.confirms) == tries
+        assert review.pending(store) == (1 if tries < review.CONFIRM_TRIES else 0)
+        retry_now(store)
+    assert (await review.run(synth)).calls == 0 and waiting(store) == []
+
+
 
 @pytest.mark.parametrize("raw", ["not JSON", "[]", '{"conflicts": "none"}', '{"conflicts": [], "conflicts": []}'])
 async def test_an_unreadable_answer_reviews_nothing_and_backs_off(tmp_path, raw):
@@ -379,7 +618,7 @@ async def test_a_failed_review_never_fails_the_learner_pass(tmp_path):
 
 # ─── how a question ends ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("how", ["forget", "replace", "correct", "both stand"])
+@pytest.mark.parametrize("how", ["forget", "replace", "correct", "narrow", "both stand"])
 async def test_the_owner_s_answer_ends_the_question(tmp_path, how):
     store = SkillStore(tmp_path)
     old, new = rule(store, OPUS), rule(store, SOL)
@@ -394,6 +633,9 @@ async def test_the_owner_s_answer_ends_the_question(tmp_path, how):
     elif how == "correct":
         store.save_memory("Code reviews were done by Opus until Sol took over.", memory_id=old.id,
                           expected_revision=old.revision, protected=True)
+    elif how == "narrow":
+        store.save_memory(OPUS, memory_id=old.id, expected_revision=old.revision, protected=True,
+                          when="When reviewing documentation only")
     else:
         store.save_memory("Both stand: Opus reviews risky changes, Sol the rest.", protected=True,
                           key=key, when="When applying these owner rules")

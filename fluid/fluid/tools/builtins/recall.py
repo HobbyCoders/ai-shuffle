@@ -147,11 +147,9 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
 def _owner_questions(store, project, hits):
     """The open conflicts (fluid.codemode.conflict_review) a recalled rule is
     part of: the two clashing passages and how the owner's answer is saved."""
-    from fluid.codemode.conflict_review import conflict_lines, open_conflicts
+    from fluid.codemode.conflict_review import conflict_lines, session_conflicts
     try:
-        entries = [vars(e) for e in store.memories()
-                   if project is None or e.scope in ("global", project)]
-        return conflict_lines(open_conflicts(entries, store.root),
+        return conflict_lines(session_conflicts(store, project),
                               about={str(e.id) for e, _ in hits})
     except Exception:  # noqa: BLE001 — a broken verdict file never fails a Recall
         return []

@@ -6,15 +6,20 @@ question of meaning, so it is put to the model the owner configured for the
 memory learner. Nothing here compares word lists.
 
 * What is reviewed: an owner-kept rule that is new or whose text, when-line,
-  scope or always flag changed since it was last reviewed (:func:`plan`). It
-  is shown beside the other owner-kept rules of the same scope and worker.
-  A store too large for one prompt shows the rules sharing the most subject
-  words first; that order only decides what is shown, never a verdict.
+  scope or always flag the owner changed since it was last reviewed
+  (:func:`plan`). A when-line the learner's backfill generated is not the
+  owner's wording: writing one reviews nothing again and keeps every
+  verdict. A rule is compared with every
+  other owner-kept rule of its scope and worker: a store too large for one
+  prompt takes several calls, the rules sharing the most subject words
+  first, and the rule counts as reviewed only after the last of them. That
+  order decides what is shown first, never a verdict.
 * What counts: the model must name two rules an assistant cannot both obey
   in one situation and quote the clashing instruction from each. A claim is
-  dropped unless both quotes are found word for word in their own rule
-  (:func:`parse`), and a second call that sees only the two rules must agree
-  (:func:`confirmed`). Silence is the default: most stores have no conflict.
+  dropped unless both quotes stand in their own rule (:func:`locate`), and a
+  second call that sees only the two rules must agree (:func:`confirmed`).
+  A claim the budget leaves unconfirmed waits for the next pass. Silence is
+  the default: most stores have no conflict.
 * Where a verdict lives: ``conflict-review.json`` beside the store, local to
   this worker. It records which exact wording of each rule was reviewed and
   the open conflicts. A conflict stays open only while both rules are live
@@ -28,8 +33,8 @@ memory learner. Nothing here compares word lists.
   names the exact wording answered about and replicates like any fact.
 
 Calls come from the learner's shared daily budget, at most
-:data:`MAX_CALLS_PER_DAY` review passes a day per store, with the review's
-own backoff after a failure. Without a learner model or budget nothing is
+:data:`MAX_CALLS_PER_DAY` a day per store, with the review's own backoff
+after a failure. Without a learner model or budget nothing is
 reviewed and no session is told anything. Rule text is never logged.
 """
 from __future__ import annotations
@@ -54,19 +59,20 @@ STATE_FILE = "conflict-review.json"
 # Rules reviewed per call, and the prompt they and their neighbours may fill.
 SUBJECTS_PER_CALL = 12
 PROMPT_CHARS = 48_000
-# Review passes a day per store (a confirmed claim costs one more call).
+# Review calls a day per store, first looks and second looks together.
 MAX_CALLS_PER_DAY = 4
 MAX_CONFLICTS_PER_CALL = 3
 # Conflicts a session is told about at once, and records kept on disk.
 MAX_OPEN_CONFLICTS = 3
 MAX_RECORDS = 64
-QUOTE_MIN_CHARS = 12
 QUOTE_MAX_CHARS = 400
 WHY_CHARS = 200
 # A failed review waits this long, doubling per failure in a row up to the cap.
 RETRY_BASE_SECONDS = 3600.0
 RETRY_MAX_SECONDS = 24 * 3600.0
 ATTENTION_FAILURES = 3
+# Unreadable second looks after which a waiting claim is given up.
+CONFIRM_TRIES = 2
 
 # Facts about who the owner is, and the owner's answers themselves, are not rules.
 COEXIST_KEY_PREFIX = "memory.coexist."
@@ -138,6 +144,18 @@ def _coexistence_value(e: dict) -> tuple:
 
 def _coexistence_token(e: dict) -> str:
     return hashlib.sha256(json.dumps(_coexistence_value(e), ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def _review_token(e: dict) -> str:
+    """The wording a review judged: identity, text, the owner's when-line and
+    where the rule applies. A when-line the backfill generated is left out
+    (``when_basis`` marks it; see the module docstring), so this is not the
+    answer key's token and it needs a raw fact, not a rendered row."""
+    from fluid.codemode.facts import global_id, written_when
+    when = written_when(e) if e.get("when_basis") is None else None
+    value = (global_id(e), e["text"], when or "", bool(e.get("always")),
+             e.get("scope") or "global", e.get("worker"))
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()[:32]
 
 
 # A document-revision cache key, not a time cache: sync, corrections, metadata
@@ -247,8 +265,16 @@ class Batch:
     """One review call: ``subjects`` are judged against everything in ``shown``."""
     subjects: list[dict] = field(default_factory=list)
     shown: dict[str, dict] = field(default_factory=dict)   # alias -> fact
-    # Rules with nothing to be compared with: reviewed without a call.
+    # Rules with nothing (left) to be compared with: reviewed without a call.
     alone: list[dict] = field(default_factory=list)
+    # Rules of the scope this call has no room for: the subjects stay
+    # unreviewed until a later call has shown them these too.
+    omitted: int = 0
+    # The wording of every rule above as planned ({global id: token}): what
+    # the model is shown, whatever the store holds when it answers.
+    tokens: dict[str, str] = field(default_factory=dict)
+    # Rules earlier calls already showed these subjects ({global id: token}).
+    carried: dict[str, str] = field(default_factory=dict)
 
     def aliases(self) -> dict[str, str]:
         from fluid.codemode.facts import global_id
@@ -262,29 +288,39 @@ class Batch:
                           ensure_ascii=False)
 
 
-def plan(entries: list[dict], checked: dict[str, str], *, limit_chars: int = PROMPT_CHARS) -> Batch:
+def plan(entries: list[dict], checked: dict[str, str], *, limit_chars: int = PROMPT_CHARS,
+         progress: dict | None = None) -> Batch:
     """The next review call for ``entries`` (raw facts visible on this worker).
 
     ``checked`` maps a rule's global id to the wording last reviewed. The
     newest unreviewed rule picks the scope; up to :data:`SUBJECTS_PER_CALL`
-    unreviewed rules of that scope are the subjects, and the scope's other
-    rules fill the prompt, those sharing the most subject words first.
+    unreviewed rules of that scope are the subjects (in at most half of the
+    prompt), and the scope's other rules fill the rest, those sharing the
+    most subject words first. ``progress`` is the unfinished review of a
+    scope too large for one call (``subjects`` and the rules already ``seen``
+    beside them, each ``{global id: wording}``): its subjects come back with
+    the rules they have not been shown yet.
     """
     from fluid.codemode.facts import global_id
     from fluid.codemode.supersession import subject_terms
 
     rules = [e for e in entries if _is_rule(e)]
-    pending = sorted((e for e in rules if checked.get(global_id(e)) != _coexistence_token(e)),
+    tokens = {global_id(e): _review_token(e) for e in rules}
+    pending = sorted((e for e in rules if checked.get(global_id(e)) != tokens[global_id(e)]),
                      key=lambda e: (-_saved(e), str(e["id"])))
-    batch = Batch()
+    batch = Batch(tokens=tokens)
     peers: dict[tuple, list[dict]] = {}
     for e in rules:
         peers.setdefault(_partition(e), []).append(e)
+    resumed = {gid for gid, token in ((progress or {}).get("subjects") or {}).items()
+               if tokens.get(gid) == token and checked.get(gid) != token}
+    seen = {gid for gid, token in ((progress or {}).get("seen") or {}).items()
+            if tokens.get(gid) == token} if resumed else set()
     lead = None
     for e in pending:
         if len(peers[_partition(e)]) < 2:
             batch.alone.append(e)
-        elif lead is None:
+        elif lead is None and (not resumed or global_id(e) in resumed):
             lead = e
     if lead is None:
         return batch
@@ -292,42 +328,50 @@ def plan(entries: list[dict], checked: dict[str, str], *, limit_chars: int = PRO
     size = 64  # the envelope
     count = 0
 
-    def fits(e: dict) -> bool:
+    def fits(e: dict, limit: int) -> bool:
         nonlocal size
         cost = len(json.dumps(_record(f"r{count + 1}", e), ensure_ascii=False)) + 16
-        if size + cost > limit_chars:
+        if size + cost > limit:
             return False
         size += cost
         return True
 
     for e in pending:
-        if _partition(e) != part or len(batch.subjects) >= SUBJECTS_PER_CALL:
+        if (_partition(e) != part or len(batch.subjects) >= SUBJECTS_PER_CALL
+                or (resumed and global_id(e) not in resumed)):
             continue
-        if not fits(e):
+        # The first subject may take what it needs; the rest leave half of
+        # the prompt to the rules they are compared with.
+        if not fits(e, limit_chars if not batch.subjects else limit_chars // 2):
             if not batch.subjects:
                 batch.alone.append(e)  # larger than any prompt: nothing can review it
             continue
         count += 1
         batch.subjects.append(e)
         batch.shown[f"r{count}"] = e
+    if resumed and {global_id(e) for e in batch.subjects} != resumed:
+        # The prompt shrank since the unfinished review: start it again.
+        return plan(entries, checked, limit_chars=limit_chars)
     if not batch.subjects:
         return batch
+    batch.carried = {gid: tokens[gid] for gid in seen}
     terms = set()
     for e in batch.subjects:
         terms |= subject_terms(f"{e.get('when') or ''} {e['text']}")
     chosen = {id(e) for e in batch.subjects}
-    others = sorted((e for e in peers[part] if id(e) not in chosen),
+    others = sorted((e for e in peers[part] if id(e) not in chosen and global_id(e) not in seen),
                     key=lambda e: (-len(terms & subject_terms(f"{e.get('when') or ''} {e['text']}")),
                                    -_saved(e), str(e["id"])))
     for e in others:
-        if not fits(e):
+        if not fits(e, limit_chars):
+            batch.omitted += 1
             continue
         count += 1
         batch.shown[f"r{count}"] = e
-    if len(batch.shown) < 2:
-        # Its only neighbours did not fit beside it.
+    if len(batch.shown) == len(batch.subjects) and (batch.omitted or len(batch.shown) < 2 or seen):
+        # Nothing (more) fits beside them: no call can compare them further.
         batch.alone.extend(batch.subjects)
-        batch.subjects, batch.shown = [], {}
+        batch.subjects, batch.shown, batch.omitted, batch.carried = [], {}, 0, {}
     return batch
 
 
@@ -361,27 +405,28 @@ _QUOTE_VARIANTS = {"'": "['’‘`]", "’": "['’‘`]", "‘": "['’‘`]", 
 def locate(quote: Any, text: str) -> str | None:
     """``quote`` as it stands in ``text`` (one space between words), or None.
 
-    Case, runs of whitespace and typographic quote and dash variants are
-    forgiven, and so are quotation marks or an ellipsis the model wrapped the
-    passage in. Anything else must match: the passage is the evidence.
+    The passage must be whole words of the rule, in the rule's own spelling
+    and capitals. Forgiven are what a model changes when it copies: runs of
+    whitespace, typographic quote and dash variants, the capital of the very
+    first letter, and quotation marks or an ellipsis wrapped around the
+    passage. What is returned is always the rule's own text.
     """
     if not isinstance(quote, str):
         return None
     given = quote.strip()
-    bare = given.strip("\"“”'‘’").removesuffix("...").removesuffix("…")
+    bare = given.strip("\"“”'‘’").removesuffix("...").removesuffix("…").strip()
     for candidate in dict.fromkeys((given, bare)):  # as given first: a mark may belong to the rule
-        words = candidate.split()
-        if not words:
+        if not candidate.split():
             continue
-        pattern = r"\s+".join("".join(_QUOTE_VARIANTS.get(ch) or re.escape(ch) for ch in word)
-                              for word in words)
-        try:
-            found = re.search(pattern, text, re.I)
-        except re.error:
-            continue
+        first = candidate[0]
+        either = (f"[{re.escape(first.lower())}{re.escape(first.upper())}]" if first.isalpha()
+                  else _QUOTE_VARIANTS.get(first) or re.escape(first))
+        rest = r"\s+".join("".join(_QUOTE_VARIANTS.get(ch) or re.escape(ch) for ch in word)
+                           for word in re.split(r"\s+", candidate[1:]))
+        found = re.search(r"(?<!\w)" + either + rest + r"(?!\w)", text)
         if found:
             passage = " ".join(found.group(0).split())
-            return passage if QUOTE_MIN_CHARS <= len(passage) <= QUOTE_MAX_CHARS else None
+            return passage if len(passage) <= QUOTE_MAX_CHARS else None
     return None
 
 
@@ -389,9 +434,10 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
     """``(claims, rejected)`` from one review answer.
 
     A malformed envelope raises: the subjects were not reviewed. A single
-    claim that names an unknown rule, two rules of which neither is a
-    subject, or a passage its rule does not contain is dropped and counted;
-    an unverifiable claim is no conflict.
+    claim that is malformed, names an unknown rule or two rules of which
+    neither is a subject, or quotes a passage its rule does not contain is
+    dropped and counted; an unverifiable claim is no conflict. Each claim
+    carries the wording the batch showed (``a_token``, ``b_token``).
     """
     from fluid.codemode.facts import global_id
 
@@ -406,8 +452,9 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
         if len(claims) >= MAX_CONFLICTS_PER_CALL:
             rejected += 1
             continue
-        a = batch.shown.get(item.get("a")) if isinstance(item, dict) else None
-        b = batch.shown.get(item.get("b")) if isinstance(item, dict) else None
+        names = [item.get(k) for k in ("a", "b")] if isinstance(item, dict) else []
+        a, b = ((batch.shown.get(name) for name in names)
+                if names and all(isinstance(name, str) for name in names) else (None, None))
         if a is None or b is None or a is b:
             rejected += 1
             continue
@@ -422,6 +469,8 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
             a, b, a_quote, b_quote = b, a, b_quote, a_quote  # b is the newer rule
         why = item.get("why")
         claims.append({"a": a, "b": b, "a_quote": a_quote, "b_quote": b_quote,
+                       "a_token": batch.tokens.get(global_id(a)) or _review_token(a),
+                       "b_token": batch.tokens.get(global_id(b)) or _review_token(b),
                        "why": " ".join(why.split())[:WHY_CHARS] if isinstance(why, str) else ""})
     return claims, rejected
 
@@ -447,21 +496,51 @@ def confirmed(text: str, claims: list[dict]) -> list[dict]:
 
 # ─── the sidecar ───────────────────────────────────────────────────────────
 
+#
+# ``checked``    {global id: wording} of every rule reviewed against its scope
+# ``conflicts``  the confirmed pairs, each bound to the two wordings judged
+# ``pending``    claims of a first look that still wait for the second
+# ``progress``   the unfinished review of a scope too large for one call
+# ``day``, ``calls``, ``failures``, ``retry_at``   pacing
+
+def _stored(value: Any) -> list[dict]:
+    """The well-formed pair records of a stored list."""
+    return [c for c in (value if isinstance(value, list) else [])
+            if isinstance(c, dict)
+            and all(isinstance(c.get(k), str) and c.get(k)
+                    for k in ("a", "b", "a_token", "b_token", "a_quote", "b_quote"))]
+
+
+def _stored_claim(claim: dict) -> dict:
+    """A claim (``a`` and ``b`` are facts) as the sidecar keeps it."""
+    from fluid.codemode.facts import global_id
+    out = {"a": global_id(claim["a"]), "b": global_id(claim["b"]),
+           "a_token": claim.get("a_token") or _review_token(claim["a"]),
+           "b_token": claim.get("b_token") or _review_token(claim["b"]),
+           "a_quote": claim["a_quote"], "b_quote": claim["b_quote"],
+           "why": str(claim.get("why") or "")[:WHY_CHARS]}
+    if claim.get("tries"):
+        out["tries"] = int(claim["tries"])
+    return out
+
+
 def _load(root: Path) -> dict:
     from fluid.codemode.skills import load_json_document
     state = load_json_document(Path(root) / STATE_FILE, {})
     if not isinstance(state.get("checked"), dict):
         state["checked"] = {}
-    state["conflicts"] = [c for c in state.get("conflicts") or []
-                          if isinstance(c, dict)
-                          and all(isinstance(c.get(k), str) and c.get(k)
-                                  for k in ("a", "b", "a_token", "b_token", "a_quote", "b_quote"))]
+    state["conflicts"] = _stored(state.get("conflicts"))
+    state["pending"] = _stored(state.get("pending"))
+    progress = state.get("progress")
+    if not (isinstance(progress, dict)
+            and all(isinstance(progress.get(k), dict) for k in ("subjects", "seen"))):
+        state.pop("progress", None)
+    state["version"] = 1
     return state
 
 
 def _save(root: Path, state: dict) -> None:
     from fluid.codemode.skills import atomic_write_text
-    state["version"] = 1
     atomic_write_text(Path(root) / STATE_FILE, json.dumps(state, ensure_ascii=False))
     _cached_records.cache_clear()
 
@@ -474,10 +553,7 @@ def _cached_records(path: str, stamp: tuple) -> tuple:
         return ()
     if not isinstance(doc, dict):
         return ()
-    return tuple(json.dumps(c) for c in doc.get("conflicts") or []
-                 if isinstance(c, dict)
-                 and all(isinstance(c.get(k), str) and c.get(k)
-                         for k in ("a", "b", "a_token", "b_token", "a_quote", "b_quote")))
+    return tuple(json.dumps(c) for c in _stored(doc.get("conflicts")))
 
 
 def _records(root: Any) -> list[dict]:
@@ -491,39 +567,57 @@ def _records(root: Any) -> list[dict]:
     return [json.loads(c) for c in _cached_records(str(path), (stat.st_mtime_ns, stat.st_size))]
 
 
-def record(root: Any, entries: list[dict], reviewed: list[dict], conflicts: list[dict],
-           *, now: float | None = None) -> list[str]:
-    """Store one review's outcome: ``reviewed`` rules are marked with their
-    current wording and ``conflicts`` (``a``, ``b``, ``a_quote``, ``b_quote``,
-    ``why``) are added. Records and marks of rules that are gone or reworded
-    are dropped. Returns the local ids of the rules newly in conflict."""
+def _apply(state: dict, entries: list[dict], reviewed: dict[str, str], conflicts: list[dict],
+           now: float) -> list[str]:
+    """Fold one outcome into ``state`` against the store as it is now.
+
+    ``reviewed`` is ``{global id: wording}`` as the model was shown it and
+    ``conflicts`` are stored-form pairs. Whatever no longer matches the
+    store (a rule edited, merged from a replica or removed while the model
+    answered) is dropped, never stamped onto the new wording. Returns the
+    local ids of the rules newly in conflict.
+    """
     from fluid.codemode.facts import global_id
 
-    now = time.time() if now is None else now
-    state = _load(Path(root))
-    tokens = {global_id(e): _coexistence_token(e) for e in entries if _is_rule(e)}
+    rules = {global_id(e): e for e in entries if _is_rule(e)}
+    tokens = {gid: _review_token(e) for gid, e in rules.items()}
+
+    def live(c: dict) -> bool:
+        return (c["a"] != c["b"] and tokens.get(c["a"]) == c["a_token"]
+                and tokens.get(c["b"]) == c["b_token"])
+
     checked = {gid: token for gid, token in state["checked"].items() if tokens.get(gid) == token}
-    for e in reviewed:
-        gid = global_id(e)
-        if gid in tokens:
-            checked[gid] = tokens[gid]
-    kept = {frozenset((c["a"], c["b"])): c for c in state["conflicts"]
-            if tokens.get(c["a"]) == c["a_token"] and tokens.get(c["b"]) == c["b_token"]}
+    checked.update({gid: token for gid, token in reviewed.items() if tokens.get(gid) == token})
+    kept = {frozenset((c["a"], c["b"])): c for c in state["conflicts"] if live(c)}
     changed: list[str] = []
     for c in conflicts:
-        a, b = global_id(c["a"]), global_id(c["b"])
-        if a not in tokens or b not in tokens or a == b:
+        if not live(c):
             continue
-        pair = frozenset((a, b))
+        pair = frozenset((c["a"], c["b"]))
         if pair not in kept:
-            changed += [str(c["a"]["id"]), str(c["b"]["id"])]
-        kept[pair] = {"a": a, "b": b, "a_token": tokens[a], "b_token": tokens[b],
-                      "a_quote": c["a_quote"], "b_quote": c["b_quote"],
-                      "why": str(c.get("why") or "")[:WHY_CHARS], "at": now}
+            changed += [str(rules[c["a"]]["id"]), str(rules[c["b"]]["id"])]
+        kept[pair] = {k: v for k, v in c.items() if k != "tries"} | {"at": now}
     state["checked"] = checked
     state["conflicts"] = sorted(kept.values(), key=lambda c: float(c.get("at") or 0))[-MAX_RECORDS:]
-    _save(Path(root), state)
+    state["pending"] = [c for c in state["pending"] if live(c)]
     return list(dict.fromkeys(changed))
+
+
+def record(root: Any, entries: list[dict], reviewed: list[dict], conflicts: list[dict],
+           *, now: float | None = None) -> list[str]:
+    """Store one review's outcome: the ``reviewed`` rules are marked and the
+    ``conflicts`` (``a`` and ``b`` are the rules, with ``a_quote``,
+    ``b_quote``, ``why``) are added, each only while ``entries`` (the store's
+    raw facts now) still holds the wording that was reviewed. Marks and
+    records of rules that are gone or reworded are dropped. Returns the
+    local ids of the rules newly in conflict."""
+    from fluid.codemode.facts import global_id
+
+    state = _load(Path(root))
+    changed = _apply(state, entries, {global_id(e): _review_token(e) for e in reviewed},
+                     [_stored_claim(c) for c in conflicts], time.time() if now is None else now)
+    _save(Path(root), state)
+    return changed
 
 
 def review_backoff(root: Any) -> dict:
@@ -542,24 +636,25 @@ def review_backoff(root: Any) -> dict:
 # ─── what a session is told ────────────────────────────────────────────────
 
 def open_conflicts(entries: list[Any], root: Any) -> list[dict]:
-    """The conflicts a session over ``entries`` is told about, newest first:
-    ``{"a", "b", "a_quote", "b_quote", "key", "scope"}`` with ``b`` the newer
-    rule. One counts only while both rules are in ``entries`` and live with
-    the reviewed wording and the owner has not said both stand.
+    """The conflicts a session over ``entries`` (raw facts) is told about,
+    newest first: ``{"a", "b", "a_quote", "b_quote", "key", "scope"}`` with
+    ``b`` the newer rule. One counts only while both rules are in
+    ``entries`` and live with the reviewed wording and the owner has not
+    said both stand.
     """
     from fluid.codemode.facts import global_id
 
     records = _records(root)
     if not records:
         return []
-    rows = [e if isinstance(e, dict) else vars(e) for e in entries]
+    rows = list(entries)
     by_id = {global_id(e): e for e in rows}
     answered = None
     out: list[dict] = []
     for c in sorted(records, key=lambda c: -float(c.get("at") or 0)):
         a, b = by_id.get(c["a"]), by_id.get(c["b"])
         if (a is None or b is None or not _is_rule(a) or not _is_rule(b)
-                or _coexistence_token(a) != c["a_token"] or _coexistence_token(b) != c["b_token"]
+                or _review_token(a) != c["a_token"] or _review_token(b) != c["b_token"]
                 or locate(c["a_quote"], a["text"]) is None or locate(c["b_quote"], b["text"]) is None):
             continue
         if answered is None:
@@ -571,6 +666,21 @@ def open_conflicts(entries: list[Any], root: Any) -> list[dict]:
         if len(out) >= MAX_OPEN_CONFLICTS:
             break
     return out
+
+
+def session_conflicts(store: Any, project: str | None = None) -> list[dict]:
+    """:func:`open_conflicts` among the rules a session of ``project`` (None:
+    every scope) has on this worker. Reads the stored facts only when a
+    verdict exists, without a lock."""
+    from fluid.codemode.facts import visible_on
+
+    if not _records(store.root):
+        return []
+    doc = store._facts.snapshot(read_only=True)
+    return open_conflicts(
+        [e for e in doc["entries"] if visible_on(e, doc["store_id"])
+         and (project is None or (e.get("scope") or "global") in ("global", project))],
+        store.root)
 
 
 def conflict_notes(conflicts: list[dict]) -> dict[str, str]:
@@ -631,12 +741,28 @@ def _visible(store: Any) -> list[dict]:
     return [e for e in doc["entries"] if visible_on(e, doc["store_id"])]
 
 
-def pending(store: Any) -> int:
-    """How many owner-kept rules still wait for a review."""
+def _waiting(state: dict, entries: list[dict]) -> list[dict]:
+    """The stored first-look claims still bound to the store's wording, as
+    claims (``a`` and ``b`` are the facts). The rest are dropped from
+    ``state``: a reworded rule is reviewed again from the start."""
     from fluid.codemode.facts import global_id
-    checked = _load(Path(store.root))["checked"]
-    return sum(1 for e in _visible(store)
-               if _is_rule(e) and checked.get(global_id(e)) != _coexistence_token(e))
+    rules = {global_id(e): e for e in entries if _is_rule(e)}
+    claims = [c | {"a": rules[c["a"]], "b": rules[c["b"]]} for c in state["pending"]
+              if c["a"] != c["b"] and c["a"] in rules and c["b"] in rules
+              and _review_token(rules[c["a"]]) == c["a_token"]
+              and _review_token(rules[c["b"]]) == c["b_token"]]
+    state["pending"] = [_stored_claim(c) for c in claims]
+    return claims
+
+
+def pending(store: Any) -> int:
+    """How much review is unfinished: owner-kept rules not yet reviewed plus
+    claims that wait for their second look."""
+    from fluid.codemode.facts import global_id
+    state, entries = _load(Path(store.root)), _visible(store)
+    return (sum(1 for e in entries
+                if _is_rule(e) and state["checked"].get(global_id(e)) != _review_token(e))
+            + len(_waiting(state, entries)))
 
 
 def _note_failure(synth: Any, root: Path, error: str, *, consumed: int,
@@ -662,96 +788,162 @@ def _add_usage(total: dict[str, int], usage: dict[str, int] | None) -> dict[str,
     return total
 
 
+def _advance(state: dict, entries: list[dict], batch: Batch, claims: list[dict], now: float) -> None:
+    """Fold a first look into ``state`` against the store as it is now.
+
+    Its claims wait for the second look. Its subjects are reviewed once
+    every rule of their scope has been shown beside them; until then
+    ``progress`` carries them, and what they were shown, to the next call.
+    """
+    from fluid.codemode.facts import global_id
+
+    subjects = {gid: batch.tokens[gid] for gid in (global_id(e) for e in batch.subjects)}
+    state["pending"] = [_stored_claim(c) for c in claims]
+    if batch.omitted:
+        shown = {gid: batch.tokens[gid] for gid in batch.aliases() if gid not in subjects}
+        state["progress"] = {"subjects": subjects, "seen": batch.carried | shown}
+        subjects = {}
+    else:
+        state.pop("progress", None)
+    _apply(state, entries, subjects, [], now)
+
+
 async def run(synth: Any) -> Result:
-    """One best-effort review call (two when it claims a conflict), never a
-    loop that can drain the learner budget.
+    """One best-effort review step, never a loop that can drain the budget:
+    the second look at claims an earlier pass left waiting, or else one
+    first look and, when it claims a conflict, its second look.
 
     Uses the learner's provider, routing, token accounting and shared daily
-    budget, and leaves at least half of that budget to synthesis. A failed
-    or unreadable answer marks nothing as reviewed and waits on this
-    review's own backoff; it never fails a synthesis pass.
+    budget, and leaves at least half of that budget to synthesis. What a
+    call decided is saved before the next call starts, so a second look the
+    budget refuses happens in a later pass. A failed or unreadable answer
+    decides nothing and waits on this review's own backoff; it never fails
+    a synthesis pass.
     """
-    from fluid.codemode.continual import InferenceBudgetExhausted, SYNTHESIS_LOCK
+    from fluid.codemode.continual import SYNTHESIS_LOCK
     from fluid.codemode.skills import journal_lock
 
-    store = synth._store
-    root = Path(store.root)
     result = Result()
     try:
-        with journal_lock(root / SYNTHESIS_LOCK) as held:
-            if not held:
-                return result
-            entries = _visible(store)
-            state = _load(root)
-            batch = plan(entries, state["checked"],
-                         limit_chars=min(PROMPT_CHARS, int(synth._prompt_limit)))
-            if batch.alone:
-                record(root, entries, batch.alone, [])
-                state = _load(root)
-            if not batch.subjects:
-                return result
-            now = time.time()
-            if (now < float(review_backoff(root).get("until", 0))
-                    or now < float(store.learner_backoff(synth._model).get("until", 0))
-                    or now < store.consolidation_retry_at()):
-                return result
-            day = int(now // 86400)
-            if state.get("day") != day:
-                state.update(day=day, calls=0)
-            if int(state.get("calls") or 0) >= MAX_CALLS_PER_DAY:
-                return result
-            budget = synth._budget(refresh=True)
-            reserve = max(budget.reserved, (budget.daily + 1) // 2)
-            spent = store._facts.inference_budget()
-            if spent.get("day") == day and int(spent.get("calls", 0)) >= budget.daily - reserve:
-                return result
-            state["calls"] = int(state.get("calls") or 0) + 1
-            _save(root, state)
-            usage: dict[str, int] = {}
-            consumed = len(batch.subjects)
-            try:
-                result.calls = 1
-                text, used = await asyncio.wait_for(
-                    synth._complete(batch.prompt(), _SYSTEM, reserve=reserve),
-                    timeout=synth._pass_timeout)
-                _add_usage(usage, used)
-                claims, result.rejected = parse(text, batch)
-                if claims:
-                    # A second look at the two rules alone, without the rest
-                    # of the store pulling their meaning together.
-                    result.calls = 2
-                    text, used = await asyncio.wait_for(
-                        synth._complete(confirm_prompt(claims), _CONFIRM_SYSTEM, reserve=reserve),
-                        timeout=synth._pass_timeout)
-                    _add_usage(usage, used)
-                    agreed = confirmed(text, claims)
-                    result.rejected += len(claims) - len(agreed)
-                    claims = agreed
-            except InferenceBudgetExhausted:
-                # Nothing was decided; the rules are reviewed when budget returns.
-                result.calls = max(0, result.calls - 1)
-                return result
-            except Exception as exc:
-                # Provider messages and raw output can echo a private rule.
-                _note_failure(synth, root, f"conflict review failed ({type(exc).__name__})",
-                              consumed=consumed, usage=usage)
-                return result
-            result.changed = record(root, _visible(store), batch.subjects, claims, now=now)
-            state = _load(root)
-            if "failures" in state or "retry_at" in state:
-                state.pop("failures", None)
-                state.pop("retry_at", None)
-                _save(root, state)
-            result.reviewed = consumed
-            result.found = len(claims)
-            synth._log_pass(
-                "memory_conflicts", ["memory-conflict:" + mid for mid in result.changed],
-                usage=usage, consumed=consumed, counts_toward_yield=False,
-                error=f"{result.rejected} unverified claims dropped" if result.rejected else None)
-            result.remaining = pending(store)
+        with journal_lock(Path(synth._store.root) / SYNTHESIS_LOCK) as held:
+            if held:
+                await _step(synth, result)
     except Exception as exc:
         _log.warning("Memory conflict review skipped (%s)", type(exc).__name__)
     return result
+
+
+async def _step(synth: Any, result: Result) -> None:
+    from fluid.codemode.continual import InferenceBudgetExhausted
+    from fluid.codemode.facts import global_id
+
+    store = synth._store
+    root = Path(store.root)
+    entries = _visible(store)
+    state = _load(root)
+    saved = json.dumps(state, sort_keys=True)
+
+    def save() -> None:
+        nonlocal saved
+        text = json.dumps(state, sort_keys=True)
+        if text != saved:
+            _save(root, state)
+            saved = text
+
+    now = time.time()
+    limit = min(PROMPT_CHARS, int(synth._prompt_limit))
+    claims = _waiting(state, entries)
+    batch = Batch()
+    for _ in range(len(entries) + 1):
+        batch = plan(entries, state["checked"], limit_chars=limit, progress=state.get("progress"))
+        if not batch.carried:
+            state.pop("progress", None)
+        if batch.alone:
+            _apply(state, entries, {gid: batch.tokens[gid] for gid in map(global_id, batch.alone)},
+                   [], now)
+        if batch.subjects or not batch.alone:
+            break
+    save()
+    if not claims and not batch.subjects:
+        return
+    if (now < float(review_backoff(root).get("until", 0))
+            or now < float(store.learner_backoff(synth._model).get("until", 0))
+            or now < store.consolidation_retry_at()):
+        return
+    day = int(now // 86400)
+    if state.get("day") != day:
+        state.update(day=day, calls=0)
+    budget = synth._budget(refresh=True)
+    reserve = max(budget.reserved, (budget.daily + 1) // 2)
+    usage: dict[str, int] = {}
+
+    async def ask(prompt: str, system: str) -> str:
+        spent = store._facts.inference_budget()
+        if (int(state.get("calls") or 0) >= MAX_CALLS_PER_DAY
+                or (spent.get("day") == day
+                    and int(spent.get("calls", 0)) >= budget.daily - reserve)):
+            raise InferenceBudgetExhausted("the conflict review's share of the day is spent")
+        state["calls"] = int(state.get("calls") or 0) + 1
+        save()
+        try:
+            text, used = await asyncio.wait_for(
+                synth._complete(prompt, system, reserve=reserve), timeout=synth._pass_timeout)
+        except InferenceBudgetExhausted:
+            state["calls"] -= 1
+            save()
+            raise
+        result.calls += 1
+        _add_usage(usage, used)
+        return text
+
+    consumed = 0
+    try:
+        if not claims:
+            claims, result.rejected = parse(await ask(batch.prompt(), _SYSTEM), batch)
+            consumed = len(batch.subjects)
+            entries = _visible(store)
+            _advance(state, entries, batch, claims, now)
+            result.reviewed = sum(1 for gid in map(global_id, batch.subjects)
+                                  if state["checked"].get(gid) == batch.tokens[gid])
+            claims = _waiting(state, entries)
+            save()
+        if claims:
+            # A second look at the two rules alone, without the rest of the
+            # store pulling their meaning together.
+            text = await ask(confirm_prompt(claims), _CONFIRM_SYSTEM)
+            try:
+                agreed = confirmed(text, claims)
+            except ValueError:
+                # A claim no second look can read in CONFIRM_TRIES answers is
+                # no conflict; it must not hold up every later review.
+                state["pending"] = [c | {"tries": int(c.get("tries") or 0) + 1}
+                                    for c in state["pending"]
+                                    if int(c.get("tries") or 0) + 1 < CONFIRM_TRIES]
+                raise
+            result.rejected += len(claims) - len(agreed)
+            state["pending"] = []
+            result.changed = _apply(state, _visible(store), {},
+                                    [_stored_claim(c) for c in agreed], now)
+            result.found = len(agreed)
+    except InferenceBudgetExhausted:
+        # What a first look decided is saved; the rest waits for budget.
+        save()
+        if not result.calls:
+            return
+    except Exception as exc:
+        save()
+        # Provider messages and raw output can echo a private rule.
+        _note_failure(synth, root, f"conflict review failed ({type(exc).__name__})",
+                      consumed=consumed, usage=usage)
+        return
+    state.pop("failures", None)
+    state.pop("retry_at", None)
+    save()
+    synth._log_pass(
+        "memory_conflicts", ["memory-conflict:" + mid for mid in result.changed],
+        usage=usage, consumed=consumed, counts_toward_yield=False,
+        error=f"{result.rejected} unverified claims dropped" if result.rejected else None)
+    result.remaining = pending(store)
 
 
 # ─── command line ──────────────────────────────────────────────────────────

@@ -2014,10 +2014,8 @@ class SkillStore:
         # of either prints both passages. Best-effort: a broken verdict file
         # never costs the snapshot.
         try:
-            from fluid.codemode.conflict_review import conflict_notes, open_conflicts
-            conflict_note = conflict_notes(open_conflicts(
-                [vars(e) for e in entries if project is None or e.scope in ("global", project)],
-                self.root))
+            from fluid.codemode.conflict_review import conflict_notes, session_conflicts
+            conflict_note = conflict_notes(session_conflicts(self, project))
         except Exception:  # noqa: BLE001
             conflict_note = {}
         for entry in entries:

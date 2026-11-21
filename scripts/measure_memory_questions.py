@@ -139,7 +139,7 @@ async def score(case: dict, cli_model: str | None = None) -> dict:
             passes += 1
             result = await conflict_review.run(synth)
             calls += result.calls
-            if not result.reviewed:
+            if not result.calls:
                 break
         found = {frozenset(ids.index(e["id"]) for e in (c["a"], c["b"]))
                  for c in conflict_review.open_conflicts(
