@@ -643,12 +643,33 @@ async def test_a_password_echoed_in_a_response_header_is_redacted(broker, servic
 
 
 def test_a_pair_the_owner_encoded_is_redacted_where_the_service_decodes_it():
-    # An owner may paste an already encoded pair as the credential. What is
-    # inside it is not checked for ASCII: it is matched as its UTF-8 bytes.
-    pair = base64.b64encode("admin:caf\u00e9-secret-2026".encode()).decode()
+    # An owner may paste an already encoded pair as the credential.
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert vault_services.credential_header("Authorization", "Basic", pair) == ("Authorization", f"Basic {pair}")
     needles = vault_services._needles(pair, f"Basic {pair}")
-    body = "signed in as admin:caf\u00e9-secret-2026, password caf\u00e9-secret-2026".encode()
+    body = f"signed in as admin:{PASSWORD}, password {PASSWORD}".encode()
     assert vault_services.redact(body, needles) == b"signed in as [redacted], password [redacted]"
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        "admin:caf\u00e9-secret-2026".encode(),           # other characters, as UTF-8
+        "admin:caf\u00e9-secret-2026".encode("latin-1"),  # and as Latin-1
+        b"admin:tab\tinside-it",
+        b"no-colon-in-this-credential",
+    ],
+)
+def test_a_pair_the_owner_encoded_is_held_to_the_same_rule(pair):
+    # Otherwise an encoded pair would be a way to store a password whose echo
+    # has more than one spelling.
+    encoded = base64.b64encode(pair).decode()
+    for credential in (encoded, encoded.rstrip("=") + "*", "not-base64-at-all!"):
+        with pytest.raises(AccessDenied) as error:
+            vault_services.credential_header("Authorization", "basic", credential)
+        assert credential not in str(error.value)
+    # Another scheme carries the same text as an opaque credential.
+    assert vault_services.credential_header("Authorization", "Bearer", encoded)[1] == f"Bearer {encoded}"
 
 
 ODD = 'tok "q" \\ a/b <c>&\'d+e =~ end'

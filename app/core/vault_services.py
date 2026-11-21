@@ -266,7 +266,22 @@ def credential_header(name: str, scheme: str, secret: str, username: str = "") -
         raise AccessDenied(
             "Enter a credential of 8 to 8,192 visible characters without spaces."
         )
+    if scheme.lower() == "basic" and not _ascii_pair(secret):
+        # A pair the owner encoded themselves is held to the rule above.
+        raise AccessDenied(
+            "A Basic credential is an encoded username and password in unaccented letters, digits "
+            "and symbols. Choose Username and password to enter them instead."
+        )
     return name, f"{scheme} {secret}" if scheme else secret
+
+
+def _ascii_pair(credential: str) -> bool:
+    """Whether a Basic credential is the base64 form of an ASCII ``username:password``."""
+    try:
+        pair = base64.b64decode(credential, validate=True).decode("ascii")
+    except ValueError:
+        return False
+    return ":" in pair and _ascii(pair)
 
 
 def request_url(origin: Origin, path: str) -> str:
@@ -319,8 +334,10 @@ def request_url(origin: Origin, path: str) -> str:
 def _needles(secret: str, header_value: str) -> list[str]:
     """The credential in every form an echo can carry; ``redact`` also reads through escapes.
 
-    Credentials are ASCII (``credential_header``). Only the text inside a pair
-    the owner encoded themselves may not be: that is matched as its UTF-8 bytes.
+    Credentials are ASCII (``credential_header``), and so is what is inside a
+    Basic pair the owner encoded themselves. Only a credential of another
+    scheme that happens to be base64 may decode to other text: that is matched
+    as its UTF-8 bytes.
     """
     # The credential without its scheme: for a username and password this is
     # the encoded pair, which is not the secret itself.
