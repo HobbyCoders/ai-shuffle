@@ -275,6 +275,34 @@ export class SettingsNavigation {
 		this.persist();
 	}
 
+	/**
+	 * The open item now goes by another id (a draft was saved): show it in the
+	 * same step. A phone gets no new Back step, so Back returns to the list
+	 * and not to the draft that no longer exists.
+	 */
+	replaceItem(item: string, category: CategoryId = this.category): void {
+		if (!this.stacked || this.view !== 'detail' || category !== this.category || this.depth === 0) {
+			this.selectItem(item, category);
+			return;
+		}
+		this.selected[category] = item;
+		const state: SettingsHistoryState = {
+			settingsView: 'detail',
+			settingsDepth: this.depth,
+			settingsCategory: category,
+			settingsItem: item,
+			...(this.staleBelow ? { settingsStaleBelow: this.staleBelow } : {})
+		};
+		try {
+			// Settings' own entry, the one it is standing on.
+			this.noteEntry(state, replaceState('', state as App.PageState));
+		} catch {
+			// Router not ready (tests, early boot): the item still shows.
+		}
+		this.requestFocus('detail');
+		this.persist();
+	}
+
 	/** Clear a collection's selection (e.g. after deleting the selected item). */
 	clearSelection(category: CategoryId = this.category): void {
 		delete this.selected[category];

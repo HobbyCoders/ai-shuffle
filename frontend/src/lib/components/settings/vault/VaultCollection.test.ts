@@ -206,6 +206,20 @@ describe('Settings > Vault adding', () => {
 		expect(secretField('Password').value).toBe('');
 	});
 
+	it('shows the added sign-in in the draft\'s step, so a phone\'s Back returns to the list', async () => {
+		await show();
+		await fireEvent.click(button('Add sign-in'));
+		const replace = vi.spyOn(settingsNav, 'replaceItem');
+		await type(field('Name'), 'Dev box');
+		await type(field('Address'), 'dev.example.com');
+		await type(field('Username'), 'deploy');
+		await type(secretField('Password'), SECRET);
+		entries = [...entries, machine({ id: 'c'.repeat(32), label: 'Dev box' })];
+		await fireEvent.click(button('Add sign-in'));
+		await waitFor(() => expect(replace).toHaveBeenCalledWith('c'.repeat(32), 'vault'));
+		replace.mockRestore();
+	});
+
 	it('sends the password that was typed', async () => {
 		let sent = '';
 		api.post.mockImplementation(async (_url: string, body: { password: string }) => {
