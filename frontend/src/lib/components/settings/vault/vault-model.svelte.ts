@@ -339,6 +339,11 @@ export class VaultModel {
 		return !!f && !!this.initial[id] && !same(f, this.initial[id]);
 	}
 
+	/** The form for ``id`` is the one a save was sent from and has not been answered. */
+	sending(id: string): boolean {
+		return this.saving === id && (id !== DRAFT_ID || this.draft === this.submitted);
+	}
+
 	addDraft(): string {
 		// A draft that is being added is no longer the owner's to edit: the next one starts empty.
 		if (!this.draft || this.draft === this.submitted) this.draft = emptyForm();

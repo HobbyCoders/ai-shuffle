@@ -532,6 +532,27 @@ describe('vault-model', () => {
 		expect(model.draft).toMatchObject({ label: 'Second', host: 'second.example', password: SECRET });
 	});
 
+	it('makes the form read-only until the add and the refresh after it are done', async () => {
+		await show();
+		let refreshed!: () => void;
+		api.get.mockImplementationOnce(() => new Promise((resolve) => { refreshed = () => resolve(listing()); }));
+		const gets = api.get.mock.calls.length;
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Add sign-in' })[0]);
+		await fireEvent.input(await screen.findByLabelText('Name'), { target: { value: 'Slow box' } });
+		await fireEvent.input(screen.getByLabelText('Address'), { target: { value: 'slow.example' } });
+		await fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'root' } });
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: SECRET } });
+		const fields = screen.getByLabelText('Name').closest('fieldset')!;
+		expect(fields.disabled).toBe(false);
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Add sign-in' }).at(-1)!);
+		// The add has been answered; the list is still being refreshed. Nothing typed now could be kept.
+		await waitFor(() => expect(api.get.mock.calls.length).toBe(gets + 1));
+		expect(fields.disabled).toBe(true);
+		expect(screen.getByLabelText('Password').closest('fieldset')).toBe(fields);
+		refreshed();
+		await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull());
+	});
+
 	it('cannot cancel a sign-in while it is being added', async () => {
 		let finish!: (value: { id: string }) => void;
 		api.post.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

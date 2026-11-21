@@ -54,6 +54,8 @@
 	const started = $derived(isDraft ? undefined : model.started(id));
 	const dirty = $derived(model.dirty(id));
 	const saving = $derived(model.saving === id);
+	/** This form is the one being sent: it is read-only until the answer is in. */
+	const sending = $derived(model.sending(id));
 	const errors = $derived(model.errors[id] ?? []);
 	const notice = $derived(model.notices[id]);
 	const locked = $derived(!model.editable);
@@ -141,9 +143,9 @@
 	>
 		{#snippet primary()}
 			{#if isDraft}
-				<button type="button" class="st-btn ghost" disabled={saving} onclick={cancelDraft}>Cancel</button>
+				<button type="button" class="st-btn ghost" disabled={sending} onclick={cancelDraft}>Cancel</button>
 				<button type="button" class="st-btn primary" disabled={saving || locked} onclick={save}>
-					{saving ? 'Adding…' : 'Add sign-in'}
+					{sending ? 'Adding…' : 'Add sign-in'}
 				</button>
 			{:else}
 				{#if dirty}
@@ -176,6 +178,8 @@
 			{/if}
 		{/snippet}
 		{#snippet children()}
+			<!-- What is typed while a save is under way would be dropped when it finishes. -->
+			<fieldset class="vault-fields" disabled={sending}>
 			<RowGroup title="Sign-in">
 				{#if isDraft}
 					<SettingRow label="Kind">
@@ -310,6 +314,7 @@
 					</SettingRow>
 				</RowGroup>
 			{/if}
+			</fieldset>
 			<p class="st-note">
 				Encrypted on this worker. The agent never sees a sign-in; using one still needs your approval in the chat that asks for it.
 			</p>
@@ -318,6 +323,9 @@
 {/if}
 
 <style>
+	.vault-fields {
+		display: contents;
+	}
 	:global(.settings-shell) textarea.st-area.vault-key {
 		min-height: 120px;
 		font-family: var(--font-mono, ui-monospace, monospace);
