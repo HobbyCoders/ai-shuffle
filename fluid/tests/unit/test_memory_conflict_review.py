@@ -170,7 +170,7 @@ async def test_a_claim_is_dropped_unless_both_quotes_are_in_their_own_rule(tmp_p
         rule(store, text)
     invented = clash(OPUS, SOL, "Code reviews must always be done by Opus", "code reviews are done by Sol")
     swapped = clash(OPUS, SOL, "code reviews are done by Sol", "Code reviews are done by Opus")
-    same = clash(OPUS, SOL, "code reviews are done by", "Code reviews are done by")
+    same = clash(OPUS, SOL, "reviews are done by", "reviews are done by")
     for claims in (invented, swapped, same):
         root = tmp_path / str(id(claims))
         copy = SkillStore(root)
@@ -331,6 +331,9 @@ def test_a_quote_keeps_the_rule_s_capitals_and_may_be_short():
     assert review.locate("Use tabs.", "Use tabs.") == "Use tabs."
     assert review.locate("Use spaces.", "Use spaces.") == "Use spaces."
     assert review.locate("x" * 500, "x" * 500) is None, "a passage, not the whole rule"
+    # A rule that has both spellings: the one that was quoted is the one found.
+    both = "Name the image Dev on staging. Never name it dev in production."
+    assert review.locate("dev", both) == "dev" and review.locate("Dev", both) == "Dev"
 
 
 def test_typographic_marks_in_a_quote_are_forgiven():
@@ -416,6 +419,21 @@ def test_passages_that_differ_only_in_capitals_are_two_instructions():
         {"a": "r1", "b": "r2", "a_quote": "Set BUILD_MODE to DEV", "b_quote": "Set BUILD_MODE to dev"}]}), batch)
     assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == (
         "Set BUILD_MODE to dev", "Set BUILD_MODE to DEV")
+
+    # A capital at the start of the passage is a difference like any other;
+    # only the very same characters from both rules are refused.
+    first = lower | {"text": "dev is the only allowed spelling for BUILD_MODE."}
+    other = upper | {"text": "Dev is the only allowed spelling for BUILD_MODE."}
+    batch = review.Batch(subjects=[other], shown={"r1": other, "r2": first})
+    claims, rejected = review.parse(json.dumps({"conflicts": [
+        {"a": "r1", "b": "r2", "a_quote": "Dev is the only allowed spelling",
+         "b_quote": "dev is the only allowed spelling"}]}), batch)
+    assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == (
+        "dev is the only allowed spelling", "Dev is the only allowed spelling")
+    same = lower | {"id": "m3", "text": "Always set BUILD_MODE to dev."}
+    batch = review.Batch(subjects=[same], shown={"r1": same, "r2": lower})
+    assert review.parse(json.dumps({"conflicts": [
+        {"a": "r1", "b": "r2", "a_quote": "BUILD_MODE to dev", "b_quote": "BUILD_MODE to dev"}]}), batch) == ([], 1)
 
 
 # ─── the store changes while the model answers ─────────────────────────────

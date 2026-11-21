@@ -425,14 +425,15 @@ def locate(quote: Any, text: str) -> str | None:
         if not candidate.split():
             continue
         first = candidate[0]
-        either = (f"[{re.escape(first.lower())}{re.escape(first.upper())}]" if first.isalpha()
-                  else _QUOTE_VARIANTS.get(first) or re.escape(first))
+        exact = _QUOTE_VARIANTS.get(first) or re.escape(first)
+        either = f"[{re.escape(first.lower())}{re.escape(first.upper())}]" if first.isalpha() else exact
         rest = r"\s+".join("".join(_QUOTE_VARIANTS.get(ch) or re.escape(ch) for ch in word)
                            for word in re.split(r"\s+", candidate[1:]))
-        found = re.search(r"(?<!\w)" + either + rest + r"(?!\w)", text)
-        if found:
-            passage = " ".join(found.group(0).split())
-            return passage if len(passage) <= QUOTE_MAX_CHARS else None
+        for start in dict.fromkeys((exact, either)):  # the quote's own capital first
+            found = re.search(r"(?<!\w)" + start + rest + r"(?!\w)", text)
+            if found:
+                passage = " ".join(found.group(0).split())
+                return passage if len(passage) <= QUOTE_MAX_CHARS else None
     return None
 
 
@@ -466,13 +467,14 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
             continue
         pair = frozenset((global_id(a), global_id(b)))
         a_quote, b_quote = locate(item.get("a_quote"), a["text"]), locate(item.get("b_quote"), b["text"])
-        # One passage found in both rules is no clash (the capital of a first
-        # letter aside, as in locate). A later call of an unfinished scope
-        # showed its subjects to each other already: only a pair with a newly
-        # shown rule is news, and repeats must not use up this call's claims.
+        # The same characters quoted from both rules are no clash. Whether two
+        # passages that differ at all (a capital included) say the same thing
+        # is the second look's judgment, never this code's. A later call of an
+        # unfinished scope showed its subjects to each other already: only a
+        # pair with a newly shown rule is news, and repeats must not use up
+        # this call's claims.
         if (pair in seen or not pair & subjects or not a_quote or not b_quote
-                or a_quote[1:] == b_quote[1:] and a_quote[0].lower() == b_quote[0].lower()
-                or (batch.carried and pair <= subjects)):
+                or a_quote == b_quote or (batch.carried and pair <= subjects)):
             rejected += 1
             continue
         seen.add(pair)
