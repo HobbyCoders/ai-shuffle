@@ -436,7 +436,7 @@ def test_redaction_counts_positions_in_the_input_so_partial_secrets_never_slide_
     redacted = vault_services.redact(data, needles, limit)
     assert redacted == b"[redacted]" * 20
     for needle in needles:
-        assert needle not in redacted
+        assert needle.encode() not in redacted
     basic = base64.b64encode(b"admin:correct-horse-battery").decode()
     needles = vault_services._needles(basic, f"Basic {basic}")
     echoed = b"user=admin:correct-horse-battery pw=correct-horse-battery"
@@ -669,6 +669,26 @@ def _dotnet(text: str) -> str:
     return "".join(out)
 
 
+def _ruby(text: str) -> str:
+    # String#dump: "\u00E9" below U+10000 and "\u{1F600}" above, a quote and a backslash escaped.
+    return "".join(
+        c if c.isascii() and c not in '"\\' else f"\\{c}" if c.isascii()
+        else f"\\u{ord(c):04X}" if ord(c) < 0x10000 else f"\\u{{{ord(c):X}}}"
+        for c in text
+    )
+
+
+def _javascript_escape(text: str) -> str:
+    # escape(): "%E9" below U+0100, "%u20AC" above, UTF-16 halves beyond U+FFFF.
+    units = text.encode("utf-16-be")
+    out = []
+    for index in range(0, len(units), 2):
+        unit = int.from_bytes(units[index : index + 2], "big")
+        keep = unit < 0x80 and (chr(unit).isalnum() or chr(unit) in "@*_+-./")
+        out.append(chr(unit) if keep else f"%{unit:02X}" if unit < 0x100 else f"%u{unit:04X}")
+    return "".join(out)
+
+
 # A name for every character of ODD that HTML 5 names ("&sol;", "&plus;", "&bsol;", "&apos;").
 _NAMED = {text: f"&{name}" for name, text in sorted(html5.items(), reverse=True) if name.endswith(";")}
 _WRITE = {
@@ -703,10 +723,17 @@ _WRITE = {
     lambda p: "".join(f"&{codepoint2name[ord(c)]};" if ord(c) in codepoint2name else c for c in p),
     lambda p: "".join(_NAMED.get(c, c) for c in p),
     lambda p: repr(p.encode())[2:-1],  # Python showing the bytes it received
+    lambda p: ascii(p)[1:-1],  # Python showing the text it decoded: "\xe9", "\u20ac", "\U0001f600"
+    lambda p: repr(p)[1:-1],
+    _ruby,
+    _javascript_escape,
+    lambda p: "".join(c if c.isalnum() else "".join(f"\\{b:03o}" for b in c.encode()) for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\x{{{ord(c):x}}}" for c in p),
 ], ids=["json", "json-utf8", "json-upper-hex", "json-slash", "dotnet", "json-escape-all", "json-in-json",
         "json-in-json-utf8", "dotnet-in-json", "url", "url-all",
         "url-lower-hex", "form", "js-url", "html", "html-decimal-quote", "entities", "hex-entities",
-        "php-htmlentities", "html5-names", "python-bytes"])
+        "php-htmlentities", "html5-names", "python-bytes", "python-ascii", "python-repr", "ruby-dump",
+        "javascript-escape", "octal-bytes", "perl-braces"])
 def test_an_echoed_credential_is_redacted_however_the_service_spells_it(spell):
     pair = base64.b64encode(f"admin:{ODD}".encode()).decode()
     needles = vault_services._needles(ODD, f"Basic {pair}")
@@ -785,6 +812,18 @@ def test_a_response_built_to_stall_the_scan_is_read_in_one_pass():
     for flood in (b"\\" * 70000, b'\\"' * 23000, b"%5c" * 23000, b"&#92;" * 14000, b"\\u005c" * 11000):
         assert vault_services.redact(flood, needles) == flood
     assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize("charset", ["utf-16", "utf-16-be", "utf-32"])
+async def test_a_response_that_is_not_text_is_not_returned(broker, service, trust, charset):
+    # Text in UTF-16 or UTF-32 puts a zero byte between the characters of an
+    # echoed credential, which the scan does not read: no part of it is returned.
+    secret = "tok-wide-echo-123"
+    service.payload = f"you sent {secret}".encode(charset)
+    grant = await broker.create("chat", spec(service, secret=secret))
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/payload"})
+    assert result["body"] == "[The response is not text, so its body is not shown.]"
+    assert not result["truncated"]
 
 
 async def test_an_escaped_echo_that_crosses_the_size_limit_is_cut_where_it_starts(broker, service, trust):
