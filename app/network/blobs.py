@@ -18,8 +18,8 @@ import httpx
 
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.db.base import get_db
-from app.network import engine, transport
+from app.db.base import get_db, utc_now_iso
+from app.network import engine, policy, transport
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ def register_present(hash_value: str, size: int) -> None:
 
 
 def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
-    """Bytes for a hash from the artifact store or a note attachment, else None."""
+    """Bytes for a hash from the artifact store, a note attachment or a kept conflict, else None."""
     try:
         from app.core.artifact_store import artifact_path
         path = artifact_path(hash_value)
@@ -72,6 +72,11 @@ def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
         cursor = conn.cursor()
         cursor.execute("SELECT data FROM note_attachments WHERE blob_hash = %s AND data IS NOT NULL LIMIT 1", (hash_value,))
         row = cursor.fetchone()
+        if not row:
+            # An attachment a peer's note deletion removed (keep_cascaded_attachments).
+            cursor.execute("SELECT kept_blob AS data FROM sync_conflicts WHERE kept_blob_hash = %s "
+                           "AND kept_blob IS NOT NULL AND expires_at > %s LIMIT 1", (hash_value, utc_now_iso()))
+            row = cursor.fetchone()
     if row and row["data"] is not None:
         data = row["data"]
         return data.tobytes() if isinstance(data, memoryview) else bytes(data)
@@ -105,6 +110,56 @@ def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=N
         store.upsert_blob(hash_value, size=size, present=True, holder=holder, _cursor=_cursor)
         return
     store.upsert_blob(hash_value, size=size, present=False, holder=holder, _cursor=_cursor)
+
+
+def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str], clock: Optional[int]) -> int:
+    """Before a peer's deletion of a note cascades, keep the attachments it removes (#1693).
+
+    ``note_attachments.data`` never travels, so this worker may be the only
+    holder of an attachment the deleting device never saw. Each one becomes a
+    conflict (the losing attachment, the winning note tombstone) that also
+    holds its bytes, so ``read_local`` still finds them by hash while the
+    conflict is kept; dismissing or expiring it drops them. Same transaction
+    as the cascade, so a crash keeps either the row or the conflict.
+
+    An attachment the deleting device itself published was seen by it and is
+    removed without a conflict. A local note deletion never reaches here.
+    Returns the number of conflicts recorded.
+    """
+    # Lock the note before reading its attachments: an upload's FK check
+    # waits on it, so the cascade removes no attachment this read missed.
+    cursor.execute("SELECT id FROM notes WHERE id = %s FOR UPDATE", (note_id,))
+    if cursor.fetchone() is None:
+        return 0
+    cursor.execute("SELECT * FROM note_attachments WHERE note_id = %s ORDER BY id", (note_id,))
+    rows = [dict(r) for r in cursor.fetchall()]
+    if not rows:
+        return 0
+    coll = policy.collection("note_attachments")
+    ctx = engine.cached_context()
+    kept = 0
+    for row in rows:
+        version = store.get_record(cursor, coll.name, row["id"])
+        if version is not None and version["origin_device_id"] == deleted_by:
+            continue
+        try:
+            losing = engine.serialize_row(coll, row, cursor=cursor) or {}
+        except engine.ApplyError:
+            losing = {"id": row["id"], "note_id": note_id, "blob_hash": row.get("blob_hash")}
+        data = row.get("data")
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        # Keyed by the bytes' own hash, also for a row whose blob_hash predates the network.
+        blob = (sha256(bytes(data)), bytes(data)) if data is not None else None
+        store.add_conflict(cursor, collection=coll.name, record_id=row["id"],
+                           losing_clock=int(version["clock"]) if version is not None else 0,
+                           losing_device_id=(version["origin_device_id"] if version is not None
+                                             else (ctx.device_id if ctx is not None else "")),
+                           losing_record=engine.redact_secrets(losing),
+                           winning_clock=int(clock or 0), winning_device_id=deleted_by or "",
+                           kept_blob=blob)
+        kept += 1
+    return kept
 
 
 def store_fetched(hash_value: str, data: bytes) -> bool:

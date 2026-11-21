@@ -701,10 +701,12 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
 def materialize(
     cursor: Any, coll: policy.Collection, record_id: str,
     record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
+    clock: Optional[int] = None,
 ) -> Optional[dict[str, Any]]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
 
-    ``origin_device_id`` is the device that signed the record, when known.
+    ``origin_device_id`` is the device that signed the record, when known;
+    ``clock`` is that version's clock.
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
@@ -754,6 +756,10 @@ def materialize(
             from app.db.connectors import delete_connector_row
             delete_connector_row(cursor, *keys)
             return None
+        if coll.name == "notes":
+            # The FK cascade removes attachments whose bytes may exist only here (#1693).
+            from app.network import blobs
+            blobs.keep_cascaded_attachments(cursor, record_id, deleted_by=origin_device_id, clock=clock)
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         if coll.name == "sessions":
             # The same durable deletion record a local delete writes, so a
@@ -2044,7 +2050,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.op == OP_DELETE:
         if coll.name == "presence":
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
-        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
+        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id, clock=env.clock)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
@@ -3262,7 +3268,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
             continue
         if item["deleted"]:
-            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"],
+                        clock=int(item["clock"]))
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],

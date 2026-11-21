@@ -223,7 +223,9 @@ def create_schema(cursor) -> None:
             winning_clock BIGINT NOT NULL,
             winning_device_id TEXT NOT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+            expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+            kept_blob_hash TEXT,
+            kept_blob BYTEA
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_conflicts_version "
@@ -380,6 +382,8 @@ def create_schema(cursor) -> None:
         )
     """)
     _ensure_columns(cursor)
+    # After the additive columns: an older database gains kept_blob_hash there.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_conflicts_kept_blob ON sync_conflicts(kept_blob_hash)")
 
 
 def _ensure_columns(cursor) -> None:
@@ -397,7 +401,9 @@ def _ensure_columns(cursor) -> None:
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
                 ("network_session_active", "snoozed_until", "TEXT"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
-                ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
+                ("network_transcript_backfill_state", "stalled_since", "BIGINT"),
+                ("sync_conflicts", "kept_blob_hash", "TEXT"),
+                ("sync_conflicts", "kept_blob", "BYTEA"))
     if type(cursor).__module__.startswith("psycopg2"):
         for table, column, kind in additive:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")
@@ -1745,28 +1751,43 @@ def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> Lis
 # ---------------------------------------------------------------------------
 
 def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, losing_device_id: str,
-                 losing_record: Any, winning_clock: int, winning_device_id: str) -> None:
+                 losing_record: Any, winning_clock: int, winning_device_id: str,
+                 kept_blob: Optional[Tuple[str, bytes]] = None) -> None:
+    """Keep a losing write for review until it expires or is dismissed.
+
+    ``kept_blob`` (hash, bytes) holds bytes the loss would otherwise remove
+    from every device (#1693). They live and go with this row: dismissing or
+    expiring the conflict drops them. ``blobs.read_local`` serves them.
+    """
     # Apply transactions serialize on the network_state clock row. A replay
     # of the same loss should neither append a row nor renew its retention.
     version = (collection, record_id, losing_clock, losing_device_id, _json(losing_record),
                winning_clock, winning_device_id)
     now = datetime.now(timezone.utc)
+    kept_hash, kept_bytes = kept_blob if kept_blob is not None else (None, None)
     cursor.execute(
         """INSERT INTO sync_conflicts (collection, record_id, losing_clock, losing_device_id, losing_record,
-                                       winning_clock, winning_device_id, created_at, expires_at)
-           SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                       winning_clock, winning_device_id, created_at, expires_at,
+                                       kept_blob_hash, kept_blob)
+           SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
            WHERE NOT EXISTS (SELECT 1 FROM sync_conflicts
                              WHERE collection = %s AND record_id = %s AND losing_clock = %s
                                AND losing_device_id = %s AND losing_record = %s
                                AND winning_clock = %s AND winning_device_id = %s)""",
-        (*version, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat(), *version))
+        (*version, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat(),
+         kept_hash, kept_bytes, *version))
+
+
+#: Every column but the kept bytes: listing conflicts never reads or returns them.
+_CONFLICT_COLUMNS = ("id, collection, record_id, losing_clock, losing_device_id, losing_record, "
+                     "winning_clock, winning_device_id, created_at, expires_at")
 
 
 def list_conflicts(limit: int = 200) -> List[dict]:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sync_conflicts WHERE expires_at > %s ORDER BY created_at DESC, id DESC LIMIT %s",
-                       (_now(), limit))
+        cursor.execute(f"SELECT {_CONFLICT_COLUMNS} FROM sync_conflicts WHERE expires_at > %s "
+                       "ORDER BY created_at DESC, id DESC LIMIT %s", (_now(), limit))
         rows = rows_to_list(cursor.fetchall())
     for row in rows:
         row["losing_record"] = _load(row.get("losing_record"))
