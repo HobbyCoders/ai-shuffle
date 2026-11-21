@@ -1,6 +1,6 @@
 """The learner as the "evolve" engine: it stops burning passes, turns the
-owner's corrections into standing-preference questions, and flags user-kept
-facts that disagree instead of leaving both in the snapshot.
+owner's corrections into standing-preference questions, and has its model
+review user-kept rules for contradictions (test_memory_conflict_review.py).
 
 Measured on a live store before this change: 324 of 648 pass-log rows were
 "budget exhausted" rows, passes read about 37 entries while about 360 waited,
@@ -17,15 +17,8 @@ import pytest
 from fluid.codemode import SkillStore, Synthesizer, memory_health
 from fluid.codemode import continual as continual_mod
 from fluid.codemode import facts as facts_mod
-from fluid.codemode.preferences import (
-    MAX_OPEN_CONFLICTS,
-    MAX_OPEN_PREFERENCE_PROPOSALS,
-    PreferenceProposals,
-    curate_protected_conflicts,
-    model_routing,
-    protected_conflicts,
-    open_conflicts,
-)
+from fluid.codemode import conflict_review
+from fluid.codemode.preferences import MAX_OPEN_PREFERENCE_PROPOSALS, PreferenceProposals
 from fluid.codemode.skills import JOURNAL_MAX_BYTES
 from fluid.codemode.transactions import file_transaction
 from fluid.providers.base import StreamChunk
@@ -251,7 +244,7 @@ def test_proposals_dedupe_by_topic_and_stop_at_three(tmp_path):
     assert queue.open(now=later) == [], "an unanswered proposal expires"
 
 
-# ─── 3. user-kept facts that disagree become one owner question ─────────────
+# ─── 3. user-kept rules that share words are not a question ────────────────
 
 # Text shapes of a real store's routing rows (no private data).
 OLD_ROUTING = ('Owner rule: going forward, code work goes to "gpt 6.1 sol" subagents; '
@@ -278,59 +271,26 @@ def routing_store(tmp_path) -> tuple[SkillStore, dict]:
     return store, saved
 
 
-def test_routing_reads_jobs_clause_by_clause():
-    assert model_routing(OLD_ROUTING) == {"code": {"sol"}, "review": {"opus"}}
-    assert model_routing(NEW_ROUTING)["review"] == {"sonnet", "opus"}
-    assert "code" not in model_routing(REVIEW_PROCESS), "a code review is a review"
-    assert model_routing(WEBSITE) == model_routing(SCHEDULE) == {}
-
-
-def test_routing_overlap_without_explicit_replacement_keeps_every_owner_rule(tmp_path):
+def test_rules_sharing_routing_words_raise_no_question_without_a_model_verdict(tmp_path):
+    # The retired word matcher asked the owner about this store on every
+    # render. Shared words are not a contradiction: nothing is asked until the
+    # learner's model has named two rules and quoted the clash.
     store, saved = routing_store(tmp_path)
     before = {m.id: m.text for m in store.memories()}
-    # Typed routing overlap was still not owner evidence of replacement (#958).
     for _ in range(2):
-        curate_protected_conflicts(store)
+        section = store.render_memory_section(None)
+        assert "owner question" not in section and "conflict" not in section
         live = {m.id: m for m in store.memories()}
         assert {i: m.text for i, m in live.items()} == before
         assert all(not m.superseded_by for m in live.values())
-        section = store.render_memory_section(None)
-        assert "unresolved conflict" in section
-        assert "and ask the owner once" in section
-        assert "and model-routing authority" in section
         assert all(saved[name].id in section for name in saved)
+    assert conflict_review.open_conflicts(store._facts.snapshot()["entries"], store.root) == []
     # An explicit correction is still applied, without deleting the old text.
     corrected = store.save_memory(
         "Owner code work goes to Opus, replacing sol; reviews go to Opus.", protected=True)
     old = next(m for m in store.memories() if m.id == saved["old"].id)
     assert old.superseded_by and old.supersession_confirmed
     assert old.text == before[old.id] and corrected.text in store.render_memory_section()
-
-
-def test_a_newer_fact_about_one_job_asks_without_hiding_a_wider_rule(tmp_path):
-    store = SkillStore(tmp_path)
-    wide = store.save_memory(NEW_ROUTING, protected=True)
-    narrow = store.save_memory("Owner rule: reviews go to Haiku.", protected=True)
-    entries = store._facts.snapshot()["entries"]
-    assert any(old["id"] == wide.id for old, _, _ in protected_conflicts(entries))
-    assert wide.text in store.render_memory_section() and narrow.text in store.render_memory_section()
-    assert all(not e.superseded_by for e in store.memories())
-
-
-def test_open_conflicts_are_capped(tmp_path):
-    store = SkillStore(tmp_path)
-    # The cap counts distinct jobs, not many pairings of the same two rules.
-    for i, job in enumerate(("Code", "Review", "UI", "Backend", "Docs")):
-        store.save_memory(f"Owner rule for team {i}: {job} work goes to Sol.", protected=True)
-        store.save_memory(f"Owner rule for team {i}: {job} work goes to Opus.", protected=True)
-    curate_protected_conflicts(store)
-    curate_protected_conflicts(store)
-    waiting = open_conflicts(store._facts.snapshot()["entries"])
-    assert waiting == MAX_OPEN_CONFLICTS
-    assert store.render_memory_section().count("[owner question; unresolved conflict]") == MAX_OPEN_CONFLICTS
-    assert all(not m.superseded_by for m in store.memories()), "questions are not replacement links"
-    assert len(store.memories()) == 2 * (MAX_OPEN_CONFLICTS + 2)
-    assert all(m.text in store.render_memory_section() for m in store.memories())
 
 
 def test_the_learner_cannot_link_a_user_kept_fact_without_the_conflict_path(tmp_path):
@@ -341,27 +301,32 @@ def test_the_learner_cannot_link_a_user_kept_fact_without_the_conflict_path(tmp_
     assert not next(m for m in store.memories() if m.id == old.id).superseded_by
 
 
-async def test_consolidation_runs_conflict_curation(tmp_path, monkeypatch):
+async def test_consolidation_never_flags_or_links_user_kept_rules(tmp_path):
     store, saved = routing_store(tmp_path)
     synth = Synthesizer(Answer(), "gpt-test", store)
     changed = await synth.consolidate()
-    assert any(item.startswith("conflict-memory:") for item in changed)
+    assert not any("conflict" in item for item in changed)
     assert all(not m.superseded_by for m in store.memories() if m.protected)
-    assert saved["old"].text in store.render_memory_section()
+    assert "owner question" not in store.render_memory_section()
+    assert not (store.root / "conflict-curation.json").exists()
 
 
 # ─── 4. health says what is waiting ─────────────────────────────────────────
 
 def test_health_names_open_questions_in_plain_words(tmp_path):
-    store, _ = routing_store(tmp_path)
+    store, saved = routing_store(tmp_path)
     signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
-    assert signal["detail"]["conflicts"] > 0
-    curate_protected_conflicts(store)
+    assert signal["detail"]["conflicts"] == 0, "shared words alone are not a conflict"
+    assert signal["reason"] == "Nothing is waiting for your answer."
+    entries = store._facts.snapshot()["entries"]
+    old, new = (next(e for e in entries if e["id"] == saved[name].id) for name in ("old", "review"))
+    conflict_review.record(store.root, entries, [old, new], [{
+        "a": old, "b": new, "a_quote": "reviews go to Opus", "b_quote": "Sonnet reviewers", "why": ""}])
     PreferenceProposals(store).propose("ci_policy", "Tests run on GitHub CI, not on the machines.")
     signal = next(s for s in memory_health.check(store)["signals"] if s["id"] == "proposals")
     assert signal["state"] == "healthy"
     assert "1 proposed preference update" in signal["reason"]
-    assert "pairs of saved facts that disagree" in signal["reason"]
+    assert "1 pair of saved rules that contradict each other" in signal["reason"]
     assert "sessions ask you about them" in signal["reason"]
-    assert signal["detail"]["conflicts"] > 0
+    assert signal["detail"]["conflicts"] == 1
     assert signal["detail"]["topics"] == ["ci_policy"]

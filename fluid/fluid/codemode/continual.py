@@ -1037,15 +1037,17 @@ class Synthesizer:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
         except TimeoutError:
             if self._in_backfill:
-                # Synthesis finished; the when-line backfill after it ran out
-                # of the close budget synthesis shares with it. That says
-                # nothing about the provider: no backoff, no failure count,
-                # no failed synthesis pass. Its lines stay missing; the facts
-                # it had picked count as tried today (the daily bound on a
-                # stuck provider) and are retried after the UTC day rolls over.
+                # Synthesis finished; the conflict review or when-line backfill
+                # after it ran out of the close budget synthesis shares with
+                # them. That says nothing about the provider: no backoff, no
+                # failure count, no failed synthesis pass. Rules left unreviewed
+                # are reviewed by a later pass. When-lines stay missing; the
+                # facts the backfill had picked count as tried today (the daily
+                # bound on a stuck provider) and are retried after the UTC day
+                # rolls over.
                 self._in_backfill = False
-                _log.info("when-line backfill on close was cut off after %.0fs; "
-                          "its facts are retried tomorrow (UTC)", self._close_timeout)
+                _log.info("conflict review or when-line backfill on close was cut off "
+                          "after %.0fs; a later pass retries", self._close_timeout)
             else:
                 self.last_error = (
                     f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
@@ -1107,10 +1109,16 @@ class Synthesizer:
         if not (self.last_pass_failed or self.last_pass_skipped):
             # Best-effort and self-contained: its failures (including its own
             # timeout) go to the backfill's backoff, never last_pass_failed.
+            from fluid.codemode.conflict_review import run as review_conflicts
             from fluid.codemode.memory_backfill import run as backfill_when
             # Left set if a close cancels it, so drain() can tell (a finally
             # would clear it before drain sees the timeout).
             self._in_backfill = True
+            # Owner rules that are new or reworded since their last review:
+            # do two of them contradict each other? Before the backfill, so a
+            # rule the owner just saved is reviewed in the pass that follows it.
+            reviewed = await review_conflicts(self)
+            changed += ["memory-conflict:" + mid for mid in reviewed.changed]
             backfilled = await backfill_when(self)
             self._in_backfill = False
             changed += ["memory-when:" + mid for mid in backfilled.lines]
@@ -1412,14 +1420,17 @@ class Synthesizer:
         deferred: int | None = None,
         filtered: int | None = None,
         ran: bool = True,
+        counts_toward_yield: bool = True,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
         ``ran=False`` marks a row for a pass that made no model call (the
         lock was held elsewhere, the daily budget was spent, or every entry
         was low-value); it carries ``"ran": false`` and does not count toward
-        the yield alarm. ``filtered`` counts low-value entries the pass
-        consumed without showing them.
+        the yield alarm. ``counts_toward_yield=False`` keeps a pass whose job
+        is not writing facts (the conflict review, where "nothing found" is
+        the healthy answer) out of that alarm too. ``filtered`` counts
+        low-value entries the pass consumed without showing them.
 
         ``last_error`` dies with the process, and a background pass that
         silently fails — or silently decides NO_CHANGES — is otherwise
@@ -1483,7 +1494,7 @@ class Synthesizer:
                 "Memory learner %s pass (model=%s, store=%s): consumed %s, changed %s",
                 kind, self._model, store, consumed, changed or "nothing",
             )
-        if ran:
+        if ran and counts_toward_yield:
             self._track_yield(changed, store)
         path = self._store.root / ".synthesis-log.jsonl"
         try:
@@ -1565,12 +1576,8 @@ class Synthesizer:
             self._store.reap()
         except Exception:  # cleanup is opportunistic, never fatal
             pass
-        # Model-free: two user-kept facts on one how-the-agent-works topic
-        # where the newer changes the rule become an owner question (both
-        # kept; the snapshot shows the conflict line). The model below may
-        # not touch user-kept facts at all.
-        from fluid.codemode.preferences import curate_protected_conflicts
-        curated = curate_protected_conflicts(self._store)
+        # The model below may not touch user-kept facts at all. Whether two
+        # of them contradict each other is conflict_review's separate call.
         lines = ["## Memory store (id, recalls, age, scope, tier, text), grouped by topic"]
         now = time.time()
         everything = [m for m in self._store.memories() if not m.conflicted]
@@ -1623,8 +1630,8 @@ class Synthesizer:
                 stop_reason=exc.stop_reason,
                 provider_status=getattr(exc, "status", None),
             )
-            return curated
-        changed: list[str] = list(curated)
+            return []
+        changed: list[str] = []
         errors: list[str] = []
         for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
             if problem:

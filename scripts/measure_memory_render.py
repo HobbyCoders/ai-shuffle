@@ -37,7 +37,7 @@ def measure(count: int, *, routing: bool = False, answer: str = "none") -> dict:
                 row["text"] = f"Code work for subsystem {i} goes to {'Opus' if i % 2 else 'Sol'}."
         if answer != "none":
             from fluid.codemode.facts import global_id
-            from fluid.codemode.preferences import coexistence_key, COEXIST_KEY_PREFIX
+            from fluid.codemode.conflict_review import coexistence_key, COEXIST_KEY_PREFIX
             a, b = doc["entries"][:2]
             if answer.startswith("legacy"):
                 values = sorted((global_id(e), e["text"], e.get("when"), bool(e.get("always")),
@@ -50,13 +50,13 @@ def measure(count: int, *, routing: bool = False, answer: str = "none") -> dict:
             doc["entries"].append(dict(template, id="m9999", text="Both stand.", key=key))
         store._facts._write(doc)
         try:
-            from fluid.codemode import preferences as pref
-            for name in ("_cached_conflict_refs", "_cached_answer_matches"):
-                cached = getattr(pref, name, None)
+            from fluid.codemode import conflict_review
+            for name in ("_cached_records", "_cached_answer_matches"):
+                cached = getattr(conflict_review, name, None)
                 if cached is not None:
                     cached.cache_clear()
         except ImportError:
-            pass  # older main revisions have no question detector
+            pass  # revisions before the model conflict review
         start = time.perf_counter()
         store.render_memory_section()
         cold_ms = (time.perf_counter() - start) * 1000

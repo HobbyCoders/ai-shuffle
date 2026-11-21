@@ -173,7 +173,7 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_
     provider = FakeInference(reply_text(
         '<memory scope="project">The user runs pytest with PYTHONPATH=fluid '
         'from the repository root.</memory>'
-    ), reply_when_lines)
+    ), reply_text('{"conflicts": []}'), reply_when_lines)
     synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, session_model="gpt-test")
     run_session(store, synth, fact=fact)
     await settle(synth)
@@ -185,9 +185,10 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_
     assert "older facts not listed" in prompt
     assert " explicit: Fact " in prompt  # explicit saves are marked read-only
     # Explicit facts cannot be merged or retired, so these do not make a
-    # consolidation call due. They can receive metadata-only when-lines.
-    assert len(provider.requests) == 2
-    assert [r["kind"] for r in log_rows(store)] == ["synthesis", "memory_backfill"]
+    # consolidation call due. They are reviewed for contradictions (one
+    # call) and can receive metadata-only when-lines.
+    assert len(provider.requests) == 3
+    assert [r["kind"] for r in log_rows(store)] == ["synthesis", "memory_conflicts", "memory_backfill"]
     assert log_rows(store)[-1]["consumed"] == 40
 
     learned = [e for e in memories_doc(store)["entries"] if not e.get("protected")]

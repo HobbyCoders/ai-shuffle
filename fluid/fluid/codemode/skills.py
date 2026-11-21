@@ -1798,17 +1798,12 @@ class SkillStore:
         return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
                                                 protected_conflict=protected_conflict)
 
-    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None,
-                                *, questions: list | None = None) -> str:
+    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
         """The ``# Memory`` footer's lines for open learner proposals (see
         fluid.codemode.preferences): one line per proposed rule update,
         "" when none. Never raises."""
-        from fluid.codemode.preferences import preference_proposal_lines, owner_conflict_lines
+        from fluid.codemode.preferences import preference_proposal_lines
         lines = preference_proposal_lines(self, project, entries=entries)
-        rows = [e if isinstance(e, dict) else vars(e)
-                for e in (self.memories() if entries is None else entries)]
-        rows = [e for e in rows if project is None or e.get("scope", "global") in ("global", project)]
-        lines += owner_conflict_lines(rows, questions=questions)
         return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
@@ -1871,9 +1866,10 @@ class SkillStore:
         render (a count line says other projects' exist). Entries pass the
         injection screen (text and when-line); a finding replaces that entry
         with a note naming the file. Tool-harvested facts carry a short
-        "unconfirmed" hint; conflicted entries stay out (Recall names them),
-        and an owner-kept fact with an unresolved replacement renders as a
-        conflict line.
+        "unconfirmed" hint; conflicted entries stay out (Recall names them).
+        An owner-kept rule the learner's model found to contradict another
+        (fluid.codemode.conflict_review) says so on its own line; Recall of
+        either rule prints the two clashing passages.
         """
         from fluid.codemode.facts import visible_on
         # One read for live and archived facts, so the counts agree.
@@ -1883,12 +1879,8 @@ class SkillStore:
         archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
         if not entries and not archived:
             return EMPTY_MEMORY_SECTION
-        from fluid.codemode.preferences import owner_questions
-        visible = [vars(e) for e in entries
-                   if project is None or e.scope in ("global", project)]
-        questions = owner_questions(visible)
         plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
-                                         task_query=task_query, questions=questions)
+                                         task_query=task_query)
         shown = plan["lines"]
         other_checkout, out_of_scope = plan["other_checkout"], plan["out_of_scope"]
         over_budget, held = plan["over_budget"], plan["held"]
@@ -1921,7 +1913,7 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
-        footer += self.learner_proposal_footer(project, entries, questions=questions)
+        footer += self.learner_proposal_footer(project, entries)
         if not shown and not over_budget and not held and not in_archive:
             return EMPTY_MEMORY_SECTION + footer
         if held:
@@ -1957,7 +1949,7 @@ class SkillStore:
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,
                              entries: list[MemoryEntry] | None = None,
                              archived: list[MemoryEntry] | None = None,
-                             task_query: str = "", questions: list | None = None) -> dict:
+                             task_query: str = "") -> dict:
         """Which facts the ``# Memory`` snapshot shows for ``project``, and
         why the rest are left out. :meth:`render_memory_section` renders it;
         the memory health check measures it without building a prompt.
@@ -2012,20 +2004,22 @@ class SkillStore:
         entries.sort(key=lambda e: (not task_match(e), off_domain(e),
                                     not (project is not None and e.scope == project),
                                     -usefulness(vars(e)), e.id))
-        pinned: list[tuple[MemoryEntry, str]] = []   # conflict and withheld lines
+        pinned: list[tuple[MemoryEntry, str]] = []   # withheld and unconfirmed-replacement lines
         always: list[tuple[MemoryEntry, str]] = []
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
         from fluid.codemode.facts import is_superseded
-        from fluid.codemode.preferences import owner_questions
-        visible = [vars(e) for e in entries
-                   if project is None or e.scope in ("global", project)]
-        questions = owner_questions(visible, questions=questions)
-        question_ids = {e["id"] for q in questions for e in q["members"]}
-        # Preserve the old bound of two full facts per question. Other members
-        # use the ordinary budgeted index; the footer names every ID for Recall.
-        # Grouping must not pin hundreds of 2k-character texts outside the budget.
-        full_question_ids = {e["id"] for q in questions for e in q["pairs"][0][:2]}
+        # Rules the learner's model found to contradict each other keep their
+        # ordinary line and budget; the line names the other rule, and Recall
+        # of either prints both passages. Best-effort: a broken verdict file
+        # never costs the snapshot.
+        try:
+            from fluid.codemode.conflict_review import conflict_notes, open_conflicts
+            conflict_note = conflict_notes(open_conflicts(
+                [vars(e) for e in entries if project is None or e.scope in ("global", project)],
+                self.root))
+        except Exception:  # noqa: BLE001
+            conflict_note = {}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
                 out_of_scope += 1
@@ -2037,26 +2031,13 @@ class SkillStore:
             if str(entry.key or "").startswith("memory.coexist."):
                 recall_only += 1
                 continue
-            if entry.id in question_ids:
-                findings = screen_findings(entry.text) + screen_findings(entry.when or "")
-                text = "[withheld — suspected injection]" if findings else entry.text
-                line = f"- [{entry.id} r{entry.revision}; owner question] "
-                if always_applies(entry) and not findings:
-                    # Group membership never downgrades ALWAYS; retain its
-                    # existing full-text budget and replica-overflow handling.
-                    always.append((entry, line + text))
-                elif entry.id in full_question_ids or findings:
-                    pinned.append((entry, line + text))
-                else:
-                    index.append((entry, line + when_line(entry)))
-                continue
             if entry.protected and entry.superseded_by:
-                # A dangling unconfirmed edge does not make a saved rule stale
-                # or remove routing authority; there is no available pair to ask.
+                # An unconfirmed edge does not make a saved rule stale or
+                # remove routing authority.
                 findings = screen_findings(entry.text) + screen_findings(entry.when or "")
                 text = "[withheld — suspected injection]" if findings else entry.text
                 pinned.append((entry, f"- [{entry.id} r{entry.revision}; {entry.provenance}] {text} "
-                               "(Proposed successor unavailable; the original rule remains usable.)"))
+                               "(A replacement was proposed but never confirmed; the original rule remains usable.)"))
                 continue
             if entry.conflicted:
                 held += 1
@@ -2086,10 +2067,11 @@ class SkillStore:
                 other_checkout += 1
                 continue
             label = f"[{entry.id} r{entry.revision}; {entry.provenance}]"
+            note = conflict_note.get(entry.id, "")
             if always_applies(entry):
-                always.append((entry, f"- {label} {entry.text}"))
+                always.append((entry, f"- {label} {entry.text}{note}"))
                 continue
-            hint = UNCONFIRMED_TAG if entry.provenance == "tool" else ""
+            hint = note or (UNCONFIRMED_TAG if entry.provenance == "tool" else "")
             if entry.key in identity_keys:
                 # Bound only the rendered identity, never the stored fact or
                 # Recall result. An ellipsis makes the omitted tail explicit.
@@ -2119,7 +2101,7 @@ class SkillStore:
                         text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
                     identity.append((entry, f"- {label} {text}"))
                     continue
-                overflow.append((entry, f"- {label} {when_line(entry)}"))
+                overflow.append((entry, f"- {label} {when_line(entry)}{conflict_note.get(entry.id, '')}"))
         identity.sort(key=lambda item: item[0].key != "profile.name")
         index = overflow + index
         remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned + identity)
@@ -2140,8 +2122,8 @@ class SkillStore:
             else:
                 full = True
                 omitted.append(entry)
-        # Identity lines lead the index, then conflict lines; withheld-entry
-        # notes close it.
+        # Identity lines lead the index, then rules with an unconfirmed
+        # replacement; withheld-entry notes close it.
         shown = shown_always + identity + [p for p in pinned if p[0].superseded_by] + shown_index + [
             p for p in pinned if not p[0].superseded_by]
         return {

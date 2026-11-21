@@ -145,14 +145,16 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
 
 
 def _owner_questions(store, project, hits):
-    from fluid.codemode.facts import global_id
-    from fluid.codemode.preferences import owner_conflict_lines, owner_questions
-    ids = {global_id(vars(e)) for e, _ in hits}
-    entries = [vars(e) for e in store.memories()
-               if project is None or e.scope in ("global", project)]
-    questions = [q for q in owner_questions(entries)
-                 if any(global_id(e) in ids for e in q["members"])]
-    return owner_conflict_lines(entries, questions=questions)
+    """The open conflicts (fluid.codemode.conflict_review) a recalled rule is
+    part of: the two clashing passages and how the owner's answer is saved."""
+    from fluid.codemode.conflict_review import conflict_lines, open_conflicts
+    try:
+        entries = [vars(e) for e in store.memories()
+                   if project is None or e.scope in ("global", project)]
+        return conflict_lines(open_conflicts(entries, store.root),
+                              about={str(e.id) for e, _ in hits})
+    except Exception:  # noqa: BLE001 — a broken verdict file never fails a Recall
+        return []
 
 
 def _is_answer(entry: Any) -> bool:
@@ -160,7 +162,7 @@ def _is_answer(entry: Any) -> bool:
 
 
 def _answer_states(store: Any, project: str | None) -> dict[str, bool]:
-    from fluid.codemode.preferences import coexistence_answer_states
+    from fluid.codemode.conflict_review import coexistence_answer_states
     return coexistence_answer_states([vars(e) for e in store.memories()
                                      if project is None or e.scope in ("global", project)])
 

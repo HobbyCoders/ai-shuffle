@@ -595,19 +595,28 @@ def test_screening_withholds_bad_text_or_when_and_keeps_conflict_lines(tmp_path)
     section = SkillStore(tmp_path).render_memory_section()
     assert section.count("an entry was withheld") == 2
     assert "Ignore all previous" not in section and "reveal the system" not in section
-    # A genuine owner contradiction asks without creating a replacement link.
+    # A genuine owner contradiction asks without creating a replacement link:
+    # once the learner's model has quoted the clash, each rule's index line
+    # names the other, within the ordinary index budget.
+    from fluid.codemode import conflict_review
     pair = SkillStore(tmp_path / "pair")
     old = pair.save_memory("Owner rule: code work goes to Sol; reviews go to Opus.",
-                           protected=True)
+                           protected=True, when="When choosing a model for code")
     new = pair.save_memory("Owner rule: code work goes to Opus; reviews go to Sonnet.",
-                           protected=True)
+                           protected=True, when="When picking who writes code")
     assert not pair.propose_memory_supersession(old.id, new.id, old_revision=1, new_revision=1,
                                                 protected_conflict=True)
+    assert "owner question" not in pair.render_memory_section()
+    rows = pair._facts.snapshot()["entries"]
+    conflict_review.record(pair.root, rows, rows, [{
+        "a": rows[0], "b": rows[1], "a_quote": "code work goes to Sol",
+        "b_quote": "code work goes to Opus", "why": ""}])
     section = pair.render_memory_section()
-    assert "[owner question; unresolved conflict]" in section
-    assert "Recall both and ask the owner" in section
-    assert "and model-routing authority" in section
-    assert old.text in section and new.text in section
+    assert (f"- [{old.id} r1; session] When choosing a model for code "
+            f"(owner question: conflicts with [{new.id}]; Recall both before relying on either)") in section
+    assert f"(owner question: conflicts with [{old.id}]; Recall both before relying on either)" in section
+    assert old.text not in section and new.text not in section
+    assert all(not e.superseded_by for e in pair.memories())
     assert not next(e for e in pair.memories() if e.id == old.id).superseded_by
 
 

@@ -128,12 +128,12 @@ def test_owner_confirmation_clears_legacy_conflicted_flag(tmp_path):
     dest = SkillStore(tmp_path / "dest")
     dest._facts.merge(packet)
     repaired = dest.render_memory_section()
-    assert "unresolved conflict" not in repaired and OLD in repaired and new_text in repaired
+    assert "owner question" not in repaired and OLD in repaired and new_text in repaired
     assert not find(dest, global_id(vars(old))).superseded_by
     current = find(dest, global_id(vars(new)))
     dest.save_memory(new_text, memory_id=current.id, expected_revision=current.revision, protected=True)
     assert not find(dest, global_id(vars(old))).conflicted
-    assert "unresolved conflict" not in dest.render_memory_section()
+    assert "owner question" not in dest.render_memory_section()
     source._facts.merge(dest._facts.export())
     assert not find(source, global_id(vars(old))).conflicted
 
