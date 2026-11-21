@@ -15,6 +15,7 @@ import {
 	MonitorSmartphone,
 	Cloud,
 	Shield,
+	Vault,
 	Server,
 	ScrollText,
 	Gauge,
@@ -55,6 +56,7 @@ const ROWS: CategoryRow[] = [
 	{ id: 'devices', label: 'Devices', icon: MonitorSmartphone, group: 'worker' },
 	{ id: 'cloud', label: 'Cloud', icon: Cloud, group: 'worker' },
 	{ id: 'security', label: 'Security', icon: Shield, group: 'worker' },
+	{ id: 'vault', label: 'Vault', icon: Vault, group: 'worker' },
 	{ id: 'system', label: 'System', icon: Server, group: 'worker' },
 	{ id: 'logs', label: 'Logs', icon: ScrollText, group: 'worker' }
 ];
