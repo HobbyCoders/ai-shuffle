@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 import fluid.engine.delegated as delegated_mod
-from fluid.engine.delegated import DelegatedLoop
+from fluid.engine.delegated import SKILL_LISTING_DESC_CHARS, DelegatedLoop
 from fluid.context.attribution import COMMIT_TRAILER, PR_LINE, cli_attribution
 from fluid.engine.delegated_proto import FORCED_CHILD_ENV
 from fluid.events import ErrorEvent, TurnComplete, UserTurn
@@ -178,16 +178,31 @@ def _settings(loop: DelegatedLoop) -> dict:
 
 def test_settings_carry_the_forced_env_when_the_host_sets_none() -> None:
     loop = DelegatedLoop(store=MemoryStore(), model="m")
-    assert _settings(loop) == {"env": FORCED_CHILD_ENV, "attribution": cli_attribution(True)}
+    assert _settings(loop) == {"env": FORCED_CHILD_ENV, "attribution": cli_attribution(True),
+                               "skillListingMaxDescChars": SKILL_LISTING_DESC_CHARS}
     assert _settings(loop)["env"]["CLAUDE_CODE_THRIFTY_SONIC"] == "0"
 
 
 def test_settings_keep_the_hosts_keys_and_never_invent_fast_mode() -> None:
     fast = DelegatedLoop(store=MemoryStore(), model="m", settings='{"fastMode": true}')
     assert _settings(fast) == {"fastMode": True, "env": FORCED_CHILD_ENV,
-                               "attribution": cli_attribution(True)}
+                               "attribution": cli_attribution(True),
+                               "skillListingMaxDescChars": SKILL_LISTING_DESC_CHARS}
     plain = DelegatedLoop(store=MemoryStore(), model="m", settings=None)
     assert "fastMode" not in _settings(plain)
+
+
+def test_the_skill_list_description_cap_is_a_default_the_host_can_change() -> None:
+    """The cap rides in every flag-settings payload (a re-sent layer replaces
+    the last one), and a value the host's settings name wins."""
+    plain = DelegatedLoop(store=MemoryStore(), model="m")
+    assert _settings(plain)["skillListingMaxDescChars"] == SKILL_LISTING_DESC_CHARS == 300
+    resent = plain._setting_request("apply_flag_settings")["settings"]
+    assert resent["skillListingMaxDescChars"] == SKILL_LISTING_DESC_CHARS
+    wide = DelegatedLoop(store=MemoryStore(), model="m",
+                         settings='{"skillListingMaxDescChars": 1536}')
+    assert _settings(wide)["skillListingMaxDescChars"] == 1536
+    assert wide._setting_request("apply_flag_settings")["settings"]["skillListingMaxDescChars"] == 1536
 
 
 def test_a_settings_env_block_cannot_undo_the_override() -> None:

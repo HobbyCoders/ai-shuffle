@@ -170,3 +170,22 @@ def test_scratch_prompt_is_absolute_session_scoped_and_survives_compaction(state
     assert str(designated) in "\n\n".join(s.text for s in adapter._compact_note())
     assert not designated.exists()
     assert not (state_fixture / ".fluid").exists()
+
+
+def test_the_compaction_note_leaves_the_session_plan_to_session_start(state_fixture, monkeypatch):
+    """The delegated loop's SessionStart answer opens with the current plan and
+    then carries this note, so a plan section here doubled it (it did until
+    the section was removed). A turn's own note still carries the plan."""
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.provider.types import SessionOptions
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="fixture", cwd=str(state_fixture))
+    adapter._is_delegated = True
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "session")
+    for name in ("_env_note", "_memory_snapshot", "_away_note"):
+        monkeypatch.setattr(adapter, name, lambda: None)
+    monkeypatch.setattr(adapter, "_plan_note", lambda: "# Session plan (revision 3; fixture)")
+    assert "# Session plan" in adapter._turn_context_note()
+    sections = adapter._compact_note()
+    assert sections and "plan" not in {s.name for s in sections}
+    assert not any("# Session plan" in s.text for s in sections)

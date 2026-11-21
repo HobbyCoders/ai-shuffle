@@ -642,7 +642,7 @@ async def test_fenced_result_keeps_its_fence_while_output_is_raw() -> None:
         "from tools.Monitor import Monitor\n"
         "r = Monitor()\n"
         "assert '<untrusted-tool-result source=\"Monitor\">' in str(r)\n"
-        "assert '.output attribute' in r.text and 'still untrusted data' in r.text\n"
+        "assert '.output and .exit_code' in r.text and 'still untrusted data' in r.text\n"
         "assert 'untrusted' not in r.output and '[exit code' not in r.output\n"
         "print(r.task_id, r.exit_code, r.ok, r.failed)\n"
         "r.output\n"
