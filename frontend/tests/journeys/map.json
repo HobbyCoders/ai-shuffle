@@ -874,7 +874,7 @@
 		},
 		{
 			"why": "Claude Code compaction: the card, the context meter, the work fold that holds mid-turn cards, and the delegated leg and mod that turn the CLI's compaction frames into them",
-			"journeys": ["compaction"],
+			"journeys": ["compaction", "compaction-live"],
 			"globs": [
 				"frontend/src/lib/components/SystemMessage.svelte",
 				"frontend/src/lib/utils/work-log.ts",
