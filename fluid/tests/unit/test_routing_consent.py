@@ -1,9 +1,8 @@
-"""Model authority and routing questions share the same positive-clause rule."""
+"""Model authority reads only the clauses an instruction affirms."""
 import re
 
 import pytest
 
-from fluid.codemode.preferences import model_routing, routing_priority
 from fluid.codemode.routing import affirmed_clauses, is_instruction
 
 
@@ -39,7 +38,6 @@ def test_only_a_clause_leading_directive_counts(text, directed):
 
 
 @pytest.mark.parametrize("prefix", ["use", "we use", "please use"])
-def test_routing_question_does_not_lose_the_authorized_model(prefix):
-    text = f"{prefix} opus for reviews not sonnet"
-    assert model_routing(text) == {"review": frozenset({"opus"})}
-    assert routing_priority(text) == 1
+def test_a_rejected_suffix_does_not_lose_the_authorized_model(prefix):
+    words = set(re.findall(r"\w+", " ".join(affirmed_clauses(f"{prefix} opus for reviews not sonnet"))))
+    assert "opus" in words and "sonnet" not in words

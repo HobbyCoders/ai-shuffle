@@ -1,62 +1,45 @@
-"""Standing-preference proposals and conflict curation for user-kept facts.
+"""Standing-preference proposals for user-kept facts.
 
 The background learner may not write a fact the owner asked to keep
 (``protected``), yet those are the facts that go stale when the owner changes
-how they want the work done. This module gives the learner two ways to
-raise the question, both bounded so they cannot nag:
+how they want the work done. This module lets the learner raise the question,
+bounded so it cannot nag. (Two saved rules that contradict each other are a
+separate question: see :mod:`fluid.codemode.conflict_review`.)
 
-* :class:`PreferenceProposals`: when a synthesis pass sees the user correct
-  HOW the agent works (model choice, delegation, reviews, CI, deploys,
-  process) it proposes the whole current rule under a short snake_case
-  topic name. The proposal is queued in ``pref-proposals.jsonl`` beside the store, never
-  saved as a fact, and the next sessions' ``# Memory`` snapshot shows it as
-  one line asking the agent to confirm it with the owner. At most
-  :data:`MAX_OPEN_PREFERENCE_PROPOSALS` are open, one per topic (a newer
-  wording replaces the older), and each expires after
-  :data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes exactly when a tool
-  call names its topic: a successful Remember with ``proposal=<topic>``
-  (the rule was saved) or Forget with ``proposal=<topic>`` and
-  ``confirm=true`` (the owner declined it, or a saved memory already states
-  it). Either closes every open proposal on that topic the calling session
-  sees (its project's or global; :meth:`PreferenceProposals.close`), and
-  the closed row stays as a tombstone for a TTL after closing so the
-  learner does not queue the same topic, scope and wording again. A
-  different wording is still queued. Tombstones are never open. The
-  queue file is local to this worker; it does not replicate. A proposal
-  also closes itself once a user-kept memory on the same topic is saved
-  after it: one keyed by the topic name, or one sharing the proposal's
-  subject terms (:func:`same_topic`); a memory the proposal already saw
-  when it was queued never counts, whatever its timestamp. The guidance queue
-  (``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
-  everything in it through the guidance gate.
-
-* :func:`curate_protected_conflicts`: deterministic, model-free detection of
-  two live user-kept facts about the same how-the-agent-works topic where
-  the newer one changes the rule. A non-link question in the existing
-  memory footer shows both texts and asks the owner to resolve the pair.
-  Both facts remain usable as context and model-routing authority; agents
-  ask which applies rather than silently choose for the contested job.
-  Curation never links, archives or rewrites a user-kept fact. At most
-  :data:`MAX_OPEN_CONFLICTS` questions are shown at once. An owner-kept
-  Remember decision under the question's version-bound key records that
-  both stand, replicates like any owner fact, and closes that pair until
-  either text (or its applicability) changes. No tool schema is extended
-  for conflicts (only proposals add the ``proposal`` parameter above).
+:class:`PreferenceProposals`: when a synthesis pass sees the user correct
+HOW the agent works (model choice, delegation, reviews, CI, deploys,
+process) it proposes the whole current rule under a short snake_case
+topic name. The proposal is queued in ``pref-proposals.jsonl`` beside the store, never
+saved as a fact, and the next sessions' ``# Memory`` snapshot shows it as
+one line asking the agent to confirm it with the owner. At most
+:data:`MAX_OPEN_PREFERENCE_PROPOSALS` are open, one per topic (a newer
+wording replaces the older), and each expires after
+:data:`PREFERENCE_PROPOSAL_TTL`. A proposal closes exactly when a tool
+call names its topic: a successful Remember with ``proposal=<topic>``
+(the rule was saved) or Forget with ``proposal=<topic>`` and
+``confirm=true`` (the owner declined it, or a saved memory already states
+it). Either closes every open proposal on that topic the calling session
+sees (its project's or global; :meth:`PreferenceProposals.close`), and
+the closed row stays as a tombstone for a TTL after closing so the
+learner does not queue the same topic, scope and wording again. A
+different wording is still queued. Tombstones are never open. The
+queue file is local to this worker; it does not replicate. A proposal
+also closes itself once a user-kept memory on the same topic is saved
+after it: one keyed by the topic name, or one sharing the proposal's
+subject terms (:func:`same_topic`); a memory the proposal already saw
+when it was queued never counts, whatever its timestamp. The guidance queue
+(``pending-proposals.jsonl``) is not reused: ``fluid evolve`` replays
+everything in it through the guidance gate.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from fluid.codemode.routing import affirmed_clauses
-
 PREFERENCE_PROPOSALS_FILE = "pref-proposals.jsonl"
-CONFLICT_CURATION_FILE = "conflict-curation.json"
 MAX_OPEN_PREFERENCE_PROPOSALS = 3
 PREFERENCE_PROPOSAL_TTL = 14 * 86400.0
 # Topics older versions wrote as ``pref.<topic>`` keys are still read.
@@ -66,13 +49,8 @@ _LEGACY_KEY_PREFIX = "pref."
 # this share of the smaller side's terms.
 PROPOSAL_ANSWER_MIN_SHARED = 3
 PROPOSAL_ANSWER_MIN_RATIO = 0.5
-MAX_OPEN_CONFLICTS = 3
-# Diagnostic pairs already curated (newest kept), not owner answers. This
-# suppresses repeat curation work only; replicated owner facts close questions.
-MAX_REMEMBERED_PAIRS = 128
 
 _TOPIC_RE = re.compile(r"[a-z][a-z0-9_]{1,40}")
-_WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def normalize_topic(raw: Any) -> str | None:
@@ -328,92 +306,6 @@ def _clip(text: str, limit: int = 80) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-# ─── conflict curation for user-kept facts ─────────────────────────────────
-
-# How-the-agent-works topics a contradiction is looked for in.
-#
-# Model routing is read clause by clause (``;``, a sentence end or a line
-# break ends one) into a job -> models map: "code work goes to Sol; reviews
-# go to Opus" is {code: sol, review: opus}. The newer of two routing facts
-# changes the rule when a job both name maps to different models; one that
-# only adds jobs, or names the same models for the jobs both cover, does not.
-_MODEL_NAMES = frozenset(
-    "opus sonnet haiku fable mythos sol astra luna terra gpt claude codex grok glm gemini qwen".split())
-# Family words a clause names beside a specific model ("GPT 6.1 Sol").
-_MODEL_FAMILIES = frozenset({"gpt", "claude"})
-_JOB_WORDS: dict[str, frozenset[str]] = {
-    "code": frozenset("code coding coder implementation implement".split()),
-    "review": frozenset("review reviews reviewer reviewing".split()),
-    "frontend": frozenset("frontend ui".split()),
-    "backend": frozenset("backend".split()),
-    "docs": frozenset("docs documentation".split()),
-}
-# Candidate eligibility uses authority's exact positive-clause screen, NOT a
-# prose classifier. A model mentioned in an anecdote can still authorize starts;
-# withholding its question would leave a contest the host silently accepts.
-_CLAUSE_RE = re.compile(r"[;\n—–]|[.!?](?=\s|$)")
-# Wording is only a ranking hint. A mistake may cost an extra question, but must
-# never remove a candidate. Keep nominal/imperative/current assignment shapes
-# ahead of narrative mentions; this is deliberately not a truth classifier.
-_ROUTING_PRIORITY = re.compile(
-    r"\b(?:use|switch|assign|does|handles?)\b|\b(?:go(?:es)?|runs?|move[ds]?)\s+(?:to|on)\b"
-    r"|\b(?:should|must)\s+be\s+used\b|\bmodel\s+used\s+for\b"
-    r"|\b(?:work|jobs?|tasks?|reviews?)\s+by\b"
-    r"|(?:\b(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\s+for\b)"
-    r"|(?::\s*(?:" + "|".join(sorted(_MODEL_NAMES)) + r")\b)", re.I)
-
-
-def routing_priority(text: str) -> int:
-    """Present-assignment hints first; never an eligibility/authority decision."""
-    # Past evaluations can contain "Sol for UI" without assigning today's work.
-    # Rank per clause so a historical aside cannot downgrade a separate assignment.
-    return int(any(_words(" ".join(affirmed_clauses(clause))) & _MODEL_NAMES
-                   and _ROUTING_PRIORITY.search(clause)
-                   and not re.search(r"\b(?:was|were)\b", clause, re.I)
-                   for clause in _CLAUSE_RE.split(text or "")))
-
-
-def model_routing(text: str) -> dict[str, frozenset[str]]:
-    """Jobs and models authority names positively, including ambiguous prose.
-
-    Never infer assignment vs anecdote here. The host accepts positive names in
-    both; :func:`routing_priority` may order questions, not withhold them.
-    """
-    routes: dict[str, frozenset[str]] = {}
-    for clause in _CLAUSE_RE.split((text or "").casefold()):
-        positive = " ".join(affirmed_clauses(clause))
-        # "code review" is a review, not code work.
-        words = _words(re.sub(r"\bcode[\s-]+review", "review", positive))
-        models = words & _MODEL_NAMES
-        models = (models - _MODEL_FAMILIES) or models
-        if not models:
-            continue
-        for job, cues in _JOB_WORDS.items():
-            if words & cues:
-                routes[job] = routes.get(job, frozenset()) | models
-    return routes
-
-
-# The other topics are value sets: a fact is on one when its words hit
-# ``cues`` of the cue words and ``values`` of the value words, and the newer
-# fact changes the rule when the value words differ (CI moved to another
-# machine, a deploy that now needs no approval).
-PREFERENCE_TOPICS: dict[str, dict[str, Any]] = {
-    "ci_policy": {
-        "cue_words": frozenset("ci suite suites runner runners prepush pre push pytest tests testing".split()),
-        "value_words": frozenset("github local locally machine machines worker workers hosted paid larger nightly".split()),
-        "cues": 2, "values": 1,
-    },
-    "deploy": {
-        "cue_words": frozenset("deploy deploys deployed deploying deployment deployments".split()),
-        "value_words": frozenset("ask asking approval approve approved without dispatch dispatched "
-                                 "owner manual automatic automatically".split()),
-        "cues": 1, "values": 1,
-    },
-}
-# Key namespaces of facts about who the owner is, not how work is done (the
-# snapshot's identity tier); a career history naming a model is no rule.
-_BIOGRAPHY_KEYS = ("profile.", "career.", "business.")
 # Words that say nothing about which rule a fact states.
 _NOISE = frozenset("""
 owner user agent agents rule rules always never only still not must should default
@@ -421,405 +313,6 @@ use uses used using via per each every new old now when then also any all
 """.split())
 
 
-def _words(text: str) -> set[str]:
-    return set(_WORD_RE.findall((text or "").casefold()))
-
-
-def preference_topics(text: str) -> dict[str, frozenset[str]]:
-    """``{topic: value words named}`` for every topic ``text`` is on."""
-    words = _words(text)
-    out = {}
-    for topic, spec in PREFERENCE_TOPICS.items():
-        cues = words & spec["cue_words"]
-        values = words & spec["value_words"]
-        if len(cues) >= spec["cues"] and len(values) >= spec["values"]:
-            out[topic] = frozenset(values)
-    return out
-
-
 def _salient(text: str) -> set[str]:
     from fluid.codemode.supersession import subject_terms
     return {t for t in subject_terms(text) if t not in _NOISE and not t.isdigit()}
-
-
-def _pair_key(old: dict, new: dict) -> str:
-    from fluid.codemode.facts import global_id
-    return f"{global_id(old)}>{global_id(new)}"
-
-
-# A decision is an ordinary owner-kept fact, not a new local-only queue.
-# Its key includes both global IDs and the exact text/applicability the owner
-# answered about. Recall/Remember/Forget and replication work unchanged.
-COEXIST_KEY_PREFIX = "memory.coexist."
-
-
-def coexistence_key(old: dict, new: dict) -> str:
-    # Version 2 names independently hashed endpoints: answer validation is O(n),
-    # not a hash of every possible pair. The old opaque pair keys stay readable.
-    tokens = sorted(_coexistence_token(e) for e in (old, new))
-    return COEXIST_KEY_PREFIX + "v2." + ".".join(tokens)
-
-
-def _coexistence_value(e: dict) -> tuple:
-    from fluid.codemode.facts import global_id, written_when
-    return (global_id(e), e["text"], written_when(e), bool(e.get("always")),
-            e.get("scope") or "global", e.get("worker"))
-
-
-def _coexistence_token(e: dict) -> str:
-    return hashlib.sha256(json.dumps(_coexistence_value(e), ensure_ascii=False).encode()).hexdigest()[:32]
-
-
-# This is a document-revision cache, NOT a time cache: sync, corrections,
-# metadata edits, resolutions and deletion all change its key. Ignore usage
-# counters, which cannot change a question. Four snapshots bound retained text.
-_CONFLICT_FIELDS = ("id", "origin", "revision", "text", "when", "always", "key", "scope", "worker",
-                    "protected", "provenance", "conflicted", "retired_at", "retired_reason",
-                    "superseded_by", "supersession_confirmed", "updated_at")
-
-
-def protected_conflicts(entries: list[dict], *, skip: set[str] | frozenset[str] = frozenset(),
-                        limit: int = MAX_OPEN_CONFLICTS,
-                        disjoint: bool = False, grouped: bool = False) -> list[tuple[dict, dict, str]]:
-    """Return caller rows. Normally cap pairs; grouped=True caps jobs, retaining their pairs."""
-    refs = _cached_conflict_refs(_conflict_revision(entries), frozenset(skip), limit, disjoint, grouped)
-    return [(entries[a], entries[b], reason) for a, b, reason in refs]
-
-
-def _conflict_revision(entries: list[dict]) -> tuple:
-    # Rendered MemoryEntry rows hide backfill lines after a text correction.
-    # Raw locked writes and validity readers must use that same applicability.
-    from fluid.codemode.facts import written_when
-    return tuple(tuple((e.get(f) or "global") if f == "scope" else
-                       written_when(e) if f == "when" else e.get(f)
-                       for f in _CONFLICT_FIELDS) for e in entries)
-
-
-def coexistence_answer_states(entries: list[dict]) -> dict[str, bool]:
-    """Current exact-pair answers vs stale historical records (Recall only)."""
-    return dict(_cached_answer_matches(_conflict_revision(entries))[0])
-
-
-@lru_cache(maxsize=4)
-def _cached_answer_matches(revision: tuple) -> tuple:
-    from fluid.codemode.facts import global_id, is_superseded
-    from fluid.context.screening import screen_findings
-    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
-    active = [e for e in rows if e.get("protected") and not is_superseded(e)
-              and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")]
-    answers = {e["key"] for e in active if str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)
-               and not screen_findings(e["text"]) and not screen_findings(e.get("when") or "")}
-    if not answers:
-        return (), frozenset()
-    # Replica-conflicted wordings of the same exact answer are both closure.
-    rules = [e for e in active if not e.get("conflicted")
-             and not str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)]
-    tokens = {_coexistence_token(e): e for e in rules}
-    states, pairs, legacy = {}, set(), set()
-    for key in answers:
-        parts = key[len(COEXIST_KEY_PREFIX):].split(".")
-        states[key] = False
-        if len(parts) == 3 and parts[0] == "v2":
-            a, b = (tokens.get(token) for token in parts[1:])
-            if a is not None and b is not None and a is not b:
-                states[key] = True
-                pairs.add(frozenset((global_id(a), global_id(b))))
-        else:
-            legacy.add(key)
-    # Compatibility with already issued opaque keys; serialize each endpoint
-    # once, not once for every candidate. No legacy record is rewritten/deleted.
-    if legacy:
-        values = sorted((_coexistence_value(e), global_id(e)) for e in rules)
-        encoded = [(json.dumps(value, ensure_ascii=False), gid) for value, gid in values]
-        for i, (first, a) in enumerate(encoded):
-            for second, b in encoded[i + 1:]:
-                key = COEXIST_KEY_PREFIX + hashlib.sha256(("[" + first + ", " + second + "]").encode()).hexdigest()[:32]
-                if key in legacy:
-                    states[key] = True
-                    pairs.add(frozenset((a, b)))
-                    legacy.remove(key)
-                    if not legacy:
-                        break
-            if not legacy:
-                break
-    return tuple(states.items()), frozenset(pairs)
-
-
-@lru_cache(maxsize=4)
-def _cached_conflict_refs(revision: tuple, skip: frozenset, limit: int, disjoint: bool, grouped: bool) -> tuple:
-    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
-    indices = {id(e): i for i, e in enumerate(rows)}
-    pairs = _find_protected_conflicts(rows, skip=skip, limit=limit, disjoint=disjoint, grouped=grouped)
-    return tuple((indices[id(a)], indices[id(b)], why) for a, b, why in pairs)
-
-
-def _find_protected_conflicts(entries: list[dict], *, skip: frozenset[str],
-                             limit: int, disjoint: bool, grouped: bool = False) -> list[tuple[dict, dict, str]]:
-    """Same-topic pairs of live user-kept facts where the newer one changes
-    the rule: ``[(old, new, reason)]``, strongest first, at most ``limit``.
-
-    Model-free and conservative. Both facts are user-kept, live, unlinked,
-    in the same scope and on the same worker, and neither is marked as an
-    exception or a guess (supersession's own screens). Then the two carry
-    the same key and say different things, or route a job both
-    name to different models (:func:`model_routing`), or are on one
-    :data:`PREFERENCE_TOPICS` topic, name different value words for it and
-    share at least two other subject words. Assignment-like pairs sort before
-    ambiguous narrative mentions. By default shared endpoints do not suppress
-    pairs: even a ranking mistake must not exclude the genuine contest.
-    The question cap still bounds prompt growth; no question revokes authority.
-    ``skip`` holds pair keys already proposed once.
-    """
-    from fluid.codemode.facts import fingerprint, global_id, is_superseded
-    from fluid.codemode.supersession import conflict_scope_evidence
-
-    from fluid.context.screening import screen_findings
-
-    owner = [e for e in entries
-             if e.get("protected") and not is_superseded(e) and not e.get("conflicted")
-             and not e.get("retired_at") and e.get("provenance") != "tool" and e.get("text")]
-    resolved_pairs = _cached_answer_matches(_conflict_revision(entries))[1]
-    live = [e for e in owner
-            if not str(e.get("key") or "").startswith((*_BIOGRAPHY_KEYS, COEXIST_KEY_PREFIX))]
-    topics = {e["id"]: preference_topics(e["text"]) for e in live}
-    routes = {e["id"]: model_routing(e["text"]) for e in live}
-    priorities = {e["id"]: routing_priority(e["text"]) for e in live}
-    salient = {e["id"]: _salient(e["text"]) for e in live}
-    fingerprints = {e["id"]: fingerprint(e["text"]) for e in live}
-    # These regex screens depend on each text, not on its O(n²) pairings.
-    applicable = {e["id"]: conflict_scope_evidence(e, e) for e in live}
-    # Most documents have no differing values at all. Index possible changes
-    # once, rather than compare every pair of identical-topic/no-topic facts.
-    from collections import Counter, defaultdict
-    keys = Counter(e.get("key") for e in live if e.get("key"))
-    route_values, topic_values = defaultdict(set), defaultdict(set)
-    for entry in live:
-        for job, models in routes[entry["id"]].items():
-            route_values[job].add(models)
-        for topic, values in topics[entry["id"]].items():
-            topic_values[topic].add(values)
-    changed_jobs = {job for job, values in route_values.items() if len(values) > 1}
-    changed_topics = {topic for topic, values in topic_values.items() if len(values) > 1}
-    edges = {global_id(e) for e in live if e.get("superseded_by")}
-    edges.update(e["superseded_by"] for e in live if e.get("superseded_by"))
-    live = [e for e in live if (keys.get(e.get("key"), 0) > 1 or global_id(e) in edges
-            or changed_jobs.intersection(routes[e["id"]])
-            or changed_topics.intersection(topics[e["id"]]))]
-    candidates: list[tuple[int, int, int, float, dict, dict, str]] = []
-    for new in live:
-        for old in live:
-            if old is new or float(old.get("updated_at") or 0) >= float(new.get("updated_at") or 0):
-                continue
-            if (old.get("scope", "global") != new.get("scope", "global")
-                    or old.get("worker") != new.get("worker")):
-                continue
-            if fingerprints[old["id"]] == fingerprints[new["id"]]:
-                continue  # a restatement, the duplicate check's business
-            same_key = bool(old.get("key")) and old.get("key") == new.get("key")
-            reason = ""
-            strength = 0
-            # A question never hides the wider rule: any shared job with
-            # different typed routing is worth asking about, not superseding.
-            old_routes, new_routes = routes[old["id"]], routes[new["id"]]
-            moved = sorted(job for job in old_routes.keys() & new_routes.keys()
-                           if old_routes[job] != new_routes[job])
-            if old.get("superseded_by") == global_id(new) and not old.get("supersession_confirmed"):
-                reason, strength = "unconfirmed replacement proposal", 3
-            elif same_key:
-                reason, strength = f"same key {old['key']}", 2
-            elif moved:
-                reason, strength = "model routing changed for " + ", ".join(moved), 1
-            else:
-                for topic in topics[old["id"]].keys() & topics[new["id"]].keys():
-                    values_old, values_new = topics[old["id"]][topic], topics[new["id"]][topic]
-                    if values_old == values_new:
-                        continue  # the same rule worded differently
-                    spec = PREFERENCE_TOPICS[topic]
-                    shared = (salient[old["id"]] & salient[new["id"]]) - spec["value_words"]
-                    if len(shared) >= 2:
-                        reason, strength = f"same topic {topic}", 1
-                        break
-            if not strength:
-                continue
-            # Typed disagreement is enough to ASK, never enough to link.
-            # Keep the scope/temporary/uncertain screens, not the stricter
-            # replacement wording needed for automatic supersession.
-            if not applicable[old["id"]] or not applicable[new["id"]]:
-                continue
-            if resolved_pairs and frozenset((global_id(old), global_id(new))) in resolved_pairs:
-                continue
-            overlap = len(salient[old["id"]] & salient[new["id"]])
-            priority = min(priorities[old["id"]], priorities[new["id"]]) if moved else 1
-            candidates.append((priority, strength, overlap, float(new.get("updated_at") or 0), old, new, reason))
-    candidates.sort(key=lambda c: (-c[0], -c[1], -c[3], -c[2]))
-    if grouped:
-        # The cap is on questions/jobs, not on pairs. Retain every unresolved
-        # pair in each selected job so one owner answer can close them together.
-        groups = _question_groups([(a, b, why) for _, _, _, _, a, b, why in candidates
-                                   if _pair_key(a, b) not in skip])
-        return list({_pair_key(a, b): (a, b, why)
-                     for pairs in list(groups.values())[:limit]
-                     for a, b, why in pairs}.values())
-    used: set[str] = set()
-    out: list[tuple[dict, dict, str]] = []
-    for _priority, _strength, _overlap, _at, old, new, reason in candidates:
-        if len(out) >= limit:
-            break
-        if ((disjoint and (old["id"] in used or new["id"] in used))
-                or _pair_key(old, new) in skip):
-            continue
-        used.update((old["id"], new["id"]))
-        out.append((old, new, reason))
-    return out
-
-
-GROUP_ANSWER_PREFIX = COEXIST_KEY_PREFIX + "job."
-
-
-def _question_groups(pairs: list) -> dict[tuple, list]:
-    """Ranked pairs -> one question per job in each scope/worker partition."""
-    rows = {e["id"]: e for a, b, _ in pairs for e in (a, b)}
-    routes = {i: model_routing(e["text"]) for i, e in rows.items()}
-    groups: dict[tuple, dict] = {}
-    for old, new, reason in pairs:
-        a, b = routes[old["id"]], routes[new["id"]]
-        shared = sorted(a.keys() & b.keys())
-        moved = [job for job in shared if a[job] != b[job]]
-        jobs = [f"model routing: {job}" for job in moved or shared]
-        for subject in jobs or [reason]:
-            partition = (old.get("scope") or "global", old.get("worker"), subject)
-            groups.setdefault(partition, {})[_pair_key(old, new)] = (old, new, reason)
-    # Aliases such as "backend code" can name multiple job categories with the
-    # identical contest. They need one answer, not another slot for the same set.
-    distinct: dict[tuple, tuple[list[str], dict]] = {}
-    for (scope, worker, subject), group in groups.items():
-        identity = (scope, worker, tuple(sorted(group)))
-        if identity not in distinct:
-            distinct[identity] = ([], group)
-        distinct[identity][0].append(subject)
-    return {(scope, worker, "; ".join(sorted(subjects))): list(group.values())
-            for (scope, worker, _), (subjects, group) in distinct.items()}
-
-
-def owner_questions(entries: list[dict], *, questions: list | None = None) -> list[dict]:
-    """One executable answer key per job, binding the entire current pair set.
-
-    This virtual key is never stored as an authority row. FactStore expands it
-    to existing exact-pair keys in one locked commit, so legacy closures and
-    endpoint-change semantics remain unchanged.
-    """
-    if questions is None:
-        return list(_cached_owner_questions(_conflict_revision(entries)))
-    if not questions or isinstance(questions[0], dict):
-        return questions
-    return _build_owner_questions(questions)  # compatibility with precomputed pair callers
-
-
-@lru_cache(maxsize=4)
-def _cached_owner_questions(revision: tuple) -> tuple:
-    """Cache the whole job plan, not just pairs: warmed renders must stay O(n).
-
-    Revision keys include raw text/applicability, not usage counters. Retain only
-    four snapshots, just like the existing pair cache; never persist a decision.
-    """
-    rows = [dict(zip(_CONFLICT_FIELDS, values)) for values in revision]
-    return tuple(_build_owner_questions(protected_conflicts(rows, grouped=True)))
-
-
-def _build_owner_questions(pairs: list) -> list[dict]:
-    from fluid.codemode.facts import global_id
-    out = []
-    for (scope, worker, subject), pairs in list(_question_groups(pairs).items())[:MAX_OPEN_CONFLICTS]:
-        members = {global_id(e): e for a, b, _ in pairs for e in (a, b)}
-        # Hash each endpoint once, not twice per pair (quadratic at capacity).
-        tokens = {i: _coexistence_token(e) for i, e in members.items()}
-        keys = [COEXIST_KEY_PREFIX + "v2." + ".".join(sorted((tokens[global_id(a)], tokens[global_id(b)])))
-                for a, b, _ in pairs]
-        basis = (scope, worker, subject, sorted(keys))
-        digest = hashlib.sha256(json.dumps(basis, ensure_ascii=False).encode()).hexdigest()[:32]
-        out.append(dict(subject=subject, scope=scope, pairs=pairs, members=list(members.values()),
-                        key=GROUP_ANSWER_PREFIX + digest))
-    return out
-
-
-def _question_refs(members: list[dict]) -> str:
-    from fluid.codemode.facts import global_id
-    ids = [global_id(e) for e in members]
-    if len(ids) <= 8:
-        return ", ".join(f"[{i}]" for i in ids)
-    # Lossless source-prefix factoring: never drop members or substitute local
-    # IDs, which could refer to a different fact after moving to another worker.
-    sources: dict[str, list[str]] = {}
-    for full in ids:
-        source, short = full.rsplit(":", 1)
-        sources.setdefault(source, []).append(short)
-    return ("; ".join(f"source {source} IDs [{', '.join(shorts)}]" for source, shorts in sources.items())
-            + " (Recall each as '<source>:<ID>')")
-
-
-def owner_conflict_lines(entries: list[dict], *, questions: list | None = None) -> list[str]:
-    """Ask once per job; answers use Remember, not replacement or local state."""
-    lines = []
-    for question in owner_questions(entries, questions=questions):
-        refs = _question_refs(question["members"])
-        both = len(question["members"]) == 2
-        lines.append(
-            f"- [owner question; unresolved conflict] Saved facts {refs} disagree ({question['subject']}). "
-            f"{'Both' if both else 'All'} facts remain usable as context and model-routing authority. "
-            f"Recall {'both' if both else 'all'} and ask the owner once which rules apply; "
-            "do not silently choose a model for the contested job. If the owner says these rules stand, "
-            f"Remember their answer with key={question['key']!r}, user_requested=true, "
-            f"scope={'global' if question['scope'] == 'global' else 'project'!r}, "
-            'when="When applying these owner rules"; no replaces. '
-            f"One answer commits all {len(question['pairs'])} pair closures together on synced workers "
-            "until a fact changes.")
-    return lines
-
-
-def open_conflicts(entries: list[dict]) -> int:
-    """Number of bounded owner questions, not the number of pair combinations."""
-    return len(owner_questions(entries))
-
-
-
-def _load_curation(root: Path) -> dict:
-    try:
-        doc = json.loads((root / CONFLICT_CURATION_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return doc if isinstance(doc, dict) else {}
-
-
-def curate_protected_conflicts(store: Any, *, now: float | None = None) -> list[str]:
-    """Record which bounded owner questions were surfaced. Never link facts.
-
-    The existing question footer derives open pairs from the same live
-    snapshot. A confirmed replacement, correction, Forget or replicated
-    keep-both answer closes a pair; another candidate can then use its slot.
-    No owner text is hidden.
-    """
-    from fluid.codemode.facts import visible_on
-    from fluid.codemode.skills import atomic_write_text
-
-    now = time.time() if now is None else now
-    try:
-        doc = store._facts.snapshot()
-        entries = [e for e in doc["entries"] if visible_on(e, doc.get("store_id"))]
-        root = Path(store.root)
-        curation = _load_curation(root)
-        proposed = [p for p in curation.get("proposed") or [] if isinstance(p, str)]
-        changed: list[str] = []
-        # Select the SAME capped questions the footer shows before skipping
-        # previously surfaced pairs; a second pass must not open another cap.
-        for old, new, _reason in protected_conflicts(entries):
-            pair = _pair_key(old, new)
-            if pair not in proposed:
-                proposed.append(pair)
-                changed.append(f"conflict-memory:{old['id']}")
-        if proposed != list(curation.get("proposed") or []):
-            curation["proposed"] = proposed[-MAX_REMEMBERED_PAIRS:]
-            curation["updated_at"] = now
-            atomic_write_text(root / CONFLICT_CURATION_FILE, json.dumps(curation))
-        return changed
-    except Exception:  # noqa: BLE001 — curation is opportunistic, never fatal
-        return []

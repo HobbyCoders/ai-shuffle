@@ -104,7 +104,7 @@ async def test_missing_successor_keeps_original_rule_usable_without_a_false_pair
     store._facts.merge(packet)
     section = store.render_memory_section()
     assert OLD in section and "the original rule remains usable" in section
-    assert "unresolved conflict" not in section
+    assert "owner question" not in section
     assert "do not use the old value" not in section
     ctx = ToolCtx(extra={"recall_store": store})
     restored = next(e for e in store.memories() if e.text == OLD)

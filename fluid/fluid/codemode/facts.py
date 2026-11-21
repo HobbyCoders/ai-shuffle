@@ -740,12 +740,10 @@ class FactStore:
         refuses one that would overflow it (:meth:`_check_always_budget`).
         """
         if isinstance(key, str) and key.startswith("memory.coexist.job."):
-            return self._save_job_answer(
-                text, key=key, scope=scope, memory_id=memory_id, provenance=provenance,
-                protected=protected, durable=durable, expected_revision=expected_revision,
-                source_session=source_session, restore=restore, per_worker=per_worker,
-                correction_project=correction_project, replaces=replaces, receipt=receipt,
-                when=when, always=always, require_when=require_when)
+            # Keys of the retired word-matching questions name no rule pair.
+            raise ValueError("This answer key belongs to a retired memory question and no longer "
+                             "names any saved rules; Recall the rules for the current question; "
+                             "nothing was saved")
         text = validate_text(text)
         if when is not None:
             when = validate_when(when)
@@ -1061,36 +1059,6 @@ class FactStore:
                 self._write(doc)
             return self._entry(entry)
 
-    def _save_job_answer(self, text, *, key, scope, **kwargs):
-        """Expand a current footer key to exact-pair rows, in one atomic commit.
-
-        A stale key, deletion fence, quota or validation failure commits nothing.
-        No ordinary rule is edited, and old per-pair keys remain valid closures.
-        """
-        from fluid.codemode.preferences import owner_questions, coexistence_key
-
-        if (not kwargs.get("protected") or kwargs.get("memory_id") is not None
-                or kwargs.get("replaces") or kwargs.get("expected_revision") is not None):
-            raise ValueError("A job answer must be a separate user-requested answer; "
-                             "no memory_id, replaces or revision; nothing was saved")
-        with file_transaction(self.lock):
-            doc = self._prepare()
-            scope = scope or "global"
-            rows = [e for e in doc["entries"] if visible_on(e, doc["store_id"])
-                    and (e.get("scope") or "global") == scope]
-            question = next((q for q in owner_questions(rows) if q["key"] == key), None)
-            if question is None:
-                raise ValueError("The owner question changed; Recall the current rules and "
-                                 "use the fresh footer answer key; nothing was saved")
-            answers = []
-            for a, b, _ in question["pairs"]:
-                answers.append(self.save(text, key=coexistence_key(a, b), scope=scope,
-                                         _document=doc, **kwargs))
-            self._write(doc)
-            if isinstance(kwargs.get("receipt"), dict):
-                kwargs["receipt"]["pair_answers"] = [e.id for e in answers]
-            return answers[-1]
-
     @staticmethod
     def _entry(entry):
         from fluid.codemode.skills import MemoryEntry
@@ -1377,8 +1345,8 @@ class FactStore:
 
         A user-kept (protected) old fact is refused unless
         ``protected_conflict`` is set and the new fact is user-kept too: the
-        pair is then linked unconfirmed, both texts stay as they are, and the
-        snapshot asks the owner to resolve it (see preferences.py)."""
+        pair is then linked unconfirmed and both texts stay usable as they
+        are until the owner confirms the replacement."""
         from fluid.codemode.supersession import replacement_evidence
         from fluid.context.screening import screen_findings
         with file_transaction(self.lock):

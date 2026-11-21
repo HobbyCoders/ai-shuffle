@@ -911,11 +911,10 @@
 			]
 		},
 		{
-			"why": "owner memory questions and their replicated keep-both answers reach real session prompts",
+			"why": "a stored conflict between two owner rules and the keep-both answer reach real session prompts",
 			"journeys": ["owner-memory-question"],
 			"globs": [
-				"fluid/fluid/codemode/preferences.py",
-				"fluid/fluid/codemode/routing.py",
+				"fluid/fluid/codemode/conflict_review.py",
 				"fluid/fluid/codemode/skills.py",
 				"fluid/fluid/tools/builtins/recall.py"
 			]

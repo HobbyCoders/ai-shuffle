@@ -180,6 +180,59 @@ lock, a spent budget, a slice of low-value entries only) carries `"ran": false`
 and is not counted as a silent pass; a provider's error message is kept, not
 reported as an empty completion.
 
+## Contradictions between owner rules
+
+Two rules the owner asked to keep can contradict each other after the owner
+changes their mind. Nothing matches words to find that. The learner's model
+reviews the rules (`fluid/fluid/codemode/conflict_review.py`) after a synthesis
+pass: one call for up to 12 rules that are new or reworded since their last
+review, shown beside the other owner rules of the same scope and worker. A
+scope that does not fit one prompt takes several calls, related rules first,
+and a rule counts as reviewed only once it has been shown beside every other
+rule of its scope. New wording is the rule's text, scope, always flag or a
+when-line the owner wrote; a when-line the backfill generates reviews nothing
+again and keeps every verdict. Profile, career and business facts, tool
+harvests, facts withheld by screening and anything that is not owner-kept are
+never sent.
+
+The model is told that most sets contain no conflict, that a narrower rule
+beside a general one, added detail, history, or rules for different jobs or
+projects are not conflicts, and to report none when unsure. A claim counts
+only when it names two shown rules of which one is under review and quotes
+one passage from each that stands in that rule: whole words in the rule's own
+spelling and capitals (only spacing, typographic quote and dash forms and the
+capital of the first letter are forgiven). A second call then looks at the
+claimed pairs alone, three at a time, and must agree; a claim it has no room
+for, or that the budget refuses, is kept and gets its second look in a later
+pass, and nothing is shown until then. Anything else is dropped and counted
+in the pass log row
+(`memory_conflicts` in `.synthesis-log.jsonl`, which never holds rule text).
+A result is stored only for the wording the model was shown: a rule edited or
+merged from a replica while the model answered is reviewed again.
+
+Verdicts live in `conflict-review.json` beside the store, local to the worker
+and not replicated: which wording of each rule was reviewed, the open pairs
+with their two passages, claims waiting for their second look and the
+progress of a scope too large for one call. Rewording, forgetting or
+replacing either rule closes its pair and sends the reworded rule to review
+again. The review spends the learner's shared daily call budget, at most 4
+calls a day (first and second looks together), and stops while half of that
+budget is spent; with no model or no budget
+nothing is asked. A failed or unreadable answer reviews nothing and waits on
+its own backoff (one hour, doubling to a day) without failing the learner.
+
+A session is not sent a question paragraph. The `# Memory` line of each rule
+in an open pair ends with `(owner question: conflicts with [id]; Recall both
+before relying on either)`, and Recall of either rule prints the two passages,
+tells the agent to follow the newer rule meanwhile and to ask the owner once.
+At most 3 pairs are open at a time; Memory health counts them. The owner
+settles a pair by correcting, replacing or forgetting a rule, or by saying
+both stand: that answer is saved under the pair's `memory.coexist.v2.` key,
+replicates like any fact, and holds until either rule is reworded (a when-line
+the backfill generates afterwards is not a rewording). A conflict never takes
+a rule's authority away; for model routing the host still accepts a model
+named by either rule.
+
 ## Self-maintenance
 
 `fluid/fluid/codemode/memory_health.py` checks each store without a model. The

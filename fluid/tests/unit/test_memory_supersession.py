@@ -36,7 +36,7 @@ async def test_different_keys_scopes_keep_only_current_value_and_recall_pair(tmp
     assert (old_now in archive) != protected
     section = reopened.render_memory_section("project:fixture")
     assert OLD not in section and NEW_LINE in section
-    assert "unresolved conflict" not in section
+    assert "owner question" not in section
     assert old.id not in {line.split()[1].strip("[") for line in reopened.memory_snapshot_plan("project:fixture")["eligible_lines"]}
     result = await recall({"query": "subagent", "limit": 10}, ToolCtx(extra={"recall_store": reopened, "memory_project": "project:fixture"}))
     assert OLD in result.text and "superseded by" in result.text.lower()
@@ -89,14 +89,14 @@ def test_replication_keeps_link_archive_and_conflict_across_stale_replay(tmp_pat
     b._facts.merge(stale)
     assert OLD not in b.render_memory_section("project:fixture")
     assert NEW_LINE in b.render_memory_section("project:fixture")
-    assert "unresolved conflict" not in b.render_memory_section("project:fixture")
+    assert "owner question" not in b.render_memory_section("project:fixture")
     # Explicit revision-safe confirmation of the replacement resolves marker,
     # while retaining the predecessor text/link on every replica.
     now = next(e for e in a.memories() if e.id == new.id)
     a.save_memory(NEW, memory_id=now.id, expected_revision=now.revision, protected=True)
-    assert "unresolved conflict" not in a.render_memory_section("project:fixture")
+    assert "owner question" not in a.render_memory_section("project:fixture")
     b._facts.merge(a._facts.export())
-    assert "unresolved conflict" not in b.render_memory_section("project:fixture")
+    assert "owner question" not in b.render_memory_section("project:fixture")
     assert next(e for e in a.memories() if e.id == old.id).text == OLD
 
 
@@ -175,7 +175,7 @@ def test_lineage_expires_and_replacement_preserves_bounded_identity(tmp_path, mo
     # precedence. Unrelated biography filler must not outrank a correction.
     assert identity.text in section
     assert section.index(NEW_LINE) < section.index("Generic unrelated protected fact")
-    assert "unresolved conflict" not in section and OLD not in section
+    assert "owner question" not in section and OLD not in section
 
 
 def test_supersession_fixture_has_bounded_unique_paragraphs(tmp_path):

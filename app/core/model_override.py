@@ -770,7 +770,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
         from fluid.codemode.facts import is_superseded, usefulness, visible_on
-        from fluid.codemode.preferences import COEXIST_KEY_PREFIX
+        from fluid.codemode.conflict_review import COEXIST_KEY_PREFIX
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -795,8 +795,9 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
                 and entry.get("scope", "global") in scopes
                 and isinstance(entry.get("text"), str) and entry["text"].strip()
                 and not screen_findings(entry["text"])]
-        # A non-link question never revokes an owner's words: both facts
-        # remain usable authority. The prompt asks which applies to the job.
+        # An open conflict question never revokes an owner's words: both
+        # rules remain usable authority. The session is told to follow the
+        # newer one and ask the owner which applies.
         live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
         return [store._facts._entry(entry) for entry in live]
     except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing
