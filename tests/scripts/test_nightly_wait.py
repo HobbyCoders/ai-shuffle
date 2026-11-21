@@ -163,6 +163,13 @@ def test_a_newer_merge_still_testing_does_not_hide_an_existing_pass():
     assert wait(api, pointer(OLD), once=True)[0] == waiter.SCHEDULED
 
 
+def test_a_new_run_on_the_passed_revision_itself_keeps_the_wait():
+    """The publisher reads only a revision's latest run, so an older pass on it is not proof yet."""
+    api = Api([run(2, MINE, status="in_progress", event="workflow_dispatch"),
+               run(1, MINE, conclusion="success", age=3600)])
+    assert wait(api, pointer(OLD), once=True)[0] == 3
+
+
 def test_a_publisher_run_created_before_the_pass_is_not_a_later_attempt():
     started = {**run(5, OLD, conclusion="success", event="schedule", age=60), "created_at":
                waiter.time.strftime("%Y-%m-%dT%H:%M:%SZ", waiter.time.gmtime(NOW - 7200))}
