@@ -181,7 +181,12 @@ export async function extract(archive, dest, stripComponents = 1) {
 		// GNU tar (Git for Windows) cannot read zip files; PowerShell always can.
 		const staging = `${dest}.unzip`;
 		await rm(staging, { recursive: true, force: true });
-		run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${staging}' -Force`]);
+		// Windows PowerShell must not inherit PSModulePath from a PowerShell 7
+		// parent (GitHub's default Windows shell): it would load PowerShell 7's
+		// Expand-Archive, which calls a .NET overload Windows PowerShell lacks,
+		// print an error and still exit 0. Stop makes any failure exit non-zero.
+		const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'));
+		run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; Expand-Archive -LiteralPath '${archive}' -DestinationPath '${staging}' -Force`], { env });
 		const { readdir } = await import('node:fs/promises');
 		let root = staging;
 		for (let i = 0; i < stripComponents; i++) {
