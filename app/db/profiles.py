@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
+from app.core.tool_access import current_tool_names
 from app.db.base import get_db, row_to_dict, rows_to_list
 
 #: ``config.system_prompt`` keys that are retired. ``inject_env_details`` once
@@ -63,7 +64,17 @@ def _decode_row(row: Dict[str, Any]) -> Dict[str, Any]:
     """Parse a stored agent row's JSON columns in place."""
     config = row["config"]
     config = json.loads(config) if isinstance(config, str) else (config if config is not None else {})
-    row["config"] = without_retired_config_keys(config)
+    config = without_retired_config_keys(config)
+    if isinstance(config, dict):
+        # A list saved before a tool was renamed, or received from another
+        # worker (lists travel under the earlier names), reads under today's
+        # names: the editor ticks the tools the list really selects, and
+        # unticking one removes the entry that selected it.
+        for key in ("allowed_tools", "disallowed_tools"):
+            saved = config.get(key)
+            if isinstance(saved, list) and (names := current_tool_names(saved)) != saved:
+                config = {**config, key: names}
+    row["config"] = config
     row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
     return row
 

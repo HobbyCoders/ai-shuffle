@@ -34,6 +34,7 @@ Kept deliberately free of app imports (no db, no fluid) so the v82 migration in
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -57,8 +58,11 @@ DENY_ALL = "*"
 # saved permission rule or a hook matcher written for the old name still
 # applies to the tool.
 _BRIDGE_PREFIX = "mcp__fluid_bundled__"
+# The MCP server the renamed tools were on, and the one they are on now.
+_EARLIER_SERVER = "chat-access"
+_RENAMED_SERVER = "app-vault"
 RENAMED_TOOLS: Dict[str, str] = {
-    f"mcp__chat-access__{old}": f"mcp__app-vault__{new}"
+    f"mcp__{_EARLIER_SERVER}__{old}": f"mcp__{_RENAMED_SERVER}__{new}"
     for old, new in (
         ("RequestChatAccess", "RequestVaultAccess"),
         ("ChatResources", "VaultResources"),
@@ -100,12 +104,27 @@ def apply_legacy_tool_aliases(tool_names: Iterable[Any]) -> List[str]:
     return out
 
 
+def _moved_server_pattern(pattern: str, server: str, to: str) -> Optional[str]:
+    """``mcp__<server>__*`` (either spelling) as the same pattern on ``to``."""
+    for prefix in ("", _BRIDGE_PREFIX):
+        if pattern == f"{prefix}mcp__{server}__*":
+            return f"{prefix}mcp__{to}__*"
+    return None
+
+
 def _renamed_by_pattern(pattern: str) -> List[str]:
-    """The current names of the renamed tools ``pattern`` selected and no
-    longer does: ``mcp__chat-access__*`` matches none of the tools it was
-    written for, and on a blocklist that would quietly unblock them."""
+    """What ``pattern`` selected among the renamed tools and no longer does:
+    ``mcp__chat-access__*`` matches none of the tools it was written for, and
+    on a blocklist that would quietly unblock them.
+
+    A pattern for the whole earlier server answers with the same pattern on
+    the new server, so it also covers a tool the Vault gains later. Any other
+    pattern answers with the current names of the tools it selected."""
     if not _is_pattern(pattern):
         return []
+    moved = _moved_server_pattern(pattern, _EARLIER_SERVER, _RENAMED_SERVER)
+    if moved:
+        return [moved]
     return [
         new for old, new in _RENAMED_SPELLINGS.items()
         if fnmatch.fnmatchcase(old, pattern) and not fnmatch.fnmatchcase(new, pattern)
@@ -137,6 +156,107 @@ def earlier_tool_names(name: str) -> List[str]:
     bridge-spelled names. A tool that was never renamed has none.
     """
     return [old for old, new in _RENAMED_SPELLINGS.items() if new == name]
+
+
+def shared_tool_names(tool_names: Iterable[Any]) -> List[Any]:
+    """A saved tool list as other workers receive it: each renamed tool under
+    the name it had before.
+
+    A worker that has not updated yet knows only the earlier names, and a
+    block it cannot match is no block there. Updated workers read the earlier
+    names as the current tools. The pattern for the whole new server travels
+    as the pattern for the whole earlier one. Any other pattern that spells
+    out the new server is kept, followed by the earlier name of every tool it
+    selects. Any other entry is returned as it is, so a list that names no
+    renamed tool is the same list, with the same content hash, it always was.
+    """
+    names = list(tool_names)
+    out: List[Any] = []
+    partial: List[str] = []
+    for entry in names:
+        earlier = None
+        if isinstance(entry, str):
+            earlier = next(iter(earlier_tool_names(entry)), None) or _moved_server_pattern(
+                entry, _RENAMED_SERVER, _EARLIER_SERVER)
+            if earlier is None and _RENAMED_SERVER in entry and _is_pattern(entry):
+                partial.append(entry)
+        if earlier is None:
+            out.append(entry)
+        elif earlier not in names and earlier not in out:
+            out.append(earlier)
+    for entry in partial:
+        for old, new in _RENAMED_SPELLINGS.items():
+            if fnmatch.fnmatchcase(new, entry) and old not in out:
+                out.append(old)
+    return out
+
+
+def current_tool_names(tool_names: Iterable[Any]) -> List[Any]:
+    """A saved tool list under today's names, for reading, showing and editing.
+
+    The reverse of ``shared_tool_names``: an earlier name becomes the current
+    one and the pattern for the whole earlier server becomes the pattern for
+    the whole new one. Any other pattern that spells out the earlier server
+    becomes the tools it selected (its tool-name part can match no current
+    name). Other entries are returned as they are.
+    """
+    names = list(tool_names)
+    out: List[Any] = []
+    for entry in names:
+        selected: List[Any] = []
+        if isinstance(entry, str):
+            if entry in _RENAMED_SPELLINGS:
+                selected = [_RENAMED_SPELLINGS[entry]]
+            elif _EARLIER_SERVER in entry:
+                selected = _renamed_by_pattern(entry)
+        if not selected:
+            out.append(entry)
+            continue
+        out.extend(name for name in selected if name not in names and name not in out)
+    return out
+
+
+def shared_tool_matcher(pattern: Any) -> Any:
+    """A hook's ``tool_matcher`` regex as other workers receive it.
+
+    A matcher written for a renamed tool's new name selects nothing on a
+    worker that has not updated yet, so a hook that guards the tool would not
+    run there. The earlier name of every renamed tool the matcher selects is
+    added as an alternative. A matcher that selects no renamed tool, or
+    already selects the earlier names too, is returned as it is.
+    """
+    if not isinstance(pattern, str) or not pattern:
+        return pattern
+    try:
+        matcher = re.compile(pattern)
+    except re.error:
+        return pattern
+    missing = [
+        old for old, new in _RENAMED_SPELLINGS.items()
+        if matcher.fullmatch(new) and not matcher.fullmatch(old)
+    ]
+    return "|".join([pattern, *(re.escape(old) for old in missing)]) if missing else pattern
+
+
+def widened_by_rename(tool_names: Iterable[Any]) -> List[str]:
+    """The renamed tools an allow list would admit only because of their new
+    names.
+
+    ``mcp__app-*__*`` selected the app-config tools and none of the "chat
+    access" tools; the Vault server's new name must not hand it those. A
+    pattern keeps a renamed tool when it selected the tool's earlier name or
+    spells out the new server, and an exact entry always does. Callers add the
+    result to the deny list that goes with the allow list.
+    """
+    entries = [str(name).strip() for name in tool_names or () if str(name).strip()]
+    out: List[str] = []
+    for old, new in _RENAMED_SPELLINGS.items():
+        if new in entries or matches_any(old, entries):
+            continue
+        patterns = [entry for entry in entries if _is_pattern(entry) and fnmatch.fnmatchcase(new, entry)]
+        if patterns and not any(_RENAMED_SERVER in entry for entry in patterns):
+            out.append(new)
+    return out
 
 
 # The delegated (Claude Code CLI) leg names some features differently from the
@@ -314,13 +434,14 @@ def _resolve_tool_selection(config: Dict[str, Any]) -> ToolAccess:
         return ToolAccess(allowed=None, disallowed=[DENY_ALL])
 
     if mode == "allow":
-        allowed = apply_legacy_tool_aliases(config.get("allowed_tools") or [])
+        saved = config.get("allowed_tools") or []
+        allowed = apply_legacy_tool_aliases(saved)
         if not allowed:
             # "Allow only selected" with nothing selected is a request for no
             # tools. Degrading to unrestricted here would silently grant every
             # tool.
             return ToolAccess(allowed=None, disallowed=[DENY_ALL])
-        return ToolAccess(allowed=allowed, disallowed=None)
+        return ToolAccess(allowed=allowed, disallowed=widened_by_rename(saved) or None)
 
     if mode == "disallow":
         disallowed = apply_legacy_tool_aliases(config.get("disallowed_tools") or [])

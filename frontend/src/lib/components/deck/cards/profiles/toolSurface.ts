@@ -176,9 +176,16 @@ export function groupSelectionState(
 	return 'some';
 }
 
-/** Drop the group's pattern and every one of its tool names from a list. */
+/**
+ * Drop the group's pattern and every one of its tool names from a list.
+ *
+ * A group that never saves a pattern can still hold one written by hand, or
+ * read from a list saved for the server's earlier name. It goes too, or the
+ * tools it selects could not be unticked.
+ */
 function withoutGroup(list: string[], group: ToolSurfaceGroup): string[] {
-	const pattern = groupPattern(group);
+	const server = group.server?.trim();
+	const pattern = server ? `mcp__${server}__*` : null;
 	const names = new Set(group.tools.map((t) => t.name));
 	return list.filter((entry) => entry !== pattern && !names.has(entry));
 }

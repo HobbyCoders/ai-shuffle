@@ -164,6 +164,39 @@ def _materialize_preference(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+# Saved tool lists and permission rules travel under the names the Vault tools
+# had before they were renamed. A worker that has not updated yet knows only
+# those names: a block sent under the new name would match nothing there and
+# the tool would run. Updated workers read the earlier names as the current
+# tools, so the record (and its content hash) is the one older builds exchange.
+
+def _serialize_agent_tools(record: Dict[str, Any]) -> Dict[str, Any]:
+    from app.core.tool_access import shared_tool_names
+    config = record.get("config")
+    if isinstance(config, dict):
+        for key in ("allowed_tools", "disallowed_tools"):
+            saved = config.get(key)
+            if isinstance(saved, list) and (names := shared_tool_names(saved)) != saved:
+                config = {**config, key: names}
+        record["config"] = config
+    return record
+
+
+def _serialize_rule_tool(record: Dict[str, Any]) -> Dict[str, Any]:
+    from app.core.tool_access import earlier_tool_names
+    earlier = earlier_tool_names(str(record.get("tool_name") or ""))
+    if earlier:
+        record["tool_name"] = earlier[0]
+    return record
+
+
+def _serialize_hook_matcher(record: Dict[str, Any]) -> Dict[str, Any]:
+    from app.core.tool_access import shared_tool_matcher
+    if "tool_matcher" in record:
+        record["tool_matcher"] = shared_tool_matcher(record["tool_matcher"])
+    return record
+
+
 def _shared_setting_row(row: Mapping[str, Any]) -> bool:
     return is_shared_setting_key(str(row.get("key", "")))
 
@@ -265,7 +298,8 @@ _register(Collection(
     fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "avatar_color",
             "created_at", "updated_at"),
     json_fields=("config", "mcp_tools"), resource="agents", priority=20,
-    notes="Profiles and their MCP definitions."))
+    serialize_hook=_serialize_agent_tools,
+    notes="Profiles and their MCP definitions. Tool lists travel under the tools' earlier names."))
 
 _register(Collection(
     name=OWNER_COLLECTION, table="assistant_account", keys=("id",),
@@ -328,13 +362,17 @@ _register(Collection(
 _register(Collection(
     name="permission_rules", table="permission_rules", keys=("id",),
     fields=("id", "profile_id", "tool_name", "tool_pattern", "decision", "created_at"),
-    resource="settings", priority=51))
+    resource="settings", priority=51,
+    serialize_hook=_serialize_rule_tool,
+    notes="A rule for a renamed tool travels under the tool's earlier name."))
 
 _register(Collection(
     name="project_hooks", table="project_hooks", keys=("id",),
     fields=("id", "project_id", "name", "event", "hook_type", "command", "timeout", "url", "secret",
             "enabled", "tool_matcher", "created_at", "updated_at"),
-    local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52))
+    local_fields=("last_triggered_at", "failure_count"), resource="hooks", priority=52,
+    serialize_hook=_serialize_hook_matcher,
+    notes="A matcher for a renamed tool travels with the tool's earlier name added."))
 
 _register(Collection(
     name="projects_v2", table="projects_v2", keys=("id",),

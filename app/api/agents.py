@@ -20,6 +20,7 @@ from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access
 from app.core.plugin_service import get_plugin_service
+from app.core.tool_access import current_tool_names
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
 
@@ -235,7 +236,11 @@ async def list_permission_rules(
     """List permanent saved decisions. A null pattern matches every tool call."""
     def _load() -> list[dict]:
         _require_rule_profile(profile_id)
-        return database.get_permission_rules(profile_id=profile_id)
+        # A rule saved for a tool before it was renamed, or received from
+        # another worker, is stored under the earlier name and still decides
+        # the tool: show it under the name the tool has now.
+        return [{**rule, "tool_name": current_tool_names([rule["tool_name"]])[0]}
+                for rule in database.get_permission_rules(profile_id=profile_id)]
 
     return await run_sync(_load)
 

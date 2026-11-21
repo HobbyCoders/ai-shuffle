@@ -272,6 +272,20 @@ describe('pattern vs names on save', () => {
 		expect(next).toEqual(['Read', 'mcp__github__create_issue', 'mcp__github__close_issue']);
 	});
 
+	it('unticks a tool held by a whole-server pattern on a group that saves names', () => {
+		// A list saved as `mcp__chat-access__*` reads as `mcp__app-vault__*`.
+		const held = ['Bash', 'mcp__app-vault__*'];
+		expect(groupSelectionState(vault, held, OPEN)).toBe('all');
+		const next = toggleToolSelection(held, vault, 'mcp__app-vault__VaultReadFile', OPEN);
+		expect(next).toEqual([
+			'Bash',
+			...PRIVATE_NAMES.filter((name) => name !== 'mcp__app-vault__VaultReadFile')
+		]);
+		expect(toggleGroupSelection(held, vault, OPEN)).toEqual(['Bash']);
+		// Ticking everything again saves names: this group never writes a pattern.
+		expect(toggleGroupSelection(['Bash'], vault, OPEN)).toEqual(['Bash', ...PRIVATE_NAMES]);
+	});
+
 	it('adds and removes a single non-MCP tool', () => {
 		expect(toggleToolSelection([], harness, 'Bash', OPEN)).toEqual(['Bash']);
 		expect(toggleToolSelection(['Read', 'Bash'], harness, 'Bash', OPEN)).toEqual(['Read']);

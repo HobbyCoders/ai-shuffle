@@ -51,7 +51,7 @@ from typing import Any, List, Mapping, Optional, Tuple
 from fluid.permissions.modes import ACCEPT_EDITS_TOOLS as _FLUID_ACCEPT_EDITS_TOOLS
 
 from app.core.tool_access import (
-    DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access, with_renamed_tools,
+    DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access, widened_by_rename, with_renamed_tools,
 )
 
 # The three sidepanel surfaces. Order is the switcher's order.
@@ -883,8 +883,11 @@ def turn_tool_surface(allowed: Optional[List[str]], disallowed: Optional[List[st
     # A Task-dispatched file/plugin agent's ``disallowedTools``: deny beats
     # allow on both legs, so appending is enough to enforce it.
     denylist = overrides.get("tool_denylist")
-    if isinstance(denylist, (list, tuple)):
-        denied = with_renamed_tools(denylist)
+    denied = with_renamed_tools(denylist) if isinstance(denylist, (list, tuple)) else []
+    if surface is not None and isinstance(listed, (list, tuple)):
+        # A pattern in ``tools:`` must not pick up a tool through its new name.
+        denied += widened_by_rename(listed)
+    if denied:
         current = list(disallowed or [])
         disallowed = current + [t for t in denied if t not in current]
     return surface, disallowed
