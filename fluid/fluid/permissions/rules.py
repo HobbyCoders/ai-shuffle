@@ -68,9 +68,9 @@ def _opened_path(value: str, cwd: str | None) -> str | None:
     ``settings `` (trailing space) is a different file from ``settings``;
     Windows drops the trailing space itself, so there this equals the
     normalized spelling. A missing path or a dangling link resolves to where
-    Write would create the file. A symlink loop (or a file used as a
-    directory) gives None: the tool cannot open it, and an allow rule must not
-    match a path that never resolved.
+    Write would create the file. A symlink loop resolves as far as it can
+    (best effort, for ask and deny rules); :func:`_openable` keeps an allow
+    rule from matching it.
     """
     if not value:
         return None
@@ -78,14 +78,23 @@ def _opened_path(value: str, cwd: str | None) -> str | None:
         path = Path(value)
         if not path.is_absolute():
             path = Path(cwd or os.getcwd()) / path
-        opened = os.path.realpath(path)
-        try:
-            os.stat(opened)
-        except FileNotFoundError:
-            pass
-        return opened
+        return os.path.realpath(path)
     except (OSError, ValueError):
         return None
+
+
+def _openable(path: str) -> bool:
+    """False when ``path`` cannot be reached (a loop, EACCES, ENOTDIR).
+
+    A missing file is openable: Write creates it.
+    """
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _resolved_forms(resolved: str, root: str, relative: bool) -> set[str]:
@@ -100,21 +109,28 @@ def _resolved_forms(resolved: str, root: str, relative: bool) -> set[str]:
     return forms
 
 
-def _opened_forms(value: str, cwd: str | None) -> set[str] | None:
-    """:func:`_opened_path` as rule candidates; None when it cannot resolve."""
+def _opened_forms(value: str, cwd: str | None, *, for_allow: bool) -> set[str] | None:
+    """:func:`_opened_path` as rule candidates; None when it cannot resolve.
+
+    Ask and deny rules get every form, best effort. An allow rule gets only
+    the absolute form and the one relative to the cwd as spelled, and nothing
+    for a path that cannot be reached.
+    """
     opened = _opened_path(value, cwd)
-    if opened is None:
+    if opened is None or (for_allow and not _openable(opened)):
         return None
     relative = bool(cwd) or not os.path.isabs(value)
     base = cwd or os.getcwd()
-    # Relative to the cwd as spelled and to the directory it really is: the
-    # opened path has no links in it, so under a symlinked cwd only the real
-    # one gives the relative form a rule like ``secrets/*`` is written for.
     forms = _resolved_forms(opened, os.path.abspath(base), relative)
-    try:
-        forms |= _resolved_forms(opened, os.path.realpath(base), relative)
-    except (OSError, ValueError):
-        pass
+    if not for_allow:
+        # The opened path has no links in it, so under a symlinked cwd only
+        # the real directory gives the relative form ``secrets/*`` is written
+        # for. Not for allow: a relative form that lost its link can name a
+        # different file than the cwd as spelled does.
+        try:
+            forms |= _resolved_forms(opened, os.path.realpath(base), relative)
+        except (OSError, ValueError):
+            pass
     return forms
 
 
@@ -129,7 +145,9 @@ def path_candidates(value: str, cwd: str | None = None) -> tuple[set[str], set[s
     included too, so a trailing-space symlink cannot hide its target.
     """
     raw = {value}
-    exact = (_opened_forms(value, cwd) if cwd or os.path.isabs(value) else None) or set()
+    exact = (
+        _opened_forms(value, cwd, for_allow=False) if cwd or os.path.isabs(value) else None
+    ) or set()
     text = value.strip().replace("\\", "/")
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
@@ -179,7 +197,7 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
         return False
     # The file the tool actually opens must be inside too: ``granted/notes ``
     # (trailing space) can link outside while ``granted/notes`` resolves in.
-    opened = _opened_forms(value, cwd)
+    opened = _opened_forms(value, cwd, for_allow=True)
     return opened is not None and any(fnmatchcase(c, p) for c in opened for p in patterns)
 
 

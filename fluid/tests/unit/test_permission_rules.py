@@ -258,6 +258,48 @@ def test_credential_ask_follows_a_link_before_dotdot_in_the_cwd(tmp_path) -> Non
     assert decision == "ask"
 
 
+@pytest.mark.skipif(os.sep == "\\", reason="a backslash in a file name is POSIX-only")
+def test_allow_rule_ignores_the_real_cwd_relative_form(tmp_path) -> None:
+    """cwd ``work/link/..`` spells ``work`` but is really ``checkout``.
+    ``granted/report `` links to ``checkout/granted\\report``, one file outside
+    ``granted``; measured from ``checkout`` and with ``\\`` read as ``/``, it
+    would pass for ``granted/report``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    (checkout / "granted").mkdir()
+    work.mkdir()
+    (checkout / "granted\\report").write_text("outside granted")
+    _symlink_or_skip(checkout / "granted" / "report ", checkout / "granted\\report")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": "granted/report"})
+    cwd = str(work / "link") + os.sep + ".."
+    assert not rule.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+
+
+def test_ask_rule_keeps_the_resolved_path_when_it_cannot_be_reached(
+    tmp_path, monkeypatch
+) -> None:
+    """Ask and deny rules see the best-effort real path even where ``stat``
+    fails (a loop, a directory that lost search permission)."""
+    _symlink_or_skip(tmp_path / "loop ", tmp_path / "loop ")
+    ask = Rule(tool="Read", decision="ask", input_globs={"file_path": str(tmp_path / "loop ")})
+    assert ask.matches("Read", {"file_path": "loop "}, cwd=str(tmp_path))
+
+    (tmp_path / ".env").write_text("SECRET=1")
+    _symlink_or_skip(tmp_path / "settings ", tmp_path / ".env")
+
+    def sealed(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("fluid.permissions.rules.os.stat", sealed)
+    rules = _credential_rules()
+    assert evaluate_rules(rules, "Read", {"file_path": "settings "}, cwd=str(tmp_path)) == "ask"
+    deny = Rule(tool="Read", decision="deny", input_globs={"file_path": "*/.env"})
+    assert deny.matches("Read", {"file_path": "settings "}, cwd=str(tmp_path))
+    allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "**"})
+    assert not allow.matches("Read", {"file_path": "settings "}, cwd=str(tmp_path))
+
+
 def test_relative_ask_rule_sees_the_opened_file_under_a_symlinked_cwd(tmp_path) -> None:
     """``notes `` (trailing space) links to ``secrets/key``; the session cwd
     is a symlink to the checkout, so the opened path is only under its target."""
