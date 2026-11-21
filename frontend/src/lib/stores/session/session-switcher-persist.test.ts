@@ -53,8 +53,8 @@ function minimalState(): ActiveSessionState {
 	} as unknown as ActiveSessionState;
 }
 
-function makeSwitcher() {
-	let state = minimalState();
+function makeSwitcher(overrides: Partial<ActiveSessionState> = {}) {
+	let state = { ...minimalState(), ...overrides };
 	const internal: InternalMutableState = {
 		pendingTools: new Set<string>(),
 		awaitingNewSession: false,
@@ -179,6 +179,16 @@ describe('session-switcher · persistSession (writes both slots)', () => {
 		expect(JSON.parse(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY) as string).sessionId).toBe('sess-1');
 		expect(fetchMock).not.toHaveBeenCalled();
 
+		switcher.destroy();
+	});
+
+	it('keeps a staged branch\'s no-checkout-yet flags with it (#1756)', () => {
+		global.fetch = vi.fn(async () => ({ ok: true })) as unknown as typeof fetch;
+		// An unbound compose whose first send is creating this branch's worktree.
+		const opening = { worktreeBranch: 'feat/auto-named', worktreeCreateNewBranch: true, worktreeCheckoutPending: false };
+		const switcher = makeSwitcher({ sessionId: null, worktreeIntent: 'worktree', ...opening });
+		switcher.persistSession();
+		expect(JSON.parse(sessionStorage.getItem(TAB_ACTIVE_SESSION_KEY) as string)).toMatchObject(opening);
 		switcher.destroy();
 	});
 

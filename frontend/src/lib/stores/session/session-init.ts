@@ -190,10 +190,10 @@ export function hasBootProjectPick(generation: number): boolean {
 
 /** The lane, project and checkout a boot project pick set on the compose. */
 function pickedCheckout(s: ActiveSessionState) {
-	const { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
-		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted } = s;
-	return { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeBaseBranch,
-		worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted };
+	const { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeCreateNewBranch,
+		worktreeCheckoutPending, worktreeBaseBranch, worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted } = s;
+	return { mode, project, projectV2Id, workspaceProjectIds, worktreeIntent, worktreeBranch, worktreeCreateNewBranch,
+		worktreeCheckoutPending, worktreeBaseBranch, worktreeId, worktreeMode, selectedWorktreeBranch, worktreeDeleted };
 }
 
 export function finishBootReconciliation(generation: number): void {
@@ -244,6 +244,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 			workspaceProjectIds: saved.workspaceProjectIds ?? [],
 			worktreeIntent: switcher.getPersistedWorktreeIntent(place.project, place.projectV2Id),
 			worktreeBranch: saved.worktreeBranch || '',
+			// A branch the first send creates has no checkout to ask Git about.
+			worktreeCreateNewBranch: saved.worktreeCreateNewBranch ?? false,
+			worktreeCheckoutPending: saved.worktreeCheckoutPending ?? false,
 			worktreeBaseBranch: saved.worktreeBaseBranch || 'main',
 			worktreeId: saved.worktreeId ?? null,
 			worktreeMode: saved.worktreeMode || 'new',
@@ -426,6 +429,8 @@ export function createSessionInit(deps: SessionInitDeps) {
 						worktreeIntent: persisted.sessionId ? persisted.worktreeIntent || 'local'
 							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, '').project, persisted.projectV2Id ?? null),
 						worktreeBranch: persisted.worktreeBranch || '',
+						worktreeCreateNewBranch: persisted.worktreeCreateNewBranch ?? false,
+						worktreeCheckoutPending: persisted.worktreeCheckoutPending ?? false,
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 						worktreeId: persisted.worktreeId ?? null,
 						worktreeMode: persisted.worktreeMode || 'new',

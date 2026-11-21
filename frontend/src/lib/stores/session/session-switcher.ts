@@ -136,6 +136,13 @@ interface LiveSnapshot {
 	activeTasks?: Task[];
 }
 
+/** A compose's checkout once an opening has spent it: no branch, no picked
+ *  worktree. Worktree on/off (`worktreeIntent`) is the user's and stays. */
+export const SPENT_CHECKOUT = {
+	worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null, worktreeMode: 'new', worktreeBaseBranch: 'main',
+	worktreeCreateNewBranch: false, worktreeCheckoutPending: false, worktreeDeleted: false,
+} as const satisfies Partial<SessionEphemeral>;
+
 /** Worktree metadata from the session list, used to restore worktree state
  * when the ephemeral cache doesn't have an entry for the target session. */
 export interface SessionWorktreeInfo {
@@ -146,7 +153,9 @@ export interface SessionWorktreeInfo {
 }
 
 interface SessionSwitcher {
-	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => Promise<void>;
+	/** `leavingOpening`: the compose being left shows a dispatched opening's
+	 *  recovery (holdsDispatchedOpening, read before navigation). */
+	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null, leavingOpening?: boolean) => Promise<void>;
 	refreshSessionMetadata: (sessionId: string) => Promise<void>;
 	/** Re-read the task registry's running list and reconcile the running
 	 *  strip with it (#320). For a reconnect, which resumes the feed at its
@@ -154,7 +163,7 @@ interface SessionSwitcher {
 	refreshRunningTasks: (sessionId: string) => Promise<void>;
 	/** `restoredDraft`: a kept draft (typed text or a staged checkout) came
 	 *  back, with the place it was composed for. */
-	newChat: (options?: { initialLanding?: boolean }) => { restoredDraft: boolean };
+	newChat: (options?: { initialLanding?: boolean; leavingOpening?: boolean }) => { restoredDraft: boolean };
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -497,21 +506,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	 * compose restore the first task's branch, so a second back-to-back task was
 	 * bound to the first task's branch and checkout (#1528). Keep everything
 	 * else (e.g. text typed meanwhile), but never the spent checkout binding.
+	 * After a reload `isCreatingWorktree` is false while the page still checks
+	 * whether that opening was delivered: `leavingOpening` says so (#1756).
 	 */
-	function buildLeavingEphemeral(state: ActiveSessionState): SessionEphemeral {
+	function buildLeavingEphemeral(state: ActiveSessionState, leavingOpening = false): SessionEphemeral {
 		const ephemeral = buildEphemeral(state);
-		if (state.sessionId || !state.isCreatingWorktree) return ephemeral;
-		return {
-			...ephemeral,
-			worktreeId: null,
-			worktreeBranch: '',
-			selectedWorktreeBranch: null,
-			worktreeMode: 'new',
-			worktreeBaseBranch: 'main',
-			worktreeCreateNewBranch: false,
-			worktreeCheckoutPending: false,
-			worktreeDeleted: false,
-		};
+		if (state.sessionId || !(state.isCreatingWorktree || leavingOpening)) return ephemeral;
+		return { ...ephemeral, ...SPENT_CHECKOUT };
 	}
 
 	function saveSelectionToBackend(profile: string, project: string) {
@@ -546,6 +547,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
+			worktreeCreateNewBranch: state.worktreeCreateNewBranch,
+			worktreeCheckoutPending: state.worktreeCheckoutPending,
 			worktreeBaseBranch: state.worktreeBaseBranch,
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,
@@ -655,7 +658,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		rememberLeavingProseQuestion(state.sessionId, state.messages, row);
 	}
 
-	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
+	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null, leavingOpening = false) {
 		beginJourney('chat.open', sessionId);
 		const generation = ++_switchGeneration;
 		const state = getState();
@@ -683,7 +686,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
-		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state, leavingOpening));
 		if (state.sessionId !== sessionId) rememberLeaving(state);
 		// #524: park the leaving session's not-yet-seen bubbles, then take the
 		// target's back (the same session's, on a re-open). They render at once
@@ -1130,7 +1133,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		feedController.reconcileRunningTasks(sessionId, snap.activeTasks ?? []);
 	}
 
-	function newChat(options?: { initialLanding?: boolean }) {
+	function newChat(options?: { initialLanding?: boolean; leavingOpening?: boolean }) {
 		// Words typed just before (still in the composer's save debounce) are a
 		// draft too: a compose with them keeps its project below.
 		flushPendingDraft();
@@ -1149,7 +1152,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Save ephemeral for the session we're leaving
 		const leavingKey = leavingSessionId || '__new_chat__';
-		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state, options?.leavingOpening));
 		rememberLeaving(state);
 		// #524: the leaving session's bubbles come back when it is re-opened.
 		pendingQueue.park(leavingSessionId, state.queuedMessages);

@@ -33,14 +33,15 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode, getPersistedUltrafastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields, SPENT_CHECKOUT,
 } from './session/session-switcher';
 
 // Extracted sub-modules
 import type { SendReservation } from './session/send-order';
 import type { Creation } from './session/message-sender';
 import { resolveSessionProject } from './session/session-project';
-import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
+import { createSessionInit, setSkipRestore, bumpInitGeneration, getInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
+import { holdsDispatchedOpening } from './session/worktree-opening';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
@@ -392,6 +393,10 @@ export interface PersistedSession {
 	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
+	/** `worktreeBranch` has no checkout yet (see ActiveSessionState). Without
+	 *  them a reload mid-opening treats the branch as an existing checkout. */
+	worktreeCreateNewBranch?: boolean;
+	worktreeCheckoutPending?: boolean;
 	worktreeBaseBranch?: string;
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
@@ -1136,15 +1141,18 @@ export const activeSession = {
 		// `reopen` opens the chat already on screen again (boot re-reading a
 		// linked chat once its row has loaded): the user has not left it, so a
 		// send still waiting on that chat must go out, not be called off (#1350).
+		const leavingOpening = holdsDispatchedOpening(_state, getInitGeneration());
 		if (!(options.reopen && _state.sessionId === sessionId)) bumpInitGeneration();
-		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
+		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id, leavingOpening);
 	},
 
 	newChat: (options?: { initialLanding?: boolean }) => {
 		clearUnavailableChat();
 		setSkipRestore(true);
+		// Before the bump below ends the opening's recovery (#1756).
+		const leavingOpening = holdsDispatchedOpening(_state, getInitGeneration());
 		bumpInitGeneration();
-		const { restoredDraft } = switcher.newChat(options);
+		const { restoredDraft } = switcher.newChat({ ...options, leavingOpening });
 		// The run binding follows the account defaults; the compose starts
 		// without a project. A kept draft keeps its place and binding as picked.
 		if (!restoredDraft) activeSession.applyComposerDefaults();
@@ -1686,6 +1694,18 @@ export const activeSession = {
 	clearWorktreeSelection() {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, null);
 		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeCheckoutPending: false, worktreeMode: 'new' as const }));
+	},
+
+	/**
+	 * The compose's opening was admitted as a chat of its own: its branch and
+	 * create flags are that chat's now, never the compose's. Saved at once, so
+	 * a switch that runs a frame later, or a reload before it, parks it clean
+	 * (#1756). The project's remembered checkout is left alone.
+	 */
+	dropSpentCheckout() {
+		if (_state.sessionId) return;
+		_update(s => ({ ...s, ...SPENT_CHECKOUT }));
+		persistSession();
 	},
 
 	markWorktreeDeleted() {

@@ -24,8 +24,11 @@
 			if (cancelled || !current()) return;
 			if (id) {
 				const attemptId = note.id; // Adopting changes the view and invalidates these props.
+				// `adopt` makes this compose the chat. Otherwise the compose is left,
+				// maybe a frame later (phone drawer), once note and recovery are
+				// gone: it gives up the spent branch now (#1756).
 				if (adopt) adopt(id);
-				else openSession(id);
+				else { activeSession.dropSpentCheckout(); openSession(id); }
 				finishOpening(attemptId);
 				recoveringOpening.set(null);
 			} else {
