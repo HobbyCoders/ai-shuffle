@@ -111,6 +111,13 @@ await runJourney({
 				}
 				const rows = list.locator('.pv-mrow');
 				const total = await rows.count();
+				// The four aliases show the model Claude Code runs for them, not the bare alias.
+				const shownIds = await list.locator('.pv-mrow .curated-identity > span:last-child').allInnerTexts();
+				for (const slug of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2']) {
+					expect(shownIds.includes(slug), `the Models tab shows ${slug}: ${shownIds}`);
+				}
+				expect(!shownIds.some((id) => ['haiku', 'sonnet', 'opus', 'fable'].includes(id)),
+					`no row shows a bare alias: ${shownIds}`);
 				expect(await rows.filter({ has: page.locator('[data-provider-logo="claude"]:visible') }).count() === total,
 					'every model in the checklist shows the Claude mark');
 				const checkboxes = list.getByRole('checkbox');

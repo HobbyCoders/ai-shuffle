@@ -36,11 +36,11 @@ const subscriptionResponse = {
 	cli_version: '2.1.325',
 	captured_at: '2026-11-14T00:00:00Z',
 	models: [
-		{ id: 'haiku', label: 'Haiku 5.5', enabled: true },
-		{ id: 'sonnet', label: 'Sonnet 5.5', enabled: true },
-		{ id: 'opus', label: 'Opus 5.5', enabled: true },
-		{ id: 'fable', label: 'Fable 5.2', enabled: true },
-		{ id: 'claude-mythos-5-1', label: 'Mythos 5.1', enabled: true },
+		{ id: 'haiku', slug: 'claude-haiku-5-5', label: 'Haiku 5.5', enabled: true },
+		{ id: 'sonnet', slug: 'claude-sonnet-5-5', label: 'Sonnet 5.5', enabled: true },
+		{ id: 'opus', slug: 'claude-opus-5-5', label: 'Opus 5.5', enabled: true },
+		{ id: 'fable', slug: 'claude-fable-5-2', label: 'Fable 5.2', enabled: true },
+		{ id: 'claude-mythos-5-1', slug: 'claude-mythos-5-1', label: 'Mythos 5.1', enabled: true },
 		{ id: 'claude-opus-4-6', label: 'Opus 4.6', enabled: false }
 	]
 };
@@ -63,6 +63,11 @@ it('lists every model Claude Code offers with Claude artwork, checkboxes, and fi
 		expect(within(list).getByText(label)).toBeTruthy();
 	}
 	expect(within(list).getByText('claude-mythos-5-1')).toBeTruthy();
+	// Aliases show the model they run; a row without a slug (older worker) shows its id.
+	for (const slug of ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-opus-4-6']) {
+		expect(within(list).getByText(slug)).toBeTruthy();
+	}
+	expect(within(list).queryByText('opus')).toBeNull();
 	expect(list.querySelectorAll('.pv-mrow [data-provider-logo="claude"][aria-hidden="true"]')).toHaveLength(
 		subscriptionResponse.models.length
 	);
@@ -78,6 +83,9 @@ it('lists every model Claude Code offers with Claude artwork, checkboxes, and fi
 	expect(within(list).getAllByRole('checkbox')).toHaveLength(1);
 	expect(within(list).getByText('Mythos 5.1')).toBeTruthy();
 
+	await fireEvent.input(search, { target: { value: 'opus-5-5' } });
+	expect(within(list).getAllByRole('checkbox')).toHaveLength(1);
+	expect(within(list).getByText('claude-opus-5-5')).toBeTruthy();
 	await fireEvent.input(search, { target: { value: 'missing' } });
 	expect(screen.getByText(/No models match/)).toBeTruthy();
 	await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
