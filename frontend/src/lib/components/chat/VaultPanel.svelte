@@ -43,7 +43,7 @@
 	type Action = FromSubagent & { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = FromSubagent & { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
 	type Saved = SavedConnection;
-	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
+	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean; password_sign_in?: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
 	/** The saved sign-in whose row is expanded into its edit form (mirrored chats). */
 	let editingSaved = $state<string | null>(null);
@@ -428,7 +428,7 @@
 {#snippet waiting()}
 	{#each data.requests as request (request.id)}
 		{@render fromSubagent(request.subagent)}
-		<VaultRequest sessionId={request.session_id ?? sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} clearSecretsKey={requestSecretsKey} onComplete={() => void refresh()} />
+		<VaultRequest sessionId={request.session_id ?? sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} passwordSignIn={!!data.password_sign_in} {owner} clearSecretsKey={requestSecretsKey} onComplete={() => void refresh()} />
 	{/each}
 	{#each data.actions as action (action.id)}
 		{@const grant = data.grants.find(g => g.id === action.grant_id)}
@@ -620,12 +620,39 @@
 		grid-template-columns: minmax(0, 1fr);
 		grid-auto-rows: max-content;
 		gap: 0.5rem;
-		max-height: min(56dvh, 36rem);
+		/* Room for a whole sign-in form with its buttons; the chat header and
+		   the composer stay on screen. */
+		max-height: max(16rem, min(calc(100dvh - 13rem), 44rem));
 		margin-bottom: 0.625rem;
 		overflow: auto;
 		overscroll-behavior: contain;
 	}
-	.pa-lane :global(.pa-card) { box-shadow: none; }
+	/* clip, not hidden: the card keeps its rounded corners without becoming
+	   the scroller, so its buttons can stay in reach while a long form
+	   scrolls inside the lane. */
+	.pa-lane :global(.pa-card) { box-shadow: none; overflow: clip; }
+	.pa-lane :global(.pa-card:not(.service-setup) .pa-actions) {
+		position: sticky;
+		bottom: 0;
+		z-index: 1;
+		margin-block: -0.5rem;
+		padding-block: 0.5rem;
+		background: var(--card);
+	}
+	.pa-lane :global(.pa-card:not(.service-setup) .pa-actions)::before {
+		content: '';
+		position: absolute;
+		inset: -0.5rem 0 100%;
+		background: linear-gradient(to bottom, transparent, var(--card));
+		pointer-events: none;
+	}
+	/* The service card's buttons sit in its footer, which stays instead. */
+	.pa-lane :global(.service-setup fieldset > .pa-section) {
+		position: sticky;
+		bottom: 0;
+		z-index: 1;
+		background: var(--card);
+	}
 
 	/* ── Panel: opens upward from the composer, at its right edge ────────── */
 	.pa-pop {

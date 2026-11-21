@@ -231,14 +231,14 @@ async def broker(monkeypatch):
 
 
 def spec(service, *, writable=False, prefix="/api", **overrides):
-    return GrantInput(
-        kind="service",
-        label="Test API",
-        url=f"https://127.0.0.1:{service.port}{prefix}",
-        writable=writable,
-        secret=SECRET,
+    return GrantInput(**{
+        "kind": "service",
+        "label": "Test API",
+        "url": f"https://127.0.0.1:{service.port}{prefix}",
+        "writable": writable,
+        "secret": SECRET,
         **overrides,
-    )
+    })
 
 
 async def pending(broker):
@@ -370,6 +370,39 @@ def test_credential_header_forms():
         "X-API-Key",
         SECRET,
     )
+
+
+PASSWORD = "correct horse battery é"
+
+
+def test_a_username_and_password_are_encoded_by_the_broker():
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert vault_services.credential_header("authorization", "basic", PASSWORD, " admin ") == (
+        "authorization", f"Basic {pair}")
+    # The encoded pair is not the stored secret, and is kept out of results too.
+    needles = vault_services._needles(PASSWORD, f"Basic {pair}")
+    echoed = f"got {pair} for admin:{PASSWORD}".encode()
+    redacted = vault_services.redact(echoed, needles)
+    assert pair.encode() not in redacted and PASSWORD.encode() not in redacted
+
+
+@pytest.mark.parametrize(
+    "name, scheme, secret, username",
+    [
+        ("Authorization", "Bearer", PASSWORD, "admin"),        # a username is Basic only
+        ("X-API-Key", "Basic", PASSWORD, "admin"),
+        ("Authorization", "", PASSWORD, "admin"),
+        ("Authorization", "Basic", PASSWORD, "ad:min"),         # RFC 7617: no colon
+        ("Authorization", "Basic", PASSWORD, "ad\nmin"),
+        ("Authorization", "Basic", "short", "admin"),
+        ("Authorization", "Basic", "line\r\nX-Injected: 1", "admin"),
+        ("Authorization", "Basic", "x" * 8193, "admin"),
+    ],
+)
+def test_a_username_and_password_are_validated_without_echo(name, scheme, secret, username):
+    with pytest.raises(AccessDenied) as error:
+        vault_services.credential_header(name, scheme, secret, username)
+    assert secret not in str(error.value) and username not in str(error.value)
 
 
 def test_redaction_counts_positions_in_the_input_so_partial_secrets_never_slide_into_view():
@@ -550,6 +583,27 @@ async def test_get_attaches_credential_and_redacts_echoes(
     assert json.dumps(SECRET)[1:-1] not in encoded
     assert "[redacted]" in result["body"]
     broker.revoke("chat", grant["id"])
+
+
+async def test_username_and_password_sign_in_sends_basic_and_redacts_both_forms(broker, service, trust):
+    grant = await broker.create(
+        "chat", spec(service, auth_scheme="Basic", username="admin", secret=PASSWORD)
+    )
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/echo"})
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert service.requests[0]["headers"]["authorization"] == f"Basic {pair}"
+    encoded = json.dumps(result, ensure_ascii=False)
+    assert pair not in encoded and PASSWORD not in encoded and "[redacted]" in result["body"]
+    # Neither the handle the model sees nor the owner's snapshot names the account.
+    assert "admin" not in json.dumps((await broker.resources("chat"))["grants"])
+    assert PASSWORD not in json.dumps(await broker.snapshot("chat"), ensure_ascii=False)
+    broker.revoke("chat", grant["id"])
+
+
+async def test_a_username_needs_the_basic_scheme_before_anything_is_contacted(broker, service, trust):
+    with pytest.raises(AccessDenied, match="Basic scheme"):
+        await broker.create("chat", spec(service, username="admin", secret=PASSWORD))
+    assert service.connections == 0 and not broker.grants
 
 
 async def test_custom_header_without_scheme(broker, service, trust):

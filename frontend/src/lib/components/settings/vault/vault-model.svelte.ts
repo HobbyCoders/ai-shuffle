@@ -45,8 +45,11 @@ export interface VaultForm {
 	label: string;
 	host: string;
 	port: number;
+	/** The SSH account, or a web service's account when it signs in with a password. */
 	username: string;
 	useKey: boolean;
+	/** A web service that signs in with a username and password (HTTP Basic), not a token. */
+	basic: boolean;
 	url: string;
 	authHeader: string;
 	authScheme: string;
@@ -81,6 +84,7 @@ export function emptyForm(kind: VaultKind = 'machine'): VaultForm {
 		port: 22,
 		username: '',
 		useKey: false,
+		basic: false,
 		url: '',
 		authHeader: 'Authorization',
 		authScheme: 'Bearer',
@@ -102,8 +106,9 @@ export function formFromEntry(entry: VaultEntry): VaultForm {
 		label: entry.label,
 		host: service ? '' : (entry.host ?? parsed?.[2] ?? ''),
 		port: service ? 22 : (entry.port ?? Number(parsed?.[3] ?? 22)),
-		username: service ? '' : (entry.username ?? parsed?.[1] ?? ''),
+		username: service ? (entry.username ?? '') : (entry.username ?? parsed?.[1] ?? ''),
 		useKey: !!entry.uses_key,
+		basic: service && !!entry.username,
 		url: service ? entry.target : '',
 		authHeader: entry.auth_header ?? 'Authorization',
 		authScheme: entry.auth_scheme ?? 'Bearer',
@@ -121,7 +126,7 @@ export function kindIcon(kind: VaultKind): SettingsIcon {
 
 /** What the stored secret is, without the secret. */
 export function secretLabel(entry: VaultEntry): string {
-	if (entry.kind === 'service') return entry.auth_header || 'Authorization';
+	if (entry.kind === 'service') return entry.username ? 'Username and password' : entry.auth_header || 'Authorization';
 	return entry.uses_key ? 'Private key' : 'Password';
 }
 
@@ -131,8 +136,10 @@ export function createBody(f: VaultForm): Record<string, unknown> {
 	if (f.fingerprint.trim()) body.fingerprint = f.fingerprint.trim();
 	if (f.kind === 'service') {
 		body.url = f.url.trim();
-		body.auth_header = f.authHeader.trim();
-		body.auth_scheme = f.authScheme.trim();
+		// The worker encodes a username and password itself; the header is fixed.
+		body.auth_header = f.basic ? 'Authorization' : f.authHeader.trim();
+		body.auth_scheme = f.basic ? 'Basic' : f.authScheme.trim();
+		if (f.basic) body.username = f.username.trim();
 		body.writable = f.writable;
 		body.secret = f.secret;
 		return body;
@@ -156,8 +163,17 @@ export function editBody(f: VaultForm, initial: VaultForm): Record<string, unkno
 	if (f.fingerprint.trim()) body.fingerprint = f.fingerprint.trim();
 	if (f.kind === 'service') {
 		if (f.url.trim() !== initial.url) body.url = f.url.trim();
-		if (f.authHeader.trim() !== initial.authHeader) body.auth_header = f.authHeader.trim();
-		if (f.authScheme.trim() !== initial.authScheme) body.auth_scheme = f.authScheme.trim();
+		if (f.basic !== initial.basic) {
+			// Another way to sign in: say all of it, so nothing stored is reused as the other kind.
+			body.auth_header = f.basic ? 'Authorization' : f.authHeader.trim();
+			body.auth_scheme = f.basic ? 'Basic' : f.authScheme.trim();
+			body.username = f.basic ? f.username.trim() : '';
+		} else if (f.basic) {
+			if (f.username.trim() !== initial.username) body.username = f.username.trim();
+		} else {
+			if (f.authHeader.trim() !== initial.authHeader) body.auth_header = f.authHeader.trim();
+			if (f.authScheme.trim() !== initial.authScheme) body.auth_scheme = f.authScheme.trim();
+		}
 		if (f.writable !== initial.writable) body.writable = f.writable;
 		if (f.secret) body.secret = f.secret;
 		return body;
@@ -180,7 +196,15 @@ export function problems(f: VaultForm, initial?: VaultForm): string[] {
 	if (!f.label.trim()) found.push('Give the sign-in a name');
 	if (f.kind === 'service') {
 		if (!/^https:\/\/\S+$/i.test(f.url.trim())) found.push('Enter an address that starts with https://');
-		if (!initial && !f.secret) found.push('Enter the secret the service expects');
+		if (f.basic) {
+			const name = f.username.trim();
+			if (!name) found.push('Enter the username');
+			else if (name.includes(':')) found.push('A username cannot contain a colon');
+		}
+		// A stored token is never reused as a password, nor a password as a token.
+		if ((!initial || initial.basic !== f.basic) && !f.secret) {
+			found.push(f.basic ? 'Enter the password' : 'Enter the secret the service expects');
+		}
 		return found;
 	}
 	if (!f.host.trim()) found.push('Enter the machine address');

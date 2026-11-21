@@ -192,7 +192,7 @@ def test_service_credentials_are_encrypted_and_never_catalogued(vault):
     catalogue = vault_store.catalog(owner)
     assert catalogue == [{"id": connection_id, "kind": "service", "label": "Inventory API",
                           "target": "https://api.example.com/v1", "fingerprint": "", "writable": True,
-                          "auth_header": "X-API-Key", "auth_scheme": ""}]
+                          "auth_header": "X-API-Key", "auth_scheme": "", "username": ""}]
     assert "vault-only-api-key" not in json.dumps(catalogue)
     machine = vault_store.save(owner, spec())
     assert {item["kind"] for item in vault_store.catalog(owner)} == {"machine", "service"}
@@ -217,7 +217,7 @@ def test_update_rewrites_in_place_and_refuses_without_writing(vault):
     assert loaded.password.get_secret_value() == "vault-only-password"
     assert len(vault) == 2 and "vault-only-password" not in json.dumps(vault_store.catalog(owner))
     before = dict(vault)
-    with pytest.raises(AccessDenied, match="already saved"):
+    with pytest.raises(AccessDenied, match="already has a sign-in with that name"):
         vault_store.update(owner, other, lambda current: current.model_copy(update={"label": "SERVERWORKER"}))
     def refuse(current):
         raise AccessDenied("refused")

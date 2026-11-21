@@ -104,7 +104,7 @@ describe('Vault panel above the composer', () => {
   resourceSync.invalidate(['vault:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   // Answered in place: the form is there without opening anything.
   expect(lane()!.textContent).toContain('Check the container logs');
-  expect(within(lane()!).getByLabelText('Server IP or hostname')).toBeTruthy();
+  expect(within(lane()!).getByLabelText('Address')).toBeTruthy();
   expect(get(vaultPending).get('s1')).toBe(1);
   expect(panel()).toBeNull();
   // The chip's click reaches the window too; it must not close what it opened.
@@ -112,7 +112,7 @@ describe('Vault panel above the composer', () => {
   expect(panel()).toBeTruthy();
   expect(trigger().getAttribute('aria-expanded')).toBe('true');
   // The panel lists access; the request stays in the lane, not copied into it.
-  expect(within(panel()!).queryByLabelText('Server IP or hostname')).toBeNull();
+  expect(within(panel()!).queryByLabelText('Address')).toBeNull();
   snapshot = empty();
   resourceSync.invalidate(['vault:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   expect(lane()).toBeNull();
@@ -161,12 +161,12 @@ describe('Vault panel above the composer', () => {
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
   snapshot = {...empty(), requests: [{id:'r1',kind:'machine',purpose:'Check the logs',expires_at:9999999999}]};
   mount({sessionId:'s1'}); await flush();
-  await fireEvent.input(screen.getByLabelText('Server IP or hostname'), {target:{value:'10.0.0.2'}});
+  await fireEvent.input(screen.getByLabelText('Address'), {target:{value:'10.0.0.2'}});
   await fireEvent.input(screen.getByLabelText('Password'), {target:{value:'test-only-password'}});
   await openAccess(); await flush();
   await fireEvent.click(within(panel()!).getByRole('button', {name:'Close Vault'})); await flush();
   expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('test-only-password');
-  expect((screen.getByLabelText('Server IP or hostname') as HTMLInputElement).value).toBe('10.0.0.2');
+  expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('10.0.0.2');
   // The request ending takes the form, and what was typed, with it.
   snapshot = empty();
   resourceSync.invalidate(['vault:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
@@ -220,7 +220,7 @@ describe('Vault panel above the composer', () => {
   await vi.advanceTimersByTimeAsync(6000); await tick();
   expect(panel()).toBeNull();
   // The request is in the lane above the composer, panel closed or not.
-  expect(within(lane()!).getByRole('textbox', {name:'Resource name'})).toBeTruthy();
+  expect(within(lane()!).getByRole('textbox', {name:'Name'})).toBeTruthy();
  });
  it('points a local chat to Settings for its saved sign-ins, with an empty state when nothing is active', async () => {
   const saved = {id:'saved1',label:'Saved server',target:'server',fingerprint:''};
@@ -253,7 +253,7 @@ describe('the phone shell, where requests open in the sheet', () => {
   expect(panel()).toBeNull();
   get(vaultSummary)!.open(); await flush();
   expect(within(panel()!).getByText('Waiting for you')).toBeTruthy();
-  expect(within(panel()!).getByRole('textbox', {name:'Resource name'})).toBeTruthy();
+  expect(within(panel()!).getByRole('textbox', {name:'Name'})).toBeTruthy();
   // Asked to open while already open (the dock's Review), it stays open.
   get(vaultSummary)!.open(); await flush();
   expect(panel()).toBeTruthy();
@@ -293,15 +293,16 @@ describe('the phone shell, where requests open in the sheet', () => {
   snapshot = {...empty(), requests: [{id:'r1',kind:'machine',purpose:'Check the logs',expires_at:9999999999}]};
   mount({sessionId:'s1'}); await flush();
   await openAccess(); await flush();
-  await fireEvent.input(screen.getByLabelText('Server IP or hostname'), {target:{value:'10.0.0.2'}});
+  await fireEvent.input(screen.getByLabelText('Address'), {target:{value:'10.0.0.2'}});
   await fireEvent.input(screen.getByLabelText('Password'), {target:{value:'test-only-password'}});
   await fireEvent.click(document.body); await flush();
   expect(panel()).toBeNull();
   await openAccess(); await flush();
   expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
   // Non-secret connection details stay so the owner can carry on.
-  expect((screen.getByLabelText('Server IP or hostname') as HTMLInputElement).value).toBe('10.0.0.2');
-  await fireEvent.click(screen.getByRole('button', {name:/Use a private key instead/}));
+  expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('10.0.0.2');
+  await fireEvent.click(screen.getByRole('button', {name:'Use a private key or check the host key'}));
+  await fireEvent.click(screen.getByRole('checkbox', {name:/Sign in with a private key/}));
   await fireEvent.input(screen.getByLabelText('Private key'), {target:{value:'test-only-key'}});
   await fireEvent.input(screen.getByLabelText('Key passphrase'), {target:{value:'test-only-passphrase'}});
   await fireEvent.keyDown(document.body, {key:'Escape'}); await flush();
@@ -430,14 +431,14 @@ describe('vault recovery and live invalidations', () => {
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};
   mount({sessionId:'s1'}); await flush();
-  const label = screen.getByRole('textbox',{name:'Resource name'}) as HTMLInputElement;
+  const label = screen.getByRole('textbox',{name:'Name'}) as HTMLInputElement;
   await fireEvent.input(label,{target:{value:'My folder'}});
   await vi.advanceTimersByTimeAsync(2000); await tick();
   expect(accessCalls()).toHaveLength(2);
-  expect((screen.getByRole('textbox',{name:'Resource name'}) as HTMLInputElement).value).toBe('My folder');
+  expect((screen.getByRole('textbox',{name:'Name'}) as HTMLInputElement).value).toBe('My folder');
   snapshot = {...empty(),grants:[{id:'g1',label:'My folder',kind:'folder',target:'/safe',expires_at:9999999999,writable:false}]};
   resourceSync.invalidate(['vault:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
-  expect(screen.queryByRole('textbox',{name:'Resource name'})).toBeNull();
+  expect(screen.queryByRole('textbox',{name:'Name'})).toBeNull();
   await fireEvent.click(trigger());
   expect(screen.getByText('My folder')).toBeTruthy();
   await vi.advanceTimersByTimeAsync(600_000);
@@ -704,7 +705,7 @@ describe('editing a saved sign-in of a mirrored chat inline', () => {
   // No link to this worker's Settings: these are not its sign-ins.
   expect(screen.queryByRole('button', {name: /Manage saved sign-ins/})).toBeNull();
   expect((form.getByLabelText('Name') as HTMLInputElement).value).toBe('NAS');
-  expect((form.getByLabelText('Server IP or hostname') as HTMLInputElement).value).toBe('10.0.0.2');
+  expect((form.getByLabelText('Address') as HTMLInputElement).value).toBe('10.0.0.2');
   expect((form.getByLabelText('Port') as HTMLInputElement).value).toBe('22');
   expect((form.getByLabelText('Username') as HTMLInputElement).value).toBe('root');
   const password = form.getByLabelText('Password') as HTMLInputElement;
@@ -785,6 +786,23 @@ describe('editing a saved sign-in of a mirrored chat inline', () => {
   await fireEvent.input(again.getByLabelText('API key or token'), {target: {value: 'test-only-token'}});
   await fireEvent.submit(again.getByRole('form', {name: 'Edit Home API'})); await flush();
   expect(lastSent()).toEqual({secret: 'test-only-token'});
+ });
+ it('edits a username and password service as an account, never through the token header settings', async () => {
+  snapshot = {...snapshot, saved_connections: [machine, {...service, auth_scheme: 'Basic', username: 'admin'}]};
+  const form = await openEditor('Home API');
+  expect(form.queryByLabelText('Credential header')).toBeNull();
+  expect(form.queryByLabelText('Scheme')).toBeNull();
+  expect(form.queryByLabelText('API key or token')).toBeNull();
+  expect((form.getByLabelText('Username') as HTMLInputElement).value).toBe('admin');
+  const password = form.getByLabelText('Password') as HTMLInputElement;
+  expect(password.value).toBe('');
+  expect(password.placeholder).toBe('Unchanged');
+  await fireEvent.input(form.getByLabelText('Username'), {target: {value: 'operator'}});
+  await fireEvent.input(password, {target: {value: 'test only pass'}});
+  await fireEvent.submit(form.getByRole('form', {name: 'Edit Home API'})); await flush();
+  // The scheme is not resent: the worker keeps Basic and encodes the pair itself.
+  expect(lastSent()).toEqual({username: 'operator', secret: 'test only pass'});
+  expect(m.patch.mock.calls[0][1].secret).toBe('');
  });
  it('refuses to take private details outside a secure context', async () => {
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });

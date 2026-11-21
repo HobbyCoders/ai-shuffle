@@ -235,6 +235,40 @@ describe('Settings > Vault adding', () => {
 		expect(api.post.mock.calls[0][1]).toMatchObject({ kind: 'service', url: 'https://api.github.com', auth_header: 'Authorization', auth_scheme: 'Bearer', writable: false });
 	});
 
+	it('adds a web service that signs in with a username and password, without header settings', async () => {
+		let sent = '';
+		api.post.mockImplementation(async (_url: string, body: { secret: string }) => {
+			sent = body.secret;
+			return { id: 'c'.repeat(32) };
+		});
+		await show();
+		await fireEvent.click(button('Add sign-in'));
+		await fireEvent.click(screen.getByRole('button', { name: 'Web service' }));
+		await type(field('Name'), 'NAS');
+		await type(field('Address'), 'https://nas.example/api');
+		// A token typed first never becomes the password.
+		await type(secretField('API key or token'), 'typed-as-a-token');
+		await fireEvent.click(screen.getByRole('button', { name: 'Username and password' }));
+		expect(screen.queryByRole('textbox', { name: 'Header' })).toBeNull();
+		expect(screen.queryByRole('textbox', { name: 'Scheme' })).toBeNull();
+		expect(secretField('Password').value).toBe('');
+		await type(secretField('Password'), SECRET);
+		await fireEvent.click(button('Add sign-in'));
+		expect((await screen.findByRole('alert')).textContent).toContain('Enter the username');
+		expect(api.post).not.toHaveBeenCalled();
+		await type(field('Username'), 'ad:min');
+		await fireEvent.click(button('Add sign-in'));
+		await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('cannot contain a colon'));
+		expect(api.post).not.toHaveBeenCalled();
+		await type(field('Username'), ' admin ');
+		await fireEvent.click(button('Add sign-in'));
+		await waitFor(() => expect(sent).toBe(SECRET));
+		expect(Object.keys(api.post.mock.calls[0][1]).sort()).toEqual(['auth_header', 'auth_scheme', 'kind', 'label', 'secret', 'url', 'username', 'writable']);
+		expect(api.post.mock.calls[0][1]).toMatchObject({ kind: 'service', url: 'https://nas.example/api', auth_header: 'Authorization', auth_scheme: 'Basic', username: 'admin' });
+		await waitFor(() => expect(api.post.mock.calls[0][1].secret).toBe(''));
+		expect(document.body.innerHTML).not.toContain(SECRET);
+	});
+
 	it('drops a typed secret when the kind changes', async () => {
 		await show();
 		await fireEvent.click(button('Add sign-in'));
@@ -327,6 +361,45 @@ describe('Settings > Vault editing', () => {
 		await waitFor(() => expect(api.patch).toHaveBeenCalledWith(`/vault/entries/${service().id}`, { writable: true }));
 	});
 
+	it('changes the account of a username and password sign-in and keeps the stored password', async () => {
+		entries = [machine(), service({ auth_scheme: 'Basic', username: 'admin' })];
+		await show(service().id);
+		// Named in the summary facts as well as on the choice itself.
+		expect(screen.getAllByText('Username and password').length).toBeGreaterThan(1);
+		expect(screen.queryByRole('textbox', { name: 'Header' })).toBeNull();
+		expect(field('Username').value).toBe('admin');
+		expect(secretField('Password').getAttribute('placeholder')).toBe('Unchanged');
+		await type(field('Username'), 'operator');
+		await fireEvent.click(button('Save'));
+		await waitFor(() => expect(api.patch).toHaveBeenCalledWith(`/vault/entries/${service().id}`, { username: 'operator' }));
+	});
+
+	it('needs the new credential to change how a web service signs in, in both directions', async () => {
+		await show(service().id);
+		await fireEvent.click(screen.getByRole('button', { name: 'Username and password' }));
+		await type(field('Username'), 'admin');
+		// The stored token is never reused as the password.
+		expect(secretField('Password').getAttribute('placeholder')).toBe('');
+		await fireEvent.click(button('Save'));
+		expect((await screen.findByRole('alert')).textContent).toContain('Enter the password');
+		expect(api.patch).not.toHaveBeenCalled();
+		// Back to the token: nothing changed, nothing to save.
+		await fireEvent.click(screen.getByRole('button', { name: 'API token' }));
+		expect(field('Scheme').value).toBe('Bearer');
+		await waitFor(() => expect(button('Save').disabled).toBe(true));
+		await fireEvent.click(screen.getByRole('button', { name: 'Username and password' }));
+		expect(field('Username').value).toBe('');
+		await type(field('Username'), 'admin');
+		await type(secretField('Password'), SECRET);
+		let sent: Record<string, unknown> = {};
+		api.patch.mockImplementation(async (_url: string, body: Record<string, unknown>) => {
+			sent = { ...body };
+			return { updated: true, revoked: 1, host_key_cleared: false };
+		});
+		await fireEvent.click(button('Save'));
+		await waitFor(() => expect(sent).toEqual({ auth_header: 'Authorization', auth_scheme: 'Basic', username: 'admin', secret: SECRET }));
+	});
+
 	it('removes a sign-in only after confirming', async () => {
 		await show(machine().id);
 		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
@@ -351,6 +424,27 @@ describe('vault-model', () => {
 		const initial = formFromEntry(machine({ uses_key: true }));
 		expect(editBody({ ...initial, passphrase: 'new' }, initial)).toEqual({ passphrase: 'new' });
 		expect(editBody({ ...initial }, initial)).toEqual({});
+	});
+
+	it('never reuses a stored service secret as the other kind of sign-in', () => {
+		const token = formFromEntry(service({ auth_header: 'X-Api-Key', auth_scheme: '' }));
+		expect(token).toMatchObject({ basic: false, username: '', authHeader: 'X-Api-Key', authScheme: '' });
+		const account = formFromEntry(service({ auth_scheme: 'Basic', username: 'admin' }));
+		expect(account).toMatchObject({ basic: true, username: 'admin' });
+		expect(problems(account, account)).toEqual([]);
+		// To a password: all of it is said, and the password is required.
+		const toBasic = { ...token, basic: true, username: 'admin', authHeader: 'Authorization', authScheme: 'Basic' };
+		expect(problems(toBasic, token)).toEqual(['Enter the password']);
+		expect(editBody({ ...toBasic, secret: 'pw-pw-pw-pw' }, token)).toEqual({
+			auth_header: 'Authorization', auth_scheme: 'Basic', username: 'admin', secret: 'pw-pw-pw-pw' });
+		// To a token: the username is cleared explicitly, and the token is required.
+		const toToken = { ...account, basic: false, username: '', authHeader: 'Authorization', authScheme: 'Bearer' };
+		expect(problems(toToken, account)).toEqual(['Enter the secret the service expects']);
+		expect(editBody({ ...toToken, secret: 'tok-tok-tok' }, account)).toEqual({
+			auth_header: 'Authorization', auth_scheme: 'Bearer', username: '', secret: 'tok-tok-tok' });
+		// A new one carries the username only when it signs in with a password.
+		expect('username' in createBody({ ...token, secret: 'tok-tok-tok' })).toBe(false);
+		expect(createBody({ ...account, secret: 'pw-pw-pw-pw' })).toMatchObject({ auth_scheme: 'Basic', username: 'admin', secret: 'pw-pw-pw-pw' });
 	});
 
 	it('accepts a blank secret only where one is already stored', () => {

@@ -145,7 +145,7 @@ async def edit_connection(session_id: str, connection_id: str, request: Request,
     try:
         edit = SavedConnectionEdit.model_validate(body)
     except ValueError:
-        raise HTTPException(422, "Invalid saved connection change. Check the fields.") from None
+        raise HTTPException(422, "That change to the sign-in is not valid. Check the fields.") from None
     owner = await owning_device(row)
     if owner is not None:
         # Relayed in memory only; a new secret goes to the owner over HTTPS or not at all.

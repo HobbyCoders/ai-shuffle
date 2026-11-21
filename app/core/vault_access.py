@@ -99,7 +99,7 @@ class SavedConnectionEdit(BaseModel):
 
 
 MACHINE_EDIT_FIELDS = frozenset({"host", "port", "username", "password", "private_key", "passphrase"})
-SERVICE_EDIT_FIELDS = frozenset({"url", "auth_header", "auth_scheme", "writable", "secret"})
+SERVICE_EDIT_FIELDS = frozenset({"url", "auth_header", "auth_scheme", "writable", "secret", "username"})
 POSIX_USERNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
 
 
@@ -161,7 +161,8 @@ def apply_saved_edit(current: GrantInput, edit: SavedConnectionEdit) -> GrantInp
     """
     sent = {name for name in edit.model_fields_set
             if getattr(edit, name) is not None and not (name in SECRET_FIELDS and not getattr(edit, name).get_secret_value())}
-    other = SERVICE_EDIT_FIELDS if current.kind == "machine" else MACHINE_EDIT_FIELDS
+    other = (SERVICE_EDIT_FIELDS - MACHINE_EDIT_FIELDS if current.kind == "machine"
+             else MACHINE_EDIT_FIELDS - SERVICE_EDIT_FIELDS)
     if sent & other:
         raise AccessDenied(f"Those settings do not apply to a saved {current.kind} connection.")
     update: dict[str, Any] = {}
@@ -212,7 +213,14 @@ def apply_saved_edit(current: GrantInput, edit: SavedConnectionEdit) -> GrantInp
         header = edit.auth_header if "auth_header" in sent else current.auth_header
         scheme = edit.auth_scheme if "auth_scheme" in sent else current.auth_scheme
         secret = edit.secret.get_secret_value() or current.secret.get_secret_value()
-        vault_services.credential_header(header, scheme, secret)
+        # A service signs in with a token, or with a username and its password.
+        username = edit.username.strip() if "username" in sent else current.username.strip()
+        if bool(username) != bool(current.username.strip()) and "secret" not in sent:
+            # A stored token is never reused as a password, nor a password as a token.
+            raise AccessDenied("Enter the new credential when changing how this service signs in.")
+        vault_services.credential_header(header, scheme, secret, username)
+        if "username" in sent:
+            update["username"] = username
         if "auth_header" in sent:
             update["auth_header"] = header.strip()
         if "auth_scheme" in sent:
@@ -274,11 +282,13 @@ def new_entry(spec: GrantInput) -> GrantInput:
             "fingerprint": fingerprint.rstrip("="), "password": spec.password,
             "private_key": spec.private_key, "passphrase": spec.passphrase})
     if spec.kind == "service":
-        if (spec.path or spec.host or spec.username or spec.port != blank.port
+        if (spec.path or spec.host or spec.port != blank.port
                 or secrets["password"] or secrets["private_key"] or secrets["passphrase"]):
             raise AccessDenied("Those settings do not apply to a web service sign-in.")
-        header, _ = vault_services.credential_header(spec.auth_header, spec.auth_scheme, secrets["secret"])
+        header, _ = vault_services.credential_header(
+            spec.auth_header, spec.auth_scheme, secrets["secret"], spec.username)
         return blank.model_copy(update={
+            "username": spec.username.strip(),
             "url": vault_services.parse_origin(spec.url.strip()).url, "auth_header": header,
             "auth_scheme": spec.auth_scheme.strip(), "writable": spec.writable, "secret": spec.secret,
             "fingerprint": vault_services.certificate_pin(spec.fingerprint)})
@@ -1033,7 +1043,7 @@ class Broker:
                                   url=plugin.service_url, writable=submission.writable)
             elif submission.saved_id:
                 if submission.connection is not None or submission.save_connection:
-                    raise AccessDenied("Choose either a saved connection or new private inputs.")
+                    raise AccessDenied("Choose either a saved sign-in or a new one.")
                 spec = stored = await run_sync(vault_store.load, request.owner, submission.saved_id)
             else:
                 spec = submission.connection
@@ -1059,7 +1069,7 @@ class Broker:
                 # deleted or replaced details cannot survive.
                 latest = await run_sync(vault_store.load, request.owner, saved_id)
                 if submission.saved_id and not vault_store.same_connection(latest, stored):
-                    raise AccessDenied("This saved connection changed while connecting. Try again.")
+                    raise AccessDenied("This saved sign-in changed while connecting. Try again.")
                 await self.get(session_id, grant["id"], preparing=True)
             await self._check_request(request)
             current.ready = True
@@ -1367,7 +1377,7 @@ class Broker:
             elif spec.kind == "service":
                 origin = vault_services.parse_origin(spec.url.strip())
                 header = vault_services.credential_header(
-                    spec.auth_header, spec.auth_scheme, spec.secret.get_secret_value())
+                    spec.auth_header, spec.auth_scheme, spec.secret.get_secret_value(), spec.username)
                 # Only the owner's private submission can select the certificate.
                 pin = vault_services.certificate_pin(spec.fingerprint)
                 if pin:
@@ -1555,6 +1565,10 @@ class Broker:
             "requests": requests,
             "folder_available": vault_files.available(),
             "restart_revokes": True,
+            # This worker signs in to a web service with a username and
+            # password too. A card showing a chat that runs on an older device
+            # must not offer it: that device would send the password as a token.
+            "password_sign_in": True,
         }
 
     async def _add_subagents(self, main: str, main_owner: tuple, grants: list, actions: list, requests: list) -> None:

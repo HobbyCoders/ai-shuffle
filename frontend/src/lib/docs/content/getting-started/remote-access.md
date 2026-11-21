@@ -65,13 +65,13 @@ Lock-screen text is fixed: “AI Shuffle” and “A chat needs you”. Chat tit
 
 ## Vault details
 
-When an agent asks for a folder, a machine or an API key, you enter the details in a Vault card. For your safety, the card only works on:
+When an agent asks for a folder, a machine or a web service, a Vault card appears above the message box and you enter the sign-in there: a password or private key for a machine, an API token or a username and password for a service. The agent never sees it. The **Vault** button next to the message box shows what the chat can reach right now, and **Settings › Vault** is where you add, change and remove saved sign-ins. For your safety, the card and that Settings page only work on:
 
 - the AI Shuffle desktop app window;
 - your worker's remote access address, from the Android app or a remote browser;
 - a browser on the same computer, when the worker runs without Docker and without the desktop app.
 
-Anywhere else, the card says "The Vault is not available on this connection". Open the chat in the desktop app or at the remote access address instead.
+Anywhere else, you see "The Vault is not available on this connection". Open the chat or Settings in the desktop app or at the remote access address instead.
 
 ## What not to do
 

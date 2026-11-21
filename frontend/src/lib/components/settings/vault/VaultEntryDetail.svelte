@@ -39,6 +39,10 @@
 		{ value: 'password', label: 'Password' },
 		{ value: 'key', label: 'Private key' }
 	] as const;
+	const SERVICE_METHOD_OPTIONS = [
+		{ value: 'token', label: 'API token' },
+		{ value: 'password', label: 'Username and password' }
+	] as const;
 
 	// Forms are created outside rendering; the collection keys this component by id.
 	// svelte-ignore state_referenced_locally
@@ -88,6 +92,17 @@
 		form.password = '';
 		form.privateKey = '';
 		form.passphrase = '';
+	}
+
+	function setServiceMethod(method: string) {
+		if (!form || form.basic === (method === 'password')) return;
+		form.basic = method === 'password';
+		// What was typed for one way of signing in never becomes the other.
+		form.secret = '';
+		const same = started && started.basic === form.basic ? started : undefined;
+		form.username = form.basic ? (same?.username ?? '') : '';
+		form.authHeader = form.basic ? 'Authorization' : (same?.authHeader ?? 'Authorization');
+		form.authScheme = form.basic ? 'Basic' : (same?.authScheme ?? 'Bearer');
 	}
 </script>
 
@@ -242,23 +257,43 @@
 				</RowGroup>
 			{:else}
 				<RowGroup title="Secret">
-					<SettingRow label="Header" hint="Carries the secret">
-						<TextField bind:value={form.authHeader} label="Header" placeholder="Authorization" mono maxlength={64} width={220} />
+					<SettingRow label="Signs in with">
+						<Segmented options={SERVICE_METHOD_OPTIONS} value={form.basic ? 'password' : 'token'} onchange={setServiceMethod} size="sm" />
 					</SettingRow>
-					<SettingRow label="Scheme" hint="Blank sends the secret alone">
-						<TextField bind:value={form.authScheme} label="Scheme" placeholder="Bearer" mono maxlength={32} width={220} />
-					</SettingRow>
-					<SettingRow label="API key or token" hint={keeps ? 'Blank keeps the stored one' : undefined}>
-						<TextField
-							bind:value={form.secret}
-							label="API key or token"
-							type="password"
-							autocomplete="new-password"
-							placeholder={keeps ? 'Unchanged' : ''}
-							mono
-							width={260}
-						/>
-					</SettingRow>
+					{#if form.basic}
+						<SettingRow label="Username" hint="Sent with the password as HTTP Basic">
+							<TextField bind:value={form.username} label="Username" mono maxlength={128} autocomplete="off" width={260} />
+						</SettingRow>
+						<SettingRow label="Password" hint={keeps && started?.basic ? 'Blank keeps the stored one' : undefined}>
+							<TextField
+								bind:value={form.secret}
+								label="Password"
+								type="password"
+								autocomplete="new-password"
+								placeholder={keeps && started?.basic ? 'Unchanged' : ''}
+								mono
+								width={260}
+							/>
+						</SettingRow>
+					{:else}
+						<SettingRow label="Header" hint="Carries the secret">
+							<TextField bind:value={form.authHeader} label="Header" placeholder="Authorization" mono maxlength={64} width={220} />
+						</SettingRow>
+						<SettingRow label="Scheme" hint="Blank sends the secret alone">
+							<TextField bind:value={form.authScheme} label="Scheme" placeholder="Bearer" mono maxlength={32} width={220} />
+						</SettingRow>
+						<SettingRow label="API key or token" hint={keeps && !started?.basic ? 'Blank keeps the stored one' : undefined}>
+							<TextField
+								bind:value={form.secret}
+								label="API key or token"
+								type="password"
+								autocomplete="new-password"
+								placeholder={keeps && !started?.basic ? 'Unchanged' : ''}
+								mono
+								width={260}
+							/>
+						</SettingRow>
+					{/if}
 				</RowGroup>
 				<RowGroup title="Certificate">
 					{#if entry?.fingerprint}

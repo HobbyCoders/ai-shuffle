@@ -34,7 +34,7 @@ CHANGED_ACTION = "chat-access-changed"
 # An SSH grant probes several host-key types before signing in.
 GRANT_TIMEOUT = 120.0
 INSECURE_INPUTS = ("Private inputs reach the device that runs this conversation only over HTTPS. "
-                   "Choose a saved connection, or enter them on that device.")
+                   "Choose a saved sign-in, or enter them on that device.")
 
 # What a viewer shows while the owner cannot answer: nothing to act on here.
 EMPTY_SNAPSHOT: Dict[str, Any] = {
@@ -254,7 +254,7 @@ async def handle(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                 edit = SavedConnectionEdit.model_validate(body.get("changes"))
             except ValueError:
                 # Never echo a validation error: it would quote the private inputs.
-                raise ValueError("Invalid saved connection change. Check the fields.") from None
+                raise ValueError("That change to the sign-in is not valid. Check the fields.") from None
             if edit_carries_secret(edit) and not control.inbound_https.get():
                 raise PermissionError(INSECURE_INPUTS)
             return await broker.edit_saved(session_id, _identifier(body, "connection_id"), edit)

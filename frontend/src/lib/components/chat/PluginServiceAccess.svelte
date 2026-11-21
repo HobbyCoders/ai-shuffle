@@ -20,6 +20,7 @@
 	} from '$lib/components/plugins/plugin-sign-in.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './vault.css';
+	import VaultDuration from './VaultDuration.svelte';
 
 	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_url?: string; plugin: string; service: string };
 	let { sessionId, request, owner = null, onComplete }: {
@@ -29,7 +30,6 @@
 	const plugin = untrack(() => request.plugin);
 	const service = untrack(() => request.service);
 	const endpoint = untrack(() => `/vault/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
-	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
 
 	let status = $state<PluginSignInStatus | null>(null);
 	let loadError = $state('');
@@ -248,7 +248,7 @@
 
 		{#if !closed && !gone && (remote || view?.step === 'sign_in' || view?.step === 'signed_in')}
 			<div class="ps-options">
-				<label class="pa-field"><span>Access for</span><select class="card-form-input" bind:value={minutes} disabled={busy}>{#each durations as [value, text]}<option {value}>{text}</option>{/each}</select></label>
+				<VaultDuration bind:minutes disabled={busy} />
 				{#if canWrite}
 					<label class="pa-option"><input type="checkbox" bind:checked={writable} disabled={busy} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow this session’s permission mode.</small></label>
 				{:else if entry}

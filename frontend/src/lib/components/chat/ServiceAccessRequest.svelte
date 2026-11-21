@@ -3,13 +3,18 @@
 	import { api } from '$lib/api/client';
 	import '../deck/cards/card-design-system.css';
 	import './vault.css';
+	import VaultSignInPicker from './VaultSignInPicker.svelte';
+	import VaultDuration from './VaultDuration.svelte';
 
 	type Saved = { id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; service_provider?: string; suggested_url?: string };
-	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: {
+	let { sessionId, request, savedConnections, vaultAvailable, passwordSignIn = false, owner = null, clearSecretsKey = 0, onComplete }: {
 		sessionId: string; request: Request; savedConnections: Saved[]; vaultAvailable: boolean;
+		/** The worker that runs this chat can sign in with a username and password (HTTP Basic). */
+		passwordSignIn?: boolean;
 		owner?: string | null; clearSecretsKey?: number; onComplete: () => void;
 	} = $props();
+	const uid = $props.id();
 	const cloudflareUrl = 'https://api.cloudflare.com/client/v4';
 	const where = $derived(owner ?? 'this worker');
 	const savedOptions = $derived(savedConnections.filter(s => s.kind === 'service'));
@@ -23,6 +28,11 @@
 	let stepHeading = $state<HTMLHeadingElement>();
 	let authHeader = $state('Authorization');
 	let authScheme = $state('Bearer');
+	// A token the service issued, or an account's username and password. The
+	// worker encodes the pair itself; the agent sees neither.
+	let method = $state<'token' | 'password'>('token');
+	const basic = $derived(method === 'password' && passwordSignIn && provider === 'custom');
+	let username = $state('');
 	let secret = $state('');
 	let fingerprint = $state('');
 	let pinCertificate = $state(false);
@@ -39,7 +49,6 @@
 	const expired = $derived(now / 1000 >= request.expires_at);
 	const unavailable = $derived(expired || terminal || complete);
 	const deadline = $derived(new Date(request.expires_at * 1000).toLocaleString());
-	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
 	const endpoint = $derived(`/vault/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
 
 	function clearSecret() { secret = ''; consent = false; }
@@ -55,14 +64,15 @@
 		if (previousClearKey !== clearSecretsKey) { previousClearKey = clearSecretsKey; clearSecret(); }
 	});
 	$effect(() => { if (unavailable) clearSecret(); });
-	// A typed token belongs to one destination: this request in this session
-	// on this worker, sent to one service address or saved connection. It is
-	// cleared when that changes, never by the form's own choices (duration,
+	// A typed secret belongs to one destination: this request in this session
+	// on this worker, sent to one service address or saved sign-in, as a token
+	// or as a password. It is cleared when that changes, never by the form's
+	// own choices (duration,
 	// saving, write access, header, scheme, certificate pinning; #673).
 	// Compare values, not snapshot object identity: background refreshes must
 	// not erase a token the owner is still preparing to submit.
 	const credentialContext = $derived(JSON.stringify([
-		sessionId, request.id, owner, provider, savedId, saved?.target, serviceUrl.trim()
+		sessionId, request.id, owner, provider, savedId, saved?.target, serviceUrl.trim(), method
 	]));
 	$effect(() => { void credentialContext; untrack(clearSecret); });
 
@@ -70,7 +80,7 @@
 		clearSecret();
 		serviceUrl = provider === 'cloudflare' ? cloudflareUrl : '';
 		label = provider === 'cloudflare' ? 'Cloudflare' : 'API service';
-		authHeader = 'Authorization'; authScheme = 'Bearer';
+		authHeader = 'Authorization'; authScheme = 'Bearer'; method = 'token'; username = '';
 		pinCertificate = false; fingerprint = ''; writable = false;
 	}
 	async function goTo(next: number) {
@@ -85,7 +95,7 @@
 		} catch { return false; }
 	}
 	async function advance() {
-		if (savedId && !saved) { error = 'This saved connection is no longer available. Choose another connection.'; return; }
+		if (savedId && !saved) { error = 'This saved sign-in is no longer available. Choose another.'; return; }
 		if (!saved && !validAddress()) { error = 'Use an HTTPS API base address without credentials, a query, or a fragment.'; return; }
 		await goTo(saved ? 3 : 2);
 	}
@@ -97,18 +107,21 @@
 		} else {
 			// Do not reflect server text that might contain user-entered credentials.
 			error = cancelling ? 'Could not cancel. Try again; the request remains open.'
-				: 'Access could not be granted. Check the connection details and retry. Your token stays only in this open form; closing it clears the token.';
+				: 'Access could not be granted. Check the details and retry. What you typed stays only in this open form; closing it clears it.';
 		}
 	}
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
 		if (busy || unavailable || !secureContext || step !== 3 || !consent) return;
-		if (savedId && !saved) { clearSecret(); error = 'This saved connection is no longer available. Go back and choose another.'; return; }
+		if (savedId && !saved) { clearSecret(); error = 'This saved sign-in is no longer available. Go back and choose another.'; return; }
 		if (!saved && (!validAddress() || secret.length < 8)) return;
+		if (!saved && basic && (!username.trim() || username.includes(':'))) return;
 		busy = true; error = '';
 		const connection = saved ? null : {
-			kind: 'service', label: label.trim(), minutes, url: serviceUrl.trim(), auth_header: authHeader.trim(),
-			auth_scheme: authScheme.trim(), secret, writable, fingerprint: pinCertificate ? fingerprint.trim() : ''
+			kind: 'service', label: label.trim(), minutes, url: serviceUrl.trim(),
+			auth_header: basic ? 'Authorization' : authHeader.trim(), auth_scheme: basic ? 'Basic' : authScheme.trim(),
+			...(basic ? { username: username.trim() } : {}),
+			secret, writable, fingerprint: pinCertificate ? fingerprint.trim() : ''
 		};
 		try {
 			await api.post(endpoint, { connection, saved_id: savedId, minutes, save_connection: !saved && saveConnection });
@@ -125,35 +138,41 @@
 	}
 </script>
 
-<section class="card-system pa-card service-setup" aria-label="Private service connection">
+<section class="card-system pa-card service-setup" aria-label="Vault request">
 	<header class="pa-head">
 		<div class="pa-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7zM8 12l3 3 5-6" /></svg></div>
-		<div class="pa-title"><h3>Connect a service <span class="card-badge card-badge--muted">Private</span></h3><p class="pa-subtitle">{request.purpose}</p></div>
+		<div class="pa-title"><h3><span>Connect a service</span></h3><p class="pa-subtitle pa-quoted" title={request.purpose}>{request.purpose}</p></div>
 	</header>
-	<div class="setup-intro">
-		<p>Prepare first. Grant access when you’re ready.</p>
-		<p class="pa-hint">This request stays available until <time datetime={new Date(request.expires_at * 1000).toISOString()}>{deadline}</time> (up to 24 hours), unless cancelled or {where} restarts. No access is granted while you prepare.</p>
-	</div>
 	<ol class="setup-steps" aria-label="Connection steps">
 		{#each ['Service', 'Prepare', 'Approve'] as title, index}<li aria-current={step === index + 1 ? 'step' : undefined} class:current={step === index + 1}><span>{index + 1}</span>{title}</li>{/each}
 	</ol>
+	<p class="pa-hint setup-wait">Nothing is granted until you approve in step 3. Take your time: this request waits until <time datetime={new Date(request.expires_at * 1000).toISOString()}>{deadline}</time> (up to 24 hours), unless it is cancelled or {where} restarts.</p>
 	<form onsubmit={submit} autocomplete="off">
 		<fieldset disabled={busy || unavailable}>
 			<div class="pa-body">
 				{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 				{#if expired}<p class="pa-error" role="alert">Preparation expired. Ask for a new service request when you’re ready. This card cannot grant access.</p>{/if}
-				{#if complete}<p class="pa-note" role="status">Request completed. Check the Vault for the current connection status.</p>{/if}
-				<h4 bind:this={stepHeading} tabindex="-1">{step === 1 ? 'Choose your connection' : step === 2 ? 'Prepare your API token' : 'Review and grant access'}</h4>
+				{#if complete}<p class="pa-note" role="status">Request completed. Check the Vault for the current status.</p>{/if}
+				<h4 bind:this={stepHeading} tabindex="-1">{step === 1 ? 'Choose the sign-in' : step === 2 ? (basic ? 'Prepare the account' : 'Prepare your API token') : 'Review and grant access'}</h4>
 				{#if step === 1}
 					{#if savedOptions.length}
-						<label class="pa-field"><span>Connection</span><select class="card-form-input" bind:value={savedId}><option value="">New connection</option>{#each savedOptions as option}<option value={option.id}>{option.label} · {option.target}</option>{/each}</select></label>
+						<VaultSignInPicker options={savedOptions} bind:value={savedId} pinLabel="Certificate" />
 					{/if}
 					{#if saved}
-						<p class="pa-note">Uses the encrypted credential saved on {where}. You still need to approve access for this conversation.</p>
+						<p class="pa-note">Uses the sign-in kept in the Vault on {where}. You still approve access for this chat.</p>
 					{:else}
 						<label class="pa-field"><span>Service</span><select class="card-form-input" bind:value={provider} onchange={changeProvider}><option value="cloudflare">Cloudflare</option><option value="custom">Other HTTPS service</option></select></label>
 						<label class="pa-field"><span>Service address</span><input class="card-form-input card-form-input--mono" type="url" required readonly={provider === 'cloudflare'} placeholder="https://api.example.com/v1" spellcheck="false" bind:value={serviceUrl} /></label>
 						<p class="pa-hint">{provider === 'cloudflare' ? 'Cloudflare’s official API address and Bearer authentication are filled in for you.' : 'Use the API base address from the service’s documentation, not its sign-in page. Do not put a key or token in this address.'}</p>
+						{#if provider === 'custom' && passwordSignIn}
+							<div class="pa-seg" role="radiogroup" aria-labelledby="{uid}-method">
+								<span class="pa-seg-legend" id="{uid}-method">Signs in with</span>
+								<div class="pa-seg-row">
+									<label class:selected={method === 'token'}><input type="radio" name="{uid}-method" value="token" bind:group={method} /><span>API key or token</span></label>
+									<label class:selected={method === 'password'}><input type="radio" name="{uid}-method" value="password" bind:group={method} /><span>Username and password</span></label>
+								</div>
+							</div>
+						{/if}
 					{/if}
 				{:else if step === 2}
 					{#if provider === 'cloudflare'}
@@ -164,48 +183,61 @@
 						</ol>
 						<div class="setup-links"><a href="https://dash.cloudflare.com/profile/api-tokens/" target="_blank" rel="noopener noreferrer">Open Cloudflare API Tokens ↗</a><a href="https://developers.cloudflare.com/fundamentals/api/get-started/create-token/" target="_blank" rel="noopener noreferrer">Official token setup guide ↗</a><a href="https://developers.cloudflare.com/fundamentals/api/reference/permissions/" target="_blank" rel="noopener noreferrer">Find the minimum API permissions ↗</a></div>
 						<p class="pa-hint">This connection uses an API token, not Cloudflare OAuth sign-in.</p>
+					{:else if basic}
+						<ol class="prepare-list"><li><strong>Use an account made for this.</strong><span>Create or choose an account on the service that holds only what this request needs, not your main administrator account.</span></li><li><strong>Start with read-only access.</strong><span>Give the account only the permissions and resources this request needs.</span></li><li><strong>Keep the password private.</strong><span>The username and password go to the service as HTTP Basic sign-in, over HTTPS only. Type them only in the next step, never in chat.</span></li></ol>
 					{:else}
-						<ol class="prepare-list"><li><strong>Find the service’s API credentials page.</strong><span>Use its official dashboard or documentation to create a dedicated API key or token. This form does not support password or OAuth sign-in.</span></li><li><strong>Start with read-only access.</strong><span>Choose only the permissions and resources needed for this request. Keep the token’s expiry short enough for the task.</span></li><li><strong>Check how the API accepts the token.</strong><span>Bearer authentication is filled in. For another format, open Authentication and certificate settings in the next step. Paste the token only in the private field, never in chat.</span></li></ol>
+						<ol class="prepare-list"><li><strong>Find the service’s API credentials page.</strong><span>Use its official dashboard or documentation to create a dedicated API key or token. {passwordSignIn ? 'For an account’s username and password, go back and choose that instead. OAuth sign-in is not supported here.' : 'This form does not support password or OAuth sign-in.'}</span></li><li><strong>Start with read-only access.</strong><span>Choose only the permissions and resources needed for this request. Keep the token’s expiry short enough for the task.</span></li><li><strong>Check how the API accepts the token.</strong><span>Bearer authentication is filled in. For another format, open Authentication and certificate settings in the next step. Paste the token only in the private field, never in chat.</span></li></ol>
 					{/if}
-					<p class="pa-note">You can close this panel and return through the Vault. Setup choices stay while this conversation remains open; reloading restores the original request, not your edits. No token is needed yet.</p>
+					<p class="pa-note">{basic ? 'No password is needed yet.' : 'No token is needed yet.'} You can leave this and come back: your choices stay while this chat remains open. Reloading restores the original request, not your edits.</p>
 				{:else}
 					<div class="connection-review"><span>Access on {where}</span><strong>{saved?.label ?? label}</strong><code>{saved?.target ?? serviceUrl}</code><small>{(saved ? saved.writable : writable) ? 'Changes allowed under this session’s permission mode' : 'Read-only · GET and HEAD only'}</small></div>
 					{#if !secureContext}<p class="pa-error" role="alert">Open the desktop app or an HTTPS connection before entering private details.</p>{/if}
 					{#if saved}
 						{#if saved.fingerprint}<details class="pa-fingerprint"><summary>Certificate SHA-256 fingerprint</summary><code>{saved.fingerprint}</code></details>{/if}
 					{:else}
-						<label class="pa-field"><span>API key or token</span><input class="card-form-input" disabled={!secureContext} type="password" required minlength="8" autocomplete="new-password" spellcheck="false" bind:value={secret} /></label>
-						<p class="pa-hint">Kept only in this open form until you submit. Closing the panel or going back clears it.</p>
-						<details class="auth-settings"><summary>Authentication and certificate settings</summary><div class="pa-reveal">
+						{#if basic}
+							<div class="pa-grid">
+								<label class="pa-field"><span>Username</span><input class="card-form-input" required maxlength="128" pattern="[^:]+" title="A username cannot contain a colon." autocomplete="off" spellcheck="false" bind:value={username} /></label>
+								<label class="pa-field"><span>Password</span><input class="card-form-input" disabled={!secureContext} type="password" required minlength="8" autocomplete="new-password" spellcheck="false" bind:value={secret} /></label>
+							</div>
+						{:else}
+							<label class="pa-field"><span>API key or token</span><input class="card-form-input" disabled={!secureContext} type="password" required minlength="8" autocomplete="new-password" spellcheck="false" bind:value={secret} /></label>
+						{/if}
+						<p class="pa-hint">Kept only in this open form until you submit. Going back clears it.</p>
+						<details class="auth-settings"><summary>{basic ? 'Certificate settings' : 'Authentication and certificate settings'}</summary><div class="pa-reveal">
+							{#if !basic}
 							<div class="pa-grid"><label class="pa-field"><span>Credential header</span><input class="card-form-input" required maxlength="64" spellcheck="false" bind:value={authHeader} /></label><label class="pa-field"><span>Scheme</span><input class="card-form-input" maxlength="32" placeholder="None" spellcheck="false" bind:value={authScheme} /></label></div>
 							<p class="pa-hint">Default: Authorization with Bearer. For X-API-Key, change the header and leave Scheme empty. Do not paste a token into either setting.</p>
+							{/if}
 							<label class="pa-option"><input type="checkbox" bind:checked={pinCertificate} /><strong>Trust a specific certificate</strong><small>For a self-signed home server. Normal certificate checks remain the default.</small></label>
-							{#if pinCertificate}<label class="pa-field"><span>Certificate SHA-256 fingerprint</span><input class="card-form-input" required maxlength="95" pattern={'[0-9A-Fa-f]{64}|([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}'} spellcheck="false" bind:value={fingerprint} /></label><p class="pa-hint">Verify this fingerprint through a trusted channel. Only this exact certificate is accepted; a replacement needs new approval. Saving the connection remembers this fingerprint.</p>{/if}
+							{#if pinCertificate}<label class="pa-field"><span>Certificate SHA-256 fingerprint</span><input class="card-form-input" required maxlength="95" pattern={'[0-9A-Fa-f]{64}|([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}'} spellcheck="false" bind:value={fingerprint} /></label><p class="pa-hint">Verify this fingerprint through a trusted channel. Only this exact certificate is accepted; a replacement needs new approval. Saving to the Vault remembers this fingerprint.</p>{/if}
 						</div></details>
 						<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow this session’s permission mode. Bypass skips repeat approval after this initial grant.</small></label>
 					{/if}
-					<div class="pa-grid">{#if !saved}<label class="pa-field"><span>Resource name</span><input class="card-form-input" required maxlength="80" bind:value={label} /></label>{/if}<label class="pa-field"><span>Access for</span><select class="card-form-input" bind:value={minutes}>{#each durations as [value, text]}<option {value}>{text}</option>{/each}</select></label></div>
+					{#if !saved}
+						<label class="pa-field"><span>Name</span><input class="card-form-input" required maxlength="80" bind:value={label} /></label>
+						<label class="pa-option" class:disabled={!vaultAvailable}><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} /><strong>Save to Vault under this name</strong><small>{vaultAvailable ? `Encrypted on ${where}. Every use still asks you first.` : 'The Vault is locked or unavailable. Access for this chat still works.'}</small></label>
+					{/if}
+					<VaultDuration bind:minutes />
 					<p class="pa-hint">Access duration starts when approved, not while you prepare. One-shot action approvals have their own deadlines.</p>
-					{#if !saved}<label class="pa-option" class:disabled={!vaultAvailable}><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} /><strong>Save this connection</strong><small>{vaultAvailable ? `Encrypted on ${where} for future requests. Each session still needs approval.` : 'Secure storage is locked or unavailable. Temporary access still works.'}</small></label>{/if}
-					<p class="pa-note">{owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history. Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the token itself: the model can use its allowed authority under that address.</p>
+					<p class="pa-promise"><strong>The agent never sees the sign-in.</strong> {saved ? `It stays encrypted on ${where}.` : `${owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history.`} Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the {basic ? 'account' : 'token'} itself: the agent can use its allowed authority under that address.</p>
 					<label class="pa-option"><input type="checkbox" disabled={!secureContext} bind:checked={consent} /><strong>I approve access for this conversation</strong><small>Only Grant access below creates a grant. You can revoke it from Vault.</small></label>
 				{/if}
 			</div>
 			<div class="pa-section"><div class="pa-actions">
 				<button type="button" class="card-btn-secondary" onclick={cancel}>{busy ? 'Please wait…' : 'Cancel request'}</button>
 				{#if step === 1}<button type="button" class="card-btn-primary" onclick={advance}>{saved ? 'Continue to review' : 'Continue to setup'}</button>
-				{:else if step === 2}<button type="button" class="card-btn-primary" onclick={() => goTo(3)}>I have a token</button>
-				{:else}<button type="submit" class="card-btn-primary" disabled={!secureContext || !consent || (!saved && secret.length < 8)}>{busy ? 'Granting access…' : 'Grant access'}</button>{/if}
-			</div>{#if step > 1}<button type="button" class="setup-back" onclick={() => goTo(step === 3 && !saved ? 2 : 1)}>Back — clears any entered token</button>{/if}</div>
+				{:else if step === 2}<button type="button" class="card-btn-primary" onclick={() => goTo(3)}>{basic ? 'I have the sign-in' : 'I have a token'}</button>
+				{:else}<button type="submit" class="card-btn-primary" disabled={!secureContext || !consent || (!saved && (secret.length < 8 || (basic && !username.trim())))}>{busy ? 'Granting access…' : 'Grant access'}</button>{/if}
+			</div>{#if step > 1}<button type="button" class="setup-back" onclick={() => goTo(step === 3 && !saved ? 2 : 1)}>Back — clears {basic ? 'the entered password' : 'any entered token'}</button>{/if}</div>
 		</fieldset>
 	</form>
 </section>
 
 <style>
 	fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
-	.setup-intro { padding: 1rem 1rem .75rem; }
-	.setup-intro > p:first-child { margin: 0 0 .375rem; font-size: .875rem; font-weight: 600; }
-	.setup-steps { display: flex; gap: .75rem; list-style: none; margin: 0; padding: 0 1rem .75rem; border-bottom: 1px solid var(--border); }
+	.setup-steps { display: flex; gap: .75rem; list-style: none; margin: 0; padding: .875rem 1rem .5rem; }
+	.setup-wait { padding: 0 1rem .75rem; border-bottom: 1px solid var(--border); }
 	.setup-steps li { flex: 1; display: flex; align-items: center; gap: .375rem; font-size: .75rem; color: var(--muted-foreground); }
 	.setup-steps span { display: grid; place-items: center; width: 1.5rem; height: 1.5rem; border: 1px solid var(--border); border-radius: 50%; }
 	.setup-steps .current { font-weight: 600; color: var(--foreground); }

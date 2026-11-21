@@ -69,6 +69,41 @@ def test_a_new_service_sign_in_keeps_only_its_own_fields():
     assert not entry.host and not entry.username and not entry.password.get_secret_value()
 
 
+def test_a_service_can_sign_in_with_a_username_and_password():
+    entry = new_entry(GrantInput.model_validate({**SERVICE, "auth_scheme": "Basic", "username": " admin ",
+                                                 "secret": "MUST-NOT-ECHO pass"}))
+    assert (entry.username, entry.auth_header, entry.auth_scheme) == ("admin", "Authorization", "Basic")
+    assert entry.secret.get_secret_value() == "MUST-NOT-ECHO pass" and not entry.password.get_secret_value()
+    # The owner's list names the account; the password is never part of it.
+    described = vault_store.describe(entry)
+    assert described["username"] == "admin" and "MUST-NOT-ECHO" not in json.dumps(described)
+    assert vault_store.describe(new_entry(GrantInput.model_validate(SERVICE)))["username"] == ""
+
+
+def test_changing_how_a_service_signs_in_needs_the_new_credential():
+    from app.core.vault_access import SavedConnectionEdit, apply_saved_edit
+    token = new_entry(GrantInput.model_validate(SERVICE))
+    basic = {"auth_scheme": "Basic", "username": "admin"}
+    with pytest.raises(AccessDenied, match="new credential") as error:
+        apply_saved_edit(token, SavedConnectionEdit.model_validate(basic))
+    assert "MUST-NOT-ECHO" not in str(error.value)
+    signed = apply_saved_edit(token, SavedConnectionEdit.model_validate({**basic, "secret": "MUST-NOT-ECHO pass"}))
+    assert (signed.username, signed.auth_scheme, signed.secret.get_secret_value()) == (
+        "admin", "Basic", "MUST-NOT-ECHO pass")
+    # Another account keeps the stored password, as a machine's username does.
+    renamed = apply_saved_edit(signed, SavedConnectionEdit.model_validate({"username": "operator"}))
+    assert (renamed.username, renamed.secret.get_secret_value()) == ("operator", "MUST-NOT-ECHO pass")
+    # Back to a token: the stored password is never sent as one.
+    back = {"auth_scheme": "Bearer", "username": ""}
+    with pytest.raises(AccessDenied, match="new credential"):
+        apply_saved_edit(signed, SavedConnectionEdit.model_validate(back))
+    again = apply_saved_edit(signed, SavedConnectionEdit.model_validate({**back, "secret": "MUST-NOT-ECHO-TOKEN"}))
+    assert (again.username, again.auth_scheme) == ("", "Bearer")
+    # A username on a token sign-in is refused instead of silently ignored.
+    with pytest.raises(AccessDenied, match="Basic scheme"):
+        apply_saved_edit(token, SavedConnectionEdit.model_validate({"username": "admin", "secret": "MUST-NOT-ECHO pass"}))
+
+
 @pytest.mark.parametrize("change", [
     {"label": "   "},
     {"password": ""},                                         # no secret at all
@@ -98,7 +133,9 @@ def test_an_invalid_machine_sign_in_is_refused_without_echo(change):
     {"auth_header": "Host"},
     {"fingerprint": "not-a-pin"},
     {"host": "10.0.0.20"},                                    # machine fields
-    {"username": "root"},
+    {"username": "root"},                                     # a username needs the Basic scheme
+    {"username": "ro:ot", "auth_scheme": "Basic"},
+    {"username": "root", "auth_scheme": "Basic", "secret": "short"},
     {"port": 2222},
     {"password": "MUST-NOT-ECHO"},
     {"path": "/srv"},

@@ -31,7 +31,7 @@ import json
 import re
 import ssl
 from dataclasses import dataclass
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, quote_plus, unquote, urlsplit
 
 import httpx
 from cryptography import x509
@@ -210,9 +210,28 @@ def parse_origin(url: str) -> Origin:
     return Origin(f"https://{netloc}{prefix}", host, port, prefix)
 
 
-def credential_header(name: str, scheme: str, secret: str) -> tuple[str, str]:
+def credential_header(name: str, scheme: str, secret: str, username: str = "") -> tuple[str, str]:
+    """The header that carries the credential, validated.
+
+    With a ``username`` the secret is that account's password and the header
+    is HTTP Basic (RFC 7617, UTF-8): the broker encodes the pair, so neither
+    the password nor the encoded pair is ever typed, stored or shown in a
+    form the model could read. Messages never quote a submitted value.
+    """
     name = (name or "").strip()
     scheme = (scheme or "").strip()
+    username = (username or "").strip()
+    if username:
+        if name.lower() != "authorization" or scheme.lower() != "basic":
+            raise AccessDenied(
+                "A username and password sign in with the Authorization header and the Basic scheme."
+            )
+        if len(username) > 128 or ":" in username or not username.isprintable():
+            raise AccessDenied("Enter the service username without a colon or line breaks.")
+        if not isinstance(secret, str) or not 8 <= len(secret) <= 8192 or not secret.isprintable():
+            raise AccessDenied("Enter a password of 8 to 8,192 characters without line breaks.")
+        pair = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("ascii")
+        return name, f"Basic {pair}"
     if not _TOKEN.fullmatch(name) or name.lower() in RESERVED_HEADERS:
         raise AccessDenied(
             "Choose a credential header such as Authorization or X-API-Key."
@@ -281,10 +300,16 @@ def request_url(origin: Origin, path: str) -> str:
 
 
 def _needles(secret: str, header_value: str) -> list[bytes]:
+    # The credential without its scheme: for a username and password this is
+    # the encoded pair, which is not the secret itself.
+    credential = header_value.rpartition(" ")[2]
     values = {
         secret,
         header_value,
+        credential,
+        quote(credential, safe=""),
         quote(secret, safe=""),
+        quote_plus(secret),  # a password may hold spaces; forms echo them as "+"
         json.dumps(secret)[1:-1],
         json.dumps(secret)[1:-1].replace("/", "\\/"),
         base64.b64encode(secret.encode()).decode(),
