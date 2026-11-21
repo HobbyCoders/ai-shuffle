@@ -12,24 +12,24 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Desktop app
 
-- **Start AI Shuffle at sign-in** in **Settings > General > Desktop app** opens the desktop app when you sign in on that computer. It is off by default and set per computer. On Windows it appears after you run the 1.3.8 installer once; an in-app update alone does not add it.
+- **Start AI Shuffle at sign-in** in **Settings > General > Desktop app** opens the desktop app when you sign in on that computer. It is off by default and set per computer. On Windows it appears after you run the 1.3.8 installer once, installed for your own Windows account (the installer's default, not "for all users"); an in-app update alone does not add it.
 - AI Shuffle has a signed and notarized macOS download for Apple Silicon Macs.
 
 ### Vault
 
 - Chat access is now called the Vault. **Settings > Vault** lists your saved sign-ins and lets you add, edit and remove them without a chat open.
-- The Vault can hold a username and password for a service; agents use the sign-in without ever seeing the secret.
+- The Vault can hold a username and password for an HTTPS service that accepts HTTP Basic authentication; agents use the sign-in without ever seeing the secret.
 - In a chat, the Vault opens from a chip in the composer instead of the chat header, and access requests appear as a card above the composer.
 
 ### Agents and providers
 
 - A Claude API key runs on its own provider, separate from a Claude subscription, with its own usage section and model checkboxes. New keys default to the 5.5 generation.
 - Antigravity shows the agent's own context usage in the meter.
-- At start, the app checks whether Claude Code and Antigravity have updates. It never installs them for you.
+- When the worker starts, it checks whether the installed Claude Code and Antigravity have updates. It never installs them for you.
 
 ### Phone
 
-- Settings rows are easier to read, each name in the composer's context line opens its own selector, and the top bars are cleaner.
+- Settings rows are easier to read, each name in the composer's context line goes straight to its own control (and opens its selector when that value can be changed), and the top bars are cleaner.
 
 ### Fixed
 
