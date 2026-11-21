@@ -3,9 +3,12 @@
 API 34 first boot can leave a Quickstep ANR in front of every app, and API 36
 first boot on a 4-vCPU hosted runner can leave a SystemUI ANR (its
 KeyguardService bind times out while the cold image is still optimizing; runs
-38343028922 and 38347338129). Recover only those exact first-boot failures,
-each once, before any Shuffle code is installed. Never dismiss an application
-ANR, never recover during instrumentation, and never turn off Android's dialogs.
+38343028922 and 38347338129). On API 36 the emulator action presses MENU
+(keycode 82) the moment boot completes, and a cold Pixel Launcher can miss that
+key's 5 s input deadline (run 44840167000: an ANR whose only record is that
+MENU key). Recover only those exact first-boot failures, each once, before any
+Shuffle code is installed. Never dismiss an application ANR, never recover
+during instrumentation, and never turn off Android's dialogs.
 
 Then select and verify the official emulator WebView (configure_webview) before
 the app is installed, keeping all Chromium crash checks enabled.
@@ -19,7 +22,19 @@ import time
 from pathlib import Path
 
 LAUNCHER = "com.android.launcher3"
+PIXEL_LAUNCHER = "com.google.android.apps.nexuslauncher"
 SYSTEMUI = "com.android.systemui"
+# One `am_anr` event record: the Pixel Launcher missing the input deadline of
+# an injected (deviceId=-1) MENU key press, and nothing else.
+BOOT_MENU_ANR = re.compile(r"\bam_anr\s*: \[\d+,\d+," + re.escape(PIXEL_LAUNCHER)
+                           + r",\d+,Input dispatching timed out \([^()]* is not responding\. Waited \d+ms for "
+                           + r"KeyEvent\(deviceId=-1, [^()]*\bkeyCode=MENU\(82\), [^()]*\), [^()]*\)\.?\]$")
+
+
+def boot_menu_anr(events: str) -> bool:
+    """True only if Android recorded ANRs and every one is the Pixel Launcher's boot-time MENU key."""
+    records = [line.strip() for line in events.splitlines() if re.search(r"\bam_anr\s*:", line)]
+    return bool(records) and all(BOOT_MENU_ANR.search(record) for record in records)
 
 
 def report_workaround(adb, message):
@@ -47,14 +62,17 @@ def readiness(displays: str, policy: str, power: str) -> str:
         return "launcher_anr"
     if re.fullmatch(r"Window\{[^}]+ u0 Application Not Responding: " + re.escape(SYSTEMUI) + r"\}", focus):
         return "systemui_anr"
+    if re.fullmatch(r"Window\{[^}]+ u0 Application Not Responding: " + re.escape(PIXEL_LAUNCHER) + r"\}", focus):
+        # Recoverable only if its ANR record proves the boot-time MENU key (see prepare).
+        return "pixel_launcher_anr"
     if "Application Not Responding:" in focus or "Application Error:" in focus:
         return "other_error"
     # AOSP API 34 uses Quickstep; Google's API 36 image uses Pixel Launcher.
-    # Recognize only these exact home packages. ANR recovery above remains
-    # restricted to the known Quickstep first-boot issue, never a Pixel/app ANR.
+    # Recognize only these exact home packages. ANR recovery above is
+    # restricted to the known first-boot launcher and SystemUI issues, never an app ANR.
     launcher_focused = any(
         re.fullmatch(r"Window\{[^}]+ u0 " + re.escape(package) + r"/[^}]+\}", focus)
-        for package in (LAUNCHER, "com.google.android.apps.nexuslauncher")
+        for package in (LAUNCHER, PIXEL_LAUNCHER)
     )
     awake = re.search(r"^\s*mWakefulness=Awake\s*$", power, re.MULTILINE)
     unlocked = re.search(r"^\s*mInputRestricted=false\s*$", policy, re.MULTILINE)
@@ -83,15 +101,23 @@ def prepare(adb, out: Path, *, deadline_seconds=120, required_samples=3, sleep=t
         state = readiness(displays, policy, power)
         if state == "other_error":
             raise RuntimeError("An unexpected Android error dialog is blocking the emulator; refusing recovery")
-        if state == "launcher_anr":
+        if state == "pixel_launcher_anr":
+            # Android's own ANR record must name the boot-time MENU key and nothing else.
+            events = adb("shell", "logcat", "-d", "-b", "events", "-s", "am_anr")
+            (out / "pixel-launcher-anr-events.txt").write_text(events, encoding="utf-8")
+            if not boot_menu_anr(events):
+                raise RuntimeError("An unexpected Android error dialog is blocking the emulator; refusing recovery")
+        if state in ("launcher_anr", "pixel_launcher_anr"):
             if recovered:
                 raise RuntimeError("The Android launcher hung again after its single pre-test restart")
-            report_workaround(adb, "First-boot launcher ANR detected before app installation; retaining diagnostics and restarting Quickstep once")
+            package, label = (LAUNCHER, "Quickstep") if state == "launcher_anr" else (PIXEL_LAUNCHER, "Pixel Launcher")
+            cause = " on the boot-time MENU key" if state == "pixel_launcher_anr" else ""
+            report_workaround(adb, f"First-boot launcher ANR{cause} detected before app installation; retaining diagnostics and restarting {label} once")
             for name, data in (("displays", displays), ("policy", policy), ("power", power)):
                 (out / f"launcher-anr-{name}.txt").write_text(data, encoding="utf-8")
             diagnostics()
-            adb("shell", "am", "force-stop", LAUNCHER)
-            adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME", "-p", LAUNCHER)
+            adb("shell", "am", "force-stop", package)
+            adb("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME", "-p", package)
             recovered = True
             stable = 0
         elif state == "systemui_anr":
