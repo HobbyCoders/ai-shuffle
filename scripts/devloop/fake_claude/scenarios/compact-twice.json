@@ -1,0 +1,13 @@
+{
+  "description": "One long turn that works, compacts automatically, works, compacts again and works on. The last tool is held for 20 s so the live turn's work fold can be checked before it settles.",
+  "steps": [
+    {"text": "Starting on the store.", "tool_calls": [{"name": "Bash", "input": {"command": "ls"}, "result": "ok", "delay_ms": 800}]},
+    {"text": "Reading.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/a.txt"}, "result_chars": 200, "delay_ms": 800}]},
+    {"compact": true, "text": "Next.", "tool_calls": [{"name": "Bash", "input": {"command": "pwd"}, "result": "ok", "delay_ms": 800}]},
+    {"text": "Still going.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/b.txt"}, "result_chars": 200, "delay_ms": 800}]},
+    {"compact": true, "text": "Next.", "tool_calls": [{"name": "Bash", "input": {"command": "git status"}, "result": "ok", "delay_ms": 800}]},
+    {"text": "Reading more.", "tool_calls": [{"name": "Read", "input": {"file_path": "/fake/c.txt"}, "result_chars": 200, "delay_ms": 800}]},
+    {"text": "Tests pass. Checking the baseline next.", "tool_calls": [{"name": "Bash", "input": {"command": "sleep 1"}, "result": "ok", "delay_ms": 20000}]},
+    {"text": "Done after two compactions."}
+  ]
+}

@@ -571,6 +571,7 @@ fake AI's:
 | `message-then-compact` | a tool that takes 2.5 s (type a message meanwhile: it rides that result), then automatic compaction at once; a summarizer standing in keeps no rows |
 | `message-then-summarize` | the same, with no answer from the mod: Claude Code's summarizer runs and keeps no rows |
 | `compact-then-tools` | automatic compaction first, then four tool calls in the same turn, for a restoration note that goes out in parts |
+| `compact-twice` | one turn that works, compacts automatically, works, compacts again and works on, holding its last tool for 20 s so the live work fold can be checked (the `compaction-live` journey) |
 | `/compact` | manual compaction: the app's compaction route, then the boundary and the conversation replayed as fresh frames (#679) |
 
 Every compaction plays a replay fixture from `scripts/devloop/fake_claude/compaction/`
