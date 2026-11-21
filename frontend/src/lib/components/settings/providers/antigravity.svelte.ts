@@ -13,6 +13,7 @@ import {
 	type AntigravityInstallStatus,
 	type AntigravityMeta
 } from '$lib/api/antigravity';
+import { checkCliUpdates } from '$lib/services/cli-update-notice';
 
 const POLL_MS = 2000;
 
@@ -94,6 +95,7 @@ class AntigravityState {
 			const saved = await setAntigravityUpdateCheck(value);
 			if (this.status) this.status = { ...this.status, check_updates: saved.check_updates,
 				latest_version: saved.latest_version };
+			void checkCliUpdates(); // switched off: the open notice leaves with it
 		} catch (e) {
 			this.error = getErrorMessage(e, 'Could not save the Antigravity update check');
 			this.retry = () => this.setUpdateCheck(value);
@@ -121,6 +123,7 @@ class AntigravityState {
 				this.status = status;
 				this.poll = null;
 				if (status.install?.state === 'running') this.schedule();
+				else void checkCliUpdates(); // an update done here takes its notice down
 			} catch (e) {
 				if (mine !== this.epoch) return;
 				this.poll = null;
