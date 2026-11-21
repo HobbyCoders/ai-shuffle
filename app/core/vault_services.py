@@ -323,7 +323,30 @@ def _needles(secret: str, header_value: str) -> list[bytes]:
                 values.add(decoded.split(":", 1)[1])  # HTTP Basic password
     except (ValueError, UnicodeDecodeError):
         pass
-    return sorted({v.encode() for v in values if len(v) >= 6}, key=len, reverse=True)
+    found = {v.encode() for v in values if len(v) >= 6}
+    # A password may hold non-ASCII characters; a service can echo them as
+    # Latin-1 instead of UTF-8.
+    for value in values:
+        if len(value) >= 6 and not value.isascii():
+            try:
+                found.add(value.encode("latin-1"))
+            except UnicodeEncodeError:
+                pass
+    return sorted(found, key=len, reverse=True)
+
+
+def _redact_header(value: str, needles: list[bytes]) -> str:
+    """Redact a response header however the service encoded what it echoes.
+
+    httpx reads header values as UTF-8 when all of them are valid UTF-8 and as
+    Latin-1 otherwise, so a non-ASCII password arrives either as its own
+    characters or as the Latin-1 reading of its bytes. Scan both.
+    """
+    try:
+        value = redact(value.encode("latin-1"), needles).decode("latin-1")
+    except UnicodeEncodeError:
+        pass  # Characters outside Latin-1: the value was read as UTF-8.
+    return redact(value.encode("utf-8"), needles).decode("utf-8", "replace")
 
 
 def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes:
@@ -454,10 +477,7 @@ async def perform(
     data = redact(bytes(kept), needles, LIMIT)
     return {
         "status": status,
-        "headers": {
-            name: redact(value.encode("latin-1", "replace"), needles).decode("latin-1")
-            for name, value in returned.items()
-        },
+        "headers": {name: _redact_header(value, needles) for name, value in returned.items()},
         "body": data.decode("utf-8", errors="replace"),
         "truncated": truncated,
     }

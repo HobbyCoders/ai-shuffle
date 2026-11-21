@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 
 from app.api.auth import require_admin
 from app.api.sessions_helpers import require_session
@@ -20,9 +22,31 @@ from app.db.async_database import run_sync
 from app.network import vault_routing as routing
 from app.network import control
 
-router = APIRouter(prefix="/api/v1/vault/sessions", tags=["Vault"])
+
+
+class VaultRoute(APIRoute):
+    """A body the framework rejects is answered without repeating it.
+
+    FastAPI's own 422 quotes the rejected input, which here can be a password,
+    a key or a token (a body that is not a JSON object never reaches the
+    handlers' manual validation).
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def plain_validation(request):
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                raise HTTPException(422, "Invalid Vault request. Send the fields as one JSON object.") from None
+
+        return plain_validation
+
+
+router = APIRouter(prefix="/api/v1/vault/sessions", tags=["Vault"], route_class=VaultRoute)
 # The owner's saved sign-ins with no chat open (Settings > Vault).
-entries_router = APIRouter(prefix="/api/v1/vault/entries", tags=["Vault"])
+entries_router = APIRouter(prefix="/api/v1/vault/entries", tags=["Vault"], route_class=VaultRoute)
 logger = logging.getLogger(__name__)
 
 UNSUPPORTED_OWNER = "Unknown control action"

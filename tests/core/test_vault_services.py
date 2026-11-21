@@ -102,6 +102,8 @@ class Service:
         self.port = 0
         # Authorization header values answered with 401 (an expired token).
         self.rejected: set[str] = set()
+        # The raw ETag value /api/etag answers with.
+        self.etag = b""
 
     async def handle(self, reader, writer):
         self.connections += 1
@@ -127,6 +129,7 @@ class Service:
             }
         )
         extra = {}
+        raw = b""
         status = "200 OK"
         if headers.get("authorization") in self.rejected:
             status = "401 Unauthorized"
@@ -147,6 +150,9 @@ class Service:
                 "X-Debug": SECRET,
             }
             payload = b""
+        elif target.startswith("/api/etag"):
+            raw = b"ETag: " + self.etag + b"\r\n"
+            payload = b"{}"
         elif target.startswith("/api/big"):
             # The secret straddles the 64 KiB boundary and repeats before it.
             payload = (
@@ -191,7 +197,7 @@ class Service:
             "Connection: close",
             *(f"{k}: {v}" for k, v in extra.items()),
         ]
-        writer.write(("\r\n".join(response) + "\r\n\r\n").encode() + payload)
+        writer.write(("\r\n".join(response) + "\r\n").encode() + raw + b"\r\n" + payload)
         try:
             await writer.drain()
         finally:
@@ -598,6 +604,34 @@ async def test_username_and_password_sign_in_sends_basic_and_redacts_both_forms(
     assert "admin" not in json.dumps((await broker.resources("chat"))["grants"])
     assert PASSWORD not in json.dumps(await broker.snapshot("chat"), ensure_ascii=False)
     broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.parametrize(
+    "password, wire",
+    [
+        (PASSWORD, "utf-8"),                    # read back as its own characters
+        (PASSWORD, "latin-1"),                  # the service answers in Latin-1
+        (PASSWORD, "utf-8+invalid"),            # read back as the Latin-1 view of its UTF-8 bytes
+        ("correct horse пароль 123", "utf-8"),  # characters outside Latin-1
+    ],
+)
+async def test_a_non_ascii_password_echoed_in_a_response_header_is_redacted(broker, service, trust, password, wire):
+    grant = await broker.create("chat", spec(service, auth_scheme="Basic", username="admin", secret=password))
+    encoding, _, invalid = wire.partition("+")
+    service.etag = b'"' + password.encode(encoding) + (b"\xff" if invalid else b"") + b'"'
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/etag"})
+    assert "[redacted]" in result["headers"]["etag"]
+    shown = json.dumps(result, ensure_ascii=False)
+    # Not the password, and no readable part of it either.
+    assert password not in shown and "correct horse" not in shown
+    broker.revoke("chat", grant["id"])
+
+
+def test_a_non_ascii_password_echoed_in_latin_1_in_the_body_is_redacted():
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    needles = vault_services._needles(PASSWORD, f"Basic {pair}")
+    body = b"signed in with " + PASSWORD.encode("latin-1")
+    assert vault_services.redact(body, needles) == b"signed in with [redacted]"
 
 
 async def test_a_username_needs_the_basic_scheme_before_anything_is_contacted(broker, service, trust):

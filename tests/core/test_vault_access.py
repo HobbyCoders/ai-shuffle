@@ -514,6 +514,14 @@ async def test_api_approval_produces_execution_and_validation_hides_secrets(brok
         endpoint = f"/api/v1/vault/sessions/chat/requests/{request_id}"
         bad = await client.post(endpoint, json={"password": "MUST-NOT-ECHO"})
         assert bad.status_code == 422 and "MUST-NOT-ECHO" not in bad.text
+        # A body the framework itself rejects is answered without quoting it.
+        saved = f"/api/v1/vault/sessions/chat/saved/{'f' * 32}"
+        for wrapped in ([{"connection": {"password": "MUST-NOT-ECHO"}}], "MUST-NOT-ECHO", None):
+            for bad in (await client.post(endpoint, json=wrapped), await client.patch(saved, json=wrapped),
+                        await client.post("/api/v1/vault/sessions/chat/actions/a1", json=wrapped)):
+                assert bad.status_code == 422 and "MUST-NOT-ECHO" not in bad.text
+                assert bad.json() == {"detail": "Invalid Vault request. Send the fields as one JSON object."}
+        assert request_id in broker.requests
         body = {**spec.model_dump(exclude=set(vault_access.SECRET_FIELDS)), "password": "test-only-password"}
         response = await client.post(endpoint, json={"connection": body})
         assert response.status_code == 200, response.text

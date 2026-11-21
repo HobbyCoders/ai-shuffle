@@ -91,6 +91,47 @@ describe('VaultRequest', () => {
 		expect(field('Password').value).toBe('');
 	});
 
+	it('asks again when the sign-in it preselected no longer matches the request', async () => {
+		const { rerender } = mount();
+		expect(chosen()).toBe('build');
+		// A rename changes nothing about where the sign-in leads.
+		await rerender({ savedConnections: [saved[0], { ...saved[1], label: 'Build box (rack 2)' }] });
+		expect(chosen()).toBe('build');
+		// Edited in Settings to another machine: the owner did not choose that one.
+		const moved = { ...saved[1], target: 'ops@10.0.0.77:22' };
+		await rerender({ savedConnections: [saved[0], moved] });
+		expect(chosen()).toBe('');
+		expect(field('Address').value).toBe('10.0.0.5');
+		// Choosing it knowingly is still the owner's call, and it then stays chosen.
+		await fireEvent.click(signIns().getByRole('radio', { name: /Build box/ }));
+		await rerender({ savedConnections: [saved[0], { ...moved }] });
+		expect(chosen()).toBe('build');
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: 'build', connection: null }));
+	});
+
+	it.each([
+		['hinted', {}],
+		['named by the request', { request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'build' } }]
+	])('never sends a removed sign-in (%s)', async (_name, overrides) => {
+		const { rerender } = mount(overrides);
+		expect(chosen()).toBe('build');
+		await rerender({ savedConnections: [saved[0]] });
+		expect(chosen()).toBe('');
+		await fireEvent.input(field('Address'), { target: { value: '10.0.0.5' } });
+		await fireEvent.input(field('Username'), { target: { value: 'ops' } });
+		await fireEvent.input(field('Password'), { target: { value: 'test-only' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '' }));
+	});
+
+	it('keeps the sign-in the request named when its address is edited', async () => {
+		const { rerender } = mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'build' } });
+		await rerender({ savedConnections: [saved[0], { ...saved[1], target: 'ops@10.0.0.77:22' }] });
+		expect(chosen()).toBe('build');
+		expect(screen.getByText('ops@10.0.0.77:22')).toBeTruthy();
+	});
+
 	it.each(['10.0.0.5', 'BUILD.Example.', '2001:db8::5'])('matches only the host when port and user are omitted: %s', host => {
 		mount({
 			request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour(), suggested_host: host },

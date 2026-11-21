@@ -99,18 +99,27 @@ describe('guided service sign-in', () => {
 		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
 	});
 
-	it('keeps a token only in component memory for a correctable retry, without storing or reflecting it', async () => {
+	it('clears the token and the approval when sending, so a failed attempt leaves neither in the form', async () => {
 		const storage = vi.spyOn(Storage.prototype, 'setItem');
 		m.post.mockRejectedValueOnce({ status: 422, detail: token });
 		const { request, rerender, onComplete } = mount(); await review(); await approve();
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
 		expect(screen.getByRole('alert').textContent).not.toContain(token);
-		expect(field('API key or token').value).toBe(token);
+		expect(screen.getByRole('alert').textContent).toContain('was cleared from this form');
+		expect(document.body.innerHTML).not.toContain(token);
+		expect(field('API key or token').value).toBe('');
+		expect((screen.getByRole('checkbox', { name: /I approve access/ }) as HTMLInputElement).checked).toBe(false);
+		// The non-secret choices stay for the retry.
+		expect(field('Name').value).toBe('Cloudflare');
 		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
 		await rerender({ request: { ...request } });
-		expect(field('API key or token').value).toBe(token);
+		expect(field('API key or token').value).toBe('');
 		expect(storage).not.toHaveBeenCalled();
+		// Nothing is sent again until the owner types the token and approves again.
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		expect(m.post).toHaveBeenCalledTimes(1);
+		await approve();
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post).toHaveBeenCalledTimes(2);

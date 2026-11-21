@@ -219,6 +219,24 @@ async def test_invalid_input_is_refused_without_echo(broker, vault):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("body", [[MACHINE], [SERVICE], "MUST-NOT-ECHO", 7, None, [[{"secret": "MUST-NOT-ECHO-TOKEN"}]]])
+async def test_a_body_that_is_not_an_object_is_refused_without_echo(broker, vault, body):
+    # The framework rejects these before the handlers' own validation runs; its
+    # default answer would quote the rejected body, credentials included.
+    async with client() as http:
+        entry_id = (await http.post("/api/v1/vault/entries", json=MACHINE)).json()["id"]
+        stored = dict(vault)
+        for response in (await http.post("/api/v1/vault/entries", json=body),
+                         await http.patch(f"/api/v1/vault/entries/{entry_id}", json=body),
+                         await http.post("/api/v1/vault/entries", content=b'[{"password": "MUST-NOT-ECHO"',
+                                         headers={"content-type": "application/json"})):
+            assert response.status_code == 422
+            assert response.json() == {"detail": "Invalid Vault request. Send the fields as one JSON object."}
+            assert not any(secret in response.text for secret in SECRETS)
+        assert vault == stored
+
+
+@pytest.mark.asyncio
 async def test_changing_or_removing_a_sign_in_ends_access_built_on_it_in_every_chat(broker, vault):
     async with client() as http:
         entry_id = (await http.post("/api/v1/vault/entries", json=MACHINE)).json()["id"]

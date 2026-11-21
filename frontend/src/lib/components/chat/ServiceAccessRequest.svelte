@@ -66,9 +66,9 @@
 	$effect(() => { if (unavailable) clearSecret(); });
 	// A typed secret belongs to one destination: this request in this session
 	// on this worker, sent to one service address or saved sign-in, as a token
-	// or as a password. It is cleared when that changes, never by the form's
-	// own choices (duration,
-	// saving, write access, header, scheme, certificate pinning; #673).
+	// or as a password. It is cleared when that changes and when it is sent,
+	// never by the form's own choices (duration, saving, write access, header,
+	// scheme, certificate pinning; #673).
 	// Compare values, not snapshot object identity: background refreshes must
 	// not erase a token the owner is still preparing to submit.
 	const credentialContext = $derived(JSON.stringify([
@@ -107,7 +107,7 @@
 		} else {
 			// Do not reflect server text that might contain user-entered credentials.
 			error = cancelling ? 'Could not cancel. Try again; the request remains open.'
-				: 'Access could not be granted. Check the details and retry. What you typed stays only in this open form; closing it clears it.';
+				: 'Access could not be granted. Check the details and retry. Anything you typed as a token or password was cleared from this form; enter it again.';
 		}
 	}
 	async function submit(event: SubmitEvent) {
@@ -123,9 +123,12 @@
 			...(basic ? { username: username.trim() } : {}),
 			secret, writable, fingerprint: pinCertificate ? fingerprint.trim() : ''
 		};
+		// The request body holds the only copy from here on: a failed attempt
+		// leaves neither the secret nor the approval in the form.
+		clearSecret();
 		try {
 			await api.post(endpoint, { connection, saved_id: savedId, minutes, save_connection: !saved && saveConnection });
-			clearSecret(); complete = true; onComplete();
+			complete = true; onComplete();
 		} catch (e) { failure(e); }
 		finally { if (connection) connection.secret = ''; busy = false; }
 	}

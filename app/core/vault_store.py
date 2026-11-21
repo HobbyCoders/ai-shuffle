@@ -131,6 +131,7 @@ def _label_taken(owner: tuple, label: str, *, except_id: str = "") -> bool:
 
 # Edits, delete and post-connect host-key pinning read and rewrite one entry;
 # serialising them means none can resurrect or overwrite another's result.
+# Adding takes it too, so its name and capacity checks see every earlier write.
 _write_lock = threading.Lock()
 
 
@@ -142,13 +143,14 @@ def same_connection(a, b) -> bool:
 def save(owner: tuple, spec) -> str:
     if not encryption.is_encryption_ready() or spec.kind not in SAVABLE_KINDS:
         raise AccessDenied("The Vault is locked or unavailable on this worker.")
-    existing = catalog(owner)
-    if len(existing) >= 50:
-        raise AccessDenied("The Vault is full. Remove a sign-in you no longer use before saving another.")
-    if any(item["label"].casefold() == spec.label.casefold() for item in existing):
-        raise AccessDenied("The Vault already has a sign-in with that name. Choose a different name.")
-    connection_id = uuid.uuid4().hex
-    _store(key(owner, connection_id), spec)
+    with _write_lock:
+        existing = catalog(owner)
+        if len(existing) >= 50:
+            raise AccessDenied("The Vault is full. Remove a sign-in you no longer use before saving another.")
+        if any(item["label"].casefold() == spec.label.casefold() for item in existing):
+            raise AccessDenied("The Vault already has a sign-in with that name. Choose a different name.")
+        connection_id = uuid.uuid4().hex
+        _store(key(owner, connection_id), spec)
     _invalidate_catalog()
     return connection_id
 

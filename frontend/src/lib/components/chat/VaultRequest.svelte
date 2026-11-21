@@ -27,24 +27,36 @@
 	});
 	// An explicit saved ID or structured hints can preselect a saved machine.
 	// Never infer a target from purpose or fall back to an unrelated entry.
-	let savedId = $state(untrack(() => {
-		if (request.saved_id) return savedConnections.find(s => s.id === request.saved_id && (s.kind ?? 'machine') === request.kind)?.id ?? '';
-		if (!machine || !request.suggested_host) return '';
-		const normalizeHost = (value: string) => {
-			const host = value.toLowerCase().replace(/\.$/, '');
-			if (!host.includes(':')) return host;
-			try { return new URL(`http://[${host}]`).hostname; }
-			catch { return host; }
-		};
-		const options = savedConnections.filter(s => (s.kind ?? 'machine') === 'machine');
-		return options.find(s => {
-			// The catalogue formats targets as username@host:port, including IPv6.
-			const target = /^([^@]+)@(.+):([0-9]+)$/.exec(s.target);
-			return target && normalizeHost(target[2]) === normalizeHost(request.suggested_host!)
-				&& (request.suggested_port === undefined || Number(target[3]) === request.suggested_port)
-				&& (!request.suggested_username || target[1] === request.suggested_username);
-		})?.id ?? '';
-	}));
+	const normalizeHost = (value: string) => {
+		const host = value.toLowerCase().replace(/\.$/, '');
+		if (!host.includes(':')) return host;
+		try { return new URL(`http://[${host}]`).hostname; }
+		catch { return host; }
+	};
+	/** Whether a saved machine is the one the request's structured hints name. */
+	function matchesHints(entry: Saved): boolean {
+		if (!machine || !request.suggested_host || (entry.kind ?? 'machine') !== 'machine') return false;
+		// The catalogue formats targets as username@host:port, including IPv6.
+		const target = /^([^@]+)@(.+):([0-9]+)$/.exec(entry.target);
+		return !!target && normalizeHost(target[2]) === normalizeHost(request.suggested_host)
+			&& (request.suggested_port === undefined || Number(target[3]) === request.suggested_port)
+			&& (!request.suggested_username || target[1] === request.suggested_username);
+	}
+	/** The sign-in the hints chose, until the owner chooses for themselves. */
+	let hinted = untrack(() => request.saved_id ? '' : savedConnections.find(matchesHints)?.id ?? '');
+	let savedId = $state(untrack(() => request.saved_id
+		? savedConnections.find(s => s.id === request.saved_id && (s.kind ?? 'machine') === request.kind)?.id ?? ''
+		: hinted));
+	// The Vault can change while the card is open (Settings, another tab). A
+	// sign-in the owner did not pick stays chosen only while it is still the one
+	// the request names; a removed one is never sent. Either way the owner
+	// chooses again.
+	$effect(() => {
+		if (savedId !== hinted) hinted = '';
+		if (!savedId) return;
+		const entry = savedOptions.find(s => s.id === savedId);
+		if (!entry || (savedId === hinted && !matchesHints(entry))) { hinted = ''; savedId = ''; }
+	});
 	let saveConnection = $state(false);
 	let label = $state(machine ? 'SSH server' : 'Folder');
 	let minutes = $state(60);
