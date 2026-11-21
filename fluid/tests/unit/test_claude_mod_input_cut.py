@@ -15,6 +15,7 @@ import json
 import re
 
 from fluid.engine.claude_mod_compaction import (
+    AUTO_MAX_RETAINED,
     INPUT_HEAD_CHARS,
     INPUT_STRING_CHARS,
     KEEP_INPUT_CALLS,
@@ -418,5 +419,33 @@ def test_a_pinned_row_leaves_the_answer_as_it_did_before_inputs_were_cut():
     assert report["input_tokens_cut"] > 4 * 18_000 // 4
     assert report["after_tokens"] + 60_000 // 4 < report["target_tokens"]  # cut, it would have fit
     assert not any(row["text"].startswith("SKILL-INSTRUCTIONS") for row in out)
+    [kept] = [entry for entry in chat.archive if entry["text"].startswith("SKILL-INSTRUCTIONS")]
+    assert kept["node_id"] in chat.checkpoint["rows"][0]["text"]
+
+
+def test_a_later_compaction_is_answered_as_it_would_be_with_inputs_whole():
+    """An earlier cut leaves the next compaction less to save. Refused for
+    that, it would write neither the archive nor the checkpoint that name a
+    skill's instructions, and the earlier checkpoint is from before the
+    skill. Judged with every input whole it is worth answering, so it is."""
+    chat = Chat()
+    for _ in range(10):
+        chat.call("Write", {"file_path": f"src/big_{chat.calls}.py", "content": "x" * 18_000},
+                  result="File created")
+    chat.call("Read", {"file_path": "src/big.py"}, result="x" * 90_000)
+    chat.write(8)
+    chat.compact("manual")
+    for n in range(4):
+        chat.add(Message("user", [Text(f"Short question {n}?")]))
+        chat.add(Message("assistant", [Text(f"Short answer {n}.")]))
+    chat.add(Message("user", [Text("/deploy-skill now")]))
+    chat.cli.append({"role": "user", "text": "SKILL-INSTRUCTIONS " + "s" * 60_000,
+                     "toolUses": [], "handle": "claude-only"})
+    for _ in range(6):
+        chat.call("Write", {"file_path": f"src/huge_{chat.calls}.py", "content": "y" * 80_000},
+                  result="File created")
+    posted = len(json.dumps(chat.cli))
+    out, _ = chat.compact()
+    assert AUTO_MAX_RETAINED * posted < len(json.dumps(out)) < posted  # too little, counted as posted
     [kept] = [entry for entry in chat.archive if entry["text"].startswith("SKILL-INSTRUCTIONS")]
     assert kept["node_id"] in chat.checkpoint["rows"][0]["text"]

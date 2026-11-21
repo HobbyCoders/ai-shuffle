@@ -1140,23 +1140,30 @@ def compact_messages(
     note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)
-    if not _saves(rows, final, trigger):
+    # Answered whenever it would be with every input whole, with the same
+    # archive and checkpoint (an earlier cut leaves less to save, and a
+    # refusal here would drop both), and also when only the cut makes it
+    # worth answering; that answer writes no checkpoint, as when refused.
+    limit = AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING
+    as_whole = _retained(_with_stored_inputs(rows, stored, set()),
+                         _alternate(([note] if note else []) + whole)) <= limit
+    retained = _retained(rows, final)
+    if not (retained <= limit or (as_whole and retained < 1)):
         raise NothingToCompact("no safe compaction saving")
     if checkpoint is not None:
         checkpoint.clear()
-        if _saves(_with_stored_inputs(rows, stored, set()),
-                  _alternate(([note] if note else []) + whole), trigger):
+        if as_whole:
             made = _checkpoint(whole, covers, shrunk, note, nodes)
             checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes) if made.get("rows") else made)
     return final
 
 
-def _saves(posted: list[dict[str, Any]], final: list[dict[str, Any]], trigger: str) -> bool:
-    """Whether answering ``posted`` with ``final`` saves enough to be worth it."""
+def _retained(posted: list[dict[str, Any]], final: list[dict[str, Any]]) -> float:
+    """The share of ``posted`` that answering it with ``final`` keeps."""
     # Content only: a handle is how Claude Code names a row, not context.
     before, after = (len(json.dumps([{k: v for k, v in r.items() if k != "handle"} for r in side]))
                      for side in (posted, final))
-    return after <= before * (AUTO_MAX_RETAINED if trigger == "auto" else 1 - MANUAL_MIN_SAVING)
+    return after / before
 
 
 def _with_stored_inputs(
