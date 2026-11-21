@@ -80,8 +80,12 @@ MANUAL_MIN_SAVING = 0.02
 # HistoryExpand away, so in every call older than the newest
 # ``KEEP_INPUT_CALLS`` a string longer than ``INPUT_STRING_CHARS`` is cut to
 # its first ``INPUT_HEAD_CHARS``. Keys, short values (a path, a description)
-# and the calls the model is working from stay as they are.
+# and the calls the model is working from stay as they are. Only the tools
+# whose long input is a command or file text, nearly all of that volume: a
+# plan, a brief sent to another agent or a question asked is state the model
+# still works from, and stays whole.
 KEEP_INPUT_CALLS = 6
+CUT_INPUT_TOOLS = frozenset({"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"})
 INPUT_STRING_CHARS = 300
 INPUT_HEAD_CHARS = 160
 
@@ -779,9 +783,9 @@ def _shorten_old_inputs(
     """``segments`` with the long inputs of the calls before ``end`` cut
     (:func:`short_input`), and the JSON chars this compaction newly cut.
 
-    Only a call whose result is in the view and is not an error: a failed
-    command is read again as it was written, and an open call is the work in
-    hand. ``refs`` names the stored node of each call (one row can stand for
+    Only a call of ``CUT_INPUT_TOOLS`` whose result is in the view and is not
+    an error: a failed command is read again as it was written, and an open
+    call is the work in hand. ``refs`` names the stored node of each call (one row can stand for
     several nodes of a streamed message) and ``shown`` is the input Claude
     Code holds for each call it has; a message with a call it does not have
     is left alone (it could not be rebuilt). A message Claude Code already
@@ -806,7 +810,8 @@ def _shorten_old_inputs(
         fresh = 0
         changed = False
         for block in message.content:
-            if isinstance(block, ToolUseBlock) and block.id in done and isinstance(block.input, dict):
+            if (isinstance(block, ToolUseBlock) and block.name in CUT_INPUT_TOOLS
+                    and block.id in done and isinstance(block.input, dict)):
                 short = short_input(block.input, refs.get(block.id, view[first].node_id))
                 if short is not block.input:
                     changed = True

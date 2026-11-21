@@ -137,6 +137,19 @@ def test_a_failed_call_keeps_its_input():
     assert CUT in shown["t0"]["content"] and CUT in shown["t5"]["content"]
 
 
+def test_a_plan_and_a_brief_keep_their_inputs():
+    chat = Chat()
+    plan = {"steps": [{"title": f"Step {n}: " + "detail " * 60} for n in range(8)]}
+    brief = {"agent": "engineer", "prompt": "Implement the importer. " * 80}
+    chat.call("Plan", plan)
+    chat.call("Task", brief, result="started")
+    chat.write(25)
+    out, _ = chat.compact()
+    shown = inputs(out)
+    assert shown["t0"] == plan and shown["t1"] == brief
+    assert CUT in shown["t2"]["content"]
+
+
 def test_short_inputs_are_left_as_claude_code_has_them():
     chat = Chat()
     for n in range(30):
