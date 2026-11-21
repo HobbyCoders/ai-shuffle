@@ -39,7 +39,8 @@ def backfill_attachment_hashes() -> int:
     updated = 0
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, data FROM note_attachments WHERE blob_hash IS NULL AND data IS NOT NULL")
+        # By id: the order every writer locks attachment rows in (_fill_empty_rows).
+        cursor.execute("SELECT id, data FROM note_attachments WHERE blob_hash IS NULL AND data IS NOT NULL ORDER BY id")
         rows = [dict(r) for r in cursor.fetchall()]
         for row in rows:
             data = row["data"]
@@ -113,16 +114,32 @@ def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=N
     """
     data = read_local(hash_value)
     if data is not None:
-        fill = ("UPDATE note_attachments SET data = %s, size_bytes = %s WHERE blob_hash = %s AND data IS NULL",
-                (data, len(data), hash_value))
         if _cursor is not None:
-            _cursor.execute(*fill)
+            _fill_empty_rows(_cursor, hash_value, data)
         else:
             with get_db() as conn:
-                conn.cursor().execute(*fill)
+                _fill_empty_rows(conn.cursor(), hash_value, data)
         store.upsert_blob(hash_value, size=size, present=True, holder=holder, _cursor=_cursor)
         return
     store.upsert_blob(hash_value, size=size, present=False, holder=holder, _cursor=_cursor)
+
+
+def _fill_empty_rows(cursor, hash_value: str, data: bytes) -> int:
+    """Copy bytes into this hash's attachment rows that have none; return the rows written.
+
+    Rows are locked by id first. Every writer that locks several attachment
+    rows takes them in id order, after their note's row when it locks that
+    (keep_cascaded_attachments, notes.delete_note), so two writers never wait
+    on each other in a circle (#1693).
+    """
+    cursor.execute("SELECT id FROM note_attachments WHERE blob_hash = %s AND data IS NULL ORDER BY id FOR UPDATE",
+                   (hash_value,))
+    ids = [r["id"] for r in cursor.fetchall()]
+    if not ids:
+        return 0
+    cursor.execute(f"UPDATE note_attachments SET data = %s, size_bytes = %s "
+                   f"WHERE id IN ({', '.join(['%s'] * len(ids))}) AND data IS NULL", (data, len(data), *ids))
+    return cursor.rowcount or 0
 
 
 def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str], clock: Optional[int]) -> int:
@@ -139,6 +156,11 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
     say the deleting device still held it (a restore from an older backup).
     Its own tombstone for the attachment does, and ``release_covered_attachment``
     then drops the conflict. A local note deletion never reaches here.
+
+    This worker deleted none of them, so it signs no tombstone for them: their
+    live sync records are forgotten here, leaving its scanner nothing to
+    retract. An attachment tombstone from a device then always means that
+    device deleted the attachment while holding it.
     Returns the number of conflicts recorded.
     """
     # Lock the note before reading its attachments: an upload's FK check
@@ -177,14 +199,19 @@ def keep_cascaded_attachments(cursor, note_id: str, *, deleted_by: Optional[str]
                            winning_clock=int(clock or 0), winning_device_id=deleted_by or "",
                            kept_blob=blob)
         kept += 1
+    if ids:
+        # After the conflicts read their losing version. A tombstone is kept.
+        cursor.execute(f"DELETE FROM sync_records WHERE collection = %s AND deleted = FALSE "
+                       f"AND record_id IN ({', '.join(['%s'] * len(ids))})", (coll.name, *ids))
     return kept
 
 
 def release_covered_attachment(cursor, attachment_id: str, *, deleted_by: Optional[str]) -> int:
     """A device's own tombstone for an attachment: its note deletion covered it (#1693).
 
-    A device signs an attachment tombstone only for a record it held (its
-    scan of the cascade, or a deliberate attachment delete), so the copy kept
+    A device signs an attachment tombstone only when its own action removed a
+    record it held (its local note delete's cascade, or a deliberate
+    attachment delete; never a peer's delete it applied), so the copy kept
     when its deletion of the note arrived is not needed: that was an ordinary
     delete. Drops only conflicts ``keep_cascaded_attachments`` wrote for that
     device's deletion; each holds its own copy, so no other conflict or row
@@ -204,9 +231,7 @@ def store_fetched(hash_value: str, data: bytes) -> bool:
     wrote = False
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE note_attachments SET data = %s, size_bytes = %s WHERE blob_hash = %s AND data IS NULL",
-                       (data, len(data), hash_value))
-        wrote = bool(cursor.rowcount)
+        wrote = bool(_fill_empty_rows(cursor, hash_value, data))
         cursor.execute("SELECT 1 FROM artifacts WHERE hash = %s", (hash_value,))
         is_artifact = cursor.fetchone() is not None
     if is_artifact:

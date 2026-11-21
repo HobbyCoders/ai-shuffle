@@ -1671,18 +1671,25 @@ def _deleted_parent(cursor, ctx: NetworkContext, env: Envelope) -> Optional[str]
     Agent IDs are routinely reused: permission rules always wait for their agent.
     Do not add reusable-ID parents here without a causal/recreation check.
     """
-    dependencies = {
-        "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
-        "note_attachments": (("note_id", "notes"),),
-        "api_user_credentials": (("api_user_id", "api_users"),),
-        "api_user_profiles": (("api_user_id", "api_users"),),
-        "user_credential_policies": (("api_user_id", "api_users"),),
-    }.get(env.collection, ())
-    if env.op != OP_UPSERT or not dependencies:
+    if env.op != OP_UPSERT or env.collection not in _CASCADE_PARENTS:
         return None
     from app.network.keyring import open_envelope
     row, _key = open_envelope(ctx, env)
-    for field, parent in dependencies:
+    return _deleted_parent_of(cursor, env.collection, row)
+
+
+_CASCADE_PARENTS = {
+    "session_tags": (("session_id", "sessions"), ("tag_id", "tags")),
+    "note_attachments": (("note_id", "notes"),),
+    "api_user_credentials": (("api_user_id", "api_users"),),
+    "api_user_profiles": (("api_user_id", "api_users"),),
+    "user_credential_policies": (("api_user_id", "api_users"),),
+}
+
+
+def _deleted_parent_of(cursor, collection: str, row: Mapping[str, Any]) -> Optional[str]:
+    """``_deleted_parent`` for an opened row."""
+    for field, parent in _CASCADE_PARENTS.get(collection, ()):
         rid = row.get(field)
         if not isinstance(rid, str) or not rid:
             continue
@@ -3285,6 +3292,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                         clock=int(item["clock"]))
             local_hash = ""
         else:
+            if coll.name == "note_attachments" and _deleted_parent_of(cursor, coll.name, item["record"]):
+                # A copy from before its note's deletion, whose record this
+                # worker forgot (#1693): refused like the live path, silently.
+                continue
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
                                        ctx=ctx)
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)

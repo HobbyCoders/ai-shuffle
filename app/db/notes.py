@@ -198,6 +198,10 @@ def delete_note(note_id: str) -> bool:
     """Delete a note"""
     with get_db() as conn:
         cursor = conn.cursor()
+        # The note, then its attachments by id, before the cascade: the order
+        # every multi-row attachment writer locks in (blobs._fill_empty_rows).
+        cursor.execute("SELECT id FROM notes WHERE id = %s FOR UPDATE", (note_id,))
+        cursor.execute("SELECT id FROM note_attachments WHERE note_id = %s ORDER BY id FOR UPDATE", (note_id,))
         cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
         return cursor.rowcount > 0
 

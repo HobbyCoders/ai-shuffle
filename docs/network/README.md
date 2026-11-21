@@ -119,12 +119,18 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    deletion cascades, each attachment is kept as a conflict that also holds
    its bytes (`kept_blob`, never listed). `read_local` serves them by hash, to
    this worker and to peers, until the conflict is dismissed or expires, and
-   they go with the row. The deleting device signs a tombstone for every
-   attachment record it held; when that tombstone arrives (before or after the
-   note's, live or in a snapshot) the delete covered the attachment, so its
-   kept conflict is dropped, and an attachment deletion never lists a conflict
-   of its own. A new attachment row with bytes already held here gets its own
-   copy. A local note deletion keeps nothing.
+   they go with the row. Only a device whose own action removed an attachment
+   (its local note deletion's cascade, or deleting the attachment) signs its
+   tombstone, so the deleting device signs one for every attachment record it
+   held. A worker that removed attachments by applying a peer's note deletion
+   forgets their sync records in the same transaction, so its scanner retracts
+   nothing, and a state copy skips a live attachment whose note it holds as
+   deleted. When the deleter's tombstone arrives (before or after the note's,
+   live or in a snapshot) the delete covered the attachment, so its kept
+   conflict is dropped, and an attachment deletion never lists a conflict of
+   its own. A new attachment row with bytes already held here gets its own
+   copy. A local note deletion keeps nothing. Attachment rows are locked in id
+   order, after their note's row.
 8. **Plugins.** `network_plugins_desired` carries each plugin's id, version,
    enabled flag and config; binaries never travel. A worker's scan publishes a
    row only for a plugin the table does not have yet or when its enabled flag

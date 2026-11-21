@@ -59,7 +59,7 @@ def test_winning_peer_note_delete_keeps_the_cascaded_attachment_bytes(workers):
     _delete_note_winning(a)
     converge([a, b])
     with b.active():
-        engine.scan_all()  # B retracts the cascaded attachment, as its scanner would
+        engine.scan_all()  # B deleted nothing itself: its scanner signs nothing for att1
     converge([a, b])
 
     with a.active():
@@ -215,7 +215,7 @@ def test_the_deleters_attachment_tombstone_in_a_later_batch_drops_the_kept_copy(
     with a.active():
         engine.scan_collection("note_attachments")
     with b.active():
-        engine.scan_all()  # B's own retraction too: whichever clock wins, A's tombstone releases
+        engine.scan_all()  # signs nothing for att1: only A deleted it
     converge([a, b])
     with b.active():
         assert _attachment_conflicts(b) == []
@@ -280,6 +280,161 @@ def test_the_deleters_tombstone_after_a_dismissed_conflict_is_harmless(workers):
     assert result.rejected == result.retry == 0
     with b.active():
         assert b.sql("SELECT id FROM sync_conflicts") == []
+
+
+def _deliver_own_ops(sender, receiver):
+    """Only the ops ``sender`` signed itself, ahead of anything it relays."""
+    with receiver.active():
+        marks = store.local_watermarks()
+    with sender.active():
+        ops, _, needs_snapshot = store.exchange_batch(marks, exclude_origin=receiver.device_id)
+    assert not needs_snapshot
+    with receiver.active():
+        return engine.apply_batch([op for op in ops if op["origin_device_id"] == sender.device_id])
+
+
+def _three_workers(workers):
+    a, b, c = workers("a"), workers("b"), workers("c")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        database.create_note(note_id="n1", title="Note", content="body")
+        engine.scan_all()
+    join(a, b)
+    join(a, c)
+    converge([a, b, c])
+    return a, b, c
+
+
+def test_a_relay_signs_nothing_for_attachments_a_peers_note_delete_removed(workers):
+    """S7: Y deleted the note never having seen B's attachment; X held only its record.
+
+    X applies Y's delete and scans. Its stream reaches B before Y's note
+    tombstone does. X deleted nothing itself, so it signs no tombstone, and B
+    still keeps the bytes when Y's deletion arrives.
+    """
+    y, b, x = _three_workers(workers)
+    _attach(b)
+    exchange(b, x)  # X mirrors the attachment record, never its bytes
+    _delete_note_winning(y)  # Y never saw att1
+    exchange(y, x)
+    with x.active():
+        engine.scan_all()
+    _deliver_own_ops(x, b)
+    with b.active():
+        assert b.sql("SELECT id FROM note_attachments") == [{"id": "att1"}]
+    converge([y, b, x])
+    with b.active():
+        assert [c["record_id"] for c in _attachment_conflicts(b)] == ["att1"]
+        assert blobs.read_local(DIGEST) == PAYLOAD
+
+
+def test_the_receivers_scan_before_the_deleters_leaves_no_conflict(workers):
+    """S6: B applies A's note delete and scans before A's scan signs the attachment tombstone."""
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])  # A holds the attachment record: its delete covers it
+    with a.active():
+        database.update_note("n1", title="edit")
+        engine.scan_all()
+        database.delete_note("n1")
+        engine.scan_collection("notes")
+    exchange(a, b)
+    with b.active():
+        engine.scan_all()  # B deleted nothing itself: nothing to sign
+    exchange(b, a)
+    with a.active():
+        engine.scan_all()  # so A's own tombstone for att1 is still signed
+    converge([a, b])
+    with b.active():
+        assert _attachment_conflicts(b) == []
+        assert b.sql("SELECT id FROM sync_conflicts WHERE kept_blob_hash IS NOT NULL") == []
+        assert blobs.read_local(DIGEST) is None
+
+
+def test_a_relays_snapshot_carries_the_deleters_attachment_tombstone(workers):
+    """S8: B catches up from C's state copy, whose frontier already holds A's attachment tombstone."""
+    a, b, c = _three_workers(workers)
+    _attach(b)
+    converge([a, b, c])
+    with a.active():
+        database.update_note("n1", title="edit")
+        engine.scan_all()
+        database.delete_note("n1")
+        engine.scan_collection("notes")
+    exchange(a, c)
+    with c.active():
+        for i in range(3):  # C's clock moves past A's
+            database.create_note(note_id=f"c{i}", title="C", content="")
+            engine.scan_all()
+    with a.active():
+        engine.scan_collection("note_attachments")
+    exchange(a, c)
+    with c.active():
+        manifest = engine.snapshot_manifest()
+        pages = [engine.snapshot_chunk(collection, 0) for collection in ("notes", "note_attachments")]
+    with b.active():
+        for page in pages:
+            engine.apply_snapshot_chunk(page)
+        engine.adopt_watermarks(manifest["watermarks"])
+    converge([a, b, c])
+    with b.active():
+        assert database.get_note("n1") is None
+        assert _attachment_conflicts(b) == []
+        assert blobs.read_local(DIGEST) is None
+
+
+def test_a_lagging_peers_snapshot_of_the_attachment_after_the_delete_is_skipped(workers):
+    """B applied A's note delete; C's state copy still has the note and the attachment live."""
+    a, b, c = _three_workers(workers)
+    _attach(b)
+    exchange(b, c)  # A never sees att1
+    _delete_note_winning(a)
+    exchange(a, b)
+    with c.active():
+        pages = [engine.snapshot_chunk(collection, 0) for collection in ("notes", "note_attachments")]
+    with b.active():
+        for page in pages:
+            engine.apply_snapshot_chunk(page)
+        assert database.get_note("n1") is None
+        assert b.sql("SELECT id FROM note_attachments") == []
+        assert [c["record_id"] for c in _attachment_conflicts(b)] == ["att1"]
+        assert blobs.read_local(DIGEST) == PAYLOAD
+
+
+def test_a_late_live_upsert_of_a_forgotten_attachment_is_refused(workers):
+    """C attached the file; B mirrored it, then applied A's note delete. C, not yet told, changes it."""
+    a, b, c = _three_workers(workers)
+    _attach(c)
+    exchange(c, b)  # A never sees att1
+    _delete_note_winning(a)
+    exchange(a, b)
+    with c.active():
+        with database.get_db() as conn:
+            conn.cursor().execute("UPDATE note_attachments SET filename = 'renamed.txt' WHERE id = 'att1'")
+        engine.scan_all()
+    result = exchange(c, b)
+    with b.active():
+        assert any(reason.startswith("parent deleted: notes/n1") for reason in result.reasons)
+        assert b.sql("SELECT id FROM note_attachments") == []
+        assert b.sql("SELECT record_id FROM sync_records WHERE collection = 'note_attachments'") == []
+        # The cascade's kept copy stays; the refusal adds main's usual notice beside it.
+        assert b.sql("SELECT record_id FROM sync_conflicts WHERE kept_blob_hash IS NOT NULL") == [
+            {"record_id": "att1"}]
+
+
+def test_a_local_attachment_delete_still_signs_its_tombstone(workers):
+    a, b = _shared_note(workers)
+    _attach(b)
+    converge([a, b])
+    with b.active():
+        database.delete_note_attachment("att1")
+        engine.scan_all()
+    exchange(b, a)
+    with a.active():
+        assert a.sql("SELECT id FROM note_attachments") == []
+        [version] = a.sql("SELECT deleted, origin_device_id FROM sync_records WHERE collection = 'note_attachments'")
+        assert bool(version["deleted"]) and version["origin_device_id"] == b.device_id
+        assert _attachment_conflicts(a) == []
 
 
 def test_local_note_delete_is_unchanged(workers):
