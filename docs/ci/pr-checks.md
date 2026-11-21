@@ -1535,11 +1535,25 @@ and the CI driver without the flag still run once.
 retry behavior. A main run that passes only on retry can authorize nightly
 publication. On **push-to-main runs only**, the last step of the `CI`
 job (after the verdict, so it adds no queued job) reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
-artifacts and opens one issue per recovered journey + full case ID (including
+artifacts and records each recovered journey + full case ID (including
 viewport/throttle). A crashed file without per-case evidence retains the
 receipt's `(whole journey)` identity. A first-pass success, an unrecovered
-failure, or a skipped retry does not file an issue. The runner's accepted
+failure, or a skipped retry is not recorded. The runner's accepted
 `known-bug` verdict on retry remains accepted and is reported as such.
+
+**One retry does not open an issue.** Every recovered case is written as a
+comment to one closed bot issue, the ledger (`UI journey retries on main
+(occurrence ledger)`, found by its hidden `ui-journey-flake-ledger:v1` marker
+and created closed on first use). A case gets its own issue only when it has
+recovered in 3 distinct main runs within 14 days, this run included
+(`THRESHOLD` and `WINDOW_DAYS` in `scripts/devloop/journey_issues.py`). A case
+whose issue is already open gets a comment on every run. A closed issue
+reopens only after 3 runs since it was closed, so closing one as not planned
+holds until the case keeps flaking. Only the bot's own ledger comments count.
+A rerun of a workflow run is never recorded again (the ledger is read back to
+when that run was created, if that is before the 14 days), and it counts only while
+its original entry does: inside the 14 days and after the close. If the
+ledger cannot be read or written, the step warns and opens nothing new.
 
 Open **and closed** issues authored by `github-actions[bot]` match when
 the body contains that case's complete stable hidden marker, **or** when the
@@ -1549,8 +1563,9 @@ recovery. A renamed title cannot override another case's complete marker.
 Markers in anyone else's issues/comments are ignored. If more
 than one bot issue matches, reporting warns and uses the lowest-numbered open
 issue, or the lowest-numbered closed issue if none is open. Each new workflow
-run adds a comment with the latest run link and commit; a closed issue is
-reopened with a note that it came back. Before choosing a target, per-case run
+run adds a comment with the latest run link and commit to an open issue; a
+closed issue that reaches the threshold again is reopened with a note that it
+came back. Before choosing a target, per-case run
 markers (`<!-- ui-journey-flake-run:<run-id>:<case-hash> -->`) in the bot's own
 bodies/comments across **all matching issues** deduplicate each case's reruns,
 even if cases share an issue or a duplicate was closed between attempts. The
@@ -1580,7 +1595,8 @@ comments are written):
 python -m scripts.devloop.journey_issues --repository HobbyCoders/ai-shuffle --run-id <run-id> --dry-run
 ```
 
-This reads real run metadata, artifacts and matching issues. For an already
+This reads real run metadata, artifacts, the ledger and matching issues, and
+prints `record` for a case still under the threshold. For an already
 downloaded artifact directory, add `--receipts <directory>` with `--dry-run`;
 its immediate `ui-journeys-<N>/summary.json` files are read, not nested
 per-attempt summaries. A malformed row is warned about and skipped without
