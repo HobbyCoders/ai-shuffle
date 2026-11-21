@@ -480,6 +480,23 @@ def test_startup_check_is_skipped(worker, asking, monkeypatch, installed, versio
     assert cuc.available() == []
 
 
+def test_the_dev_loop_asks_no_vendor_about_its_scripted_cli(worker, asking, monkeypatch):
+    # Its fake claude has a made-up version: a real answer would put a banner
+    # over every UI journey.
+    _, cli, _ = worker
+    cli.installed, cli.cli_version = True, "2.1.323"
+    release = Mock(return_value="9.9.9")
+    monkeypatch.setattr(ci, "latest_release", release)
+    monkeypatch.setenv("SHUFFLE_DEV_FAKE_AI_URL", "http://127.0.0.1:4010")
+    monkeypatch.setattr("app.preview_run.disposable_preview_data", lambda: True)
+    assert cuc.suppressed() is True
+    assert ci.check_on_startup(cli) is False
+    release.assert_not_called()
+    # The same variable on a real install changes nothing.
+    monkeypatch.setattr("app.preview_run.disposable_preview_data", lambda: False)
+    assert cuc.suppressed() is False
+
+
 def test_the_switch_is_on_by_default_and_turning_it_off_drops_the_notice(worker, asking, monkeypatch):
     store, cli, _ = worker
     cli.installed, cli.cli_version = True, "2.1.323"

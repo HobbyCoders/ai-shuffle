@@ -43,8 +43,11 @@ def set_enabled(provider: str, value: bool) -> None:
 
 
 def suppressed() -> bool:
-    """The test suite never asks a vendor anything."""
-    return os.environ.get("TESTING") == "1"
+    """The test suite and the dev loop, whose CLIs are scripted, ask no vendor."""
+    if os.environ.get("TESTING") == "1":
+        return True
+    from app.core.claude_api_models import dev_base_url
+    return dev_base_url() is not None
 
 
 def version_key(text: Optional[str]) -> Optional[tuple]:

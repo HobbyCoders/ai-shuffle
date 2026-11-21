@@ -100,8 +100,8 @@ services:
       # kept when the container is replaced.
       - claude-home:/home/appuser/.claude
       # Provider CLI programs (Claude Code, installed from Settings or setup
-      # with Anthropic's installer). Container start never installs or
-      # updates it.
+      # with Anthropic's installer). Container start never installs, updates
+      # or removes them.
       - local-home:/home/appuser/.local
       # GitHub CLI sign-in.
       - gh-auth:/home/appuser/.config/gh

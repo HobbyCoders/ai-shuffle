@@ -4,8 +4,9 @@
  *
  * The worker only looks. Nothing is installed until the owner presses Update
  * here or in Settings > Providers, where each provider also has the switch
- * that turns its check off. Closing a banner hides that version in this
- * browser; the next version shows again.
+ * that turns its check off. A banner leaves on its own after a while and
+ * comes back on the next load. Closing it hides that version in this browser;
+ * the next version shows again.
  */
 import { getErrorMessage } from '$lib/api/client';
 import { getAntigravityStatus, updateAntigravity } from '$lib/api/antigravity';
@@ -17,12 +18,16 @@ type Provider = CliUpdate['provider'];
 const DISMISSED_KEY = 'ai-shuffle-cli-update-dismissed';
 /** The worker's check runs in the background after it starts: ask once more later. */
 export const SETTLE_MS = 30_000;
+/** How long an offer stays up. Left up, it covers controls on a phone. */
+export const SHOW_MS = 15_000;
 const POLL_MS = 2000;
 const JOB_LIMIT_MS = 15 * 60_000;
 const RESULT_MS = 8000;
 
 /** The banner on screen for each CLI and the version it offers. */
 const shown = new Map<Provider, { id: string; version: string }>();
+/** Versions whose banner timed out: not put up again on this load. */
+const rested = new Map<Provider, string>();
 /** CLIs whose update the owner started from a banner. */
 const working = new Set<Provider>();
 let installed = false;
@@ -56,7 +61,7 @@ function drop(provider: Provider): void {
 function show(update: CliUpdate): void {
 	const { provider, latest_version: version } = update;
 	if (working.has(provider) || shown.get(provider)?.version === version) return;
-	if (dismissedVersions()[provider] === version) return;
+	if (dismissedVersions()[provider] === version || rested.get(provider) === version) return;
 	drop(provider);
 	const id = notify.banner(`${update.name} ${version} is available. This worker has ${update.installed_version}.`, {
 		severity: 'info',
@@ -67,6 +72,12 @@ function show(update: CliUpdate): void {
 		onDismiss: () => rememberDismissed(provider, version)
 	});
 	shown.set(provider, { id, version });
+	// Timed here, not by the banner: the next ask has to know it timed out.
+	setTimeout(() => {
+		if (shown.get(provider)?.id !== id) return;
+		rested.set(provider, version);
+		drop(provider);
+	}, SHOW_MS);
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -164,6 +175,7 @@ export function installCliUpdateNotice(): () => void {
 		if (timer) clearTimeout(timer);
 		timer = null;
 		for (const provider of [...shown.keys()]) drop(provider);
+		rested.clear();
 		stopWatching?.();
 		stopWatching = null;
 	};

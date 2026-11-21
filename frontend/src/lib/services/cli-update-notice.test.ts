@@ -12,7 +12,7 @@ import { liveBanners, notify } from '$lib/stores/notifications';
 import { antigravity } from '$lib/components/settings/providers/antigravity.svelte';
 import { ClaudeCliInstallState } from '$lib/components/settings/providers/claude-cli-install.svelte';
 import { MachineSettingsModel } from '$lib/components/settings/devices/machine-settings.svelte';
-import { SETTLE_MS, installCliUpdateNotice, recheckCliUpdates } from './cli-update-notice';
+import { SETTLE_MS, SHOW_MS, installCliUpdateNotice, recheckCliUpdates } from './cli-update-notice';
 
 const claude = { provider: 'claude', name: 'Claude Code', installed_version: '2.1.323', latest_version: '2.1.330' };
 const agy = { provider: 'antigravity', name: 'Antigravity', installed_version: '1.5.7', latest_version: '1.5.13' };
@@ -129,6 +129,33 @@ describe('cli update notice', () => {
 		// It comes back on the next ask, here and after a reload.
 		for (const banner of get(liveBanners)) notify.dismissLive(banner.id);
 		recheckCliUpdates();
+		await settle();
+		expect(messages()).toEqual(['Claude Code 2.1.330 is available. This worker has 2.1.323.']);
+	});
+
+	it('leaves on its own, stays down for this load and is back on the next', async () => {
+		updates = [claude];
+		teardown = installCliUpdateNotice();
+		await settle();
+		await vi.advanceTimersByTimeAsync(SHOW_MS - 1);
+		expect(banners()).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(banners()).toHaveLength(0);
+		// Not closed by the owner, and the later asks do not put it back.
+		expect(localStorage.getItem('ai-shuffle-cli-update-dismissed')).toBeNull();
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		recheckCliUpdates();
+		await settle();
+		expect(banners()).toHaveLength(0);
+		// A newer version is a new offer.
+		updates = [{ ...claude, latest_version: '2.1.331' }];
+		recheckCliUpdates();
+		await settle();
+		expect(messages()).toEqual(['Claude Code 2.1.331 is available. This worker has 2.1.323.']);
+
+		updates = [claude];
+		teardown();
+		teardown = installCliUpdateNotice();
 		await settle();
 		expect(messages()).toEqual(['Claude Code 2.1.330 is available. This worker has 2.1.323.']);
 	});
