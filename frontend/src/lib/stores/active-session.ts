@@ -33,7 +33,7 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode, getPersistedUltrafastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields, SPENT_CHECKOUT,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -1694,6 +1694,18 @@ export const activeSession = {
 	clearWorktreeSelection() {
 		composerPreferences.rememberCheckout({projectId:_state.project, projectV2Id:_state.projectV2Id}, null);
 		_update(s => ({ ...s, worktreeId: null, selectedWorktreeBranch: null, worktreeBranch: '', worktreeCheckoutPending: false, worktreeMode: 'new' as const }));
+	},
+
+	/**
+	 * The compose's opening was admitted as a chat of its own: its branch and
+	 * create flags are that chat's now, never the compose's. Saved at once, so
+	 * a switch that runs a frame later, or a reload before it, parks it clean
+	 * (#1756). The project's remembered checkout is left alone.
+	 */
+	dropSpentCheckout() {
+		if (_state.sessionId) return;
+		_update(s => ({ ...s, ...SPENT_CHECKOUT }));
+		persistSession();
 	},
 
 	markWorktreeDeleted() {

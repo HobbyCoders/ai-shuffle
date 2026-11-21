@@ -136,6 +136,13 @@ interface LiveSnapshot {
 	activeTasks?: Task[];
 }
 
+/** A compose's checkout once an opening has spent it: no branch, no picked
+ *  worktree. Worktree on/off (`worktreeIntent`) is the user's and stays. */
+export const SPENT_CHECKOUT = {
+	worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null, worktreeMode: 'new', worktreeBaseBranch: 'main',
+	worktreeCreateNewBranch: false, worktreeCheckoutPending: false, worktreeDeleted: false,
+} as const satisfies Partial<SessionEphemeral>;
+
 /** Worktree metadata from the session list, used to restore worktree state
  * when the ephemeral cache doesn't have an entry for the target session. */
 export interface SessionWorktreeInfo {
@@ -505,17 +512,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	function buildLeavingEphemeral(state: ActiveSessionState, leavingOpening = false): SessionEphemeral {
 		const ephemeral = buildEphemeral(state);
 		if (state.sessionId || !(state.isCreatingWorktree || leavingOpening)) return ephemeral;
-		return {
-			...ephemeral,
-			worktreeId: null,
-			worktreeBranch: '',
-			selectedWorktreeBranch: null,
-			worktreeMode: 'new',
-			worktreeBaseBranch: 'main',
-			worktreeCreateNewBranch: false,
-			worktreeCheckoutPending: false,
-			worktreeDeleted: false,
-		};
+		return { ...ephemeral, ...SPENT_CHECKOUT };
 	}
 
 	function saveSelectionToBackend(profile: string, project: string) {
