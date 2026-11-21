@@ -62,6 +62,7 @@ await runJourney({
 			const row = page.getByRole('button', { name: new RegExp(`^${label}`) }).filter({ visible: true }).first();
 			const emptyDetail = page.getByText('Select a sign-in, or add one.').filter({ visible: true });
 			const bar = page.locator('.topbar');
+			const synced = page.getByText(/Encrypted, and synced to your other workers\./).filter({ visible: true });
 
 			await mark('open Settings > Vault');
 			const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
@@ -88,11 +89,13 @@ await runJourney({
 			await button('Remove').waitFor();
 			expect(await page.getByLabel('Password', { exact: true }).filter({ visible: true }).inputValue() === '',
 				'the saved password is not sent back to the page');
+			expect(await synced.count() === 1, 'the saved sign-in says it syncs to the other workers');
 
 			await mark('Back returns to the Vault list');
 			await bar.getByRole('button', { name: 'Back to Vault', exact: true }).click();
 			await row.waitFor();
 			expect(await emptyDetail.count() === 0, 'Back shows the list, not an empty detail page');
+			expect(await synced.count() === 1, 'the list says its sign-ins sync to the other workers');
 
 			await mark('open the sign-in and go back with the system Back');
 			await row.click();

@@ -1,7 +1,7 @@
 /**
  * Vault: the data and form state behind Settings > Vault.
  *
- * - The list is the owner's saved sign-ins on this worker. The worker never
+ * - The list is the owner's saved sign-ins, synced across workers. The worker never
  *   sends a stored secret, so secret fields always start empty: on an existing
  *   sign-in a blank secret keeps the stored one and a typed one replaces it.
  * - Saving is explicit. Only changed fields are sent, and typed secrets are

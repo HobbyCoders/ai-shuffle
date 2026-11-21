@@ -97,6 +97,8 @@ _LOCAL_SETTING_PATTERNS = [
         r"^cluster_",
         r"^mobile_",
         r"^credential_key_state",
+        # Vault sign-ins a worker saved before they synced. Startup moves them
+        # to vault_entry:*, which is shared; a row left here stays local.
         r"^chat_connection:",
         r"^plugin_oauth:",
         r"^claude_cli_relogin_notice(:|$)",

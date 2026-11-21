@@ -106,7 +106,7 @@
 		if (restoreFocus || focusInside) chip()?.focus({ preventScroll: true });
 	}
 	const togglePanel = () => (panelOpen ? closePanel() : openPanel());
-	/** Saved sign-ins of this worker are edited in Settings, not in a chat. */
+	/** Saved sign-ins are edited in Settings; they sync to the owner's other workers. */
 	function manageSaved() {
 		closePanel();
 		openSettings({ category: 'vault' });
@@ -557,8 +557,8 @@
 			{/if}
 
 			{#if owner}
-				<!-- A mirrored chat: its sign-ins live on the device it runs on, out
-				     of reach of this worker's Settings, so they are managed here. -->
+				<!-- A mirrored chat lists what the device it runs on holds (that is
+				     what this chat can use) and edits them there. -->
 				{#if data.saved_connections.length}
 					<h3 class="pa-group">Saved sign-ins on {owner}</h3>
 					<ul class="pa-list" aria-label="Saved sign-ins">
@@ -591,13 +591,15 @@
 					{#if editNotice}<p class="pa-hint pa-foot" role="status">{editNotice}</p>{/if}
 					<p class="pa-hint pa-foot">Removing a saved sign-in, or changing more than its name, ends access that uses it.</p>
 				{/if}
-			{:else}
-				<button type="button" class="pa-manage" onclick={manageSaved}>
-					<Settings2 size={14} strokeWidth={1.7} aria-hidden="true" />
-					<span>Manage saved sign-ins in Settings › Vault</span>
-					{#if data.saved_connections.length}<small>{data.saved_connections.length} saved</small>{/if}
-				</button>
 			{/if}
+			<!-- In a mirrored chat too: saved sign-ins sync between workers, so
+			     this worker's Settings reaches them even when a typed secret
+			     cannot travel to the other device. -->
+			<button type="button" class="pa-manage" onclick={manageSaved}>
+				<Settings2 size={14} strokeWidth={1.7} aria-hidden="true" />
+				<span>Manage saved sign-ins in Settings › Vault</span>
+				{#if !owner && data.saved_connections.length}<small>{data.saved_connections.length} saved</small>{/if}
+			</button>
 		</div>
 	</div>
 </div>

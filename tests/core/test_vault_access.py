@@ -1196,6 +1196,78 @@ async def test_saved_edit_of_address_clears_the_pin_and_next_use_pins_the_presen
     broker.revoke("chat", handle["id"])
 
 
+def _synced(saved_id, spec):
+    """Another worker's version of a saved sign-in, stored the way worker sync stores it."""
+    from app.core import vault_store
+    vault_store._store(vault_store.key(EDIT_OWNER, saved_id), spec)
+
+
+@pytest.mark.asyncio
+async def test_change_made_on_another_worker_ends_grants_built_on_the_old_details(broker, saved_vault, ssh_target):
+    from app.core import vault_store
+    spec, _, _ = ssh_target
+    saved_id = vault_store.save(EDIT_OWNER, spec)
+    other_id = vault_store.save(EDIT_OWNER, spec.model_copy(update={"label": "Second"}))
+    handle, other = await _grant_saved(broker, saved_id), await _grant_saved(broker, other_id)
+
+    # A rename there keeps the grant here, as a rename here does.
+    _synced(saved_id, spec.model_copy(update={"label": "Renamed elsewhere"}))
+    await broker.saved_changed_elsewhere({saved_id})
+    assert {handle["id"], other["id"]} <= set(broker.grants)
+
+    # A replaced password ends the grant built on the old one, and only that grant.
+    from pydantic import SecretStr
+    _synced(saved_id, spec.model_copy(update={"label": "Renamed elsewhere",
+                                              "password": SecretStr("replacement-only-secret")}))
+    await broker.saved_changed_elsewhere({saved_id})
+    assert handle["id"] not in broker.grants and other["id"] in broker.grants
+
+    # So does a removal: the row is gone when the notice arrives.
+    del saved_vault[vault_store.key(EDIT_OWNER, other_id)]
+    await broker.saved_changed_elsewhere({other_id, "f" * 32})
+    assert not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_host_key_recorded_on_another_worker_keeps_only_grants_that_verified_the_same_key(
+        broker, saved_vault, ssh_target):
+    from app.core import vault_store
+    spec, _, _ = ssh_target
+    unpinned = spec.model_copy(update={"fingerprint": ""})
+    saved_id = vault_store.save(EDIT_OWNER, unpinned)
+    handle = await _grant_saved(broker, saved_id)
+    assert vault_store.load(EDIT_OWNER, saved_id).fingerprint == spec.fingerprint
+
+    # Another worker's first connection recorded the key this grant verified too.
+    _synced(saved_id, spec)
+    await broker.saved_changed_elsewhere({saved_id})
+    assert handle["id"] in broker.grants
+
+    # A different key there means the two workers did not reach the same machine.
+    _synced(saved_id, spec.model_copy(update={"fingerprint": "SHA256:" + "c" * 43}))
+    await broker.saved_changed_elsewhere({saved_id})
+    assert handle["id"] not in broker.grants
+
+
+@pytest.mark.asyncio
+async def test_sync_thread_hands_vault_changes_to_the_broker_on_the_app_loop(broker, saved_vault, ssh_target, monkeypatch):
+    from app.core import vault_store
+    from app.core.global_events import global_events
+    spec, _, _ = ssh_target
+    saved_id = vault_store.save(EDIT_OWNER, spec)
+    handle = await _grant_saved(broker, saved_id)
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(global_events, "_loop", asyncio.get_running_loop(), raising=False)
+    assert vault_store.catalog(EDIT_OWNER, cache_empty=True)
+    del saved_vault[vault_store.key(EDIT_OWNER, saved_id)]
+    # Worker sync calls this on its own thread, after its commit.
+    await asyncio.to_thread(vault_access.saved_changed_elsewhere, [vault_store.key(EDIT_OWNER, saved_id)])
+    async with asyncio.timeout(3):
+        while broker.grants:
+            await asyncio.sleep(0.01)
+    assert handle["id"] not in broker.grants
+
+
 def test_apply_saved_edit_address_and_credential_rules():
     from app.core.vault_access import SavedConnectionEdit, apply_saved_edit
     pin = "SHA256:" + "a" * 43
