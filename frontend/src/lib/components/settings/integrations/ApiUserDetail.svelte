@@ -81,7 +81,7 @@
 			return;
 		}
 		settingsNav.setTab('integrations', created, 'Overview');
-		settingsNav.selectItem(created, 'integrations');
+		settingsNav.replaceItem(created, 'integrations');
 	}
 
 	function cancelDraft() {

@@ -82,7 +82,7 @@ def test_nightly_and_both_stable_paths_use_the_unprivileged_bundle_job():
     assert "secrets." not in workflow and "ubuntu-24.04" in workflow
     nightly = (ROOT / ".github/workflows/desktop-source.yml").read_text()
     assert "uses: ./.github/workflows/source-ui-bundle.yml" in nightly
-    assert "SOURCE_UI_BUNDLE_FILE:" in nightly and "- cron: '0 6 * * *'" in nightly
+    assert "SOURCE_UI_BUNDLE_FILE:" in nightly and "- cron: '0 0 * * *'" in nightly and "timezone: America/New_York" in nightly
     # One version per run: a release tag pushed between the UI build and the
     # signer must not stamp the bundle and the manifest differently (v1.2.0).
     assert "version: ${{ needs.gate.outputs.version }}" in nightly

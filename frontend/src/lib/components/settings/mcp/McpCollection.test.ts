@@ -122,6 +122,18 @@ describe('Settings > MCP servers editing', () => {
 		await waitFor(() => expect(settingsNav.selectedItem('mcp')).toBe('github'));
 	});
 
+	it('opens a saved server whose name was the old draft id (#1895)', async () => {
+		await show();
+		await fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+		await type(field('github'), 'new-mcp-server');
+		await type(field('npx'), 'npx');
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Add server' }).at(-1)!);
+		await waitFor(() => expect(settingsNav.selectedItem('mcp')).toBe('new-mcp-server'));
+		expect(screen.queryByText('Not added yet')).toBeNull();
+		expect(screen.queryByText('Select a server, or add one.')).toBeNull();
+		expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+	});
+
 	it('saves an edit only when Save is pressed', async () => {
 		await show('files');
 		const save = () => screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;

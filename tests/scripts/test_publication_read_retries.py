@@ -128,7 +128,7 @@ def test_unknown_cli_failure_and_invalid_json_are_not_retried(monkeypatch, waits
                                  *map(cli_timeout, CLI_TIMEOUTS)])
 def test_exhausted_jobs_read_never_writes_publication_permission(monkeypatch, tmp_path, waits, error):
     event, output = tmp_path / "event.json", tmp_path / "output"
-    event.write_text('{"schedule": "0 6 * * *"}')
+    event.write_text(json.dumps({"schedule": gate.NIGHTLY_CRON}))
     for key, value in {
         "GITHUB_EVENT_PATH": str(event), "GITHUB_OUTPUT": str(output),
         "GITHUB_EVENT_NAME": "schedule", "GITHUB_REPOSITORY": gate.REPOSITORY,

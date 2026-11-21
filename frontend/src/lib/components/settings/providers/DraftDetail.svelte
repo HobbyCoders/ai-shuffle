@@ -55,7 +55,7 @@
 
 	async function finish(item: string) {
 		const draftItem = draft.item;
-		settingsNav.selectItem(item, 'providers');
+		settingsNav.replaceItem(item, 'providers');
 		providerDrafts.remove(draftItem);
 		flashSaved();
 		await providers.refreshProviders().catch(() => {});

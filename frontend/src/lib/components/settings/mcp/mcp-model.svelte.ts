@@ -23,7 +23,12 @@ import {
 import { isForbidden } from '$lib/settings/access.svelte';
 import type { SettingsIcon } from '$lib/settings/categories';
 
-export const DRAFT_ID = 'new-mcp-server';
+/**
+ * The draft's item id. Servers are keyed by name, and a name is only letters,
+ * digits, hyphens and underscores, so the colon keeps a saved server from ever
+ * taking the draft's id (a server named `new-mcp-server` is allowed).
+ */
+export const DRAFT_ID = 'draft:new-mcp-server';
 
 export interface Pair {
 	key: string;
