@@ -124,25 +124,28 @@ def suite_state(api, commit, *, now, cache=None):
     landing mid-poll must not make its replacement run look unrelated.
     """
     cache = {} if cache is None else cache
-    # Active runs are read before finished ones so a run finishing between the
-    # two reads is still seen.
-    testing = [run for run in _active(api, "ci.yml", MAIN_EVENTS) if contains(api, commit, run["head_sha"], cache)]
-    finished, seen = [], set()
-    for run in _runs(api, "ci.yml", "completed", MAIN_EVENTS):
-        sha = run["head_sha"]
-        if sha in seen:
-            continue  # newest run per commit, as the publication gate reads it
-        seen.add(sha)
-        if not contains(api, commit, sha, cache):
-            break  # main is linear: every older run is on an older revision
-        finished.append(run)
+    # Each revision counts by its latest run, active or finished, as the
+    # publication gate reads it. Active runs are read first so a run finishing
+    # between the two reads is still seen; its finished copy then wins.
+    latest = {}
+    for run in _active(api, "ci.yml", MAIN_EVENTS) + _runs(api, "ci.yml", "completed", MAIN_EVENTS):
+        held = latest.get(run["head_sha"])
+        if held is None or run.get("id", 0) >= held.get("id", 0):
+            latest[run["head_sha"]] = run
+    covering = []
+    for run in sorted(latest.values(), key=lambda run: run.get("id", 0), reverse=True):
+        if not contains(api, commit, run["head_sha"], cache):
+            if run.get("status") == "completed":
+                break  # main is linear: every older run is on an older revision
+            continue  # an active run on an older revision says nothing
+        covering.append(run)
+    finished = [run for run in covering if run.get("status") == "completed"]
     passed = next((run for run in finished if run.get("conclusion") == "success"), None)
-    # A pass already proves the commit for the next nightly; a newer merge's run
-    # still testing does not change that. A run active on the passed revision
-    # itself does: the publisher reads only that revision's latest run.
-    if testing and (not passed or passed["head_sha"] in {run["head_sha"] for run in testing}):
-        run = testing[0]
-        return "testing", f"CI is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
+    # Any covering revision whose latest run passed proves the commit for the
+    # next nightly; a run still testing matters only when none has.
+    testing = next((run for run in covering if run.get("status") != "completed"), None)
+    if testing and not passed:
+        return "testing", f"CI is {testing['status'].replace('_', ' ')} on {testing['head_sha'][:9]}: {testing['html_url']}"
     # The publisher runs at 12:00 AM New York time or on owner dispatch, and may
     # also ship an owner local pass: while one is in flight the commit may ship.
     publishers = _active(api, "desktop-source.yml")
