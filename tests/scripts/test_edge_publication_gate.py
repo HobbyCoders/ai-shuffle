@@ -276,7 +276,7 @@ def env(**changes):
 
 
 def status_event(**changes):
-    event = {"schedule": "0 6 * * *", "context": gate.CONTEXT, "state": "success", "sha": REVISION, "sender": {"id": int(gate.OWNER_ID)}}
+    event = {"schedule": gate.NIGHTLY_CRON, "context": gate.CONTEXT, "state": "success", "sha": REVISION, "sender": {"id": int(gate.OWNER_ID)}}
     event.update(changes)
     return event
 
@@ -305,6 +305,8 @@ def test_event_predicate():
     assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_ACTOR_ID="7"), {})
     assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_TRIGGERING_ACTOR="x"), {})
     assert not gate.event_allowed(env(), {"schedule": "0 7 * * *"})
+    # The old 06:00 UTC schedule no longer authorizes a run.
+    assert not gate.event_allowed(env(), {"schedule": "0 6 * * *"})
     for name in ["pull_request", "workflow_run", "status", "push"]:
         assert not gate.event_allowed(env(GITHUB_EVENT_NAME=name), status_event())
     assert not gate.event_allowed(env(GITHUB_REF="refs/heads/feature"), status_event())
@@ -338,42 +340,18 @@ def hosted_event(**changes):
     return {"workflow_run": run}
 
 
-@pytest.mark.parametrize("changes", [
-    {"name": "other"}, {"status": "in_progress"}, {"conclusion": "failure"},
-    {"conclusion": "cancelled"}, {"head_branch": "feature"}, {"event": "pull_request"},
-    {"repository": {"full_name": "fork/ai-shuffle"}},
-    {"head_repository": {"full_name": "fork/ai-shuffle"}}, {"id": True}, {"id": 0},
-])
-def test_workflow_run_payload_guards(changes):
-    assert gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event())
-    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event(**changes))
-
-
-@pytest.mark.parametrize("valid,changes", [
-    (True, {}), (False, {"run_attempt": 1}), (False, {"id": 40}),
-    (False, {"head_sha": OTHER}), (False, {"head_sha": "invalid"}),
-])
-def test_workflow_run_entrypoint_reverifies_api_even_with_local_pass(valid, changes, monkeypatch, tmp_path):
+def test_a_green_main_ci_run_no_longer_starts_publication(monkeypatch, tmp_path):
+    """The nightly is scheduled or dispatched; a merge's finished CI run is refused."""
+    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event())
+    assert not gate.event_allowed(env(GITHUB_EVENT_NAME="workflow_run"), hosted_event(event="workflow_dispatch"))
     event_path, output = tmp_path / "event.json", tmp_path / "out"
-    event_path.write_text(json.dumps(hosted_event(**changes)))
+    event_path.write_text(json.dumps(hosted_event()))
     for key, value in env(GITHUB_EVENT_NAME="workflow_run", GITHUB_EVENT_PATH=str(event_path),
                           GITHUB_OUTPUT=str(output)).items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("SOURCE_REVISION", raising=False)
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    api = HostedGitHub(statuses=[status()])
-    monkeypatch.setattr(gate, "GitHub", lambda: api)
-    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: REVISION + "\n")
-    monkeypatch.setattr(gate, "main_history", lambda api, **kw: [REVISION, OTHER])
-    monkeypatch.setattr(gate, "published_edge_revision", lambda: OTHER)
-    if valid:
+    with pytest.raises(ValueError, match="not authorized"):
         gate.main(["--select"])
-        assert output.read_text() == f"ready=true\nrevision={REVISION}\n"
-        assert "actions/runs/41/attempts/2/jobs?per_page=100&page=1" in api.calls
-    else:
-        with pytest.raises(ValueError, match="Triggering hosted"):
-            gate.main(["--select"])
-        assert not output.exists()
+    assert not output.exists()
 
 
 def test_entrypoint_refuses_unauthorized_events(monkeypatch, tmp_path):
@@ -422,10 +400,10 @@ def test_workflow_wiring_matches_the_gate():
     condition = config["jobs"]["gate"]["if"]
     assert "github.event_name == 'schedule'" in condition
     assert f"github.actor_id == '{gate.OWNER_ID}'" in condition
-    assert set(config["on"]) == {"schedule", "workflow_dispatch", "workflow_run"}
-    assert config["on"]["workflow_run"] == {
-        "workflows": [gate.MAIN_SUITE_NAME], "types": ["completed"], "branches": ["main"]}
-    assert config["on"]["schedule"] == [{"cron": "0 6 * * *"}]
+    # Once a night at 12:00 AM New York time, or the owner's dispatch; no merge starts it.
+    assert set(config["on"]) == {"schedule", "workflow_dispatch"}
+    assert config["on"]["schedule"] == [{"cron": gate.NIGHTLY_CRON, "timezone": "America/New_York"}]
+    assert "workflow_run" not in (ROOT / ".github/workflows/desktop-source.yml").read_text()
     assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"

@@ -92,10 +92,10 @@ def test_a_replaced_waiting_run_is_not_an_event():
         return pointer(TIP if len(polls) >= 5 else OLD)()
 
     code, said, _ = wait(api, fetch)
-    assert code == 0
+    assert code == waiter.SCHEDULED
     assert not any("cancel" in line.lower() for line in said)
-    assert [line.split(".")[0] for line in said] == [
-        "Not in a nightly yet (live: 1", f"CI passed on {TIP[:9]}; waiting for the publisher", "Published: nightly 1"]
+    assert [line.split(".")[0] for line in said] == ["Not in a nightly yet (live: 1", f"CI passed on {TIP[:9]}"]
+    assert "12:00 AM New York time" in said[-1]
 
 
 def test_unchanged_state_is_reported_once():
@@ -146,11 +146,25 @@ def test_a_run_that_has_not_registered_yet_gets_time_to_appear():
     assert said[0].startswith("No CI run in flight covers") and "queued" in said[1]
 
 
-def test_a_pass_the_publisher_never_ships_is_reported():
-    api = Api([run(1, MINE, conclusion="success", age=waiter.PUBLISH_SECONDS + 60)])
+@pytest.mark.parametrize("publishers", [[], [run(5, OLD, conclusion="success", event="schedule", age=7200)]])
+def test_a_proven_commit_waits_for_the_next_nightly_and_exits(publishers):
+    """No merge starts the publisher: a pass with no publisher run since it is scheduled, not blocked."""
+    api = Api([run(1, MINE, conclusion="success", age=3600)], publishers=publishers)
+    code, said, clock = wait(api, pointer(OLD))
+    assert code == waiter.SCHEDULED and clock.now == NOW
+    assert said == [f"CI passed on {MINE[:9]}. The next nightly publishes it: 12:00 AM New York time, "
+                    f"or sooner if the owner runs the publisher: {waiter.PUBLISHER_URL}"]
+    # --once reports the same state.
+    assert wait(api, pointer(OLD), once=True)[0] == waiter.SCHEDULED
+
+
+@pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
+def test_a_pass_the_publisher_ran_after_but_did_not_ship_is_reported(event):
+    api = Api([run(1, MINE, conclusion="success", age=3600)],
+              publishers=[run(5, TIP, conclusion="success", event=event, age=60)])
     code, said, _ = wait(api, pointer(OLD))
     assert code == 1
-    assert "no nightly" in said[0] and "desktop-source.yml" in said[0]
+    assert "without shipping it" in said[0] and "runs/5" in said[0]
 
 
 def test_only_real_main_runs_on_covering_commits_count():
@@ -220,9 +234,9 @@ def test_an_active_rerun_behind_a_page_of_newer_failures_still_counts():
 
 
 @pytest.mark.parametrize("runs", [[run(3, TIP, conclusion="failure")], [],
-                                  [run(1, MINE, conclusion="success", age=waiter.PUBLISH_SECONDS + 60)]])
+                                  [run(1, MINE, conclusion="success", age=3600)]])
 def test_an_in_flight_publisher_keeps_the_wait_alive(runs):
-    """A schedule, owner dispatch or owner local pass can still ship the commit."""
+    """The midnight schedule, an owner dispatch or an owner local pass can still ship the commit."""
     api = Api(runs, publishers=[run(5, TIP, status="in_progress", event="schedule")])
     state, detail = waiter.suite_state(api, MINE, now=NOW)
     assert state == "publishing" and "runs/5" in detail
