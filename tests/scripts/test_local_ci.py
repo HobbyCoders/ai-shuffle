@@ -851,6 +851,29 @@ def test_install_refuses_to_overwrite_two_foreign_hooks(tmp_path):
         local_ci.install_hook(tmp_path)
     assert (tmp_path / "pre-push").read_text(encoding="utf-8") == "theirs"
 
+
+def test_a_failed_install_leaves_an_earlier_hook_running(tmp_path, monkeypatch):
+    """The earlier hook is copied aside, not moved: it stays the active one
+    until the new hook is in place, and a retry finishes the install."""
+    theirs = "#!/bin/sh\necho theirs\n"
+    (tmp_path / "pre-push").write_text(theirs, encoding="utf-8")
+    replace = Path.replace
+
+    def refuse_the_swap(self, target):
+        if Path(target).name == "pre-push":
+            raise PermissionError("in use")
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse_the_swap)
+    with pytest.raises(PermissionError):
+        local_ci.install_hook(tmp_path)
+    assert (tmp_path / "pre-push").read_text(encoding="utf-8") == theirs
+    monkeypatch.setattr(Path, "replace", replace)
+    local_ci.install_hook(tmp_path)
+    assert local_ci.HOOK_MARKER in (tmp_path / "pre-push").read_text(encoding="utf-8")
+    assert (tmp_path / "pre-push.user").read_text(encoding="utf-8") == theirs
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["pre-push", "pre-push.user"]
+
 @pytest.mark.parametrize("state,labels,gh_error,expected,note", [
     (None, [], "no pull requests found for branch", 0, "no PR exists"),
     (True, [], "", 0, "PR is a draft"),

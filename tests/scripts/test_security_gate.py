@@ -665,11 +665,12 @@ def test_a_secret_finding_withholds_an_owner_detail_in_the_file_name(tmp_path, m
     ("origin", "origin/main", ["refs/remotes/origin/main"]),
     ("origin", "origin/topic", []),  # its main was unavailable: the configured comparison base
     ("https://example.invalid/repo.git", "origin/main", []),  # a URL push names no remote
+    ("mirrors/demo", "mirrors/demo/main", []),  # a pushed path spelt like the remote mirrors' demo/main
 ])
 def test_only_the_push_remotes_main_can_upgrade_the_installed_hook(monkeypatch, remote, base, expected):
     """The fallback base is whatever branch a developer configured. A branch
     that never merged must not raise the hook every worktree shares."""
-    monkeypatch.setattr(local_ci, "git", lambda *args: "head")
+    monkeypatch.setattr(local_ci, "git", lambda *args: "origin\nmirrors" if args == ("remote",) else "head")
     monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
     monkeypatch.setenv("LOCAL_CI_HOOK", "4")
     monkeypatch.setenv(local_ci.PUSH_REMOTE_ENV, remote)

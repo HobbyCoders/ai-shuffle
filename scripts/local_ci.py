@@ -1228,9 +1228,10 @@ def cmd_pre_push(args) -> int:
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
     base = fetch_push_base(push_remote)
-    if push_remote and base == f"{push_remote}/main":
-        # Only the push remote's own main: the fallback base can be any
-        # branch a developer configured, including one that never merged.
+    if push_remote in git("remote").splitlines() and base == f"{push_remote}/main":
+        # Only a named push remote's own main: the fallback base can be any
+        # branch a developer configured, including one that never merged, and
+        # a pushed path can spell the same as such a branch.
         upgrade_installed_hook(f"refs/remotes/{base}")
     for local_sha, remote_ref in branches:
         # Labels and draft state are live policy, checked on every push.
@@ -1260,7 +1261,6 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     target, kept = directory / "pre-push", directory / "pre-push.user"
     source = HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n")
-    foreign = False
     if target.exists():
         installed = target.read_text(encoding="utf-8", errors="replace")
         version_pattern = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
@@ -1271,9 +1271,14 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
             raise Failure(f"{target} has newer hook v{current_version[1]}; refusing to replace it "
                           f"with v{source_version[1]}. Use install --force to downgrade explicitly.")
         if HOOK_MARKER not in installed:
-            if kept.exists():
+            # A copy left by an install that failed before the swap is reused.
+            if kept.exists() and kept.read_bytes() != target.read_bytes():
                 raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
-            foreign = True
+            # Copied, not moved: the earlier hook stays the active one until
+            # the swap below, so a failed install never leaves a push unchecked.
+            backup = directory / f"pre-push.{os.getpid()}.user"
+            shutil.copy2(target, backup)
+            backup.replace(kept)
     # Swap the file in whole: a push in progress may be running the old one,
     # and a shell reads its script as it goes. The staging file is this
     # process's own, so two installs cannot rename each other's half-written one.
@@ -1281,8 +1286,6 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     try:
         staged.write_bytes(source)
         staged.chmod(0o755)
-        if foreign:
-            target.replace(kept)
         staged.replace(target)
     finally:
         staged.unlink(missing_ok=True)
