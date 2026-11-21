@@ -5,7 +5,7 @@ import { runJourney } from './runner.mjs';
 import { expect, gotoApp, settleServiceWorker, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Memory', 'Integrations', 'Plugins', 'MCP servers', 'Hooks', 'Devices', 'Cloud', 'Security', 'System', 'Logs'];
+const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Memory', 'Integrations', 'Plugins', 'MCP servers', 'Hooks', 'Devices', 'Cloud', 'Security', 'Vault', 'System', 'Logs'];
 // Security and Usage shifted for #1301 (a loading placeholder smaller than the
 // loaded control); the rest are measured with --all-pages.
 const pages = process.argv.includes('--all-pages') ? ALL : ['Security', 'Usage'];

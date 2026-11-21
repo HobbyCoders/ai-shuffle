@@ -468,18 +468,26 @@ node tests/verify-git-panel.mjs   # in a second terminal
 
 #### Browser check for the Vault approval card
 
-`frontend/tests/vault.html` mounts the real `VaultPanel` button and
-dialog; `frontend/tests/verify-vault.mjs` answers the session and
-Vault API in the browser and checks the one-shot command card for a
+`frontend/tests/vault.html` mounts the real `VaultPanel` the way a chat does:
+waiting cards above the composer, the Vault chip in the composer row and the
+panel the chip opens. `frontend/tests/verify-vault.mjs` answers the session
+and Vault API in the browser and checks the one-shot command card for a
 writable folder, a read-only folder and an SSH machine at 1280x800 and 390x844
-(touch): title, effect line, verbatim command, fit, and the approve request.
-Same requirements as the Git panel check.
+(touch): shown without opening anything, title, effect line, verbatim command,
+fit, and the approve request. Same requirements as the Git panel check.
 
 ```sh
 cd frontend
 npx vite dev --config tests/vite.vault.config.js --host 127.0.0.1 --port 6917 --strictPort
 node tests/verify-vault.mjs   # in a second terminal
 ```
+
+With the same server running, `node tests/shoot-vault.mjs` saves a screenshot
+of every state the owner sees (idle, each kind of request including a web
+service with a username and password, an approval, active access; panel closed
+and open) at desktop and phone size. `THEMES=dark,light` and `ONLY=<state,...>`
+narrow the run; `SCREENSHOT_DIR` chooses the folder. Look at them after
+changing a card: nothing asserts on layout.
 
 #### Browser check for the one-time branch choice
 
@@ -592,9 +600,9 @@ node tests/verify-composer-send-guard.mjs   # in a second terminal
 `frontend/tests/vault-remote.html` mounts the real `VaultPanel` for a
 session that runs on another device. `frontend/tests/verify-vault-remote.mjs`
 answers this worker's session and Vault API in the browser and checks,
-at 1440x900 and 390x844, that the owner's request card, saved connection,
-one-shot approval and revocation work from the viewer and name the owning
-device. The forwarding itself is covered by
+at 1440x900 and 390x844, that the owner's request card with its saved
+sign-in, the one-shot approval, and revocation from the panel work from the
+viewer and name the owning device. The forwarding itself is covered by
 `tests/core/network/test_vault_routing.py`.
 
 ```sh

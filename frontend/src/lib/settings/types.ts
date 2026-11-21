@@ -22,6 +22,7 @@ export const CATEGORY_IDS = [
 	'devices',
 	'cloud',
 	'security',
+	'vault',
 	'system',
 	'logs'
 ] as const;
@@ -46,6 +47,7 @@ export const PAGE_TYPES: Record<CategoryId, PageType> = {
 	devices: 'collection',
 	cloud: 'preference',
 	security: 'preference',
+	vault: 'collection',
 	system: 'preference',
 	logs: 'collection'
 };

@@ -19,6 +19,7 @@ import * as hooks from './entries/hooks';
 import * as devices from './entries/devices';
 import * as cloud from './entries/cloud';
 import * as security from './entries/security';
+import * as vault from './entries/vault';
 import * as system from './entries/system';
 import * as logs from './entries/logs';
 import { CATEGORY_IDS, isCategoryId, type CategoryId, type CategoryModule, type SettingEntry } from './types';
@@ -38,6 +39,7 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	devices,
 	cloud,
 	security,
+	vault,
 	system,
 	logs
 };

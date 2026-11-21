@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const m = vi.hoisted(() => ({ post: vi.fn(), delete: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: m }));
@@ -9,6 +9,9 @@ const url = 'https://api.cloudflare.com/client/v4';
 const token = 'test-only-private-token';
 const endpoint = '/vault/sessions/s%201/requests/r%2F1';
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
+// Saved sign-ins are a short list of radios; the last one is a sign-in typed here.
+const signIns = () => within(screen.getByRole('radiogroup', { name: 'Sign in with' }));
+const chosen = () => (signIns().getAllByRole('radio') as HTMLInputElement[]).find(radio => radio.checked)?.value;
 function mount(overrides: Record<string, unknown> = {}) {
 	const request = { id: 'r/1', kind: 'service', purpose: 'Read Cloudflare inventory', expires_at: Date.now() / 1000 + 86400, service_provider: 'cloudflare', suggested_url: url };
 	const onComplete = vi.fn();
@@ -27,13 +30,13 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
-describe('guided private service access', () => {
+describe('guided service sign-in', () => {
 	it('preselects an explicit saved service without asking for a token', async () => {
 		const { onComplete } = mount({
 			request: { id: 'r/1', kind: 'service', purpose: 'Read saved inventory', expires_at: Date.now() / 1000 + 86400, saved_id: 'cf' },
 			savedConnections: [{ id: 'cf', kind: 'service', label: 'Inventory API', target: url, fingerprint: '', writable: false }]
 		});
-		expect(field('Connection').value).toBe('cf');
+		expect(chosen()).toBe('cf');
 		expect(m.post).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue to review' }));
 		expect(screen.queryByLabelText('API key or token')).toBeNull();
@@ -96,18 +99,27 @@ describe('guided private service access', () => {
 		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
 	});
 
-	it('keeps a token only in component memory for a correctable retry, without storing or reflecting it', async () => {
+	it('clears the token and the approval when sending, so a failed attempt leaves neither in the form', async () => {
 		const storage = vi.spyOn(Storage.prototype, 'setItem');
 		m.post.mockRejectedValueOnce({ status: 422, detail: token });
 		const { request, rerender, onComplete } = mount(); await review(); await approve();
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
 		expect(screen.getByRole('alert').textContent).not.toContain(token);
-		expect(field('API key or token').value).toBe(token);
+		expect(screen.getByRole('alert').textContent).toContain('was cleared from this form');
+		expect(document.body.innerHTML).not.toContain(token);
+		expect(field('API key or token').value).toBe('');
+		expect((screen.getByRole('checkbox', { name: /I approve access/ }) as HTMLInputElement).checked).toBe(false);
+		// The non-secret choices stay for the retry.
+		expect(field('Name').value).toBe('Cloudflare');
 		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
 		await rerender({ request: { ...request } });
-		expect(field('API key or token').value).toBe(token);
+		expect(field('API key or token').value).toBe('');
 		expect(storage).not.toHaveBeenCalled();
+		// Nothing is sent again until the owner types the token and approves again.
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		expect(m.post).toHaveBeenCalledTimes(1);
+		await approve();
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post).toHaveBeenCalledTimes(2);
@@ -117,7 +129,7 @@ describe('guided private service access', () => {
 		const { rerender } = mount(); await review(); await approve();
 		await rerender({ clearSecretsKey: 1 });
 		expect(field('API key or token').value).toBe('');
-		expect(field('Resource name').value).toBe('Cloudflare');
+		expect(field('Name').value).toBe('Cloudflare');
 		expect((screen.getByRole('checkbox', { name: /I approve access/ }) as HTMLInputElement).checked).toBe(false);
 		expect(m.post).not.toHaveBeenCalled();
 	});
@@ -178,7 +190,7 @@ describe('guided private service access', () => {
 		await fireEvent.input(fingerprint, { target: { value: 'bad' } }); expect(fingerprint.checkValidity()).toBe(false);
 		await fireEvent.input(fingerprint, { target: { value: 'AB'.repeat(32) } }); expect(fingerprint.checkValidity()).toBe(true);
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow changes/ }));
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save to Vault under this name/ }));
 		await approve(); await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(received).toBeTruthy());
 		expect(received.connection).toMatchObject({ url: 'https://home.example/api', auth_header: 'X-API-Key', auth_scheme: '', writable: true, fingerprint: 'AB'.repeat(32), secret: token });
@@ -197,13 +209,19 @@ describe('guided private service access', () => {
 			{ id: 'ssh', kind: 'machine', label: 'SSH', target: 'host', fingerprint: '' },
 			{ id: 'cf', kind: 'service', label: 'Cloudflare account', target: url, fingerprint: '', writable: false }
 		] });
-		expect(field('Connection').value).toBe('');
-		expect(screen.queryByRole('option', { name: /SSH/ })).toBeNull();
-		await fireEvent.change(field('Connection'), { target: { value: 'cf' } });
+		expect(chosen()).toBe('');
+		// A machine sign-in is never offered for a web service.
+		expect(signIns().getAllByRole('radio')).toHaveLength(2);
+		expect(signIns().queryByRole('radio', { name: /SSH/ })).toBeNull();
+		await fireEvent.click(signIns().getByRole('radio', { name: /Cloudflare account/ }));
+		expect(screen.queryByLabelText('Service address')).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue to review' }));
 		expect(screen.queryByLabelText('API key or token')).toBeNull();
+		expect(screen.queryByLabelText('Name')).toBeNull();
 		expect(screen.getByText('Read-only · GET and HEAD only')).toBeTruthy();
-		expect(screen.getByText(/Sent only to Owner PC through this worker/)).toBeTruthy();
+		// Nothing is typed, so nothing is sent: the stored sign-in stays on the owning device.
+		expect(screen.getByText(/It stays encrypted on Owner PC/)).toBeTruthy();
+		expect(screen.queryByText(/Sent to Owner PC/)).toBeNull();
 		await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
@@ -214,7 +232,7 @@ describe('guided private service access', () => {
 		Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
 		mount({ vaultAvailable: false }); await review();
 		expect(field('API key or token').disabled).toBe(true);
-		expect((screen.getByRole('checkbox', { name: /Save this connection/ }) as HTMLInputElement).disabled).toBe(true);
+		expect((screen.getByRole('checkbox', { name: /Save to Vault under this name/ }) as HTMLInputElement).disabled).toBe(true);
 		expect(screen.getByRole('alert').textContent).toMatch(/HTTPS connection/);
 	});
 
@@ -228,15 +246,15 @@ describe('guided private service access', () => {
 		const grant = () => screen.getByRole('button', { name: 'Grant access' }) as HTMLButtonElement;
 		expect(grant().disabled).toBe(false);
 
-		await fireEvent.change(field('Access for'), { target: { value: '15' } });
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('radio', { name: '15 minutes' }));
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save to Vault under this name/ }));
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow changes/ }));
 		await fireEvent.click(screen.getByText('Authentication and certificate settings'));
 		await fireEvent.input(field('Credential header'), { target: { value: 'X-API-Key' } });
 		await fireEvent.input(field('Scheme'), { target: { value: '' } });
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Trust a specific certificate/ }));
 		await fireEvent.input(field('Certificate SHA-256 fingerprint'), { target: { value: 'AB'.repeat(32) } });
-		await fireEvent.input(field('Resource name'), { target: { value: 'Home API' } });
+		await fireEvent.input(field('Name'), { target: { value: 'Home API' } });
 		await tick();
 
 		expect(field('API key or token').value).toBe(token);
@@ -262,7 +280,7 @@ describe('guided private service access', () => {
 		await approve(); unmount(); await tick(); mount(); await review(); expect(field('API key or token').value).toBe('');
 	});
 
-	it('a token never carries over to another service address or a saved connection', async () => {
+	it('a token never carries over to another service address or a saved sign-in', async () => {
 		mount({ savedConnections: [{ id: 'cf', kind: 'service', label: 'Cloudflare account', target: url, fingerprint: '', writable: false }] });
 		await fireEvent.change(field('Service'), { target: { value: 'custom' } });
 		await fireEvent.input(field('Service address'), { target: { value: 'https://home.example/api' } });
@@ -278,12 +296,98 @@ describe('guided private service access', () => {
 		await approve();
 		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
 		await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
-		await fireEvent.change(field('Connection'), { target: { value: 'cf' } });
+		await fireEvent.click(signIns().getByRole('radio', { name: /Cloudflare account/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Continue to review' }));
 		expect(screen.queryByLabelText('API key or token')).toBeNull();
 		await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(m.post).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][1]).toEqual({ connection: null, saved_id: 'cf', minutes: 60, save_connection: false });
+	});
+
+	describe('username and password', () => {
+		const password = 'test only pass phrase';
+		const custom = async (overrides: Record<string, unknown> = {}) => {
+			const mounted = mount({ passwordSignIn: true, ...overrides });
+			await fireEvent.change(field('Service'), { target: { value: 'custom' } });
+			await fireEvent.input(field('Service address'), { target: { value: 'https://nas.example/api' } });
+			return mounted;
+		};
+		const method = (name: string) => within(screen.getByRole('radiogroup', { name: 'Signs in with' })).getByRole('radio', { name }) as HTMLInputElement;
+
+		it('is offered only where the device that runs the chat supports it, and never for Cloudflare', async () => {
+			// An older owning device would send the password as a bearer token.
+			mount(); await fireEvent.change(field('Service'), { target: { value: 'custom' } });
+			expect(screen.queryByRole('radiogroup', { name: 'Signs in with' })).toBeNull();
+			cleanup();
+			mount({ passwordSignIn: true });
+			expect(screen.queryByRole('radiogroup', { name: 'Signs in with' })).toBeNull();
+			await fireEvent.change(field('Service'), { target: { value: 'custom' } });
+			expect(method('API key or token').checked).toBe(true);
+			// Chosen, then back to Cloudflare: its token flow, not a password.
+			await fireEvent.click(method('Username and password'));
+			await fireEvent.change(field('Service'), { target: { value: 'cloudflare' } });
+			await review();
+			expect(screen.queryByLabelText('Password')).toBeNull();
+			expect(field('API key or token')).toBeTruthy();
+		});
+
+		it('sends the account as HTTP Basic for the worker to encode, without header settings', async () => {
+			let received: any;
+			m.post.mockImplementation(async (_: string, body: unknown) => { received = structuredClone(body); });
+			const { onComplete } = await custom();
+			await fireEvent.click(method('Username and password'));
+			await prepare();
+			expect(screen.getByRole('heading', { name: 'Prepare the account' })).toBeTruthy();
+			expect(screen.getByText(/not your main administrator account/)).toBeTruthy();
+			expect(screen.queryByLabelText('Password')).toBeNull();
+			await fireEvent.click(screen.getByRole('button', { name: 'I have the sign-in' }));
+			expect(screen.queryByLabelText('API key or token')).toBeNull();
+			await fireEvent.click(screen.getByText('Certificate settings'));
+			expect(screen.queryByLabelText('Credential header')).toBeNull();
+			expect(screen.queryByLabelText('Scheme')).toBeNull();
+			const grant = () => screen.getByRole('button', { name: 'Grant access' }) as HTMLButtonElement;
+			await fireEvent.input(field('Password'), { target: { value: password } });
+			await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
+			// A password alone is not a sign-in.
+			expect(grant().disabled).toBe(true);
+			expect(field('Username').checkValidity()).toBe(false);
+			await fireEvent.input(field('Username'), { target: { value: 'ad:min' } });
+			expect(field('Username').checkValidity()).toBe(false);
+			await fireEvent.submit(grant().closest('form')!);
+			expect(m.post).not.toHaveBeenCalled();
+			await fireEvent.input(field('Username'), { target: { value: ' admin ' } });
+			expect(field('Password').value).toBe(password);
+			await fireEvent.click(grant());
+			await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+			expect(received.connection).toMatchObject({
+				kind: 'service', url: 'https://nas.example/api', auth_header: 'Authorization', auth_scheme: 'Basic',
+				username: 'admin', secret: password, writable: false, fingerprint: ''
+			});
+			// The body the request carried is scrubbed afterwards.
+			expect(m.post.mock.calls[0][1].connection.secret).toBe('');
+		});
+
+		it('never turns a typed token into a password, or a password into a token', async () => {
+			await custom(); await review(); await approve();
+			await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+			await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+			await fireEvent.click(method('Username and password'));
+			await prepare(); await fireEvent.click(screen.getByRole('button', { name: 'I have the sign-in' }));
+			expect(field('Password').value).toBe('');
+			await fireEvent.input(field('Username'), { target: { value: 'admin' } });
+			await fireEvent.input(field('Password'), { target: { value: password } });
+			await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+			await fireEvent.click(screen.getByRole('button', { name: /Back/ }));
+			await fireEvent.click(method('API key or token'));
+			await review();
+			expect(field('API key or token').value).toBe('');
+			expect(screen.queryByLabelText('Username')).toBeNull();
+			await approve(); await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+			await waitFor(() => expect(m.post).toHaveBeenCalledOnce());
+			const sent = m.post.mock.calls[0][1].connection;
+			expect(sent.auth_scheme).toBe('Bearer');
+			expect('username' in sent).toBe(false);
+		});
 	});
 });

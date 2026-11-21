@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 
 const m = vi.hoisted(() => ({ post: vi.fn(), delete: vi.fn() }));
 vi.mock('$lib/api/client', () => ({
@@ -28,6 +28,10 @@ function mount(overrides: Record<string, unknown> = {}) {
 }
 const endpoint = '/vault/sessions/s%201/requests/r%2F1';
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
+// Saved sign-ins are a short list of radios; the last one is a sign-in typed here.
+const signIns = () => within(screen.getByRole('radiogroup', { name: 'Sign in with' }));
+const chosen = () => (signIns().getAllByRole('radio') as HTMLInputElement[]).find(radio => radio.checked)?.value;
+const another = () => signIns().getByRole('radio', { name: 'Another sign-in…' });
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -40,7 +44,7 @@ afterEach(cleanup);
 describe('VaultRequest', () => {
 	it('preselects an explicit saved ID without knowing its address', async () => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'lab' } });
-		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('lab');
+		expect(chosen()).toBe('lab');
 		expect(m.post).not.toHaveBeenCalled();
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: 'lab', connection: null }));
@@ -48,7 +52,7 @@ describe('VaultRequest', () => {
 
 	it('accepts owner-entered hostnames up to 253 characters', async () => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour() } });
-		const input = field('Server IP or hostname');
+		const input = field('Address');
 		expect(input.maxLength).toBe(253);
 		await fireEvent.input(input, { target: { value: 'build.example' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
@@ -59,13 +63,16 @@ describe('VaultRequest', () => {
 
 	it('offers the saved server matching the structured hints and grants it without sending credentials', async () => {
 		const { onComplete } = mount();
-		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
+		expect(chosen()).toBe('build');
 		expect(screen.getByText('ops@10.0.0.5:22')).toBeTruthy();
-		expect(screen.queryByText('Save this connection')).toBeNull();
-		await fireEvent.change(screen.getByLabelText('Access for'), { target: { value: '240' } });
+		// A saved sign-in needs no name and is not saved again.
+		expect(screen.queryByLabelText('Name')).toBeNull();
+		expect(screen.queryByText('Save to Vault under this name')).toBeNull();
+		expect((screen.getByRole('radio', { name: '1 hour' }) as HTMLInputElement).checked).toBe(true);
+		await fireEvent.click(screen.getByRole('radio', { name: '8 hours' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'build', minutes: 240, save_connection: false });
+		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'build', minutes: 480, save_connection: false });
 	});
 
 	it.each([
@@ -75,13 +82,54 @@ describe('VaultRequest', () => {
 		{ suggested_host: '10.0.0.50' },
 		{ suggested_port: 22, suggested_username: 'ops' },
 		{}
-	])('defaults to new rather than an unrelated saved connection for %j', hints => {
+	])('defaults to new rather than an unrelated saved sign-in for %j', hints => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Check 10.0.0.5 and 10.0.0.9', expires_at: inAnHour(), ...hints } });
-		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('');
-		expect(field('Server IP or hostname').value).toBe(hints.suggested_host ?? '');
+		expect(chosen()).toBe('');
+		expect(field('Address').value).toBe(hints.suggested_host ?? '');
 		expect(field('Port').value).toBe(String(hints.suggested_port ?? 22));
 		expect(field('Username').value).toBe(hints.suggested_username ?? '');
 		expect(field('Password').value).toBe('');
+	});
+
+	it('asks again when the sign-in it preselected no longer matches the request', async () => {
+		const { rerender } = mount();
+		expect(chosen()).toBe('build');
+		// A rename changes nothing about where the sign-in leads.
+		await rerender({ savedConnections: [saved[0], { ...saved[1], label: 'Build box (rack 2)' }] });
+		expect(chosen()).toBe('build');
+		// Edited in Settings to another machine: the owner did not choose that one.
+		const moved = { ...saved[1], target: 'ops@10.0.0.77:22' };
+		await rerender({ savedConnections: [saved[0], moved] });
+		expect(chosen()).toBe('');
+		expect(field('Address').value).toBe('10.0.0.5');
+		// Choosing it knowingly is still the owner's call, and it then stays chosen.
+		await fireEvent.click(signIns().getByRole('radio', { name: /Build box/ }));
+		await rerender({ savedConnections: [saved[0], { ...moved }] });
+		expect(chosen()).toBe('build');
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: 'build', connection: null }));
+	});
+
+	it.each([
+		['hinted', {}],
+		['named by the request', { request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'build' } }]
+	])('never sends a removed sign-in (%s)', async (_name, overrides) => {
+		const { rerender } = mount(overrides);
+		expect(chosen()).toBe('build');
+		await rerender({ savedConnections: [saved[0]] });
+		expect(chosen()).toBe('');
+		await fireEvent.input(field('Address'), { target: { value: '10.0.0.5' } });
+		await fireEvent.input(field('Username'), { target: { value: 'ops' } });
+		await fireEvent.input(field('Password'), { target: { value: 'test-only' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '' }));
+	});
+
+	it('keeps the sign-in the request named when its address is edited', async () => {
+		const { rerender } = mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect saved server', expires_at: inAnHour(), saved_id: 'build' } });
+		await rerender({ savedConnections: [saved[0], { ...saved[1], target: 'ops@10.0.0.77:22' }] });
+		expect(chosen()).toBe('build');
+		expect(screen.getByText('ops@10.0.0.77:22')).toBeTruthy();
 	});
 
 	it.each(['10.0.0.5', 'BUILD.Example.', '2001:db8::5'])('matches only the host when port and user are omitted: %s', host => {
@@ -89,7 +137,7 @@ describe('VaultRequest', () => {
 			request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour(), suggested_host: host },
 			savedConnections: [{ ...saved[1], target: `ops@${host.toLowerCase().replace(/\.$/, '')}:2222` }]
 		});
-		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
+		expect(chosen()).toBe('build');
 	});
 
 	it('matches canonical IPv6 saved targets against expanded literals', () => {
@@ -97,15 +145,15 @@ describe('VaultRequest', () => {
 			request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour(), suggested_host: '2001:0db8:0:0:0:0:0:5', suggested_port: 2222, suggested_username: 'ops' },
 			savedConnections: [{ ...saved[1], target: 'ops@2001:db8::5:2222' }]
 		});
-		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
+		expect(chosen()).toBe('build');
 	});
 
 	it('prefills editable new-machine fields and submits the reviewed values', async () => {
 		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect VM', expires_at: inAnHour(), suggested_host: '10.0.0.50', suggested_port: 2222, suggested_username: 'x' } });
-		expect(field('Server IP or hostname').value).toBe('10.0.0.50');
+		expect(field('Address').value).toBe('10.0.0.50');
 		expect(field('Port').value).toBe('2222');
 		expect(field('Username').value).toBe('x');
-		await fireEvent.input(field('Server IP or hostname'), { target: { value: '10.0.0.60' } });
+		await fireEvent.input(field('Address'), { target: { value: '10.0.0.60' } });
 		await fireEvent.input(field('Port'), { target: { value: '22' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
 		await fireEvent.input(field('Password'), { target: { value: 'card-only' } });
@@ -113,27 +161,42 @@ describe('VaultRequest', () => {
 		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '', connection: expect.objectContaining({ host: '10.0.0.60', port: 22, username: 'deploy' }) }));
 	});
 
-	it('keeps the full saved host key in an initially collapsed disclosure', async () => {
+	it('shows every saved address, and the full host key of the chosen sign-in', async () => {
 		const fingerprint = `SHA256:${'a'.repeat(64)}`;
-		mount({ savedConnections: [{ ...saved[1], fingerprint }] });
-		const summary = screen.getByText('Host-key fingerprint');
-		const disclosure = summary.closest('details')!;
-		expect(disclosure.open).toBe(false);
-		expect(disclosure.querySelector('code')?.textContent).toBe(fingerprint);
-		await fireEvent.click(summary);
-		expect(disclosure.open).toBe(true);
+		mount({ savedConnections: [saved[0], { ...saved[1], fingerprint }] });
+		expect(chosen()).toBe('build');
+		// Both addresses are readable before choosing; only the chosen one shows its key.
 		expect(screen.getByText('ops@10.0.0.5:22')).toBeTruthy();
+		expect(screen.getByText('root@10.0.0.9:22')).toBeTruthy();
+		expect(screen.getByText(fingerprint)).toBeTruthy();
+		expect(screen.queryByText('SHA256:lab')).toBeNull();
+		await fireEvent.click(signIns().getByRole('radio', { name: /Lab box/ }));
+		expect(screen.getByText('SHA256:lab')).toBeTruthy();
+		expect(screen.queryByText(fingerprint)).toBeNull();
+		// Nothing is typed for a saved sign-in.
+		expect(screen.queryByLabelText('Password')).toBeNull();
+	});
+
+	it('drops a typed password when a saved sign-in is chosen instead', async () => {
+		mount();
+		await fireEvent.click(another());
+		await fireEvent.input(field('Password'), { target: { value: 'typed-for-new' } });
+		await fireEvent.click(signIns().getByRole('radio', { name: /Build box/ }));
+		await fireEvent.click(another());
+		expect(field('Password').value).toBe('');
+		// The address the agent proposed is not a secret and stays.
+		expect(field('Address').value).toBe('10.0.0.5');
 	});
 
 	it('sends a new connection with save_connection and wipes the password from the form', async () => {
 		let finish!: () => void;
 		m.post.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
 		const { onComplete } = mount();
-		await fireEvent.change(screen.getByLabelText('Connection'), { target: { value: '' } });
-		await fireEvent.input(field('Server IP or hostname'), { target: { value: ' 10.0.0.7 ' } });
+		await fireEvent.click(another());
+		await fireEvent.input(field('Address'), { target: { value: ' 10.0.0.7 ' } });
 		await fireEvent.input(field('Username'), { target: { value: ' deploy ' } });
 		await fireEvent.input(field('Password'), { target: { value: 'hunter2' } });
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Save to Vault under this name/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		expect(m.post).toHaveBeenCalledWith(endpoint, {
 			connection: {
@@ -153,36 +216,51 @@ describe('VaultRequest', () => {
 
 	it('uses a private key instead of the password and pins a typed host key', async () => {
 		mount({ savedConnections: [] });
-		await fireEvent.input(field('Server IP or hostname'), { target: { value: '10.0.0.7' } });
+		await fireEvent.input(field('Address'), { target: { value: '10.0.0.7' } });
 		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
-		await fireEvent.click(screen.getByRole('button', { name: /Use a private key/ }));
+		await fireEvent.input(field('Password'), { target: { value: 'typed-first' } });
+		// One disclosure holds the less common choices, closed until asked for.
+		const more = screen.getByRole('button', { name: 'Use a private key or check the host key' });
+		expect(more.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByLabelText('Host-key fingerprint')).toBeNull();
+		await fireEvent.click(more);
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Sign in with a private key/ }));
 		expect(screen.queryByLabelText('Password')).toBeNull();
 		await fireEvent.input(screen.getByLabelText('Private key'), { target: { value: 'KEY' } });
-		await fireEvent.click(screen.getByRole('button', { name: /Verify the host key/ }));
 		await fireEvent.input(field('Host-key fingerprint'), { target: { value: ' SHA256:abc ' } });
+		// What will be sent is never hidden: the section stays open while it is in use.
+		await fireEvent.click(more);
+		expect(more.getAttribute('aria-expanded')).toBe('true');
+		expect(field('Host-key fingerprint').value).toBe(' SHA256:abc ');
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		await waitFor(() => expect(m.post).toHaveBeenCalledOnce());
+		const sent = JSON.stringify(m.post.mock.calls);
+		// Read before the form scrubs the body: the key went, the password typed first did not.
+		expect(sent).not.toContain('typed-first');
 		const { connection } = m.post.mock.calls[0][1];
 		expect(connection).toMatchObject({ password: '', fingerprint: 'SHA256:abc' });
 	});
 
 	it('cannot save a connection while the vault is locked', () => {
 		mount({ savedConnections: [], vaultAvailable: false });
-		expect((screen.getByRole('checkbox', { name: /Save this connection/ }) as HTMLInputElement).disabled).toBe(true);
-		expect(screen.getByText(/Secure storage is locked or unavailable/)).toBeTruthy();
+		expect((screen.getByRole('checkbox', { name: /Save to Vault under this name/ }) as HTMLInputElement).disabled).toBe(true);
+		expect(screen.getByText(/The Vault is locked or unavailable/)).toBeTruthy();
 	});
 
 	it('grants a writable folder with the chosen duration', async () => {
 		const { onComplete } = mount({ request: { id: 'r/1', kind: 'folder', purpose: 'Read my notes', expires_at: inAnHour() } });
-		expect(screen.queryByLabelText('Connection')).toBeNull();
+		// A folder is never kept in the Vault, so there is nothing saved to pick.
+		expect(screen.queryByRole('radiogroup', { name: 'Sign in with' })).toBeNull();
+		expect(screen.queryByText('Save to Vault under this name')).toBeNull();
 		// Folders are confined on Linux and macOS workers, so the note names neither.
 		expect(screen.getByText(/Kernel file confinement: no shell/)).toBeTruthy();
 		expect(screen.queryByText(/Linux file confinement/)).toBeNull();
 		await fireEvent.input(field('Folder on this worker'), { target: { value: '/home/me/notes' } });
 		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow text writes/ }));
+		await fireEvent.click(screen.getByRole('radio', { name: '15 minutes' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-		expect(m.post.mock.calls[0][1]).toMatchObject({ saved_id: '', save_connection: false, connection: { kind: 'folder', label: 'Folder', path: '/home/me/notes', writable: true } });
+		expect(m.post.mock.calls[0][1]).toMatchObject({ saved_id: '', save_connection: false, minutes: 15, connection: { kind: 'folder', label: 'Folder', path: '/home/me/notes', writable: true } });
 	});
 
 	it('prefills a proposed folder but preserves edits across refreshes and a failed approval', async () => {
@@ -208,19 +286,19 @@ describe('VaultRequest', () => {
 
 	it('names the owning device for a mirrored conversation and posts to this worker', async () => {
 		const { onComplete } = mount({ owner: 'Owner PC', savedConnections: [], request: { id: 'r/1', kind: 'folder', purpose: 'Read my notes', expires_at: inAnHour() } });
-		expect(screen.getByText(/Sent only to Owner PC through this worker/)).toBeTruthy();
+		expect(screen.getByText(/Sent to Owner PC through this worker/)).toBeTruthy();
 		await fireEvent.input(field('Folder on Owner PC'), { target: { value: '/home/me/notes' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][0]).toBe(endpoint);
 		cleanup();
 		mount({ owner: 'Owner PC', savedConnections: [] });
-		expect(screen.getByText(/Encrypted on Owner PC for future requests/)).toBeTruthy();
+		expect(screen.getByText(/Encrypted on Owner PC\. Each new request to use it still needs your approval/)).toBeTruthy();
 	});
 
 	it('routes service requests into guided preparation, not the credential form', () => {
 		mount({ request: { id: 'r/1', kind: 'service', purpose: 'Read Cloudflare inventory', expires_at: inAnHour(), service_provider: 'cloudflare', suggested_url: 'https://api.cloudflare.com/client/v4' } });
-		expect(screen.getByRole('region', { name: 'Private service connection' })).toBeTruthy();
+		expect(screen.getByRole('region', { name: 'Vault request' })).toBeTruthy();
 		expect(field('Service address').value).toBe('https://api.cloudflare.com/client/v4');
 		expect(screen.queryByLabelText('API key or token')).toBeNull();
 		expect(m.post).not.toHaveBeenCalled();

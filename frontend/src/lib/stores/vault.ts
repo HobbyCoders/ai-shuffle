@@ -1,11 +1,11 @@
 /**
- * vault — what the Vault panel for the active chat is showing.
+ * vault — what the Vault for the active chat is showing.
  *
- * VaultPanel owns the polling, the request cards and the header panel. The
- * chat's own prompts (VaultPrompt above the composer, the phone's
- * prompt dock) read what is waiting from here and open that panel through
- * `open`. VaultPanel publishes the summary whenever its snapshot changes and
- * clears the entry when it unmounts.
+ * VaultPanel sits above the composer and owns the polling, the request cards
+ * and the panel that lists active access. The Vault chip in the composer row
+ * (VaultChip) and the phone's prompt dock read the state from here and open
+ * that panel through `open` / `toggle`. VaultPanel publishes the summary
+ * whenever its snapshot changes and clears the entry when it unmounts.
  */
 import { writable } from 'svelte/store';
 
@@ -28,12 +28,23 @@ export interface VaultSummary {
 	items?: PendingAccessItem[];
 	/** Grants currently active in this chat. */
 	active: number;
-	/** Saved connections listed in the panel. */
+	/** Saved sign-ins the chat can offer. */
 	saved: number;
+	/**
+	 * The device a mirrored conversation runs on, where its access and saved
+	 * sign-ins live; null when it runs on this worker.
+	 */
+	owner?: string | null;
+	/** The panel has something to show: the chip is worth rendering. */
+	manageable?: boolean;
+	/** DOM id of the panel, for the chip's `aria-controls`. */
+	panelId?: string;
 	/** The last refresh failed; the panel shows the error. */
 	error: boolean;
 	/** Open the Vault panel. No-op when there is nothing to show. */
 	open: () => void;
+	/** Open the panel, or close it when it is open (the chip). */
+	toggle?: () => void;
 	/**
 	 * Answer a waiting one-shot approval (`kind: 'action'`) without opening the
 	 * panel. Requests that need private inputs still go through `open`.

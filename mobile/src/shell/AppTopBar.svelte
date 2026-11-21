@@ -9,14 +9,15 @@
 	 * shows beside the main panel.
 	 *
 	 * One row carries everything the phone used to stack in three:
-	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic
+	 *   ☰ | page or chat title            | ⌄ | actions (Git) | mic
 	 *     | ● worker · parent             |
 	 * The second line is the "Connected to" worker chip (which also tells the
 	 * Android app to hide its own worker bar), plus the parent chat's link in a
 	 * subagent's chat. Project and branch live in the line under the composer.
 	 * The chevron opens the chat-actions sheet
 	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
-	 * MainPanel's header cluster: Vault + the compact Git button.
+	 * MainPanel's header cluster: the compact Git button. The Vault is with the
+	 * composer (its chip in the quick bar).
 	 *
 	 * Away for all chats and the notification bell live in that sidebar's header,
 	 * so this bar carries neither. The ☰ names the unread count for screen readers.
@@ -58,7 +59,7 @@
 		hideGlobalStt?: boolean;
 		/** Out: the actual phone drawer, independent of desktop sidebar preferences. */
 		drawerOpen?: boolean;
-		/** Chat actions on the bar's right (Vault, Git); omit off-chat. */
+		/** Chat actions on the bar's right (Git); omit off-chat. */
 		actions?: Snippet;
 	}
 
@@ -508,14 +509,6 @@
 	.tb-actions .tb-hamburger { color: var(--muted-foreground); }
 	.tb-actions .tb-hamburger:hover { color: var(--foreground); }
 	.recording, .tb-actions .recording { color: var(--destructive); }
-
-	/* The Vault shield, sized like the bar's other controls: a 44x48
-	   target and a 20px glyph, its count/dot riding the glyph's corner. */
-	.tb-actions :global(.pa-trigger) { width: 44px; height: 48px; border-radius: 8px; }
-	.tb-actions :global(.pa-glyph) { width: 20px; height: 20px; }
-	.tb-actions :global(.pa-glyph > svg) { width: 20px; height: 20px; }
-	.tb-actions :global(.pa-count) { top: -7px; left: 12px; }
-	.tb-actions :global(.pa-dot) { top: -3px; right: -4px; width: 8px; height: 8px; }
 
 	/* Title on line 1; line 2 (worker chip, trail) is laid over the bottom of
 	   the same 56px column so its 44px tap targets can reach the bar's edge. */

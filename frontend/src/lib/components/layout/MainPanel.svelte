@@ -58,7 +58,6 @@
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning, type GitOperationAction } from '$lib/stores/gitOperations.svelte';
 	import ChatView from './ChatView.svelte';
-	import VaultPanel from '$lib/components/chat/VaultPanel.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
@@ -1075,20 +1074,6 @@
 	     whose composer has no context row, keeps it in the top bar. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && (!!header || phoneLayout.active)}
 		<NoProjectPill variant="compact" />
-	{/if}
-	<!-- Not in a subagent's chat: its requests and approvals show in its main
-	     chat's panel, labelled with the subagent. -->
-	{#if $activeView?.type === 'session' && activeTab?.sessionId && !activeIsSubagent}
-		{#key activeTab.sessionId}
-			<!-- Vault is managed here on every lane (desktop bar and the
-			     phone shell's one bar): a shield icon shows when the chat has a
-			     request, a grant or a saved connection, and opens a panel (a bottom
-			     sheet on phones) to approve, review or revoke. Waiting requests
-			     also show in the chat above the composer (VaultPrompt).
-			     The Git panel no longer carries it (#1816). Swarms show in the
-			     running-tasks list, which keeps their state hydrated. -->
-			<VaultPanel sessionId={activeTab.sessionId} />
-		{/key}
 	{/if}
 	{#if activeTab && gitUiVisible}
 		<div class="git-actions-host">

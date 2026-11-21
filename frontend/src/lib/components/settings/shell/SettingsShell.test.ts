@@ -102,6 +102,7 @@ describe('SettingsShell index', () => {
 			'Devices',
 			'Cloud',
 			'Security',
+			'Vault',
 			'System',
 			'Logs'
 		]);

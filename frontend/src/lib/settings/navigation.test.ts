@@ -357,6 +357,33 @@ describe('stacked (phone) history', () => {
 		expect(settingsNav.depth).toBe(0);
 	});
 
+	it('shows a saved draft in the step the draft had, so Back returns to the list', () => {
+		settingsNav.selectCategory('vault');
+		settingsNav.selectItem('__draft__');
+		nav.pushState.mockClear();
+		settingsNav.replaceItem('saved-1');
+		expect(nav.pushState).not.toHaveBeenCalled();
+		expect(nav.replaceState).toHaveBeenLastCalledWith('', {
+			settingsView: 'detail',
+			settingsDepth: 2,
+			settingsCategory: 'vault',
+			settingsItem: 'saved-1'
+		});
+		expect(settingsNav.selectedItem('vault')).toBe('saved-1');
+		expect(settingsNav.view).toBe('detail');
+		expect(settingsNav.depth).toBe(2);
+	});
+
+	it('selects the saved item as usual where there is no step to rewrite', () => {
+		settingsNav.stacked = false;
+		settingsNav.selectCategory('vault');
+		settingsNav.replaceItem('saved-1');
+		expect(nav.replaceState).not.toHaveBeenCalled();
+		expect(nav.pushState).not.toHaveBeenCalled();
+		expect(settingsNav.selectedItem('vault')).toBe('saved-1');
+		expect(settingsNav.view).toBe('detail');
+	});
+
 	it('steps back without history when nothing was pushed', () => {
 		const back = vi.spyOn(history, 'back');
 		settingsNav.view = 'detail';

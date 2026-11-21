@@ -703,6 +703,7 @@ from app.api import data_export
 app.include_router(data_export.router)
 from app.api import vault
 app.include_router(vault.router)
+app.include_router(vault.entries_router)
 from app.api.swarms import router as swarm_router
 app.include_router(swarm_router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(query.router)

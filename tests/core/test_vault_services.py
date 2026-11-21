@@ -3,10 +3,15 @@
 import asyncio
 import base64
 import datetime
+import html
 import ipaddress
 import json
+import re
 import ssl
+import time
+from html.entities import codepoint2name, html5
 from unittest.mock import AsyncMock
+from urllib.parse import quote, quote_plus
 
 import pytest
 import pytest_asyncio
@@ -102,6 +107,10 @@ class Service:
         self.port = 0
         # Authorization header values answered with 401 (an expired token).
         self.rejected: set[str] = set()
+        # The raw ETag value /api/etag answers with.
+        self.etag = b""
+        # The body /api/payload answers with.
+        self.payload = b""
 
     async def handle(self, reader, writer):
         self.connections += 1
@@ -127,6 +136,7 @@ class Service:
             }
         )
         extra = {}
+        raw = b""
         status = "200 OK"
         if headers.get("authorization") in self.rejected:
             status = "401 Unauthorized"
@@ -147,6 +157,11 @@ class Service:
                 "X-Debug": SECRET,
             }
             payload = b""
+        elif target.startswith("/api/etag"):
+            raw = b"ETag: " + self.etag + b"\r\n"
+            payload = b"{}"
+        elif target.startswith("/api/payload"):
+            payload = self.payload
         elif target.startswith("/api/big"):
             # The secret straddles the 64 KiB boundary and repeats before it.
             payload = (
@@ -154,6 +169,15 @@ class Service:
                 + b"x" * (vault_files.LIMIT - 10 * len(SECRET) - 5)
                 + SECRET.encode() * 4
             )
+        elif target.startswith("/api/stall"):
+            # Part of a long response arrives, then nothing more.
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                b"Content-Length: 10000000\r\nConnection: close\r\n\r\n" + self.payload
+            )
+            await writer.drain()
+            await asyncio.sleep(60)
+            payload = b""
         elif target.startswith("/api/hold"):
             self.held.set()
             await asyncio.sleep(60)
@@ -191,7 +215,7 @@ class Service:
             "Connection: close",
             *(f"{k}: {v}" for k, v in extra.items()),
         ]
-        writer.write(("\r\n".join(response) + "\r\n\r\n").encode() + payload)
+        writer.write(("\r\n".join(response) + "\r\n").encode() + raw + b"\r\n" + payload)
         try:
             await writer.drain()
         finally:
@@ -231,14 +255,14 @@ async def broker(monkeypatch):
 
 
 def spec(service, *, writable=False, prefix="/api", **overrides):
-    return GrantInput(
-        kind="service",
-        label="Test API",
-        url=f"https://127.0.0.1:{service.port}{prefix}",
-        writable=writable,
-        secret=SECRET,
+    return GrantInput(**{
+        "kind": "service",
+        "label": "Test API",
+        "url": f"https://127.0.0.1:{service.port}{prefix}",
+        "writable": writable,
+        "secret": SECRET,
         **overrides,
-    )
+    })
 
 
 async def pending(broker):
@@ -372,6 +396,44 @@ def test_credential_header_forms():
     )
 
 
+PASSWORD = "correct horse battery 42!"
+
+
+def test_a_username_and_password_are_encoded_by_the_broker():
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert vault_services.credential_header("authorization", "basic", PASSWORD, " admin ") == (
+        "authorization", f"Basic {pair}")
+    # The encoded pair is not the stored secret, and is kept out of results too.
+    needles = vault_services._needles(PASSWORD, f"Basic {pair}")
+    echoed = f"got {pair} for admin:{PASSWORD}".encode()
+    redacted = vault_services.redact(echoed, needles)
+    assert pair.encode() not in redacted and PASSWORD.encode() not in redacted
+
+
+@pytest.mark.parametrize(
+    "name, scheme, secret, username",
+    [
+        ("Authorization", "Bearer", PASSWORD, "admin"),        # a username is Basic only
+        ("X-API-Key", "Basic", PASSWORD, "admin"),
+        ("Authorization", "", PASSWORD, "admin"),
+        ("Authorization", "Basic", PASSWORD, "ad:min"),         # RFC 7617: no colon
+        ("Authorization", "Basic", PASSWORD, "ad\nmin"),
+        ("Authorization", "Basic", "short", "admin"),
+        ("Authorization", "Basic", "line\r\nX-Injected: 1", "admin"),
+        ("Authorization", "Basic", "x" * 8193, "admin"),
+        # Only ASCII: other characters have no single spelling for a service to echo.
+        ("Authorization", "Basic", "caf\u00e9-secret-2026", "admin"),
+        ("Authorization", "Basic", "caf\u00c3\u00a9\u96ea-2026", "admin"),
+        ("Authorization", "Basic", "tab\tinside-it", "admin"),
+        ("Authorization", "Basic", PASSWORD, "adm\u00edn"),
+    ],
+)
+def test_a_username_and_password_are_validated_without_echo(name, scheme, secret, username):
+    with pytest.raises(AccessDenied) as error:
+        vault_services.credential_header(name, scheme, secret, username)
+    assert secret not in str(error.value) and username not in str(error.value)
+
+
 def test_redaction_counts_positions_in_the_input_so_partial_secrets_never_slide_into_view():
     needles = vault_services._needles(SECRET, f"Bearer {SECRET}")
     data = SECRET.encode() * 20 + SECRET.encode()[:10]
@@ -379,7 +441,7 @@ def test_redaction_counts_positions_in_the_input_so_partial_secrets_never_slide_
     redacted = vault_services.redact(data, needles, limit)
     assert redacted == b"[redacted]" * 20
     for needle in needles:
-        assert needle not in redacted
+        assert needle.encode() not in redacted
     basic = base64.b64encode(b"admin:correct-horse-battery").decode()
     needles = vault_services._needles(basic, f"Basic {basic}")
     echoed = b"user=admin:correct-horse-battery pw=correct-horse-battery"
@@ -550,6 +612,293 @@ async def test_get_attaches_credential_and_redacts_echoes(
     assert json.dumps(SECRET)[1:-1] not in encoded
     assert "[redacted]" in result["body"]
     broker.revoke("chat", grant["id"])
+
+
+async def test_username_and_password_sign_in_sends_basic_and_redacts_both_forms(broker, service, trust):
+    grant = await broker.create(
+        "chat", spec(service, auth_scheme="Basic", username="admin", secret=PASSWORD)
+    )
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/echo"})
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert service.requests[0]["headers"]["authorization"] == f"Basic {pair}"
+    encoded = json.dumps(result, ensure_ascii=False)
+    assert pair not in encoded and PASSWORD not in encoded and "[redacted]" in result["body"]
+    # Neither the handle the model sees nor the owner's snapshot names the account.
+    assert "admin" not in json.dumps((await broker.resources("chat"))["grants"])
+    assert PASSWORD not in json.dumps(await broker.snapshot("chat"), ensure_ascii=False)
+    broker.revoke("chat", grant["id"])
+
+
+@pytest.mark.parametrize("around", [b"", "caf\u00e9 ".encode(), "caf\u00e9 ".encode("latin-1"), b"\xff "])
+async def test_a_password_echoed_in_a_response_header_is_redacted(broker, service, trust, around):
+    # Whatever charset the rest of the header is in, and however httpx then reads it.
+    grant = await broker.create("chat", spec(service, auth_scheme="Basic", username="admin", secret=PASSWORD))
+    service.etag = b'"' + around + PASSWORD.encode() + b'"'
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/etag"})
+    assert "[redacted]" in result["headers"]["etag"]
+    shown = json.dumps(result, ensure_ascii=False)
+    # Not the password, and no readable part of it either.
+    assert PASSWORD not in shown and "correct horse" not in shown
+    broker.revoke("chat", grant["id"])
+
+
+async def test_a_header_is_scanned_as_the_bytes_the_service_sent(broker, service, trust):
+    # A credential of another scheme may be base64 of any text. httpx reads this
+    # header as UTF-8; scanning its text re-encoded as Latin-1 would miss the echo.
+    text = "caf\u00e9-secret-2026"
+    grant = await broker.create("chat", spec(service, secret=base64.b64encode(text.encode()).decode()))
+    service.etag = b'"' + text.encode() + b'"'
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/etag"})
+    assert result["headers"]["etag"] == '"[redacted]"'
+    broker.revoke("chat", grant["id"])
+
+
+def test_a_pair_the_owner_encoded_is_redacted_where_the_service_decodes_it():
+    # An owner may paste an already encoded pair as the credential.
+    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+    assert vault_services.credential_header("Authorization", "Basic", pair) == ("Authorization", f"Basic {pair}")
+    needles = vault_services._needles(pair, f"Basic {pair}")
+    body = f"signed in as admin:{PASSWORD}, password {PASSWORD}".encode()
+    assert vault_services.redact(body, needles) == b"signed in as [redacted], password [redacted]"
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        "admin:caf\u00e9-secret-2026".encode(),           # other characters, as UTF-8
+        "admin:caf\u00e9-secret-2026".encode("latin-1"),  # and as Latin-1
+        b"admin:tab\tinside-it",
+        b"no-colon-in-this-credential",
+        b"admin:aB3!",                                    # too short to be found in a response
+        b"x" * 129 + b":" + PASSWORD.encode(),
+    ],
+)
+def test_a_pair_the_owner_encoded_is_held_to_the_same_rule(pair):
+    # Otherwise an encoded pair would be a way to store a password whose echo
+    # has more than one spelling, or one too short to redact.
+    encoded = base64.b64encode(pair).decode()
+    for credential in (encoded, encoded.rstrip("=") + "*", "not-base64-at-all!"):
+        with pytest.raises(AccessDenied) as error:
+            vault_services.credential_header("Authorization", "basic", credential)
+        assert credential not in str(error.value)
+    # Another scheme carries the same text as an opaque credential.
+    assert vault_services.credential_header("Authorization", "Bearer", encoded)[1] == f"Bearer {encoded}"
+
+
+ODD = 'tok "q" \\ a/b <c>&\'d+e =~ end'
+
+
+def _upper_hex(text: str) -> str:
+    return re.sub(r"\\u[0-9a-f]{4}|%[0-9a-f]{2}|&#x[0-9a-f]+;", lambda m: m[0][:2] + m[0][2:].upper(), text)
+
+
+def _dotnet(text: str) -> str:
+    # System.Text.Json: non-ASCII and HTML-sensitive characters as upper-case escapes.
+    units = text.encode("utf-16-be")
+    out = []
+    for index in range(0, len(units), 2):
+        unit = int.from_bytes(units[index : index + 2], "big")
+        out.append(chr(unit) if unit < 0x80 and chr(unit) not in "\"\\<>&'+`" else f"\\u{unit:04X}")
+    return "".join(out)
+
+
+def _ruby(text: str) -> str:
+    # String#dump: "\u00E9" below U+10000 and "\u{1F600}" above, a quote and a backslash escaped.
+    return "".join(
+        c if c.isascii() and c not in '"\\' else f"\\{c}" if c.isascii()
+        else f"\\u{ord(c):04X}" if ord(c) < 0x10000 else f"\\u{{{ord(c):X}}}"
+        for c in text
+    )
+
+
+def _javascript_escape(text: str) -> str:
+    # escape(): "%E9" below U+0100, "%u20AC" above, UTF-16 halves beyond U+FFFF.
+    units = text.encode("utf-16-be")
+    out = []
+    for index in range(0, len(units), 2):
+        unit = int.from_bytes(units[index : index + 2], "big")
+        keep = unit < 0x80 and (chr(unit).isalnum() or chr(unit) in "@*_+-./")
+        out.append(chr(unit) if keep else f"%{unit:02X}" if unit < 0x100 else f"%u{unit:04X}")
+    return "".join(out)
+
+
+# A name for every character of ODD that HTML 5 names ("&sol;", "&plus;", "&bsol;", "&apos;").
+_NAMED = {text: f"&{name}" for name, text in sorted(html5.items(), reverse=True) if name.endswith(";")}
+_WRITE = {
+    "json": lambda text: json.dumps(text)[1:-1],
+    "php": lambda text: json.dumps(text)[1:-1].replace("/", "\\/"),  # PHP escapes the slash too
+    "percent": lambda text: quote(text, safe="/"),
+    "form": quote_plus,
+    "html": html.escape,
+}
+
+
+@pytest.mark.parametrize("spell", [
+    lambda p: json.dumps(p)[1:-1],
+    lambda p: json.dumps(p, ensure_ascii=False)[1:-1],
+    lambda p: _upper_hex(json.dumps(p)[1:-1]),
+    lambda p: json.dumps(p)[1:-1].replace("/", "\\/"),
+    _dotnet,
+    lambda p: "".join(f"\\u{ord(c):04x}" if not c.isalnum() and ord(c) < 0x10000 else c for c in p),
+    lambda p: json.dumps(json.dumps(p))[3:-3],  # a JSON document quoted inside a JSON string
+    lambda p: json.dumps(json.dumps(p, ensure_ascii=False), ensure_ascii=False)[3:-3],
+    lambda p: json.dumps(_dotnet(p))[1:-1],
+    quote,
+    lambda p: quote(p, safe=""),
+    lambda p: quote(p, safe="").lower(),
+    quote_plus,
+    lambda p: quote(p, safe="!*'()"),  # encodeURIComponent
+    html.escape,
+    lambda p: html.escape(p).replace("&#x27;", "&#39;"),
+    lambda p: "".join(c if c.isalnum() else f"&#{ord(c)};" for c in p),
+    lambda p: "".join(c if c.isalnum() else f"&#x{ord(c):X};" for c in p),
+    # PHP htmlentities(): every character that has an HTML 4 name ("&eacute;", "&euro;").
+    lambda p: "".join(f"&{codepoint2name[ord(c)]};" if ord(c) in codepoint2name else c for c in p),
+    lambda p: "".join(_NAMED.get(c, c) for c in p),
+    lambda p: repr(p.encode())[2:-1],  # Python showing the bytes it received
+    lambda p: ascii(p)[1:-1],
+    lambda p: repr(p)[1:-1],
+    _ruby,
+    _javascript_escape,
+    lambda p: "".join(c if c.isalnum() else "".join(f"\\{b:03o}" for b in c.encode()) for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\x{{{ord(c):x}}}" for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\x{ord(c):02x}" for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\U{ord(c):08x}" for c in p),
+    re.escape,  # a pattern escaper: "\+", "\ ", "\<"
+    lambda p: "".join(c if c.isalnum() or c in "/=+~" else f"\\{c}" for c in p),  # a shell: printf %q
+], ids=["json", "json-utf8", "json-upper-hex", "json-slash", "dotnet", "json-escape-all", "json-in-json",
+        "json-in-json-utf8", "dotnet-in-json", "url", "url-all",
+        "url-lower-hex", "form", "js-url", "html", "html-decimal-quote", "entities", "hex-entities",
+        "php-htmlentities", "html5-names", "python-bytes", "python-ascii", "python-repr", "ruby-dump",
+        "javascript-escape", "octal-bytes", "perl-braces", "hex-bytes", "long-unicode", "pattern-escape", "shell"])
+def test_an_echoed_credential_is_redacted_however_the_service_spells_it(spell):
+    pair = base64.b64encode(f"admin:{ODD}".encode()).decode()
+    needles = vault_services._needles(ODD, f"Basic {pair}")
+    assert vault_services.redact(b'{"echo": "' + spell(ODD).encode() + b'"}', needles) == b'{"echo": "[redacted]"}'
+    # The Base64 pair of the header, as a serializer that escapes "+", "/" and "=" writes it.
+    assert vault_services.redact(_dotnet(pair).replace("/", "\\/").encode(), needles) == b"[redacted]"
+
+
+def test_only_the_credential_is_redacted_not_text_that_resembles_it():
+    needles = vault_services._needles("tok+en/abc=123", "Bearer tok+en/abc=123")
+    for near in (b"tok en/abc=123", b"tok\\u002ben-abc=123", b"TOK+EN/ABC=123", b"tok%2ben%2fabc"):
+        assert vault_services.redact(near, needles) == near
+
+
+def test_escapes_around_a_credential_keep_their_place():
+    needles = vault_services._needles("tok+en/abc=123", "Bearer tok+en/abc=123")
+    # Text before and after an occurrence is returned as it was sent, escapes included.
+    data = b'{"a": "caf\\u00e9 %41 &amp;", "t": "tok\\u002Ben\\/abc=123", "b": "\\u00e9\\\\ %zz &bogus; \\ud83d"}'
+    assert vault_services.redact(data, needles) == data.replace(b"tok\\u002Ben\\/abc=123", b"[redacted]")
+    # Two spellings side by side, and one cut off by the limit, are each handled once.
+    both = b"tok+en/abc=123 tok%2Ben%2Fabc%3D123 tok&#43;en&#x2F;abc=123"
+    assert vault_services.redact(both, needles) == b"[redacted] [redacted] [redacted]"
+    assert vault_services.redact(both, needles, 20) == b"[redacted] [redacted]"
+    assert vault_services.redact(both, needles, 15) == b"[redacted] "
+
+
+@pytest.mark.parametrize("outer", ["json", "php", "html", "percent"])
+@pytest.mark.parametrize("inner", ["json", "percent", "form", "html"])
+def test_a_credential_escaped_twice_is_redacted(outer, inner):
+    # Text held inside other text: a URL or a page in JSON, JSON in a JSON string, a page that shows a URL.
+    needles = vault_services._needles(ODD, f"Bearer {ODD}")
+    echoed = _WRITE[outer](f"see {_WRITE[inner](ODD)} now").encode()
+    redacted = vault_services.redact(echoed, needles)
+    assert redacted == _WRITE[outer]("see ").encode() + b"[redacted]" + _WRITE[outer](" now").encode()
+
+
+@pytest.mark.parametrize("outer", [None, "json", "php", "html", "percent"])
+@pytest.mark.parametrize("inner", [None, "json", "percent", "form", "html"])
+@pytest.mark.parametrize("secret", [ODD, '"quoted" first', "&%\\ escapes first"])
+def test_a_response_cut_inside_an_echo_returns_none_of_the_credential(outer, inner, secret):
+    # Wherever reading stops inside an echoed credential, even inside an escape
+    # or before its first character is whole, the result ends before the echo.
+    inside = _WRITE[inner] if inner else str
+    outside = _WRITE[outer] if outer else str
+    needles = vault_services._needles(secret, f"Bearer {secret}")
+    before = outside("see ").encode()
+    echoed = outside(f"see {inside(secret)}").encode()
+    assert vault_services.redact(echoed, needles) == before + b"[redacted]"
+    # Cut right after the echo, it is replaced, unless an escape just before it
+    # (the space of "see ") is close enough to the end to be held back too.
+    whole = vault_services.redact(echoed, needles, cut=True)
+    assert whole == before + b"[redacted]" or before.startswith(whole), whole
+    for size in range(len(before) + 1, len(echoed)):
+        returned = vault_services.redact(echoed[:size], needles, cut=True)
+        assert before.startswith(returned), (size, returned)
+    # A response that ended there was read whole: nothing is cut from it.
+    assert vault_services.redact(echoed[:-1], needles) == echoed[:-1]
+
+
+def test_a_cut_response_keeps_what_cannot_be_the_start_of_an_echo():
+    needles = vault_services._needles("tok+en/abc=123", "Bearer tok+en/abc=123")
+    plain = b"x" * 500
+    assert vault_services.redact(plain, needles, cut=True) == plain
+    # Escapes well before the end stay; only the last stretch is held back.
+    text = b'{"a": "caf\\u00e9 &amp; %41"}' + plain
+    assert vault_services.redact(text, needles, cut=True) == text
+    assert vault_services.redact(plain + b"&amp; and more", needles, cut=True) == plain
+
+
+def test_a_response_built_to_stall_the_scan_is_read_in_one_pass():
+    # The service chooses the response: a scan that tries every reading of a
+    # run of backslashes would not finish.
+    secret = "\\" * 40 + 'q"' * 20 + "end"
+    needles = vault_services._needles(secret, f"Bearer {secret}")
+    started = time.perf_counter()
+    for flood in (b"\\" * 70000, b'\\"' * 23000, b"%5c" * 23000, b"&#92;" * 14000, b"\\u005c" * 11000):
+        assert vault_services.redact(flood, needles) == flood
+    assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize("charset", ["utf-16", "utf-16-be", "utf-32"])
+async def test_a_response_that_is_not_text_is_not_returned(broker, service, trust, charset):
+    # Text in UTF-16 or UTF-32 puts a zero byte between the characters of an
+    # echoed credential, which the scan does not read: no part of it is returned.
+    secret = "tok-wide-echo-123"
+    service.payload = f"you sent {secret}".encode(charset)
+    grant = await broker.create("chat", spec(service, secret=secret))
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/payload"})
+    assert result["body"] == "[The response is not text, so its body is not shown.]"
+    assert not result["truncated"]
+
+
+async def test_an_escaped_echo_that_crosses_the_size_limit_is_cut_where_it_starts(broker, service, trust):
+    # An escaped spelling is longer than the credential, so it may not be read
+    # to its end: the part before the limit must not be returned.
+    secret = "tok+" * 3 + "&<'>+" * 8
+    spelled = _dotnet(secret).encode()
+    assert len(spelled) > 3 * len(secret)
+    service.payload = b"x" * (vault_files.LIMIT - 10) + spelled + b" tail"
+    grant = await broker.create("chat", spec(service, secret=secret))
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/payload"})
+    assert result["truncated"] and result["body"] == "x" * (vault_files.LIMIT - 10)
+    # One that ends within what is read is replaced as usual.
+    service.payload = b"x" * (vault_files.LIMIT - 10) + _dotnet(secret[:12]).encode() + b" tail"
+    short = await broker.create("chat", spec(service, secret=secret[:12]))
+    result = await broker.run("chat", short["id"], "http", {"method": "GET", "path": "/payload"})
+    assert result["truncated"] and result["body"] == "x" * (vault_files.LIMIT - 10) + "[redacted]"
+    broker.revoke("chat", grant["id"])
+    broker.revoke("chat", short["id"])
+
+
+async def test_a_long_credential_does_not_make_a_stalled_response_wait_for_more(broker, service, trust):
+    # The preview is returned once the limit and one credential's length are
+    # read; a service that then goes quiet must not turn it into a timeout.
+    secret = "k" + "0123456789abcdef" * 128
+    service.payload = b"x" * (vault_files.LIMIT + 3 * len(secret))
+    grant = await broker.create("chat", spec(service, secret=secret))
+    result = await asyncio.wait_for(
+        broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/stall"}), 5
+    )
+    assert result["truncated"] and result["body"] == "x" * vault_files.LIMIT
+    broker.revoke("chat", grant["id"])
+
+
+async def test_a_username_needs_the_basic_scheme_before_anything_is_contacted(broker, service, trust):
+    with pytest.raises(AccessDenied, match="Basic scheme"):
+        await broker.create("chat", spec(service, username="admin", secret=PASSWORD))
+    assert service.connections == 0 and not broker.grants
 
 
 async def test_custom_header_without_scheme(broker, service, trust):

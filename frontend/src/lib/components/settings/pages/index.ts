@@ -35,6 +35,7 @@ export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	mcp: () => import('../mcp/McpCollection.svelte'),
 	hooks: () => import('../hooks/HooksCollection.svelte'),
 	devices: () => import('../devices/DevicesCollection.svelte'),
+	vault: () => import('../vault/VaultCollection.svelte'),
 	logs: () => import('../logs/LogsCollection.svelte')
 };
 

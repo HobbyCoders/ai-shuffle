@@ -1,8 +1,9 @@
 // Real-browser check of Vault on a mirrored conversation (#1267).
 // The session runs on another device ("Owner PC"); this worker forwards the
-// panel's calls there. The check answers this worker's API in the browser and
-// drives the owner-side request card, saved connection, one-shot approval and
-// revocation, at 1440x900 and 390x844.
+// Vault's calls there. The check answers this worker's API in the browser and
+// drives the owner-side request card above the composer, the saved sign-in,
+// the one-shot approval, and revocation from the panel the composer chip
+// opens, at 1440x900 and 390x844.
 //
 // Run from frontend/ while the fixture is serving:
 //   npx vite dev --config tests/vite.vault-remote.config.js --host 127.0.0.1 --port 6600 --strictPort
@@ -40,15 +41,18 @@ async function harness(viewport, touch) {
 		calls: [],
 		snapshot: {
 			grants: [], actions: [], saved_connections: [{ id: 'c1', label: 'NAS', kind: 'machine', target: grant.target, fingerprint: grant.fingerprint }],
-			requests: [{ id: 'r1', kind: 'machine', purpose: 'Check disk usage on the NAS', expires_at: later() }],
+			// The agent named the machine, which is what selects the matching saved sign-in.
+			requests: [{ id: 'r1', kind: 'machine', purpose: 'Check disk usage on the NAS', expires_at: later(), suggested_host: '10.0.0.2', suggested_username: 'root' }],
 			vault_available: true, folder_available: false, restart_revokes: true,
 		},
 	};
 	await context.route((u) => u.pathname.startsWith('/api/'), async (route) => {
 		const request = route.request();
 		const path = new URL(request.url()).pathname;
-		if (path === '/api/v1/sessions/remote-chat')
-			return route.fulfill({ json: { id: 'remote-chat', mode: 'chat', is_remote: true, device_name: 'Owner PC' } });
+		const meta = { id: 'remote-chat', mode: 'chat', is_remote: true, device_name: 'Owner PC' };
+		if (path === '/api/v1/sessions/remote-chat') return route.fulfill({ json: meta });
+		// The slim read the panel tries first carries the same owner fields.
+		if (path === '/api/v1/sessions/remote-chat/live') return route.fulfill({ json: { session_meta: meta } });
 		if (!path.startsWith('/api/v1/vault/sessions/remote-chat')) return route.abort();
 		const call = { method: request.method(), path: path.slice('/api/v1/vault/sessions/remote-chat'.length), body: request.postDataJSON?.() ?? null };
 		if (call.method !== 'GET') state.calls.push(call);
@@ -81,32 +85,44 @@ async function harness(viewport, touch) {
 	});
 
 	await page.goto(url);
-	const trigger = page.getByRole('button', { name: /^Vault/ });
+	const trigger = page.getByRole('button', { name: /^Vault/ }).first();
 	await trigger.waitFor();
-	check((await trigger.getAttribute('aria-label')) === 'Vault: 1 waiting for you', 'the owner-side request is pending on the viewer');
-	await tap(trigger);
-	const dialog = page.getByRole('dialog', { name: 'Vault' });
-	await dialog.waitFor();
-	const card = dialog.getByRole('region', { name: 'Vault request' });
+	await page.waitForFunction(() => document.querySelector('button[aria-label="Vault: 1 waiting for you"]'));
+	check(true, 'the owner-side request is pending on the viewer');
+	// Inline above the composer: nothing to open before answering.
+	const lane = page.getByRole('group', { name: 'Vault: waiting for you' });
+	const card = lane.getByRole('region', { name: 'Vault request' });
+	await card.waitFor();
+	check(await page.locator('.pa-pop:not([hidden])').count() === 0, 'the panel stays closed while a request waits');
 	check(await card.getByText('Check disk usage on the NAS').isVisible(), 'the request card shows the purpose');
-	check((await card.getByLabel('Connection').inputValue()) === 'c1', 'the owner\'s saved connection is offered');
-	check(await card.getByText(/Uses the saved sign-in for/).isVisible(), 'no credentials are asked for a saved connection');
-	check(await card.getByText(/Sent only to Owner PC through this worker/).isVisible(), 'the card names the device that keeps access');
-	check(!(await overflow()).page && !(await overflow()).dialog, 'nothing overflows with the request open', await overflow());
+	check(await card.getByRole('radio', { name: /NAS/ }).isChecked(), 'the owner\'s saved sign-in is offered and chosen');
+	check(await card.getByRole('radio', { name: 'Another sign-in…' }).isVisible(), 'a different sign-in can be entered instead');
+	check(await card.locator('input[type="password"]').count() === 0, 'no credentials are asked for a saved sign-in');
+	check(await card.getByText(/It stays encrypted on Owner PC/).isVisible(), 'the card names the device that keeps the sign-in');
+	check(!(await overflow()).page, 'nothing overflows with the request shown', await overflow());
 	await shot('request');
 	await tap(card.getByRole('button', { name: 'Connect' }));
-	const approve = dialog.getByRole('button', { name: 'Approve once' });
+	const approval = lane.getByRole('region', { name: 'One-time approval' });
+	const approve = approval.getByRole('button', { name: 'Run once' });
 	await approve.waitFor();
 	check(state.calls[0]?.path === '/requests/r1' && state.calls[0].body?.saved_id === 'c1' && state.calls[0].body?.connection === null,
-		'the grant went to this worker as a saved-connection choice', state.calls[0]);
-	check(await dialog.getByText('df -h /mnt/user').isVisible(), 'the owner\'s pending command is shown for approval');
+		'the grant went to this worker as a saved sign-in choice', state.calls[0]);
+	check(await approval.getByText('df -h /mnt/user').isVisible(), 'the owner\'s pending command is shown for approval');
 	await shot('approval');
 	await tap(approve);
-	await dialog.getByText('df -h /mnt/user').waitFor({ state: 'detached' });
+	await approval.waitFor({ state: 'detached' });
 	check(JSON.stringify(state.calls[1]) === JSON.stringify({ method: 'POST', path: '/actions/a1', body: { allow: true } }),
 		'the one-shot approval went to this worker for the owner', state.calls[1]);
 
-	check(await dialog.getByText(/Encrypted on Owner PC/).isVisible(), 'saved connections say where they are stored');
+	// The chip opens the panel: active access and the owner's saved sign-ins.
+	await tap(trigger);
+	const dialog = page.getByRole('dialog', { name: 'Vault' });
+	await dialog.waitFor();
+	await page.waitForTimeout(300);
+	check(await dialog.getByText('Saved sign-ins on Owner PC').isVisible(), 'saved sign-ins are listed for the owning device');
+	check(await dialog.getByText(/Encrypted on Owner PC/).isVisible(), 'saved sign-ins say where they are stored');
+	check(!(await overflow()).page && !(await overflow()).dialog, 'the open panel fits the viewport', await overflow());
+	await shot('panel');
 	await tap(dialog.getByRole('button', { name: 'Revoke' }));
 	await tap(dialog.locator('.pa-small-btn.danger.solid'));
 	await dialog.getByRole('button', { name: 'Revoke' }).waitFor({ state: 'detached' });

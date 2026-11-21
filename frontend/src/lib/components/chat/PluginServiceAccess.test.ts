@@ -84,9 +84,9 @@ describe('plugin service sign-in card', () => {
 		mount();
 		await fireEvent.click(await screen.findByRole('checkbox', { name: /Allow changes/ }));
 		expect(screen.getByText('Read and write')).toBeTruthy();
-		await fireEvent.change(screen.getByLabelText('Access for'), { target: { value: '120' } });
+		await fireEvent.click(screen.getByRole('radio', { name: '8 hours' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
-		expect(m.post).toHaveBeenCalledWith(endpoint, { sign_in: true, writable: true, minutes: 120 });
+		expect(m.post).toHaveBeenCalledWith(endpoint, { sign_in: true, writable: true, minutes: 480 });
 	});
 
 	it('explains a cancelled sign-in and lets the owner try again', async () => {

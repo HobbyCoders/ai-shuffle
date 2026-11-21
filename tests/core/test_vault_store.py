@@ -178,6 +178,50 @@ def test_duplicate_names_never_overwrite_credentials(vault):
     assert vault_store.load(owner, first).label == "ServerWorker"
 
 
+def test_concurrent_adds_cannot_pass_the_capacity_or_name_check_together(vault, monkeypatch):
+    import threading
+    owner = ("local", "worker", None)
+    for index in range(49):
+        vault_store.save(owner, spec().model_copy(update={"label": f"Machine {index}"}))
+    # Without the write lock both adds read the catalogue before either writes.
+    read = threading.Barrier(2, timeout=0.3)
+    catalog = vault_store.catalog
+
+    def slow_catalog(*args, **kwargs):
+        found = catalog(*args, **kwargs)
+        try:
+            read.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return found
+
+    monkeypatch.setattr(vault_store, "catalog", slow_catalog)
+    outcomes = []
+
+    def add(label):
+        try:
+            outcomes.append(vault_store.save(owner, spec().model_copy(update={"label": label})))
+        except AccessDenied as exc:
+            outcomes.append(exc)
+
+    for labels in (("Last", "One too many"), ("Same name", "same NAME")):
+        outcomes.clear()
+        read.reset()
+        threads = [threading.Thread(target=add, args=(label,)) for label in labels]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sum(isinstance(outcome, AccessDenied) for outcome in outcomes) == 1, outcomes
+        if labels[0] == "Last":
+            assert len(vault) == 50
+            vault.pop(next(key for key in vault if vault_store.unpack(
+                owner, key.rsplit(":", 1)[-1], vault[key]).label in labels))
+            vault.pop(next(iter(vault)))
+        else:
+            assert len(vault) == 49
+
+
 def test_service_credentials_are_encrypted_and_never_catalogued(vault):
     owner = ("local", "worker", None)
     service = GrantInput(kind="service", label="Inventory API", url="https://api.example.com/v1",
@@ -192,7 +236,7 @@ def test_service_credentials_are_encrypted_and_never_catalogued(vault):
     catalogue = vault_store.catalog(owner)
     assert catalogue == [{"id": connection_id, "kind": "service", "label": "Inventory API",
                           "target": "https://api.example.com/v1", "fingerprint": "", "writable": True,
-                          "auth_header": "X-API-Key", "auth_scheme": ""}]
+                          "auth_header": "X-API-Key", "auth_scheme": "", "username": ""}]
     assert "vault-only-api-key" not in json.dumps(catalogue)
     machine = vault_store.save(owner, spec())
     assert {item["kind"] for item in vault_store.catalog(owner)} == {"machine", "service"}
@@ -217,7 +261,7 @@ def test_update_rewrites_in_place_and_refuses_without_writing(vault):
     assert loaded.password.get_secret_value() == "vault-only-password"
     assert len(vault) == 2 and "vault-only-password" not in json.dumps(vault_store.catalog(owner))
     before = dict(vault)
-    with pytest.raises(AccessDenied, match="already saved"):
+    with pytest.raises(AccessDenied, match="already has a sign-in with that name"):
         vault_store.update(owner, other, lambda current: current.model_copy(update={"label": "SERVERWORKER"}))
     def refuse(current):
         raise AccessDenied("refused")

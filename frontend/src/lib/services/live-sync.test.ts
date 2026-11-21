@@ -72,10 +72,11 @@ describe('root authenticated live-sync lifecycle',()=>{
    snapshot = {...empty, actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
    Socket.all[0].emit({type:'vault_changed',session_id:'other'});
    await vi.advanceTimersByTimeAsync(100);await tick();
-   expect(screen.queryByText('Approve this remote command?')).toBeNull();
+   expect(screen.queryByRole('region',{name:'One-time approval'})).toBeNull();
    Socket.all[0].emit({type:'vault_changed',session_id:'s1'});
    await vi.advanceTimersByTimeAsync(100);await tick();
-   expect(screen.getByText('Approve this remote command?')).toBeTruthy();
+   expect(screen.getByRole('region',{name:'One-time approval'})).toBeTruthy();
+   expect(screen.getByText('Run this on this resource?')).toBeTruthy();
    expect(access.get.mock.calls.filter(([url])=>url.startsWith('/vault/sessions/'))).toHaveLength(2);
    expect(access.get.mock.calls.filter(([url])=>url.startsWith('/sessions/'))).toHaveLength(1);
   } finally {view.unmount();cleanup();resourceSync.clear();}

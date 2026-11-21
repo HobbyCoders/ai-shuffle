@@ -27,6 +27,8 @@
 	} = $props();
 
 	const service = untrack(() => saved.kind === 'service');
+	// A web service that signs in with a username and password (HTTP Basic).
+	const basic = untrack(() => saved.kind === 'service' && !!saved.username);
 	// Older catalogues carry only `username@host:port`.
 	const parsed = untrack(() => /^([^@]+)@(.+):([0-9]+)$/.exec(saved.target));
 	const initial = untrack(() => ({
@@ -82,8 +84,12 @@
 		if (fingerprint.trim()) body.fingerprint = fingerprint.trim();
 		if (service) {
 			if (url.trim() !== initial.url) body.url = url.trim();
-			if (authHeader.trim() !== initial.authHeader) body.auth_header = authHeader.trim();
-			if (authScheme.trim() !== initial.authScheme) body.auth_scheme = authScheme.trim();
+			if (basic) {
+				if (username.trim() !== initial.username) body.username = username.trim();
+			} else {
+				if (authHeader.trim() !== initial.authHeader) body.auth_header = authHeader.trim();
+				if (authScheme.trim() !== initial.authScheme) body.auth_scheme = authScheme.trim();
+			}
 			if (writable !== initial.writable) body.writable = writable;
 			if (secret) body.secret = secret;
 		} else {
@@ -131,18 +137,26 @@
 	<label class="pa-field"><span>Name</span><input class="card-form-input" required maxlength="80" bind:this={nameInput} bind:value={label} /></label>
 	{#if service}
 		<label class="pa-field"><span>Service address</span><input class="card-form-input card-form-input--mono" type="url" required placeholder="https://api.example.com/v1" spellcheck="false" bind:value={url} /></label>
-		<div class="pa-grid">
-			<label class="pa-field"><span>Credential header</span><input class="card-form-input" required maxlength="64" spellcheck="false" bind:value={authHeader} /></label>
-			<label class="pa-field"><span>Scheme</span><input class="card-form-input" maxlength="32" placeholder="None" spellcheck="false" bind:value={authScheme} /></label>
-		</div>
-		<label class="pa-field"><span>API key or token</span><input class="card-form-input" disabled={!secureContext} type="password" minlength="8" placeholder="Unchanged" autocomplete="new-password" spellcheck="false" aria-describedby="{uid}-secret" bind:value={secret} /></label>
-		<p class="pa-hint" id="{uid}-secret">Leave blank to keep the saved token. A new one replaces it.</p>
+		{#if basic}
+			<div class="pa-grid">
+				<label class="pa-field"><span>Username</span><input class="card-form-input" required maxlength="128" pattern="[^:]+" title="A username cannot contain a colon." autocomplete="off" spellcheck="false" bind:value={username} /></label>
+				<label class="pa-field"><span>Password</span><input class="card-form-input" disabled={!secureContext} type="password" minlength="8" placeholder="Unchanged" autocomplete="new-password" spellcheck="false" aria-describedby="{uid}-secret" bind:value={secret} /></label>
+			</div>
+			<p class="pa-hint" id="{uid}-secret">Leave blank to keep the saved password. A new one replaces it.</p>
+		{:else}
+			<div class="pa-grid">
+				<label class="pa-field"><span>Credential header</span><input class="card-form-input" required maxlength="64" spellcheck="false" bind:value={authHeader} /></label>
+				<label class="pa-field"><span>Scheme</span><input class="card-form-input" maxlength="32" placeholder="None" spellcheck="false" bind:value={authScheme} /></label>
+			</div>
+			<label class="pa-field"><span>API key or token</span><input class="card-form-input" disabled={!secureContext} type="password" minlength="8" placeholder="Unchanged" autocomplete="new-password" spellcheck="false" aria-describedby="{uid}-secret" bind:value={secret} /></label>
+			<p class="pa-hint" id="{uid}-secret">Leave blank to keep the saved token. A new one replaces it.</p>
+		{/if}
 		<label class="pa-field"><span>Certificate SHA-256 fingerprint</span><input class="card-form-input card-form-input--mono" maxlength="95" pattern={'[0-9A-Fa-f]{64}|([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}'} placeholder={saved.fingerprint && !addressChanged ? 'Unchanged' : 'Optional, for a self-signed server'} spellcheck="false" bind:value={fingerprint} /></label>
 		{#if addressChanged && saved.fingerprint && !fingerprint.trim()}<p class="pa-hint" role="status">A new address clears the trusted certificate. Enter its fingerprint here if the server is self-signed.</p>{/if}
 		<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow the session’s permission mode.</small></label>
 	{:else}
 		<div class="pa-grid host">
-			<label class="pa-field"><span>Server IP or hostname</span><input class="card-form-input" required maxlength="253" spellcheck="false" bind:value={host} /></label>
+			<label class="pa-field"><span>Address</span><input class="card-form-input" required maxlength="253" spellcheck="false" bind:value={host} /></label>
 			<label class="pa-field"><span>Port</span><input class="card-form-input" required type="number" min="1" max="65535" bind:value={port} /></label>
 		</div>
 		<label class="pa-field"><span>Username</span><input class="card-form-input" required autocomplete="off" spellcheck="false" bind:value={username} /></label>

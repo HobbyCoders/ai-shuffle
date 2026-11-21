@@ -23,15 +23,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import bisect
 import datetime
 import hashlib
 import hmac
 import ipaddress
-import json
 import re
 import ssl
 from dataclasses import dataclass
-from urllib.parse import quote, unquote, urlsplit
+from functools import partial
+from html.entities import html5
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from cryptography import x509
@@ -78,6 +80,7 @@ CONTENT_TYPE = re.compile(
     r"[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+(; ?charset=[A-Za-z0-9_-]+)?"
 )
 _REDACTED = b"[redacted]"
+_NOT_TEXT = b"[The response is not text, so its body is not shown.]"
 
 
 def certificate_pin(value: str) -> str:
@@ -164,6 +167,11 @@ def _printable(value: str) -> bool:
     return all(0x21 <= ord(ch) <= 0x7E for ch in value)
 
 
+def _ascii(value: str) -> bool:
+    """Visible ASCII characters and spaces."""
+    return all(0x20 <= ord(ch) <= 0x7E for ch in value)
+
+
 def parse_origin(url: str) -> Origin:
     if not isinstance(url, str) or not url or len(url) > 2048 or not _printable(url):
         raise AccessDenied("Enter the service as an https:// address.")
@@ -210,9 +218,37 @@ def parse_origin(url: str) -> Origin:
     return Origin(f"https://{netloc}{prefix}", host, port, prefix)
 
 
-def credential_header(name: str, scheme: str, secret: str) -> tuple[str, str]:
+def credential_header(name: str, scheme: str, secret: str, username: str = "") -> tuple[str, str]:
+    """The header that carries the credential, validated.
+
+    With a ``username`` the secret is that account's password and the header
+    is HTTP Basic (RFC 7617): the broker encodes the pair, so neither the
+    password nor the encoded pair is ever typed, stored or shown in a form the
+    model could read. Messages never quote a submitted value.
+
+    Both are ASCII. Servers disagree on the charset of other characters in
+    Basic credentials, and an ASCII character is the same byte in every
+    charset and the same number in every escape, which is what lets ``redact``
+    find an echoed credential however the service wrote it.
+    """
     name = (name or "").strip()
     scheme = (scheme or "").strip()
+    username = (username or "").strip()
+    if username:
+        if name.lower() != "authorization" or scheme.lower() != "basic":
+            raise AccessDenied(
+                "A username and password sign in with the Authorization header and the Basic scheme."
+            )
+        if not _basic_username(username):
+            raise AccessDenied(
+                "Enter the service username without a colon, using unaccented letters, digits and symbols."
+            )
+        if not _basic_password(secret):
+            raise AccessDenied(
+                "Enter a password of 8 to 8,192 characters, using unaccented letters, digits, symbols and spaces."
+            )
+        pair = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
+        return name, f"Basic {pair}"
     if not _TOKEN.fullmatch(name) or name.lower() in RESERVED_HEADERS:
         raise AccessDenied(
             "Choose a credential header such as Authorization or X-API-Key."
@@ -230,7 +266,30 @@ def credential_header(name: str, scheme: str, secret: str) -> tuple[str, str]:
         raise AccessDenied(
             "Enter a credential of 8 to 8,192 visible characters without spaces."
         )
+    if scheme.lower() == "basic" and not _encoded_pair(secret):
+        # A pair the owner encoded themselves is held to the rules above.
+        raise AccessDenied(
+            "A Basic credential is an encoded username and password: unaccented letters, digits and "
+            "symbols, and a password of at least 8 characters. Choose Username and password to enter them."
+        )
     return name, f"{scheme} {secret}" if scheme else secret
+
+
+def _basic_username(value: str) -> bool:
+    return len(value) <= 128 and ":" not in value and _ascii(value)
+
+
+def _basic_password(value: object) -> bool:
+    return isinstance(value, str) and 8 <= len(value) <= 8192 and _ascii(value)
+
+
+def _encoded_pair(credential: str) -> bool:
+    """Whether a Basic credential is the base64 form of a username and password that could be typed."""
+    try:
+        username, colon, password = base64.b64decode(credential, validate=True).decode("ascii").partition(":")
+    except ValueError:
+        return False
+    return bool(colon) and _basic_username(username) and _basic_password(password)
 
 
 def request_url(origin: Origin, path: str) -> str:
@@ -280,13 +339,21 @@ def request_url(origin: Origin, path: str) -> str:
     return url
 
 
-def _needles(secret: str, header_value: str) -> list[bytes]:
+def _needles(secret: str, header_value: str) -> list[str]:
+    """The credential in every form an echo can carry; ``redact`` also reads through escapes.
+
+    Credentials are ASCII (``credential_header``), and so is what is inside a
+    Basic pair the owner encoded themselves. Only a credential of another
+    scheme that happens to be base64 may decode to other text: that is matched
+    as its UTF-8 bytes.
+    """
+    # The credential without its scheme: for a username and password this is
+    # the encoded pair, which is not the secret itself.
+    credential = header_value.rpartition(" ")[2]
     values = {
         secret,
         header_value,
-        quote(secret, safe=""),
-        json.dumps(secret)[1:-1],
-        json.dumps(secret)[1:-1].replace("/", "\\/"),
+        credential,
         base64.b64encode(secret.encode()).decode(),
         base64.b64encode(header_value.encode()).decode(),
     }
@@ -298,11 +365,208 @@ def _needles(secret: str, header_value: str) -> list[bytes]:
                 values.add(decoded.split(":", 1)[1])  # HTTP Basic password
     except (ValueError, UnicodeDecodeError):
         pass
-    return sorted({v.encode() for v in values if len(v) >= 6}, key=len, reverse=True)
+    # ``redact`` reads one character per byte.
+    return sorted((value.encode().decode("latin-1") for value in values if len(value) >= 6), key=len, reverse=True)
 
 
-def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes:
+# A response is scanned as characters, one per byte. An escape that holds a
+# number stands for the character with that number. A credential is ASCII, and
+# an ASCII character is one byte in every charset a service answers in and the
+# same number whether the writer of "\x2b" meant a character or a byte.
+
+
+def _character(code: int) -> str | None:
+    return chr(code) if code < 0xD800 or 0xDFFF < code <= 0x10FFFF else None
+
+
+def _numbered(match: re.Match[str]) -> str | None:
+    """What a backslash escape stands for: groups are a UTF-16 pair, then hexadecimal
+    forms, then an octal one, then a character that the mark only protects."""
+    high, low, *hexadecimal, octal, protected = match.groups()
+    if protected:
+        return protected
+    if high:
+        return _character(0x10000 + ((int(high, 16) - 0xD800) << 10) + int(low, 16) - 0xDC00)
+    if octal:
+        return chr(int(octal, 8))
+    return _character(int(next(filter(None, hexadecimal)), 16))
+
+
+def _percent(match: re.Match[str]) -> str | None:
+    high, low, unit, byte = match.groups()
+    if match[0] == "+":
+        return " "
+    if high:
+        return _character(0x10000 + ((int(high, 16) - 0xD800) << 10) + int(low, 16) - 0xDC00)
+    return _character(int(unit or byte, 16))
+
+
+def _entity(match: re.Match[str]) -> str | None:
+    decimal, hexadecimal, name = match.groups()
+    if name:
+        return _ENTITIES.get(name)
+    return _character(int(decimal) if decimal else int(hexadecimal, 16))
+
+
+# Every named character of HTML ("&quot;", "&plus;", "&sol;").
+_ENTITIES = {name[:-1]: text for name, text in html5.items() if name.endswith(";")}
+
+
+def _pair(mark: str) -> str:
+    """A character above U+FFFF written as its two UTF-16 halves, each after ``mark``."""
+    return mark + "([dD][89abAB][0-9a-fA-F]{2})" + mark + "([dD][c-fC-F][0-9a-fA-F]{2})"
+
+
+# The ways a service writes the characters of what it echoes, each as (what an
+# escape looks like, what it stands for).
+# Backslash escapes of JSON and of the languages services are written in:
+# "+" in either case and as a UTF-16 pair, "\U0000002b", "\u{2b}",
+# "\x{2b}", "\x2b", "\053", and a symbol or a space the mark only protects
+# ("\/" in JSON, "\+" from a pattern escaper, "\ " from a shell).
+_BACKSLASH = (
+    re.compile(
+        _pair(r"\\u") + r"|\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|[ux]\{([0-9a-fA-F]{1,6})\}"
+        r"|x([0-9a-fA-F]{2})|([0-3][0-7]{2})|([ -/:-@\[-`{-~]))"
+    ),
+    _numbered,
+)
+# URLs: "%2B", and "%u002B" from JavaScript's escape(). Forms also write a space as "+".
+_PERCENT = (re.compile(_pair("%u") + "|%(?:u([0-9a-fA-F]{4})|([0-9a-fA-F]{2}))"), _percent)
+_FORM = (re.compile(_PERCENT[0].pattern + r"|\+"), _percent)
+# Pages: "&#43;", "&#x2B;" and "&plus;".
+_HTML = (re.compile("&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]*));"), _entity)
+_ESCAPES = (_BACKSLASH, _PERCENT, _FORM, _HTML)
+# What an escape starts with, and the length of the longest one.
+_STARTS = frozenset("\\%&")
+_LONGEST = max(map(len, _ENTITIES)) + 2
+
+
+class _Decoded:
+    """Text with one kind of escape written out, and where each stretch of it came from."""
+
+    def __init__(self, text: str, escapes, source: _Decoded | None = None):
+        token, decode = escapes
+        out, length, position = [], 0, 0
+        # Stretches of the output that stand for an escape: where each starts,
+        # and (output end, input start, input end). Everything between them is
+        # copied as is.
+        self._at: list[int] = []
+        self._stretches: list[tuple[int, int, int]] = []
+        for match in token.finditer(text):
+            written = decode(match)
+            if written is None:
+                continue
+            length += match.start() - position
+            self._at.append(length)
+            length += len(written)
+            out += (text[position : match.start()], written)
+            self._stretches.append((length, match.start(), match.end()))
+            position = match.end()
+        self.changed = bool(self._at)
+        out.append(text[position:])
+        self.text = "".join(out)
+        self._source = source
+
+    def _origin(self, index: int, end: bool) -> int:
+        """Where output position ``index`` is in the input; an escape counts as a whole."""
+        found = bisect.bisect_right(self._at, index - 1 if end else index) - 1
+        if found < 0:
+            return index
+        stop, before, after = self._stretches[found]
+        if (index <= stop) if end else (index < stop):
+            return after if end else before
+        return after + index - stop
+
+    def span(self, start: int, end: int) -> tuple[int, int]:
+        """The stretch of the original text that reads as output ``start``..``end``."""
+        start, end = self._origin(start, False), self._origin(end, True)
+        return self._source.span(start, end) if self._source else (start, end)
+
+
+def _readings(text: str) -> list[_Decoded]:
+    """``text`` with one kind of escape written out, and with a second kind on top of it.
+
+    Two layers cover text held inside other text: JSON in a JSON string, a URL
+    or a page in JSON, a page that shows a URL.
+    """
+    readings: list[_Decoded] = []
+    for outer in _ESCAPES:
+        once = _Decoded(text, outer)
+        if not once.changed:
+            continue
+        readings.append(once)
+        for inner in _ESCAPES:
+            twice = _Decoded(once.text, inner, once)
+            if twice.changed:
+                readings.append(twice)
+    return readings
+
+
+def _occurrences(text: str, needles: list[str]):
+    """Where each needle is in ``text``. ``str.find`` stays linear on any input, which
+    an alternation of long needles does not."""
+    for needle in needles:
+        at = text.find(needle)
+        while at != -1:
+            yield at, at + len(needle)
+            at = text.find(needle, at + len(needle))
+
+
+def _borders(needle: str) -> list[int]:
+    """For each prefix of ``needle``, how much of its end is also its start."""
+    table, matched = [0] * len(needle), 0
+    for index in range(1, len(needle)):
+        while matched and needle[index] != needle[matched]:
+            matched = table[matched - 1]
+        if needle[index] == needle[matched]:
+            matched += 1
+        table[index] = matched
+    return table
+
+
+def _running(text: str, needle: str, borders: list[int]) -> int | None:
+    """Where ``needle`` starts in ``text`` without ending before ``text`` does.
+
+    The start of the needle may run to the end of ``text`` or to an escape the
+    end cut off, which reads as plain text from the character every escape
+    starts with. Two layers can leave two such pieces. Such a character near
+    the end counts by itself too: the escape it starts may be the needle's
+    first character. One pass, like ``redact``.
+    """
+    size = len(text)
+    edge = max(0, size - 2 * _LONGEST)
+    earliest, matched = None, 0
+    for index in range(max(0, edge - len(needle) + 1), size + 1):
+        if matched == len(needle):
+            matched = borders[matched - 1]  # A whole occurrence: ``redact`` has it.
+        if index == size:
+            return earliest if not matched else min(index - matched, size if earliest is None else earliest)
+        if index >= edge and text[index] in _STARTS:
+            earliest = min(index - matched, size if earliest is None else earliest)
+        while matched and text[index] != needle[matched]:
+            matched = borders[matched - 1]
+        if text[index] == needle[matched]:
+            matched += 1
+    return earliest
+
+
+def redact(data: bytes, needles: list[str], limit: int | None = None, *, cut: bool = False) -> bytes:
     """Replace every whole occurrence that starts before ``limit``; keep at most ``limit`` input bytes.
+
+    An occurrence is the credential as written or behind up to two layers of
+    the escapes above: those of JSON and the languages services are written
+    in, of URLs and forms, and of pages. A credential is ASCII, so the charset
+    of the response does not change how it is written; a body in UTF-16 or
+    UTF-32 is not returned at all. Every pass is one linear scan: the service
+    chooses the response, so nothing here may backtrack. This catches a
+    service that repeats what it was sent. One that transforms a credential
+    some other way (a hash, a third layer of escapes) cannot be caught by a
+    scan; the owner chose to send it that credential.
+
+    With ``cut``, ``data`` is the start of a longer response: the result also
+    stops where an occurrence was still running when ``data`` ended, or where
+    an escape near the end may have been cut off, so the start of a credential
+    is never returned and nothing waits for the rest of the response.
 
     Positions are counted in the input, so a shortened replacement can never pull
     a partially read occurrence at the end of ``data`` back inside the limit.
@@ -310,15 +574,34 @@ def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes
     limit = len(data) if limit is None else min(limit, len(data))
     if not needles:
         return data[:limit]
-    pattern = re.compile(b"|".join(re.escape(needle) for needle in needles))
+    # One character per byte, so a position in the text is a position in ``data``.
+    text = data.decode("latin-1")
+    readings = _readings(text)
+    spans = list(_occurrences(text, needles))
+    for reading in readings:
+        spans += [reading.span(start, end) for start, end in _occurrences(reading.text, needles)]
+    # Where the result stops when an occurrence was still running. A whole
+    # occurrence that starts exactly there is still replaced.
+    stop = limit
+    if cut:
+        for needle in needles:
+            borders = _borders(needle)
+            at = _running(text, needle, borders)
+            if at is not None:
+                stop = min(stop, at)
+            for reading in readings:
+                at = _running(reading.text, needle, borders)
+                if at is not None:
+                    stop = min(stop, reading.span(at, at + 1)[0])
     out, position = bytearray(), 0
-    for match in pattern.finditer(data):
-        if match.start() >= limit:
+    for start, end in sorted(spans):
+        if start >= limit or start > stop:
             break
-        out += data[position : match.start()] + _REDACTED
-        position = match.end()
-    if position < limit:
-        out += data[position:limit]
+        if start >= position:
+            out += data[position:start] + _REDACTED
+        position = max(position, end)
+    if position < stop:
+        out += data[position:stop]
     return bytes(out)
 
 
@@ -377,7 +660,8 @@ async def perform(
         set(_needles(secret, header[1])).union(*(_needles(old, old) for old in also_redact if old)),
         key=len, reverse=True,
     )
-    keep = LIMIT + max((len(n) for n in needles), default=0)
+    # Far enough past the limit to read a credential that starts inside it in full.
+    keep = LIMIT + max(map(len, needles), default=0)
     try:
         async with (
             asyncio.timeout(REQUEST_DEADLINE),
@@ -403,8 +687,10 @@ async def perform(
                     truncated = True
                     break
             status = response.status_code
+            # The bytes the service sent: the charset httpx reads them in is a guess.
+            charset = response.headers.encoding
             returned = {
-                name: response.headers[name]
+                name: b", ".join(value for key, value in response.headers.raw if key.lower() == name.encode())
                 for name in RESPONSE_HEADERS
                 if name in response.headers
             }
@@ -423,16 +709,20 @@ async def perform(
         raise AccessDenied(
             "Could not complete a verified HTTPS request to the granted service."
         ) from None
-    # Only occurrences starting inside the returned window matter, and every
-    # such occurrence was read in full (``keep`` adds the longest needle).
+    # Only occurrences starting inside the returned window matter. One written
+    # as sent was read in full (``keep`` adds the longest); one behind escapes
+    # may still be running where reading stopped, and the body is cut there.
+    # Off the event loop: the service chooses how much of the response is escapes.
+    if b"\0" in kept:
+        # A file, or text in UTF-16 or UTF-32: nothing the agent can read as
+        # text, and an encoding the scan does not read. None of it is returned.
+        data = _NOT_TEXT
+    else:
+        data = await asyncio.to_thread(partial(redact, bytes(kept), needles, LIMIT, cut=truncated))
     truncated = truncated or len(kept) > LIMIT
-    data = redact(bytes(kept), needles, LIMIT)
     return {
         "status": status,
-        "headers": {
-            name: redact(value.encode("latin-1", "replace"), needles).decode("latin-1")
-            for name, value in returned.items()
-        },
+        "headers": {name: redact(value, needles).decode(charset, "replace") for name, value in returned.items()},
         "body": data.decode("utf-8", errors="replace"),
         "truncated": truncated,
     }

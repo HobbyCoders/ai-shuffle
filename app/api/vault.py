@@ -10,24 +10,54 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 
 from app.api.auth import require_admin
 from app.api.sessions_helpers import require_session
-from app.core.vault_access import AccessDenied, GrantSubmission, SavedConnectionEdit, broker, grant_failure
+from app.core.vault_access import (
+    AccessDenied, GrantInput, GrantSubmission, SavedConnectionEdit, broker, grant_failure, vault_owner,
+)
 from app.db.async_database import run_sync
 from app.network import vault_routing as routing
 from app.network import control
 
-router = APIRouter(prefix="/api/v1/vault/sessions", tags=["Vault"])
+
+
+class VaultRoute(APIRoute):
+    """A body the framework rejects is answered without repeating it.
+
+    FastAPI's own 422 quotes the rejected input, which here can be a password,
+    a key or a token (a body that is not a JSON object never reaches the
+    handlers' manual validation).
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def plain_validation(request):
+            try:
+                return await handler(request)
+            except RequestValidationError:
+                raise HTTPException(422, "Invalid Vault request. Send the fields as one JSON object.") from None
+
+        return plain_validation
+
+
+router = APIRouter(prefix="/api/v1/vault/sessions", tags=["Vault"], route_class=VaultRoute)
+# The owner's saved sign-ins with no chat open (Settings > Vault).
+entries_router = APIRouter(prefix="/api/v1/vault/entries", tags=["Vault"], route_class=VaultRoute)
 logger = logging.getLogger(__name__)
 
 UNSUPPORTED_OWNER = "Unknown control action"
 
 INSECURE_TRANSPORT = ("The Vault is not available on this connection. Open this chat in the "
                       "AI Shuffle desktop app window, or through this worker's HTTPS remote access address.")
+INSECURE_SETTINGS = ("The Vault is not available on this connection. Open Settings in the "
+                     "AI Shuffle desktop app window, or through this worker's HTTPS remote access address.")
 
 
-async def checked(request: Request, session_id: str) -> dict:
+def private_transport(request: Request, message: str = INSECURE_TRANSPORT) -> None:
     """Private inputs need a transport the worker itself can vouch for.
 
     Accepted: the local listener from loopback (with the desktop's per-launch
@@ -42,9 +72,14 @@ async def checked(request: Request, session_id: str) -> dict:
     if (request.url.scheme != "https"
             and request.scope.get("shuffle.forwarded_https") is not True
             and not loopback_request(request)):
-        raise HTTPException(403, INSECURE_TRANSPORT)
+        raise HTTPException(403, message)
     if getattr(request.state, "preview_grant", None) is not None:
         raise HTTPException(403, "Preview access cannot manage private connections.")
+
+
+async def checked(request: Request, session_id: str) -> dict:
+    """The session row, after the transport check. See ``private_transport``."""
+    private_transport(request)
     return await require_session(request, session_id)
 
 
@@ -134,7 +169,7 @@ async def edit_connection(session_id: str, connection_id: str, request: Request,
     try:
         edit = SavedConnectionEdit.model_validate(body)
     except ValueError:
-        raise HTTPException(422, "Invalid saved connection change. Check the fields.") from None
+        raise HTTPException(422, "That change to the sign-in is not valid. Check the fields.") from None
     owner = await owning_device(row)
     if owner is not None:
         # Relayed in memory only; a new secret goes to the owner over HTTPS or not at all.
@@ -185,5 +220,62 @@ async def decide(session_id: str, action_id: str, request: Request, body: dict, 
     try:
         await broker.decide(session_id, action_id, body["allow"])
         return {"accepted": True}
+    except AccessDenied as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+# Settings > Vault: the install owner's saved sign-ins, with no chat open.
+#
+# ``require_admin`` admits only the install owner (or its live-authorized
+# managed owner), so the principal is always the owner's own Vault; an API
+# user's entries are never listed or changed here. Every route, the listing
+# included, needs the same transport as the in-chat card. Nothing is contacted
+# and no access is granted: an entry is used only through a request the owner
+# approves in a chat.
+
+
+@entries_router.get("")
+async def list_entries(request: Request, token: str = Depends(require_admin)):
+    private_transport(request, INSECURE_SETTINGS)
+    from app.core import encryption
+    try:
+        entries = await broker.entries(vault_owner())
+    except AccessDenied as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"entries": entries, "vault_available": encryption.is_encryption_ready()}
+
+
+@entries_router.post("")
+async def add_entry(request: Request, body: dict, token: str = Depends(require_admin)):
+    private_transport(request, INSECURE_SETTINGS)
+    # Validate manually so a Pydantic error never echoes a supplied secret.
+    try:
+        spec = GrantInput.model_validate(body)
+    except ValueError:
+        raise HTTPException(422, "Invalid Vault sign-in. Check the fields.") from None
+    try:
+        return {"id": await broker.add_entry(vault_owner(), spec)}
+    except AccessDenied as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@entries_router.patch("/{entry_id}")
+async def edit_entry(entry_id: str, request: Request, body: dict, token: str = Depends(require_admin)):
+    private_transport(request, INSECURE_SETTINGS)
+    try:
+        edit = SavedConnectionEdit.model_validate(body)
+    except ValueError:
+        raise HTTPException(422, "Invalid Vault sign-in change. Check the fields.") from None
+    try:
+        return await broker.edit_entry(vault_owner(), entry_id, edit)
+    except AccessDenied as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@entries_router.delete("/{entry_id}")
+async def remove_entry(entry_id: str, request: Request, token: str = Depends(require_admin)):
+    private_transport(request, INSECURE_SETTINGS)
+    try:
+        return {"deleted": True, "revoked": await broker.remove_entry(vault_owner(), entry_id)}
     except AccessDenied as exc:
         raise HTTPException(409, str(exc)) from None
