@@ -65,7 +65,7 @@ Lock-screen text is fixed: “AI Shuffle” and “A chat needs you”. Chat tit
 
 ## Vault details
 
-When an agent asks for a folder, a machine or a web service, a Vault card appears above the message box and you enter the sign-in there: a password or private key for a machine, an API token or a username and password for a service. The agent never sees it. The **Vault** button next to the message box shows what the chat can reach right now, and **Settings › Vault** is where you add, change and remove saved sign-ins. For your safety, the card and that Settings page only work on:
+When an agent asks for a folder, a machine or a web service, a Vault card appears above the message box and you enter the sign-in there: a password or private key for a machine, an API token or a username and password for a service. The agent never sees the password, key or token. A username is not hidden the same way: a web service can show it to the agent by repeating it in a response. The **Vault** button next to the message box shows what the chat can reach right now, and **Settings › Vault** is where you add, change and remove saved sign-ins. For your safety, the card and that Settings page only work on:
 
 - the AI Shuffle desktop app window;
 - your worker's remote access address, from the Android app or a remote browser;

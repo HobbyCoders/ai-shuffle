@@ -196,7 +196,7 @@
 		<div class="pa-section">
 			<VaultDuration bind:minutes disabled={busy} />
 			<p class="pa-promise">
-				{#if machine}<strong>The agent never sees the sign-in.</strong> {saved ? `It stays encrypted on ${where}.` : `${sentTo}, never to the model or chat history.`} Commands run with this account’s authority and follow this session’s permission mode; bypass skips repeat approvals.
+				{#if machine}<strong>The agent never sees the password or key.</strong> {saved ? `It stays encrypted on ${where}.` : `${sentTo}, never to the model or chat history.`} Commands run with this account’s authority and follow this session’s permission mode; bypass skips repeat approvals.
 				{:else}<strong>The agent reaches this folder only.</strong> {sentTo}. Kernel file confinement: no shell, links or mount traversal, and files up to 64 KiB.{/if}
 			</p>
 			<div class="pa-actions">

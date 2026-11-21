@@ -458,7 +458,7 @@
 				{:else}
 					<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
 				{/if}
-				<p class="pa-hint">{action.operation === 'command' ? 'It runs with that account’s authority and can change files on that machine. The next command asks again.' : action.operation === 'http' ? 'It is sent with the sign-in attached, which the agent never sees. The next change asks again.' : 'It writes this text once. The next write asks again.'}</p>
+				<p class="pa-hint">{action.operation === 'command' ? 'It runs with that account’s authority and can change files on that machine. The next command asks again.' : action.operation === 'http' ? 'It is sent with the sign-in attached; the agent never sees the token or password. The next change asks again.' : 'It writes this text once. The next write asks again.'}</p>
 			</div>
 			<div class="pa-section">
 				<div class="pa-actions">

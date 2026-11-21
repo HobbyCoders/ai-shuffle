@@ -403,7 +403,7 @@ describe('vault recovery and live invalidations', () => {
   expect(within(card).getByRole('button', {name: 'Send once'})).toBeTruthy();
   const pre = card.querySelector('pre.pa-mono')!;
   expect(pre.textContent).toBe('POST /items\napplication/json\n\n{"n":1}');
-  expect(within(card).getByText(/sent with the sign-in attached, which the agent never sees/)).toBeTruthy();
+  expect(within(card).getByText(/sent with the sign-in attached; the agent never sees the token or password/)).toBeTruthy();
   await fireEvent.click(trigger());
   expect(within(panel()!).getByText(/HTTPS API · changes follow session permission mode/)).toBeTruthy();
   await fireEvent.click(within(card).getByRole('button', {name: 'Deny'})); await flush();

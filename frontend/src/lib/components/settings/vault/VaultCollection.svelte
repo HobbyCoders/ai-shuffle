@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * Settings > Vault: the owner's saved sign-ins on this worker (SSH machines
-	 * and web services). The agent never sees a sign-in; using one still needs
+	 * and web services). The agent never sees a password, key or token; using a sign-in still needs
 	 * the owner's approval in the chat that asks. Stored secrets never come back
 	 * to this page: a blank secret keeps the stored one.
 	 */
@@ -106,7 +106,7 @@
 				<EmptyDetail
 					icon={Vault}
 					title="Nothing in the Vault yet"
-					message="Save a machine or web service sign-in. The agent can use it after you approve, and never sees it."
+					message="Save a machine or web service sign-in. The agent can use it after you approve, and never sees the password, key or token."
 					full={!selected}
 				>
 					<button type="button" class="st-btn primary" disabled={!model.editable} onclick={add}><Plus />Add sign-in</button>

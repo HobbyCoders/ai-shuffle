@@ -29,7 +29,7 @@
 	let authHeader = $state('Authorization');
 	let authScheme = $state('Bearer');
 	// A token the service issued, or an account's username and password. The
-	// worker encodes the pair itself; the agent sees neither.
+	// worker encodes the pair itself and passes neither to the agent.
 	let method = $state<'token' | 'password'>('token');
 	const basic = $derived(method === 'password' && passwordSignIn && provider === 'custom');
 	let username = $state('');
@@ -223,7 +223,7 @@
 					{/if}
 					<VaultDuration bind:minutes />
 					<p class="pa-hint">Access duration starts when approved, not while you prepare. One-shot action approvals have their own deadlines.</p>
-					<p class="pa-promise"><strong>The agent never sees the sign-in.</strong> {saved ? `It stays encrypted on ${where}.` : `${owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history.`} Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the {basic ? 'account' : 'token'} itself: the agent can use its allowed authority under that address.</p>
+					<p class="pa-promise"><strong>The agent never sees the token or password.</strong> {saved ? `It stays encrypted on ${where}.` : `${owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history.`} Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the {basic ? 'account' : 'token'} itself: the agent can use its allowed authority under that address.</p>
 					<label class="pa-option"><input type="checkbox" disabled={!secureContext} bind:checked={consent} /><strong>I approve access for this conversation</strong><small>Only Grant access below creates a grant. You can revoke it from Vault.</small></label>
 				{/if}
 			</div>

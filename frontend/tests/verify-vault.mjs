@@ -33,7 +33,7 @@ const scenarios = [
 	{ name: 'service-change', grant: { kind: 'service', label: 'Inventory', target: 'https://api.example.com/v1', writable: true },
 		action: { operation: 'http', arguments: { method: 'POST', path: '/items', body: '{"n":1}', content_type: 'application/json' } }, shown: 'POST /items\napplication/json\n\n{"n":1}',
 		title: 'Send this to Inventory?', scope: 'Once, to https://api.example.com/v1', button: 'Send once',
-		hint: 'It is sent with the sign-in attached, which the agent never sees. The next change asks again.' },
+		hint: 'It is sent with the sign-in attached; the agent never sees the token or password. The next change asks again.' },
 	{ name: 'folder-write', grant: { kind: 'folder', label: 'Notes', target: '/home/me/notes', writable: true },
 		action: { operation: 'write', arguments: { path: 'todo.md', content: '- call the plumber' } }, shown: 'todo.md\n\n- call the plumber',
 		title: 'Write this file on Notes?', scope: 'Once, in /home/me/notes', button: 'Write once',
