@@ -286,14 +286,14 @@ describe('VaultRequest', () => {
 
 	it('names the owning device for a mirrored conversation and posts to this worker', async () => {
 		const { onComplete } = mount({ owner: 'Owner PC', savedConnections: [], request: { id: 'r/1', kind: 'folder', purpose: 'Read my notes', expires_at: inAnHour() } });
-		expect(screen.getByText(/Sent only to Owner PC through this worker/)).toBeTruthy();
+		expect(screen.getByText(/Sent to Owner PC through this worker/)).toBeTruthy();
 		await fireEvent.input(field('Folder on Owner PC'), { target: { value: '/home/me/notes' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][0]).toBe(endpoint);
 		cleanup();
 		mount({ owner: 'Owner PC', savedConnections: [] });
-		expect(screen.getByText(/Encrypted on Owner PC\. Every use still asks you first/)).toBeTruthy();
+		expect(screen.getByText(/Encrypted on Owner PC\. Each new request to use it still needs your approval/)).toBeTruthy();
 	});
 
 	it('routes service requests into guided preparation, not the credential form', () => {

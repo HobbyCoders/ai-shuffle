@@ -11,7 +11,7 @@
 	let { sessionId, request, savedConnections, vaultAvailable, passwordSignIn = false, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; passwordSignIn?: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
 	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
 	const where = $derived(owner ?? 'this worker');
-	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
+	const sentTo = $derived(owner ? `Sent to ${owner} through this worker` : 'Sent to this worker');
 	const machine = untrack(() => request.kind === 'machine');
 	const service = untrack(() => request.kind === 'service');
 	// HTTPS setup lives in ServiceAccessRequest; these fields are SSH/folder only.
@@ -187,7 +187,7 @@
 					<label class="pa-option" class:disabled={!vaultAvailable}>
 						<input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} />
 						<strong>Save to Vault under this name</strong>
-						<small>{vaultAvailable ? `Encrypted on ${where}. Every use still asks you first.` : 'The Vault is locked or unavailable. Access for this chat still works.'}</small>
+						<small>{vaultAvailable ? `Encrypted on ${where}. Each new request to use it still needs your approval.` : 'The Vault is locked or unavailable. Access for this chat still works.'}</small>
 					</label>
 				{/if}
 			{/if}

@@ -316,7 +316,7 @@
 			{/if}
 			</fieldset>
 			<p class="st-note">
-				Encrypted on this worker. The agent never sees the password, key or token; using a sign-in still needs your approval in the chat that asks for it.
+				Encrypted on this worker. The agent never sees the password, key or token, and can use this sign-in only after you approve a request for it.
 			</p>
 		{/snippet}
 	</DetailPane>

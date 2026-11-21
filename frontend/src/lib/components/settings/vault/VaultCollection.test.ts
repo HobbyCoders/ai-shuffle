@@ -74,7 +74,7 @@ async function show(item?: string) {
 	settingsNav.selectCategory('vault');
 	if (item) settingsNav.go({ category: 'vault', item });
 	const page = render(VaultCollection);
-	await screen.findByText('Encrypted on this worker. Using a sign-in', { exact: false });
+	await screen.findByText('Encrypted on this worker. An agent can use a sign-in', { exact: false });
 	return page;
 }
 

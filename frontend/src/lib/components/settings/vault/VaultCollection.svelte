@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
 	 * Settings > Vault: the owner's saved sign-ins on this worker (SSH machines
-	 * and web services). The agent never sees a password, key or token; using a sign-in still needs
-	 * the owner's approval in the chat that asks. Stored secrets never come back
+	 * and web services). The agent never sees a password, key or token, and can use
+	 * a sign-in only after the owner approves a request for it. Stored secrets never come back
 	 * to this page: a blank secret keeps the stored one.
 	 */
 	import { onMount } from 'svelte';
@@ -116,7 +116,7 @@
 			{/if}
 			{#if model.loaded && !model.blocked && !model.forbidden}
 				<p class="st-note">
-					Encrypted on this worker. Using a sign-in still needs your approval in the chat that asks for it.
+					Encrypted on this worker. An agent can use a sign-in only after you approve a request for it.
 				</p>
 			{/if}
 		</div>

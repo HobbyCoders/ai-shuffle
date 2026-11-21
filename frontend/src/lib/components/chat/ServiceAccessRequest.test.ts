@@ -221,7 +221,7 @@ describe('guided service sign-in', () => {
 		expect(screen.getByText('Read-only · GET and HEAD only')).toBeTruthy();
 		// Nothing is typed, so nothing is sent: the stored sign-in stays on the owning device.
 		expect(screen.getByText(/It stays encrypted on Owner PC/)).toBeTruthy();
-		expect(screen.queryByText(/Sent only to/)).toBeNull();
+		expect(screen.queryByText(/Sent to Owner PC/)).toBeNull();
 		await fireEvent.click(screen.getByRole('checkbox', { name: /I approve access/ }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());

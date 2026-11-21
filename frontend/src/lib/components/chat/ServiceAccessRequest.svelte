@@ -219,11 +219,11 @@
 					{/if}
 					{#if !saved}
 						<label class="pa-field"><span>Name</span><input class="card-form-input" required maxlength="80" bind:value={label} /></label>
-						<label class="pa-option" class:disabled={!vaultAvailable}><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} /><strong>Save to Vault under this name</strong><small>{vaultAvailable ? `Encrypted on ${where}. Every use still asks you first.` : 'The Vault is locked or unavailable. Access for this chat still works.'}</small></label>
+						<label class="pa-option" class:disabled={!vaultAvailable}><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} /><strong>Save to Vault under this name</strong><small>{vaultAvailable ? `Encrypted on ${where}. Each new request to use it still needs your approval.` : 'The Vault is locked or unavailable. Access for this chat still works.'}</small></label>
 					{/if}
 					<VaultDuration bind:minutes />
 					<p class="pa-hint">Access duration starts when approved, not while you prepare. One-shot action approvals have their own deadlines.</p>
-					<p class="pa-promise"><strong>The agent never sees the token or password.</strong> {saved ? `It stays encrypted on ${where}.` : `${owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history.`} Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the {basic ? 'account' : 'token'} itself: the agent can use its allowed authority under that address.</p>
+					<p class="pa-promise"><strong>The agent never sees the token or password.</strong> {saved ? `It stays encrypted on ${where}.` : `${owner ? `Sent to ${owner} through this worker` : 'Sent to this worker'}, never to the model or chat history.`} Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the {basic ? 'account' : 'token'} itself: the agent can use its allowed authority under that address.</p>
 					<label class="pa-option"><input type="checkbox" disabled={!secureContext} bind:checked={consent} /><strong>I approve access for this conversation</strong><small>Only Grant access below creates a grant. You can revoke it from Vault.</small></label>
 				{/if}
 			</div>
