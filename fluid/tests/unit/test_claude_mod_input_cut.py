@@ -22,8 +22,8 @@ from fluid.engine.claude_mod_compaction import (
     project,
     short_input,
 )
-from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
-from fluid.store.base import SessionNode
+from fluid.messages import Image, Message, Text, ToolResultBlock, ToolUseBlock
+from fluid.store.base import SessionNode, new_id
 
 from tests.unit.test_claude_mod_compaction_cycles import assert_mod_accepts, read_whole
 
@@ -95,6 +95,12 @@ def test_short_input_cuts_long_strings_and_keeps_the_shape():
 def test_short_input_returns_the_same_object_when_nothing_is_long():
     value = {"command": "c" * INPUT_STRING_CHARS, "items": ["a", {"b": 1}], "n": None}
     assert short_input(value, "node_7") is value
+
+
+def test_a_cut_input_is_not_cut_again():
+    value = {"command": "c" * 9_000_000, "content": "d" * 301}
+    short = short_input(value, new_id("node"))
+    assert short_input(short, new_id("node")) is short
 
 
 def test_old_calls_of_the_working_request_lose_their_long_inputs():
@@ -205,3 +211,94 @@ def test_a_parallel_group_is_cut_and_stays_paired():
     shown = inputs(out)
     assert all(CUT in shown[tid]["command"] and len(shown[tid]["command"]) < INPUT_STRING_CHARS
                for tid in ("p0", "p1"))
+
+
+def script(tid: str) -> dict:
+    return {"command": f"SCRIPT-{tid} " + "echo step; " * 300, "description": "Run the steps"}
+
+
+def test_only_the_input_changes_in_a_cut_row():
+    """The row is Claude Code's own with a shorter input: its result row, and
+    every row around it, is handed back by its handle."""
+    chat = Chat()
+    ids = chat.write(30)
+    posted = {row["handle"]: row for row in chat.cli}
+    out, _ = chat.compact()
+    cut = [row for row in out if CUT in json.dumps(row["toolUses"])]
+    assert {use["tool_use_id"] for row in cut for use in row["toolUses"]} == set(ids[:-KEEP_INPUT_CALLS])
+    assert all("handle" not in row for row in cut)
+    kept = [row for row in out if "handle" in row]
+    assert all(posted[row["handle"]] == row for row in kept)
+    assert len(kept) == 1 + 30 + KEEP_INPUT_CALLS  # the request, every result, the newest calls
+
+
+def test_text_streamed_with_a_call_survives_every_later_cut():
+    """One Claude Code row can be the text and the call of one streamed
+    message, stored as two nodes. Cutting the call's input, and later the
+    input of another call of its group, must not drop the text."""
+    chat = Chat()
+    chat.write(2)
+    said = "NOTE-FOR-LATER: these three scripts build the importer in order."
+    row = chat.add(Message("assistant", [Text(said)]))
+    first = Message("assistant", [ToolUseBlock("g0", "Bash", script("g0"))])
+    first.provider_meta["claude_uuid"] = row["handle"]
+    chat.stored.append(SessionNode(f"node_{len(chat.stored):012x}", chat.stored[-1].node_id, first))
+    row["toolUses"] = project(first)["toolUses"]  # one row: the text and the call
+    for tid in ("g1", "g2"):
+        chat.add(Message("assistant", [ToolUseBlock(tid, "Bash", script(tid))]))
+    for tid in ("g0", "g1", "g2"):
+        chat.add(Message("user", [ToolResultBlock(tid, [Text("done")])]))
+    chat.write(KEEP_INPUT_CALLS - 1)  # g2 is still one of the newest calls
+    out, _ = chat.compact()
+    shown = inputs(out)
+    assert CUT in shown["g0"]["command"] and CUT in shown["g1"]["command"]
+    assert CUT not in shown["g2"]["command"]
+    assert sum(said in r["text"] for r in out) == 1
+    chat.write(20)  # g2 is old now: its group is cut again
+    out, _ = chat.compact()
+    shown = inputs(out)
+    assert all(CUT in shown[tid]["command"] for tid in ("g0", "g1", "g2"))
+    assert sum(said in r["text"] for r in out) == 1
+    chat.write(20)
+    out, _ = chat.compact()
+    assert sum(said in r["text"] for r in out) == 1
+
+
+def test_the_newest_calls_are_counted_call_by_call_in_a_parallel_row():
+    """Seven writes made together are one row. Two newer calls leave four of
+    them among the newest: the three oldest are cut, the big one first, and
+    the compaction saves enough to be used."""
+    chat = Chat()
+    ids = [f"w{n}" for n in range(7)]
+    big = {"file_path": "src/w0.py", "content": "BIG " + "x" * 150_000}
+    chat.add(Message("assistant", [
+        ToolUseBlock(tid, "Write", big if tid == "w0" else {
+            "file_path": f"src/{tid}.py", "content": f"BODY-{tid} " + "line of code\n" * 250})
+        for tid in ids]))
+    chat.add(Message("user", [ToolResultBlock(tid, [Text("File created")]) for tid in ids]))
+    newer = [chat.call("Read", {"file_path": f"src/r{n}.py"}, result="x" * 9_000) for n in range(2)]
+    out, report = chat.compact()
+    shown = inputs(out)
+    assert list(shown) == ids + newer
+    assert all(CUT in shown[tid]["content"] for tid in ids[:3])
+    assert all(CUT not in shown[tid]["content"] for tid in ids[3:])
+    assert report["input_tokens_cut"] > 150_000 // 4
+
+
+def test_a_group_with_an_image_result_is_left_as_claude_code_has_it():
+    """A tool group with a block only Claude Code holds stays its own rows,
+    also when each of its rows matches a stored node."""
+    chat = Chat()
+    chat.write(4)
+    rows = [
+        chat.add(Message("assistant", [ToolUseBlock("b0", "Bash", script("b0"))])),
+        chat.add(Message("assistant", [ToolUseBlock("r0", "Read", {"file_path": "shot.png"})])),
+        chat.add(Message("user", [ToolResultBlock("b0", [Text("done")])])),
+        chat.add(Message("user", [ToolResultBlock("r0", [Image(media_type="image/png", data="AAAA")])])),
+    ]
+    chat.write(20)
+    out, _ = chat.compact()
+    assert inputs(out)["b0"] == script("b0")
+    handles = {row.get("handle") for row in out}
+    assert all(row["handle"] in handles for row in rows)
+    assert CUT in inputs(out)["t0"]["content"]  # the calls around it are cut as usual

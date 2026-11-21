@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from fluid.context.compaction import (
@@ -764,75 +764,52 @@ def short_input(value: Any, node_id: str) -> Any:
     return value
 
 
-def _old_calls_end(view: list[SessionNode], tail: int) -> int:
-    """The view position before which a call is old: outside the recency
-    tail and not one of the newest ``KEEP_INPUT_CALLS`` calls."""
-    seen = 0
-    for position in range(len(view) - 1, -1, -1):
-        seen += sum(isinstance(b, ToolUseBlock) for b in view[position].message.content)
-        if seen >= KEEP_INPUT_CALLS:
-            return min(position, tail)
-    return 0
+def _cut_old_inputs(
+    out: list[dict[str, Any]], shrunk: list[bool], *, refs: dict[Any, str],
+    guarded: set[Any], fixed: set[int], shown: dict[Any, Any],
+) -> int:
+    """Cut the long inputs of the old finished calls in ``out``
+    (:func:`short_input`), in place; the JSON chars this compaction newly cut.
 
+    A call is cut when it is one of ``CUT_INPUT_TOOLS``, is not among the
+    newest ``KEEP_INPUT_CALLS`` calls of the answer (counted call by call, so
+    the older calls of one large parallel group are cut too), its result is in
+    the answer and is not an error (a failed command is read again as it was
+    written) and ``refs`` names its stored node (the caller lists the stored
+    calls before the recency tail). ``guarded`` holds the calls never cut and
+    ``fixed`` the ``id`` of the rows never changed.
 
-def _shorten_old_inputs(
-    segments: list[tuple[int, int, Message]], view: list[SessionNode], *, end: int,
-    refs: dict[str, str], shown: dict[Any, Any], unit_of: dict[int, list[int]],
-    rebuilt: set[int], skip: set[int],
-) -> tuple[list[tuple[int, int, Message]], int]:
-    """``segments`` with the long inputs of the calls before ``end`` cut
-    (:func:`short_input`), and the JSON chars this compaction newly cut.
-
-    Only a call of ``CUT_INPUT_TOOLS`` whose result is in the view and is not
-    an error: a failed command is read again as it was written, and an open
-    call is the work in hand. ``refs`` names the stored node of each call (one row can stand for
-    several nodes of a streamed message) and ``shown`` is the input Claude
-    Code holds for each call it has; a message with a call it does not have
-    is left alone (it could not be rebuilt). A message Claude Code already
-    shows cut (an earlier compaction did it) stays the stored message, so its
-    row stays Claude Code's own, unless that row is rebuilt anyway: the
-    ladder changed the message, or its tool group is rebuilt (``rebuilt``, or
-    another call of the group is newly cut), and a rebuild from the stored
-    message would bring the whole input back. ``skip`` holds the positions
-    never rebuilt.
+    Only the input changes: the row keeps its text, its other calls and its
+    place, and loses its handle, so Claude Code builds it from what the row
+    says instead of reading its own copy. A row Claude Code already shows cut
+    (an earlier compaction did it) is equal to its cut and stays Claude Code's
+    own; a row rebuilt from the stored message, which has the whole input, is
+    cut again. ``shown`` is the input Claude Code holds for each call, for the
+    count.
     """
-    done = {b.tool_use_id for node in view for b in node.message.content
-            if isinstance(b, ToolResultBlock) and not b.is_error}
-    # position -> (the message cut, whether its row must change, chars newly cut)
-    cut: dict[int, tuple[Message, bool, int]] = {}
-    for first, last, message in segments:
-        if first != last or first >= end or first in skip or message.role != "assistant":
-            continue
-        uses = [b for b in message.content if isinstance(b, ToolUseBlock)]
-        if not uses or any(b.id not in shown for b in uses):
-            continue
-        blocks: list[Any] = []
-        fresh = 0
-        changed = False
-        for block in message.content:
-            if (isinstance(block, ToolUseBlock) and block.name in CUT_INPUT_TOOLS
-                    and block.id in done and isinstance(block.input, dict)):
-                short = short_input(block.input, refs.get(block.id, view[first].node_id))
-                if short is not block.input:
-                    changed = True
-                    if shown[block.id] != short:
-                        fresh += len(json.dumps(block.input)) - len(json.dumps(short))
-                    block = replace(block, input=short)
-            blocks.append(block)
-        if changed:
-            cut[first] = (replace(message, content=blocks),
-                          fresh > 0 or message is not view[first].message, fresh)
-    out: list[tuple[int, int, Message]] = []
+    done = {result["tool_use_id"] for row in out for result in row.get("toolResults", [])
+            if not result.get("isError", False)}
+    order = [use["tool_use_id"] for row in out for use in row["toolUses"]]
+    recent = set(order[-KEEP_INPUT_CALLS:])
     saved = 0
-    for first, last, message in segments:
-        if first == last and first in cut:
-            short_message, needed, fresh = cut[first]
-            if needed or first in rebuilt or any(
-                    p in cut and cut[p][1] for p in unit_of.get(first, ())):
-                message = short_message
-                saved += fresh
-        out.append((first, last, message))
-    return out, saved
+    for i, row in enumerate(out):
+        if id(row) in fixed:
+            continue
+        uses = []
+        for use in row["toolUses"]:
+            call = use["tool_use_id"]
+            if (call in refs and call in done and call not in recent and call not in guarded
+                    and use["tool"] in CUT_INPUT_TOOLS):
+                short = short_input(use["input"], refs[call])
+                if short is not use["input"]:
+                    saved += max(0, len(json.dumps(shown.get(call, use["input"])))
+                                 - len(json.dumps(short)))
+                    use = {"tool_use_id": call, "tool": use["tool"], "input": short}
+            uses.append(use)
+        if any(a is not b for a, b in zip(uses, row["toolUses"])):
+            out[i] = {**{k: v for k, v in row.items() if k != "handle"}, "toolUses": uses}
+            shrunk[i] = True
+    return saved
 
 
 def compact_messages(
@@ -862,7 +839,7 @@ def compact_messages(
     on a miss, the ``contributors`` still over it (chars/4 tokens by kind).
 
     Whatever the ladder kept, the long inputs of old finished calls are cut
-    to their opening (:func:`_shorten_old_inputs`); the stored call is whole
+    to their opening (:func:`_cut_old_inputs`); the stored call is whole
     and its ref is in the cut.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
@@ -1026,27 +1003,15 @@ def compact_messages(
 
     stored_at = {position: k for k, position in at.items()}
     hard = {p for p in range(len(view)) if stored_at.get(p) in opaque}
-
-    def rebuilt_units() -> set[int]:
-        """A unit stays its own rows only while none of its nodes is compacted."""
-        touched = {k for first, last, m in segments if compacted(first, last, m)
-                   for k in range(first, last + 1)}
-        return {p for p, positions in unit_of.items() if touched & set(positions)}
-
-    # Claude Code's own rows leave by what the ladder compacted: a call whose
-    # input is cut below does not make the rows around it old.
-    last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
-                         default=-1)
-    segments, cut_chars = _shorten_old_inputs(
-        segments, view, end=_old_calls_end(view, tail),
-        refs={key: nodes[k].node_id for key, k in owners.items()},
-        shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},
-        unit_of=unit_of, rebuilt=rebuilt_units(),
-        skip=hard | {p for p, positions in unit_of.items() if hard & set(positions)},
-    )
     in_fold = {k for first, last, m in segments if folded(first, last, m)
                for k in range(first, last + 1)}
-    rebuilt = rebuilt_units()
+    # A unit stays its own rows only while none of its nodes is compacted.
+    touched = {k for first, last, m in segments if compacted(first, last, m)
+               for k in range(first, last + 1)}
+    rebuilt = {p for p, positions in unit_of.items() if touched & set(positions)}
+
+    last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
+                         default=-1)
     # Claude Code's own rows of the newest request, and of the newest earlier
     # request that has any, are the work in hand (a skill being followed, a
     # command's expansion): never dropped.
@@ -1125,6 +1090,22 @@ def compact_messages(
             mark(cover, False)
     take(len(view))
     mark(-1, False)
+    # The long inputs of old calls are cut in the rows as they stand, whatever
+    # the ladder did. Not in a tool group with a block only Claude Code holds
+    # (an image, a tool_reference): its rows stay exactly Claude Code's own.
+    guarded: set[Any] = set()
+    for start, end in _group_spans(rows):
+        group = rows[start:end]
+        keys = ([use["tool_use_id"] for row in group for use in row["toolUses"]]
+                + [f"result:{r['tool_use_id']}" for row in group for r in row.get("toolResults", [])])
+        if any(owners.get(key) in opaque for key in keys):
+            guarded.update(use["tool_use_id"] for row in group for use in row["toolUses"])
+    cut_chars = _cut_old_inputs(
+        out, shrunk,
+        refs={key: nodes[k].node_id for key, k in owners.items() if at.get(k, tail) < tail},
+        guarded=guarded, fixed={id(row) for _, row in unknown},
+        shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},
+    )
     _fit_pinned(out, covers, shrunk, dropped, unknown, requests, target, report)
     if report is not None:
         report["input_tokens_cut"] = cut_chars // 4
