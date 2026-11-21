@@ -144,7 +144,7 @@ def _summary(head: str, components: Iterable[Any], services: List[str]) -> str:
         lines.append("Runs code once the owner enables it:")
         lines += [f"- {label(c)}" + (f": {c['detail']}" if c.get("detail") else "") for c in runs]
     if services:
-        lines.append("Outside services it asks for (the owner grants each in the private access card):")
+        lines.append("Outside services it asks for (the owner grants each in the Vault card):")
         lines += [f"- {s}" for s in services]
     if len(lines) > _MAX_LINES:
         lines = lines[:_MAX_LINES] + [f"... {len(lines) - _MAX_LINES} more lines"]

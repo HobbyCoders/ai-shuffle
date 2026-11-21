@@ -95,7 +95,7 @@ class ConfinedFilesTests(unittest.TestCase):
         self.assertEqual({p.read_text() for p in paths}, {str(i) for i in range(24)})
 
     def test_leaf_replacement_before_create(self):
-        original = files._windows_create if os.name == 'nt' else files.chat_files.confined_open
+        original = files._windows_create if os.name == 'nt' else files.vault_files.confined_open
         raced = False
         def opening(*args, **kwargs):
             nonlocal raced
@@ -105,7 +105,7 @@ class ConfinedFilesTests(unittest.TestCase):
                 raced = True
                 os.link(self.secret, self.root / 'file.txt')
             return original(*args, **kwargs)
-        target = 'app.core.confined_files._windows_create' if os.name == 'nt' else 'app.core.chat_files.confined_open'
+        target = 'app.core.confined_files._windows_create' if os.name == 'nt' else 'app.core.vault_files.confined_open'
         with patch(target, side_effect=opening):
             new = files.upload(self.root, '', 'file.txt', b'new')
         self.assertTrue(raced)
@@ -115,7 +115,7 @@ class ConfinedFilesTests(unittest.TestCase):
     def test_parent_replacement_before_create(self):
         sub = self.root / 'sub'
         sub.mkdir()
-        original = files._windows_create if os.name == 'nt' else files.chat_files.confined_open
+        original = files._windows_create if os.name == 'nt' else files.vault_files.confined_open
         raced = False
         blocked = False
         def opening(*args, **kwargs):
@@ -131,7 +131,7 @@ class ConfinedFilesTests(unittest.TestCase):
                 else:
                     self.link(sub, self.outside, directory=True)
             return original(*args, **kwargs)
-        target = 'app.core.confined_files._windows_create' if os.name == 'nt' else 'app.core.chat_files.confined_open'
+        target = 'app.core.confined_files._windows_create' if os.name == 'nt' else 'app.core.vault_files.confined_open'
         try:
             with patch(target, side_effect=opening):
                 if os.name == 'nt':

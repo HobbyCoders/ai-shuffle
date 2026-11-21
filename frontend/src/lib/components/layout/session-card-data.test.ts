@@ -111,10 +111,10 @@ describe('owner runtime state', () => {
 		expect(deriveStatus({ remoteRuntimeState, streaming: true, optimisticStreaming: true,
 			attention: null, isActive: true })).toBe(expected);
 	});
-	// #1807: a pending private-access request outranks the owner's run state,
-	// which reads `working` while the RequestChatAccess call waits.
-	it.each(['working', 'idle', 'unknown', null] as const)('a waiting private-access request reads as needing the owner over %s', (remoteRuntimeState) => {
-		expect(deriveStatus({ remoteRuntimeState, streaming: true, privateAccess: true,
+	// #1807: a pending Vault request outranks the owner's run state,
+	// which reads `working` while the RequestVaultAccess call waits.
+	it.each(['working', 'idle', 'unknown', null] as const)('a waiting Vault request reads as needing the owner over %s', (remoteRuntimeState) => {
+		expect(deriveStatus({ remoteRuntimeState, streaming: true, vault: true,
 			attention: null, isActive: true })).toBe('needs_permission');
 	});
 	it('keeps git stage independent after a remote turn settles', () => {
@@ -900,7 +900,7 @@ describe('sessionNeedsYou / attentionTitle', () => {
 		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'permission' }, null)).toBe(true);
 		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'idle' }, { count: 3 })).toBe(false);
 	});
-	it('counts a waiting private-access request for local and remote sessions (#1807)', () => {
+	it('counts a waiting Vault request for local and remote sessions (#1807)', () => {
 		expect(sessionNeedsYou(local, null, 1)).toBe(true);
 		expect(sessionNeedsYou({ status: 'active', is_remote: true, remote_runtime_state: 'working' }, null, 2)).toBe(true);
 		expect(sessionNeedsYou(local, null, 0)).toBe(false);
@@ -927,7 +927,7 @@ describe('needsYouCount (spec §5)', () => {
 
 	it('counts each of the five sources alone as one', () => {
 		// QuestionTray question, PermissionQueue permission, an assistant confirm
-		// (a permission request asked in the conversation), PrivateAccessPrompt,
+		// (a permission request asked in the conversation), VaultPrompt,
 		// and a prose question.
 		expect(needsYouCount(local, null, 0, open({ pendingQuestions: [{ request_id: 'q1' }] }))).toBe(1);
 		expect(needsYouCount(local, null, 0, open({ pendingPermissions: [{ request_id: 'p1' }] }))).toBe(1);

@@ -143,13 +143,13 @@ async def test_an_answer_already_given_on_screen_is_reported_not_repeated(monkey
 
 
 @pytest.mark.parametrize("request_", [
-    {"request_id": "r", "tool_name": "mcp__chat-access__ChatRunCommand", "title": "Run a remote command"},
-    {"request_id": "r", "tool_name": "RequestChatAccess"},
+    {"request_id": "r", "tool_name": "mcp__app-vault__VaultRunCommand", "title": "Run a remote command"},
+    {"request_id": "r", "tool_name": "RequestVaultAccess"},
     {"request_id": "r", "tool_name": "mcp__svc__login", "tool_input": {"api_key": "sk-123"}},
     {"request_id": "r", "tool_name": "Write", "tool_input": {"nested": {"password": "hunter2"}}},
 ])
 @pytest.mark.asyncio
-async def test_private_access_and_secrets_stay_on_screen(monkeypatch, request_):
+async def test_vault_and_secrets_stay_on_screen(monkeypatch, request_):
     desk, calls, _ = _desk(monkeypatch)
     text = desk.offer(request_)
     assert "on screen" in text and "cannot be answered by voice" in text

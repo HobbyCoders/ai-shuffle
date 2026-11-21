@@ -475,7 +475,7 @@ class Session(SessionBase):
     hidden: bool = False
     # A Task/Swarm child's own chat (``sessions.is_worker``, see
     # ``provider_agent.is_subagent_row``). The UI keeps such a chat to reading
-    # and messaging: no Git or private-access controls. NULL reads as False.
+    # and messaging: no Git or Vault controls. NULL reads as False.
     is_worker: bool = False
     created_at: datetime
     updated_at: datetime

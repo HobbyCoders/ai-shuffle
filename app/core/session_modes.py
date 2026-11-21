@@ -50,7 +50,9 @@ from typing import Any, List, Mapping, Optional, Tuple
 
 from fluid.permissions.modes import ACCEPT_EDITS_TOOLS as _FLUID_ACCEPT_EDITS_TOOLS
 
-from app.core.tool_access import DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access
+from app.core.tool_access import (
+    DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access, with_renamed_tools,
+)
 
 # The three sidepanel surfaces. Order is the switcher's order.
 SESSION_MODES: Tuple[str, ...] = ("code", "chat", "voice")
@@ -72,9 +74,9 @@ CHAT_MODE_MEMORY_TOOLS: List[str] = [
     "mcp__builtins__Remember", "mcp__builtins__Recall", "mcp__builtins__Forget",
 ]
 CHAT_MODE_RESOURCE_TOOLS: List[str] = [
-    f"mcp__chat-access__{name}" for name in (
-        "RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand",
-        "ChatHttpRequest",
+    f"mcp__app-vault__{name}" for name in (
+        "RequestVaultAccess", "VaultResources", "VaultListFiles", "VaultReadFile", "VaultWriteFile", "VaultRunCommand",
+        "VaultHttpRequest",
     )
 ]
 # The question card. It only asks the owner and reaches no file, shell or
@@ -480,7 +482,7 @@ COMPUTER_USE_REQUEST_ACCESS = "mcp__computer-use__request_access"
 # The tools Accept Edits approves on its own, on every leg: fluid's
 # ``ACCEPT_EDITS_TOOLS`` (Edit, Write, MultiEdit, NotebookEdit — the file-edit
 # tools, which is what the mode means in Claude Code). The app adds no name of
-# its own: none of its in-proc MCP tools (``mcp__builtins__*``, chat-access,
+# its own: none of its in-proc MCP tools (``mcp__builtins__*``, vault,
 # computer-use) edits a workspace file, and code mode's ``run_python`` is a
 # kernel, not an edit, so it asks like ``Bash`` does. Re-exported here so the
 # approver, the no-approver paths and the tests read the one table.
@@ -787,8 +789,8 @@ PROACTIVE_DENIED_TOOLS = [
     "Task", "Agent", "Swarm", "StartSession", "MessageSession", "RemoteTrigger",
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
-    "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
-    "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "GenerateNativeVideo", "Skill", "ToolSearch",
+    "CronCreate", "CronDelete", "RequestVaultAccess", "VaultRunCommand",
+    "VaultWriteFile", "VaultHttpRequest", "GenerateNativeImage", "GenerateNativeVideo", "Skill", "ToolSearch",
     "run_python", "list_tools", "search_tools", "read_tool_docs",
     "save_skill", "delete_skill", "save_plugin",
 ]
@@ -866,8 +868,9 @@ def turn_tool_surface(allowed: Optional[List[str]], disallowed: Optional[List[st
     # An all-blank list degrades to None rather than to an empty allowlist: [] on
     # the engine would mean "no tools at all", which is never what a malformed
     # ``tools:`` line asked for.
-    dispatch_surface = ([str(t).strip() for t in listed if str(t).strip()]
-                        if isinstance(listed, (list, tuple)) else []) or None
+    # Agent files written before a tool was renamed still name the old tool:
+    # ``with_renamed_tools`` adds its current name to either list.
+    dispatch_surface = (with_renamed_tools(listed) if isinstance(listed, (list, tuple)) else []) or None
     surface = intersect_tool_surfaces(allowed, dispatch_surface)
     if surface == []:
         # An empty intersection is a real answer ("the agent and the dispatch
@@ -881,7 +884,7 @@ def turn_tool_surface(allowed: Optional[List[str]], disallowed: Optional[List[st
     # allow on both legs, so appending is enough to enforce it.
     denylist = overrides.get("tool_denylist")
     if isinstance(denylist, (list, tuple)):
-        denied = [str(t).strip() for t in denylist if str(t).strip()]
+        denied = with_renamed_tools(denylist)
         current = list(disallowed or [])
         disallowed = current + [t for t in denied if t not in current]
     return surface, disallowed

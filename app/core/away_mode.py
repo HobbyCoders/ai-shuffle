@@ -10,7 +10,7 @@ switches are read mid-session; while effective Away is on:
   park on the owner. It returns at once with each question's recommended
   option (the label marked "(Recommended)", else the first option), and every
   such decision is recorded on the session as an ``away_decision`` system row.
-* An approval prompt (tool permission, computer-use access, a private-access
+* An approval prompt (tool permission, computer-use access, a Vault
   confirmation) is NOT granted. It is deferred with a clear result instead of
   waiting on a card nobody is watching. Away mode never widens permissions.
 * Each turn carries a short reminder telling the model the owner is away.
@@ -22,7 +22,7 @@ Chats another of the owner's chats starts with StartSession get Away-style
 handling without the flag (:func:`assistant_work`): their questions are
 answered the same way, and their approval prompts are raised in the starting
 chat (``provider_agent_approvals``) where the owner answers the real card.
-Anything that cannot be routed there, such as a private-access request, is
+Anything that cannot be routed there, such as a Vault request, is
 deferred exactly as Away mode defers it. Nothing more is ever granted. This
 applies to every owner chat (#371 step 5).
 """

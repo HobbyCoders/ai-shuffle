@@ -7,7 +7,7 @@ authorization). Tests: `tests/core/test_terminals.py`,
 `tests/api/test_terminals_api.py`.
 
 Terminals support local Unix PTYs and Windows ConPTY, explicitly selected
-private-access SSH machine grants, and shells on another worker in the owner's
+Vault SSH machine grants, and shells on another worker in the owner's
 network (#349, #353, #642, #674). Peer terminals are off by default. The switch
 is **Settings > Security > Terminals on other workers** (`network_peer_terminals`
 owner policy), and both workers need it on. The setting allows the feature; it
@@ -199,7 +199,7 @@ the real desktop app. Not exercised: sign-out ending a shell, the ten-minute and
 Live-smoke row: `two-worker-smoke.peer-terminal-acceptance`.
 
 SSH targets require an active, writable machine grant for this chat (including
-grants approved from saved connections). They reuse the private-access SSH
+grants approved from saved connections). They reuse the Vault SSH
 client and its pinned host-key validation; there is no new credential store.
 SSH opens the approved account's login shell/home, with no supplied command,
 folder, environment or forwarding. Expiry, revocation or ownership change ends
@@ -727,5 +727,5 @@ trusted HTTPS context. Plain HTTP and currently unsupported sealed-LAN control
 routes are refused rather than used as fallback.
 
 `app/core/terminal_targets.py` adapts peer/SSH streams to the existing bounded
-terminal registry. SSH tasks belong to the private-access grant and close the
+terminal registry. SSH tasks belong to the Vault grant and close the
 connection on revocation, even if cancellation precedes the reader's start.

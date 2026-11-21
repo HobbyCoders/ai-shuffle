@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * What waits on the owner in the open chat, docked above the composer
-	 * (issue #1816): permission prompts, private-access requests and the
+	 * (issue #1816): permission prompts, Vault requests and the
 	 * agent's questions. It replaces the permission modal and the question
 	 * tray on the phone and never renders inside the controls panel.
 	 *
@@ -21,7 +21,7 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
-	import { chatAccessSummary, type PendingAccessItem } from '$lib/stores/chat-access';
+	import { vaultSummary, type PendingAccessItem } from '$lib/stores/vault';
 	import { notify } from '$lib/stores/notifications';
 	import { sentQuestions } from '$lib/stores/session/sent-questions';
 	import type { PromptDockProps } from '$lib/components/chat/composer-shell';
@@ -43,7 +43,7 @@
 		| { kind: 'question'; id: string; request: UserQuestionData }
 		| { kind: 'access'; id: string; item: PendingAccessItem };
 
-	const summary = $derived($chatAccessSummary);
+	const summary = $derived($vaultSummary);
 	const accessItems = $derived<PendingAccessItem[]>(
 		summary && sessionId && summary.sessionId === sessionId && summary.pending > 0 ? summary.items ?? [] : []
 	);
@@ -193,7 +193,7 @@
 		);
 	}
 
-	// ── Private access ────────────────────────────────────────────────────
+	// ── Vault ────────────────────────────────────────────────────
 	const KIND_LABEL: Record<PendingAccessItem['kind'], string> = {
 		machine: 'SSH machine',
 		folder: 'Folder',

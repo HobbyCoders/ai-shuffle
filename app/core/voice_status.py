@@ -129,7 +129,7 @@ def work_status(session_id: str) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         logger.debug("Voice status: interaction read failed for %s", session_id, exc_info=True)
     try:
-        from app.core.chat_access import broker
+        from app.core.vault_access import broker
         status["on_screen_waiting"] += sum(
             1 for action in list(broker.actions.values())
             if action.session_id == session_id and not action.decision.done()
@@ -138,7 +138,7 @@ def work_status(session_id: str) -> Dict[str, Any]:
             if request.session_id == session_id and not request.result.done()
         )
     except Exception:  # noqa: BLE001
-        logger.debug("Voice status: private-access read failed for %s", session_id, exc_info=True)
+        logger.debug("Voice status: Vault read failed for %s", session_id, exc_info=True)
     return status
 
 

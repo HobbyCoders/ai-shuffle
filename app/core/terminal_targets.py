@@ -74,7 +74,7 @@ async def targets(session_id, *, include_peers=True):
         workers = [row for row in rows["runners"] if not row["is_self"]]
         result.extend(await asyncio.gather(*(_worker_target(row) for row in workers)))
     if session_id:
-        from app.core.chat_access import broker, AccessDenied
+        from app.core.vault_access import broker, AccessDenied
         for grant in list(broker.grants.values()):
             if grant.session_id != session_id or grant.kind != "machine":
                 continue
@@ -213,7 +213,7 @@ class PeerTerminal(StreamTerminal):
 class SSHTerminal(StreamTerminal):
     async def start(self, target):
         import asyncssh
-        from app.core.chat_access import broker, AccessDenied
+        from app.core.vault_access import broker, AccessDenied
         self.broker = broker
         try:
             grant = await broker.get(self.session_id, target.grant_id)
@@ -270,7 +270,7 @@ class SSHTerminal(StreamTerminal):
             self._on_exit(self.process.exit_status if self.process.exit_status is not None else -1)
 
     async def write(self, data):
-        from app.core.chat_access import AccessDenied
+        from app.core.vault_access import AccessDenied
         try:
             await self.broker.get(self.session_id, self.grant.id)
             if self.state == service.STATE_EXITED:

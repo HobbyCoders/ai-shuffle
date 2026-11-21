@@ -508,7 +508,7 @@ async def _settle_prompt_via(chats, monkeypatch, via):
 @pytest.mark.parametrize("kind", ["permission", "question", "private", "prose", "parked_prose"])
 async def test_settle_dismisses_owner_wait_producers(chats, monkeypatch, via, kind):
     import asyncio
-    from app.core import chat_access, interaction_events, query_session_lifecycle
+    from app.core import vault_access, interaction_events, query_session_lifecycle
     from app.core.global_events import global_events
     from app.core.permission_handler import permission_handler
     from app.core.sync_engine import sync_engine
@@ -521,9 +521,9 @@ async def test_settle_dismisses_owner_wait_producers(chats, monkeypatch, via, ki
     monkeypatch.setattr(sync_engine, "_broadcast_user_message", frames)
     monkeypatch.setattr(global_events, "lifecycle", lifecycle)
     monkeypatch.setattr(query_session_lifecycle, "stop_all_background_tasks", stop_all)
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
     turn = turns.enqueue_turn("target", "user", prompt="Run", profile_id="agent")
     turns.start_turn(turn["id"])
     waiter = None
@@ -578,7 +578,7 @@ async def test_settle_dismisses_owner_wait_producers(chats, monkeypatch, via, ki
             assert any(f["type"] == "user_question_timeout" and f["request_id"] == "request" for f in sent)
         elif kind == "private":
             assert not broker.requests
-            assert any(f["type"] == "chat_access_changed" and f["pending"] == 0 for f in sent)
+            assert any(f["type"] == "vault_changed" and f["pending"] == 0 for f in sent)
         else:
             assert turns.get_turn(turn["id"])["state"] == "parked"
             assert sessions.get_session("target")["last_assistant_question_seq"] is None
@@ -679,12 +679,12 @@ async def test_settle_answered_prose_is_idle_noop(chats, monkeypatch):
 async def test_settle_denies_private_action_without_revoking_access(chats, monkeypatch):
     import asyncio
     import time
-    from app.core import chat_access
+    from app.core import vault_access
 
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
-    grant = chat_access.Grant("grant", "target", (None, "worker", None), "Service", "service",
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    grant = vault_access.Grant("grant", "target", (None, "worker", None), "Service", "service",
                               "example", time.time() + 60)
     broker.grants[grant.id] = grant
     registered = asyncio.Event()
@@ -692,7 +692,7 @@ async def test_settle_denies_private_action_without_revoking_access(chats, monke
     waiter = asyncio.create_task(broker.approve(grant, "http", {"method": "POST"}))
     await asyncio.wait_for(registered.wait(), 5)
     assert not (await invoke(chats, "SettleSession", session_id="target")).is_error
-    with pytest.raises(chat_access.AccessDenied, match="denied"):
+    with pytest.raises(vault_access.AccessDenied, match="denied"):
         await asyncio.wait_for(waiter, 5)
     assert not broker.pending_count("target")
     assert broker.grants[grant.id] is grant and not grant.revoked
@@ -700,7 +700,7 @@ async def test_settle_denies_private_action_without_revoking_access(chats, monke
 @pytest.mark.parametrize("kind", ["permission", "private"])
 async def test_settle_redirected_wait_interrupts_only_waiting_child(chats, monkeypatch, kind):
     import asyncio
-    from app.core import chat_access
+    from app.core import vault_access
     from app.db import interactions
 
     sessions.create_session("child-wait", "agent", parent_session_id="target")
@@ -708,9 +708,9 @@ async def test_settle_redirected_wait_interrupts_only_waiting_child(chats, monke
     child_turn = turns.enqueue_turn("child-wait", "user", prompt="Ask", profile_id="agent")
     turns.start_turn(root_turn["id"])
     turns.start_turn(child_turn["id"])
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
     if kind == "permission":
         interactions.create_interaction("target", "permission", {
             "request_id": "child-request", "tool_name": "Bash", "tool_input": {},
@@ -730,12 +730,12 @@ async def test_settle_redirected_wait_interrupts_only_waiting_child(chats, monke
 
 async def test_settle_snapshot_preserves_successor_and_all_new_prompts(chats, monkeypatch):
     import asyncio
-    from app.core import chat_access, session_settlement, turn_manager
+    from app.core import vault_access, session_settlement, turn_manager
     from app.db import interactions, runs, session_events
 
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, "worker", None)))
     old = turns.enqueue_turn("target", "user", prompt="Old", profile_id="agent")
     lease = runs.claim_run("target", "runner", 60)
     turns.start_turn(old["id"], lease["id"], "runner")

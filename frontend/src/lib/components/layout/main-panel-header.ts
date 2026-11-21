@@ -18,7 +18,7 @@ export interface MainPanelHeaderContext {
 	headerActions: Snippet;
 	/**
 	 * The open chat is a subagent's (read and message only): it has no Git or
-	 * private access actions, so a shell need not draw a row for them.
+	 * Vault actions, so a shell need not draw a row for them.
 	 */
 	subagentChat?: boolean;
 }

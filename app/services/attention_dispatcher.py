@@ -1,6 +1,6 @@
 """Durable, owner-worker-only Needs-you state and latest-command outbox.
 
-Inputs are *pending* interactions, private-access waits and the existing prose
+Inputs are *pending* interactions, Vault waits and the existing prose
 question projection, never lifecycle events or bell severity. State travels in
 the owner-ordered session catalog. Android also persists version/episode receipts
 so retries, reordering and a relay acceptance followed by a crash cannot re-alert.
@@ -200,10 +200,10 @@ class AttentionDispatcher:
 
     @staticmethod
     def private_needs(session_id):
-        from app.core.chat_access import broker
+        from app.core.vault_access import broker
         now = time.time()
         # Push belongs to the executing session, even when the UI surfaces a
-        # child's private-access card in its parent panel on another worker.
+        # child's Vault card in its parent panel on another worker.
         return {"access:" + item.attention_id for item in list(broker.requests.values()) + list(broker.actions.values())
                 if item.attention_id and item.session_id == session_id and item.expires_at > now
                 and not (item.result if hasattr(item, "result") else item.decision).done()}

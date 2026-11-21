@@ -79,14 +79,14 @@ async def test_permission_prompt_is_deferred_while_away():
     create.assert_not_called()
 
 
-async def test_private_access_is_refused_at_once_while_away():
+async def test_vault_is_refused_at_once_while_away():
     pytest.importorskip("asyncssh")
-    from app.core import chat_access
+    from app.core import vault_access
 
     with patch.object(away_mode, "is_away_async", AsyncMock(return_value=True)), \
             patch.object(away_mode, "record_decision", AsyncMock()):
-        with pytest.raises(chat_access.AccessDenied, match="Owner away; deferred"):
-            await chat_access._defer_if_away("s1", "private folder access request")
+        with pytest.raises(vault_access.AccessDenied, match="Owner away; deferred"):
+            await vault_access._defer_if_away("s1", "private folder access request")
 
 
 async def test_release_pending_questions_answers_waiting_requests():

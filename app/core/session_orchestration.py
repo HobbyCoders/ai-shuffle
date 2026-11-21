@@ -2072,7 +2072,7 @@ async def _start_remote(plan, sender_id, sender_generation):
               "worker": {"device_id": owner, "name": name},
               "url": "/?session=" + answer["session_id"],
               "note": (f"Runs on {name}, in this project's checkout there (not your worktree), with no "
-                       "private-access grants. Queued is not delivered; retry the same request_id to read "
+                       "vault grants. Queued is not delivered; retry the same request_id to read "
                        "its status. It cannot start further chats; the user sees it "
                        "in the sidebar once the worker publishes it.")}
     # What the destination actually made it on; an older release does not
@@ -2084,7 +2084,7 @@ async def _start_remote(plan, sender_id, sender_generation):
         provider_id=answer.get("provider_id") if "model" in answer else plan["body"].get("provider_id")))
     if plan["body"].get("report_back", answer.get("report_back")):
         if answer.get("report_back"):
-            result["note"] = (f"Runs on {name}, in the project's checkout there, with no private-access "
+            result["note"] = (f"Runs on {name}, in the project's checkout there, with no Vault "
                               "grants. It reports back to you automatically when it finishes or fails.")
             if answer.get("assistant_work", plan["body"].get("assistant_work", True)):
                 result["note"] += (" It runs in Away mode there: questions get the recommended option and "

@@ -6,7 +6,7 @@
 	 * Sidebar the desktop shell docks), over the shared MainPanel. The bar
 	 * carries the menu, the title, the "Connected to <worker>" chip and, in a
 	 * chat, the trail, the chat-actions chevron and MainPanel's header actions
-	 * (private access, Git). Export lives in the composer's Chat controls
+	 * (Vault, Git). Export lives in the composer's Chat controls
 	 * (issue #1816).
 	 */
 	import { onMount } from 'svelte';

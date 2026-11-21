@@ -35,7 +35,7 @@
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
-	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
+	import VaultPrompt from '$lib/components/chat/VaultPrompt.svelte';
 	import NewSessionHero from './NewSessionHero.svelte';
 	import ChatUnavailableNotice from './ChatUnavailableNotice.svelte';
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
@@ -332,7 +332,7 @@
 	// question opens here too, so it can still be answered.
 	const dialogPermissions = $derived($activeSession.pendingPermissions ?? []);
 	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
-	// A shell prompt dock answers permissions, private access and questions
+	// A shell prompt dock answers permissions, Vault and questions
 	// above the composer, so it replaces the modal and the question tray.
 	const PromptDock = composerShell().PromptDock;
 
@@ -643,7 +643,7 @@
 							onQuestion={handleQuestionResponse}
 						/>
 					{:else}
-						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
+						<VaultPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} sent={$sentQuestions} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />

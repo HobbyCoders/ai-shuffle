@@ -1,12 +1,12 @@
 /**
  * A subagent's own chat (a Task or Swarm child) is for reading the transcript
- * and messaging the subagent: no Git rail and no private access control. Its
- * private access requests show in its main chat instead (ChatAccess.test.ts).
+ * and messaging the subagent: no Git rail and no Vault control. Its
+ * Vault requests show in its main chat instead (VaultPanel.test.ts).
  *
  * MainPanel pulls in the whole session/store graph, so, as in
  * chatview-mode-lanes.test.ts, these pin its source; the gates themselves are
  * rendered in git-header-visibility.test.ts, ContextPillBar.test.ts and
- * ChatAccess.test.ts.
+ * VaultPanel.test.ts.
  */
 import { describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
@@ -25,10 +25,10 @@ describe('subagent chat controls in MainPanel', () => {
 		expect(mainPanel).not.toMatch(/startsWith\(['"]task\//);
 	});
 
-	it('mounts the private access control only outside a subagent chat', () => {
-		const mount = mainPanel.match(/\{#if ([^}]*)\}\s*\{#key activeTab\.sessionId\}\s*<ChatAccess /);
+	it('mounts the Vault control only outside a subagent chat', () => {
+		const mount = mainPanel.match(/\{#if ([^}]*)\}\s*\{#key activeTab\.sessionId\}\s*<VaultPanel /);
 		expect(mount?.[1]).toContain('!activeIsSubagent');
-		expect(mainPanel.match(/<ChatAccess /g)).toHaveLength(1);
+		expect(mainPanel.match(/<VaultPanel /g)).toHaveLength(1);
 	});
 
 	it('hides the Git rail and stops loading Git for a subagent chat', () => {

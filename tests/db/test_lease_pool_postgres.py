@@ -70,7 +70,7 @@ def test_real_holders_leave_renewal_and_reaper_available(lease_pool, monkeypatch
 
 def _settle(sid):
     from app.core import session_settlement
-    from app.core.chat_access import broker
+    from app.core.vault_access import broker
 
     snapshot = session_settlement._capture_and_dismiss(sid, broker, None)
     assert snapshot is not None

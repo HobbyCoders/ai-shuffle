@@ -137,8 +137,8 @@ def is_subagent_row(row: Optional[Mapping[str, Any]]) -> bool:
     across restarts, runners and devices. A StartSession peer is a top-level
     chat and never carries it. A subagent's chat is for reading the transcript
     and messaging it: owner-driven Git operations are refused for it
-    (``app.api.git_owner``) and its private-access requests surface in its main
-    chat (``app.core.chat_access``).
+    (``app.api.git_owner``) and its Vault requests surface in its main
+    chat (``app.core.vault_access``).
     """
     return bool(row) and bool(row.get("is_worker"))
 
@@ -1015,7 +1015,7 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     A no-project (chat) caller passes its mode on the same way: a chat in
     Bypass starts its workers in Bypass, one in Auto in Auto (owner decision,
     #486, replacing the #415/#416 rule that started them on Ask). Paid
-    generation, spending limits and new private-access grants still ask.
+    generation, spending limits and new Vault grants still ask.
 
     A caller that is itself a worker is capped by its own ceiling. Retired
     ``plan`` settings are ignored. Returns ``None`` (no override — the worker
@@ -2863,7 +2863,7 @@ async def _dispatch_worker(
     register_worker_session(worker_session_id)
     # Private grants follow the actual local caller, not the root used for UI
     # routing on nested Tasks. Register before the child's first turn can run.
-    from app.core.chat_access import broker as access_broker
+    from app.core.vault_access import broker as access_broker
     access_broker.register_delegation(worker_session_id, owner_session_id, routing_parent=parent_session_id)
 
     # --- approval routing (ONE contiguous region) --------------------------

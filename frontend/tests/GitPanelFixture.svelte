@@ -5,7 +5,7 @@
 	import { get } from 'svelte/store';
 	import GitHeaderActions from '../src/lib/components/git/GitHeaderActions.svelte';
 	import { gitSnapshot, gitOperationState } from './git-panel-stubs';
-	import { chatAccessSummary } from '../src/lib/stores/chat-access';
+	import { vaultSummary } from '../src/lib/stores/vault';
 	import { openHeaderDropdown } from '../src/lib/stores/header-dropdowns';
 
 	let isStreaming = $state(false);
@@ -87,7 +87,7 @@
 	}
 
 	scenario((new URLSearchParams(location.search).get('s') as Scenario | null) ?? 'dirty');
-	chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 2, saved: 1, error: false, open: record('access') });
+	vaultSummary.set({ sessionId: 's1', pending: 0, active: 2, saved: 1, error: false, open: record('access') });
 	Object.assign(window, {
 		gitPanelFixture: {
 			calls,

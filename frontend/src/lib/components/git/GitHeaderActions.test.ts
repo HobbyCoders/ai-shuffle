@@ -21,8 +21,8 @@
  *  - the panel opens when an operation starts after mount, never on mount
  *    for one already active (a pinned failure, a resumed Ship It)
  *  - everything disables under actionsBusy (isStreaming)
- *  - the panel is Git only: no swarms, agent transcripts or private access
- *    (#1816; those live in the running-tasks list and the private-access icon)
+ *  - the panel is Git only: no swarms, agent transcripts or Vault
+ *    (#1816; those live in the running-tasks list and the Vault icon)
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -143,7 +143,7 @@ function setSnapshot(patch: Record<string, unknown>) {
 import GitHeaderActions from './GitHeaderActions.svelte';
 import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
-import { chatAccessSummary } from '$lib/stores/chat-access';
+import { vaultSummary } from '$lib/stores/vault';
 
 // ── Scenario setup ──────────────────────────────────────────────────────────
 
@@ -248,7 +248,7 @@ beforeEach(() => {
 	gitActionPreferences.reset();
 	mocks.gitOperationState.set({ active: false, status: 'idle', title: null, steps: [] });
 	openHeaderDropdown.set(null);
-	chatAccessSummary.set(null);
+	vaultSummary.set(null);
 	mocks.gitMode.set('project');
 	mocks.mobileShell = false;
 	vi.clearAllMocks();
@@ -257,7 +257,7 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	openHeaderDropdown.set(null);
-	chatAccessSummary.set(null);
+	vaultSummary.set(null);
 });
 
 describe('GitHeaderActions chat exports', () => {
@@ -401,7 +401,7 @@ describe('GitHeaderActions header label', () => {
 
 	it('ignores waiting access approvals: they are not Git state (#1816)', () => {
 		cleanAheadBranch();
-		chatAccessSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 0, error: false, open: vi.fn() });
+		vaultSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 0, error: false, open: vi.fn() });
 		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false } });
 		expect(trigger().textContent).not.toContain('to approve');
 		expect(trigger().textContent).toContain('conflicts');
@@ -1431,14 +1431,14 @@ describe('GitHeaderActions handler wiring', () => {
 	});
 
 	// #1816: the panel is Git only. Swarms and agent transcripts moved to the
-	// running-tasks list; private access lives on the header's private-access icon
+	// running-tasks list; Vault lives on the header's Vault icon
 	// and in the chat's own prompt.
-	it('renders no private-access row, even with grants and requests waiting', async () => {
+	it('renders no Vault row, even with grants and requests waiting', async () => {
 		dirtyFeatureBranch();
-		chatAccessSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 1, error: false, open: vi.fn() });
+		vaultSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 1, error: false, open: vi.fn() });
 		renderHeader();
 		await openPanel();
-		expect(queryRow('Private access')).toBeNull();
+		expect(queryRow('Vault')).toBeNull();
 		expect(within(panel()).queryByText(/active grant|to approve|saved connection/)).toBeNull();
 	});
 
@@ -1453,7 +1453,7 @@ describe('GitHeaderActions handler wiring', () => {
 
 	it('does not mount the swarm list or read swarm state', () => {
 		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/git/GitHeaderActions.svelte'), 'utf8');
-		expect(source).not.toMatch(/SwarmDropdown|SwarmCard|stores\/swarms|chat-access/);
+		expect(source).not.toMatch(/SwarmDropdown|SwarmCard|stores\/swarms|vault/);
 	});
 });
 

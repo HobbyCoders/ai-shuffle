@@ -778,7 +778,7 @@ WINDOWS_FULL_HINT = (f"`{WINDOWS_FULL_COMMAND}` (one Monitor job per run; "
 # Covered only at release time or by hand: no hardware here, or a full image build.
 NOT_LOCAL = [
     (["ios/*"], "iOS app: needs a Mac. Runs only when the owner dispatches ios.yml before a release."),
-    (["app/core/chat_files.py", "app/core/confined_files.py"],
+    (["app/core/vault_files.py", "app/core/confined_files.py"],
      "macOS folder confinement: needs a Mac. Runs only when the owner dispatches ci-folder-confinement.yml."),
     (["Dockerfile", "docker/*", "entrypoint.sh", "frontend/src/routes/setup/*", "frontend/src/lib/components/setup/*"],
      "Container image: built and verified by the release workflow, or locally with "

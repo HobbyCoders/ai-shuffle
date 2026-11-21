@@ -141,7 +141,7 @@ def _linked() -> bool:
 
 def _private_transport(request: Request) -> None:
     """A client secret travels only where the worker can vouch for the
-    connection: the same rule as private access inputs (app.api.chat_access)."""
+    connection: the same rule as Vault inputs (app.api.vault)."""
     from app.core.owner_auth import loopback_request
     if (request.url.scheme != "https"
             and request.scope.get("shuffle.forwarded_https") is not True

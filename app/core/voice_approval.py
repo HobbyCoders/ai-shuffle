@@ -17,7 +17,7 @@ audio turn after the question was put to them:
 
 The answer goes through ``permission_handler.respond`` (the same call a tap on
 the card makes) after the tap's authority checks are re-run for the call's
-caller. Requests the app keeps on screen (private access, anything carrying a
+caller. Requests the app keeps on screen (Vault, anything carrying a
 secret) are never answered by voice; the voice says they need the screen.
 On a conversation another network worker runs, the answer is forwarded to
 that worker (``control.answer_permission``), as a tap there would be (#700).
@@ -75,11 +75,11 @@ def classify_spoken_answer(text: str) -> str:
     return owner_confirm.classify(text)
 
 
-# Tools whose approval belongs to the private-access card, and argument names
+# Tools whose approval belongs to the Vault card, and argument names
 # that mean a secret travels with the request. Neither is answered by voice.
 _SCREEN_TOOLS = frozenset({
-    "RequestChatAccess", "ChatResources", "ChatRunCommand", "ChatWriteFile",
-    "ChatReadFile", "ChatListFiles", "ChatHttpRequest",
+    "RequestVaultAccess", "VaultResources", "VaultRunCommand", "VaultWriteFile",
+    "VaultReadFile", "VaultListFiles", "VaultHttpRequest",
 })
 _SECRET_ARG = re.compile(
     r"secret|token|password|passwd|passphrase|api[_-]?key|credential|private[_-]?key|cookie|bearer",
@@ -98,12 +98,18 @@ def _has_secret(value: Any, depth: int = 0) -> bool:
     return False
 
 
+_VAULT_SERVERS = ("__app-vault__", "__app_vault__", "__chat-access__", "__chat_access__")
+
+
 def needs_screen(request: Dict[str, Any]) -> Optional[str]:
     """Why this request must be answered on screen, or None when voice may."""
     name = str(request.get("tool_name") or "")
     short = name.rsplit("__", 1)[-1]
-    if short in _SCREEN_TOOLS or "chat-access" in name or "chat_access" in name:
-        return "Private access is approved in its card on screen."
+    # The Vault server under its current name and the one it had before the
+    # rename (a prompt saved before an update still carries the old one). A
+    # user's own MCP server that merely has "vault" in its name is not ours.
+    if short in _SCREEN_TOOLS or any(server in name for server in _VAULT_SERVERS):
+        return "Vault access is approved in its card on screen."
     if _has_secret(request.get("tool_input")):
         return "It carries a secret, which is only handled on screen."
     return None

@@ -260,9 +260,9 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "provider-agent": PROVIDER_AGENT_RISK_MAP,
     # The broker enforces grants and per-action confirmation outside Bypass.
     # Gating writes/commands here too would ask the user twice.
-    "chat-access": {
-        "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
-        "ChatWriteFile": "safe", "ChatRunCommand": "safe", "ChatHttpRequest": "safe",
+    "app-vault": {
+        "RequestVaultAccess": "safe", "VaultResources": "safe", "VaultListFiles": "safe", "VaultReadFile": "safe",
+        "VaultWriteFile": "safe", "VaultRunCommand": "safe", "VaultHttpRequest": "safe",
     },
 }
 
@@ -312,7 +312,7 @@ NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
 # mode) or schemas (JSON path) ride every first request. Every other tool on
 # the registry when the session is built (fluid's memory, recall, session,
 # scratch and web builtins, the remaining ``builtins`` bridge tools,
-# chat-access) is moved to the deferred tier: announced by name, still
+# vault) is moved to the deferred tier: announced by name, still
 # callable, its docs loaded on demand by ``read_tool_docs`` under code mode or
 # by ToolSearch on the JSON path. Before this allowlist those docs cost ~17k
 # tokens per first request (Oct 2026). Registry names; an allowlist, so a tool
@@ -347,7 +347,7 @@ NATIVE_JSON_EAGER_TOOLS: frozenset[str] = frozenset({
 # earlier 23-tool tier still ~12k. Only the turn-by-turn core stays loaded:
 # Task and Monitor (the CLI's own are banned on this leg) and the chat lane's
 # attachment reader. Every other bridged tool (memory and recall, the task
-# tools, peer sessions, hand-off, usage, private access, app-config, ai-tools,
+# tools, peer sessions, hand-off, usage, Vault, app-config, ai-tools,
 # Android, cron, plugins, sidebar organisation, the app's logs, and the
 # Glob/Grep fallback) is listed with ``_meta anthropic/alwaysLoad: false``:
 # the CLI shows it by name in its deferred-tools list and its own ToolSearch

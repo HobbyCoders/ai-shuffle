@@ -31,7 +31,7 @@ Code-mode Python cells have no OS sandbox on any platform. The subprocess,
 import allowlist, audit/I/O guards, credential environment scrub and memory
 limits remain defence in depth. Every cell is write-class: Ask and Accept Edits
 prompt each time; Bypass approves. Host tool calls retain their own gates.
-Folder grants expose list/read/write only; `ChatRunCommand` requires an SSH
+Folder grants expose list/read/write only; `VaultRunCommand` requires an SSH
 machine grant and never falls back to an unsandboxed local command.
 
 ## Storage and process paths reviewed
@@ -308,7 +308,7 @@ and Windows network-share behavior before enabling this mode.
 ## What breaks and needs an owner decision
 
 - Builds that use a host secret from Monitor's inherited environment must use
-  an explicit approved child configuration or a private access grant. Passing an
+  an explicit approved child configuration or a Vault grant. Passing an
   app secret through `FLUID_CHILD_ENV_PASSTHROUGH` no longer works.
 - A real user split changes project file ownership, Git safe-directory rules,
   PATH/HOME, CLI sign-ins, SSH agents, browser profiles and permission to run local

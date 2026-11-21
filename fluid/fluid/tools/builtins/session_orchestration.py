@@ -69,7 +69,7 @@ _START_DESCRIPTION = (
     "example one with the platform or files the task needs. That chat runs there with your "
     "agent, model and permission mode in the same project's checkout on that worker (refused "
     "when the project is not checked out there), never your worktree or branch, and receives "
-    "no private-access grants. It cannot start further chats; "
+    "no Vault grants. It cannot start further chats; "
     "the user sees it in the sidebar. An offline or unknown worker is refused, never "
     "replaced by this one. "
     "project (owner top-level sessions only, not API sessions): a registered project's name, id or path; "

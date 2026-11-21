@@ -30,7 +30,7 @@ vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
 const access = vi.hoisted(() => ({get: vi.fn()}));
 vi.mock('$lib/api/client', async (importOriginal) => {
  const actual = await importOriginal<typeof import('$lib/api/client')>();
- // ChatAccess reads the session row through /live metadata (getSessionOwnerMeta).
+ // VaultPanel reads the session row through /live metadata (getSessionOwnerMeta).
  const getShared = async (url: string) => {
   const row = await access.get(url);
   return url.includes('/live?') ? {session_meta: {is_remote: false, device_name: null, ...row}} : row;
@@ -39,7 +39,7 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 });
 import { render, screen, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
-import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
+import VaultPanel from '$lib/components/chat/VaultPanel.svelte';
 import { startLiveSync } from './live-sync';
 import { resourceSync } from './resource-sync';
 import { hydrateModelRegistry } from '$lib/constants/models';
@@ -66,17 +66,17 @@ describe('root authenticated live-sync lifecycle',()=>{
   let snapshot: Record<string, unknown> = empty;
   access.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? {mode:'code'} : snapshot);
   stop=startLiveSync();account('alice');
-  const view=render(ChatAccess,{sessionId:'s1'});
+  const view=render(VaultPanel,{sessionId:'s1'});
   try {
    await vi.advanceTimersByTimeAsync(0);
    snapshot = {...empty, actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
-   Socket.all[0].emit({type:'chat_access_changed',session_id:'other'});
+   Socket.all[0].emit({type:'vault_changed',session_id:'other'});
    await vi.advanceTimersByTimeAsync(100);await tick();
    expect(screen.queryByText('Approve this remote command?')).toBeNull();
-   Socket.all[0].emit({type:'chat_access_changed',session_id:'s1'});
+   Socket.all[0].emit({type:'vault_changed',session_id:'s1'});
    await vi.advanceTimersByTimeAsync(100);await tick();
    expect(screen.getByText('Approve this remote command?')).toBeTruthy();
-   expect(access.get.mock.calls.filter(([url])=>url.startsWith('/chat-access/'))).toHaveLength(2);
+   expect(access.get.mock.calls.filter(([url])=>url.startsWith('/vault/sessions/'))).toHaveLength(2);
    expect(access.get.mock.calls.filter(([url])=>url.startsWith('/sessions/'))).toHaveLength(1);
   } finally {view.unmount();cleanup();resourceSync.clear();}
  });
@@ -328,7 +328,7 @@ describe('root authenticated live-sync lifecycle',()=>{
    // Not read yet: the boot load that reads it starts after the subscription.
    expect(invalidated()).not.toContain('tags');
    // No read stands for this name: it is refreshed as before.
-   expect(invalidated()).toContain('chat-access');
+   expect(invalidated()).toContain('vault');
    // A reconnect afterwards catches up on everything.
    Socket.all[0].emit({type:'sync_ready'});
    expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenLastCalledWith(undefined);

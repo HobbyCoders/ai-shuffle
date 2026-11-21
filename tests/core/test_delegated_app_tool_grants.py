@@ -179,17 +179,17 @@ def test_whole_server_wildcard_only_when_every_tool_is_safe(tmp_path, monkeypatc
     from app.core.provider import sdk_tool_records
 
     tools = {
-        "chat-access": [SimpleNamespace(name="ChatResources"), SimpleNamespace(name="ChatReadFile")],
+        "app-vault": [SimpleNamespace(name="VaultResources"), SimpleNamespace(name="VaultReadFile")],
         "app-config": [SimpleNamespace(name="listHooks"), SimpleNamespace(name="createHook")],
     }
     monkeypatch.setattr(
         sdk_tool_records, "recorded_sdk_server_tools", lambda cfg: tools.get(cfg.get("name"))
     )
-    options = _grant_options(tmp_path, ["mcp__chat-access", "mcp__app-config"])
+    options = _grant_options(tmp_path, ["mcp__app-vault", "mcp__app-config"])
     for name in tools:
         options.mcp_servers[name] = {"type": "sdk", "name": name, "instance": object()}
     assert _app_grants(ha._delegated_permission_grants(options)) == [
-        "mcp__fluid_bundled__mcp__chat-access__*",
+        "mcp__fluid_bundled__mcp__app-vault__*",
         "mcp__fluid_bundled__mcp__app-config__listHooks",
     ]
 

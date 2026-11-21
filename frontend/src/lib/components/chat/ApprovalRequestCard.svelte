@@ -111,7 +111,7 @@
 </div>
 
 <style>
-	/* The chat's card language (QuestionTray, the private-access cards): one
+	/* The chat's card language (QuestionTray, the Vault cards): one
 	   neutral surface on the theme radius, a sentence-case card badge for the
 	   state, and no colour wash. The request waiting for the owner's reply
 	   carries the strong border, as a picked option does. */

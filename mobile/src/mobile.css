@@ -346,7 +346,7 @@ html:root[data-platform='mobile'] .git-btn {
 	font-size: 0.75rem;
 }
 
-/* Private access keeps touch-sized fields on the unfolded screen too. */
+/* Vault keeps touch-sized fields on the unfolded screen too. */
 html:root[data-platform='mobile'] .pa-field .card-form-input {
 	min-height: 44px;
 	font-size: 1rem;

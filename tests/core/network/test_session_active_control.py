@@ -219,7 +219,7 @@ async def test_local_settle_commits_while_joining_worker_bootstraps(workers, mon
 async def test_settlement_dismisses_wait_on_execution_owner(workers, monkeypatch, via, kind):
     import asyncio
     from unittest.mock import AsyncMock
-    from app.core import chat_access, interaction_events
+    from app.core import vault_access, interaction_events
     from app.core.global_events import global_events
     from app.core.permission_handler import permission_handler
     from app.core.user_question_handler import user_question_handler
@@ -234,9 +234,9 @@ async def test_settlement_dismisses_wait_on_execution_owner(workers, monkeypatch
     join(a, b)
     _new_session(a, "waiting", "Waiting on owner")
     converge([a, b])
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
     waiter = None
     with a.active():
         if kind == "permission":
@@ -326,7 +326,7 @@ async def test_settlement_dismisses_wait_on_execution_owner(workers, monkeypatch
 async def test_delayed_fast_path_does_not_rewrite_newer_membership(workers, monkeypatch, reopened):
     import asyncio
     from unittest.mock import AsyncMock
-    from app.core import chat_access
+    from app.core import vault_access
     from app.core.user_question_handler import user_question_handler
     from app.db import interactions, session_events
     from app.db.base import get_db
@@ -353,9 +353,9 @@ async def test_delayed_fast_path_does_not_rewrite_newer_membership(workers, monk
     assert calls[0][1] == "session-settle-dismiss"  # Old owners safely refuse, never re-settle.
     assert "settled_membership" in calls[0][2]
     converge([a, b])
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, "owner", None)))
     with a.active():
         await session_active.set_local("late-settle", True)
         if not reopened:

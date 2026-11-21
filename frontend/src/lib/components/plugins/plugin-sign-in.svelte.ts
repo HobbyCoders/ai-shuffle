@@ -1,5 +1,5 @@
 /**
- * Plugin service sign-in, shared by the private access card and
+ * Plugin service sign-in, shared by the Vault card and
  * Settings > Plugins > Connections.
  *
  * `signInView` is the one place that decides what the owner is offered: the

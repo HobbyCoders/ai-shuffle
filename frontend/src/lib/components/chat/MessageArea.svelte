@@ -44,7 +44,7 @@
 	import TranscriptLoadingSkeleton from './TranscriptLoadingSkeleton.svelte';
 	import { sessionEphemeralCache } from '$lib/stores/session-cache';
 	import { createScrollTopPersist, readLeavingScrollTop } from './scroll-top-persist';
-	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { vaultPending } from '$lib/stores/vault';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 	import { swarms } from '$lib/stores/swarms';
@@ -726,7 +726,7 @@
 	// The open session's "Needs you" count (spec §5), through the same
 	// derivation and signals as its sidebar row and the tab title: the real
 	// row (a mirror's owner state counts before its queues load), the
-	// background attention entry a reconnect can restore, private access and
+	// background attention entry a reconnect can restore, Vault and
 	// the session's own queues and prose question.
 	const openSessionId = $derived($activeSession.sessionId);
 	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
@@ -774,7 +774,7 @@
 			? needsYouCount(
 				openRow ?? { status: 'active', is_remote: openIsRemote, remote_runtime_state: null },
 				$backgroundPermissions.get(openSessionId),
-				$privateAccessPending.get(openSessionId) ?? 0,
+				$vaultPending.get(openSessionId) ?? 0,
 				openNeeds
 			)
 			: 0

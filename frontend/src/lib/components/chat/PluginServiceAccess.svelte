@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * PluginServiceAccess: the private access card for a service an installed
-	 * plugin declares with an OAuth sign-in (RequestChatAccess with plugin and
+	 * PluginServiceAccess: the Vault card for a service an installed
+	 * plugin declares with an OAuth sign-in (RequestVaultAccess with plugin and
 	 * service). One flow: the primary button signs in at the provider, then
 	 * becomes "Grant access" for this conversation. No key or token is typed
 	 * here; the grant is `{sign_in: true}` and the worker attaches the token.
@@ -19,7 +19,7 @@
 		returnAddressUsable, signInView
 	} from '$lib/components/plugins/plugin-sign-in.svelte';
 	import '../deck/cards/card-design-system.css';
-	import './private-access.css';
+	import './vault.css';
 
 	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_url?: string; plugin: string; service: string };
 	let { sessionId, request, owner = null, onComplete }: {
@@ -28,7 +28,7 @@
 
 	const plugin = untrack(() => request.plugin);
 	const service = untrack(() => request.service);
-	const endpoint = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
+	const endpoint = untrack(() => `/vault/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
 	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
 
 	let status = $state<PluginSignInStatus | null>(null);
@@ -112,7 +112,7 @@
 		const code = (e as { status?: number })?.status;
 		if ([401, 403, 404, 410].includes(code ?? 0)) {
 			terminal = true;
-			error = 'This request is no longer available. Reopen Private access to check its status.';
+			error = 'This request is no longer available. Reopen the Vault to check its status.';
 		} else if (cancelling) {
 			error = 'Could not cancel. Try again; the request remains open.';
 		} else {
@@ -209,7 +209,7 @@
 
 		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#if expired}<p class="pa-error" role="alert">This request expired. Ask the agent to request access again.</p>
-		{:else if complete}<p class="pa-note" role="status">Request completed. Check Private access for the current status.</p>
+		{:else if complete}<p class="pa-note" role="status">Request completed. Check the Vault for the current status.</p>
 		{:else if remote}
 			<p class="pa-note">This conversation runs on {owner}. Sign-ins stay on each device: sign in to {service} from AI Shuffle on {owner}, then grant access here.</p>
 		{:else if gone}

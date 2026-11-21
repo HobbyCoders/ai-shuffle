@@ -64,7 +64,7 @@ def _servers(cwd: str) -> dict:
     from app.mcp.ai_tools_sdk import create_ai_tools_server
     from app.mcp.app_config_sdk import create_app_config_server
     from app.mcp.builtin_tools import create_builtin_tools_server
-    from app.mcp.chat_access_sdk import create_chat_access_server
+    from app.mcp.vault_sdk import create_vault_server
 
     servers = {
         "builtins": create_builtin_tools_server(
@@ -72,7 +72,7 @@ def _servers(cwd: str) -> dict:
             model="opus", provider_id=None, cwd=cwd,
         ),
         "app-config": create_app_config_server(is_admin=True, project_dir=cwd),
-        "chat-access": create_chat_access_server(SID),
+        "app-vault": create_vault_server(SID),
         "ai-tools": create_ai_tools_server(
             {key: True for key in (
                 "image_generation", "image_editing", "video_generation",
@@ -166,7 +166,7 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
         "mcp__builtins__InstallPlugin", "mcp__builtins__WorktreeReport",
         "mcp__app-config__getConfigCapabilities", "mcp__app-config__createAutomation",
         "mcp__ai-tools__generateImage", "mcp__ai-tools__runFalModel",
-        "mcp__chat-access__ChatHttpRequest", "mcp__chat-access__ChatRunCommand",
+        "mcp__app-vault__VaultHttpRequest", "mcp__app-vault__VaultRunCommand",
     ):
         assert name in by_name, name
         assert _is_deferred(by_name[name]), name
@@ -178,7 +178,7 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
 
 @pytest.mark.asyncio
 async def test_tools_the_prompt_names_are_on_the_bridge(tmp_path):
-    from app.mcp.chat_access_sdk import GUIDANCE
+    from app.mcp.vault_sdk import GUIDANCE
 
     _options, registry, tools = await _bridge(tmp_path)
     blocks = "\n".join(ha._app_guidance_blocks(_options, leg="claude", registry=registry))
@@ -193,8 +193,8 @@ async def test_tools_the_prompt_names_are_on_the_bridge(tmp_path):
     assert named <= listed, named - listed
     # The background-work routing the prompt leads with stays loaded.
     assert {"Task", "Monitor"} <= loaded
-    # The private-access guidance's tools are all bridged.
-    for name in set(re.findall(r"\b(RequestChatAccess|Chat[A-Z]\w+)\b", GUIDANCE)):
+    # The Vault guidance's tools are all bridged.
+    for name in set(re.findall(r"\b(RequestVaultAccess|Vault[A-Z]\w+)\b", GUIDANCE)):
         assert name in listed, name
 
 

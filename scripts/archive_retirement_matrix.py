@@ -188,12 +188,12 @@ async def reconcile():
     while (D/'pause').exists():await asyncio.sleep(.05)
     if (D/'reconciled.json').exists():
         await original();return
-    from app.core import chat_access
+    from app.core import vault_access
     from app.core.task_registry import task_registry
     from app.core.monitor_spawn import make_fluid_monitor_spawner
     task_registry.mark_user_stopped(IDS['stopped'])
-    await chat_access.broker.request(IDS['waits'],'service','Disposable migration acceptance')
-    private_before=chat_access.broker.pending_count(IDS['waits'])
+    await vault_access.broker.request(IDS['waits'],'service','Disposable migration acceptance')
+    private_before=vault_access.broker.pending_count(IDS['waits'])
     completion=D/'monitor-completed';release=D/'release-monitor'
     code="import pathlib,time; p=pathlib.Path("+repr(str(release))+"); end=time.monotonic()+90\nwhile not p.exists() and time.monotonic()<end: time.sleep(.05)\nassert p.exists(); pathlib.Path("+repr(str(completion))+").touch(); print('retained settled Monitor completed')"
     import shlex
@@ -232,7 +232,7 @@ async def reconcile():
     assert [row['id'] for row in checkout_lock.checkout_owners(str(path),IDS['active'])[1]]==[IDS['background']]
     assert session_pr_state._pull_claimed_elsewhere(pr,candidate,None)
     assert checkout_lock.tool_denial(IDS['active'],'Bash',{'command':'git switch -c disposable-next','cwd':str(path)},str(path))
-    result={'private_before':private_before,'private_after':chat_access.broker.pending_count(IDS['waits']),
+    result={'private_before':private_before,'private_after':vault_access.broker.pending_count(IDS['waits']),
         'stop_latched':task_registry.is_user_stopped(IDS['stopped']),'outbox_held':engine.outbox_held(),
         'monitor_running_after_settlement':True,'idle_history_releases_checkout_and_pr':True,'live_monitor_protects_checkout_and_pr':True}
     (D/'reconciled.json').write_text(json.dumps(result));release.touch();(D/'release-outbox').touch();held(False)

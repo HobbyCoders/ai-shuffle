@@ -1213,7 +1213,7 @@ class TestVoiceCallAttach:
             "stop_agent", "respond_approval", "WebSearch", "WebFetch",
         ]
         assert {"createAutomation", "listHooks", "createProfile", "listConnectors"} <= set(names)
-        from app.mcp.chat_access_sdk import NAMES, GUIDANCE
+        from app.mcp.vault_sdk import NAMES, GUIDANCE
         assert set(NAMES) <= set(names)
         assert GUIDANCE in sidebands[0].sent[0]["session"]["instructions"]
         assert not any(n in {"Edit", "Write", "Bash", "Read", "Grep", "Glob"} for n in names)

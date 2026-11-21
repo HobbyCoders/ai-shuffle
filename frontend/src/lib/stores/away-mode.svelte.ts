@@ -25,7 +25,7 @@ export function slimSessionReadEnabled(): boolean {
 	return import.meta.env.VITE_PERF_SLIM_SESSION_READ !== '0';
 }
 
-/** The session row fields away mode and the private-access panel read. */
+/** The session row fields away mode and the Vault panel read. */
 export interface SessionOwnerMeta {
 	mode?: string | null;
 	away_mode?: boolean | null;

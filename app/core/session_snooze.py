@@ -10,7 +10,7 @@ write (:func:`app.network.session_active.write_wake`):
 
 * the wake loop (:func:`maintain_snoozes`) when its time arrives;
 * the chat asking the owner for something (a permission or approval prompt,
-  an ask-user question or a private-access request), via
+  an ask-user question or a Vault request), via
   :func:`wake_for_attention`;
 * the owner sending it a message, which already reactivates a settled chat
   (``turn_manager._reactivate_for_send``); activating always clears a snooze.

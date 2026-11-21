@@ -9,7 +9,7 @@ group           source                                            names
 harness         fluid's ``register_builtins`` into a throwaway
                 ``ToolRegistry``                                  bare (``Read``…)
 app             ``app.mcp.builtin_tools`` server definitions      ``mcp__builtins__*``
-private_access  ``app.mcp.chat_access_sdk`` server definitions    ``mcp__chat-access__*``
+vault           ``app.mcp.vault_sdk`` server definitions          ``mcp__app-vault__*``
 ai              ``app.mcp.ai_tools_sdk`` (``TOOL_CONFIG_MAP``)    ``mcp__ai-tools__*``
 computer_use    ``app.mcp.computer_use_sdk._TOOL_NAMES``          ``mcp__computer-use__*``
 browser         the bundled browser server's ``list_tools``       ``mcp__browser__*``
@@ -405,30 +405,30 @@ def app_config_tools() -> List[Dict[str, Any]]:
     return rows
 
 
-#: The one-line hint the picker shows under the private-access group's label.
-PRIVATE_ACCESS_NOTE = "Machines, folders and services you approve in a private card"
+#: The one-line hint the picker shows under the Vault group's label.
+VAULT_NOTE = "Machines, folders and services you approve in a Vault card"
 
 
-def private_access_tools() -> List[Dict[str, Any]]:
-    """``mcp__chat-access__*`` — the private-access tools (RequestChatAccess…).
+def vault_tools() -> List[Dict[str, Any]]:
+    """``mcp__app-vault__*`` — the Vault tools (RequestVaultAccess…).
 
-    ``query_options`` attaches the chat-access server only when at least one
+    ``query_options`` attaches the vault server only when at least one
     of these names is permitted by the agent's tool lists, so an agent in
-    "Allow only selected" mode needs them in its list to get private access.
+    "Allow only selected" mode needs them in its list to get the Vault tools.
     The server factory only closes over the session id (used when a tool is
     called, never at construction), so an empty id yields the real
     definitions. Rows keep the server's own order, which leads with
-    RequestChatAccess and ChatResources.
+    RequestVaultAccess and VaultResources.
     """
-    from app.mcp.chat_access_sdk import TOOL_NAMES, create_chat_access_server
+    from app.mcp.vault_sdk import TOOL_NAMES, create_vault_server
 
     described: Dict[str, Any] = {}
     try:
-        server = create_chat_access_server("")
+        server = create_vault_server("")
         for t in _sdk_server_tools(server):
-            described[f"mcp__chat-access__{t.name}"] = t.description
+            described[f"mcp__app-vault__{t.name}"] = t.description
     except Exception:
-        logger.warning("could not build the chat-access server for discovery", exc_info=True)
+        logger.warning("could not build the vault server for discovery", exc_info=True)
 
     names = list(dict.fromkeys(list(TOOL_NAMES) + list(described)))
     return [_tool_row(name, described.get(name)) for name in names]
@@ -554,7 +554,7 @@ def _group(
 async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
     """Every tool a session can be given, grouped.
 
-    Group order is the editor's: harness, app, private_access, ai, browser,
+    Group order is the editor's: harness, app, vault, ai, browser,
     computer_use, app_config, then MCP servers alphabetically.
     """
     errors: List[Dict[str, str]] = []
@@ -574,15 +574,15 @@ async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
     app = _safe("app", app_tools)
     groups.append(_group("app", "App tools", "app", app or []))
 
-    private = _safe("private_access", private_access_tools)
+    vault = _safe("vault", vault_tools)
     groups.append(
         _group(
-            "private_access",
-            "Private access",
-            "private_access",
-            private or [],
-            server="chat-access",
-            note=PRIVATE_ACCESS_NOTE,
+            "vault",
+            "Vault",
+            "vault",
+            vault or [],
+            server="app-vault",
+            note=VAULT_NOTE,
         )
     )
 

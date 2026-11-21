@@ -39,11 +39,11 @@ def _builtin_tool_names():
     for rows in (tool_catalog.harness_tools(), tool_catalog.app_tools(), tool_catalog.app_config_tools(),
                  tool_catalog.ai_tools()[0], tool_catalog.computer_use_tools()[0]):
         names |= {row["name"] for row in rows}
-    from app.mcp import chat_access_sdk
-    names |= {f"mcp__chat-access__{name}" for name in (
-        "RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile",
-        "ChatRunCommand", "ChatHttpRequest")}
-    assert chat_access_sdk  # The chat-access server these names come from.
+    from app.mcp import vault_sdk
+    names |= {f"mcp__app-vault__{name}" for name in (
+        "RequestVaultAccess", "VaultResources", "VaultListFiles", "VaultReadFile", "VaultWriteFile",
+        "VaultRunCommand", "VaultHttpRequest")}
+    assert vault_sdk  # The vault server these names come from.
     return names
 
 
@@ -120,9 +120,9 @@ HIGH_CALLS = [
     ("Bash", {"command": "docker compose up -d"}),
     ("Bash", {"command": "systemctl restart ai-shuffle"}),
     ("PowerShell", {"command": "Stop-Process -Id 1234"}),
-    # Private access and secrets.
-    ("mcp__chat-access__RequestChatAccess", {"kind": "machine", "purpose": "x"}),
-    ("mcp__chat-access__ChatRunCommand", {"grant_id": "g", "command": "ls"}),
+    # Vault and secrets.
+    ("mcp__app-vault__RequestVaultAccess", {"kind": "machine", "purpose": "x"}),
+    ("mcp__app-vault__VaultRunCommand", {"grant_id": "g", "command": "ls"}),
     ("Read", {"file_path": inside(".env")}),
     ("Bash", {"command": "cat .env"}),
     ("Bash", {"command": "ssh unraid ls"}),

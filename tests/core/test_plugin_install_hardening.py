@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.core import plugin_install, plugin_updates
-from app.core.chat_files import AccessDenied
+from app.core.vault_files import AccessDenied
 from app.core.plugin_models import PluginScope
 from app.core.plugin_service import PluginService
 

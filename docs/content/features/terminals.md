@@ -49,9 +49,9 @@ A terminal opened from a chat starts in the chat's own working copy, its project
 ### Choose another target
 
 Use **+ → Target** to explicitly choose an approved writable SSH machine grant
-for this chat. Approve SSH access through the existing private-access card
+for this chat. Approve SSH access through the existing Vault card
 first; saved connections still require a fresh grant. SSH starts in that
-account's home and login shell. Credentials stay in the private-access broker
+account's home and login shell. Credentials stay in the Vault broker
 and host keys are verified there.
 
 Revoking or expiring an SSH grant ends its SSH connection. After an SSH shell

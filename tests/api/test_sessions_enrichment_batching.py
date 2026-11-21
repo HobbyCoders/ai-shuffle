@@ -192,7 +192,7 @@ class TestEnrichmentOutputIsUnchanged:
         with patch.object(runners, "self_device_id", return_value="local-device"), \
                 patch.object(engine, "context", return_value=SimpleNamespace(device_id="local-device")):
             _enrich(sessions, install_settings)
-            # The UI flag must agree with private-access execution ownership,
+            # The UI flag must agree with Vault execution ownership,
             # even when sync stores the receiving worker's instance_id.
             assert control.owner_of(sessions[0]) == "peer-device"
         assert sessions[0]["is_remote"] is True

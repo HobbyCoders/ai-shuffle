@@ -132,7 +132,7 @@ async def broadcast(*args,**kwargs):
 async def controller():
     from app.core.user_question_handler import user_question_handler
     from app.core.permission_handler import permission_handler
-    from app.core import chat_access
+    from app.core import vault_access
     from app.core.monitor_spawn import make_fluid_monitor_spawner
     from app.core.task_registry import task_registry
     from app.db import interactions
@@ -152,7 +152,7 @@ async def controller():
                     await question(sid,c['request'])
                     if name=='waits':
                         interactions.create_interaction(sid,'permission',{'request_id':'offline-permission','tool_name':'Bash','tool_input':{'command':'true'}},None)
-                        await chat_access.broker.request(sid,'service','Disposable offline settlement')
+                        await vault_access.broker.request(sid,'service','Disposable offline settlement')
                 elif name=='monitor':
                     release=D/'release-monitor'
                     code="import pathlib,time; p=pathlib.Path("+repr(str(release))+"); end=time.monotonic()+600\nwhile not p.exists() and time.monotonic()<end: time.sleep(.05)\nassert p.exists(); print('settled Monitor completed normally')"
@@ -161,7 +161,7 @@ async def controller():
                     value=dict(outcome.ui or {})
                 elif name=='status':
                     task=task_registry.get_task(sid,c['task_id'])
-                    value={'private':chat_access.broker.pending_count(sid),'task_status':task['status']}
+                    value={'private':vault_access.broker.pending_count(sid),'task_status':task['status']}
                 elif name=='finish-monitor':(D/'release-monitor').touch()
                 else:raise AssertionError('unknown acceptance command')
                 r.write_text(json.dumps(value,default=str))

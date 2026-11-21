@@ -2,8 +2,8 @@
 context-usage breakdown describes it.
 
 A real HarnessAdapter connects a native leg over a recording provider with the
-app's bundled in-proc servers (builtins, app-config, chat-access, ai-tools), the
-default-profile preset prompt and private-access guidance. The first request is
+app's bundled in-proc servers (builtins, app-config, vault, ai-tools), the
+default-profile preset prompt and Vault guidance. The first request is
 priced with the app's own estimator (chars/4) and compared with the breakdown
 ``get_context_usage`` reported before the turn.
 
@@ -81,7 +81,7 @@ def _default_servers(session_id: str, cwd: str) -> dict:
     from app.mcp.ai_tools_sdk import create_ai_tools_server
     from app.mcp.app_config_sdk import create_app_config_server
     from app.mcp.builtin_tools import create_builtin_tools_server
-    from app.mcp.chat_access_sdk import create_chat_access_server
+    from app.mcp.vault_sdk import create_vault_server
 
     servers = {
         "builtins": create_builtin_tools_server(
@@ -89,7 +89,7 @@ def _default_servers(session_id: str, cwd: str) -> dict:
             model="gpt-5.4", provider_id=None, cwd=cwd,
         ),
         "app-config": create_app_config_server(is_admin=True, project_dir=cwd),
-        "chat-access": create_chat_access_server(session_id),
+        "app-vault": create_vault_server(session_id),
         "ai-tools": create_ai_tools_server(
             {key: True for key in (
                 "image_generation", "image_editing", "video_generation",
@@ -111,7 +111,7 @@ async def _first_request(monkeypatch, tmp_path, *, code_mode: bool,
     from app.core import fluid_memory
     from app.core.config import settings
     from app.core.environment import get_security_instructions
-    from app.mcp.chat_access_sdk import GUIDANCE
+    from app.mcp.vault_sdk import GUIDANCE
 
     # No session row here: the priced request is the installation owner's.
     monkeypatch.setattr(fluid_memory, "session_memory", lambda _session_id, cwd=None: (
@@ -406,9 +406,9 @@ async def test_only_the_core_is_eager_and_the_rest_is_announced(
     # Memory is eager: its save and correction rules must be in front of the
     # model when it calls.
     assert {"Remember", "Recall"} <= registered - deferred
-    # Deferred now, still callable: peer sessions, private access and the
+    # Deferred now, still callable: peer sessions, Vault and the
     # rarely used owner-request tools (plus the task tools under code mode).
-    for name in ("StartSession", "mcp__chat-access__RequestChatAccess",
+    for name in ("StartSession", "mcp__app-vault__RequestVaultAccess",
                  "mcp__builtins__AndroidAction", "mcp__app-config__createAutomation"):
         assert name in deferred, name
     for name in ("SessionSearch", "mcp__builtins__TaskOutput"):
@@ -463,7 +463,7 @@ async def test_chat_lane_defers_only_what_its_toolsearch_can_load(monkeypatch, t
         assert name in sent, (name, sorted(sent))
     assert not [n for n in sent if n.startswith(("mcp__app-config__", "mcp__ai-tools__"))]
     reachable = {s.name for s in engine.registry.deferred_tools() if engine._tool_wired(s.name)}
-    assert "mcp__chat-access__RequestChatAccess" in reachable | sent
+    assert "mcp__app-vault__RequestVaultAccess" in reachable | sent
     for name in sorted(reachable):
         out = await engine.registry.dispatch("ToolSearch", {"query": f"select:{name}"}, engine.ctx)
         assert not out.is_error, (name, out.text)
@@ -480,7 +480,7 @@ async def test_allowlist_without_tool_search_defers_nothing_it_permits(
     that omits ToolSearch: every permitted tool stays loaded, because a
     code-mode session whose kernel fails falls back to JSON tool calls."""
     allow = ["Read", "Edit", "Bash", "SessionSearch", "Remember",
-             "mcp__builtins__TaskOutput", "mcp__chat-access__ChatResources"]
+             "mcp__builtins__TaskOutput", "mcp__app-vault__VaultResources"]
     engine, request, _reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode, tool_allowlist=allow,
     )

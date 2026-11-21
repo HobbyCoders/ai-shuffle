@@ -1,5 +1,5 @@
 // Real-browser check of plugin service sign-in (OAuth) on both surfaces: the
-// private access card for a plugin request and Settings > Plugins >
+// Vault card for a plugin request and Settings > Plugins >
 // Connections. Every state the worker reports, the provider window (a fake
 // provider that redirects to a faked callback page posting the same
 // `plugin-oauth` message the worker's page posts), the focus fallback when no
@@ -120,8 +120,8 @@ async function fake(context, w) {
 		}
 		if (path === '/auth/status') return route.fulfill({ json: { authenticated: true, setup_required: false, is_admin: true, username: 'owner' } });
 		if (path === '/sessions/fixture-session') return route.fulfill({ json: { mode: 'chat' } });
-		if (path === '/chat-access/fixture-session') return route.fulfill({ json: { grants: [], actions: [], requests: w.requests, saved_connections: [], vault_available: true } });
-		if (path === '/chat-access/fixture-session/requests/r1') { w.requests = []; return route.fulfill({ json: { granted: true, saved: false } }); }
+		if (path === '/vault/sessions/fixture-session') return route.fulfill({ json: { grants: [], actions: [], requests: w.requests, saved_connections: [], vault_available: true } });
+		if (path === '/vault/sessions/fixture-session/requests/r1') { w.requests = []; return route.fulfill({ json: { granted: true, saved: false } }); }
 		if (path === '/plugins/oauth/status') {
 			const only = url.searchParams.get('service');
 			// relayFields: a worker with the relay (W1); without it, the PR #1762 shape.
@@ -211,9 +211,9 @@ async function run(viewport, touch) {
 
 	// ── The access card ────────────────────────────────────────────────────
 	const openCard = async () => {
-		await page.goto(`${origin}/tests/chat-access.html?session=fixture-session`);
+		await page.goto(`${origin}/tests/vault.html?session=fixture-session`);
 		await phoneShell();
-		const button = page.getByRole('button', { name: /^Private access/ }).first();
+		const button = page.getByRole('button', { name: /^Vault/ }).first();
 		await button.waitFor();
 		if (touch) await button.tap(); else await button.click();
 		const card = page.getByRole('region', { name: 'Sign in to cloudflare' });
@@ -256,7 +256,7 @@ async function run(viewport, touch) {
 	await shot('card-3-signed-in');
 	if (touch) await grant.tap(); else await grant.click();
 	await page.waitForFunction(() => !document.querySelector('[aria-label="Sign in to cloudflare"]') || /Request completed/.test(document.body.textContent || ''));
-	const granted = w.sent.find((s) => s.path === '/chat-access/fixture-session/requests/r1');
+	const granted = w.sent.find((s) => s.path === '/vault/sessions/fixture-session/requests/r1');
 	check(JSON.stringify(granted?.body) === JSON.stringify({ sign_in: true, writable: false, minutes: 60 }), 'grant is sign_in only', granted);
 
 	label = 'card not configured';
@@ -341,7 +341,7 @@ async function run(viewport, touch) {
 	await shot('card-8-write');
 	await card.getByRole('button', { name: 'Grant access' }).click();
 	await page.waitForTimeout(200);
-	check(w.sent.find((s) => s.path === '/chat-access/fixture-session/requests/r1')?.body?.writable === true, 'writable only when declared');
+	check(w.sent.find((s) => s.path === '/vault/sessions/fixture-session/requests/r1')?.body?.writable === true, 'writable only when declared');
 
 	label = 'card plugin off';
 	reset([entry()], { enabled: false });

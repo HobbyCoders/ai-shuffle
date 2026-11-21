@@ -25,7 +25,7 @@
 	import { memoryHealth } from '$lib/stores/memory-health.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { isTranscriptProseDismissed, observeSessionRows, proseQuestionDismissals, proseQuestionSessions } from '$lib/stores/session/prose-questions';
-	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { vaultPending } from '$lib/stores/vault';
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
@@ -559,7 +559,7 @@
 	}
 	watchResources(["tags"], () => loadAllTags());
 
-	// Everything waiting on you (spec §5: prompts, private access and the open
+	// Everything waiting on you (spec §5: prompts, Vault and the open
 	// session's prose question), shown in the tab title so a backgrounded tab
 	// still says when an agent is blocked on you.
 	// Other sessions count a prose question this tab saw when it left them.
@@ -587,7 +587,7 @@
 		$sessions.reduce((total, s) => total + (s.hidden ? 0 : countNeedsYou(
 			s,
 			$backgroundPermissions.get(s.id),
-			$privateAccessPending.get(s.id),
+			$vaultPending.get(s.id),
 			sessionNeedsInput(
 				s.id === openId,
 				openNeeds,

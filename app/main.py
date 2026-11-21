@@ -701,8 +701,8 @@ app.include_router(projects.router)
 app.include_router(sessions.router)
 from app.api import data_export
 app.include_router(data_export.router)
-from app.api import chat_access
-app.include_router(chat_access.router)
+from app.api import vault
+app.include_router(vault.router)
 from app.api.swarms import router as swarm_router
 app.include_router(swarm_router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(query.router)

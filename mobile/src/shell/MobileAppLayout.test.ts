@@ -57,7 +57,7 @@ describe('MobileAppLayout', () => {
 	});
 
 	// #1816: export moved into the composer's Chat controls; the bar keeps Git.
-	it('puts the chat actions (Git, private access) on the one bar in a chat, with no export there', () => {
+	it('puts the chat actions (Git, Vault) on the one bar in a chat, with no export there', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
 		renderLayout();
@@ -69,7 +69,7 @@ describe('MobileAppLayout', () => {
 		expect(header.getAttribute('data-hide-stt')).toBe('true');
 	});
 
-	it('passes no chat actions in a subagent chat (no Git or private access there)', () => {
+	it('passes no chat actions in a subagent chat (no Git or Vault there)', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.subagentChat = true;
 		const { container } = renderLayout();

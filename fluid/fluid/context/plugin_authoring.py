@@ -236,7 +236,7 @@ def _no_secrets(text: str, what: str) -> None:
     if found:
         raise PluginDraftError(
             f"{what} looks like it contains {found[0]}; a plugin never holds a credential. "
-            "Ask for access with the private access card instead"
+            "Ask for access with the Vault card instead"
         )
 
 
@@ -455,13 +455,13 @@ def check_services(value: Any) -> list[dict[str, Any]]:
         if secret_keys:
             raise PluginDraftError(
                 f"service entries never hold a secret such as {secret_keys[0][:40]!r}; an OAuth "
-                "client secret or key is entered by the owner in the private access card"
+                "client secret or key is entered by the owner in the Vault card"
             )
         extra = sorted(set(entry) - _SERVICE_KEYS)
         if extra:
             raise PluginDraftError(
                 f"service entries take only {sorted(_SERVICE_KEYS)}; remove {extra}. "
-                "Credentials are entered by the owner in the private access card"
+                "Credentials are entered by the owner in the Vault card"
             )
         sname = _name(entry.get("name"), "service name")
         provider = entry.get("provider", "custom")

@@ -517,7 +517,7 @@ class TestToolSelectionMode:
         original = _make_profile(
             id="overseer", config={"tool_selection_mode": "all", "system_prompt": {"type": "preset"}},
         )
-        names = ["Read", "mcp__chat-access__RequestChatAccess"]
+        names = ["Read", "mcp__app-vault__RequestVaultAccess"]
         tool = get_tool(admin_tools, "updateProfile")
         with patch("app.db.database.get_profile", return_value=original), \
              patch("app.db.database.update_profile", return_value=original) as mock_update:
@@ -618,7 +618,7 @@ class TestToolSelectionMode:
     @pytest.mark.asyncio
     async def test_create_stamps_the_mode(self, admin_tools):
         tool = get_tool(admin_tools, "createProfile")
-        names = ["mcp__chat-access__RequestChatAccess"]
+        names = ["mcp__app-vault__RequestVaultAccess"]
         with patch("app.db.database.get_profile", return_value=None), \
              patch("app.db.database.create_profile", return_value=_make_profile()) as mock_create:
             result = await tool.handler({

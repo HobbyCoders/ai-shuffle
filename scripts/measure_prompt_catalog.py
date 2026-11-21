@@ -29,7 +29,7 @@ def compile_fixture(*, native=True, environment_text=None):
     from app.core.environment import DEFAULT_SECURITY_INSTRUCTIONS
     from app.mcp.app_config_sdk import APP_CONFIG_SYSTEM_PROMPT, create_app_config_server
     from app.mcp.builtin_tools import create_builtin_tools_server
-    from app.mcp.chat_access_sdk import GUIDANCE, create_chat_access_server
+    from app.mcp.vault_sdk import GUIDANCE, create_vault_server
     from app.mcp.ai_tools_sdk import create_ai_tools_server
     from fluid.codemode.projection import Projection
 
@@ -74,7 +74,7 @@ def compile_fixture(*, native=True, environment_text=None):
         servers = {
             "builtins": create_builtin_tools_server(is_admin=True, cwd="/fixture", workflow_guidance=True),
             "app-config": create_app_config_server(is_admin=True),
-            "chat-access": create_chat_access_server("fixture"),
+            "app-vault": create_vault_server("fixture"),
             "ai-tools": create_ai_tools_server(dict.fromkeys((
                 "image_generation", "image_editing", "image_reference", "video_generation",
                 "image_to_video", "video_with_audio", "text_to_3d", "image_to_3d",
@@ -179,7 +179,7 @@ def main():
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print("Fixture: owner code chat; bundled builtins/app-config/chat-access/ai-tools; no external MCPs")
+        print("Fixture: owner code chat; bundled builtins/app-config/app-vault/ai-tools; no external MCPs")
         print("Characters / approximate tokens (chars/4; not provider billing):")
         for group in ("sections", "tools", "delegated_loaded_tools", "worker_sections", "totals"):
             if group not in result:

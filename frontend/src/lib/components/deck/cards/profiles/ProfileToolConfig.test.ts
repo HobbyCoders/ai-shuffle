@@ -359,18 +359,18 @@ describe('search', () => {
 	});
 });
 
-describe('private access group', () => {
+describe('Vault group', () => {
 	afterEach(() => cleanup());
 
 	const names = [
-		'mcp__chat-access__RequestChatAccess',
-		'mcp__chat-access__ChatResources'
+		'mcp__app-vault__RequestVaultAccess',
+		'mcp__app-vault__VaultResources'
 	];
-	const privateAccess: ToolSurfaceGroup = {
-		id: 'private_access',
-		label: 'Private access',
-		kind: 'private_access',
-		server: 'chat-access',
+	const vault: ToolSurfaceGroup = {
+		id: 'vault',
+		label: 'Vault',
+		kind: 'vault',
+		server: 'app-vault',
 		available: true,
 		admin_only: false,
 		note: 'Machines, folders and services you approve in a private card',
@@ -386,7 +386,7 @@ describe('private access group', () => {
 				toolSelectionMode: 'allow',
 				allowedTools: saved.list,
 				disallowedTools: [],
-				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				surface: { discovered_at: '', errors: [], groups: [vault] },
 				isAdmin: false,
 				onToolSelectionModeChange: vi.fn(),
 				onToggleTool: (g: ToolSurfaceGroup, name: string) => {
@@ -398,22 +398,22 @@ describe('private access group', () => {
 				onRefresh: vi.fn()
 			}
 		});
-		expect(getByText(privateAccess.note as string)).toBeTruthy();
-		const box = groupBox(getByRole, 'Private access');
+		expect(getByText(vault.note as string)).toBeTruthy();
+		const box = groupBox(getByRole, 'Vault');
 		// Not admin-only: a non-admin owner can grant it too.
 		expect(box.disabled).toBe(false);
 		await fireEvent.click(box);
 		expect(saved.list).toEqual(['Read', ...names]);
 	});
 
-	it('labels tiles without the mcp__chat-access__ prefix', async () => {
+	it('labels tiles without the mcp__app-vault__ prefix', async () => {
 		const toggled: string[] = [];
 		const { getByRole, queryByText } = render(ProfileToolConfig, {
 			props: {
 				toolSelectionMode: 'allow',
 				allowedTools: [],
 				disallowedTools: [],
-				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				surface: { discovered_at: '', errors: [], groups: [vault] },
 				isAdmin: false,
 				onToolSelectionModeChange: vi.fn(),
 				onToggleTool: (_g: ToolSurfaceGroup, name: string) => toggled.push(name),
@@ -421,13 +421,13 @@ describe('private access group', () => {
 				onRefresh: vi.fn()
 			}
 		});
-		await fireEvent.click(getByRole('button', { name: /Toggle Private access section/ }));
+		await fireEvent.click(getByRole('button', { name: /Toggle Vault section/ }));
 		// Accessible name stays exact; only the visible label drops the prefix.
-		const tile = getByRole('checkbox', { name: 'mcp__chat-access__RequestChatAccess' });
-		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestChatAccess');
-		expect(queryByText('mcp__chat-access__RequestChatAccess')).toBeNull();
+		const tile = getByRole('checkbox', { name: 'mcp__app-vault__RequestVaultAccess' });
+		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestVaultAccess');
+		expect(queryByText('mcp__app-vault__RequestVaultAccess')).toBeNull();
 		await fireEvent.click(tile);
 		// The saved entry is still the exact runtime name.
-		expect(toggled).toEqual(['mcp__chat-access__RequestChatAccess']);
+		expect(toggled).toEqual(['mcp__app-vault__RequestVaultAccess']);
 	});
 });

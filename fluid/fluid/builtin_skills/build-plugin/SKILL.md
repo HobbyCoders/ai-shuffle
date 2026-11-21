@@ -121,13 +121,13 @@ the owner to paste one into the chat. Declare each service in
 
 The skill that uses the service then tells the agent to:
 
-1. Call `ChatResources` and look for an approved grant for the service.
-2. If there is none, call `RequestChatAccess` with `kind` `service`, the
+1. Call `VaultResources` and look for an approved grant for the service.
+2. If there is none, call `RequestVaultAccess` with `kind` `service`, the
    provider, the API address and the purpose. Tell the owner to finish the
-   private access card, then end the turn. The host sends the approval or
+   Vault card, then end the turn. The host sends the approval or
    decline as a notice; use the granted handle it carries. Never poll, and
    the owner does not need to send another message.
-3. Call `ChatHttpRequest` with that grant. The worker attaches the credential;
+3. Call `VaultHttpRequest` with that grant. The worker attaches the credential;
    no model sees it. For several independent requests, pass them together as
    `requests` (up to 8): they run at once and come back in order.
 
@@ -137,7 +137,7 @@ format page): `type` `oauth2`, `authorize_url`, `token_url`, `scopes`,
 public client already registered with the provider for this plugin (the
 owner gives you its ID), and `registration_url` only when the service
 documents dynamic client registration. Never a client secret. Then the agent asks with
-`RequestChatAccess` naming the plugin and service, and the owner signs in.
+`RequestVaultAccess` naming the plugin and service, and the owner signs in.
 
 ## 6. Check it and fix what it reports
 
@@ -168,7 +168,7 @@ Tell the owner:
 3. Each service it will ask access to, and why.
 4. What to do: open Settings > Plugins, where it shows as waiting for review,
    check what it adds, and choose **Approve and enable**. Then finish the
-   private access card the first time a skill asks for a service.
+   Vault card the first time a skill asks for a service.
 
 ## Example
 
@@ -204,10 +204,10 @@ name: zone-report
 description: List the DNS records in the owner's Cloudflare zones and flag likely mistakes. Use when the owner asks about their DNS.
 ---
 
-1. Call ChatResources and look for an approved Cloudflare service grant.
-2. If there is none, call RequestChatAccess with kind "service", service_provider "cloudflare" and purpose "List zones and their DNS records". Tell the owner to finish the access card, then end the turn. Wait for the host's approval or decline notice and use the granted handle it carries; never poll.
-3. Call ChatHttpRequest with the grant, method GET and path /zones.
-4. Call ChatHttpRequest once with requests: one item per zone (up to 8 per call), each with the grant, method GET and path /zones/<zone id>/dns_records.
+1. Call VaultResources and look for an approved Cloudflare service grant.
+2. If there is none, call RequestVaultAccess with kind "service", service_provider "cloudflare" and purpose "List zones and their DNS records". Tell the owner to finish the access card, then end the turn. Wait for the host's approval or decline notice and use the granted handle it carries; never poll.
+3. Call VaultHttpRequest with the grant, method GET and path /zones.
+4. Call VaultHttpRequest once with requests: one item per zone (up to 8 per call), each with the grant, method GET and path /zones/<zone id>/dns_records.
 5. Give the record list to the record-auditor subagent.
 6. Report one table per zone (type, name, content, proxied), then the auditor's findings.
 ```

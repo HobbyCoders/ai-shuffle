@@ -96,7 +96,7 @@ describe('AppTopBar actions', () => {
 		expect(container.querySelectorAll('header')).toHaveLength(1);
 	});
 
-	it('renders the chat actions (private access, Git) on the right of the one bar', () => {
+	it('renders the chat actions (Vault, Git) on the right of the one bar', () => {
 		activeSession.set({ sessionId: 's-1', title: 'Fix login', messages: [], project: null });
 		activeView.set({ type: 'session' });
 		const actions = createRawSnippet(() => ({ render: () => '<button type="button">Git actions: 3 files changed</button>' }));

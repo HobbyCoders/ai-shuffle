@@ -50,24 +50,93 @@ DENY_ALL = "*"
 # time only (never migrated in the DB) so saved profiles keep working. The
 # builtin ``PushNotification`` leaf tool was renamed to ``NotifyDevices`` to
 # resolve a collision with a bare stub of the same name.
+#
+# The Vault's tools were the "chat access" tools (MCP server ``chat-access``)
+# until the feature was renamed. ``RENAMED_TOOLS`` maps the full name each had
+# to the full name it has now; ``earlier_tool_names`` reads it backwards so a
+# saved permission rule or a hook matcher written for the old name still
+# applies to the tool.
+_BRIDGE_PREFIX = "mcp__fluid_bundled__"
+RENAMED_TOOLS: Dict[str, str] = {
+    f"mcp__chat-access__{old}": f"mcp__app-vault__{new}"
+    for old, new in (
+        ("RequestChatAccess", "RequestVaultAccess"),
+        ("ChatResources", "VaultResources"),
+        ("ChatListFiles", "VaultListFiles"),
+        ("ChatReadFile", "VaultReadFile"),
+        ("ChatWriteFile", "VaultWriteFile"),
+        ("ChatRunCommand", "VaultRunCommand"),
+        ("ChatHttpRequest", "VaultHttpRequest"),
+    )
+}
+# Both spellings of each renamed tool: the bundled bridge serves the same
+# tools as ``mcp__fluid_bundled__<name>``.
+_RENAMED_SPELLINGS: Dict[str, str] = {
+    **RENAMED_TOOLS,
+    **{_BRIDGE_PREFIX + old: _BRIDGE_PREFIX + new for old, new in RENAMED_TOOLS.items()},
+}
 LEGACY_TOOL_ALIASES: Dict[str, str] = {
     "PushNotification": "mcp__builtins__NotifyDevices",
     "mcp__builtins__PushNotification": "mcp__builtins__NotifyDevices",
+    **_RENAMED_SPELLINGS,
 }
 
 
 def apply_legacy_tool_aliases(tool_names: Iterable[Any]) -> List[str]:
     """Translate legacy tool names to their current equivalents, in order,
-    without introducing duplicates. Blank/non-string entries are dropped."""
+    without introducing duplicates. Blank/non-string entries are dropped.
+
+    A pattern is kept, and the current name of every renamed tool it selected
+    is added after it (see ``with_renamed_tools``).
+    """
     out: List[str] = []
     for name in tool_names or ():
         text = str(name).strip()
         if not text:
             continue
-        mapped = LEGACY_TOOL_ALIASES.get(text, text)
-        if mapped not in out:
-            out.append(mapped)
+        for mapped in (LEGACY_TOOL_ALIASES.get(text, text), *_renamed_by_pattern(text)):
+            if mapped not in out:
+                out.append(mapped)
     return out
+
+
+def _renamed_by_pattern(pattern: str) -> List[str]:
+    """The current names of the renamed tools ``pattern`` selected and no
+    longer does: ``mcp__chat-access__*`` matches none of the tools it was
+    written for, and on a blocklist that would quietly unblock them."""
+    if not _is_pattern(pattern):
+        return []
+    return [
+        new for old, new in _RENAMED_SPELLINGS.items()
+        if fnmatch.fnmatchcase(old, pattern) and not fnmatch.fnmatchcase(new, pattern)
+    ]
+
+
+def with_renamed_tools(tool_names: Iterable[Any]) -> List[str]:
+    """``tool_names`` plus the current name of every renamed tool an entry
+    selects, by name or by pattern. Nothing is removed or rewritten, so this is
+    safe on a list the delegated leg also reads (agent files' ``tools`` and
+    ``disallowedTools``). Order is kept; blank entries are dropped.
+    """
+    out: List[str] = []
+    for name in tool_names or ():
+        text = str(name).strip()
+        if not text:
+            continue
+        current = _RENAMED_SPELLINGS.get(text)
+        for entry in (text, *([current] if current else []), *_renamed_by_pattern(text)):
+            if entry not in out:
+                out.append(entry)
+    return out
+
+
+def earlier_tool_names(name: str) -> List[str]:
+    """The names a renamed tool had before, in the spelling ``name`` uses.
+
+    ``mcp__fluid_bundled__<tool>`` (the bundled bridge's spelling) answers with
+    bridge-spelled names. A tool that was never renamed has none.
+    """
+    return [old for old, new in _RENAMED_SPELLINGS.items() if new == name]
 
 
 # The delegated (Claude Code CLI) leg names some features differently from the

@@ -507,7 +507,20 @@ def tool_matcher_matches(pattern: str, tool_name: str, *, plugin: bool = False) 
 
     An invalid pattern is compared as plain text and logged once per pattern,
     so one bad hook cannot stop the event's other hooks from running.
+
+    A matcher written for a name the tool had before it was renamed still
+    selects it (``tool_access.earlier_tool_names``), so a hook that guards the
+    "chat access" tools keeps guarding the Vault tools they became.
     """
+    from app.core.tool_access import earlier_tool_names
+
+    return any(
+        _tool_matcher_matches(pattern, name, plugin)
+        for name in (tool_name, *earlier_tool_names(tool_name))
+    )
+
+
+def _tool_matcher_matches(pattern: str, tool_name: str, plugin: bool) -> bool:
     try:
         if plugin:
             return re.match(pattern, tool_name, re.IGNORECASE) is not None

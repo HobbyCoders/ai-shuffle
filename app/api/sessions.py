@@ -1344,7 +1344,7 @@ async def get_live_session(
         "speed": resolve_speed(session.get("fast"), session.get("speed")),
         # Runtime status is not Active/Settled membership or composer availability.
         "status": session.get("status"),
-        # A subagent's chat shows no Git or private-access controls.
+        # A subagent's chat shows no Git or Vault controls.
         "is_worker": bool(session.get("is_worker")),
         # Read the user-message revision without loading the transcript (#2259).
         "last_user_message_at": _serialize_last_user_message_at(session.get("last_user_message_at")),
@@ -1364,7 +1364,7 @@ async def get_live_session(
             "hidden": bool(session.get("hidden")),
             "parent_session_id": session.get("parent_session_id"),
         })
-        # Which device runs this chat (private access is managed there).
+        # Which device runs this chat (Vault is managed there).
         annotated = dict(session)
         await run_sync(_annotate_cluster_fields, [annotated])
         session_meta["is_remote"] = bool(annotated.get("is_remote"))

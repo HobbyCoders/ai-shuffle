@@ -9,15 +9,15 @@
 
 <script lang="ts">
 	/**
-	 * Inline edit form for one saved private-access connection, shown inside
-	 * its row of the Private access panel (never a nested dialog).
+	 * Inline edit form for one saved Vault connection, shown inside
+	 * its row of the Vault panel (never a nested dialog).
 	 *
 	 * Stored secrets never reach this form: secret fields start empty and say
 	 * "Unchanged". A blank secret keeps the stored one; a typed one replaces
 	 * it. Only changed fields are sent, and typed secrets are cleared after
 	 * every submit and whenever the panel closes (clearSecretsKey).
 	 */
-	import './private-access.css';
+	import './vault.css';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 

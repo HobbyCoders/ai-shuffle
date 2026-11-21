@@ -48,7 +48,7 @@ export function openSession(sessionId: string, openedSession?: Session, { reopen
 	appMode.set(normalizeSessionMode(session?.mode), false);
 	// An archived chat opens read-only; /live corrects a row this tab lacks.
 	if (session) archivedChats.mark(sessionId, session.status === 'archived');
-	// A subagent's chat opens without Git or private access controls.
+	// A subagent's chat opens without Git or Vault controls.
 	if (session?.is_worker !== undefined) subagentChats.mark(sessionId, session.is_worker);
 	const select = () => {
 		// Only a reopen says so; every other open calls the store as before.

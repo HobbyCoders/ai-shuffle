@@ -36,8 +36,8 @@ type HeaderDropdownId =
 	| 'session-title'
 	// The chat header's one Export button.
 	| 'chat-export'
-	// The chat header's private-access panel (ChatAccess).
-	| 'private-access'
+	// The chat header's Vault panel (VaultPanel).
+	| 'vault'
 	// The chat header's git panel (one button opens it) and the option popovers
 	// for the actions inside it. A popover id implies the panel is open too:
 	// GitHeaderActions treats every `git-*` id as "panel open" and returns to

@@ -22,7 +22,7 @@ provider-neutral core behind that declaration:
   registered clients and the tokens (:func:`save_tokens`), keyed by plugin id
   and service name, in
   ``system_settings`` under ``plugin_oauth:<worker>:``. Like
-  ``app.core.chat_vault``: only ``enc:`` envelopes are written, each bound to
+  ``app.core.vault_store``: only ``enc:`` envelopes are written, each bound to
   its own key, the namespace is worker-local and never replicated
   (``app.network.policy``), and nothing here decrypts for a model.
   :func:`status` reports a sign-in without any secret.
@@ -31,7 +31,7 @@ Errors are :class:`PluginOAuthError` with a fixed reason and fixed wording.
 Provider response bodies, codes, tokens and client secrets never reach a log,
 an exception message or a value meant for the model.
 
-Entry points for the sign-in routes and ``ChatHttpRequest`` (slice 2):
+Entry points for the sign-in routes and ``VaultHttpRequest`` (slice 2):
 :func:`installed_config`, :func:`config_from_manifest`, :func:`client_for_sign_in`,
 :func:`start_sign_in`, :func:`complete_sign_in`, :func:`access_token_for_use`, :func:`sign_out`,
 :func:`status`, and the client functions :func:`save_client`,
@@ -902,7 +902,7 @@ def status(config: OAuthConfig, *, now: float | None = None) -> dict[str, Any]:
     return out
 
 
-# ─── higher-level steps for the routes and ChatHttpRequest (slice 2) ─────────
+# ─── higher-level steps for the routes and VaultHttpRequest (slice 2) ─────────
 
 _locks: dict[str, asyncio.Lock] = {}
 

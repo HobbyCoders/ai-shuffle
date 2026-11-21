@@ -8,9 +8,9 @@ vi.mock('$lib/api/client', () => ({
 vi.mock('$lib/api/plugin-oauth', () => ({ getSignInStatus: m.getSignInStatus, startSignIn: m.startSignIn, saveClient: m.saveClient }));
 vi.mock('$lib/api/runtime', () => ({ isBundledMobile: () => m.mobile }));
 import PluginServiceAccess from './PluginServiceAccess.svelte';
-import PrivateAccessRequest from './PrivateAccessRequest.svelte';
+import VaultRequest from './VaultRequest.svelte';
 
-const endpoint = '/chat-access/s1/requests/r1';
+const endpoint = '/vault/sessions/s1/requests/r1';
 const request = { id: 'r1', kind: 'service', purpose: 'List DNS zones', expires_at: Date.now() / 1000 + 86400, suggested_url: 'https://api.cloudflare.com/client/v4', plugin: 'dns-reader@mp', service: 'cloudflare' };
 function status(service: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
 	return {
@@ -42,7 +42,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe('plugin service sign-in card', () => {
 	it('replaces the key form for plugin requests', async () => {
 		m.getSignInStatus.mockResolvedValue(status());
-		render(PrivateAccessRequest, { sessionId: 's1', request, savedConnections: [], vaultAvailable: true, onComplete: vi.fn() });
+		render(VaultRequest, { sessionId: 's1', request, savedConnections: [], vaultAvailable: true, onComplete: vi.fn() });
 		expect(await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' })).toBeTruthy();
 		expect(screen.queryByLabelText('API key or token')).toBeNull();
 		expect(screen.queryByText('Continue to setup')).toBeNull();

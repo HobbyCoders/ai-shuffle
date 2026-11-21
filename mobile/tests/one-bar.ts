@@ -7,13 +7,13 @@ import { installMobileShell } from '../src/shell/register';
 /**
  * Browser review fixture for the phone's one-bar header: the production
  * AppTopBar with the worker chip, the trail, the chat-actions chevron, the
- * private-access shield and the compact Git button. Every request is answered
+ * Vault shield and the compact Git button. Every request is answered
  * here; nothing reaches a backend. The git stores are the git-panel stubs
  * (vite.one-bar.config.js).
  *
  *   ?scenario=normal      a project chat, clean branch, nothing shared
  *   ?scenario=git-access  9 changed files and an active access grant
- *   ?scenario=subagent    a subagent's chat (no Git, no private access)
+ *   ?scenario=subagent    a subagent's chat (no Git, no Vault)
  *   ?scenario=nogit       a chat whose project is not a git repository
  *   ?scenario=settings    a non-chat page
  *   ?unread=1             unread notifications (the dot on the menu)
@@ -67,7 +67,7 @@ window.fetch = async (input, init) => {
 	else if (path === '/api/v1/sessions/cursor' || path === '/api/v1/sessions/paginated') data = { items: sessionRows, total: sessionRows.length, has_more: false, next_cursor: null };
 	else if (path.endsWith('/live')) data = { session_meta: { is_remote: false, mode: 'code', is_worker: path.includes('fixture-subagent') } };
 	else if (path.startsWith('/api/v1/sessions/')) data = path.includes('fixture-subagent') ? childRow : parentRow;
-	else if (path.startsWith('/api/v1/chat-access/')) data = { grants: scenario === 'git-access' ? [grant] : [], actions: [], requests: [], saved_connections: [], vault_available: false };
+	else if (path.startsWith('/api/v1/vault/sessions/')) data = { grants: scenario === 'git-access' ? [grant] : [], actions: [], requests: [], saved_connections: [], vault_available: false };
 	else if (path.endsWith('/cluster/installs')) data = { installs, self_instance_id: 'unraid' };
 	return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
 };

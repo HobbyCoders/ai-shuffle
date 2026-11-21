@@ -126,10 +126,10 @@ describe('shouldShowGithubGitActions', () => {
 	});
 });
 
-// #1816: private access left the Git panel. The header's private-access icon is
+// #1816: Vault left the Git panel. The header's Vault icon is
 // the one place to approve, review and revoke on every lane, so MainPanel always
-// renders ChatAccess (icon + panel), and no standalone Swarm button.
-describe('chat header private access and swarms', () => {
+// renders VaultPanel (icon + panel), and no standalone Swarm button.
+describe('chat header Vault and swarms', () => {
 	const mainPanel = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8')
 		.replace(/<!--[\s\S]*?-->/g, '');
 
@@ -139,8 +139,8 @@ describe('chat header private access and swarms', () => {
 		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
 	});
 
-	it('gives every session its own private-access control', () => {
-		expect(mainPanel).toContain('<ChatAccess sessionId={activeTab.sessionId} />');
+	it('gives every session its own Vault control', () => {
+		expect(mainPanel).toContain('<VaultPanel sessionId={activeTab.sessionId} />');
 	});
 
 	it('renders no swarm dropdown in the header', () => {

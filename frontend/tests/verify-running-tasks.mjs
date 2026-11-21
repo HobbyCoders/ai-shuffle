@@ -229,7 +229,7 @@ async function gitSheet(theme) {
 	const panel = await rect(page, '.git-panel');
 	check(panel.left === 0 && Math.abs(panel.right - 390) < 1 && panel.bottom <= 844.5, 'Git panel is a bottom sheet across the phone', panel);
 	const text = await page.locator('.git-panel').textContent();
-	check(!/swarm|Private access|transcript/i.test(text), 'Git sheet is Git only', text.slice(0, 200));
+	check(!/swarm|Vault|transcript/i.test(text), 'Git sheet is Git only', text.slice(0, 200));
 	await page.screenshot({ path: join(shots, `${name.replace(/ /g, '-')}.png`) });
 	check(errors.length === 0, 'no page errors', errors);
 	await context.close();

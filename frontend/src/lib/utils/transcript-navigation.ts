@@ -201,7 +201,7 @@ export function turnsOwningTools(
 /**
  * The ticks that carry the amber "Needs you" dot (spec §5), given the open
  * session's count. A pending question sits on the turn that asked it;
- * everything else waiting (a permission, private access, a prose question,
+ * everything else waiting (a permission, Vault, a prose question,
  * an owner state whose queue has not loaded) belongs to the newest turn.
  */
 export function needsYouTurnIds(
