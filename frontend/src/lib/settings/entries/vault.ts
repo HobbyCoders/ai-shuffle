@@ -1,6 +1,6 @@
 /**
- * Vault: the owner's saved sign-ins on this worker (SSH machines and web
- * services the agent can use without seeing the secret).
+ * Vault: the owner's saved sign-ins, synced across workers (SSH machines and
+ * web services the agent can use without seeing the secret).
  *
  * The list is the only row that renders without data. Each sign-in reaches
  * search through `searchSource()`, by its name and kind only.

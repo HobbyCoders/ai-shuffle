@@ -316,7 +316,7 @@
 			{/if}
 			</fieldset>
 			<p class="st-note">
-				Encrypted on this worker. The agent never sees the password, key or token, and can use this sign-in only after you approve a request for it.
+				Encrypted, and synced to your other workers. The agent never sees the password, key or token, and can use this sign-in only after you approve a request for it.
 			</p>
 		{/snippet}
 	</DetailPane>

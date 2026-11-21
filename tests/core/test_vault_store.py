@@ -78,14 +78,19 @@ def test_no_plaintext_or_locked_storage_fallback(vault, monkeypatch):
         vault_store.save(owner, spec())
 
 
-def test_swapped_ciphertext_and_other_worker_fail_closed(vault, monkeypatch):
+def test_swapped_ciphertext_and_another_data_key_fail_closed(vault, monkeypatch):
     owner = ("local", "worker", None)
     connection_id = vault_store.save(owner, spec())
     other = "b" * 32
     vault[vault_store.key(owner, other)] = vault[vault_store.key(owner, connection_id)]
     with pytest.raises(AccessDenied):
         vault_store.load(owner, other)
+    # The key names the owner, not the worker: the entry reads the same on
+    # every worker that holds it under its own data key.
     monkeypatch.setattr(vault_store, "settings", SimpleNamespace(effective_instance_id="worker-two"))
+    assert vault_store.load(owner, connection_id).password.get_secret_value() == "vault-only-password"
+    # Ciphertext copied from a worker with another data key is not an entry here.
+    monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
     with pytest.raises(AccessDenied):
         vault_store.load(owner, connection_id)
 
@@ -163,9 +168,70 @@ def test_empty_query_started_before_save_cannot_republish_stale_absence(vault, m
     assert vault_store.catalog(owner, cache_empty=True)[0]["id"] == connection_id
 
 
-def test_connections_are_never_network_shared():
+def test_entries_are_network_shared_and_rows_from_before_stay_local():
     from app.network.policy import is_shared_setting_key
+    owner = ("local", "worker", None)
+    assert is_shared_setting_key(vault_store.key(owner, "a" * 32))
     assert not is_shared_setting_key("chat_connection:worker:scope:abc")
+
+
+def _kept_by(worker, owner, connection_id):
+    """The key a worker used for an entry before entries synced."""
+    return f"{vault_store.LOCAL_PREFIX}{worker}:{vault_store.key(owner, connection_id)[len(vault_store.SHARED_PREFIX):]}"
+
+
+def test_entries_this_worker_kept_move_into_the_shared_vault_once(vault):
+    owner, api_user = ("local", "worker", None), ("local", "worker", "api-user")
+    mine, theirs, other_worker = _kept_by("worker-one", owner, "a" * 32), _kept_by("worker-one", api_user, "b" * 32), \
+        _kept_by("worker-two", owner, "c" * 32)
+    vault_store._store(mine, spec())
+    vault_store._store(theirs, spec().model_copy(update={"label": "Backup"}))
+    vault_store._store(other_worker, spec())
+    # Ciphertext bound to another row, and a row that is not ciphertext at all.
+    swapped, corrupt = _kept_by("worker-one", owner, "d" * 32), _kept_by("worker-one", owner, "e" * 32)
+    vault[swapped], vault[corrupt] = vault[mine], "corrupt"
+    assert vault_store.catalog(owner) == []
+
+    assert vault_store.adopt_local_entries() == 2
+    assert set(vault) == {vault_store.key(owner, "a" * 32), vault_store.key(api_user, "b" * 32),
+                          other_worker, swapped, corrupt}
+    # Re-bound to the shared key, secrets intact and each still under its own principal.
+    assert vault_store.load(owner, "a" * 32).password.get_secret_value() == "vault-only-password"
+    assert [item["label"] for item in vault_store.catalog(api_user)] == ["Backup"]
+    with pytest.raises(AccessDenied):
+        vault_store.load(owner, "b" * 32)
+    before = dict(vault)
+    assert vault_store.adopt_local_entries() == 0 and vault == before
+
+
+def test_move_keeps_a_shared_entry_that_already_exists_and_waits_while_locked(vault, monkeypatch):
+    owner = ("local", "worker", None)
+    kept = _kept_by("worker-one", owner, "a" * 32)
+    vault_store._store(kept, spec())
+    with monkeypatch.context() as locked:
+        locked.setattr(encryption, "_encryption_key", None)
+        assert vault_store.adopt_local_entries() == 0 and set(vault) == {kept}
+    # A crash after the shared row was written: another worker may have
+    # changed that row since, so it wins and only the old row goes.
+    newer = spec().model_copy(update={"label": "Renamed since"})
+    vault_store._store(vault_store.key(owner, "a" * 32), newer)
+    vault_store._store(kept, spec())
+    assert vault_store.adopt_local_entries() == 1
+    assert set(vault) == {vault_store.key(owner, "a" * 32)}
+    assert vault_store.load(owner, "a" * 32).label == "Renamed since"
+
+
+def test_entries_merged_from_several_workers_stay_listed_past_the_cap(vault):
+    owner = ("local", "worker", None)
+    for index in range(vault_store.MAX_ENTRIES + 5):
+        vault_store._store(vault_store.key(owner, f"{index:032x}"), spec().model_copy(update={"label": f"Machine {index}"}))
+    assert len(vault_store.catalog(owner)) == vault_store.MAX_ENTRIES + 5
+    with pytest.raises(AccessDenied, match="Vault is full"):
+        vault_store.save(owner, spec())
+    # Removing the extra ones is how the owner gets back under it.
+    for index in range(6):
+        vault_store.delete(owner, f"{index:032x}")
+    assert vault_store.save(owner, spec())
 
 
 def test_duplicate_names_never_overwrite_credentials(vault):

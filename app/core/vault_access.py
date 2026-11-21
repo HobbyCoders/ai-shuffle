@@ -347,6 +347,9 @@ class Grant:
     revoked: bool = False
     ready: bool = True
     saved_id: str = ""
+    # The saved sign-in as it read when this grant was built on it, to tell a
+    # rename made on another worker from a change that must end the grant.
+    saved_spec: Any = None  # GrantInput
     timer: asyncio.TimerHandle | None = None
     tasks: set = field(default_factory=set)
 
@@ -1052,16 +1055,16 @@ class Broker:
             spec = spec.model_copy(update={"minutes": submission.minutes})
             grant = await self.create(session_id, spec, request=request, plugin=plugin)
             await self._check_request(request)
-            saved_id = submission.saved_id
+            saved_id, built = submission.saved_id, stored
             if submission.save_connection:
                 # Save the key actually pinned, so later uses verify against it
                 # even when the user left the fingerprint blank.
-                pinned = spec.model_copy(update={"fingerprint": grant["fingerprint"]})
-                saved_id = await run_sync(vault_store.save, request.owner, pinned)
+                built = spec.model_copy(update={"fingerprint": grant["fingerprint"]})
+                saved_id = await run_sync(vault_store.save, request.owner, built)
                 self._notify(session_id, request.owner, saved=True)
             await self._check_request(request)
             current = await self.get(session_id, grant["id"], preparing=True)
-            current.saved_id = saved_id
+            current.saved_id, current.saved_spec = saved_id, built if saved_id else None
             if saved_id:
                 # Deletion or an edit may race the SSH handshake or the save.
                 # Attach the binding before rechecking storage so either one
@@ -1115,6 +1118,29 @@ class Broker:
         self._notifications.add(task)
         task.add_done_callback(self._notifications.discard)
         # Devices showing one of this worker's sessions as a mirror list the saved sign-ins too.
+        vault_routing.notify_watchers("", saved=True)
+
+    async def saved_changed_elsewhere(self, connection_ids: set) -> None:
+        """Saved sign-ins that another worker added, changed or removed arrived by worker sync.
+
+        As for an edit or a delete made here: a grant built on a sign-in that
+        is gone, or whose address, account or secret now differs, ends, because
+        a grant is never silently re-pointed. A rename keeps it, and so does
+        recording the host key its own connection verified.
+        """
+        from app.core import vault_store
+        from app.db.async_database import run_sync
+        from app.network import vault_routing
+        for grant in list(self.grants.values()):
+            if not grant.saved_id or grant.saved_id not in connection_ids:
+                continue
+            try:
+                latest = await run_sync(vault_store.load, grant.owner, grant.saved_id)
+            except Exception:  # noqa: BLE001 - removed, or unreadable here: either way the grant ends
+                latest = None
+            if self.grants.get(grant.id) is grant and not _still_built_on(grant, latest):
+                self.revoke(grant.session_id, grant.id)
+        # Every open panel and mirror of this worker's sessions lists the saved sign-ins.
         vault_routing.notify_watchers("", saved=True)
 
     async def _forget(self, owner: tuple, connection_id: str) -> int:
@@ -1443,7 +1469,7 @@ class Broker:
             os.close(grant.root)
             grant.root = None
         grant.password, grant.key = "", None
-        grant.header, grant.secret = None, ""
+        grant.header, grant.secret, grant.saved_spec = None, "", None
         self._notify(session_id, grant.owner)
 
     async def get(self, session_id: str, grant_id: str, *, preparing: bool = False) -> Grant:
@@ -1802,6 +1828,35 @@ class Broker:
 
 
 broker = Broker()
+
+
+def _still_built_on(grant: Grant, latest) -> bool:
+    """Whether the saved sign-in ``grant`` was built on still reads the same, its name aside."""
+    built = grant.saved_spec
+    if built is None or latest is None:
+        return False
+    from app.core import vault_store
+    expected = {"label": latest.label}
+    if not built.fingerprint.strip() and latest.fingerprint == grant.fingerprint:
+        # Saved without a host key; a first connection (here or on another
+        # worker) recorded the one this grant itself verified.
+        expected["fingerprint"] = latest.fingerprint
+    return vault_store.same_connection(built.model_copy(update=expected), latest)
+
+
+def saved_changed_elsewhere(keys) -> None:
+    """Worker sync stored another worker's Vault changes under ``keys``.
+
+    Called on the sync thread after its commit; the broker lives on the app's
+    event loop, so the grants are judged there.
+    """
+    from app.core import vault_store
+    from app.core.global_events import global_events
+    vault_store.changed_elsewhere()
+    loop = getattr(global_events, "_loop", None)
+    if loop and not loop.is_closed():
+        asyncio.run_coroutine_threadsafe(
+            broker.saved_changed_elsewhere({key.rsplit(":", 1)[-1] for key in keys}), loop)
 
 
 async def _plugin_config(plugin_id: str, service: str):
