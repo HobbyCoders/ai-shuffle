@@ -67,7 +67,7 @@
 	import { wrapTabWithin } from '$lib/components/ui/focus-trap';
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
-	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
+	import type { ComposerSetupRow, ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
 	import SpeedLabel from '$lib/components/chat/SpeedLabel.svelte';
 	import { SPEED_NAMES, SPEED_OPTIONS, pickedSpeed, shownSpeed, ultrafastCost } from '$lib/components/chat/speed-tier';
@@ -78,7 +78,7 @@
 	} from './quick-controls';
 
 	let {
-		open, newChat = false, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
+		open, setupRow = null, newChat = false, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortKnown = true, effortDefaultValue = null,
@@ -296,8 +296,7 @@
 	/** Set from a close request until the panel opens again: the close pops every history entry itself. */
 	let closingPanel = false;
 
-	function closePanel() {
-		closingPanel = true;
+	function closePanel() {		closingPanel = true;
 		dismissHostedMenus();
 		requestOpen(false);
 	}
@@ -413,6 +412,16 @@
 	function syncHostedPage() {
 		const hosted: Page | null = hostedMenuCount(runnerHost) ? 'runner' : hostedMenuCount(agentHost) ? 'agent' : hostedMenuCount(projectHost) ? 'project' : null;
 		if (hosted && pageName !== hosted) {
+			if (setupDirect) {
+				// Opened from the composer's context line: show the page at once,
+				// with no Back to the list (Escape and Android Back close the panel).
+				setupDirect = false;
+				setPage(hosted);
+				direct = true;
+				opener = null;
+				void focusPanel();
+				return;
+			}
 			const row = panelRef?.querySelector<HTMLElement>(
 				hosted === 'agent' ? '.mcp-setup .context-selector-btn'
 					: hosted === 'project' ? '.mcp-setup .repo-chip'
@@ -420,8 +429,55 @@
 			);
 			goTo(hosted, row ?? null);
 		} else if (!hosted && (pageName === 'agent' || pageName === 'runner' || pageName === 'project')) {
-			backToMain();
+			// A pick on a page opened from the context line is done: back to the composer.
+			if (direct) {
+				if (open && !closingPanel) closePanel();
+			} else {
+				backToMain();
+			}
 		}
+	}
+
+	/** Each context-line name's row in Setup: the shared selectors' triggers. */
+	const SETUP_TRIGGERS: Record<ComposerSetupRow, string> = {
+		agent: '.context-selector-btn',
+		project: '.repo-chip',
+		branch: '.branch-btn, .branch-trigger, .ctx-chip.readonly:has(.branch-name)',
+		worker: '.ctx-chip.runner, .mode-trigger, .ctx-chip.readonly:has(.lucide-monitor), .ctx-chip.readonly:has(.lucide-monitor-off)'
+	};
+	/** Set while a context-line tap opens its row: the hosted page it opens shows directly. */
+	let setupDirect = false;
+
+	/**
+	 * Open the Setup row a context-line name stands for, as a tap on that row
+	 * would: a selector whose menu has a page opens it straight away; one whose
+	 * menu opens in place (workspace folders, branch) or a fixed row is brought
+	 * into view on the list.
+	 */
+	async function openSetupRow(row: ComposerSetupRow) {
+		// After the tap that opened the sheet has finished: it is still bubbling,
+		// and the menus close on any document click outside them.
+		await new Promise((resolve) => setTimeout(resolve));
+		if (!open || closingPanel || pageName !== 'main') return;
+		const trigger = panelRef?.querySelector<HTMLElement>(`.mcp-setup :is(${SETUP_TRIGGERS[row]})`);
+		if (!trigger) return;
+		const actionable = trigger instanceof HTMLButtonElement && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true';
+		if (actionable) {
+			setupDirect = true;
+			trigger.click();
+			// The hosted page, if any, shows once its menu mounts (syncHostedPage).
+			await new Promise((resolve) => setTimeout(resolve));
+			if (!setupDirect) return;
+			setupDirect = false;
+		}
+		if (!open || pageName !== 'main') return;
+		// Scroll the list only (scrollIntoView would also move the page behind).
+		const list = bodyRef?.getBoundingClientRect();
+		const rowBox = trigger.getBoundingClientRect();
+		if (bodyRef && list && (rowBox.bottom > list.bottom || rowBox.top < list.top)) {
+			bodyRef.scrollTop += rowBox.top - list.top - Math.max(0, (list.height - rowBox.height) / 2);
+		}
+		if (actionable) trigger.focus({ preventScroll: true });
 	}
 
 	$effect(() => {
@@ -477,7 +533,10 @@
 				void tick().then(() => {
 					if (bodyRef && pageName === 'main') bodyRef.scrollTop = 0;
 				});
+				// A name on the composer's context line: go straight to its selector.
+				if (setupRow && pageName === 'main') void openSetupRow(setupRow);
 			} else {
+				setupDirect = false;
 				dismissHostedMenus();
 				renderTimer = setTimeout(() => {
 					rendered = false;
