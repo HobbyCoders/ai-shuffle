@@ -463,7 +463,10 @@ class CrossAppFenceTest {
         assertNotTapped()
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
-        fixture("dense:100"); fixture("delay:5") // Each read takes over 500 ms; a clean one must still count.
+        fixture("dense:100")
+        // The read after each consent stalls once for 1 s, far past the 500 ms window yet inside the 2 s read limit, however
+        // many calls it makes. A per-row delay sums one sleep per call, and those reads measured 0.6 to over 2 s on CI.
+        onceClosed("stallread:1000")
         val tapping = tap(read(waitSeconds = 15)); allow()
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)
