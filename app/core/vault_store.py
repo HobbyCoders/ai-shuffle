@@ -350,8 +350,9 @@ def update(owner: tuple, connection_id: str, change):
 
     ``change`` validates and raises ``AccessDenied``; nothing is written then.
     The id, and so the binding, stays the same. A host key recorded by a first
-    connection is part of ``current``, so an edit that keeps it stores it in
-    the entry itself; the recorded row stays too (see ``PIN_PREFIX``).
+    connection is part of ``current`` and of the ``new`` returned, but an edit
+    that keeps it leaves it where it was recorded (see ``PIN_PREFIX``): the
+    entry holds only a host key the owner entered.
     """
     if not encryption.is_encryption_ready():
         raise AccessDenied("The Vault is locked or unavailable on this worker.")
@@ -362,7 +363,14 @@ def update(owner: tuple, connection_id: str, change):
             raise AccessDenied("A saved sign-in keeps its type.")
         if new.label.casefold() != current.label.casefold() and _label_taken(owner, new.label, except_id=connection_id):
             raise AccessDenied("The Vault already has a sign-in with that name. Choose a different name.")
-        if not _replace(owner, connection_id, new, row, trust if _same_host(current, new) else ""):
+        keeps, kept = _same_host(current, new), new
+        if keeps and not _open(key(owner, connection_id), row.value).fingerprint.strip():
+            # The key ``current`` shows was read from the row beside the entry,
+            # and stays only there. Copied into the entry it would outrank that
+            # row for good: also after sync settled the row on the key another
+            # worker recorded, which this worker had not received yet.
+            kept = new.model_copy(update={"fingerprint": ""})
+        if not _replace(owner, connection_id, kept, row, trust if keeps else ""):
             raise AccessDenied("This sign-in was just changed or removed on another worker. Check it and try again.")
     _written()
     return current, new

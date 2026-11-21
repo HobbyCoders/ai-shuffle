@@ -467,12 +467,14 @@ def test_a_sign_in_that_a_later_edit_elsewhere_brings_back_still_has_its_host_ke
 
 
 @pytest.mark.parametrize("by", ["an exchange", "a full copy"])
-@pytest.mark.parametrize("meanwhile", ["nothing else", "a new password"])
+@pytest.mark.parametrize("meanwhile", ["nothing else", "a new password", "a rename after"])
 def test_two_workers_recording_a_host_key_for_the_same_address_settle_on_one(workers, tmp_path, by, meanwhile):
     """Both connect first, apart, one of them perhaps after changing the
-    password. One key stands on both, never none; a grant that verified the
-    other ends (tests/core/test_vault_access.py), so a different key is never
-    accepted quietly."""
+    password, or renaming the sign-in once its own key is recorded. One key
+    stands on both, never none, and it is the one sync kept: the rename does
+    not carry the key its worker saw into the entry, over the other. A grant
+    that verified the other ends (tests/core/test_vault_access.py), so a
+    different key is never accepted quietly."""
     a, b = pair(workers)
     with a.active():
         saved = vault_store.save(OWNER, machine(fingerprint=""))
@@ -482,6 +484,10 @@ def test_two_workers_recording_a_host_key_for_the_same_address_settle_on_one(wor
         if meanwhile == "a new password":
             vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
         assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        if meanwhile == "a rename after":
+            # As the edit form does it: the sign-in as shown, key included, under another name.
+            old, new = vault_store.update(OWNER, saved, lambda current: current.model_copy(update={"label": "Renamed"}))
+            assert (old.fingerprint, new.fingerprint) == (HOST_KEY, HOST_KEY)
         scan()
     writes_later(b, than=a)
     with b.active():
@@ -498,7 +504,8 @@ def test_two_workers_recording_a_host_key_for_the_same_address_settle_on_one(wor
         with worker.active():
             held = vault_store.load(OWNER, saved)
             assert held.fingerprint == "SHA256:" + "c" * 43
-            assert held.password.get_secret_value() == (PASSWORD if meanwhile == "nothing else" else "replacement-only")
+            assert held.label == ("Renamed" if meanwhile == "a rename after" else "Home server")
+            assert held.password.get_secret_value() == ("replacement-only" if meanwhile == "a new password" else PASSWORD)
             # Recorded: a later first connection here does not write another over it.
             assert not vault_store.pin_fingerprint(OWNER, saved, held.model_copy(update={"fingerprint": ""}), HOST_KEY)
 

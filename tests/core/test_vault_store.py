@@ -413,12 +413,19 @@ def test_a_recorded_host_key_stays_with_the_address_it_was_verified_at(vault):
     assert vault_store.connection_id_of(pin) == vault_store.connection_id_of(entry) == connection_id
     assert vault_store.connection_id_of(entry + "_params") == vault_store.connection_id_of("tts_model") == ""
     kept = vault[pin]
-    # A rename, another account and a new password keep the key: it is stored
-    # in the entry too, and its own row is left where it was.
+    # A rename, another account and a new password keep the key, in its own
+    # row only: copied into the entry it would outrank whichever key sync
+    # settles that row on (tests/core/network/test_vault_sync.py).
     for change in ({"label": "Renamed"}, {"username": "deploy"}, {"password": SecretStr("replacement-only")}):
         old, new = vault_store.update(owner, connection_id, lambda current: current.model_copy(update=change))
         assert (old.fingerprint, new.fingerprint) == (key, key)
         assert inside()["trust"] == trust and vault[pin] == kept and shown() == key
+        assert inside()["connection"]["fingerprint"] == ""
+    # A key the owner entered is the entry's own, and an edit keeps it there.
+    entered = vault_store.save(owner, spec().model_copy(update={"label": "Entered"}))
+    vault_store.update(owner, entered, lambda current: current.model_copy(update={"label": "Entered, renamed"}))
+    assert json.loads(encryption.decrypt_value(vault[vault_store.key(owner, entered)]))["connection"]["fingerprint"] == spec().fingerprint
+    vault_store.delete(owner, entered)
     # Clearing the key the owner sees asks for the next connection to be trusted
     # afresh: the old row is left, and no longer read.
     vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"fingerprint": ""}))
