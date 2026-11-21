@@ -546,6 +546,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			worktreeIntent: state.worktreeIntent,
 			worktreeId: state.worktreeId,
 			worktreeBranch: state.worktreeBranch,
+			worktreeCreateNewBranch: state.worktreeCreateNewBranch,
+			worktreeCheckoutPending: state.worktreeCheckoutPending,
 			worktreeBaseBranch: state.worktreeBaseBranch,
 			selectedWorktreeBranch: state.selectedWorktreeBranch,
 			worktreeMode: state.worktreeMode,

@@ -16,6 +16,7 @@ import { holdPendingDraft, releasePendingDraft, writeDraft } from './draft-persi
 import { bindSessionOwner } from '../session-owner';
 import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
+import { workerGitTargetKey } from '$lib/components/layout/worker-git-target';
 
 /**
  * Restored-session race (e2e Bug A): init() adopts a persisted sessionId before
@@ -412,6 +413,27 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 
 		expect(getState().sessionId).toBeNull();
 		expect(getState().isRestoringSession).toBe(false);
+	});
+
+	it('a reload mid-opening keeps the staged branch a branch with no checkout yet (#1756)', async () => {
+		// Saved while the first send was creating this branch's worktree. Read
+		// back as an existing checkout, the draft asked Git for it and got 409.
+		const { init, getState } = makeInit({
+			sessionId: null,
+			title: 'New Chat',
+			profile: 'profile-1',
+			project: 'proj-1',
+			modelOverride: null,
+			permissionModeOverride: null,
+			effortLevelOverride: null,
+			worktreeBranch: 'feat/auto-named',
+			worktreeCreateNewBranch: true,
+		});
+
+		await init();
+
+		expect(getState()).toMatchObject({ worktreeBranch: 'feat/auto-named', worktreeCreateNewBranch: true, worktreeCheckoutPending: false });
+		expect(workerGitTargetKey({ ...getState(), projectV2Id: 'pv2-1' })).toBe(JSON.stringify(['local', null]));
 	});
 
 	it('does not mark the window when there is nothing persisted', async () => {

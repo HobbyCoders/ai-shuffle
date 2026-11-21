@@ -392,6 +392,10 @@ export interface PersistedSession {
 	worktreeIntent?: ExecutionMode;
 	worktreeId?: string | null;
 	worktreeBranch?: string;
+	/** `worktreeBranch` has no checkout yet (see ActiveSessionState). Without
+	 *  them a reload mid-opening treats the branch as an existing checkout. */
+	worktreeCreateNewBranch?: boolean;
+	worktreeCheckoutPending?: boolean;
 	worktreeBaseBranch?: string;
 	selectedWorktreeBranch?: string | null;
 	worktreeMode?: 'new' | 'existing';
