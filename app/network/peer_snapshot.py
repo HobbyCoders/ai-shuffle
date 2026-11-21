@@ -50,9 +50,9 @@ PAGE_ITEMS = {FORMAT_FULL: 100, FORMAT_DEFERRED: 500}
 APPLY_BATCH_ITEMS = 5000
 # Settings whose listeners act on the row that arrived, so a copy reports them
 # by key as an ordinary exchange does: provider readings
-# (app.core.provider_observations.PREFIX) and saved Vault sign-ins
-# (app.core.vault_store.SHARED_PREFIX).
-_RECORD_SETTINGS = ("provider_observation:", "vault_entry:")
+# (app.core.provider_observations.PREFIX) and saved Vault sign-ins with their
+# host-key pins (app.core.vault_store.SYNCED_PREFIXES).
+_RECORD_SETTINGS = ("provider_observation:", "vault_entry:", "vault_pin:")
 # A transfer stays downloadable for TTL plus a budget for its size. The signed
 # expires_at is checked by this worker's page endpoint and by the recipient's
 # apply, so a fixed TTL failed every large copy: a worker with millions of

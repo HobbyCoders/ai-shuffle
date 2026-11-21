@@ -1,4 +1,5 @@
 import json
+import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -31,9 +32,15 @@ def vault(monkeypatch):
     monkeypatch.setattr(vault_store.database, "set_system_setting_if_unchanged", write_if_unchanged)
     class Cursor:
         def execute(self, sql, params):
-            self.prefix = params[0][:-1]
+            # LIKE as the database reads it: "%" any run, "_" any one character,
+            # and the query's escape character before a literal one.
+            escape, pattern, chars = "!" if "ESCAPE '!'" in sql else None, "", iter(params[0])
+            for char in chars:
+                pattern += (re.escape(next(chars)) if char == escape
+                            else {"%": ".*", "_": "."}.get(char, re.escape(char)))
+            self.matches = re.compile(pattern, re.S).fullmatch
         def fetchall(self):
-            return [{"key": k, "value": v} for k, v in rows.items() if k.startswith(self.prefix)]
+            return [{"key": k, "value": v} for k, v in rows.items() if self.matches(k)]
     @contextmanager
     def db():
         yield SimpleNamespace(cursor=Cursor)
@@ -182,6 +189,8 @@ def test_entries_are_network_shared_and_rows_from_before_stay_local():
     from app.network.policy import is_shared_setting_key
     owner = ("local", "worker", None)
     assert is_shared_setting_key(vault_store.key(owner, "a" * 32))
+    # So is the host key a first connection recorded for one.
+    assert is_shared_setting_key(vault_store._pin_key(owner, "a" * 32))
     assert not is_shared_setting_key("chat_connection:worker:scope:abc")
 
 
@@ -360,14 +369,63 @@ def test_pin_fingerprint_only_fills_a_blank_pin_on_unchanged_details(vault):
     # Edited after the handshake started: the key seen is not saved.
     edited = unpinned.model_copy(update={"port": 2222})
     assert not vault_store.pin_fingerprint(owner, connection_id, edited, key)
+    entry = vault_store.key(owner, connection_id)
+    before = vault[entry]
+    assert not vault_store.pin_fingerprint(owner, connection_id, unpinned, "not a host key")
     assert vault_store.pin_fingerprint(owner, connection_id, unpinned.model_copy(update={"minutes": 5}), key)
     assert vault_store.load(owner, connection_id).fingerprint == key
+    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [key]
     # An existing pin is never replaced this way.
     assert not vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id),
                                           "SHA256:" + "c" * 43)
     assert vault_store.load(owner, connection_id).fingerprint == key
+    # The entry, which holds the credentials, was not rewritten to record it:
+    # the key is a row of its own, with no credentials in it.
+    pin = next(k for k in vault if k != entry)
+    assert vault[entry] == before and pin.startswith(vault_store.PIN_PREFIX) and len(vault) == 2
+    assert "vault-only-password" not in encryption.decrypt_value(vault[pin])
     vault_store.delete(owner, connection_id)
     assert not vault_store.pin_fingerprint(owner, connection_id, unpinned, key) and not vault
+
+
+def test_a_recorded_host_key_holds_for_the_version_it_was_verified_with_and_an_edit_keeps_it(vault):
+    owner = ("local", "worker", None)
+    connection_id = vault_store.save(owner, spec().model_copy(update={"fingerprint": ""}))
+    key, entry = "SHA256:" + "b" * 43, vault_store.key(owner, connection_id)
+    assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), key)
+    pin = next(k for k in vault if k != entry)
+    # An edit that keeps the key stores it in the entry itself, so it no longer rests on the pin row.
+    old, new = vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"label": "Renamed"}))
+    assert (old.fingerprint, new.fingerprint) == (key, key)
+    kept = vault.pop(pin)
+    assert vault_store.load(owner, connection_id).fingerprint == key
+    # A pin written for a version that has since been replaced (as when another
+    # worker changed the password) applies to nothing.
+    vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"fingerprint": ""}))
+    vault[pin] = kept
+    assert vault_store.load(owner, connection_id).fingerprint == ""
+    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
+    # Nor does one bound to another row, or one that cannot be read.
+    other = vault_store.save(owner, spec().model_copy(update={"fingerprint": "", "label": "Other"}))
+    assert vault_store.pin_fingerprint(owner, other, vault_store.load(owner, other), key)
+    vault[pin] = vault[next(k for k in vault if k.startswith(vault_store.PIN_PREFIX) and k != pin)]
+    assert vault_store.load(owner, connection_id).fingerprint == ""
+    vault[pin] = "corrupt"
+    assert vault_store.load(owner, connection_id).fingerprint == ""
+
+
+def test_every_stored_version_carries_a_random_value_of_its_own(vault):
+    """Worker sync keeps a hash of what it decrypted; with nothing random in an
+    entry that hash would confirm a guessed password without the data key."""
+    owner = ("local", "worker", None)
+    connection_id = vault_store.save(owner, spec())
+    entry = vault_store.key(owner, connection_id)
+    first = json.loads(encryption.decrypt_value(vault[entry]))
+    vault_store.update(owner, connection_id, lambda current: current)
+    second = json.loads(encryption.decrypt_value(vault[entry]))
+    assert first["connection"] == second["connection"]
+    assert re.fullmatch("[0-9a-f]{32}", first["version"]) and re.fullmatch("[0-9a-f]{32}", second["version"])
+    assert first["version"] != second["version"]
 
 
 def test_the_list_holds_entries_only_whatever_else_is_named_like_one(vault):
@@ -377,6 +435,9 @@ def test_the_list_holds_entries_only_whatever_else_is_named_like_one(vault):
     # (the model-parameters API appends "_params" to a caller's key).
     vault[vault_store.key(owner, connection_id) + "_params"] = "{}"
     vault[vault_store.prefix(owner) + "not-an-entry"] = "plain"
+    # As long as an entry's key, and differing only where LIKE reads "_" as any character.
+    vault[vault_store.key(owner, "f" * 32).replace("vault_entry:", "vaultXentry:")] = "plain"
+    vault[vault_store.prefix(owner) + "G" * 32] = "plain"
     assert [item["id"] for item in vault_store.catalog(owner)] == [connection_id]
     assert vault_store.load(owner, connection_id).label == "ServerWorker"
     # Neither counts against the cap or blocks a name.
