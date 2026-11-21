@@ -707,6 +707,23 @@ def test_escapes_around_a_credential_keep_their_place():
     assert vault_services.redact(both, needles, 15) == b"[redacted] "
 
 
+@pytest.mark.parametrize("outer", ["json", "php", "html", "percent"])
+@pytest.mark.parametrize("inner", ["json", "percent", "form", "html"])
+def test_a_credential_escaped_twice_is_redacted(outer, inner):
+    # Text held inside other text: a URL or a page in JSON, JSON in a JSON string, a page that shows a URL.
+    write = {
+        "json": lambda text: json.dumps(text)[1:-1],
+        "php": lambda text: json.dumps(text)[1:-1].replace("/", "\\/"),  # PHP escapes the slash too
+        "percent": lambda text: quote(text, safe="/"),
+        "form": quote_plus,
+        "html": html.escape,
+    }
+    needles = vault_services._needles(ODD, f"Bearer {ODD}")
+    echoed = write[outer](f"see {write[inner](ODD)} now").encode()
+    redacted = vault_services.redact(echoed, needles)
+    assert redacted == write[outer]("see ").encode() + b"[redacted]" + write[outer](" now").encode()
+
+
 def test_a_response_built_to_stall_the_scan_is_read_in_one_pass():
     # The service chooses the response: a scan that tries every reading of a
     # run of backslashes would not finish.

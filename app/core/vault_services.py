@@ -379,9 +379,10 @@ _JSON = (
 _PERCENT = (re.compile(rb"%([0-9a-fA-F]{2})"), lambda match: bytes([int(match[1], 16)]))
 _FORM = (re.compile(rb"%([0-9a-fA-F]{2})|\+"), lambda match: bytes([int(match[1], 16)]) if match[1] else b" ")
 _HTML = (re.compile(rb"&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|(amp|lt|gt|quot|apos));"), _entity)
-# The longest escape for one byte of a credential: a backslash in JSON held in
-# a JSON string, each of its two backslashes written as "\\u005c".
-_WIDEST = 12
+_ESCAPES = (_JSON, _PERCENT, _FORM, _HTML)
+# The most bytes two layers can spend on one byte of a credential: the widest
+# escape ("&#0000043;") with each of its ten characters written that way again.
+_WIDEST = 100
 
 
 class _Decoded:
@@ -425,17 +426,20 @@ class _Decoded:
 
 
 def _readings(data: bytes):
-    """``data`` as each kind of escape reads; a JSON string may itself hold JSON."""
-    once = _Decoded(data, _JSON)
-    if once.changed:
+    """``data`` with one kind of escape written out, then a second kind on top of it.
+
+    Two layers cover text held inside other text: JSON in a JSON string, a URL
+    or a page in JSON, a page that shows a URL.
+    """
+    for outer in _ESCAPES:
+        once = _Decoded(data, outer)
+        if not once.changed:
+            continue
         yield once
-        twice = _Decoded(once.data, _JSON, once)
-        if twice.changed:
-            yield twice
-    for escapes in (_PERCENT, _FORM, _HTML):
-        reading = _Decoded(data, escapes)
-        if reading.changed:
-            yield reading
+        for inner in _ESCAPES:
+            twice = _Decoded(once.data, inner, once)
+            if twice.changed:
+                yield twice
 
 
 def _occurrences(data: bytes, needles: list[bytes]):
@@ -451,10 +455,11 @@ def _occurrences(data: bytes, needles: list[bytes]):
 def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes:
     """Replace every whole occurrence that starts before ``limit``; keep at most ``limit`` input bytes.
 
-    An occurrence is the credential as written or behind escapes. Every pass is
-    one linear scan: the service chooses the response, so nothing here may
-    backtrack. A service that deliberately disguises a credential cannot be
-    caught by a scan.
+    An occurrence is the credential as written or behind up to two layers of
+    JSON, URL, form or HTML escapes. Every pass is one linear scan: the service
+    chooses the response, so nothing here may backtrack. This catches a service
+    that repeats what it was sent. One that transforms a credential some other
+    way cannot be caught by a scan; the owner chose to send it that credential.
 
     Positions are counted in the input, so a shortened replacement can never pull
     a partially read occurrence at the end of ``data`` back inside the limit.
@@ -582,7 +587,8 @@ async def perform(
     # Only occurrences starting inside the returned window matter, and every
     # such occurrence was read in full (``keep`` adds the longest occurrence).
     truncated = truncated or len(kept) > LIMIT
-    data = redact(bytes(kept), needles, LIMIT)
+    # Off the event loop: the service chooses how much of the response is escapes.
+    data = await asyncio.to_thread(redact, bytes(kept), needles, LIMIT)
     return {
         "status": status,
         "headers": {name: _redact_header(value, needles) for name, value in returned.items()},
