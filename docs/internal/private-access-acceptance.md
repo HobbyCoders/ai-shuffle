@@ -169,8 +169,10 @@ Boundaries (`app/core/chat_services.py`):
   inherited. Only content type/length, location, retry-after, etag and
   last-modified response headers are returned (never Set-Cookie).
 - Bodies are bounded to 64 KiB. Known encodings of the secret (raw, header
-  value, URL/JSON-escaped, Base64, decoded Basic credentials) are redacted from
-  the body and returned headers. Positions are counted in the received bytes so
+  value, URL/JSON-escaped, Base64, and for a Basic sign-in the password and
+  the encoded pair) are redacted from the body and returned headers. A Basic
+  username on its own is not redacted: the agent can read it if the service
+  repeats it. Positions are counted in the received bytes so
   a truncated occurrence cannot slide into view. This is defence in depth: a
   service which transforms and echoes the credential differently could still
   disclose it, so the card says the model can use its full authority there.
