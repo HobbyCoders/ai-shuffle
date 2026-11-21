@@ -227,8 +227,8 @@ tells the agent to follow the newer rule meanwhile and to ask the owner once.
 At most 3 pairs are open at a time; Memory health counts them. The owner
 settles a pair by correcting, replacing or forgetting a rule, or by saying
 both stand: that answer is saved under the pair's `memory.coexist.v2.` key,
-replicates like any fact, and holds until either rule is reworded. A conflict
-never takes a rule's authority away; for model routing the host still accepts
+replicates like any fact, and holds until either rule is reworded (a when-line
+the backfill generates afterwards is not a rewording). A conflict never takes a rule's authority away; for model routing the host still accepts
 a model named by either rule.
 
 ## Self-maintenance

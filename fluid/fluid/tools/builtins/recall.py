@@ -160,9 +160,8 @@ def _is_answer(entry: Any) -> bool:
 
 
 def _answer_states(store: Any, project: str | None) -> dict[str, bool]:
-    from fluid.codemode.conflict_review import coexistence_answer_states
-    return coexistence_answer_states([vars(e) for e in store.memories()
-                                     if project is None or e.scope in ("global", project)])
+    from fluid.codemode.conflict_review import coexistence_answer_states, session_facts
+    return coexistence_answer_states(session_facts(store, project))
 
 
 def _memory_label(entry: Any, archived: bool, answers: dict[str, bool]) -> str:

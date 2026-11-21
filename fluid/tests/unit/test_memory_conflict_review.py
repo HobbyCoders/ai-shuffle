@@ -384,6 +384,40 @@ async def test_a_scope_too_large_for_one_prompt_is_compared_in_turns(tmp_path, m
     assert "progress" not in state_of(store)
 
 
+def test_a_continued_review_does_not_spend_its_claims_on_pairs_already_compared():
+    now = time.time()
+    def row(n, text):
+        return {"id": f"m{n}", "origin": "o", "revision": 1, "text": text, "protected": True,
+                "scope": "global", "updated_at": now - n}
+    a, b, c = (row(n, f"Team {n} code reviews are done by Opus.") for n in (1, 2, 3))
+    late = row(9, "Team 1 code reviews are done by Sol.")
+    shown = {"r1": a, "r2": b, "r3": c, "r4": late}
+    def claim(x, y):
+        return {"a": x, "b": y, "a_quote": shown[x]["text"].rstrip("."),
+                "b_quote": shown[y]["text"].rstrip(".")}
+    answer = json.dumps({"conflicts": [claim("r1", "r2"), claim("r1", "r3"), claim("r2", "r3"),
+                                       claim("r1", "r4")]})
+    # A later call of the same scope: the subjects were shown to each other before.
+    later = review.Batch(subjects=[a, b, c], shown=shown, carried={"o:m8": "seen"})
+    claims, rejected = review.parse(answer, later)
+    assert [(x["a"]["id"], x["b"]["id"]) for x in claims] == [("m9", "m1")] and rejected == 3
+    # The first call of a scope judges its subjects against each other too.
+    first = review.Batch(subjects=[a, b, c], shown=shown)
+    assert len(review.parse(answer, first)[0]) == review.MAX_CONFLICTS_PER_CALL
+
+
+def test_passages_that_differ_only_in_capitals_are_two_instructions():
+    now = time.time()
+    lower = {"id": "m1", "origin": "o", "revision": 1, "text": "Set BUILD_MODE to dev.",
+             "protected": True, "scope": "global", "updated_at": now - 1}
+    upper = lower | {"id": "m2", "text": "Set BUILD_MODE to DEV.", "updated_at": now}
+    batch = review.Batch(subjects=[upper], shown={"r1": upper, "r2": lower})
+    claims, rejected = review.parse(json.dumps({"conflicts": [
+        {"a": "r1", "b": "r2", "a_quote": "Set BUILD_MODE to DEV", "b_quote": "Set BUILD_MODE to dev"}]}), batch)
+    assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == (
+        "Set BUILD_MODE to dev", "Set BUILD_MODE to DEV")
+
+
 # ─── the store changes while the model answers ─────────────────────────────
 
 async def test_a_rule_reworded_while_the_model_answers_is_reviewed_again(tmp_path):
@@ -451,6 +485,31 @@ async def test_a_when_line_the_backfill_writes_in_the_same_pass_keeps_the_verdic
     assert waiting(store) == [] and review.pending(store) == 1
 
 
+async def test_a_when_line_generated_after_the_owner_s_answer_does_not_reopen_it(tmp_path):
+    store = SkillStore(tmp_path)
+    old, new = rule(store, OPUS), rule(store, SOL)
+    model = Model(REVIEWERS)
+    synth = learner(store, model, min_new_entries=1)
+    await review.run(synth)
+    answer = store.save_memory("Both stand: Opus reviews risky changes, Sol the rest.", protected=True,
+                               key=waiting(store)[0]["key"], when="When applying these owner rules")
+    assert waiting(store) == []
+    # The backfill gets to the two rules only after the owner answered.
+    store.journal_append({"kind": "remember", "text": "Keep the release checklist for future work."})
+    await synth._run_safe()
+    assert {m.when for m in store.memories() if m.id in (old.id, new.id)} == {"When planning the work"}
+    assert waiting(store) == [] and "owner question" not in store.render_memory_section()
+    recalled = await recall({"ids": [answer.id, old.id]}, ToolCtx(extra={"recall_store": store}))
+    assert "current exact-pair coexistence answer" in recalled.text
+    assert "stale coexistence answer" not in recalled.text and "- [owner question]" not in recalled.text
+    # The owner's own when-line still reopens the pair: the answer was about other wording.
+    revision = next(m.revision for m in store.memories() if m.id == old.id)
+    store.save_memory(OPUS, memory_id=old.id, expected_revision=revision, protected=True,
+                      when="When reviewing documentation only")
+    recalled = await recall({"ids": [answer.id]}, ToolCtx(extra={"recall_store": store}))
+    assert "stale coexistence answer" in recalled.text
+
+
 # ─── failure, budget and logging ───────────────────────────────────────────
 
 async def test_one_malformed_claim_does_not_cost_the_others(tmp_path):
@@ -508,11 +567,12 @@ async def test_first_and_second_looks_share_the_daily_cap(tmp_path):
     assert review.pending(store) == review.MAX_CALLS_PER_DAY
 
 
-async def test_a_claim_no_second_look_can_read_is_given_up(tmp_path):
+@pytest.mark.parametrize("answer", ["I am not sure.", ""])
+async def test_a_claim_no_second_look_can_read_is_given_up(tmp_path, answer):
     store = SkillStore(tmp_path)
     for text in (OPUS, SOL):
         rule(store, text)
-    model = Model(REVIEWERS, confirm_raw="I am not sure.")
+    model = Model(REVIEWERS, confirm_raw=answer)  # unreadable, or no answer at all
     synth = learner(store, model, daily_calls=40)
     for tries in range(1, review.CONFIRM_TRIES + 1):
         result = await review.run(synth)

@@ -128,7 +128,8 @@ with one verdict per pair. No markdown and no commentary.
 # An answer is an ordinary owner-kept fact, not a local queue. Its key names
 # both rules by the exact text and applicability the owner answered about, so
 # Recall, Remember, Forget and replication work unchanged and a later edit of
-# either rule reopens the question.
+# either rule reopens the question. A when-line the backfill generates later
+# is not such an edit: the key issued before it stays valid.
 
 def coexistence_key(old: dict, new: dict) -> str:
     """The key an owner's "both stand" answer for this exact pair is saved under."""
@@ -162,7 +163,7 @@ def _review_token(e: dict) -> str:
 # edits, answers and deletion all change it. Usage counters are left out.
 _CONFLICT_FIELDS = ("id", "origin", "revision", "text", "when", "always", "key", "scope", "worker",
                     "protected", "provenance", "conflicted", "retired_at", "retired_reason",
-                    "superseded_by", "supersession_confirmed", "updated_at")
+                    "superseded_by", "supersession_confirmed", "updated_at", "when_basis")
 
 
 def _conflict_revision(entries: list[dict]) -> tuple:
@@ -175,7 +176,8 @@ def _conflict_revision(entries: list[dict]) -> tuple:
 
 
 def coexistence_answer_states(entries: list[dict]) -> dict[str, bool]:
-    """Current exact-pair answers vs stale historical records (Recall only)."""
+    """Current exact-pair answers vs stale historical records (Recall only).
+    ``entries`` are raw facts, like everything that reads a verdict."""
     return dict(_cached_answer_matches(_conflict_revision(entries))[0])
 
 
@@ -199,6 +201,10 @@ def _cached_answer_matches(revision: tuple) -> tuple:
     rules = [e for e in active if not e.get("conflicted")
              and not str(e.get("key") or "").startswith(COEXIST_KEY_PREFIX)]
     tokens = {_coexistence_token(e): e for e in rules}
+    for e in rules:
+        if e.get("when") and e.get("when_basis") is not None:
+            # Answered before the backfill generated this when-line.
+            tokens.setdefault(_coexistence_token(e | {"when": None}), e)
     states, pairs, legacy = {}, set(), set()
     for key in answers:
         parts = key[len(COEXIST_KEY_PREFIX):].split(".")
@@ -460,8 +466,13 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
             continue
         pair = frozenset((global_id(a), global_id(b)))
         a_quote, b_quote = locate(item.get("a_quote"), a["text"]), locate(item.get("b_quote"), b["text"])
+        # One passage found in both rules is no clash (the capital of a first
+        # letter aside, as in locate). A later call of an unfinished scope
+        # showed its subjects to each other already: only a pair with a newly
+        # shown rule is news, and repeats must not use up this call's claims.
         if (pair in seen or not pair & subjects or not a_quote or not b_quote
-                or a_quote.casefold() == b_quote.casefold()):
+                or a_quote[1:] == b_quote[1:] and a_quote[0].lower() == b_quote[0].lower()
+                or (batch.carried and pair <= subjects)):
             rejected += 1
             continue
         seen.add(pair)
@@ -668,19 +679,22 @@ def open_conflicts(entries: list[Any], root: Any) -> list[dict]:
     return out
 
 
-def session_conflicts(store: Any, project: str | None = None) -> list[dict]:
-    """:func:`open_conflicts` among the rules a session of ``project`` (None:
-    every scope) has on this worker. Reads the stored facts only when a
-    verdict exists, without a lock."""
+def session_facts(store: Any, project: str | None = None) -> list[dict]:
+    """The raw facts a session of ``project`` (None: every scope) has on this
+    worker, read without a lock."""
     from fluid.codemode.facts import visible_on
 
+    doc = store._facts.snapshot(read_only=True)
+    return [e for e in doc["entries"] if visible_on(e, doc["store_id"])
+            and (project is None or (e.get("scope") or "global") in ("global", project))]
+
+
+def session_conflicts(store: Any, project: str | None = None) -> list[dict]:
+    """:func:`open_conflicts` among the rules of :func:`session_facts`. The
+    stored facts are read only when a verdict exists."""
     if not _records(store.root):
         return []
-    doc = store._facts.snapshot(read_only=True)
-    return open_conflicts(
-        [e for e in doc["entries"] if visible_on(e, doc["store_id"])
-         and (project is None or (e.get("scope") or "global") in ("global", project))],
-        store.root)
+    return open_conflicts(session_facts(store, project), store.root)
 
 
 def conflict_notes(conflicts: list[dict]) -> dict[str, str]:
@@ -834,7 +848,7 @@ async def run(synth: Any) -> Result:
 
 
 async def _step(synth: Any, result: Result) -> None:
-    from fluid.codemode.continual import InferenceBudgetExhausted
+    from fluid.codemode.continual import InferenceBudgetExhausted, SynthesisIncomplete
     from fluid.codemode.facts import global_id
 
     store = synth._store
@@ -870,14 +884,14 @@ async def _step(synth: Any, result: Result) -> None:
             or now < float(store.learner_backoff(synth._model).get("until", 0))
             or now < store.consolidation_retry_at()):
         return
-    day = int(now // 86400)
-    if state.get("day") != day:
-        state.update(day=day, calls=0)
     budget = synth._budget(refresh=True)
     reserve = max(budget.reserved, (budget.daily + 1) // 2)
     usage: dict[str, int] = {}
 
     async def ask(prompt: str, system: str) -> str:
+        day = int(time.time() // 86400)
+        if state.get("day") != day:
+            state.update(day=day, calls=0)
         spent = store._facts.inference_budget()
         if (int(state.get("calls") or 0) >= MAX_CALLS_PER_DAY
                 or (spent.get("day") == day
@@ -910,12 +924,12 @@ async def _step(synth: Any, result: Result) -> None:
         if claims:
             # A second look at the two rules alone, without the rest of the
             # store pulling their meaning together.
-            text = await ask(confirm_prompt(claims), _CONFIRM_SYSTEM)
             try:
-                agreed = confirmed(text, claims)
-            except ValueError:
-                # A claim no second look can read in CONFIRM_TRIES answers is
-                # no conflict; it must not hold up every later review.
+                agreed = confirmed(await ask(confirm_prompt(claims), _CONFIRM_SYSTEM), claims)
+            except (ValueError, SynthesisIncomplete):
+                # A claim whose second look is unreadable, empty or cut off
+                # CONFIRM_TRIES times is no conflict; it must not hold up
+                # every later review. A transport failure only waits.
                 state["pending"] = [c | {"tries": int(c.get("tries") or 0) + 1}
                                     for c in state["pending"]
                                     if int(c.get("tries") or 0) + 1 < CONFIRM_TRIES]
