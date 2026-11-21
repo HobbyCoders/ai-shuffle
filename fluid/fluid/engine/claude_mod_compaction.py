@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from fluid.context.compaction import (
@@ -73,6 +73,17 @@ DEEP_FOLD_FACTOR = 4
 # Code's own summary runs instead. A manual one only has to save something.
 AUTO_MAX_RETAINED = 0.75
 MANUAL_MIN_SAVING = 0.02
+# The working request is never digested, so its calls stay as the model made
+# them, and the long text inside an old call's input (a script, a file's new
+# content, an edit's strings) stayed with them: measured on real chats, about
+# a third of what an over-target answer kept. That text is on disk or one
+# HistoryExpand away, so in every call older than the newest
+# ``KEEP_INPUT_CALLS`` a string longer than ``INPUT_STRING_CHARS`` is cut to
+# its first ``INPUT_HEAD_CHARS``. Keys, short values (a path, a description)
+# and the calls the model is working from stay as they are.
+KEEP_INPUT_CALLS = 6
+INPUT_STRING_CHARS = 300
+INPUT_HEAD_CHARS = 160
 
 # A row Fluid builds for stored content it will not rebuild (a call Claude
 # Code holds with blocks Fluid cannot reproduce, a message with nothing it
@@ -728,6 +739,97 @@ def _owner(requests: list[int], position: int) -> int | None:
     return owner
 
 
+def short_input(value: Any, node_id: str) -> Any:
+    """``value`` with every long string cut to its opening, naming the stored
+    node whose ``HistoryExpand`` shows the call whole.
+
+    The shape is kept (same keys, same types), so a row built from it is a
+    tool call like any other. Returns ``value`` itself when nothing is long.
+    """
+    if isinstance(value, str):
+        if len(value) <= INPUT_STRING_CHARS:
+            return value
+        return (f'{value[:INPUT_HEAD_CHARS]}… [+{len(value) - INPUT_HEAD_CHARS} chars cut by '
+                f'compaction; HistoryExpand("{node_id}") shows the whole call]')
+    if isinstance(value, dict):
+        cut = {key: short_input(item, node_id) for key, item in value.items()}
+        return value if all(cut[key] is value[key] for key in value) else cut
+    if isinstance(value, list):
+        cut = [short_input(item, node_id) for item in value]
+        return value if all(a is b for a, b in zip(cut, value)) else cut
+    return value
+
+
+def _old_calls_end(view: list[SessionNode], tail: int) -> int:
+    """The view position before which a call is old: outside the recency
+    tail and not one of the newest ``KEEP_INPUT_CALLS`` calls."""
+    seen = 0
+    for position in range(len(view) - 1, -1, -1):
+        seen += sum(isinstance(b, ToolUseBlock) for b in view[position].message.content)
+        if seen >= KEEP_INPUT_CALLS:
+            return min(position, tail)
+    return 0
+
+
+def _shorten_old_inputs(
+    segments: list[tuple[int, int, Message]], view: list[SessionNode], *, end: int,
+    refs: dict[str, str], shown: dict[Any, Any], unit_of: dict[int, list[int]],
+    rebuilt: set[int], skip: set[int],
+) -> tuple[list[tuple[int, int, Message]], int]:
+    """``segments`` with the long inputs of the calls before ``end`` cut
+    (:func:`short_input`), and the JSON chars this compaction newly cut.
+
+    Only a call whose result is in the view and is not an error: a failed
+    command is read again as it was written, and an open call is the work in
+    hand. ``refs`` names the stored node of each call (one row can stand for
+    several nodes of a streamed message) and ``shown`` is the input Claude
+    Code holds for each call it has; a message with a call it does not have
+    is left alone (it could not be rebuilt). A message Claude Code already
+    shows cut (an earlier compaction did it) stays the stored message, so its
+    row stays Claude Code's own, unless that row is rebuilt anyway: the
+    ladder changed the message, or its tool group is rebuilt (``rebuilt``, or
+    another call of the group is newly cut), and a rebuild from the stored
+    message would bring the whole input back. ``skip`` holds the positions
+    never rebuilt.
+    """
+    done = {b.tool_use_id for node in view for b in node.message.content
+            if isinstance(b, ToolResultBlock) and not b.is_error}
+    # position -> (the message cut, whether its row must change, chars newly cut)
+    cut: dict[int, tuple[Message, bool, int]] = {}
+    for first, last, message in segments:
+        if first != last or first >= end or first in skip or message.role != "assistant":
+            continue
+        uses = [b for b in message.content if isinstance(b, ToolUseBlock)]
+        if not uses or any(b.id not in shown for b in uses):
+            continue
+        blocks: list[Any] = []
+        fresh = 0
+        changed = False
+        for block in message.content:
+            if isinstance(block, ToolUseBlock) and block.id in done and isinstance(block.input, dict):
+                short = short_input(block.input, refs.get(block.id, view[first].node_id))
+                if short is not block.input:
+                    changed = True
+                    if shown[block.id] != short:
+                        fresh += len(json.dumps(block.input)) - len(json.dumps(short))
+                    block = replace(block, input=short)
+            blocks.append(block)
+        if changed:
+            cut[first] = (replace(message, content=blocks),
+                          fresh > 0 or message is not view[first].message, fresh)
+    out: list[tuple[int, int, Message]] = []
+    saved = 0
+    for first, last, message in segments:
+        if first == last and first in cut:
+            short_message, needed, fresh = cut[first]
+            if needed or first in rebuilt or any(
+                    p in cut and cut[p][1] for p in unit_of.get(first, ())):
+                message = short_message
+                saved += fresh
+        out.append((first, last, message))
+    return out, saved
+
+
 def compact_messages(
     rows: Any, nodes: list[SessionNode], *, config: CompactionConfig | None = None,
     context_window: int | None = None, trigger: str = "manual",
@@ -751,8 +853,12 @@ def compact_messages(
     leave through the note (archived) first, those of the earlier pinned
     request, then the newest request's older additions, never the row that
     opens the newest request. ``report``, when given, is filled with
-    ``target_tokens``, ``after_tokens``, ``met`` and, on a miss, the
-    ``contributors`` still over it (chars/4 tokens by kind).
+    ``target_tokens``, ``after_tokens``, ``met``, ``input_tokens_cut`` and,
+    on a miss, the ``contributors`` still over it (chars/4 tokens by kind).
+
+    Whatever the ladder kept, the long inputs of old finished calls are cut
+    to their opening (:func:`_shorten_old_inputs`); the stored call is whole
+    and its ref is in the cut.
 
     Raises :class:`NothingToCompact` when the result would not be smaller
     (for ``trigger="auto"``: small enough to leave the threshold), and
@@ -915,15 +1021,27 @@ def compact_messages(
 
     stored_at = {position: k for k, position in at.items()}
     hard = {p for p in range(len(view)) if stored_at.get(p) in opaque}
-    in_fold = {k for first, last, m in segments if folded(first, last, m)
-               for k in range(first, last + 1)}
-    # A unit stays its own rows only while none of its nodes is compacted.
-    touched = {k for first, last, m in segments if compacted(first, last, m)
-               for k in range(first, last + 1)}
-    rebuilt = {p for p, positions in unit_of.items() if touched & set(positions)}
 
+    def rebuilt_units() -> set[int]:
+        """A unit stays its own rows only while none of its nodes is compacted."""
+        touched = {k for first, last, m in segments if compacted(first, last, m)
+                   for k in range(first, last + 1)}
+        return {p for p, positions in unit_of.items() if touched & set(positions)}
+
+    # Claude Code's own rows leave by what the ladder compacted: a call whose
+    # input is cut below does not make the rows around it old.
     last_compacted = max((last for first, last, m in segments if compacted(first, last, m)),
                          default=-1)
+    segments, cut_chars = _shorten_old_inputs(
+        segments, view, end=_old_calls_end(view, tail),
+        refs={key: nodes[k].node_id for key, k in owners.items()},
+        shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},
+        unit_of=unit_of, rebuilt=rebuilt_units(),
+        skip=hard | {p for p, positions in unit_of.items() if hard & set(positions)},
+    )
+    in_fold = {k for first, last, m in segments if folded(first, last, m)
+               for k in range(first, last + 1)}
+    rebuilt = rebuilt_units()
     # Claude Code's own rows of the newest request, and of the newest earlier
     # request that has any, are the work in hand (a skill being followed, a
     # command's expansion): never dropped.
@@ -1003,6 +1121,8 @@ def compact_messages(
     take(len(view))
     mark(-1, False)
     _fit_pinned(out, covers, shrunk, dropped, unknown, requests, target, report)
+    if report is not None:
+        report["input_tokens_cut"] = cut_chars // 4
     note = _note_row(dropped, notes, archive)
     final = _alternate(([note] if note else []) + out)
     validate_rows(final, handles=False)

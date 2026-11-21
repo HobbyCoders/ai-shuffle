@@ -2224,6 +2224,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.warning("claude mod compaction %s: no portable checkpoint (%s); a re-seed "
                            "on another worker starts from the stored path, compacted to "
                            "fit its window", compaction_id, checkpoint["skipped"])
+        if report.get("input_tokens_cut"):
+            logger.info("claude mod compaction (%s) cut ~%d tokens of old tool call inputs",
+                        trigger, report["input_tokens_cut"])
         if report and not report.get("met"):
             # The target is a soft goal, not the selected context window.
             # Preserving recent results/instructions can legitimately exceed it.
