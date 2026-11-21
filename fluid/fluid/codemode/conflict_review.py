@@ -412,25 +412,38 @@ def locate(quote: Any, text: str) -> str | None:
     """``quote`` as it stands in ``text`` (one space between words), or None.
 
     The passage must be whole words of the rule, in the rule's own spelling
-    and capitals. Forgiven are what a model changes when it copies: runs of
-    whitespace, typographic quote and dash variants, the capital of the very
-    first letter, and quotation marks or an ellipsis wrapped around the
-    passage. What is returned is always the rule's own text.
+    and capitals. Forgiven are what a model changes when it copies: quotation
+    marks or an ellipsis wrapped around the passage, runs of whitespace,
+    typographic quote and dash variants, and the capital of the very first
+    letter. The least altered reading the rule contains wins, so a rule that
+    holds two spellings is quoted with the one the model named. What is
+    returned is always the rule's own text.
     """
     if not isinstance(quote, str):
         return None
     given = quote.strip()
     bare = given.strip("\"“”'‘’").removesuffix("...").removesuffix("…").strip()
-    for candidate in dict.fromkeys((given, bare)):  # as given first: a mark may belong to the rule
-        if not candidate.split():
-            continue
+    candidates = [c for c in dict.fromkeys((given, bare)) if c]
+
+    def spaced(candidate: str, char: Any) -> str:
+        return r"\s+".join("".join(char(ch) for ch in word) for word in candidate.split())
+
+    def variant(ch: str) -> str:
+        return _QUOTE_VARIANTS.get(ch) or re.escape(ch)
+
+    def capital(candidate: str) -> str:
         first = candidate[0]
-        exact = _QUOTE_VARIANTS.get(first) or re.escape(first)
-        either = f"[{re.escape(first.lower())}{re.escape(first.upper())}]" if first.isalpha() else exact
-        rest = r"\s+".join("".join(_QUOTE_VARIANTS.get(ch) or re.escape(ch) for ch in word)
-                           for word in re.split(r"\s+", candidate[1:]))
-        for start in dict.fromkeys((exact, either)):  # the quote's own capital first
-            found = re.search(r"(?<!\w)" + start + rest + r"(?!\w)", text)
+        either = f"[{re.escape(first.lower())}{re.escape(first.upper())}]" if first.isalpha() else variant(first)
+        rest = spaced("x" + candidate[1:], variant)[1:]
+        return either + rest
+
+    readings = (re.escape,                              # the quote, character for character
+                lambda c: spaced(c, re.escape),         # ... with any run of whitespace
+                lambda c: spaced(c, variant),           # ... and any form of a quote mark or dash
+                capital)                                # ... and either capital of its first letter
+    for reading in readings:
+        for candidate in candidates:  # as given first: a mark may belong to the rule
+            found = re.search(r"(?<!\w)" + reading(candidate) + r"(?!\w)", text)
             if found:
                 passage = " ".join(found.group(0).split())
                 return passage if len(passage) <= QUOTE_MAX_CHARS else None

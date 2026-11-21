@@ -334,6 +334,20 @@ def test_a_quote_keeps_the_rule_s_capitals_and_may_be_short():
     # A rule that has both spellings: the one that was quoted is the one found.
     both = "Name the image Dev on staging. Never name it dev in production."
     assert review.locate("dev", both) == "dev" and review.locate("Dev", both) == "Dev"
+    # The same holds for a dash: the form that was quoted wins over a variant
+    # that stands earlier in the rule, and the two rules stay two passages.
+    hyphen = "Never write dev-preview or Dev–preview. The label is Dev-preview."
+    dash = "The label is Dev–preview."
+    assert review.locate("Dev-preview", hyphen) == "Dev-preview"
+    assert review.locate("Dev–preview", hyphen) == "Dev–preview"
+    now = time.time()
+    a = {"id": "m1", "origin": "o", "revision": 1, "text": hyphen, "protected": True,
+         "scope": "global", "updated_at": now - 1}
+    b = a | {"id": "m2", "text": dash, "updated_at": now}
+    claims, rejected = review.parse(json.dumps({"conflicts": [
+        {"a": "r1", "b": "r2", "a_quote": "Dev-preview", "b_quote": "Dev–preview"}]}),
+        review.Batch(subjects=[b], shown={"r1": a, "r2": b}))
+    assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == ("Dev-preview", "Dev–preview")
 
 
 def test_typographic_marks_in_a_quote_are_forgiven():
