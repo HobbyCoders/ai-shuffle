@@ -291,6 +291,50 @@ def test_cut_inputs_do_not_move_the_portable_checkpoint():
     assert CUT not in json.dumps(chat.checkpoint["rows"])
 
 
+def screenshot(chat: Chat) -> int:
+    """A screenshot result Claude Code holds whole; its stored index."""
+    chat.add(Message("assistant", [ToolUseBlock("shot", "mcp__browser__screenshot", {})]))
+    chat.add(Message("user", [ToolResultBlock(
+        "shot", [Text("Screenshot of the page"), Image(media_type="image/png", data="AAAA")])]))
+    return len(chat.stored) - 1
+
+
+def test_shorter_inputs_do_not_make_a_checkpoint_that_holds_a_screenshot_as_text():
+    """Whole, the writes before the screenshot put a checkpoint through the
+    trimmed result after it over the size limit, and none was written. Cut,
+    they fit. The checkpoint still may not reach the screenshot: its rows are
+    text, and a replay from them skips the stored node that has the image."""
+    for trigger in ("auto", "manual"):
+        chat = Chat()
+        for n in range(23):
+            chat.call("Write", {"file_path": f"src/big_{n}.py", "content": f"BODY-{n} " + "x" * 18_000},
+                      result="File created")
+        screenshot(chat)
+        held = chat.cli[-1]
+        chat.call("Read", {"file_path": "src/big.py"}, result="x" * 60_000)  # trimmed by the ladder
+        chat.write(8)
+        out, report = chat.compact(trigger)
+        assert report["input_tokens_cut"] > 23 * 18_000 // 4
+        assert held in out  # the live answer keeps Claude Code's row, image and all
+        assert chat.checkpoint == {}
+
+
+def test_a_checkpoint_ends_before_a_screenshot_and_keeps_what_came_before():
+    """What was compacted before the screenshot is still portable: the
+    checkpoint ends there, and the stored nodes replayed after it carry the
+    image and the calls that followed."""
+    chat = Chat()
+    chat.call("Read", {"file_path": "src/first.py"}, result="x" * 60_000)  # trimmed by the ladder
+    shot = screenshot(chat)
+    chat.call("Read", {"file_path": "src/second.py"}, result="y" * 60_000)  # trimmed too
+    chat.write(30)
+    chat.compact()
+    through = next(i for i, node in enumerate(chat.stored)
+                   if node.node_id == chat.checkpoint["through"])
+    assert through == 2 < shot
+    assert "Screenshot of the page" not in json.dumps(chat.checkpoint["rows"])
+
+
 def test_the_newest_calls_are_counted_call_by_call_in_a_parallel_row():
     """Seven writes made together are one row. Two newer calls leave four of
     them among the newest: the three oldest are cut, the big one first, and

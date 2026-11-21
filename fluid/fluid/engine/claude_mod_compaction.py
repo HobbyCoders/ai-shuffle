@@ -688,12 +688,20 @@ def _opaque_nodes(nodes: list[SessionNode], owners: dict[str, int]) -> set[int]:
              if isinstance(block, ToolUseBlock)}
     opaque: set[int] = set()
     for i, node in enumerate(nodes):
-        for block in node.message.content:
-            if isinstance(block, Image) or (isinstance(block, ToolResultBlock) and (
-                    names.get(block.tool_use_id) in _OPAQUE_RESULT_TOOLS
-                    or any(isinstance(inner, Image) for inner in block.content or ()))):
-                opaque.add(i)
+        if _holds_image(node) or any(
+                isinstance(block, ToolResultBlock)
+                and names.get(block.tool_use_id) in _OPAQUE_RESULT_TOOLS
+                for block in node.message.content):
+            opaque.add(i)
     return opaque
+
+
+def _holds_image(node: SessionNode) -> bool:
+    """Whether the stored message has an image, its own or in a tool result."""
+    return any(
+        isinstance(block, Image) or (isinstance(block, ToolResultBlock) and any(
+            isinstance(inner, Image) for inner in block.content or ()))
+        for block in node.message.content)
 
 
 # Turns the host starts on the owner's behalf: they continue the request
@@ -795,8 +803,9 @@ def _cut_old_inputs(
     input Claude Code holds for each call, for the count.
 
     The rows are not marked as compacted: the portable checkpoint ends where
-    the ladder's work ends, as it did, and never moves past a row it cannot
-    reproduce (an image) because an input after it got shorter.
+    the ladder's work ends, as it did. A shorter input can still bring a
+    checkpoint under its size limit, or make a compaction worth answering at
+    all; :func:`_checkpoint` keeps either from replacing an image with text.
     """
     done = {result["tool_use_id"] for row in out for result in row.get("toolResults", [])
             if not result.get("isError", False)}
@@ -1131,7 +1140,7 @@ def compact_messages(
         raise NothingToCompact("no safe compaction saving")
     if checkpoint is not None:
         checkpoint.clear()
-        checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes))
+        checkpoint.update(_checkpoint(out, covers, shrunk, note, nodes, owners))
     return final
 
 
@@ -1204,7 +1213,7 @@ def _fit_pinned(
 
 def _checkpoint(
     out: list[dict[str, Any]], covers: list[int], shrunk: list[bool],
-    note: dict[str, Any] | None, nodes: list[SessionNode],
+    note: dict[str, Any] | None, nodes: list[SessionNode], owners: dict[Any, int],
 ) -> dict[str, Any]:
     """The compacted part of the answer, portable to another worker.
 
@@ -1214,12 +1223,30 @@ def _checkpoint(
     rows and then the stored nodes after ``through`` instead of the whole
     history (#685). The cut is the last compacted row, moved later until no
     later row stands for an older stored node and no tool call is left open,
-    so nothing is replayed twice and every call keeps its result. Empty when
-    nothing was compacted; ``{"skipped": reason}`` when the rows would not
-    validate or are larger than ``CHECKPOINT_MAX_CHARS`` (the caller says so:
-    a re-seed elsewhere then starts from the full path, sized by its guard).
+    so nothing is replayed twice and every call keeps its result.
+
+    The rows are text, so a row Claude Code keeps with an image would be
+    replayed as its caption alone, and the replay skips the stored node that
+    has the image. The checkpoint therefore ends before the first such row
+    (``owners``: :func:`_tool_owners` of ``nodes``), whatever made the rows
+    after it smaller: the stored nodes replayed after ``through`` carry the
+    image.
+
+    Empty when nothing was compacted, or nothing before that row;
+    ``{"skipped": reason}`` when the rows would not validate or are larger
+    than ``CHECKPOINT_MAX_CHARS`` (the caller says so: a re-seed elsewhere
+    then starts from the full path, sized by its guard).
     """
-    compacted_at = [i for i, flag in enumerate(shrunk) if flag]
+    images = {i for i, node in enumerate(nodes) if _holds_image(node)}
+    end = len(out)
+    for i, row in enumerate(out):
+        stands_for = {covers[i]} | {owners.get(key) for key in (
+            [use["tool_use_id"] for use in row["toolUses"]]
+            + [f"result:{result['tool_use_id']}" for result in row.get("toolResults", [])])}
+        if "handle" in row and images & stands_for:
+            end = i
+            break
+    compacted_at = [i for i, flag in enumerate(shrunk[:end]) if flag]
     if not compacted_at:
         return {}
     cut = compacted_at[-1]
@@ -1238,7 +1265,7 @@ def _checkpoint(
             break
         cut += 1
         through = max(through, covers[cut])
-    if through < 0:
+    if through < 0 or cut >= end:
         return {}
     rows = [{k: v for k, v in row.items() if k != "handle"}
             for row in _alternate(([note] if note else []) + out[: cut + 1])]
