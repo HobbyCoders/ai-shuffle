@@ -22,7 +22,8 @@ Three things make the field match more than a bare ``fnmatch``:
   spelling as well as the raw one, so ``.env/``, ``.env `` (trailing space)
   and ``./x/../.env`` all reach the rule written for ``.env``. An allow rule
   only sees the normalized spellings: a raw ``src/../.env`` must not slip
-  through ``src/**``.
+  through ``src/**``. The real path of the value exactly as the tool opens
+  it is checked too: on Linux ``settings `` is not ``settings``.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any
 
 # Input fields that carry a filesystem path. The tool resolves the path after
@@ -56,6 +58,90 @@ def pattern_matches(value: str, pattern: str) -> bool:
     return fnmatchcase(value, pattern)
 
 
+def _opened_path(value: str, cwd: str | None) -> str | None:
+    """The real path the file tools open for ``value``, or None.
+
+    Mirrors ``fluid.tools.builtins._util.resolve``: the value exactly as given
+    (no stripping), joined to the session cwd when relative, symlinks
+    followed. The cwd is joined as given, not collapsed first: in
+    ``/work/link/..`` the ``..`` applies after ``link`` is followed. On Linux
+    ``settings `` (trailing space) is a different file from ``settings``;
+    Windows drops the trailing space itself, so there this equals the
+    normalized spelling. A missing path or a dangling link resolves to where
+    Write would create the file. A symlink loop resolves as far as it can
+    (best effort, for ask and deny rules); :func:`_openable` keeps an allow
+    rule from matching it.
+    """
+    if not value:
+        return None
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            path = Path(cwd or os.getcwd()) / path
+        return os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _openable(path: str) -> bool:
+    """False when ``path`` cannot be reached (a loop, EACCES, ENOTDIR).
+
+    A missing file is openable: Write creates it.
+    """
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _resolved_forms(resolved: str, root: str, relative: bool) -> set[str]:
+    """A resolved path's absolute spelling and, under ``root``, its relative one."""
+    forms = {resolved.replace("\\", "/")}
+    if relative:
+        try:
+            if os.path.commonpath([root, resolved]) == root:
+                forms.add(os.path.relpath(resolved, root).replace("\\", "/"))
+        except ValueError:  # Different drives have no relative form.
+            pass
+    return forms
+
+
+def _opened_forms(value: str, cwd: str | None, *, for_allow: bool) -> set[str] | None:
+    """:func:`_opened_path` as rule candidates; None when it cannot resolve.
+
+    Ask and deny rules get every form, best effort. An allow rule gets the
+    absolute form, plus the cwd-relative one only when the cwd as spelled is
+    the real cwd, and nothing for a path that cannot be reached.
+    """
+    opened = _opened_path(value, cwd)
+    if opened is None or (for_allow and not _openable(opened)):
+        return None
+    relative = bool(cwd) or not os.path.isabs(value)
+    base = cwd or os.getcwd()
+    spelled = os.path.abspath(base)
+    if for_allow and relative:
+        # ``work/link/..`` collapses to ``work`` but is really the link's
+        # parent; a form relative to ``work`` would name the wrong file.
+        try:
+            relative = os.path.normcase(spelled) == os.path.normcase(os.path.realpath(base))
+        except (OSError, ValueError):
+            relative = False
+    forms = _resolved_forms(opened, spelled, relative)
+    if not for_allow:
+        # The opened path has no links in it, so under a symlinked cwd only
+        # the real directory gives the relative form ``secrets/*`` is written
+        # for. Not for allow: a relative form that lost its link can name a
+        # different file than the cwd as spelled does.
+        try:
+            forms |= _resolved_forms(opened, os.path.realpath(base), relative)
+        except (OSError, ValueError):
+            pass
+    return forms
+
+
 def path_candidates(value: str, cwd: str | None = None) -> tuple[set[str], set[str]]:
     """``(raw, normalized)`` spellings of a path-bearing input value.
 
@@ -63,14 +149,19 @@ def path_candidates(value: str, cwd: str | None = None) -> tuple[set[str], set[s
     separators unified to ``/``, ``.`` and ``..`` segments collapsed, the
     absolute form (against ``cwd`` when given), the real path with symlinks
     followed, and the ``cwd``-relative form when the path sits under ``cwd``.
+    The real path of the value exactly as the tool opens it (unstripped) is
+    included too, so a trailing-space symlink cannot hide its target.
     """
     raw = {value}
+    exact = (
+        _opened_forms(value, cwd, for_allow=False) if cwd or os.path.isabs(value) else None
+    ) or set()
     text = value.strip().replace("\\", "/")
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]
     if not text:
-        return raw, set()
-    normalized = {os.path.normpath(text).replace("\\", "/")}
+        return raw, exact
+    normalized = {os.path.normpath(text).replace("\\", "/"), *exact}
     absolute = text if os.path.isabs(text) else (os.path.join(cwd, text) if cwd else None)
     if absolute:
         forms = {os.path.normpath(absolute)}
@@ -109,14 +200,13 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
         resolved = os.path.realpath(os.path.join(root, text))
     except (OSError, ValueError):
         return False
-    resolved_candidates = {resolved.replace("\\", "/")}
-    if cwd or not os.path.isabs(text):
-        try:
-            if os.path.commonpath([root, resolved]) == root:
-                resolved_candidates.add(os.path.relpath(resolved, root).replace("\\", "/"))
-        except ValueError:  # Different drives have no relative form.
-            pass
-    return any(fnmatchcase(c, p) for c in resolved_candidates for p in patterns)
+    resolved_candidates = _resolved_forms(resolved, root, bool(cwd) or not os.path.isabs(text))
+    if not any(fnmatchcase(c, p) for c in resolved_candidates for p in patterns):
+        return False
+    # The file the tool actually opens must be inside too: ``granted/notes ``
+    # (trailing space) can link outside while ``granted/notes`` resolves in.
+    opened = _opened_forms(value, cwd, for_allow=True)
+    return opened is not None and any(fnmatchcase(c, p) for c in opened for p in patterns)
 
 
 def _command_matches(value: str, pattern: str, decision: str) -> bool:

@@ -97,13 +97,32 @@ async def test_rg_error_exit_is_an_error_with_stderr(tmp_path, fake_rg) -> None:
 async def test_rg_withholds_credential_file_hits_and_caps_globally(tmp_path, fake_rg) -> None:
     # The credential hit arrives before the cap: the stream stops at the cap,
     # so a hit after it is never read and never counted.
-    lines = ["./.env:1:needle=secret"] + [f"./src/f{i}.py:{i}:needle" for i in range(5)]
+    lines = ["./.env\x001:needle=secret"] + [f"./src/f{i}.py\x00{i}:needle" for i in range(5)]
     fake_rg["proc"] = _Proc(stdout=("\n".join(lines) + "\n").encode())
     outcome = await _grep(tmp_path, limit=3)
     assert "needle=secret" not in outcome.text
     assert "hits in credential-pattern files" in outcome.text
     assert "[search truncated: match cap 3 reached" in outcome.text
     assert f"{tmp_path}{os.sep}src/f0.py:0:needle" in outcome.text
+
+
+async def test_rg_paths_are_parsed_through_the_nul_before_the_newline(
+    tmp_path, fake_rg
+) -> None:
+    """#1778: a file name may hold a newline; the NUL rg prints after the
+    path (``--null``) is where the path ends, not the first newline."""
+    fake_rg["proc"] = _Proc(stdout=(
+        b"./.env.site\nconfig\x001:needle=secret\n"
+        b"./a\nb.py\x002:needle plain\n"
+        b"./src/c.py\x003:needle: x:4: y\n"
+    ))
+    outcome = await _grep(tmp_path, no_ignore=True)
+    args, _ = fake_rg["calls"][0]
+    assert "--null" in args
+    assert "needle=secret" not in outcome.text
+    assert "hits in credential-pattern files" in outcome.text
+    assert f"{tmp_path}{os.sep}a\nb.py:2:needle plain" in outcome.text
+    assert f"{tmp_path}{os.sep}src/c.py:3:needle: x:4: y" in outcome.text
 
 
 async def test_rg_single_file_target_runs_in_its_parent(tmp_path, fake_rg) -> None:
@@ -118,7 +137,7 @@ async def test_rg_single_file_target_runs_in_its_parent(tmp_path, fake_rg) -> No
 
 
 async def test_repeat_search_returns_a_pointer(tmp_path, fake_rg) -> None:
-    fake_rg["proc"] = _Proc(stdout=b"./a.py:1:needle\n")
+    fake_rg["proc"] = _Proc(stdout=b"./a.py\x001:needle\n")
     ctx = ToolCtx(cwd=str(tmp_path))
     first = await grep_mod.handler({"pattern": "needle"}, ctx)
     second = await grep_mod.handler({"pattern": "needle"}, ctx)

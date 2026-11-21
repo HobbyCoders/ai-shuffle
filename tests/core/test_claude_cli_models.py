@@ -532,6 +532,23 @@ def test_a_preview_never_refreshes_the_cli_list():
             assert _preview_may_change_dev_data(refresh) is False
 
 
+def test_settings_rows_show_the_model_each_alias_runs(cli, mock_db):
+    """Settings lists `opus` as `claude-opus-5-5` (what the CLI resolves it to), keyed by the alias."""
+    rows = {row["id"]: row for row in cm.subscription_catalog_rows()["models"]}
+    assert {a: rows[a]["slug"] for a in cm.ALIASES} == {
+        "haiku": "claude-haiku-5-5",
+        "sonnet": "claude-sonnet-5-5",
+        "opus": "claude-opus-5-5",
+        "fable": "claude-fable-5-2",
+    }
+    assert rows["claude-mythos-5-1"]["slug"] == "claude-mythos-5-1"
+    # Before the CLI listed its models nothing says which version an alias runs.
+    cli["mode"] = "api_key"
+    rows = cm.subscription_catalog_rows()
+    assert rows["captured"] is False
+    assert [(row["id"], row["slug"]) for row in rows["models"]] == [(a, a) for a in cm.ALIASES]
+
+
 def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(cli, mock_db, monkeypatch, tmp_path):
     """S1 + S2 + S3: independent per-model keys, hidden_models metadata, and no-enabled-default refusal."""
     import asyncio

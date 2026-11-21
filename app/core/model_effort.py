@@ -158,6 +158,11 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
                 if listed is not None and listed.get("effort_levels") is not None:
                     known = cap or table.get(_DELEGATED_ALIASES.get(model, model)) or {}
                     cap = _capability(list(listed["effort_levels"]), known.get("default_effort"))
+        elif provider.get("provider_type") == "anthropic" and route == "anthropic":
+            # The saved Anthropic API key (claude_api_provider.virtual_row) runs
+            # the native Messages API: same table and aliases as the unbound
+            # native route above, never the delegated CLI's.
+            cap = _ANTHROPIC.get(_ALIASES.get(model, model)) or _ANTHROPIC.get(canonical_effort_model(model))
         elif provider.get("provider_type") == "openai" and provider.get("auth_mode") not in ("chatgpt", "grok"):
             cap = _OPENAI.get(model)
         elif provider.get("provider_type") in ("xai", "grok"):

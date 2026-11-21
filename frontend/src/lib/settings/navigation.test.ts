@@ -371,4 +371,32 @@ describe('stacked (phone) history', () => {
 		settingsNav.selectItem('l1');
 		expect(nav.pushState).not.toHaveBeenCalled();
 	});
+
+	// #1895: an MCP server, hook or API user added from its draft form.
+	it('shows a saved draft in the step the draft had, so Back returns to the list (#1895)', () => {
+		settingsNav.selectCategory('mcp');
+		settingsNav.selectItem('__draft__');
+		nav.pushState.mockClear();
+		settingsNav.replaceItem('github', 'mcp');
+		expect(nav.pushState).not.toHaveBeenCalled();
+		expect(nav.replaceState).toHaveBeenLastCalledWith('', {
+			settingsView: 'detail',
+			settingsDepth: 2,
+			settingsCategory: 'mcp',
+			settingsItem: 'github'
+		});
+		expect(settingsNav.selectedItem('mcp')).toBe('github');
+		expect(settingsNav.view).toBe('detail');
+		expect(settingsNav.depth).toBe(2);
+	});
+
+	it('selects a saved draft as usual where there is no step to rewrite (#1895)', () => {
+		settingsNav.stacked = false;
+		settingsNav.selectCategory('hooks');
+		settingsNav.replaceItem('hk1');
+		expect(nav.replaceState).not.toHaveBeenCalled();
+		expect(nav.pushState).not.toHaveBeenCalled();
+		expect(settingsNav.selectedItem('hooks')).toBe('hk1');
+		expect(settingsNav.view).toBe('detail');
+	});
 });

@@ -43,7 +43,7 @@
 		const name = await model.save(id);
 		if (!name) return;
 		flashSaved();
-		if (isDraft) settingsNav.selectItem(name, CATEGORY);
+		if (isDraft) settingsNav.replaceItem(name, CATEGORY);
 	}
 
 	function cancelDraft() {

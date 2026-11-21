@@ -10,9 +10,19 @@ from unittest.mock import patch
 
 module = runpy.run_path(str(Path(__file__).with_name("prepare-android-ui.py")))
 readiness, prepare, configure_webview = module["readiness"], module["prepare"], module["configure_webview"]
+boot_menu_anr = module["boot_menu_anr"]
 
 HOME = "mCurrentFocus=Window{18f6feb u0 com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher}\n"
 LAUNCHER_ANR = "mCurrentFocus=Window{563c1f5 u0 Application Not Responding: com.android.launcher3}\n"
+PIXEL_HOME = HOME.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
+PIXEL_ANR = LAUNCHER_ANR.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
+# Verbatim from run 44840167000 (API 36, shard 2/4): the emulator action's boot-time `input keyevent 82`.
+MENU_ANR = ("11-21 00:02:47.032   682  2460 I am_anr  : [0,1405,com.google.android.apps.nexuslauncher,885767749,"
+            "Input dispatching timed out (25486f1 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher."
+            "NexusLauncherActivity is not responding. Waited 5001ms for KeyEvent(deviceId=-1, eventTime=38712000000, "
+            "source=UNKNOWN, displayId=-1, action=DOWN, flags=0x00000000, keyCode=MENU(82), scanCode=0, "
+            "metaState=0x00000000, repeatCount=0), policyFlags=0x6b000000).]\n")
+EVENTS = "--------- beginning of events\n" + MENU_ANR
 UNLOCKED, AWAKE = "mInputRestricted=false\n", "mWakefulness=Awake\n"
 CAPTURE = json.loads((Path(__file__).parent / "fixtures/api36-webview133.json").read_text())
 SDK = re.fullmatch(r"\[ro.build.version.sdk\]: \[(.+)\]", CAPTURE["sdk_property"])[1]
@@ -40,8 +50,8 @@ class EmulatorReadinessTest(unittest.TestCase):
             self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("com.android.launcher3", package), UNLOCKED, AWAKE))
         self.assertEqual("other_error", readiness(LAUNCHER_ANR.replace("Application Not Responding", "Application Error"), UNLOCKED, AWAKE))
 
-    def test_google_api36_launcher_is_ready_but_not_anr_recoverable(self):
-        pixel = HOME.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
+    def test_google_api36_launcher_is_ready(self):
+        pixel = PIXEL_HOME
         self.assertEqual("ready", readiness(pixel, UNLOCKED, AWAKE))
         self.assertEqual("waiting", readiness(pixel, "mInputRestricted=true", AWAKE))
         self.assertEqual("waiting", readiness(pixel, UNLOCKED, "mWakefulness=Asleep"))
@@ -49,18 +59,60 @@ class EmulatorReadinessTest(unittest.TestCase):
         self.assertEqual("waiting", readiness(pixel + HOME, UNLOCKED, AWAKE))
         self.run_preparation([pixel])
         self.assertFalse(any("force-stop" in command for command in self.commands))
-        pixel_anr = LAUNCHER_ANR.replace("com.android.launcher3", "com.google.android.apps.nexuslauncher")
-        with self.assertRaisesRegex(RuntimeError, "refusing recovery"):
-            self.run_preparation([pixel_anr])
-        self.assertFalse(any("force-stop" in command for command in self.commands))
+        self.assertFalse(any("logcat" in command for command in self.commands))
+
+    def test_only_the_boot_menu_key_anr_record_is_recognized(self):
+        self.assertTrue(boot_menu_anr(EVENTS))
+        self.assertTrue(boot_menu_anr(MENU_ANR * 2))
+        app = MENU_ANR.replace("com.google.android.apps.nexuslauncher", "com.hobbycoders.aishuffle")
+        for events in ("", "--------- beginning of events\n", app, EVENTS + app,
+                       MENU_ANR.replace("keyCode=MENU(82)", "keyCode=BACK(4)"),
+                       MENU_ANR.replace("deviceId=-1", "deviceId=3"),
+                       MENU_ANR.replace("Input dispatching timed out", "executing service"),
+                       MENU_ANR.replace(",com.google.android.apps.nexuslauncher,", ",com.google.android.apps.nexuslauncher.other,"),
+                       EVENTS.replace("Waited 5001ms for KeyEvent", "Waited 5001ms for MotionEvent")):
+            with self.subTest(events=events):
+                self.assertFalse(boot_menu_anr(events))
+
+    def test_pixel_launcher_boot_menu_anr_gets_one_restart_then_all_readiness_checks(self):
+        self.assertEqual("pixel_launcher_anr", readiness(PIXEL_ANR, UNLOCKED, AWAKE))
+        self.assertEqual("other_error", readiness(PIXEL_ANR.replace("Application Not Responding", "Application Error"), UNLOCKED, AWAKE))
+        self.run_preparation([PIXEL_ANR, "mCurrentFocus=null", PIXEL_HOME], events=EVENTS)
+        self.assertEqual([("shell", "am", "force-stop", "com.google.android.apps.nexuslauncher")],
+                         [command for command in self.commands if "force-stop" in command])
+        self.assertIn(("shell", "am", "start", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME",
+                       "-p", "com.google.android.apps.nexuslauncher"), self.commands)
+        self.assertEqual(1, self.diagnostics)
+        self.assertIn("ANR on the boot-time MENU key", self.summary)
+        self.assertIn("restarting Pixel Launcher once", self.summary)
+        self.assertEqual(EVENTS, self.evidence["pixel-launcher-anr-events.txt"])
+
+    def test_pixel_launcher_anr_without_the_menu_key_record_is_never_dismissed(self):
+        app = MENU_ANR.replace("com.google.android.apps.nexuslauncher", "com.hobbycoders.aishuffle")
+        for events in ("", EVENTS + app, MENU_ANR.replace("keyCode=MENU(82)", "keyCode=WAKEUP(224)")):
+            with self.subTest(events=events), self.assertRaisesRegex(RuntimeError, "refusing recovery"):
+                self.run_preparation([PIXEL_ANR], events=events)
+            self.assertFalse(any("force-stop" in command for command in self.commands))
+            self.assertEqual(0, self.diagnostics)
+
+    def test_repeated_pixel_launcher_anr_fails_without_repeated_recovery(self):
+        with self.assertRaisesRegex(RuntimeError, "hung again"):
+            self.run_preparation([PIXEL_ANR], events=EVENTS)
+        self.assertEqual(1, sum("force-stop" in command for command in self.commands))
+
+    def test_launcher_restart_is_shared_between_both_launchers(self):
+        with self.assertRaisesRegex(RuntimeError, "hung again"):
+            self.run_preparation([LAUNCHER_ANR, PIXEL_ANR], events=EVENTS)
+        self.assertEqual(1, sum("force-stop" in command for command in self.commands))
 
     def test_full_dump_with_historical_focus_is_not_ready(self):
         self.assertEqual("waiting", readiness(HOME + LAUNCHER_ANR, UNLOCKED, AWAKE))
 
-    def run_preparation(self, snapshots, deadline_seconds=12):
+    def run_preparation(self, snapshots, deadline_seconds=12, events=""):
         self.commands = []
         self.diagnostics = 0
         self.elapsed = 0
+        self.evidence = {}
         iterator = iter(snapshots)
         current = None
 
@@ -80,6 +132,8 @@ class EmulatorReadinessTest(unittest.TestCase):
                 return BUILD_ID + "\n"
             if args == ("shell", "dumpsys", "webviewupdate"):
                 return SYNTHETIC_PROVIDER
+            if args == ("shell", "logcat", "-d", "-b", "events", "-s", "am_anr"):
+                return events
             return ""
 
         def sleep(seconds):
@@ -96,6 +150,7 @@ class EmulatorReadinessTest(unittest.TestCase):
                             diagnostics=diagnostics)
                 finally:
                     self.summary = summary.read_text() if summary.exists() else ""
+                    self.evidence = {path.name: path.read_text() for path in Path(folder).glob("*-events.txt")}
 
     def test_normal_boot_never_restarts_any_application(self):
         self.run_preparation([HOME])

@@ -166,7 +166,7 @@ class CrossAppFenceTest {
         fixture(command)
         await("No event reached the service after $command") { service.eventsSeen > seen }
     }
-    private fun holdEventChecks() { ShuffleAccessibilityService.eventCheckDelayMs = 1_500 }
+    private fun holdEventChecks(ms: Long = 1_500) { ShuffleAccessibilityService.eventCheckDelayMs = ms }
     /** How long the app's main thread took to run something posted now. */
     private fun mainThreadDelay(): Long {
         val ran = CountDownLatch(1); val started = android.os.SystemClock.uptimeMillis()
@@ -463,9 +463,28 @@ class CrossAppFenceTest {
         assertNotTapped()
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
-        fixture("dense:100"); fixture("delay:5") // Each read takes over 500 ms; a clean one must still count.
-        val tapping = tap(read(waitSeconds = 15)); allow()
-        assertEquals("performed", status(tapping, 15).getString("status"))
+        fixture("dense:100")
+        // No event fence check runs in this test, so once the slow read is armed nothing but the tap's own reads reaches the target.
+        holdEventChecks(60_000)
+        val ref = read(waitSeconds = 15)
+        // Every attempt's read of the target takes 550 ms at that one call: past the 500 ms window, yet with the ~100 rows still well
+        // inside the 2 s read limit, as no other call is slowed. A per-row delay sums one sleep per call, and those reads measured
+        // 0.6 to over 2 s on CI. Armed once the closing panel's events have arrived, so none should land in the first read.
+        val slow = suspend { withContext(Dispatchers.IO) { fixture("slowread:550") } }
+        ShuffleAccessibilityService.afterConsentClosed = { delay(300); slow() }
+        val readings = java.util.concurrent.CopyOnWriteArrayList<Reading>()
+        // A late event can still make an attempt PENDING (or a bad read UNCONFIRMED), and the fence then rightly reads again. Arm the
+        // delay again for that read only, so a retry is as slow as the first. SAME and CHANGED end the tap, so a passing run leaves nothing armed.
+        ShuffleAccessibilityService.beforeRetryWindow = { reading ->
+            readings += reading
+            if (reading.verdict == FenceRead.PENDING || reading.verdict == FenceRead.UNCONFIRMED) slow()
+        }
+        val tapping = tap(ref); allow()
+        assertEquals("Reads after consent: $readings", "performed", status(tapping, 15).getString("status"))
+        // The hook sees each attempt once, and the fence stops at the first SAME, so the attempt that tapped is the last one seen.
+        val tapped = readings.lastOrNull()
+        assertTrue("The read that let the tap through must be clean and take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $readings",
+            tapped != null && tapped.verdict == FenceRead.SAME && (tapped.readMs ?: 0L) > AppControlFence.SETTLE_MS)
         assertTapped(1)
     }
     /** A screen where every read takes over 500 ms, and a reference to its target. */

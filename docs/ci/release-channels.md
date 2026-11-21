@@ -228,10 +228,11 @@ success on the exact protected-main revision, using the same read-only gate. It 
 back. Missing/stale/failed evidence refuses promotion; this lane never moves
 `latest`, major or minor aliases, and mixed nightly/stable requests are rejected.
 
-The **nightly** source update runs automatically after `CI` completes
-successfully on protected `main`, as well as once a day at **06:00 UTC** and by
-owner-only manual dispatch for retries. Pushes start the read-only full suite,
-not signing directly. Before setting up publication dependencies, the publisher
+The **nightly** source update runs once a night at **12:00 AM New York time**
+(`America/New_York`, so it follows daylight saving time) and by owner-only
+manual dispatch. A merge or a finished `CI` run never starts it: pushes start
+only the read-only full suite, and the next nightly ships the newest revision
+it proved. Before setting up publication dependencies, the publisher
 compares main's revision with the published manifest and exits if unchanged.
 
 Publication requires either proof on the **exact revision being published**:
@@ -243,8 +244,6 @@ Publication requires either proof on the **exact revision being published**:
   exact path through GitHub's API, both repository identities, `head_sha`,
   `head_branch: main`, and event `push` or `workflow_dispatch`. Those events
   load the root workflow from that main revision, never PR/fork workflow code.
-  The `workflow_run` payload only triggers selection: the gate re-verifies its
-  run ID and attempt through the API before considering any publication proof.
 
 Only the newest hosted run and its **latest attempt** count; a failed, cancelled
 or in-progress rerun cannot reuse an older hosted pass. The gate queries jobs

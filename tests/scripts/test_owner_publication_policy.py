@@ -275,20 +275,18 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
     assert "inputs.publish_download" in publish
 
 
-def test_nightly_hosted_completion_is_guarded_but_stable_stays_owner_only():
+def test_nightly_starts_only_on_its_schedule_or_owner_dispatch():
     condition = workflow("desktop-source.yml")["jobs"]["gate"]["if"]
-    assert permits(condition, event="workflow_run", run_event="push", actor_id="7")
-    assert permits(condition, event="workflow_run", run_event="workflow_dispatch", actor_id="7")
-    for changes in [
-        {"run_event": "pull_request"}, {"run_branch": "feature"}, {"run_repo": "fork/ai-shuffle"},
-        {"run_status": "in_progress"}, {"run_conclusion": "cancelled"}, {"run_conclusion": "failure"},
-        {"repo": "fork/ai-shuffle"}, {"ref": "refs/heads/feature"},
-    ]:
-        context = dict(event="workflow_run", run_event="push")
-        context.update(changes)
-        assert not permits(condition, **context)
-    assert not permits(condition, actor_id="7")  # Manual dispatch remains owner-only.
     assert permits(condition, event="schedule")
+    assert permits(condition)  # The owner's manual dispatch on main.
+    assert not permits(condition, actor_id="7")  # Manual dispatch remains owner-only.
+    # A green CI run on main (a merge) no longer starts a nightly.
+    for run_event in ("push", "workflow_dispatch"):
+        assert not permits(condition, event="workflow_run", run_event=run_event, actor_id="7")
+        assert not permits(condition, event="workflow_run", run_event=run_event)
+    for changes in [{"repo": "fork/ai-shuffle"}, {"ref": "refs/heads/feature"}]:
+        assert not permits(condition, event="schedule", **changes)
+        assert not permits(condition, **changes)
 
 
 @pytest.mark.parametrize("ref", [MAIN, TAG, "refs/pull/123/merge"])

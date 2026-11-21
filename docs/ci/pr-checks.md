@@ -369,7 +369,7 @@ only: it compares with what main has published.
 - The daily scheduled run (08:00 UTC, its own concurrency groups in `ci.yml`
   and every workflow it calls, so it never queues with or displaces a push run)
   and a dispatch (its own groups too) run **everything**. The scheduled run
-  never publishes: the nightly follows push and dispatch runs only. Dispatch
+  never proves a revision for the nightly: only push and dispatch runs do. Dispatch
   `ci.yml` on `main` before a stable release to prove the whole tree in one run.
 - A push run that skipped areas authorizes publication like any other: the
   `CI` job passes only when every area either passed in this run or was skipped
@@ -386,7 +386,9 @@ files. The run on main after the merge adds the rest: every area no pull
 request passed on the same files, and every journey the changes select,
 including the `all` rules and UI files no rule covers
 ([UI journeys](#ui-journeys)). The nightly publishes only the newest main
-commit whose run passed all of it.
+commit whose run passed all of it. A merge does not start the nightly: it runs
+once a night at 12:00 AM New York time, or when the owner dispatches "Publish
+desktop source update" (`desktop-source.yml`).
 
 A started run on main is never cancelled by a later merge. Merges that land
 while it runs wait as one run: GitHub keeps one run going and the newest one
@@ -446,9 +448,12 @@ python scripts/ci/nightly_wait.py --pr <number>   # or the commit on main
 
 It reads GitHub and the public nightly pointer, prints one line per change of
 state, and exits 0 once the published nightly contains the commit, 1 when
-nothing in flight can publish it (the newest covering run failed, or a pass was
-never published; the reason is printed), or 2 on timeout (default 120 minutes).
-`--once` reports the current state and exits (3 when not published yet).
+nothing in flight can publish it (the newest covering run failed, or the
+publisher ran after a pass without shipping it; the reason is printed), 2 on
+timeout (default 120 minutes), or 4 when main's CI has proven the commit and
+it waits for the next nightly (12:00 AM New York time, or the owner's dispatch
+of the publisher). `--once` reports the current state and exits (3 when not
+published yet, 4 when proven and waiting for the nightly).
 
 The root workflow calls the checked-in reusable CI workflows; their matrices,
 full test selection and gates remain in force. No test job has signing
@@ -496,9 +501,11 @@ No stage needs private source or owner-machine material. Update reach uses
 public Git history, signed manifests and merged-PR metadata only; a signed
 pointer that is not on public main refuses.
 
-After a successful main run, `desktop-source.yml` starts via `workflow_run` and
-re-verifies canonical repository, main/push-or-dispatch identity, root workflow
-path/ID, exact SHA, latest run/attempt and successful aggregate through the API.
+A successful main run does not start `desktop-source.yml`; the nightly runs at
+12:00 AM New York time or on owner dispatch. It selects the newest revision
+with a hosted pass and re-verifies canonical repository, main/push-or-dispatch
+identity, root workflow path/ID, exact SHA, latest run/attempt and successful
+aggregate through the API.
 The latest attempt number and URL are included in publication logs. Owner-local
 `local/full-suite` successes remain accepted independently. The newest terminal
 owner outcome decides, ignoring pending retries: failure/error vetoes that exact
@@ -1179,7 +1186,7 @@ python scripts/local_ci.py full --attest
 This runs every suite, rebuilds the backend test map that later selections
 use, and posts the commit status `local/full-suite` (pending while it runs,
 then success or failure) through `gh`. "Publish desktop source update"
-runs at 06:00 UTC or on owner dispatch. It selects the newest owner-authored
+runs at 12:00 AM New York time or on owner dispatch. It selects the newest owner-authored
 successful status on protected main's **first-parent** history, strictly newer
 than the verified published revision (`scripts/ci/edge_publication_gate.py`).
 A merge during a full run no longer wastes the ancestor's pass: that exact tree
