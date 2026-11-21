@@ -167,6 +167,11 @@ def _printable(value: str) -> bool:
     return all(0x21 <= ord(ch) <= 0x7E for ch in value)
 
 
+def _ascii(value: str) -> bool:
+    """Visible ASCII characters and spaces."""
+    return all(0x20 <= ord(ch) <= 0x7E for ch in value)
+
+
 def parse_origin(url: str) -> Origin:
     if not isinstance(url, str) or not url or len(url) > 2048 or not _printable(url):
         raise AccessDenied("Enter the service as an https:// address.")
@@ -217,9 +222,14 @@ def credential_header(name: str, scheme: str, secret: str, username: str = "") -
     """The header that carries the credential, validated.
 
     With a ``username`` the secret is that account's password and the header
-    is HTTP Basic (RFC 7617, UTF-8): the broker encodes the pair, so neither
-    the password nor the encoded pair is ever typed, stored or shown in a
-    form the model could read. Messages never quote a submitted value.
+    is HTTP Basic (RFC 7617): the broker encodes the pair, so neither the
+    password nor the encoded pair is ever typed, stored or shown in a form the
+    model could read. Messages never quote a submitted value.
+
+    Both are ASCII. Servers disagree on the charset of other characters in
+    Basic credentials, and an ASCII character is the same byte in every
+    charset and the same number in every escape, which is what lets ``redact``
+    find an echoed credential however the service wrote it.
     """
     name = (name or "").strip()
     scheme = (scheme or "").strip()
@@ -229,10 +239,14 @@ def credential_header(name: str, scheme: str, secret: str, username: str = "") -
             raise AccessDenied(
                 "A username and password sign in with the Authorization header and the Basic scheme."
             )
-        if len(username) > 128 or ":" in username or not username.isprintable():
-            raise AccessDenied("Enter the service username without a colon or line breaks.")
-        if not isinstance(secret, str) or not 8 <= len(secret) <= 8192 or not secret.isprintable():
-            raise AccessDenied("Enter a password of 8 to 8,192 characters without line breaks.")
+        if len(username) > 128 or ":" in username or not _ascii(username):
+            raise AccessDenied(
+                "Enter the service username without a colon, using unaccented letters, digits and symbols."
+            )
+        if not isinstance(secret, str) or not 8 <= len(secret) <= 8192 or not _ascii(secret):
+            raise AccessDenied(
+                "Enter a password of 8 to 8,192 characters, using unaccented letters, digits, symbols and spaces."
+            )
         pair = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
         return name, f"Basic {pair}"
     if not _TOKEN.fullmatch(name) or name.lower() in RESERVED_HEADERS:
@@ -303,7 +317,11 @@ def request_url(origin: Origin, path: str) -> str:
 
 
 def _needles(secret: str, header_value: str) -> list[str]:
-    """The credential in every form an echo can carry; ``redact`` also reads through escapes."""
+    """The credential in every form an echo can carry; ``redact`` also reads through escapes.
+
+    Credentials are ASCII (``credential_header``). Only the text inside a pair
+    the owner encoded themselves may not be: that is matched as its UTF-8 bytes.
+    """
     # The credential without its scheme: for a username and password this is
     # the encoded pair, which is not the secret itself.
     credential = header_value.rpartition(" ")[2]
@@ -322,14 +340,15 @@ def _needles(secret: str, header_value: str) -> list[str]:
                 values.add(decoded.split(":", 1)[1])  # HTTP Basic password
     except (ValueError, UnicodeDecodeError):
         pass
-    return sorted((value for value in values if len(value) >= 6), key=len, reverse=True)
+    # ``redact`` reads one character per byte.
+    return sorted((value.encode().decode("latin-1") for value in values if len(value) >= 6), key=len, reverse=True)
 
 
 def _redact_header(value: str, needles: list[str]) -> str:
     """Redact a response header however the service encoded what it echoes.
 
     httpx reads header values as UTF-8 when all of them are valid UTF-8 and as
-    Latin-1 otherwise. Scan the bytes it received: ``redact`` reads both.
+    Latin-1 otherwise. Scan the bytes it received.
     """
     try:
         charset, data = "latin-1", value.encode("latin-1")
@@ -338,12 +357,10 @@ def _redact_header(value: str, needles: list[str]) -> str:
     return redact(data, needles).decode(charset, "replace")
 
 
-# A response is scanned as characters, one per byte to begin with. An escape
-# that holds a number stands for the character with that number, whether its
-# writer meant a character ("\xe9" from Python's ascii()) or one byte of its
-# UTF-8 form ("\xc3\xa9" from repr() of bytes); ``_UTF8`` then joins bytes
-# into the characters they spell. The credential is compared as characters,
-# so neither the escape nor the charset has to be guessed.
+# A response is scanned as characters, one per byte. An escape that holds a
+# number stands for the character with that number. A credential is ASCII, and
+# an ASCII character is one byte in every charset a service answers in and the
+# same number whether the writer of "\x2b" meant a character or a byte.
 
 
 def _character(code: int) -> str | None:
@@ -351,11 +368,11 @@ def _character(code: int) -> str | None:
 
 
 def _numbered(match: re.Match[str]) -> str | None:
-    """What an escape holding a number stands for: groups are a UTF-16 pair, then
-    hexadecimal forms, then an octal one, then a character written after the mark."""
-    high, low, *hexadecimal, octal, short = match.groups()
-    if short:
-        return short
+    """What a backslash escape stands for: groups are a UTF-16 pair, then hexadecimal
+    forms, then an octal one, then a character that the mark only protects."""
+    high, low, *hexadecimal, octal, protected = match.groups()
+    if protected:
+        return protected
     if high:
         return _character(0x10000 + ((int(high, 16) - 0xD800) << 10) + int(low, 16) - 0xDC00)
     if octal:
@@ -379,14 +396,7 @@ def _entity(match: re.Match[str]) -> str | None:
     return _character(int(decimal) if decimal else int(hexadecimal, 16))
 
 
-def _joined(match: re.Match[str]) -> str | None:
-    try:
-        return match[0].encode("latin-1").decode("utf-8")
-    except UnicodeDecodeError:
-        return None  # Not the shortest form, or a surrogate: not UTF-8.
-
-
-# Every named character of HTML (PHP's htmlentities() writes "é" as "&eacute;").
+# Every named character of HTML ("&quot;", "&plus;", "&sol;").
 _ENTITIES = {name[:-1]: text for name, text in html5.items() if name.endswith(";")}
 
 
@@ -398,25 +408,24 @@ def _pair(mark: str) -> str:
 # The ways a service writes the characters of what it echoes, each as (what an
 # escape looks like, what it stands for).
 # Backslash escapes of JSON and of the languages services are written in:
-# "é" in either case and as a UTF-16 pair, "\U000000e9", "\u{e9}",
-# "\x{e9}", "\xe9", "\351", and a quote, slash or backslash after the mark.
+# "+" in either case and as a UTF-16 pair, "\U0000002b", "\u{2b}",
+# "\x{2b}", "\x2b", "\053", and a symbol or a space the mark only protects
+# ("\/" in JSON, "\+" from a pattern escaper, "\ " from a shell).
 _BACKSLASH = (
     re.compile(
         _pair(r"\\u") + r"|\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|[ux]\{([0-9a-fA-F]{1,6})\}"
-        r"|x([0-9a-fA-F]{2})|([0-3][0-7]{2})|([\"\\/']))"
+        r"|x([0-9a-fA-F]{2})|([0-3][0-7]{2})|([ -/:-@\[-`{-~]))"
     ),
     _numbered,
 )
-# URLs: "%C3%A9", and "%u00E9" from JavaScript's escape(). Forms also write a space as "+".
+# URLs: "%2B", and "%u002B" from JavaScript's escape(). Forms also write a space as "+".
 _PERCENT = (re.compile(_pair("%u") + "|%(?:u([0-9a-fA-F]{4})|([0-9a-fA-F]{2}))"), _percent)
 _FORM = (re.compile(_PERCENT[0].pattern + r"|\+"), _percent)
-# Pages: "&#233;", "&#xE9;" and "&eacute;".
+# Pages: "&#43;", "&#x2B;" and "&plus;".
 _HTML = (re.compile("&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]*));"), _entity)
 _ESCAPES = (_BACKSLASH, _PERCENT, _FORM, _HTML)
-# Bytes that spell one character in UTF-8, each still a character of its own.
-_UTF8 = (re.compile("[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}"), _joined)
-# What an escape or a character of several bytes starts with, and the length of the longest escape.
-_STARTS = frozenset("\\%&") | frozenset(map(chr, range(0xC2, 0xF5)))
+# What an escape starts with, and the length of the longest one.
+_STARTS = frozenset("\\%&")
 _LONGEST = max(map(len, _ENTITIES)) + 2
 
 
@@ -463,24 +472,22 @@ class _Decoded:
 
 
 def _readings(text: str) -> list[_Decoded]:
-    """``text`` with one kind of escape written out, a second kind on top of it, and
-    each of those, and ``text`` itself, with its bytes joined into characters.
+    """``text`` with one kind of escape written out, and with a second kind on top of it.
 
     Two layers cover text held inside other text: JSON in a JSON string, a URL
     or a page in JSON, a page that shows a URL.
     """
-    layers: list[_Decoded] = []
+    readings: list[_Decoded] = []
     for outer in _ESCAPES:
         once = _Decoded(text, outer)
         if not once.changed:
             continue
-        layers.append(once)
+        readings.append(once)
         for inner in _ESCAPES:
             twice = _Decoded(once.text, inner, once)
             if twice.changed:
-                layers.append(twice)
-    joined = [_Decoded(text, _UTF8), *(_Decoded(layer.text, _UTF8, layer) for layer in layers)]
-    return layers + [reading for reading in joined if reading.changed]
+                readings.append(twice)
+    return readings
 
 
 def _occurrences(text: str, needles: list[str]):
@@ -508,11 +515,11 @@ def _borders(needle: str) -> list[int]:
 def _running(text: str, needle: str, borders: list[int]) -> int | None:
     """Where ``needle`` starts in ``text`` without ending before ``text`` does.
 
-    The start of the needle may run to the end of ``text`` or to an escape, or
-    a character of several bytes, that the end cut off: it reads as plain text
-    from what such a thing starts with. Two layers can leave two such pieces.
-    Such a start near the end counts by itself too: what it starts may be the
-    needle's first character. One pass, like ``redact``.
+    The start of the needle may run to the end of ``text`` or to an escape the
+    end cut off, which reads as plain text from the character every escape
+    starts with. Two layers can leave two such pieces. Such a character near
+    the end counts by itself too: the escape it starts may be the needle's
+    first character. One pass, like ``redact``.
     """
     size = len(text)
     edge = max(0, size - 2 * _LONGEST)
@@ -534,14 +541,15 @@ def _running(text: str, needle: str, borders: list[int]) -> int | None:
 def redact(data: bytes, needles: list[str], limit: int | None = None, *, cut: bool = False) -> bytes:
     """Replace every whole occurrence that starts before ``limit``; keep at most ``limit`` input bytes.
 
-    An occurrence is the credential as written, in UTF-8 or Latin-1, or behind
-    up to two layers of the escapes above: those of JSON and the languages
-    services are written in, of URLs and forms, and of pages. A body in UTF-16
-    or UTF-32 is not returned at all. Every pass is one linear scan: the
-    service chooses the response, so nothing here may backtrack. This catches a
+    An occurrence is the credential as written or behind up to two layers of
+    the escapes above: those of JSON and the languages services are written
+    in, of URLs and forms, and of pages. A credential is ASCII, so the charset
+    of the response does not change how it is written; a body in UTF-16 or
+    UTF-32 is not returned at all. Every pass is one linear scan: the service
+    chooses the response, so nothing here may backtrack. This catches a
     service that repeats what it was sent. One that transforms a credential
-    some other way (another charset, a hash, a third layer of escapes) cannot
-    be caught by a scan; the owner chose to send it that credential.
+    some other way (a hash, a third layer of escapes) cannot be caught by a
+    scan; the owner chose to send it that credential.
 
     With ``cut``, ``data`` is the start of a longer response: the result also
     stops where an occurrence was still running when ``data`` ended, or where
@@ -641,7 +649,7 @@ async def perform(
         key=len, reverse=True,
     )
     # Far enough past the limit to read a credential that starts inside it in full.
-    keep = LIMIT + max((len(n.encode()) for n in needles), default=0)
+    keep = LIMIT + max(map(len, needles), default=0)
     try:
         async with (
             asyncio.timeout(REQUEST_DEADLINE),

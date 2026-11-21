@@ -396,7 +396,7 @@ def test_credential_header_forms():
     )
 
 
-PASSWORD = "correct horse battery é"
+PASSWORD = "correct horse battery 42!"
 
 
 def test_a_username_and_password_are_encoded_by_the_broker():
@@ -421,6 +421,11 @@ def test_a_username_and_password_are_encoded_by_the_broker():
         ("Authorization", "Basic", "short", "admin"),
         ("Authorization", "Basic", "line\r\nX-Injected: 1", "admin"),
         ("Authorization", "Basic", "x" * 8193, "admin"),
+        # Only ASCII: other characters have no single spelling for a service to echo.
+        ("Authorization", "Basic", "caf\u00e9-secret-2026", "admin"),
+        ("Authorization", "Basic", "caf\u00c3\u00a9\u96ea-2026", "admin"),
+        ("Authorization", "Basic", "tab\tinside-it", "admin"),
+        ("Authorization", "Basic", PASSWORD, "adm\u00edn"),
     ],
 )
 def test_a_username_and_password_are_validated_without_echo(name, scheme, secret, username):
@@ -624,35 +629,29 @@ async def test_username_and_password_sign_in_sends_basic_and_redacts_both_forms(
     broker.revoke("chat", grant["id"])
 
 
-@pytest.mark.parametrize(
-    "password, wire",
-    [
-        (PASSWORD, "utf-8"),                    # read back as its own characters
-        (PASSWORD, "latin-1"),                  # the service answers in Latin-1
-        (PASSWORD, "utf-8+invalid"),            # read back as the Latin-1 view of its UTF-8 bytes
-        ("correct horse пароль 123", "utf-8"),  # characters outside Latin-1
-    ],
-)
-async def test_a_non_ascii_password_echoed_in_a_response_header_is_redacted(broker, service, trust, password, wire):
-    grant = await broker.create("chat", spec(service, auth_scheme="Basic", username="admin", secret=password))
-    encoding, _, invalid = wire.partition("+")
-    service.etag = b'"' + password.encode(encoding) + (b"\xff" if invalid else b"") + b'"'
+@pytest.mark.parametrize("around", [b"", "caf\u00e9 ".encode(), "caf\u00e9 ".encode("latin-1"), b"\xff "])
+async def test_a_password_echoed_in_a_response_header_is_redacted(broker, service, trust, around):
+    # Whatever charset the rest of the header is in, and however httpx then reads it.
+    grant = await broker.create("chat", spec(service, auth_scheme="Basic", username="admin", secret=PASSWORD))
+    service.etag = b'"' + around + PASSWORD.encode() + b'"'
     result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/etag"})
     assert "[redacted]" in result["headers"]["etag"]
     shown = json.dumps(result, ensure_ascii=False)
     # Not the password, and no readable part of it either.
-    assert password not in shown and "correct horse" not in shown
+    assert PASSWORD not in shown and "correct horse" not in shown
     broker.revoke("chat", grant["id"])
 
 
-def test_a_non_ascii_password_echoed_in_latin_1_in_the_body_is_redacted():
-    pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
-    needles = vault_services._needles(PASSWORD, f"Basic {pair}")
-    body = b"signed in with " + PASSWORD.encode("latin-1")
-    assert vault_services.redact(body, needles) == b"signed in with [redacted]"
+def test_a_pair_the_owner_encoded_is_redacted_where_the_service_decodes_it():
+    # An owner may paste an already encoded pair as the credential. What is
+    # inside it is not checked for ASCII: it is matched as its UTF-8 bytes.
+    pair = base64.b64encode("admin:caf\u00e9-secret-2026".encode()).decode()
+    needles = vault_services._needles(pair, f"Basic {pair}")
+    body = "signed in as admin:caf\u00e9-secret-2026, password caf\u00e9-secret-2026".encode()
+    assert vault_services.redact(body, needles) == b"signed in as [redacted], password [redacted]"
 
 
-ODD = 'caf\u00e9 "q" \\ a/b <c>&\'d+e \U0001f600 \u20ac'
+ODD = 'tok "q" \\ a/b <c>&\'d+e =~ end'
 
 
 def _upper_hex(text: str) -> str:
@@ -723,17 +722,21 @@ _WRITE = {
     lambda p: "".join(f"&{codepoint2name[ord(c)]};" if ord(c) in codepoint2name else c for c in p),
     lambda p: "".join(_NAMED.get(c, c) for c in p),
     lambda p: repr(p.encode())[2:-1],  # Python showing the bytes it received
-    lambda p: ascii(p)[1:-1],  # Python showing the text it decoded: "\xe9", "\u20ac", "\U0001f600"
+    lambda p: ascii(p)[1:-1],
     lambda p: repr(p)[1:-1],
     _ruby,
     _javascript_escape,
     lambda p: "".join(c if c.isalnum() else "".join(f"\\{b:03o}" for b in c.encode()) for c in p),
     lambda p: "".join(c if c.isalnum() else f"\\x{{{ord(c):x}}}" for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\x{ord(c):02x}" for c in p),
+    lambda p: "".join(c if c.isalnum() else f"\\U{ord(c):08x}" for c in p),
+    re.escape,  # a pattern escaper: "\+", "\ ", "\<"
+    lambda p: "".join(c if c.isalnum() or c in "/=+~" else f"\\{c}" for c in p),  # a shell: printf %q
 ], ids=["json", "json-utf8", "json-upper-hex", "json-slash", "dotnet", "json-escape-all", "json-in-json",
         "json-in-json-utf8", "dotnet-in-json", "url", "url-all",
         "url-lower-hex", "form", "js-url", "html", "html-decimal-quote", "entities", "hex-entities",
         "php-htmlentities", "html5-names", "python-bytes", "python-ascii", "python-repr", "ruby-dump",
-        "javascript-escape", "octal-bytes", "perl-braces"])
+        "javascript-escape", "octal-bytes", "perl-braces", "hex-bytes", "long-unicode", "pattern-escape", "shell"])
 def test_an_echoed_credential_is_redacted_however_the_service_spells_it(spell):
     pair = base64.b64encode(f"admin:{ODD}".encode()).decode()
     needles = vault_services._needles(ODD, f"Basic {pair}")
