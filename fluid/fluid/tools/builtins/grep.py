@@ -234,6 +234,20 @@ def _is_sensitive_match(line: str, is_sensitive_path) -> bool:
     return match is not None and is_sensitive_path(match.group(1))
 
 
+def _is_sensitive_file(path: str, is_sensitive_path) -> bool:
+    """A credential file by its own spelling or by the file it resolves to.
+
+    A search root or a file under it can be a symlink: ``/tmp/aws-link`` to
+    ``~/.aws`` prints its hit as ``/tmp/aws-link/credentials``.
+    """
+    if is_sensitive_path(path):
+        return True
+    try:
+        return is_sensitive_path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return True  # Where it points is unknown: withhold it.
+
+
 def _sensitive_note(dropped: int) -> list[str]:
     if not dropped:
         return []
@@ -289,6 +303,32 @@ async def _byte_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
         yield b"".join(pending)
 
 
+async def _rg_records(
+    stream: asyncio.StreamReader, with_path: bool,
+) -> AsyncIterator[tuple[bytes | None, bytes]]:
+    """``(path, b"line:content")`` per match from ``rg --null`` output.
+
+    The path ends at the NUL rg prints after it, not at a newline: a file name
+    can hold newlines (``.env.site\\nconfig``), and splitting there first
+    showed only ``config`` to the credential filter. Match content never holds
+    a newline. A single-file target prints no path, so its lines come back
+    with ``None``.
+    """
+    path_parts: list[bytes] = []
+    async for piece in _byte_lines(stream):
+        if not with_path:
+            if piece:
+                yield None, piece
+            continue
+        nul = piece.find(b"\0")
+        if nul < 0:
+            path_parts.append(piece)  # A newline inside the file name.
+            continue
+        path_parts.append(piece[:nul])
+        yield b"\n".join(path_parts), piece[nul + 1:]
+        path_parts.clear()
+
+
 async def _ripgrep(
     rg: str, pattern: str, root: Path, glob: str | None, no_ignore: bool, limit: int,
     ctx: ToolCtx | None = None,
@@ -298,7 +338,7 @@ async def _ripgrep(
     # on its own — a thousand files each return up to ``limit`` lines. It stays
     # as a cheap per-file bound; the global cap is enforced on the stream below.
     args = [
-        rg, "-n", "--no-heading", "--color=never",
+        rg, "-n", "--no-heading", "--color=never", "--null",
         "--max-count", str(limit),
         "--max-filesize", _MAX_FILESIZE,
     ]
@@ -338,19 +378,33 @@ async def _ripgrep(
     lines: list[str] = []
     dropped = 0
     capped = False
+    last_path: bytes | None = None
+    last_sensitive = False
     try:
         async with (
             asyncio.timeout(RG_TIMEOUT_S),
-            contextlib.aclosing(_byte_lines(proc.stdout)) as stream,
+            contextlib.aclosing(_rg_records(proc.stdout, target == ".")) as stream,
         ):
             # Matches are filtered as they stream in, and rg is stopped as soon
             # as one more than ``limit`` has been kept: the rest of the tree is
             # never searched and the output never sits in memory.
-            async for raw in stream:
-                if not raw:
-                    continue
-                line = _absolutize_line(raw.decode(errors="replace"), run_dir, target)
-                if _is_sensitive_match(line, is_sensitive_path):
+            async for path, rest in stream:
+                text = rest.decode(errors="replace")
+                if path is None:
+                    # A single-file target, already through the Grep path rule.
+                    line = _absolutize_line(text, run_dir, target)
+                    sensitive = _is_sensitive_match(line, is_sensitive_path)
+                else:
+                    line = _absolutize_line(
+                        f"{path.decode(errors='replace')}:{text}", run_dir, target
+                    )
+                    if path != last_path:  # rg prints one file's hits together
+                        last_path = path
+                        last_sensitive = _is_sensitive_file(
+                            str(run_dir / os.fsdecode(path)), is_sensitive_path
+                        )
+                    sensitive = last_sensitive
+                if sensitive:
                     dropped += 1
                 elif len(lines) < limit:
                     lines.append(line)
@@ -426,8 +480,12 @@ def _pure_python_grep(
         if is_sensitive_path(str(path)):
             dropped += 1
             continue
-        for hit in _search_file(path, rx, limit - len(out)):
-            out.append(hit)
+        hits = list(_search_file(path, rx, limit - len(out)))
+        # A symlinked file (or root) is judged by its target, once it has hits.
+        if hits and _is_sensitive_file(str(path), is_sensitive_path):
+            dropped += 1
+            continue
+        out.extend(hits)
         if len(out) >= limit:
             capped = True
             break
