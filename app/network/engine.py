@@ -2449,9 +2449,9 @@ for _parent, _set_null in _SET_NULL_CHILDREN.items():
 LOCAL_CHANGE_WAITS = "A local change is waiting to be signed"
 
 
-def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) -> bool:
-    """Whether this worker's scanner publishes this record."""
-    return (ctx.bootstrap_state == BOOTSTRAP_READY and coll.name != "session_active"
+def _scanned_here(ctx: Optional[NetworkContext], coll: policy.Collection, record_id: str) -> bool:
+    """Whether this worker's scanner publishes this record (nothing, without a context)."""
+    return (ctx is not None and ctx.bootstrap_state == BOOTSTRAP_READY and coll.name != "session_active"
             and coll.name in policy.SCANNED_COLLECTIONS
             and not (coll.name == "presence" and record_id != ctx.device_id))
 
@@ -2804,7 +2804,7 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
             wanted[(name, record_id)] = [previous[0] or deleting, None, previous[2] and deleting]
         else:
             wanted[(name, record_id)] = [deleting, incoming, deleting]
-    if not wanted or ctx.bootstrap_state != BOOTSTRAP_READY:
+    if not wanted or ctx is None or ctx.bootstrap_state != BOOTSTRAP_READY:
         return locked
     if not locked:
         store.lock_state(cursor)
