@@ -620,9 +620,10 @@
 		grid-template-columns: minmax(0, 1fr);
 		grid-auto-rows: max-content;
 		gap: 0.5rem;
-		/* Room for a whole sign-in form with its buttons; the chat header and
-		   the composer stay on screen. */
-		max-height: max(16rem, min(calc(100dvh - 13rem), 44rem));
+		/* Most of the height for a sign-in form, with the chat header, the
+		   composer and the row under it still on screen; the card's buttons
+		   stay in reach while the rest scrolls. */
+		max-height: max(16rem, min(calc(100dvh - 17rem), 44rem));
 		margin-bottom: 0.625rem;
 		overflow: auto;
 		overscroll-behavior: contain;

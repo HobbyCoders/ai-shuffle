@@ -207,7 +207,8 @@
 	transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .pa-pick-row:hover { border-color: var(--accent); }
-.pa-pick-row.selected { border-color: var(--primary); background: color-mix(in oklch, var(--primary) 8%, var(--card)); }
+/* oklab, not oklch: mixing a hue toward the card's white swings it to pink. */
+.pa-pick-row.selected { border-color: var(--primary); background: color-mix(in oklab, var(--primary) 8%, var(--card)); }
 .pa-pick-row:focus-within { outline: 2px solid var(--ring); outline-offset: 2px; }
 .pa-pick-row input { width: 1rem; height: 1rem; margin: 0; accent-color: var(--primary); }
 .pa-pick-main { display: grid; gap: 0.1rem; min-width: 0; }
