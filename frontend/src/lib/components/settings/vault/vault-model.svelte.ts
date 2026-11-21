@@ -257,6 +257,8 @@ export class VaultModel {
 	changedElsewhere = $state<Record<string, boolean>>({});
 	saving = $state<string | null>(null);
 	draft = $state<VaultForm | null>(null);
+	/** The draft whose request is under way; the owner may have left it for another since. */
+	private submitted: VaultForm | null = null;
 
 	entry(id: string): VaultEntry | undefined {
 		return this.entries.find((e) => e.id === id);
@@ -338,7 +340,8 @@ export class VaultModel {
 	}
 
 	addDraft(): string {
-		if (!this.draft) this.draft = emptyForm();
+		// A draft that is being added is no longer the owner's to edit: the next one starts empty.
+		if (!this.draft || this.draft === this.submitted) this.draft = emptyForm();
 		return DRAFT_ID;
 	}
 
@@ -365,7 +368,10 @@ export class VaultModel {
 		this.forms[id] = formFromEntry(e);
 	}
 
-	/** Saves the form. Returns the sign-in's id on success. */
+	/**
+	 * Saves the form. Returns the sign-in's id on success, or null when the
+	 * owner has since left the draft it was sent from (nothing to show in its place).
+	 */
 	async save(id: string): Promise<string | null> {
 		const f = this.form(id);
 		if (!f || this.saving) return null;
@@ -389,10 +395,12 @@ export class VaultModel {
 		clearSecrets(f);
 		try {
 			if (isDraft) {
+				this.submitted = this.draft;
 				const created = await api.post<{ id: string }>(ENDPOINT, body);
-				this.draft = null;
+				const current = this.draft === this.submitted;
+				if (current) this.draft = null;
 				await this.load();
-				return created.id;
+				return current ? created.id : null;
 			}
 			const result = Object.keys(body).length
 				? await api.patch<EditResult>(`${ENDPOINT}/${encodeURIComponent(id)}`, body)
@@ -402,6 +410,8 @@ export class VaultModel {
 			if (result) this.notices[id] = savedNotice(result);
 			return id;
 		} catch (e) {
+			// A failure belongs to the draft that was sent, not to one started since.
+			if (isDraft && this.draft !== this.submitted) return null;
 			this.errors[id] = [
 				isForbidden(e) && settingsAccess.readOnly
 					? 'You need owner access to change the Vault'
@@ -410,6 +420,7 @@ export class VaultModel {
 			return null;
 		} finally {
 			for (const name of ['password', 'private_key', 'passphrase', 'secret']) if (name in body) body[name] = '';
+			this.submitted = null;
 			this.saving = null;
 		}
 	}

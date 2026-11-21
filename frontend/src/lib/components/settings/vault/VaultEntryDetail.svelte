@@ -141,7 +141,7 @@
 	>
 		{#snippet primary()}
 			{#if isDraft}
-				<button type="button" class="st-btn ghost" onclick={cancelDraft}>Cancel</button>
+				<button type="button" class="st-btn ghost" disabled={saving} onclick={cancelDraft}>Cancel</button>
 				<button type="button" class="st-btn primary" disabled={saving || locked} onclick={save}>
 					{saving ? 'Adding…' : 'Add sign-in'}
 				</button>

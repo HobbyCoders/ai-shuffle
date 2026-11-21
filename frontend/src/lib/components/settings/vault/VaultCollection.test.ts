@@ -489,6 +489,47 @@ describe('vault-model', () => {
 		expect(model.form(service().id)!.label).toBe('CF');
 	});
 
+	it.each(['added', 'refused'])('keeps a draft started while an earlier one is still being %s', async (outcome) => {
+		const model = new VaultModel();
+		await model.load();
+		let answer!: { resolve: (value: { id: string }) => void; reject: (reason: unknown) => void };
+		api.post.mockImplementationOnce(() => new Promise((resolve, reject) => { answer = { resolve, reject }; }));
+		model.addDraft();
+		Object.assign(model.draft!, { label: 'First', host: 'first.example', username: 'root', password: SECRET });
+		const first = model.save(DRAFT_ID);
+		await waitFor(() => expect(api.post).toHaveBeenCalledOnce());
+		// The owner leaves the form and starts another sign-in before the answer arrives.
+		model.addDraft();
+		expect(model.draft!.label).toBe('');
+		Object.assign(model.draft!, { label: 'Second', host: 'second.example', username: 'root', password: SECRET });
+		if (outcome === 'added') answer.resolve({ id: 'c'.repeat(32) });
+		else answer.reject({ status: 400, detail: 'The Vault already has a sign-in with that name.' });
+		// Nothing to open in its place, and nothing said about a form the owner is no longer on.
+		expect(await first).toBeNull();
+		expect(model.draft).toMatchObject({ label: 'Second', host: 'second.example', password: SECRET });
+		expect(model.errors[DRAFT_ID]).toBeUndefined();
+		// The second one is then added as usual.
+		expect(await model.save(DRAFT_ID)).toBe('c'.repeat(32));
+		expect(api.post.mock.calls[1][1]).toMatchObject({ label: 'Second', host: 'second.example' });
+		expect(model.draft).toBeNull();
+	});
+
+	it('cannot cancel a sign-in while it is being added', async () => {
+		let finish!: (value: { id: string }) => void;
+		api.post.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		await show();
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Add sign-in' })[0]);
+		await fireEvent.input(await screen.findByLabelText('Name'), { target: { value: 'Slow box' } });
+		await fireEvent.input(screen.getByLabelText('Address'), { target: { value: 'slow.example' } });
+		await fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'root' } });
+		await fireEvent.input(screen.getByLabelText('Password'), { target: { value: SECRET } });
+		await fireEvent.click(screen.getAllByRole('button', { name: 'Add sign-in' }).at(-1)!);
+		await waitFor(() => expect(api.post).toHaveBeenCalledOnce());
+		expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+		finish({ id: 'c'.repeat(32) });
+		await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull());
+	});
+
 	it('drops a form and its typed secret when the sign-in is removed elsewhere or the Vault is blocked', async () => {
 		const model = new VaultModel();
 		await model.load();

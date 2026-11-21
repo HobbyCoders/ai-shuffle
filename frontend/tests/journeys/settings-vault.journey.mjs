@@ -10,7 +10,8 @@ import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobileShell = process.argv.includes('--mobile-shell');
-const LABEL = 'Journey box';
+// One name per run: cleanup removes that sign-in and nothing else on the instance.
+let label = '';
 // Never used to sign in anywhere: the address does not resolve and the entry is removed afterwards.
 const PLACEHOLDER = 'journey-only-placeholder';
 
@@ -42,13 +43,13 @@ await runJourney({
 			const removeOurs = async () => {
 				const listed = await fetch(entries);
 				if (!listed.ok) throw new Error(`listing the Vault returned ${listed.status}`);
-				for (const entry of (await listed.json()).entries.filter(({ label }) => label === LABEL)) {
+				for (const entry of (await listed.json()).entries.filter((saved) => saved.label === label)) {
 					const removed = await fetch(`${entries}/${entry.id}`,
 						{ method: 'DELETE', headers: { Origin: new URL(ui).origin, 'Sec-Fetch-Site': 'same-origin' } });
 					if (!removed.ok) throw new Error(`removing the journey's sign-in returned ${removed.status}`);
 				}
 			};
-			await removeOurs();
+			label = `Journey box ${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 			deferCleanup(removeOurs);
 			page.setDefaultTimeout(15_000);
 			await gotoApp(page, { urls: { ui } }, mobileShell ? '/mobile/' : '/');
@@ -58,7 +59,7 @@ await runJourney({
 		async act({ page, mark }) {
 			const button = (name) => page.getByRole('button', { name, exact: true }).filter({ visible: true });
 			const field = (name) => page.getByRole('textbox', { name, exact: true }).filter({ visible: true });
-			const row = page.getByRole('button', { name: new RegExp(`^${LABEL}`) }).filter({ visible: true }).first();
+			const row = page.getByRole('button', { name: new RegExp(`^${label}`) }).filter({ visible: true }).first();
 			const emptyDetail = page.getByText('Select a sign-in, or add one.').filter({ visible: true });
 			const bar = page.locator('.topbar');
 
@@ -73,7 +74,7 @@ await runJourney({
 			await mark('start an SSH sign-in');
 			await button('Add sign-in').first().click();
 			await button('SSH machine').click();
-			await field('Name').fill(LABEL);
+			await field('Name').fill(label);
 			await field('Address').fill('journey-box.invalid');
 			await field('Username').fill('ci');
 			await page.getByLabel('Password', { exact: true }).filter({ visible: true }).fill(PLACEHOLDER);
