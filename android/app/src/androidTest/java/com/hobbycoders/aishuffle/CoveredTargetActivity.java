@@ -13,8 +13,14 @@ public class CoveredTargetActivity extends android.app.Activity {
     /** The target answers no read until this uptime, and takes this long over its next action. */
     private volatile long stallReadsUntil = 0;
     private volatile int stallAction = 0;
-    /** The target's next accessibility read, whoever makes it, takes this long in full; reads after it answer at once. */
-    private volatile int slowRead = 0;
+    /**
+     * Every whole read of the screen takes this long once, at the last dense row, however many calls it makes into this app: a
+     * cold read fetches a node and then refreshes it, and a per-call delay would count it twice. Reading the status view, which
+     * every whole read reaches before the rows, arms it again. Both run on this thread, as commands do.
+     */
+    private int passDelay = 0;
+    private boolean passArmed = false;
+    private int takePass() { int pass = passArmed ? passDelay : 0; passArmed = false; return pass; }
     private int noiseEvery = 0;
     /** An accessibility event with nothing changed, as a busy app sends. */
     private void sendNoise() { status.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED); }
@@ -44,7 +50,7 @@ public class CoveredTargetActivity extends android.app.Activity {
                 case "notify": sendNoise(); break;
                 case "noisy": noiseEvery = value; status.removeCallbacks(noise); if (value > 0) noise.run(); break;
                 case "stallread": stallReadsUntil = android.os.SystemClock.uptimeMillis() + value; break;
-                case "slowread": slowRead = value; break;
+                case "slowreads": passDelay = value; break;
                 case "stallaction": stallAction = value; break;
                 default: layout.setPadding(32, MOVED_TOP, 32, 32);
             }
@@ -109,7 +115,7 @@ public class CoveredTargetActivity extends android.app.Activity {
             row.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
                 @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
                     super.onInitializeAccessibilityNodeInfo(host, info);
-                    android.os.SystemClock.sleep(rowDelay + (last ? lastRowDelay : 0));
+                    android.os.SystemClock.sleep(rowDelay + (last ? lastRowDelay + takePass() : 0));
                 }
             });
             rows.addView(row, new android.widget.LinearLayout.LayoutParams(-1, 1));
@@ -123,6 +129,12 @@ public class CoveredTargetActivity extends android.app.Activity {
         // A fixed size: changing this text must not also move anything.
         status = new android.widget.TextView(this);
         status.setText("Opening"); status.setTextSize(24);
+        status.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                passArmed = true;
+            }
+        });
         layout.addView(status, new android.widget.LinearLayout.LayoutParams(-1, 120));
         android.widget.Button target = new android.widget.Button(this);
         target.setText("Covered target"); target.setAllCaps(false);
@@ -131,8 +143,6 @@ public class CoveredTargetActivity extends android.app.Activity {
             @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
                 super.onInitializeAccessibilityNodeInfo(host, info);
                 android.os.SystemClock.sleep(Math.max(0, stallReadsUntil - android.os.SystemClock.uptimeMillis()));
-                int slow = slowRead; slowRead = 0; // Commands and reads both run on this thread, so only one read takes it.
-                android.os.SystemClock.sleep(slow);
             }
             @Override public boolean performAccessibilityAction(android.view.View host, int action, android.os.Bundle args) {
                 int stall = stallAction; stallAction = 0;

@@ -167,6 +167,18 @@ class CrossAppFenceTest {
         await("No event reached the service after $command") { service.eventsSeen > seen }
     }
     private fun holdEventChecks(ms: Long = 1_500) { ShuffleAccessibilityService.eventCheckDelayMs = ms }
+    /**
+     * From now on every whole read of a dense screen takes [ms] longer, once per read however many calls it makes into the
+     * target: past the fence's 500 ms settle window, and with ~100 rows still far inside its 2 s read limit. A per-row delay
+     * instead sums one sleep per call, and those reads measured 0.6 to over 2 s on CI. Configured once, so nothing has to run
+     * between a test's attempts to keep them slow.
+     */
+    private fun slowReads(ms: Long = 600) = fixture("slowreads:$ms")
+    /** Each final attempt's reading, in order. Only observes. */
+    private fun attemptReadings() = java.util.concurrent.CopyOnWriteArrayList<Reading>().also { readings ->
+        ShuffleAccessibilityService.beforeRetryWindow = { readings += it }
+    }
+    private fun slowerThan(reading: Reading?, ms: Long = AppControlFence.SETTLE_MS) = (reading?.readMs ?: 0L) > ms
     /** How long the app's main thread took to run something posted now. */
     private fun mainThreadDelay(): Long {
         val ran = CountDownLatch(1); val started = android.os.SystemClock.uptimeMillis()
@@ -464,32 +476,25 @@ class CrossAppFenceTest {
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
         fixture("dense:100")
-        // No event fence check runs in this test, so once the slow read is armed nothing but the tap's own reads reaches the target.
+        // No event fence check runs in this test, so once reads are slowed nothing but the tap's own reads reaches the target.
         holdEventChecks(60_000)
         val ref = read(waitSeconds = 15)
-        // Every attempt's read of the target takes 550 ms at that one call: past the 500 ms window, yet with the ~100 rows still well
-        // inside the 2 s read limit, as no other call is slowed. A per-row delay sums one sleep per call, and those reads measured
-        // 0.6 to over 2 s on CI. Armed once the closing panel's events have arrived, so none should land in the first read.
-        val slow = suspend { withContext(Dispatchers.IO) { fixture("slowread:550") } }
-        ShuffleAccessibilityService.afterConsentClosed = { delay(300); slow() }
-        val readings = java.util.concurrent.CopyOnWriteArrayList<Reading>()
-        // A late event can still make an attempt PENDING (or a bad read UNCONFIRMED), and the fence then rightly reads again. Arm the
-        // delay again for that read only, so a retry is as slow as the first. SAME and CHANGED end the tap, so a passing run leaves nothing armed.
-        ShuffleAccessibilityService.beforeRetryWindow = { reading ->
-            readings += reading
-            if (reading.verdict == FenceRead.PENDING || reading.verdict == FenceRead.UNCONFIRMED) slow()
-        }
+        // Slowed once the closing panel's events have arrived, so none should land in the first attempt. A late event can still make
+        // an attempt PENDING (or a bad read UNCONFIRMED), and the fence then rightly reads again: that read is as slow, and nothing
+        // runs between attempts to make it so, which would spend the retry or quiet window.
+        ShuffleAccessibilityService.afterConsentClosed = { delay(300); withContext(Dispatchers.IO) { slowReads() } }
+        val readings = attemptReadings()
         val tapping = tap(ref); allow()
         assertEquals("Reads after consent: $readings", "performed", status(tapping, 15).getString("status"))
         // The hook sees each attempt once, and the fence stops at the first SAME, so the attempt that tapped is the last one seen.
         val tapped = readings.lastOrNull()
         assertTrue("The read that let the tap through must be clean and take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $readings",
-            tapped != null && tapped.verdict == FenceRead.SAME && (tapped.readMs ?: 0L) > AppControlFence.SETTLE_MS)
+            tapped != null && tapped.verdict == FenceRead.SAME && slowerThan(tapped))
         assertTapped(1)
     }
-    /** A screen where every read takes over 500 ms, and a reference to its target. */
-    private fun denseSlowRef(): String {
-        fixture("dense:100"); fixture("delay:5")
+    /** A screen where every read takes over 500 ms, once per read, and a reference to its target. */
+    private fun denseSlowRef(slowMs: Long = 600): String {
+        fixture("dense:100"); slowReads(slowMs)
         return read(waitSeconds = 15)
     }
     @Test fun denseSlowScreenTapRecoversFromABadRead() {
@@ -497,8 +502,12 @@ class CrossAppFenceTest {
         holdEventChecks()
         onceClosed("move") // The first final read isn't exact, so the retry that proves it must fit its window.
         afterFinalRead { undoMoveAndLetEventsArrive() }
+        val readings = attemptReadings()
         val tapping = tap(ref); allow()
-        assertEquals("performed", status(tapping, 15).getString("status"))
+        assertEquals("Reads after consent: $readings", "performed", status(tapping, 15).getString("status"))
+        // The retry starts after the bad read is done, so over 500 ms of its own it fit only a window sized from how slowly the screen reads.
+        assertTrue("The first attempt must read the moved screen, and the one that tapped must be clean and take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $readings",
+            readings.firstOrNull()?.verdict == FenceRead.UNCONFIRMED && readings.last().verdict == FenceRead.SAME && slowerThan(readings.last()))
         assertTapped(1)
     }
     /** Returns once the event fence has finished a read of the whole cached tree this fast. The read that follows it is not. */
@@ -516,46 +525,65 @@ class CrossAppFenceTest {
         }
     }
     @Test fun fastEventCheckBetweenASlowBadReadAndItsRetryWindowDoesNotShrinkIt() {
-        val ref = denseSlowRef()
+        // Every fresh read takes over 800 ms, so the retry outlasts the 700 ms window a 100 ms read would size, and cannot fit a shrunk one.
+        val fastMs = 100L
+        val ref = denseSlowRef(slowMs = 800)
         holdEventChecks()
         onceClosed("move")
         val attempts = AtomicInteger(); val bad = AtomicInteger(); val failure = AtomicReference<Throwable?>()
+        val readings = java.util.concurrent.CopyOnWriteArrayList<Reading>()
         // Not in afterFinalRead: that runs inside the attempt's own 2 s limit, and overrunning it is a refusal of its own.
         ShuffleAccessibilityService.beforeRetryWindow = { reading ->
+            readings += reading
             attempts.incrementAndGet()
             if (reading.verdict == FenceRead.UNCONFIRMED && bad.getAndIncrement() == 0) withContext(Dispatchers.IO) {
                 ShuffleAccessibilityService.eventCheckDelayMs = 0
-                runCatching { fixture("back"); fastEventCheck(underMs = 100) }.onFailure(failure::set) // Over 500 ms of row delays is not read in 100.
+                runCatching { fixture("back"); fastEventCheck(underMs = fastMs) }.onFailure(failure::set) // A fresh read is never that fast here; a cached one is.
             }
         }
         val tapping = tap(ref); allow()
         val outcome = status(tapping, 25).getString("status")
         assertNull("The fast event check never happened", failure.get())
         assertTrue("The first read must have been the slow bad one", bad.get() >= 1)
-        assertEquals("performed", outcome)
+        assertEquals("Reads after consent: $readings", "performed", outcome)
         assertTrue("The bad read must have been retried", attempts.get() >= 2)
+        val shrunk = AppControlFence.retryWindow(AppControlFence.SETTLE_MS, fastMs)
+        assertTrue("The read that tapped must be clean and take over the $shrunk ms a window sized from the fast check allows, or this proves nothing: $readings",
+            readings.last().verdict == FenceRead.SAME && slowerThan(readings.last(), shrunk))
         assertTapped(1)
     }
     @Test fun denseSlowScreenReadRecoversFromABadRead() {
-        fixture("dense:100"); fixture("delay:5")
+        fixture("dense:100"); slowReads()
         holdEventChecks()
         onceClosed("move")
-        afterFinalRead { undoMoveAndLetEventsArrive() }
+        // When each final read finished, and when the step after it returned.
+        val reads = java.util.concurrent.CopyOnWriteArrayList<Pair<Long, Long>>()
+        ShuffleAccessibilityService.afterFinalRead = {
+            val finished = android.os.SystemClock.elapsedRealtime()
+            if (reads.isEmpty()) undoMoveAndLetEventsArrive()
+            reads += finished to android.os.SystemClock.elapsedRealtime()
+        }
         read(waitSeconds = 15) // Asserts ok, and that the target is still among the captured nodes.
+        // The first final read is of the moved screen, and the read that proves it starts after that one's step is done.
+        val proving = if (reads.size < 2) 0L else reads.last().first - reads[reads.size - 2].second
+        assertTrue("The moved screen must be read again, and the read that proves it must take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: " +
+            "${reads.size} reads, the last ending $proving ms after the one before it", proving > AppControlFence.SETTLE_MS)
     }
     @Test fun denseSlowScreenKeepsItsPanelThroughABlip() {
         val tapping = tap(denseSlowRef())
         panelUp()
         // The move lasts until a fresh read by the event fence has seen it, so this can't pass with nothing to recover from.
         // Undone before that read's verdict is acted on, so the retry reads only the reverted screen.
-        val mismatched = CountDownLatch(1); val recovered = CountDownLatch(1)
+        val mismatched = CountDownLatch(1); val recovered = CountDownLatch(1); val recovering = AtomicReference<Reading>()
         ShuffleAccessibilityService.afterEventCheckRead = { fresh, reading ->
             if (fresh && reading.verdict == FenceRead.UNCONFIRMED && mismatched.count == 1L) { runCatching { fixture("back") }; mismatched.countDown() }
-            else if (fresh && reading.verdict == FenceRead.SAME && mismatched.count == 0L) recovered.countDown()
+            else if (fresh && reading.verdict == FenceRead.SAME && mismatched.count == 0L && recovering.compareAndSet(null, reading)) recovered.countDown()
         }
         fixtureWithEvent("move")
         assertTrue("The event fence never read the move", mismatched.await(10, TimeUnit.SECONDS))
         assertTrue("The event fence never read the screen exact again", recovered.await(10, TimeUnit.SECONDS))
+        assertTrue("The read that found the screen exact again must take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: ${recovering.get()}",
+            slowerThan(recovering.get()))
         allow()
         assertEquals("performed", status(tapping, 15).getString("status"))
         assertTapped(1)
@@ -563,17 +591,24 @@ class CrossAppFenceTest {
     @Test fun denseSlowScreenLastingMoveAfterThePanelClosesIsRefused() {
         val ref = denseSlowRef()
         onceClosed("move")
+        val readings = attemptReadings()
         val tapping = tap(ref); allow()
-        assertEquals("stale_ref", status(tapping, 15).getString("status"))
-        fixture("delay:0")
+        assertEquals("Reads after consent: $readings", "stale_ref", status(tapping, 15).getString("status"))
+        assertTrue("An attempt must have read the moved screen, taking over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $readings",
+            readings.any { it.verdict == FenceRead.UNCONFIRMED && slowerThan(it) })
+        slowReads(0)
         assertNotTapped()
     }
     @Test fun denseSlowScreenLastingMoveUnderThePanelCancelsIt() {
         val tapping = tap(denseSlowRef())
         panelUp()
+        val moved = java.util.concurrent.CopyOnWriteArrayList<Reading>()
+        ShuffleAccessibilityService.afterEventCheckRead = { fresh, reading -> if (fresh && reading.verdict == FenceRead.UNCONFIRMED) moved += reading }
         fixtureWithEvent("move")
         assertEquals("denied", status(tapping, 15).getString("status"))
-        fixture("delay:0")
+        assertTrue("The event fence must have read the moved screen afresh, taking over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $moved",
+            moved.any { slowerThan(it) })
+        slowReads(0)
         assertNotTapped()
     }
     @Test fun readTooLargeToDeliverIsCutDownAndItsReferencesStillWork() {
