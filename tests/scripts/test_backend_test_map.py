@@ -427,6 +427,86 @@ def test_a_pull_request_also_runs_the_tests_of_what_main_changed_since_the_map(p
     assert found["tests"] == sorted(A_TESTS + B_TESTS)
 
 
+UNREAD_DOC = "misc/deep/unread.md"
+
+
+@pytest.mark.parametrize("path, text", [
+    (".github/workflows/ci-backend.yml", "jobs: {}\n"),
+    (UNREAD_DOC, "nothing reads this\n"),
+])
+def test_ci_plumbing_or_an_unread_file_only_main_changed_keeps_the_selection(pull_request, path, text):
+    # Main's full run tested it; it cannot change which tests reach the pull request's files.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", path, text)
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] != "all", reasons
+    assert set(A_TESTS) <= set(found["tests"])
+    assert "1 of them only main changed since" in reasons[0]
+
+
+@pytest.mark.parametrize("path, text", [
+    (".github/workflows/ci-backend.yml", "jobs: {}\n"),
+    (UNREAD_DOC, "nothing reads this\n"),
+])
+def test_the_pull_request_changing_ci_plumbing_or_an_unread_file_runs_everything(pull_request, path, text):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("pr", path, text)
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
+@pytest.mark.parametrize("path, text", [
+    ("requirements.txt", "requests==2\n"),
+    ("tests/conftest.py", "X = 1\n"),
+    ("tests/data/fixture.json", "{}\n"),
+])
+def test_dependencies_conftests_and_test_data_main_changed_still_run_everything(pull_request, path, text):
+    # Only CI plumbing and unread files are let through; these still run everything.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", path, text)
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
+def test_main_only_python_nothing_names_still_runs_everything(pull_request):
+    # Python outside the mapped folders is not an unread file: something may import it.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", "tools/research/probe.py", "X = 1\n")
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
+def test_the_pull_request_setting_a_file_back_to_the_maps_version_still_counts(pull_request):
+    # Main adds the workflow after the map; the pull request removes it again,
+    # so the change since the map no longer holds it, but the pull request changes it.
+    repo, map_path, commit, merge = pull_request
+    commit("main", ".github/workflows/ci-backend.yml", "jobs: {}\n")
+    commit("main", UNREAD_DOC, "nothing reads this\n")
+    commit("pr", "app/a.py", CHANGED_F)
+    run_git(repo, "merge", "-q", "-m", "sync", "main")
+    run_git(repo, "rm", "-q", ".github/workflows/ci-backend.yml")
+    run_git(repo, "commit", "-q", "-m", "revert workflow")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and "ci-backend.yml" in reasons[1]
+
+
+def test_a_file_both_changed_counts_as_the_pull_requests(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("main", UNREAD_DOC, "main's text\n")
+    commit("pr", UNREAD_DOC, "the pull request's text\n")
+    run_git(map_path.parent / "repo", "checkout", "-q", "pr")
+    run_git(map_path.parent / "repo", "merge", "-q", "-X", "theirs", "-m", "sync", "main")
+    commit("pr", UNREAD_DOC, "the pull request's final text\n")
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
 def test_a_pull_request_no_shard_test_reaches_runs_no_shard(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", BASE["app/a.py"] + "\ndef new():\n    return 4\n")
