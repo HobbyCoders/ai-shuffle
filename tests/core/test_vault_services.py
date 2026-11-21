@@ -9,6 +9,7 @@ import json
 import re
 import ssl
 import time
+from html.entities import codepoint2name, html5
 from unittest.mock import AsyncMock
 from urllib.parse import quote, quote_plus
 
@@ -168,6 +169,15 @@ class Service:
                 + b"x" * (vault_files.LIMIT - 10 * len(SECRET) - 5)
                 + SECRET.encode() * 4
             )
+        elif target.startswith("/api/stall"):
+            # Part of a long response arrives, then nothing more.
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                b"Content-Length: 10000000\r\nConnection: close\r\n\r\n" + self.payload
+            )
+            await writer.drain()
+            await asyncio.sleep(60)
+            payload = b""
         elif target.startswith("/api/hold"):
             self.held.set()
             await asyncio.sleep(60)
@@ -659,6 +669,17 @@ def _dotnet(text: str) -> str:
     return "".join(out)
 
 
+# A name for every character of ODD that HTML 5 names ("&sol;", "&plus;", "&bsol;", "&apos;").
+_NAMED = {text: f"&{name}" for name, text in sorted(html5.items(), reverse=True) if name.endswith(";")}
+_WRITE = {
+    "json": lambda text: json.dumps(text)[1:-1],
+    "php": lambda text: json.dumps(text)[1:-1].replace("/", "\\/"),  # PHP escapes the slash too
+    "percent": lambda text: quote(text, safe="/"),
+    "form": quote_plus,
+    "html": html.escape,
+}
+
+
 @pytest.mark.parametrize("spell", [
     lambda p: json.dumps(p)[1:-1],
     lambda p: json.dumps(p, ensure_ascii=False)[1:-1],
@@ -678,9 +699,14 @@ def _dotnet(text: str) -> str:
     lambda p: html.escape(p).replace("&#x27;", "&#39;"),
     lambda p: "".join(c if c.isalnum() else f"&#{ord(c)};" for c in p),
     lambda p: "".join(c if c.isalnum() else f"&#x{ord(c):X};" for c in p),
+    # PHP htmlentities(): every character that has an HTML 4 name ("&eacute;", "&euro;").
+    lambda p: "".join(f"&{codepoint2name[ord(c)]};" if ord(c) in codepoint2name else c for c in p),
+    lambda p: "".join(_NAMED.get(c, c) for c in p),
+    lambda p: repr(p.encode())[2:-1],  # Python showing the bytes it received
 ], ids=["json", "json-utf8", "json-upper-hex", "json-slash", "dotnet", "json-escape-all", "json-in-json",
         "json-in-json-utf8", "dotnet-in-json", "url", "url-all",
-        "url-lower-hex", "form", "js-url", "html", "html-decimal-quote", "entities", "hex-entities"])
+        "url-lower-hex", "form", "js-url", "html", "html-decimal-quote", "entities", "hex-entities",
+        "php-htmlentities", "html5-names", "python-bytes"])
 def test_an_echoed_credential_is_redacted_however_the_service_spells_it(spell):
     pair = base64.b64encode(f"admin:{ODD}".encode()).decode()
     needles = vault_services._needles(ODD, f"Basic {pair}")
@@ -711,17 +737,43 @@ def test_escapes_around_a_credential_keep_their_place():
 @pytest.mark.parametrize("inner", ["json", "percent", "form", "html"])
 def test_a_credential_escaped_twice_is_redacted(outer, inner):
     # Text held inside other text: a URL or a page in JSON, JSON in a JSON string, a page that shows a URL.
-    write = {
-        "json": lambda text: json.dumps(text)[1:-1],
-        "php": lambda text: json.dumps(text)[1:-1].replace("/", "\\/"),  # PHP escapes the slash too
-        "percent": lambda text: quote(text, safe="/"),
-        "form": quote_plus,
-        "html": html.escape,
-    }
     needles = vault_services._needles(ODD, f"Bearer {ODD}")
-    echoed = write[outer](f"see {write[inner](ODD)} now").encode()
+    echoed = _WRITE[outer](f"see {_WRITE[inner](ODD)} now").encode()
     redacted = vault_services.redact(echoed, needles)
-    assert redacted == write[outer]("see ").encode() + b"[redacted]" + write[outer](" now").encode()
+    assert redacted == _WRITE[outer]("see ").encode() + b"[redacted]" + _WRITE[outer](" now").encode()
+
+
+@pytest.mark.parametrize("outer", [None, "json", "php", "html", "percent"])
+@pytest.mark.parametrize("inner", [None, "json", "percent", "form", "html"])
+@pytest.mark.parametrize("secret", [ODD, '"quoted" first', "&%\\ escapes first"])
+def test_a_response_cut_inside_an_echo_returns_none_of_the_credential(outer, inner, secret):
+    # Wherever reading stops inside an echoed credential, even inside an escape
+    # or before its first character is whole, the result ends before the echo.
+    inside = _WRITE[inner] if inner else str
+    outside = _WRITE[outer] if outer else str
+    needles = vault_services._needles(secret, f"Bearer {secret}")
+    before = outside("see ").encode()
+    echoed = outside(f"see {inside(secret)}").encode()
+    assert vault_services.redact(echoed, needles) == before + b"[redacted]"
+    # Cut right after the echo, it is replaced, unless an escape just before it
+    # (the space of "see ") is close enough to the end to be held back too.
+    whole = vault_services.redact(echoed, needles, cut=True)
+    assert whole == before + b"[redacted]" or before.startswith(whole), whole
+    for size in range(len(before) + 1, len(echoed)):
+        returned = vault_services.redact(echoed[:size], needles, cut=True)
+        assert before.startswith(returned), (size, returned)
+    # A response that ended there was read whole: nothing is cut from it.
+    assert vault_services.redact(echoed[:-1], needles) == echoed[:-1]
+
+
+def test_a_cut_response_keeps_what_cannot_be_the_start_of_an_echo():
+    needles = vault_services._needles("tok+en/abc=123", "Bearer tok+en/abc=123")
+    plain = b"x" * 500
+    assert vault_services.redact(plain, needles, cut=True) == plain
+    # Escapes well before the end stay; only the last stretch is held back.
+    text = b'{"a": "caf\\u00e9 &amp; %41"}' + plain
+    assert vault_services.redact(text, needles, cut=True) == text
+    assert vault_services.redact(plain + b"&amp; and more", needles, cut=True) == plain
 
 
 def test_a_response_built_to_stall_the_scan_is_read_in_one_pass():
@@ -735,16 +787,35 @@ def test_a_response_built_to_stall_the_scan_is_read_in_one_pass():
     assert time.perf_counter() - started < 5
 
 
-async def test_an_escaped_echo_that_crosses_the_size_limit_is_read_in_full(broker, service, trust):
-    # An escaped spelling is longer than the credential: the window read past the
-    # limit must cover it, or the part before the limit would be returned.
+async def test_an_escaped_echo_that_crosses_the_size_limit_is_cut_where_it_starts(broker, service, trust):
+    # An escaped spelling is longer than the credential, so it may not be read
+    # to its end: the part before the limit must not be returned.
     secret = "tok+" * 3 + "&<'>+" * 8
     spelled = _dotnet(secret).encode()
     assert len(spelled) > 3 * len(secret)
     service.payload = b"x" * (vault_files.LIMIT - 10) + spelled + b" tail"
     grant = await broker.create("chat", spec(service, secret=secret))
     result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/payload"})
+    assert result["truncated"] and result["body"] == "x" * (vault_files.LIMIT - 10)
+    # One that ends within what is read is replaced as usual.
+    service.payload = b"x" * (vault_files.LIMIT - 10) + _dotnet(secret[:12]).encode() + b" tail"
+    short = await broker.create("chat", spec(service, secret=secret[:12]))
+    result = await broker.run("chat", short["id"], "http", {"method": "GET", "path": "/payload"})
     assert result["truncated"] and result["body"] == "x" * (vault_files.LIMIT - 10) + "[redacted]"
+    broker.revoke("chat", grant["id"])
+    broker.revoke("chat", short["id"])
+
+
+async def test_a_long_credential_does_not_make_a_stalled_response_wait_for_more(broker, service, trust):
+    # The preview is returned once the limit and one credential's length are
+    # read; a service that then goes quiet must not turn it into a timeout.
+    secret = "k" + "0123456789abcdef" * 128
+    service.payload = b"x" * (vault_files.LIMIT + 3 * len(secret))
+    grant = await broker.create("chat", spec(service, secret=secret))
+    result = await asyncio.wait_for(
+        broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/stall"}), 5
+    )
+    assert result["truncated"] and result["body"] == "x" * vault_files.LIMIT
     broker.revoke("chat", grant["id"])
 
 

@@ -31,6 +31,8 @@ import ipaddress
 import re
 import ssl
 from dataclasses import dataclass
+from functools import partial
+from html.entities import html5
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -349,10 +351,12 @@ def _character(code: int) -> bytes | None:
     return chr(code).encode() if code < 0xD800 or 0xDFFF < code <= 0x10FFFF else None
 
 
-def _json_escape(match: re.Match[bytes]) -> bytes | None:
-    high, low, unit, short = match.groups()
+def _backslash_escape(match: re.Match[bytes]) -> bytes | None:
+    high, low, unit, byte, short = match.groups()
     if short:
         return short
+    if byte:
+        return bytes([int(byte, 16)])
     if unit:
         return _character(int(unit, 16))
     return _character(0x10000 + ((int(high, 16) - 0xD800) << 10) + int(low, 16) - 0xDC00)
@@ -361,28 +365,37 @@ def _json_escape(match: re.Match[bytes]) -> bytes | None:
 def _entity(match: re.Match[bytes]) -> bytes | None:
     decimal, hexadecimal, name = match.groups()
     if name:
-        return _ENTITIES[name]
+        return _ENTITIES.get(name)
     return _character(int(decimal) if decimal else int(hexadecimal, 16))
 
 
-_ENTITIES = {b"amp": b"&", b"lt": b"<", b"gt": b">", b"quot": b'"', b"apos": b"'"}
+# Every named character of HTML (PHP's htmlentities() writes "é" as "&eacute;").
+_ENTITIES = {name[:-1].encode(): text.encode() for name, text in html5.items() if name.endswith(";")}
 # The ways a service writes the characters of what it echoes, each as (what an
 # escape looks like, what it stands for). JSON serializers disagree on which
-# characters they escape and on the case of the digits; URLs and forms
-# percent-encode; pages use entities.
-_JSON = (
+# characters they escape and on the case of the digits, and JavaScript and
+# Python also write "\xHH" and "\'"; URLs and forms percent-encode; pages use
+# entities.
+_BACKSLASH = (
     re.compile(
-        rb"\\(?:u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|([\"\\/]))"
+        rb"\\(?:u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})|u([0-9a-fA-F]{4})"
+        rb"|x([0-9a-fA-F]{2})|([\"\\/']))"
     ),
-    _json_escape,
+    _backslash_escape,
 )
 _PERCENT = (re.compile(rb"%([0-9a-fA-F]{2})"), lambda match: bytes([int(match[1], 16)]))
 _FORM = (re.compile(rb"%([0-9a-fA-F]{2})|\+"), lambda match: bytes([int(match[1], 16)]) if match[1] else b" ")
-_HTML = (re.compile(rb"&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|(amp|lt|gt|quot|apos));"), _entity)
-_ESCAPES = (_JSON, _PERCENT, _FORM, _HTML)
-# The most bytes two layers can spend on one byte of a credential: the widest
-# escape ("&#0000043;") with each of its ten characters written that way again.
-_WIDEST = 100
+_HTML = (
+    re.compile(
+        rb"&(?:#([0-9]{1,7})|#[xX]([0-9a-fA-F]{1,6})|([A-Za-z][A-Za-z0-9]{0,%d}));"
+        % (max(map(len, _ENTITIES)) - 1)
+    ),
+    _entity,
+)
+_ESCAPES = (_BACKSLASH, _PERCENT, _FORM, _HTML)
+# The bytes every escape starts with, and the length of the longest one.
+_STARTS = b"\\%&"
+_LONGEST = max(map(len, _ENTITIES)) + 2
 
 
 class _Decoded:
@@ -452,7 +465,45 @@ def _occurrences(data: bytes, needles: list[bytes]):
             at = data.find(needle, at + len(needle))
 
 
-def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes:
+def _borders(needle: bytes) -> list[int]:
+    """For each prefix of ``needle``, how much of its end is also its start."""
+    table, matched = [0] * len(needle), 0
+    for index in range(1, len(needle)):
+        while matched and needle[index] != needle[matched]:
+            matched = table[matched - 1]
+        if needle[index] == needle[matched]:
+            matched += 1
+        table[index] = matched
+    return table
+
+
+def _running(text: bytes, needle: bytes, borders: list[int]) -> int | None:
+    """Where ``needle`` starts in ``text`` without ending before ``text`` does.
+
+    The start of the needle may run to the end of ``text`` or to an escape the
+    end cut off, which reads as plain text from the byte every escape starts
+    with. Two layers can leave two such pieces. Such a byte near the end counts
+    by itself too: the escape it starts may be the needle's first character.
+    One pass, like ``redact``.
+    """
+    size = len(text)
+    edge = max(0, size - 2 * _LONGEST)
+    earliest, matched = None, 0
+    for index in range(max(0, edge - len(needle) + 1), size + 1):
+        if matched == len(needle):
+            matched = borders[matched - 1]  # A whole occurrence: ``redact`` has it.
+        if index == size:
+            return earliest if not matched else min(index - matched, size if earliest is None else earliest)
+        if index >= edge and text[index] in _STARTS:
+            earliest = min(index - matched, size if earliest is None else earliest)
+        while matched and text[index] != needle[matched]:
+            matched = borders[matched - 1]
+        if text[index] == needle[matched]:
+            matched += 1
+    return earliest
+
+
+def redact(data: bytes, needles: list[bytes], limit: int | None = None, *, cut: bool = False) -> bytes:
     """Replace every whole occurrence that starts before ``limit``; keep at most ``limit`` input bytes.
 
     An occurrence is the credential as written or behind up to two layers of
@@ -461,24 +512,43 @@ def redact(data: bytes, needles: list[bytes], limit: int | None = None) -> bytes
     that repeats what it was sent. One that transforms a credential some other
     way cannot be caught by a scan; the owner chose to send it that credential.
 
+    With ``cut``, ``data`` is the start of a longer response: the result also
+    stops where an occurrence was still running when ``data`` ended, or where
+    an escape near the end may have been cut off, so the start of a credential
+    is never returned and nothing waits for the rest of the response.
+
     Positions are counted in the input, so a shortened replacement can never pull
     a partially read occurrence at the end of ``data`` back inside the limit.
     """
     limit = len(data) if limit is None else min(limit, len(data))
     if not needles:
         return data[:limit]
+    readings = list(_readings(data))
     spans = list(_occurrences(data, needles))
-    for reading in _readings(data):
+    for reading in readings:
         spans += [reading.span(start, end) for start, end in _occurrences(reading.data, needles)]
+    # Where the result stops when an occurrence was still running. A whole
+    # occurrence that starts exactly there is still replaced.
+    stop = limit
+    if cut:
+        for needle in needles:
+            borders = _borders(needle)
+            at = _running(data, needle, borders)
+            if at is not None:
+                stop = min(stop, at)
+            for reading in readings:
+                at = _running(reading.data, needle, borders)
+                if at is not None:
+                    stop = min(stop, reading.span(at, at + 1)[0])
     out, position = bytearray(), 0
     for start, end in sorted(spans):
-        if start >= limit:
+        if start >= limit or start > stop:
             break
         if start >= position:
             out += data[position:start] + _REDACTED
         position = max(position, end)
-    if position < limit:
-        out += data[position:limit]
+    if position < stop:
+        out += data[position:stop]
     return bytes(out)
 
 
@@ -537,8 +607,8 @@ async def perform(
         set(_needles(secret, header[1])).union(*(_needles(old, old) for old in also_redact if old)),
         key=len, reverse=True,
     )
-    # An occurrence behind escapes is longer than the credential itself.
-    keep = LIMIT + _WIDEST * max((len(n) for n in needles), default=0)
+    # Far enough past the limit to read a credential that starts inside it in full.
+    keep = LIMIT + max((len(n) for n in needles), default=0)
     try:
         async with (
             asyncio.timeout(REQUEST_DEADLINE),
@@ -584,11 +654,12 @@ async def perform(
         raise AccessDenied(
             "Could not complete a verified HTTPS request to the granted service."
         ) from None
-    # Only occurrences starting inside the returned window matter, and every
-    # such occurrence was read in full (``keep`` adds the longest occurrence).
-    truncated = truncated or len(kept) > LIMIT
+    # Only occurrences starting inside the returned window matter. One written
+    # as sent was read in full (``keep`` adds the longest); one behind escapes
+    # may still be running where reading stopped, and the body is cut there.
     # Off the event loop: the service chooses how much of the response is escapes.
-    data = await asyncio.to_thread(redact, bytes(kept), needles, LIMIT)
+    data = await asyncio.to_thread(partial(redact, bytes(kept), needles, LIMIT, cut=truncated))
+    truncated = truncated or len(kept) > LIMIT
     return {
         "status": status,
         "headers": {name: _redact_header(value, needles) for name, value in returned.items()},
