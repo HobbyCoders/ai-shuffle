@@ -132,7 +132,10 @@ def catalog(owner: tuple, *, cache_empty: bool = False) -> list[dict]:
         cursor = conn.cursor()
         cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s ORDER BY key LIMIT %s",
                        (scope + "%", _READ_LIMIT))
-        rows = cursor.fetchall()
+        # Entries only. LIKE reads the "_" in the prefix as any character, and
+        # another setting whose name merely starts like an entry's is not a
+        # sign-in: neither may break the list.
+        rows = [row for row in cursor.fetchall() if re.fullmatch(re.escape(scope) + "[0-9a-f]{32}", row["key"])]
     if cache_empty and not rows:
         with _catalog_lock:
             if generation == _catalog_generation:
@@ -154,15 +157,39 @@ def load(owner: tuple, connection_id: str):
     return unpack(owner, connection_id, raw)
 
 
-def _store(binding: str, spec) -> None:
-    """Encrypt ``spec`` (secrets included) under its owner-scoped binding."""
+def _sealed(binding: str, spec) -> str:
+    """``spec`` (secrets included) encrypted under its owner-scoped binding."""
     from app.core.vault_access import SECRET_FIELDS
     payload = spec.model_dump(exclude=set(SECRET_FIELDS))
     payload.update({name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS})
     ciphertext = encryption.encrypt_value(json.dumps({"binding": binding, "connection": payload}))
     if not encryption.is_encrypted(ciphertext):
         raise AccessDenied("Secure storage refused an unencrypted value.")
-    database.set_system_setting(binding, ciphertext)
+    return ciphertext
+
+
+def _store(binding: str, spec) -> None:
+    database.set_system_setting(binding, _sealed(binding, spec))
+
+
+def _read(owner: tuple, connection_id: str):
+    """An entry and the stored row it was read from, for ``_replace``."""
+    binding = key(owner, connection_id)
+    row = database.get_system_setting_snapshot(binding)
+    if row is None or not row.value:
+        raise AccessDenied("Unknown saved connection on this worker.")
+    return _open(binding, row.value), row
+
+
+def _replace(owner: tuple, connection_id: str, spec, row) -> bool:
+    """Rewrite an entry only if its row is still the one ``_read`` returned.
+
+    Worker sync applies another worker's edit or removal without taking
+    ``_write_lock``. Writing over that would bring a removed sign-in back, or
+    undo a password change, and publish the stale one to every worker.
+    """
+    binding = key(owner, connection_id)
+    return database.set_system_setting_if_unchanged(binding, _sealed(binding, spec), row)
 
 
 def _label_taken(owner: tuple, label: str, *, except_id: str = "") -> bool:
@@ -205,13 +232,14 @@ def update(owner: tuple, connection_id: str, change):
     if not encryption.is_encryption_ready():
         raise AccessDenied("The Vault is locked or unavailable on this worker.")
     with _write_lock:
-        current = load(owner, connection_id)
+        current, row = _read(owner, connection_id)
         new = change(current)
         if new.kind != current.kind or new.kind not in SAVABLE_KINDS:
             raise AccessDenied("A saved sign-in keeps its type.")
         if new.label.casefold() != current.label.casefold() and _label_taken(owner, new.label, except_id=connection_id):
             raise AccessDenied("The Vault already has a sign-in with that name. Choose a different name.")
-        _store(key(owner, connection_id), new)
+        if not _replace(owner, connection_id, new, row):
+            raise AccessDenied("This sign-in was just changed or removed on another worker. Check it and try again.")
     _written()
     return current, new
 
@@ -226,12 +254,13 @@ def pin_fingerprint(owner: tuple, connection_id: str, expected, fingerprint: str
         return False
     with _write_lock:
         try:
-            current = load(owner, connection_id)
+            current, row = _read(owner, connection_id)
         except AccessDenied:
             return False
         if current.kind != "machine" or current.fingerprint.strip() or not same_connection(current, expected):
             return False
-        _store(key(owner, connection_id), current.model_copy(update={"fingerprint": fingerprint}))
+        if not _replace(owner, connection_id, current.model_copy(update={"fingerprint": fingerprint}), row):
+            return False  # changed or removed on another worker meanwhile: that result stands
     _written()
     return True
 
@@ -271,8 +300,8 @@ def adopt_local_entries() -> int:
                 spec = _open(row["key"], row["value"])
             except AccessDenied:
                 continue
-            if not database.get_system_setting(shared):
-                _store(shared, spec)
+            # Written only where no shared row exists; one that does is kept.
+            database.set_system_setting_if_unchanged(shared, _sealed(shared, spec), None)
             database.delete_system_setting(row["key"])
             moved += 1
     if moved:

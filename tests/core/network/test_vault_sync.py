@@ -190,3 +190,82 @@ def test_arriving_entries_clear_cached_absence_and_refresh_open_vault_lists(work
     exchange(a, b)
     grants.assert_not_called()
     assert not [call for call in emit.call_args_list if call.args[0] == "vault"]
+
+
+def test_a_full_copy_from_a_peer_reports_changed_and_removed_sign_ins_by_key(workers, tmp_path):
+    """A worker that was away catches up by a whole copy, not an exchange: the
+    Vault must still hear which sign-ins changed, to end the grants built on them."""
+    from app.network import peer_snapshot
+    a, b = pair(workers)
+    with a.active():
+        removed, changed = vault_store.save(OWNER, machine()), vault_store.save(OWNER, machine(label="Backup"))
+        scan()
+    exchange(a, b)
+    with a.active():
+        vault_store.delete(OWNER, removed)
+        vault_store.update(OWNER, changed, lambda current: machine(label="Backup", password="replacement-only"))
+        scan()
+        manifest = peer_snapshot.capture(b.device_id)
+        for index in range(len(manifest["pages"])):
+            (tmp_path / f"{index}.json").write_bytes(peer_snapshot.page(b.device_id, manifest["transfer"], index))
+    committed = []
+
+    def notified(touched):
+        assert not b.raw.in_transaction
+        committed.extend(touched)
+    engine.on_applied(notified)
+    with b.active():
+        peer_snapshot.apply(manifest, tmp_path, a.device_id)
+        assert [item["id"] for item in vault_store.catalog(OWNER)] == [changed]
+        assert vault_store.load(OWNER, changed).password.get_secret_value() == "replacement-only"
+    # By key, which is what startup._on_applied passes to the Vault (previous test).
+    assert ("system_settings", vault_store.key(OWNER, removed), "delete") in committed
+    assert ("system_settings", vault_store.key(OWNER, changed), "upsert") in committed
+
+
+@pytest.mark.parametrize("arrives", ["a removal", "a new password"])
+@pytest.mark.parametrize("write", ["an edit", "a host key pin"])
+def test_a_write_here_never_goes_over_what_another_worker_changed_meanwhile(workers, monkeypatch, write, arrives):
+    """Sync applies another worker's change without the store's lock, so it can
+    land after an edit or a pin read the entry and before it writes."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        scan()
+    exchange(a, b)
+    with a.active():
+        if arrives == "a removal":
+            vault_store.delete(OWNER, saved)
+        else:
+            vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
+        scan()
+
+    def held():
+        try:
+            return vault_store.load(OWNER, saved).password.get_secret_value()
+        except AccessDenied:
+            return None
+
+    stands = None if arrives == "a removal" else "replacement-only"
+    with b.active():
+        connecting = vault_store.load(OWNER, saved)
+        if write == "an edit":
+            def renamed(current):
+                exchange(a, b)  # lands between the edit's read and its write
+                return current.model_copy(update={"label": "Renamed here"})
+            with pytest.raises(AccessDenied, match="changed or removed on another worker"):
+                vault_store.update(OWNER, saved, renamed)
+        else:
+            same_connection = vault_store.same_connection
+
+            def compared(current, expected):
+                exchange(a, b)  # lands between the pin's read and its write
+                return same_connection(current, expected)
+            monkeypatch.setattr(vault_store, "same_connection", compared)
+            assert not vault_store.pin_fingerprint(OWNER, saved, connecting, "SHA256:" + "b" * 43)
+        assert held() == stands
+        scan()
+    exchange(b, a)
+    with a.active():
+        # Nothing stale was published back: the other worker's change stands on both.
+        assert held() == stands

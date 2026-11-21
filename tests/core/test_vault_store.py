@@ -19,6 +19,16 @@ def vault(monkeypatch):
     monkeypatch.setattr(vault_store.database, "get_system_setting", lambda k: rows.get(k))
     monkeypatch.setattr(vault_store.database, "set_system_setting", lambda k, v: rows.__setitem__(k, v))
     monkeypatch.setattr(vault_store.database, "delete_system_setting", lambda k: rows.pop(k, None) is not None)
+    # As the table behaves: a conditional write lands only on the row that was
+    # read (or, given no row, only where there is still none).
+    monkeypatch.setattr(vault_store.database, "get_system_setting_snapshot",
+                        lambda k: SimpleNamespace(value=rows[k]) if k in rows else None)
+    def write_if_unchanged(k, v, expected):
+        if rows.get(k) != (expected.value if expected else None):
+            return False
+        rows[k] = v
+        return True
+    monkeypatch.setattr(vault_store.database, "set_system_setting_if_unchanged", write_if_unchanged)
     class Cursor:
         def execute(self, sql, params):
             self.prefix = params[0][:-1]
@@ -358,3 +368,17 @@ def test_pin_fingerprint_only_fills_a_blank_pin_on_unchanged_details(vault):
     assert vault_store.load(owner, connection_id).fingerprint == key
     vault_store.delete(owner, connection_id)
     assert not vault_store.pin_fingerprint(owner, connection_id, unpinned, key) and not vault
+
+
+def test_the_list_holds_entries_only_whatever_else_is_named_like_one(vault):
+    owner = ("local", "worker", None)
+    connection_id = vault_store.save(owner, spec())
+    # Another setting can be written under a name that starts like an entry's
+    # (the model-parameters API appends "_params" to a caller's key).
+    vault[vault_store.key(owner, connection_id) + "_params"] = "{}"
+    vault[vault_store.prefix(owner) + "not-an-entry"] = "plain"
+    assert [item["id"] for item in vault_store.catalog(owner)] == [connection_id]
+    assert vault_store.load(owner, connection_id).label == "ServerWorker"
+    # Neither counts against the cap or blocks a name.
+    vault_store.save(owner, spec().model_copy(update={"label": "Second"}))
+    assert len(vault_store.catalog(owner)) == 2

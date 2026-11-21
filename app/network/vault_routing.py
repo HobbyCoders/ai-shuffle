@@ -34,7 +34,8 @@ CHANGED_ACTION = "chat-access-changed"
 # An SSH grant probes several host-key types before signing in.
 GRANT_TIMEOUT = 120.0
 INSECURE_INPUTS = ("Private inputs reach the device that runs this conversation only over HTTPS. "
-                   "Choose a saved sign-in, or enter them on that device.")
+                   "Choose a saved sign-in, enter them on that device, or add or change the sign-in in "
+                   "Settings › Vault here: saved sign-ins sync to your other workers.")
 
 # What a viewer shows while the owner cannot answer: nothing to act on here.
 EMPTY_SNAPSHOT: Dict[str, Any] = {

@@ -48,6 +48,11 @@ PAGE_ITEMS = {FORMAT_FULL: 100, FORMAT_DEFERRED: 500}
 # A receiving transaction applies pages until it holds this many items (or
 # the copy ends), then commits.
 APPLY_BATCH_ITEMS = 5000
+# Settings whose listeners act on the row that arrived, so a copy reports them
+# by key as an ordinary exchange does: provider readings
+# (app.core.provider_observations.PREFIX) and saved Vault sign-ins
+# (app.core.vault_store.SHARED_PREFIX).
+_RECORD_SETTINGS = ("provider_observation:", "vault_entry:")
 # A transfer stays downloadable for TTL plus a budget for its size. The signed
 # expires_at is checked by this worker's page endpoint and by the recipient's
 # apply, so a fixed TTL failed every large copy: a worker with millions of
@@ -601,9 +606,11 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
                 # Provider rows by id, upserts too: a disable or new key that
                 # arrives here ends the row's running agents (an edit that
-                # changes nothing an agent holds keeps them).
+                # changes nothing an agent holds keeps them). Saved Vault
+                # sign-ins too: one removed or changed elsewhere ends the
+                # grants built on it here.
                 touched.extend(t for t in page_touched if t[0] in ("provider_billing", "model_providers") or
-                               (t[0] == "system_settings" and t[1].startswith("provider_observation:")))
+                               (t[0] == "system_settings" and t[1].startswith(_RECORD_SETTINGS)))
                 index += 1
             if index >= len(pages):
                 # Only once every page is in: the frontier, and what is still owed.
