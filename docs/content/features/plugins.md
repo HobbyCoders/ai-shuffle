@@ -65,7 +65,7 @@ Ask an agent for a plugin, for example "make me a plugin that reads my Cloudflar
 
 A plugin that talks to an outside service, such as Cloudflare, says so. Its details show the service, what it needs access for, and how you sign in.
 
-- **With an API key:** when the agent first needs it, you enter the key in a private access card. The agent never sees the key.
+- **With an API key:** when the agent first needs it, you enter the key in a Vault card. The agent never sees the key.
 - **With a sign-in:** you sign in to the service from the card in your browser. Some plugins sign in through a short confirmation page on hobbycoders.com. Only choose **Continue** there if you just started that sign-in in AI Shuffle.
 
 If a sign-in through hobbycoders.com is not available, for example because the worker is not connected to your account, the card offers **Set up manually**, where you enter your own sign-in app details.

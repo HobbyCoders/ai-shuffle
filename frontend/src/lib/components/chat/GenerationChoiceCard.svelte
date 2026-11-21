@@ -898,7 +898,7 @@
 </section>
 
 <style>
-	/* The chat's card language (QuestionTray, the private-access cards): a flat
+	/* The chat's card language (QuestionTray, the Vault cards): a flat
 	   card on the theme radius, a neutral icon tile, sentence-case card badges,
 	   neutral selection (strong border on muted, as the question tray marks a
 	   picked answer) and the foreground-filled send button. */

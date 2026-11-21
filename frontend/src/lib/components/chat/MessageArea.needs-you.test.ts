@@ -11,12 +11,12 @@ import { resolve } from 'node:path';
 const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/MessageArea.svelte'), 'utf8');
 
 describe('MessageArea Needs-you rail wiring', () => {
-	it('counts the real session row with its background attention and private access', () => {
+	it('counts the real session row with its background attention and Vault', () => {
 		const call = source.slice(source.indexOf('const openNeedsYou'), source.indexOf('const openMessages'));
 		expect(call).toContain('needsYouCount(');
 		expect(call).toContain('openRow ??');
 		expect(call).toContain('$backgroundPermissions.get(openSessionId)');
-		expect(call).toContain('$privateAccessPending.get(openSessionId)');
+		expect(call).toContain('$vaultPending.get(openSessionId)');
 		expect(call).toContain('openNeeds');
 		expect(call).not.toMatch(/\{\s*status:\s*'active',\s*is_remote:\s*false/);
 	});

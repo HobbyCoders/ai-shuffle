@@ -1,9 +1,9 @@
 <script lang="ts">
 	// The production AppTopBar (worker chip, trail, chat-actions chevron) with
-	// the same actions MainPanel hands the phone shell: the real ChatAccess
+	// the same actions MainPanel hands the phone shell: the real VaultPanel
 	// and the compact GitHeaderActions. one-bar.ts answers every request.
 	import AppTopBar from '../src/shell/AppTopBar.svelte';
-	import ChatAccess from '../../frontend/src/lib/components/chat/ChatAccess.svelte';
+	import VaultPanel from '../../frontend/src/lib/components/chat/VaultPanel.svelte';
 	import GitHeaderActions from '../../frontend/src/lib/components/git/GitHeaderActions.svelte';
 
 	let { sessionId, chat, subagent, gitRepo }: { sessionId: string; chat: boolean; subagent: boolean; gitRepo: boolean } = $props();
@@ -11,7 +11,7 @@
 </script>
 
 {#snippet actions()}
-	<ChatAccess {sessionId} />
+	<VaultPanel {sessionId} />
 	<div class="git-actions-host">
 		<GitHeaderActions
 			{sessionId}

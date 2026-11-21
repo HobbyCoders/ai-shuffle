@@ -350,6 +350,12 @@ It is chosen by the request alone, so it behaves the same after restarts:
   skipped this question.` for a skip. Native (Dev agent) chats only: the fake
   `claude` CLI does not play `AskUserQuestion`. `question-tray.journey.mjs`
   plays both.
+* `[script:vault-request]` asks for Vault access to an SSH machine
+  (`RequestChatAccess`) and waits on the Vault card. Use a native **Dev
+  agent** chat attached to a project and approve the `run_python` request.
+  The Vault is hidden from preview grants, so open the instance as the
+  loopback owner (`up --no-vite`, then `http://localhost:<app.local_port>/`
+  from the status JSON). Decline the card; never type real credentials.
 * `[script:guardrail-refusal]` plays a provider safety-check block on
   `fake-ai`: Anthropic `stop_reason: "refusal"` with `stop_details`
   (category `cyber`), a `content_filter` stop on chat completions, and

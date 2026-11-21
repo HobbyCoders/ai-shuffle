@@ -16,7 +16,7 @@
 	 * subagent's chat. Project and branch live in the line under the composer.
 	 * The chevron opens the chat-actions sheet
 	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
-	 * MainPanel's header cluster: private access + the compact Git button.
+	 * MainPanel's header cluster: Vault + the compact Git button.
 	 *
 	 * Away for all chats and the notification bell live in that sidebar's header,
 	 * so this bar carries neither. The ☰ names the unread count for screen readers.
@@ -58,7 +58,7 @@
 		hideGlobalStt?: boolean;
 		/** Out: the actual phone drawer, independent of desktop sidebar preferences. */
 		drawerOpen?: boolean;
-		/** Chat actions on the bar's right (private access, Git); omit off-chat. */
+		/** Chat actions on the bar's right (Vault, Git); omit off-chat. */
 		actions?: Snippet;
 	}
 
@@ -509,7 +509,7 @@
 	.tb-actions .tb-hamburger:hover { color: var(--foreground); }
 	.recording, .tb-actions .recording { color: var(--destructive); }
 
-	/* The private-access shield, sized like the bar's other controls: a 44x48
+	/* The Vault shield, sized like the bar's other controls: a 44x48
 	   target and a 20px glyph, its count/dot riding the glyph's corner. */
 	.tb-actions :global(.pa-trigger) { width: 44px; height: 48px; border-radius: 8px; }
 	.tb-actions :global(.pa-glyph) { width: 20px; height: 20px; }

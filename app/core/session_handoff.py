@@ -26,7 +26,7 @@ as the Stop button does, then moves. The rules (#1819):
   dropped there. When the move is cancelled, fails, expires or is refused,
   they are sent here instead. A message that cannot be sent is named in the
   chat; none is dropped silently.
-* Approval and private-access cards refuse the move. Question-only waits
+* Approval and Vault cards refuse the move. Question-only waits
   detach their callback and carry a durable card; its answer starts a new turn.
 * Pending wake-ups move with the chat (``app.network.handoff``). They remain
   durably dormant on the receiver until holding ends; a held human message

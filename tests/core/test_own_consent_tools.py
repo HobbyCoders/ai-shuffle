@@ -2,7 +2,7 @@
 
 In an owner chat, a high-risk call waits for the owner's typed yes
 (``background_permissions``). Some tools already ask the owner themselves: the
-private access card, a grant the owner approved, the broker's one-shot card,
+Vault card, a grant the owner approved, the broker's one-shot card,
 the screen-access card. Asking a yes/no before those was a second gate for one
 decision. ``OWN_CONSENT_TOOLS`` lists them; the gate stands aside when their
 own consent covers the call and still asks where the mode skips it.
@@ -16,13 +16,13 @@ import pytest
 
 from app.core import background_permissions as ap
 from app.core.agent_types import PermissionResultAllow, PermissionResultDeny
-from app.core.chat_access import AccessDenied
+from app.core.vault_access import AccessDenied
 from app.core.provider import harness_adapter as ha
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.provider.types import PermissionRequestEvent, SessionOptions
 from app.mcp.computer_use import access as cu_access
 from tests.core.test_assistant_permissions import ROOT, SCOPE, _spec
-from tests.core.test_chat_access import broker, pending, ssh_target  # noqa: F401 — fixtures
+from tests.core.test_vault_access import broker, pending, ssh_target  # noqa: F401 — fixtures
 
 CHAT = "mcp__chat-access__"
 REQUEST_ACCESS = "mcp__computer-use__request_access"
@@ -136,7 +136,7 @@ def test_every_allowlisted_tool_is_a_declared_tool():
 
 def test_native_engine_leaves_the_tools_own_consent_alone():
     ask = ha._AssistantPermissionEngine(SCOPE, approval_policy="on_write")
-    # The app rates chat-access "safe": the broker is its gate, so nothing asks.
+    # The app rates vault "safe": the broker is its gate, so nothing asks.
     assert ask.decide(_spec(CHAT + "ChatRunCommand", "safe"), {"command": "ls"}, cwd=ROOT).decision == "allow"
     assert ask.decide(_spec(CHAT + "RequestChatAccess", "safe"), {"kind": "machine"}, cwd=ROOT).decision == "allow"
     # The access request still reaches the approver, which shows its own card.
@@ -223,7 +223,7 @@ async def test_the_bridge_flags_screen_access_for_the_owner_only_in_bypass():
 # The tools' own cards still ask the owner
 # ---------------------------------------------------------------------------
 
-async def test_request_chat_access_shows_only_its_private_card(broker):  # noqa: F811
+async def test_request_vault_access_shows_only_its_private_card(broker):  # noqa: F811
     adapter = _adapter("default")
 
     async def request(data, ctx):

@@ -12,8 +12,8 @@
  *   5. an open PR
  *   6. up to date
  *
- * Private-access approvals are not Git state: they show in the chat above the
- * composer and on the header's private-access icon (#1816).
+ * Vault approvals are not Git state: they show in the chat above the
+ * composer and on the header's Vault icon (#1816).
  *
  * The same input also drives the Ship It pipeline strip inside the panel:
  * which steps are already done, which one runs next, and where a conflict

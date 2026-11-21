@@ -77,7 +77,7 @@ The permission mode decides when the agent asks you before using a tool. Pick it
 
 A session without a project offers the same modes, Accept Edits included, and they mean the same thing there. Attaching a project puts the session back on Ask.
 
-Subagents, Swarm tasks and chats an agent starts begin in the starting chat's current mode, so a chat in Bypass starts them in Bypass. Paid generation, spending limits and new private access still ask in every mode.
+Subagents, Swarm tasks and chats an agent starts begin in the starting chat's current mode, so a chat in Bypass starts them in Bypass. Paid generation, spending limits and new Vault access still ask in every mode.
 
 **What a shell can reach.** An agent's shell commands run as the same user as AI Shuffle on that worker. A command you approve, or any command in Bypass, can read what AI Shuffle itself can read there, including its database and the key for your saved credentials. Owner-only features such as terminals do not limit that. On a Docker worker you can turn on [agent isolation](/docs/getting-started/install-docker-compose#keep-agents-away-from-ai-shuffles-own-keys-optional): shells then still run as that user, but AI Shuffle's database and keys belong to a separate account they cannot read. Use Bypass only with work and sources you trust, and keep Ask when an agent reads untrusted web pages or repositories.
 
@@ -93,7 +93,7 @@ Subagents, Swarm tasks and chats an agent starts begin in the starting chat's cu
 
 **Saved approvals.** An agent's **Approvals** tab lists every rule saved with **Always for this agent**: the tool, what it covers (every call, or a pattern), Allow or Deny, and the day it was saved. **Remove** deletes one rule and **Remove all** deletes every rule for that agent. Both ask first and cannot be undone. A removed rule stops applying on your other workers once they sync, and the agent asks again. Only the owner sees this tab.
 
-**Tools that ask you themselves** do not also ask for a yes before they run: a private access request (its card is the approval), the one-shot approval for a command or write on access you granted, and the screen-control card. Listing or reading files and GET or HEAD requests on access you already granted ask nothing more. In Bypass, a command, write or other change on granted access still asks you in your own chat, because Bypass skips its one-shot approval. Outside Bypass, a saved Deny for one of these tools still denies; Bypass skips saved rules, as it does for every tool. A saved Always allow for screen control skips its card, as it does in other chats.
+**Tools that ask you themselves** do not also ask for a yes before they run: a Vault request (its card is the approval), the one-shot approval for a command or write on access you granted, and the screen-control card. Listing or reading files and GET or HEAD requests on access you already granted ask nothing more. In Bypass, a command, write or other change on granted access still asks you in your own chat, because Bypass skips its one-shot approval. Outside Bypass, a saved Deny for one of these tools still denies; Bypass skips saved rules, as it does for every tool. A saved Always allow for screen control skips its card, as it does in other chats.
 
 **Runs with nobody to ask**, such as API queries and automation **Send prompt** steps, follow the mode alone. Anything that would ask is denied. Give them a mode that allows the tools they need.
 

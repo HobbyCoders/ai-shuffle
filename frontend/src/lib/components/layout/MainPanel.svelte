@@ -58,7 +58,7 @@
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { gitOperations, gitOperationRunning, type GitOperationAction } from '$lib/stores/gitOperations.svelte';
 	import ChatView from './ChatView.svelte';
-	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
+	import VaultPanel from '$lib/components/chat/VaultPanel.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
@@ -354,7 +354,7 @@
 	}
 	const activeSessionRow = $derived($sessions.find((s) => s.id === activeSessionId));
 	// A subagent's own chat (Task/Swarm child) is read and message only: no Git
-	// controls and no private access UI (its requests show in its main chat).
+	// controls and no Vault UI (its requests show in its main chat).
 	const activeIsSubagent = $derived(!!activeSessionId && $subagentChats.has(activeSessionId));
 	// Follow-up buttons in the Git panel's outcome ("Pull first", "Stash & pull",
 	// "Resolve with agent") stay on screen while their availability changes, so
@@ -1080,14 +1080,14 @@
 	     chat's panel, labelled with the subagent. -->
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && !activeIsSubagent}
 		{#key activeTab.sessionId}
-			<!-- Private access is managed here on every lane (desktop bar and the
+			<!-- Vault is managed here on every lane (desktop bar and the
 			     phone shell's one bar): a shield icon shows when the chat has a
 			     request, a grant or a saved connection, and opens a panel (a bottom
 			     sheet on phones) to approve, review or revoke. Waiting requests
-			     also show in the chat above the composer (PrivateAccessPrompt).
+			     also show in the chat above the composer (VaultPrompt).
 			     The Git panel no longer carries it (#1816). Swarms show in the
 			     running-tasks list, which keeps their state hydrated. -->
-			<ChatAccess sessionId={activeTab.sessionId} />
+			<VaultPanel sessionId={activeTab.sessionId} />
 		{/key}
 	{/if}
 	{#if activeTab && gitUiVisible}

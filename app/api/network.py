@@ -686,7 +686,7 @@ async def peer_control(action: str, request: Request,
     if not control.known_action(action):
         raise HTTPException(404, "Unknown control action")
     # Only the real scheme or the tunnel listener's attestation counts, as for
-    # the private-access UI; a forwarded-proto header on the LAN does not.
+    # the Vault UI; a forwarded-proto header on the LAN does not.
     secure = control.inbound_https.set(
         request.url.scheme == "https" or request.scope.get("shuffle.forwarded_https") is True)
     # Controls use device tokens, not the encrypted LAN sync wrapper. Keep

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from app.api import (
     auth,
     browser_panel,
-    chat_access,
+    vault,
     generation_choices,
     plugin_oauth,
     preferences,
@@ -303,7 +303,7 @@ async def _terminal(request):
 
 
 async def _private_inputs(request):
-    await chat_access.checked(request, "session")
+    await vault.checked(request, "session")
 
 
 async def _plugin_sign_in(request):
@@ -364,7 +364,7 @@ def guard_app(lookup, monkeypatch):
     monkeypatch.setattr(database, "get_install", passed)
     monkeypatch.setattr(voice_remote, "owner_of", lambda row: True)
     monkeypatch.setattr(owner_auth, "loopback_request", lambda request: True)
-    monkeypatch.setattr(chat_access, "require_session", passed_async)
+    monkeypatch.setattr(vault, "require_session", passed_async)
     monkeypatch.setattr(remote_workspace_files.engine, "context", passed)
     monkeypatch.setattr("app.api.sessions_helpers.require_transcript_session", passed_async)
     monkeypatch.setattr(generation_choices, "_identity", lambda request: ("admin", "owner"))

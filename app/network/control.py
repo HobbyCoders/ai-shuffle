@@ -609,8 +609,8 @@ def _away_mode_handler():
     return handle_away_mode
 
 
-def _chat_access_handler():
-    from app.network.chat_access_routing import handle
+def _vault_access_handler():
+    from app.network.vault_routing import handle
     return handle
 
 
@@ -619,8 +619,8 @@ def _app_logs_handler():
     return handle_peer_app_logs
 
 
-def _chat_access_changed_handler():
-    from app.network.chat_access_routing import handle_changed
+def _vault_changed_handler():
+    from app.network.vault_routing import handle_changed
     return handle_changed
 
 
@@ -656,8 +656,10 @@ _LAZY_HANDLERS = {
     "terminal": _terminal_handler,
     "terminal-owner": _terminal_owner_handler,
     "app-logs": _app_logs_handler,
-    "chat-access": _chat_access_handler,
-    "chat-access-changed": _chat_access_changed_handler,
+    # The Vault's control actions keep the names they had as "chat access":
+    # workers on an older version still send and expect them.
+    "chat-access": _vault_access_handler,
+    "chat-access-changed": _vault_changed_handler,
     "run-settings": _run_settings_handler,
     "fast-wait": _fast_wait_handler,
     "permission-mode": _permission_mode_handler,

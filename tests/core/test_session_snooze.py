@@ -191,14 +191,14 @@ def test_canonical_and_validate():
     assert session_snooze.validate_future(now + timedelta(seconds=5), now=now) == "2030-01-01T00:00:05+00:00"
 
 
-async def test_private_access_request_wakes_snoozed_chat(mock_db, broadcasts, monkeypatch):
+async def test_vault_request_wakes_snoozed_chat(mock_db, broadcasts, monkeypatch):
     import asyncio
-    from app.core import chat_access, chat_vault
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("local", "worker")))
-    monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
+    from app.core import vault_access, vault_store
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=("local", "worker")))
+    monkeypatch.setattr(vault_store, "catalog", lambda owner, **kwargs: [])
     sid = _new()
     await _patch(sid, False, _soon())
-    broker = chat_access.Broker()
+    broker = vault_access.Broker()
     task = asyncio.create_task(broker.request(sid, "machine", "Need server access"))
     row = await _woke(sid)
     assert row["is_active"] in (True, 1) and row["snoozed_until"] is None

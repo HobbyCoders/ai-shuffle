@@ -8,12 +8,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import MobilePromptDock from './MobilePromptDock.svelte';
-import { chatAccessSummary } from '$lib/stores/chat-access';
+import { vaultSummary } from '$lib/stores/vault';
 import { clearSentQuestions, markQuestionSent, unmarkQuestionSent } from '$lib/stores/session/sent-questions';
 
 afterEach(() => {
 	cleanup();
-	chatAccessSummary.set(null);
+	vaultSummary.set(null);
 });
 
 const ALL_SCOPES = ['none', 'session', 'profile'];
@@ -427,11 +427,11 @@ describe('agent question', () => {
 	});
 });
 
-describe('private access', () => {
+describe('Vault', () => {
 	function access(items: { id: string; kind: 'action' | 'folder'; detail: string; subagent?: string }[]) {
 		const decide = vi.fn().mockResolvedValue(true);
 		const open = vi.fn();
-		chatAccessSummary.set({ sessionId: 's1', pending: items.length, items, active: 0, saved: 0, error: false, open, decide });
+		vaultSummary.set({ sessionId: 's1', pending: items.length, items, active: 0, saved: 0, error: false, open, decide });
 		return { decide, open };
 	}
 
@@ -443,9 +443,10 @@ describe('private access', () => {
 		await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith('a1', true));
 	});
 
-	it('sends a request that needs private inputs to the access panel', async () => {
+	it('sends a request that needs private inputs to the Vault panel', async () => {
 		const { open, decide } = access([{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths' }]);
 		renderDock({ permissions: [] });
+		expect(screen.getByText('Vault request')).toBeTruthy();
 		expect(screen.queryByRole('slider')).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Review' }));
 		expect(open).toHaveBeenCalledOnce();

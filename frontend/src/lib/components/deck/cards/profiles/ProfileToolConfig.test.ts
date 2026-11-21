@@ -359,17 +359,17 @@ describe('search', () => {
 	});
 });
 
-describe('private access group', () => {
+describe('Vault group', () => {
 	afterEach(() => cleanup());
 
 	const names = [
 		'mcp__chat-access__RequestChatAccess',
 		'mcp__chat-access__ChatResources'
 	];
-	const privateAccess: ToolSurfaceGroup = {
-		id: 'private_access',
-		label: 'Private access',
-		kind: 'private_access',
+	const vault: ToolSurfaceGroup = {
+		id: 'vault',
+		label: 'Vault',
+		kind: 'vault',
 		server: 'chat-access',
 		available: true,
 		admin_only: false,
@@ -386,7 +386,7 @@ describe('private access group', () => {
 				toolSelectionMode: 'allow',
 				allowedTools: saved.list,
 				disallowedTools: [],
-				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				surface: { discovered_at: '', errors: [], groups: [vault] },
 				isAdmin: false,
 				onToolSelectionModeChange: vi.fn(),
 				onToggleTool: (g: ToolSurfaceGroup, name: string) => {
@@ -398,8 +398,8 @@ describe('private access group', () => {
 				onRefresh: vi.fn()
 			}
 		});
-		expect(getByText(privateAccess.note as string)).toBeTruthy();
-		const box = groupBox(getByRole, 'Private access');
+		expect(getByText(vault.note as string)).toBeTruthy();
+		const box = groupBox(getByRole, 'Vault');
 		// Not admin-only: a non-admin owner can grant it too.
 		expect(box.disabled).toBe(false);
 		await fireEvent.click(box);
@@ -413,7 +413,7 @@ describe('private access group', () => {
 				toolSelectionMode: 'allow',
 				allowedTools: [],
 				disallowedTools: [],
-				surface: { discovered_at: '', errors: [], groups: [privateAccess] },
+				surface: { discovered_at: '', errors: [], groups: [vault] },
 				isAdmin: false,
 				onToolSelectionModeChange: vi.fn(),
 				onToggleTool: (_g: ToolSurfaceGroup, name: string) => toggled.push(name),
@@ -421,7 +421,7 @@ describe('private access group', () => {
 				onRefresh: vi.fn()
 			}
 		});
-		await fireEvent.click(getByRole('button', { name: /Toggle Private access section/ }));
+		await fireEvent.click(getByRole('button', { name: /Toggle Vault section/ }));
 		// Accessible name stays exact; only the visible label drops the prefix.
 		const tile = getByRole('checkbox', { name: 'mcp__chat-access__RequestChatAccess' });
 		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestChatAccess');

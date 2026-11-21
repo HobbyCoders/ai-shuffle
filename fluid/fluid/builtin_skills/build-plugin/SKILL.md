@@ -124,7 +124,7 @@ The skill that uses the service then tells the agent to:
 1. Call `ChatResources` and look for an approved grant for the service.
 2. If there is none, call `RequestChatAccess` with `kind` `service`, the
    provider, the API address and the purpose. Tell the owner to finish the
-   private access card, then end the turn. The host sends the approval or
+   Vault card, then end the turn. The host sends the approval or
    decline as a notice; use the granted handle it carries. Never poll, and
    the owner does not need to send another message.
 3. Call `ChatHttpRequest` with that grant. The worker attaches the credential;
@@ -168,7 +168,7 @@ Tell the owner:
 3. Each service it will ask access to, and why.
 4. What to do: open Settings > Plugins, where it shows as waiting for review,
    check what it adds, and choose **Approve and enable**. Then finish the
-   private access card the first time a skill asks for a service.
+   Vault card the first time a skill asks for a service.
 
 ## Example
 

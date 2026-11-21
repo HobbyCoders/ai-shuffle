@@ -1754,7 +1754,7 @@ class HarnessAdapter(ProviderAdapter):
             if not isinstance(frame, dict):
                 continue
             task_id = frame.get("task_id")
-            # A private-access card's outcome (chat_access.outcome_frame) rides
+            # A Vault card's outcome (vault_access.outcome_frame) rides
             # the notification lane but names no task the engine started.
             if not task_id or frame.get("kind") == "access":
                 continue
@@ -7117,7 +7117,7 @@ def _delegated_bridge_deferral(options: SessionOptions):
 
     The chat lane bans the CLI's ToolSearch (``_delegated_disallowed``), so a
     deferred tool there is listed by name and can never be loaded: its
-    permitted generation, memory and private-access tools all vanished. Chat
+    permitted generation, memory and Vault tools all vanished. Chat
     serves only its small surface, so nothing is deferred there. (The native
     chat lane defers: fluid's ToolSearch is on its ceiling and reads only the
     session's filtered view.)

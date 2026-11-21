@@ -466,19 +466,19 @@ npx vite dev --config tests/vite.git-panel.config.js --host 127.0.0.1 --port 519
 node tests/verify-git-panel.mjs   # in a second terminal
 ```
 
-#### Browser check for the private-access approval card
+#### Browser check for the Vault approval card
 
-`frontend/tests/chat-access.html` mounts the real `ChatAccess` button and
-dialog; `frontend/tests/verify-chat-access.mjs` answers the session and
-private-access API in the browser and checks the one-shot command card for a
+`frontend/tests/vault.html` mounts the real `VaultPanel` button and
+dialog; `frontend/tests/verify-vault.mjs` answers the session and
+Vault API in the browser and checks the one-shot command card for a
 writable folder, a read-only folder and an SSH machine at 1280x800 and 390x844
 (touch): title, effect line, verbatim command, fit, and the approve request.
 Same requirements as the Git panel check.
 
 ```sh
 cd frontend
-npx vite dev --config tests/vite.chat-access.config.js --host 127.0.0.1 --port 6917 --strictPort
-node tests/verify-chat-access.mjs   # in a second terminal
+npx vite dev --config tests/vite.vault.config.js --host 127.0.0.1 --port 6917 --strictPort
+node tests/verify-vault.mjs   # in a second terminal
 ```
 
 #### Browser check for the one-time branch choice
@@ -587,20 +587,20 @@ cd frontend
 npx vite dev --config tests/vite.composer-send-guard.config.js --host 127.0.0.1 --port 6101 --strictPort
 node tests/verify-composer-send-guard.mjs   # in a second terminal
 
-#### Browser check for private access on a mirrored conversation
+#### Browser check for Vault on a mirrored conversation
 
-`frontend/tests/chat-access-remote.html` mounts the real `ChatAccess` for a
-session that runs on another device. `frontend/tests/verify-chat-access-remote.mjs`
-answers this worker's session and private-access API in the browser and checks,
+`frontend/tests/vault-remote.html` mounts the real `VaultPanel` for a
+session that runs on another device. `frontend/tests/verify-vault-remote.mjs`
+answers this worker's session and Vault API in the browser and checks,
 at 1440x900 and 390x844, that the owner's request card, saved connection,
 one-shot approval and revocation work from the viewer and name the owning
 device. The forwarding itself is covered by
-`tests/core/network/test_chat_access_routing.py`.
+`tests/core/network/test_vault_routing.py`.
 
 ```sh
 cd frontend
-npx vite dev --config tests/vite.chat-access-remote.config.js --host 127.0.0.1 --port 6600 --strictPort
-node tests/verify-chat-access-remote.mjs   # in a second terminal
+npx vite dev --config tests/vite.vault-remote.config.js --host 127.0.0.1 --port 6600 --strictPort
+node tests/verify-vault-remote.mjs   # in a second terminal
 ```
 
 ### Writing Good Tests

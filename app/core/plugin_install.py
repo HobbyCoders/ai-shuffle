@@ -354,7 +354,7 @@ def _plugin_entries(src: Path, root: Path):
     cover source traversal, so every enumeration and file read must be confined.
     Reuse the upload reader's no-follow openat/Windows directory-pin primitives.
     """
-    from app.core import chat_files, confined_files
+    from app.core import vault_files, confined_files
 
     root = root.resolve(strict=True)
     src = src.resolve(strict=True)
@@ -365,7 +365,7 @@ def _plugin_entries(src: Path, root: Path):
             parent = stack.enter_context(confined_files._windows_directory(root, names))
         else:
             fd = stack.enter_context(confined_files._linux_root(root))
-            parent = stack.enter_context(chat_files.directory(fd, names))
+            parent = stack.enter_context(vault_files.directory(fd, names))
         with os.scandir(parent) as entries:
             yield (src / entry.name for entry in entries)
 

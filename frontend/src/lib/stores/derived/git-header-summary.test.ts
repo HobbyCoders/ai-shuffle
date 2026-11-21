@@ -78,7 +78,7 @@ describe('computeHeaderSummary priority ladder', () => {
 		expect(s.tone).toBe('idle');
 	});
 
-	it('leads with a merge conflict: private access is not Git state (#1816)', () => {
+	it('leads with a merge conflict: Vault is not Git state (#1816)', () => {
 		const s = computeHeaderSummary({ ...base, mergeBlocked: true, prNumber: 9, hasChanges: true, additions: 1, filesChanged: 1 });
 		expect(s.tone).toBe('blocked');
 		expect(s.label).toBe('PR #9');

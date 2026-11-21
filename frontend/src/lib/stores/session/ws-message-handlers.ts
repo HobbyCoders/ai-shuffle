@@ -27,7 +27,7 @@ import { pendingQueue, reconcilePendingPeerMessages, restoredDraftFields, SEND_M
 import { queueHydration } from './queue-hydration';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
-import { setPrivateAccessPending } from '../chat-access';
+import { setVaultPending } from '../vault';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
@@ -1693,8 +1693,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
-			case 'chat_access_changed': {
-				// The worker says a session's private access changed and how many
+			case 'vault_changed': {
+				// The worker says a session's Vault changed and how many
 				// requests/approvals now wait for the owner (#1807). The open chat's
 				// panel refetches through resourceSync and publishes its own count;
 				// this keeps every other session's "Needs you" mark current. An
@@ -1703,7 +1703,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				const pending = data.pending;
 				if (typeof accessSessionId === 'string' && accessSessionId
 					&& typeof pending === 'number' && Number.isFinite(pending)) {
-					setPrivateAccessPending(accessSessionId, pending);
+					setVaultPending(accessSessionId, pending);
 				}
 				break;
 			}

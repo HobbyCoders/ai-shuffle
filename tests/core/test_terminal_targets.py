@@ -9,7 +9,7 @@ import pytest
 
 from app.api import terminals as api
 from app.core import terminal_targets as targets, terminals as service
-from app.core import chat_access
+from app.core import vault_access
 from app.db import terminal_device_links as link_store
 from app.network import control, engine, terminal_device_links as links, terminal_relay as relay
 from tests.api.peer_device import Device
@@ -195,11 +195,11 @@ async def test_peer_disconnect_lease_closes_shell(peers, monkeypatch):
 @pytest.fixture
 def ssh(monkeypatch):
     owner = ("local", None, None, None)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=owner))
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=owner))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
     monkeypatch.setattr(broker, "_notify", lambda *a, **k: None)
-    grant = chat_access.Grant("grant", "chat", owner, "Approved machine", "machine", "", time.time() + 60,
+    grant = vault_access.Grant("grant", "chat", owner, "Approved machine", "machine", "", time.time() + 60,
                               writable=True, fingerprint="test-pin", host_key_alg="ssh-ed25519")
     broker.grants[grant.id] = grant
     output = asyncio.Queue()
@@ -277,7 +277,7 @@ async def test_real_grant_producer_feeds_terminal_and_immediate_revocation(ssh, 
 
     connect.side_effect = [VerifyConnection(), connection]
     # Drive the real producer, including machine writable=True normalization.
-    result = await broker.create("chat", chat_access.GrantInput(
+    result = await broker.create("chat", vault_access.GrantInput(
         kind="machine", label="Test SSH", host="192.0.2.8", username="test-user", password="test-only"))
     grant = broker.grants[result["id"]]
     assert grant.writable

@@ -1,15 +1,15 @@
 <script lang="ts">
 	/**
 	 * What waits on the owner in the open chat, docked above the composer
-	 * (issue #1816): permission prompts, private-access requests and the
+	 * (issue #1816): permission prompts, Vault requests and the
 	 * agent's questions. It replaces the permission modal and the question
 	 * tray on the phone and never renders inside the controls panel.
 	 *
 	 * Permission and one-shot access approvals are answered by sliding the
 	 * knob right (approve) or left (deny), or by tapping Deny / Approve, with
 	 * a choice of how long the answer lasts above them (Once, This chat,
-	 * Always) when the server offers one. An access request that needs private
-	 * inputs opens the header's access panel (a bottom sheet) through Review. A question shows
+	 * Always) when the server offers one. A Vault request that needs private
+	 * inputs opens the Vault panel (a bottom sheet) through Review. A question shows
 	 * its options as large buttons plus "Type an answer" and "Skip this
 	 * question"; a multi-part, multi-select or model-picker question falls back
 	 * to the shared question form. Several waiting items show "1 of N", which
@@ -21,7 +21,7 @@
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
-	import { chatAccessSummary, type PendingAccessItem } from '$lib/stores/chat-access';
+	import { vaultSummary, type PendingAccessItem } from '$lib/stores/vault';
 	import { notify } from '$lib/stores/notifications';
 	import { sentQuestions } from '$lib/stores/session/sent-questions';
 	import type { PromptDockProps } from '$lib/components/chat/composer-shell';
@@ -43,7 +43,7 @@
 		| { kind: 'question'; id: string; request: UserQuestionData }
 		| { kind: 'access'; id: string; item: PendingAccessItem };
 
-	const summary = $derived($chatAccessSummary);
+	const summary = $derived($vaultSummary);
 	const accessItems = $derived<PendingAccessItem[]>(
 		summary && sessionId && summary.sessionId === sessionId && summary.pending > 0 ? summary.items ?? [] : []
 	);
@@ -193,7 +193,7 @@
 		);
 	}
 
-	// ── Private access ────────────────────────────────────────────────────
+	// ── Vault ────────────────────────────────────────────────────
 	const KIND_LABEL: Record<PendingAccessItem['kind'], string> = {
 		machine: 'SSH machine',
 		folder: 'Folder',
@@ -342,7 +342,7 @@
 				{@const item = current.item}
 				<div class="p-head">
 					<KeyRound size={17} class="t-ico keyc" aria-hidden="true" />
-					<strong>{item.kind === 'action' ? 'Approval' : 'Access request'}</strong>
+					<strong>{item.kind === 'action' ? 'Approval' : 'Vault request'}</strong>
 					<span class="what">{KIND_LABEL[item.kind]}</span>
 					{#if queue.length > 1}
 						<button type="button" class="count" onclick={next} aria-label={`${position} of ${queue.length}. Show the next request`}>{position} of {queue.length}<ChevronRight size={14} aria-hidden="true" /></button>

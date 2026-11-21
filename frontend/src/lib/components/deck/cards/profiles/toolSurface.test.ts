@@ -91,10 +91,10 @@ const PRIVATE_NAMES = [
 	'mcp__chat-access__ChatHttpRequest'
 ];
 
-const privateAccess: ToolSurfaceGroup = {
-	id: 'private_access',
-	label: 'Private access',
-	kind: 'private_access',
+const vault: ToolSurfaceGroup = {
+	id: 'vault',
+	label: 'Vault',
+	kind: 'vault',
 	server: 'chat-access',
 	available: true,
 	admin_only: false,
@@ -346,36 +346,36 @@ describe('profileToolCount', () => {
 	});
 });
 
-describe('private access group', () => {
-	const surface = { groups: [github, aiTools, privateAccess, harness], discovered_at: '', errors: [] };
+describe('Vault group', () => {
+	const surface = { groups: [github, aiTools, vault, harness], discovered_at: '', errors: [] };
 
 	it('sorts right after the app tools and before AI generation', () => {
 		const app: ToolSurfaceGroup = { id: 'app', label: 'App tools', kind: 'app', tools: [] };
-		const ordered = sortGroups([github, appConfig, aiTools, privateAccess, app, harness]);
+		const ordered = sortGroups([github, appConfig, aiTools, vault, app, harness]);
 		expect(ordered.map((g) => g.id)).toEqual([
 			'harness',
 			'app',
-			'private_access',
+			'vault',
 			'ai',
 			'app_config',
 			'mcp:github'
 		]);
 	});
 
-	it('saves the exact chat-access names, never a server pattern', () => {
-		expect(groupPattern(privateAccess)).toBeNull();
-		expect(groupBlockedReason(privateAccess, LOCKED)).toBeNull();
-		const all = toggleGroupSelection(['Read'], privateAccess, OPEN);
+	it('saves the exact vault names, never a server pattern', () => {
+		expect(groupPattern(vault)).toBeNull();
+		expect(groupBlockedReason(vault, LOCKED)).toBeNull();
+		const all = toggleGroupSelection(['Read'], vault, OPEN);
 		expect(all).toEqual(['Read', ...PRIVATE_NAMES]);
-		expect(groupSelectionState(privateAccess, all, OPEN)).toBe('all');
-		const one = toggleToolSelection(['Read'], privateAccess, 'mcp__chat-access__RequestChatAccess', OPEN);
+		expect(groupSelectionState(vault, all, OPEN)).toBe('all');
+		const one = toggleToolSelection(['Read'], vault, 'mcp__chat-access__RequestChatAccess', OPEN);
 		expect(one).toEqual(['Read', 'mcp__chat-access__RequestChatAccess']);
-		expect(groupSelectionState(privateAccess, one, OPEN)).toBe('some');
-		expect(toggleGroupSelection(all, privateAccess, OPEN)).toEqual(['Read']);
+		expect(groupSelectionState(vault, one, OPEN)).toBe('some');
+		expect(toggleGroupSelection(all, vault, OPEN)).toEqual(['Read']);
 	});
 
 	it('counts like any other group in every mode', () => {
-		// harness 3 + generateImage 1 + github 3 + private access 7
+		// harness 3 + generateImage 1 + github 3 + Vault 7
 		expect(profileToolCount({ tool_selection_mode: 'all' }, surface, true, true)).toBe(14);
 		expect(
 			profileToolCount({ tool_selection_mode: 'allow', allowed_tools: ['Read'] }, surface, true, true)

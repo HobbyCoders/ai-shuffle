@@ -59,19 +59,19 @@ Phone notifications need a HobbyCoders account sign-in. Sign in and link each wo
 
 Use the Firebase-configured Android build and pair it with each linked worker you use. Android asks for system notification permission once at app start; there is no extra explanation dialog. Removing a paired phone revokes its registration; rotating its token updates the registration automatically.
 
-The **Needs you** channel alerts only when a chat goes from no pending needs to at least one question, permission/approval card, private-access request/approval or trailing prose question, or when an agent explicitly asks for you with `NotifyDevices`. More pending items update the same notification silently. Answering, dismissing, expiry or settling clears it once nothing needs you. Completions, parking, progress, errors, watches and update notices never produce phone alerts; the in-app bell still works as before.
+The **Needs you** channel alerts only when a chat goes from no pending needs to at least one question, permission/approval card, Vault request/approval or trailing prose question, or when an agent explicitly asks for you with `NotifyDevices`. More pending items update the same notification silently. Answering, dismissing, expiry or settling clears it once nothing needs you. Completions, parking, progress, errors, watches and update notices never produce phone alerts; the in-app bell still works as before.
 
-Lock-screen text is fixed: “AI Shuffle” and “A chat needs you”. Chat titles, questions, tool input and private-access details are never sent. The HobbyCoders relay and Google receive the phone registration token and worker/chat identifiers needed for delivery and tap routing. Tap opens that worker and chat. “Sent” means the relay accepted the message, not that Android displayed it or that you saw it. Delivery can be delayed or unavailable (for example after force-stopping the app); opening the app silently refreshes current state. When nothing is accepted, `NotifyDevices` reports a short reason, such as no eligible phone, a relay error code and HTTP status, or how long to wait before retrying. Relay failures also produce a warning in the worker log, limited to once per outcome every five minutes and without phone tokens or chat content.
+Lock-screen text is fixed: “AI Shuffle” and “A chat needs you”. Chat titles, questions, tool input and Vault details are never sent. The HobbyCoders relay and Google receive the phone registration token and worker/chat identifiers needed for delivery and tap routing. Tap opens that worker and chat. “Sent” means the relay accepted the message, not that Android displayed it or that you saw it. Delivery can be delayed or unavailable (for example after force-stopping the app); opening the app silently refreshes current state. When nothing is accepted, `NotifyDevices` reports a short reason, such as no eligible phone, a relay error code and HTTP status, or how long to wait before retrying. Relay failures also produce a warning in the worker log, limited to once per outcome every five minutes and without phone tokens or chat content.
 
-## Private access details
+## Vault details
 
-When an agent asks for a folder, a machine or an API key, you enter the details in a private access card. For your safety, the card only works on:
+When an agent asks for a folder, a machine or an API key, you enter the details in a Vault card. For your safety, the card only works on:
 
 - the AI Shuffle desktop app window;
 - your worker's remote access address, from the Android app or a remote browser;
 - a browser on the same computer, when the worker runs without Docker and without the desktop app.
 
-Anywhere else, the card says "Private access is not available on this connection". Open the chat in the desktop app or at the remote access address instead.
+Anywhere else, the card says "The Vault is not available on this connection". Open the chat in the desktop app or at the remote access address instead.
 
 ## What not to do
 

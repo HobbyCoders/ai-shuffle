@@ -7,7 +7,7 @@ import ServiceAccessRequest from './ServiceAccessRequest.svelte';
 
 const url = 'https://api.cloudflare.com/client/v4';
 const token = 'test-only-private-token';
-const endpoint = '/chat-access/s%201/requests/r%2F1';
+const endpoint = '/vault/sessions/s%201/requests/r%2F1';
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 function mount(overrides: Record<string, unknown> = {}) {
 	const request = { id: 'r/1', kind: 'service', purpose: 'Read Cloudflare inventory', expires_at: Date.now() / 1000 + 86400, service_provider: 'cloudflare', suggested_url: url };

@@ -2784,9 +2784,9 @@ async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> Non
 
 
 async def on_access_outcome(session_id: str, frame: Dict[str, Any]) -> None:
-    """The owner answered a private-access card this chat asked for (#1420).
+    """The owner answered a Vault card this chat asked for (#1420).
 
-    ``frame`` is ``chat_access.outcome_frame``: no registry task, so it is
+    ``frame`` is ``vault_access.outcome_frame``: no registry task, so it is
     admitted to the OWN lane like a started session, with the same mid-turn
     steer, Stop latch, archive refusal and one-wake-per-id latch.
     """
@@ -3275,7 +3275,7 @@ _SESSION_NEEDS_OWNER_NOTE = (
 )
 
 
-# A private-access card's outcome (``on_access_outcome``): host-authored, not a
+# A Vault card's outcome (``on_access_outcome``): host-authored, not a
 # report from work the chat started.
 _ACCESS_NOTICE_NOTE = (
     "Host notice: the user answered your RequestChatAccess card. Use a granted "

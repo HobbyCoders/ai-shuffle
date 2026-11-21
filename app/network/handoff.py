@@ -175,7 +175,7 @@ def open_prompt(cursor, sid, *, allow_questions=False):
                 and (allow_questions or payload.get("nonblocking") is True)):
             continue
         return True
-    from app.core.chat_access import broker
+    from app.core.vault_access import broker
 
     return broker.pending_count(sid) > 0
 

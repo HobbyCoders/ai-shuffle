@@ -98,7 +98,7 @@ const { appData } = await import('../../frontend/src/lib/stores/app-data.svelte'
 await appData.loadProjects();
 await appData.loadSessions();
 const { activeSession } = await import('../../frontend/src/lib/stores/active-session');
-const { chatAccessSummary } = await import('../../frontend/src/lib/stores/chat-access');
+const { vaultSummary } = await import('../../frontend/src/lib/stores/vault');
 activeSession.newChat();
 activeSession.setProject(project.id);
 if (bound) {
@@ -139,13 +139,13 @@ const questions = promptKind === 'question' || promptKind === 'all' ? [{
 	] }]
 }] : [];
 if (promptKind === 'access' || promptKind === 'all') {
-	chatAccessSummary.set({
+	vaultSummary.set({
 		sessionId: SESSION, pending: 2, active: 0, saved: 0, error: false,
 		items: [
 			{ id: 'a1', kind: 'action', detail: '$ ls /mnt/user/appdata/ai-shuffle' },
 			{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths with ServerWorker.' }
 		],
-		open: () => alert('Opens the private-access dialog'),
+		open: () => alert('Opens the Vault dialog'),
 		decide: async () => true
 	});
 }

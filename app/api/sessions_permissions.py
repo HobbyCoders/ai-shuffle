@@ -605,10 +605,10 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
                 logger.warning("Mode applied but pending prompts could not be released for %s",
                                session_id, exc_info=True)
         try:
-            from app.core.chat_access import broker
+            from app.core.vault_access import broker
             await broker.resolve_mode_actions(session_id)
         except Exception:
-            logger.warning("Mode applied but private-access confirmations could not be released for %s",
+            logger.warning("Mode applied but Vault confirmations could not be released for %s",
                            session_id, exc_info=True)
         return {"permission_mode": mode}
 

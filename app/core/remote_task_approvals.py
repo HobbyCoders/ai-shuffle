@@ -19,7 +19,7 @@ worker, so the prompt travels over the signed control channel:
   waits. Anything else (a replay, a late answer, another worker) is refused.
 
 What travels back is allow-once or deny. Saved rules, the permission mode and
-private-access grants never travel: the proxy prompt ignores the parent's
+Vault grants never travel: the proxy prompt ignores the parent's
 saved rules (a person always decides). It exposes one-shot answers only;
 legacy remember flags are ignored rather than saving a rule on the parent.
 

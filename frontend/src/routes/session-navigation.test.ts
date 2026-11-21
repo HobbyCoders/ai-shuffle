@@ -180,7 +180,7 @@ describe('Swarm session navigation through the actual active-session store', () 
 		expect(link.getAttribute('href')).toBe('/?session=worker-child');
 		const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
 		link.dispatchEvent(event);
-		// A Swarm child's transcript opens as a subagent's chat (no Git or private access UI).
+		// A Swarm child's transcript opens as a subagent's chat (no Git or Vault UI).
 		expect(get(subagentChats).has('worker-child')).toBe(true);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
 		expect(event.defaultPrevented).toBe(true);

@@ -2,10 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { defineConfig, mergeConfig, searchForWorkspaceRoot } from 'vite';
 import base from '../vite.config.js';
-// Serve the private-access and Settings > Plugins fixtures from one server
+// Serve the Vault and Settings > Plugins fixtures from one server
 // for verify-plugin-sign-in.mjs, before SvelteKit's authenticated shell. No
 // module stubs: the script answers every API request in the browser.
-const FIXTURES = ['/tests/chat-access.html', '/tests/settings-plugins.html'];
+const FIXTURES = ['/tests/vault.html', '/tests/settings-plugins.html'];
 export default mergeConfig(
 	base,
 	defineConfig({

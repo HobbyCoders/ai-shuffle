@@ -852,10 +852,10 @@ async def test_rule4_an_open_prompt_refuses_the_move_when_queued_and_when_it_run
     assert _queued_prompts() == ["one"]
 
 
-def test_rule4_an_open_private_access_card_counts_as_an_open_prompt():
-    with patch("app.core.chat_access.broker.pending_count", return_value=1):
+def test_rule4_an_open_vault_card_counts_as_an_open_prompt():
+    with patch("app.core.vault_access.broker.pending_count", return_value=1):
         assert sh._open_prompt("s1") is True
-    with patch("app.core.chat_access.broker.pending_count", return_value=0):
+    with patch("app.core.vault_access.broker.pending_count", return_value=0):
         assert sh._open_prompt("s1") is False
 
 

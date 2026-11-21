@@ -56,7 +56,7 @@
 		settledTotal
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
-	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { vaultPending } from '$lib/stores/vault';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { activeView, layout, viewOwnsPanel, viewPanelTitles } from '$lib/stores/layout.svelte';
@@ -468,7 +468,7 @@
 						backgroundWork: !!s.has_running_tasks,
 						parked: !!s.parked_task_kind,
 						attention: $backgroundPermissions.get(s.id) ?? null,
-						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
+						vault: ($vaultPending.get(s.id) ?? 0) > 0,
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: rowActive(s),

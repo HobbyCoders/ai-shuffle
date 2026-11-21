@@ -336,8 +336,8 @@ export function deriveStatus(input: {
 	backgroundWork?: boolean;
 	parked?: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
-	/** A private-access request or one-shot approval waits for the owner (#1807). */
-	privateAccess?: boolean;
+	/** A Vault request or one-shot approval waits for the owner (#1807). */
+	vault?: boolean;
 	openPr?: boolean;
 	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
@@ -347,10 +347,10 @@ export function deriveStatus(input: {
 	/** The latest turn was stopped (see `lastWorkStopped`). */
 	stopped?: boolean;
 }): SessionCardStatus {
-	// A private-access request blocks the agent on the owner like a permission
+	// A Vault request blocks the agent on the owner like a permission
 	// prompt. It is tracked apart from the run state, so it also outranks a
 	// mirror's owner state (which reads `working` while the tool call waits).
-	if (input.privateAccess) return 'needs_permission';
+	if (input.vault) return 'needs_permission';
 	// Explicit prompt queues are authoritative and can block a running turn.
 	// Prose alone is only attention-worthy after all work has ended.
 	if (input.open) {
@@ -1017,7 +1017,7 @@ export function swipeActions(actions: readonly CardAction[]): { left: CardAction
  * How many things a session is waiting on the user for: the single "Needs
  * you" count (spec §5) behind the sidebar row, the TurnNavigator dot and the
  * tab title. It unions the permission/question prompts (assistant confirms
- * are permission prompts), private-access requests and, for the open
+ * are permission prompts), Vault requests and, for the open
  * session, a prose question. A remote session's owner state wins over the
  * local attention map, matching `deriveStatus`. Archived rows never count.
  *
@@ -1028,7 +1028,7 @@ export function swipeActions(actions: readonly CardAction[]): { left: CardAction
 export function needsYouCount(
 	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'> & Partial<Pick<Session, 'has_running_tasks' | 'parked_task_kind'>>,
 	attention: { count: number } | null | undefined,
-	privateAccessPending = 0,
+	vaultPending = 0,
 	open: OpenSessionNeeds | null = null
 ): number {
 	if (isArchived(s as Session)) return 0;
@@ -1038,17 +1038,17 @@ export function needsYouCount(
 	const liveWork = s.is_remote
 		? !!s.remote_runtime_state && s.remote_runtime_state !== 'idle'
 		: s.has_running_tasks || !!s.parked_task_kind;
-	return Math.max(0, privateAccessPending) + prompts + (open?.proseQuestion && !liveWork ? 1 : 0);
+	return Math.max(0, vaultPending) + prompts + (open?.proseQuestion && !liveWork ? 1 : 0);
 }
 
 /** Whether a session is waiting on the user right now (see `needsYouCount`). */
 export function sessionNeedsYou(
 	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'> & Partial<Pick<Session, 'has_running_tasks' | 'parked_task_kind'>>,
 	attention: { count: number } | null | undefined,
-	privateAccessPending = 0,
+	vaultPending = 0,
 	open: OpenSessionNeeds | null = null
 ): boolean {
-	return needsYouCount(s, attention, privateAccessPending, open) > 0;
+	return needsYouCount(s, attention, vaultPending, open) > 0;
 }
 
 /** The tab title with the number of things waiting on the user in front. */

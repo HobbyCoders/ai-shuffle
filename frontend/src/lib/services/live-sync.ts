@@ -167,8 +167,8 @@ export function startLiveSync() {
    } else if (data.type === 'sync_reconcile') {
     reconcilePreferences();
     invalidate();
-   } else if (data.type === 'chat_access_changed' && typeof data.session_id === 'string') {
-    resourceSync.invalidate([`chat-access:${data.session_id}`]);
+   } else if (data.type === 'vault_changed' && typeof data.session_id === 'string') {
+    resourceSync.invalidate([`vault:${data.session_id}`]);
    } else if (data.type === 'preferences_changed' && Array.isArray(data.keys)) {
     for (const key of new Set(data.keys)) if (typeof key === 'string') void preferenceSync.refresh(key);
    } else if (data.type === 'resources_changed' && Array.isArray(data.resources)) {

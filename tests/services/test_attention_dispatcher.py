@@ -197,28 +197,28 @@ def test_replayed_need_identity_after_zero_is_silent():
 
 
 @pytest.mark.asyncio
-async def test_private_access_waits_and_approvals_use_executing_session(chat, monkeypatch):
-    from app.core import chat_access
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("worker-a", "runner", None)))
+async def test_vault_waits_and_approvals_use_executing_session(chat, monkeypatch):
+    from app.core import vault_access
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=("worker-a", "runner", None)))
     dispatcher, sender = chat
     monkeypatch.setattr(dispatcher, "private_needs", attention.AttentionDispatcher.private_needs)
     # Service preparation returns its real pending card without making any request
     # to the service. The purpose must never appear in phone commands.
     from fluid.tools.registry import current_tool_use_id
     token = current_tool_use_id.set("tool-private-1")
-    await broker.request("push-chat", "service", "private access purpose")
+    await broker.request("push-chat", "service", "Vault purpose")
     try:
         assert broker.requests
         await dispatcher.reconcile("push-chat")
         broker.dismiss_pending("push-chat")
         await dispatcher.reconcile("push-chat")
         assert [c["action"] for c in commands(sender)] == ["alert", "clear"]
-        assert "private access purpose" not in json.dumps(commands(sender))
+        assert "Vault purpose" not in json.dumps(commands(sender))
         # The in-memory card can be recreated with a different ID after restart.
         # Its canonical tool use is still the same need and cannot re-alert.
-        await broker.request("push-chat", "service", "private access purpose")
+        await broker.request("push-chat", "service", "Vault purpose")
         await dispatcher.reconcile("push-chat")
         assert commands(sender)[-1]["action"] == "update"
     finally:
@@ -230,20 +230,20 @@ async def test_private_access_waits_and_approvals_use_executing_session(chat, mo
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_id", ["sdk-access-call", None])
 async def test_sdk_metadata_never_delays_private_card_or_broadcast(chat, monkeypatch, tool_id):
-    from app.core import chat_access
+    from app.core import vault_access
     from app.core.sync_engine import sync_engine
     from fluid.tools.registry import current_tool_use_id
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("worker-a", "runner", "user-7")))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=("worker-a", "runner", "user-7")))
     monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
-    monkeypatch.setattr(chat_access, "_defer_if_away", AsyncMock())
+    monkeypatch.setattr(vault_access, "_defer_if_away", AsyncMock())
     broadcast = AsyncMock()
     monkeypatch.setattr(sync_engine, "_broadcast_user_message", broadcast)
     identity = asyncio.get_running_loop().create_future()
     async def slow_metadata(session_id):
         return await identity
-    monkeypatch.setattr(chat_access, "_tool_attention_id", slow_metadata)
+    monkeypatch.setattr(vault_access, "_tool_attention_id", slow_metadata)
     dispatcher, sender = chat
     monkeypatch.setattr(dispatcher, "private_needs", attention.AttentionDispatcher.private_needs)
     token = current_tool_use_id.set(None)
@@ -255,7 +255,7 @@ async def test_sdk_metadata_never_delays_private_card_or_broadcast(chat, monkeyp
         await dispatcher.reconcile("push-chat")
         sender.send_to_all_devices.assert_not_awaited()  # No random identity can alert first.
         broadcast.assert_awaited_with("user-7", {
-            "type": "chat_access_changed", "session_id": "push-chat", "pending": 1})
+            "type": "vault_changed", "session_id": "push-chat", "pending": 1})
         identity.set_result(tool_id)
         await asyncio.gather(*list(broker._notifications))
         await dispatcher.reconcile("push-chat")
@@ -263,7 +263,7 @@ async def test_sdk_metadata_never_delays_private_card_or_broadcast(chat, monkeyp
             sender.send_to_all_devices.assert_not_awaited()
             return  # The owner card stays usable, never push a random card ID.
         broker.dismiss_pending("push-chat")
-        with pytest.raises(chat_access.AccessDenied):
+        with pytest.raises(vault_access.AccessDenied):
             await task
         await dispatcher.reconcile("push-chat")
         await broker.request("push-chat", "service", "Private resource")
@@ -293,15 +293,15 @@ async def test_not_linked_is_not_a_future_alert_backlog(chat):
 
 @pytest.mark.asyncio
 async def test_private_action_producer_and_denial_clear(chat, monkeypatch):
-    from app.core import chat_access
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
+    from app.core import vault_access
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
     owner = ("worker-a", "runner", None)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=owner))
-    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=owner))
+    monkeypatch.setattr(vault_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
     dispatcher, sender = chat
     monkeypatch.setattr(dispatcher, "private_needs", attention.AttentionDispatcher.private_needs)
-    grant = chat_access.Grant("grant", "push-chat", owner, "Resource", "service", "redacted", attention.time.time() + 120)
+    grant = vault_access.Grant("grant", "push-chat", owner, "Resource", "service", "redacted", attention.time.time() + 120)
     # The SDK producer records the canonical tool before requesting approval.
     session_events.append_events("push-chat", [{"type": "tool.use", "payload": {
         "id": "sdk-private-action", "name": "mcp__ai_shuffle__ChatHttpRequest"}}])
@@ -313,7 +313,7 @@ async def test_private_action_producer_and_denial_clear(chat, monkeypatch):
         await asyncio.gather(*list(broker._notifications))
         await dispatcher.reconcile("push-chat")
         next(iter(broker.actions.values())).decision.set_result(False)
-        with pytest.raises(chat_access.AccessDenied):
+        with pytest.raises(vault_access.AccessDenied):
             await task
         await dispatcher.reconcile("push-chat")
         assert [c["action"] for c in commands(sender)] == ["alert", "clear"]

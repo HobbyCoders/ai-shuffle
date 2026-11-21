@@ -9,7 +9,7 @@ import { createMessageHandlers, type MessageHandlerDeps, type SessionAttention }
 import type { ActiveSessionState } from '../active-session';
 import type { PermissionRequest } from '$lib/api/client';
 import { get } from 'svelte/store';
-import { privateAccessPending } from '../chat-access';
+import { vaultPending } from '../vault';
 
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
 vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
@@ -83,15 +83,15 @@ describe('permission queue frames', () => {
 		expect(h.state().pendingPermissions[1]).not.toHaveProperty('assistant_confirm');
 	});
 
-	it('tracks the private-access waiting count from chat_access_changed (#1807)', () => {
+	it('tracks the Vault waiting count from vault_changed (#1807)', () => {
 		const h = harness();
-		const counts = () => get(privateAccessPending);
-		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg', pending: 2 });
+		const counts = () => get(vaultPending);
+		h.handleMessage({ type: 'vault_changed', session_id: 'bg', pending: 2 });
 		expect(counts().get('bg')).toBe(2);
 		// An older worker sends no count: the mark is left as it is.
-		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg' });
+		h.handleMessage({ type: 'vault_changed', session_id: 'bg' });
 		expect(counts().get('bg')).toBe(2);
-		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg', pending: 0 });
+		h.handleMessage({ type: 'vault_changed', session_id: 'bg', pending: 0 });
 		expect(counts().has('bg')).toBe(false);
 	});
 

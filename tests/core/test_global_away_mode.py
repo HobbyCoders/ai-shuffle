@@ -161,13 +161,13 @@ async def test_sweep_skips_remote_and_excluded_chats_and_off_is_noop():
 
 
 async def test_private_input_and_action_producing_paths_unblock_with_away_message(monkeypatch):
-    from app.core import chat_access
+    from app.core import vault_access
 
     chat("owner")
-    broker = chat_access.Broker()
-    monkeypatch.setattr(chat_access, "broker", broker)
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=(None, None, "admin", "owner")))
-    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    broker = vault_access.Broker()
+    monkeypatch.setattr(vault_access, "broker", broker)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=(None, None, "admin", "owner")))
+    monkeypatch.setattr(vault_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
     monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
     monkeypatch.setattr(broker, "_track_attention", lambda _: None)
     monkeypatch.setattr(broker, "_notify", lambda *a, **kw: None)
@@ -190,7 +190,7 @@ async def test_private_input_and_action_producing_paths_unblock_with_away_messag
         with patch.object(away_mode, "record_decision", AsyncMock()) as record:
             assert (await global_away_mode.apply(True))["deferred_approvals"] == 2
             results = await asyncio.wait_for(asyncio.gather(request, action, return_exceptions=True), 3)
-            assert all(isinstance(r, chat_access.AccessDenied) and str(r) == away_mode.DEFERRED_MESSAGE
+            assert all(isinstance(r, vault_access.AccessDenied) and str(r) == away_mode.DEFERRED_MESSAGE
                        for r in results)
             assert record.await_count == 2
             assert (await global_away_mode.apply(True))["deferred_approvals"] == 0

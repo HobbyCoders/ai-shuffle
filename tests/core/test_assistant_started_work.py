@@ -323,7 +323,7 @@ async def test_held_back_approvals_come_back_as_needs_owner(home):
     assert turns.start_turn(result["turn_id"])
     session_events.append_events(new_id, [{"type": "message.user", "turn_id": result["turn_id"],
                                            "payload": {"content": "brief"}}])
-    # A private-access request cannot be routed to the assistant: it is
+    # A Vault request cannot be routed to the assistant: it is
     # deferred exactly as Away mode defers it, never granted.
     assert await away_mode.defer_if_away(new_id, "private folder access request") == away_mode.DEFERRED_MESSAGE
     session_events.append_events(new_id, [{"type": "assistant.text_delta", "turn_id": result["turn_id"],

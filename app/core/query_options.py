@@ -1774,11 +1774,11 @@ def build_options_from_profile(
             logger.exception("Failed to evaluate computer-use availability")
 
     from app.core.session_modes import CHAT_MODE_RESOURCE_TOOLS
-    private_access_names = [
+    vault_names = [
         name for name in CHAT_MODE_RESOURCE_TOOLS
         if tool_permitted(name, access.allowed, access.disallowed)
     ] if session_id else []
-    mcp_allowed_tools.extend(private_access_names)
+    mcp_allowed_tools.extend(vault_names)
 
     # Build final allowed_tools list:
     # - When sdk_tools is set (preset), built-in tools are handled by the preset.
@@ -1868,9 +1868,9 @@ def build_options_from_profile(
         generation_context=generation_context,
     ) or {}
 
-    if private_access_names:
-        from app.mcp.chat_access_sdk import create_chat_access_server, GUIDANCE, CHAT_GUIDANCE
-        mcp_servers_dict["chat-access"] = create_chat_access_server(session_id)
+    if vault_names:
+        from app.mcp.vault_sdk import create_vault_server, GUIDANCE, CHAT_GUIDANCE
+        mcp_servers_dict["chat-access"] = create_vault_server(session_id)
         guidance = GUIDANCE
         if session_mode == "chat":
             guidance = CHAT_GUIDANCE + guidance

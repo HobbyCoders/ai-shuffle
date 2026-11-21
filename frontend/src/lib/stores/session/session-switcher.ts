@@ -116,7 +116,7 @@ interface LiveSnapshot {
 		worktree_deleted?: boolean;
 		/** 'archived' opens the chat read-only (#1822). */
 		status?: string | null;
-		/** A subagent's chat: no Git or private access UI. */
+		/** A subagent's chat: no Git or Vault UI. */
 		is_worker?: boolean;
 		is_remote?: boolean;
 		device_name?: string | null;

@@ -38,36 +38,36 @@ def test_saturated_journal_bounds_reaps_and_warning_rate(tmp_path, monkeypatch, 
 
 @pytest.mark.asyncio
 async def test_access_request_lifecycle_broadcasts_scoped_refresh(monkeypatch):
-    from app.core import chat_access
+    from app.core import vault_access
     from app.core.sync_engine import sync_engine
     owner = ("project", "worker", "user-7", "created")
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=owner))
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=owner))
     send = AsyncMock()
     monkeypatch.setattr(sync_engine, "_broadcast_user_message", send)
-    broker = chat_access.Broker()
+    broker = vault_access.Broker()
     task = asyncio.create_task(broker.request("session-7", "machine", "Verify an isolated test target"))
     await asyncio.sleep(0)
     await asyncio.gather(*broker._notifications)
     # The bare waiting count lets the sidebar mark a session that is not open (#1807).
-    send.assert_awaited_with("user-7", {"type": "chat_access_changed", "session_id": "session-7", "pending": 1})
+    send.assert_awaited_with("user-7", {"type": "vault_changed", "session_id": "session-7", "pending": 1})
     request_id = next(iter(broker.requests))
     await broker.decline("session-7", request_id)
-    with pytest.raises(chat_access.AccessDenied, match="declined"):
+    with pytest.raises(vault_access.AccessDenied, match="declined"):
         await task
     await asyncio.gather(*broker._notifications)
     assert send.await_count == 2
-    send.assert_awaited_with("user-7", {"type": "chat_access_changed", "session_id": "session-7", "pending": 0})
+    send.assert_awaited_with("user-7", {"type": "vault_changed", "session_id": "session-7", "pending": 0})
     assert not broker.requests
 
 
 @pytest.mark.asyncio
 async def test_expired_access_does_not_create_refresh_feedback(monkeypatch):
-    from app.core import chat_access, chat_vault
+    from app.core import vault_access, vault_store
     owner = ("project", "worker", "user-7", "created")
-    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=owner))
-    monkeypatch.setattr(chat_vault, "catalog", lambda user, *, cache_empty: [])
-    broker = chat_access.Broker()
-    grant = chat_access.Grant(id="expired", session_id="session-7", owner=owner, label="fixture", kind="folder", target="fixture", expires_at=0)
+    monkeypatch.setattr(vault_access, "session_owner", AsyncMock(return_value=owner))
+    monkeypatch.setattr(vault_store, "catalog", lambda user, *, cache_empty: [])
+    broker = vault_access.Broker()
+    grant = vault_access.Grant(id="expired", session_id="session-7", owner=owner, label="fixture", kind="folder", target="fixture", expires_at=0)
     broker.grants[grant.id] = grant
     from unittest.mock import Mock
     notify = Mock()
@@ -79,12 +79,12 @@ async def test_expired_access_does_not_create_refresh_feedback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_empty_access_snapshot_authorizes_once(monkeypatch):
-    from app.core import chat_access, chat_vault
+    from app.core import vault_access, vault_store
     owner = ("project", "worker", "user-7", "created")
     get_owner = AsyncMock(return_value=owner)
-    monkeypatch.setattr(chat_access, "session_owner", get_owner)
-    monkeypatch.setattr(chat_vault, "catalog", lambda user, *, cache_empty: [])
-    result = await chat_access.Broker().snapshot("session-7")
+    monkeypatch.setattr(vault_access, "session_owner", get_owner)
+    monkeypatch.setattr(vault_store, "catalog", lambda user, *, cache_empty: [])
+    result = await vault_access.Broker().snapshot("session-7")
     assert result["grants"] == []
     get_owner.assert_awaited_once_with("session-7")
 
@@ -99,11 +99,11 @@ async def test_empty_access_endpoint_reads_session_once_and_caches_empty_catalog
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from app.api import chat_access as api
-    from app.core import chat_access, chat_vault, encryption
+    from app.api import vault as api
+    from app.core import vault_access, vault_store, encryption
     from app.db import database
     from app.network import control
-    chat_vault._invalidate_catalog()
+    vault_store._invalidate_catalog()
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
     monkeypatch.setattr(control, "owner_of", lambda row: None)
     session_reads, catalog_reads = [], []
@@ -119,19 +119,19 @@ async def test_empty_access_endpoint_reads_session_once_and_caches_empty_catalog
     @contextmanager
     def db():
         yield SimpleNamespace(cursor=Cursor)
-    monkeypatch.setattr(chat_vault.database, "get_db", db)
-    monkeypatch.setattr(api, "broker", chat_access.Broker())
+    monkeypatch.setattr(vault_store.database, "get_db", db)
+    monkeypatch.setattr(api, "broker", vault_access.Broker())
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
     try:
         async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
             for _ in range(10):
-                response = await client.get("/api/v1/chat-access/session-7")
+                response = await client.get("/api/v1/vault/sessions/session-7")
                 assert response.status_code == 200, response.text
                 assert response.json()["saved_connections"] == []
     finally:
-        chat_vault._invalidate_catalog()
+        vault_store._invalidate_catalog()
     assert session_reads == ["session-7"] * 10
     assert len(catalog_reads) == 1
 
@@ -141,13 +141,13 @@ async def test_access_endpoint_still_refuses_unsupported_session_from_loaded_row
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from app.api import chat_access as api
-    from app.core import chat_access, chat_vault
+    from app.api import vault as api
+    from app.core import vault_access, vault_store
     from app.db import database
-    from app.network import chat_access_routing as routing
+    from app.network import vault_routing as routing
     from app.network import control
     catalog, forwarded = [], []
-    monkeypatch.setattr(chat_vault, "catalog", lambda *args, **kwargs: catalog.append(args) or [])
+    monkeypatch.setattr(vault_store, "catalog", lambda *args, **kwargs: catalog.append(args) or [])
     monkeypatch.setattr(control, "owner_of", lambda row: row.get("owner_device_id"))
 
     async def forward(owner, session_id, operation, payload=None, **_):
@@ -157,14 +157,14 @@ async def test_access_endpoint_still_refuses_unsupported_session_from_loaded_row
     monkeypatch.setattr(routing, "forward", forward)
     rows = {"unknown-mode": {"mode": "unexpected"}, "mirrored": {"mode": "chat", "owner_device_id": "peer"}}
     monkeypatch.setattr(database, "get_session", lambda session_id: rows[session_id])
-    monkeypatch.setattr(api, "broker", chat_access.Broker())
+    monkeypatch.setattr(api, "broker", vault_access.Broker())
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api.require_admin] = lambda: "owner"
     async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
-        assert (await client.get("/api/v1/chat-access/unknown-mode")).status_code == 409
+        assert (await client.get("/api/v1/vault/sessions/unknown-mode")).status_code == 409
         # A mirrored session's access lives on its owner: forwarded, never served from this vault.
-        assert (await client.get("/api/v1/chat-access/mirrored")).status_code == 200
+        assert (await client.get("/api/v1/vault/sessions/mirrored")).status_code == 200
     assert forwarded == [("peer", "mirrored", "snapshot")]
     assert catalog == []
 

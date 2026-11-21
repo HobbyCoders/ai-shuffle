@@ -117,7 +117,7 @@ def _read_text(root: Path, path: Path, result: CheckResult) -> str | None:
     if found:
         result.errors.append(
             f"{rel}: looks like it contains {found[0]}. A plugin never holds a credential; "
-            "remove it and ask for access through the private access card (RequestChatAccess)"
+            "remove it and ask for access through the Vault card (RequestChatAccess)"
         )
     return text
 

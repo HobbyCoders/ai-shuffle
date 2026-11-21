@@ -32,7 +32,7 @@ Rows written by earlier builds carry the ``assistant_confirm`` key instead.
 row never uses that key, so no client shows it as a card without controls.
 
 What needs a decision at all is unchanged (permission modes and saved rules).
-Entering a secret still uses the private access card, and a provider safety
+Entering a secret still uses the Vault card, and a provider safety
 check (``ModelGuardrail``) stays out of this flow and keeps its Continue / Stop
 buttons (:func:`is_owner_approval`).
 """

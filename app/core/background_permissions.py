@@ -15,7 +15,7 @@ arguments (shell commands, Python cells, file reads and writes, starting work
 on another worker, the browser) declare a rule that can raise them to high: the
 fixed list is destructive git, deletes and overwrites outside version control,
 merges to a default branch, deploys and releases, worker restarts, secrets,
-private access, outward writes, spending, app security settings, and anything
+Vault, outward writes, spending, app security settings, and anything
 outside the registered projects. A rule that cannot tell answers high.
 
 The runtime seams decide from these levels (``harness_adapter``: the native
@@ -24,7 +24,7 @@ dispatch), and the approver puts a high call to the owner past any mode or
 saved rule (``query_engine``). The model can ask when the app would not, but it
 cannot lower a level or skip an ask, and the levels are not a setting.
 
-A few tools put their own consent in front of the owner (a private access
+A few tools put their own consent in front of the owner (a Vault
 card, a grant, a one-shot approval, the screen-access card). The gate does not
 ask before those as well: :data:`OWN_CONSENT_TOOLS`.
 """
@@ -534,7 +534,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "FindPlugins": LOW,
     "CheckPlugin": _check_plugin_rule,
     "InstallPlugin": HIGH,
-    # Private access: folders, machines and service credentials.
+    # Vault: folders, machines and service credentials.
     "mcp__chat-access__ChatResources": LOW,
     "mcp__chat-access__RequestChatAccess": HIGH,
     "mcp__chat-access__ChatListFiles": HIGH,
@@ -742,9 +742,9 @@ def _outside_bypass(data: Mapping[str, Any], mode: Optional[str]) -> bool:
 def _chat_http_consent(data: Mapping[str, Any], mode: Optional[str]) -> bool:
     # A batch is covered by the grant alone only when every request in it
     # reads; one write (or a malformed batch) keeps the Bypass gate.
-    from app.core import chat_http_batch
+    from app.core import vault_http_batch
     try:
-        batch = chat_http_batch.items(data)
+        batch = vault_http_batch.items(data)
     except Exception:  # noqa: BLE001 — doubt keeps the owner's yes in Bypass
         return _outside_bypass(data, mode)
     calls = [data] if batch is None else batch
@@ -772,7 +772,7 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #: Bypass skips saved rules for these tools as for every tool. Nothing here
 #: grants access: the card, the grant's scope, its expiry and Away mode decide.
 #:
-#: * RequestChatAccess: the private access card, in every mode. The owner
+#: * RequestChatAccess: the Vault card, in every mode. The owner
 #:   approves it there (and types any secret there); Away refuses it.
 #: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD (every request of a
 #:   batch): inside a grant the owner approved; the broker refuses anything

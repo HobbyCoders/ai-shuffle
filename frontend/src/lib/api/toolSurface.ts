@@ -12,7 +12,7 @@ import { api } from './client';
 export type ToolGroupKind =
 	| 'harness'
 	| 'app'
-	| 'private_access'
+	| 'vault'
 	| 'ai'
 	| 'computer_use'
 	| 'browser'

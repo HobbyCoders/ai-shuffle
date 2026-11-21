@@ -22,7 +22,7 @@ provider-neutral core behind that declaration:
   registered clients and the tokens (:func:`save_tokens`), keyed by plugin id
   and service name, in
   ``system_settings`` under ``plugin_oauth:<worker>:``. Like
-  ``app.core.chat_vault``: only ``enc:`` envelopes are written, each bound to
+  ``app.core.vault_store``: only ``enc:`` envelopes are written, each bound to
   its own key, the namespace is worker-local and never replicated
   (``app.network.policy``), and nothing here decrypts for a model.
   :func:`status` reports a sign-in without any secret.

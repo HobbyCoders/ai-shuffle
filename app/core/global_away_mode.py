@@ -41,7 +41,7 @@ def _covered_local(session_id: str) -> bool:
 
 async def release_session_pending(session_id: str, *, strict: bool = False) -> dict:
     """Best-effort recovery; startup can request failure reporting for retry."""
-    from app.core.chat_access import broker
+    from app.core.vault_access import broker
 
     counts = {"released_questions": 0, "deferred_approvals": 0}
     try:
@@ -88,10 +88,10 @@ async def release_local_pending(*, strict: bool = False) -> dict:
     """Release only covered chats executed here; repeated/overlapping sweeps are safe.
 
     Permission cards share one durable state machine, including starter-chat,
-    remote-task and owner_confirm cards. Private-access cards have local futures.
+    remote-task and owner_confirm cards. Vault cards have local futures.
     Guarded DB answers and done futures make every successful release one-shot.
     """
-    from app.core.chat_access import broker
+    from app.core.vault_access import broker
 
     ids = set(await run_sync(_pending_sessions))
     ids.update(r.session_id for r in list(broker.requests.values()) if not r.result.done())

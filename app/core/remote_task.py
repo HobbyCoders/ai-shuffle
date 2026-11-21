@@ -16,7 +16,7 @@ the target uses as its idempotency key:
 
 Only identifiers travel: agent and provider ids, the model, Git identifiers
 from ``worker_checkout`` and the parent's session ids. Paths, the parent's
-cwd, worktree details, credentials and private-access grants never do.
+cwd, worktree details, credentials and Vault grants never do.
 
 When the child finishes, the target stores its report as owed and sends it
 with ``task-report`` until the parent acknowledges it (:func:`sweep`, also at
@@ -64,7 +64,7 @@ failed at boot (the turn reap aborts it, :func:`sweep` sends the report), and
 the child can be continued by message once its worker is back.
 
 A remote child's permission prompts are shown in the parent conversation
-(``remote_task_approvals``); its questions and private-access requests still
+(``remote_task_approvals``); its questions and Vault requests still
 get Away handling there: deferred, never granted, and listed in its report.
 """
 from __future__ import annotations
@@ -643,7 +643,7 @@ def remote_receipt(answer: Mapping[str, Any], *, worker: Mapping[str, Any], work
         "permission_mode": permission_mode,
         "checkout": checkout,
         "note": (
-            f"Worker started on {name}, {where}, with no private-access grants, at permission mode "
+            f"Worker started on {name}, {where}, with no Vault grants, at permission mode "
             f"{permission_mode}. "
             + ("It runs in the background even though sync was asked for: blocking on another "
                "worker is not supported yet. " if mode == "sync" else "")
@@ -1027,7 +1027,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
             from app.db import mobile_tool_identity
             mobile_tool_identity.inherit_label(start.worker_session_id, start.parent_session_id, conn)
             # Permission prompts travel to the parent (remote_task_approvals);
-            # Away handling still defers what cannot (private-access requests).
+            # Away handling still defers what cannot (Vault requests).
             conn.cursor().execute(
                 "UPDATE sessions SET away_mode=TRUE, branch=%s WHERE id=%s",
                 (checkout.branch if checkout else None, start.worker_session_id))

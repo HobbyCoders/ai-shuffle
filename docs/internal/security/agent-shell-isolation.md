@@ -308,7 +308,7 @@ and Windows network-share behavior before enabling this mode.
 ## What breaks and needs an owner decision
 
 - Builds that use a host secret from Monitor's inherited environment must use
-  an explicit approved child configuration or a private access grant. Passing an
+  an explicit approved child configuration or a Vault grant. Passing an
   app secret through `FLUID_CHILD_ENV_PASSTHROUGH` no longer works.
 - A real user split changes project file ownership, Git safe-directory rules,
   PATH/HOME, CLI sign-ins, SSH agents, browser profiles and permission to run local

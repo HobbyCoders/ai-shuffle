@@ -62,7 +62,7 @@ def test_response_shape(client):
             "id", "label", "kind", "server", "available", "admin_only", "tools",
         }
         assert group["kind"] in (
-            "harness", "app", "private_access", "ai", "computer_use", "browser",
+            "harness", "app", "vault", "ai", "computer_use", "browser",
             "app_config", "mcp",
         )
         for entry in group["tools"]:

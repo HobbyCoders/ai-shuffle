@@ -139,7 +139,7 @@ async def test_parked_wake_uses_latest_permission_choice(mock_db, tmp_path, init
     try:
         with patch("app.core.session_pool.get_session_pool", return_value=pool), \
                 patch("app.core.permission_handler.permission_handler.resolve_mode_permissions", new_callable=AsyncMock), \
-                patch("app.core.chat_access.broker.resolve_mode_actions", new_callable=AsyncMock):
+                patch("app.core.vault_access.broker.resolve_mode_actions", new_callable=AsyncMock):
             await apply_permission_mode(SID, initial)
             turns.park_turn(live["id"], ["background-job"])
             session_runtime._live_runtimes.pop(SID)
@@ -389,7 +389,7 @@ async def test_inherited_permission_producer_paths(mock_db, tmp_path, producer):
             async def checkout(_):
                 with patch("app.core.session_pool.get_session_pool", return_value=pool), \
                         patch("app.core.permission_handler.permission_handler.resolve_mode_permissions", new_callable=AsyncMock), \
-                        patch("app.core.chat_access.broker.resolve_mode_actions", new_callable=AsyncMock):
+                        patch("app.core.vault_access.broker.resolve_mode_actions", new_callable=AsyncMock):
                     await apply_permission_mode(SID, "default")
                 assert database.get_session(SID)["permission_mode"] == "default"
                 state.adapter.set_permission_mode.reset_mock()

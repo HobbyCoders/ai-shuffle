@@ -1,6 +1,6 @@
 """Upload/attachment IO through pinned directories, never a checked-then-open path.
 
-Linux and macOS use chat_files.confined_open (openat2, or a per-component
+Linux and macOS use vault_files.confined_open (openat2, or a per-component
 openat walk on macOS); Windows pins each directory without FILE_SHARE_DELETE and
 opens entries with OPEN_REPARSE_POINT. Other platforms fail closed.
 """
@@ -9,12 +9,12 @@ import errno
 import os
 from pathlib import Path
 
-from app.core import chat_files
-from app.core.chat_files import AccessDenied
+from app.core import vault_files
+from app.core.vault_files import AccessDenied
 
 
 def _relative(path: str, *, empty: bool = False) -> list[str]:
-    names = chat_files.parts(path, empty=empty)
+    names = vault_files.parts(path, empty=empty)
     # Also reject NT device names, streams, and Win32 normalization aliases.
     for name in names:
         if ':' in name or name.rstrip(' .') != name:
@@ -125,7 +125,7 @@ def _windows_directory(root: Path, names: list[str], *, create: bool = False):
 
 @contextmanager
 def _linux_root(root: Path):
-    fd = chat_files.open_root(str(root))
+    fd = vault_files.open_root(str(root))
     try:
         yield fd
     finally:
@@ -147,15 +147,15 @@ def upload(root: Path, directory: str, filename: str, content: bytes) -> Path:
         else:
             fd = stack.enter_context(_linux_root(root))
             for i, name in enumerate(names):
-                with chat_files.directory(fd, names[:i]) as parent_fd:
+                with vault_files.directory(fd, names[:i]) as parent_fd:
                     try:
                         os.mkdir(name, mode=0o700, dir_fd=parent_fd)
                     except FileExistsError:
                         pass
-                with chat_files.directory(fd, names[:i + 1]):
+                with vault_files.directory(fd, names[:i + 1]):
                     pass
             def create(name):
-                return chat_files.confined_open(fd, '/'.join([*names, name]),
+                return vault_files.confined_open(fd, '/'.join([*names, name]),
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         original = Path(filename)
         for counter in range(10000):
@@ -165,7 +165,7 @@ def upload(root: Path, directory: str, filename: str, content: bytes) -> Path:
             except FileExistsError:
                 continue
             with os.fdopen(output, 'wb') as stream:
-                chat_files.regular(os.fstat(stream.fileno()))
+                vault_files.regular(os.fstat(stream.fileno()))
                 stream.write(content)
             return root.joinpath(*names, candidate)
     raise AccessDenied("Too many duplicate filenames.")
@@ -179,7 +179,7 @@ def list_confined(root: Path, relative: str):
             parent = stack.enter_context(_windows_directory(root, names))
         else:
             fd = stack.enter_context(_linux_root(root))
-            parent = stack.enter_context(chat_files.directory(fd, names))
+            parent = stack.enter_context(vault_files.directory(fd, names))
         with os.scandir(parent) as entries:
             result = []
             for entry in entries:
@@ -210,9 +210,9 @@ def open_attachment(root: Path, path: Path):
             fd = stack.enter_context(_windows_handle(parent / names[-1], directory=False))
         else:
             root_fd = stack.enter_context(_linux_root(root))
-            fd = chat_files.confined_open(root_fd, '/'.join(names), os.O_RDONLY | os.O_NONBLOCK)
+            fd = vault_files.confined_open(root_fd, '/'.join(names), os.O_RDONLY | os.O_NONBLOCK)
             stack.callback(os.close, fd)
-        chat_files.regular(os.fstat(fd))
+        vault_files.regular(os.fstat(fd))
         # Duplicate so the stream and the directory/handle owners close independently.
         with os.fdopen(os.dup(fd), 'rb') as stream:
             yield stream

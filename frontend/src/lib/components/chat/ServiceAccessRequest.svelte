@@ -2,7 +2,7 @@
 	import { onMount, onDestroy, tick, untrack } from 'svelte';
 	import { api } from '$lib/api/client';
 	import '../deck/cards/card-design-system.css';
-	import './private-access.css';
+	import './vault.css';
 
 	type Saved = { id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean };
 	type Request = { id: string; kind: string; purpose: string; expires_at: number; saved_id?: string; service_provider?: string; suggested_url?: string };
@@ -40,7 +40,7 @@
 	const unavailable = $derived(expired || terminal || complete);
 	const deadline = $derived(new Date(request.expires_at * 1000).toLocaleString());
 	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;
-	const endpoint = $derived(`/chat-access/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
+	const endpoint = $derived(`/vault/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(request.id)}`);
 
 	function clearSecret() { secret = ''; consent = false; }
 	onMount(() => {
@@ -93,7 +93,7 @@
 		const status = (e as { status?: number })?.status;
 		if ([401, 403, 404, 409, 410].includes(status ?? 0)) {
 			terminal = true; clearSecret();
-			error = 'This request is no longer available or you no longer have access. No new access can be granted here. Reopen Private access to check its status.';
+			error = 'This request is no longer available or you no longer have access. No new access can be granted here. Reopen the Vault to check its status.';
 		} else {
 			// Do not reflect server text that might contain user-entered credentials.
 			error = cancelling ? 'Could not cancel. Try again; the request remains open.'
@@ -142,7 +142,7 @@
 			<div class="pa-body">
 				{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 				{#if expired}<p class="pa-error" role="alert">Preparation expired. Ask for a new service request when you’re ready. This card cannot grant access.</p>{/if}
-				{#if complete}<p class="pa-note" role="status">Request completed. Check Private access for the current connection status.</p>{/if}
+				{#if complete}<p class="pa-note" role="status">Request completed. Check the Vault for the current connection status.</p>{/if}
 				<h4 bind:this={stepHeading} tabindex="-1">{step === 1 ? 'Choose your connection' : step === 2 ? 'Prepare your API token' : 'Review and grant access'}</h4>
 				{#if step === 1}
 					{#if savedOptions.length}
@@ -167,7 +167,7 @@
 					{:else}
 						<ol class="prepare-list"><li><strong>Find the service’s API credentials page.</strong><span>Use its official dashboard or documentation to create a dedicated API key or token. This form does not support password or OAuth sign-in.</span></li><li><strong>Start with read-only access.</strong><span>Choose only the permissions and resources needed for this request. Keep the token’s expiry short enough for the task.</span></li><li><strong>Check how the API accepts the token.</strong><span>Bearer authentication is filled in. For another format, open Authentication and certificate settings in the next step. Paste the token only in the private field, never in chat.</span></li></ol>
 					{/if}
-					<p class="pa-note">You can close this panel and return through Private access. Setup choices stay while this conversation remains open; reloading restores the original request, not your edits. No token is needed yet.</p>
+					<p class="pa-note">You can close this panel and return through the Vault. Setup choices stay while this conversation remains open; reloading restores the original request, not your edits. No token is needed yet.</p>
 				{:else}
 					<div class="connection-review"><span>Access on {where}</span><strong>{saved?.label ?? label}</strong><code>{saved?.target ?? serviceUrl}</code><small>{(saved ? saved.writable : writable) ? 'Changes allowed under this session’s permission mode' : 'Read-only · GET and HEAD only'}</small></div>
 					{#if !secureContext}<p class="pa-error" role="alert">Open the desktop app or an HTTPS connection before entering private details.</p>{/if}
@@ -188,7 +188,7 @@
 					<p class="pa-hint">Access duration starts when approved, not while you prepare. One-shot action approvals have their own deadlines.</p>
 					{#if !saved}<label class="pa-option" class:disabled={!vaultAvailable}><input type="checkbox" disabled={!vaultAvailable} bind:checked={saveConnection} /><strong>Save this connection</strong><small>{vaultAvailable ? `Encrypted on ${where} for future requests. Each session still needs approval.` : 'Secure storage is locked or unavailable. Temporary access still works.'}</small></label>{/if}
 					<p class="pa-note">{owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker'}, never to the model or chat history. Requests stay under the approved address; redirects are not followed. TLS verification stays enabled unless you explicitly pin a certificate. Limit the token itself: the model can use its allowed authority under that address.</p>
-					<label class="pa-option"><input type="checkbox" disabled={!secureContext} bind:checked={consent} /><strong>I approve access for this conversation</strong><small>Only Grant access below creates a grant. You can revoke it from Private access.</small></label>
+					<label class="pa-option"><input type="checkbox" disabled={!secureContext} bind:checked={consent} /><strong>I approve access for this conversation</strong><small>Only Grant access below creates a grant. You can revoke it from Vault.</small></label>
 				{/if}
 			</div>
 			<div class="pa-section"><div class="pa-actions">

@@ -225,7 +225,7 @@ export interface ComposerShellHooks {
 	/** The controls sheet component, or `null` when this build has none. */
 	ControlsSheet: Component<ComposerSheetProps> | null;
 	/**
-	 * Docks permission prompts, private-access requests and agent questions
+	 * Docks permission prompts, Vault requests and agent questions
 	 * above the composer, replacing the permission modal and the question tray.
 	 * `null` (desktop) keeps those.
 	 */

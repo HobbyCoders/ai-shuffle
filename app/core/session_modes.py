@@ -480,7 +480,7 @@ COMPUTER_USE_REQUEST_ACCESS = "mcp__computer-use__request_access"
 # The tools Accept Edits approves on its own, on every leg: fluid's
 # ``ACCEPT_EDITS_TOOLS`` (Edit, Write, MultiEdit, NotebookEdit — the file-edit
 # tools, which is what the mode means in Claude Code). The app adds no name of
-# its own: none of its in-proc MCP tools (``mcp__builtins__*``, chat-access,
+# its own: none of its in-proc MCP tools (``mcp__builtins__*``, vault,
 # computer-use) edits a workspace file, and code mode's ``run_python`` is a
 # kernel, not an edit, so it asks like ``Bash`` does. Re-exported here so the
 # approver, the no-approver paths and the tests read the one table.

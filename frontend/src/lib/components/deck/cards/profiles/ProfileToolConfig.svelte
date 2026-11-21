@@ -5,7 +5,7 @@
 	 *
 	 * Every tool a session can be given comes from `GET /tools/surface`, grouped
 	 * by where it lives: the harness builtins, the app's bridged servers, the
-	 * private-access tools, the AI tools, the browser, computer use, app config,
+	 * Vault tools, the AI tools, the browser, computer use, app config,
 	 * then each configured MCP server (in its own card). There is no hardcoded
 	 * list — a builtin added upstream shows up here on the next refresh.
 	 *
@@ -118,7 +118,7 @@
 	/** Strip the `mcp__server__` prefix inside a server's own card. */
 	function shortName(group: ToolSurfaceGroup, name: string): string {
 		const server = group.server?.trim();
-		const ownCard = group.kind === 'mcp' || group.kind === 'private_access';
+		const ownCard = group.kind === 'mcp' || group.kind === 'vault';
 		return ownCard && server && name.startsWith(`mcp__${server}__`)
 			? name.slice(`mcp__${server}__`.length)
 			: name;

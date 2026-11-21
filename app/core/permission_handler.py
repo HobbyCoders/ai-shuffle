@@ -127,9 +127,9 @@ class PermissionRule:
             # cannot see. A Deny that names any request covers the call; an
             # Allow (or Defer) only one that names every request. A malformed
             # batch is refused by the tool, so only a Deny claims it.
-            from app.core import chat_http_batch
+            from app.core import vault_http_batch
             try:
-                batch = chat_http_batch.items(tool_input)
+                batch = vault_http_batch.items(tool_input)
             except ValueError:
                 return self.decision == PermissionDecision.DENY
             if batch is not None:
@@ -1091,7 +1091,7 @@ class PermissionHandler:
     async def resolve_mode_permissions(self, session_id: str, state) -> None:
         """Release only this run's ordinary prompts covered by its live mode.
 
-        Private access, questions, screen-access prompts and redirected worker
+        Vault requests, questions, screen-access prompts and redirected worker
         prompts retain their own explicit answer. No remembered rules are added.
         """
         from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt

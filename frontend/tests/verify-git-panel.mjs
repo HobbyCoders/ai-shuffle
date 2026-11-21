@@ -99,7 +99,7 @@ async function harness(viewport, { touch, shell }) {
 	}
 
 	// #1615: a worktree whose status reads "not a repository" keeps a labelled
-	// Git button and its panel (which hosts Swarm and Private access).
+	// Git button and its panel (which hosts Swarm and Vault).
 	async function checkoutChecks() {
 		const label = page.locator('.git-btn.trigger .btn-label');
 		const shown = (selector) => page.locator(`.git-btn.trigger ${selector}`).evaluate((el) => getComputedStyle(el).display !== 'none');
@@ -125,7 +125,7 @@ async function harness(viewport, { touch, shell }) {
 		await press(button('Check again'));
 		check((await page.evaluate(() => window.gitPanelRetries ?? 0)) === before + 1, 'unreadable: Check again retries the load');
 		check((await open()) === 'git-panel', 'unreadable: Check again keeps the panel open', await open());
-		check(await page.getByRole('button', { name: 'Private access' }).isEnabled(), 'unreadable: Private access stays reachable');
+		check(await page.getByRole('button', { name: 'Vault' }).isEnabled(), 'unreadable: Vault stays reachable');
 		await fx(() => window.gitPanelFixture.scenario('dirty'));
 		check(await page.locator('.gp-rows').getByRole('button', { name: 'Commit', exact: true }).isEnabled(), 'recovered: Commit is back');
 		await press(page.locator('.gp-close'));

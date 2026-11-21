@@ -134,15 +134,15 @@ def test_delegated_loaded_tools_budget():
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])
-def test_private_access_guidance_has_one_owner(native):
-    from app.mcp.chat_access_sdk import GUIDANCE
+def test_vault_guidance_has_one_owner(native):
+    from app.mcp.vault_sdk import GUIDANCE
 
     compiled, catalog, specs = compile_fixture(native=native)
     system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
               if native else compiled.text)
     combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
     assert system.count(GUIDANCE.strip()) == 1
-    assert combined.count("# Private resource access") == 1
+    assert combined.count("# Vault\n") == 1
     # What applies before any tool is touched stays in every prompt.
     for rule in (
         "Never ask for addresses, passwords, private keys, API keys, tokens",

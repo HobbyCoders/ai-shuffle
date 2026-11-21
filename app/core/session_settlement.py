@@ -157,7 +157,7 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
 
 async def dismiss_owner_waits(session_id: str, *, expected_revision=None) -> bool:
     from app.core import interaction_events, interaction_wait, streaming_status, turn_manager
-    from app.core.chat_access import broker, publish_change
+    from app.core.vault_access import broker, publish_change
     from app.core.permission_handler import permission_handler
     from app.core.sync_engine import sync_engine
     from app.core.user_question_handler import publish_session_attention

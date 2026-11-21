@@ -1,7 +1,7 @@
 """Plugin service grants: RequestChatAccess(plugin, service) and ChatHttpRequest
-with the owner's OAuth sign-in (app/core/chat_access.py).
+with the owner's OAuth sign-in (app/core/vault_access.py).
 
-The API is the TLS test service from test_chat_services; the token endpoint is
+The API is the TLS test service from test_vault_services; the token endpoint is
 a fake behind ``httpx.MockTransport``; sign-in storage is in memory behind the
 real encryption. The agent side never sees a token.
 """
@@ -17,9 +17,9 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.core import encryption, plugin_oauth
-from app.core.chat_access import AccessDenied, GrantInput, GrantSubmission
+from app.core.vault_access import AccessDenied, GrantInput, GrantSubmission
 from app.core.plugin_oauth import OAuthClient, OAuthConfig, PluginOAuthError, TokenSet
-from tests.core.test_chat_services import (  # noqa: F401 - fixtures
+from tests.core.test_vault_services import (  # noqa: F401 - fixtures
     broker,
     pki,
     service,
@@ -117,10 +117,10 @@ def _clean(*values) -> None:
 @pytest.mark.parametrize("url", ["", None, " \t", "custom"])
 async def test_sdk_plugin_placeholders_open_declared_service_card(broker, declared, oauth, monkeypatch, url):
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
-    from app.mcp import chat_access_sdk as sdk
+    from app.mcp import vault_sdk as sdk
 
     monkeypatch.setattr(sdk, "broker", broker)
-    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
     response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE,
         "saved_id": None, "service_provider": "custom", "suggested_url": url,
@@ -143,10 +143,10 @@ async def test_sdk_plugin_placeholders_open_declared_service_card(broker, declar
 ])
 async def test_sdk_plugin_real_hints_are_refused(broker, declared, oauth, monkeypatch, hints):
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
-    from app.mcp import chat_access_sdk as sdk
+    from app.mcp import vault_sdk as sdk
 
     monkeypatch.setattr(sdk, "broker", broker)
-    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
     response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE, **hints,
     })
@@ -314,7 +314,7 @@ async def test_write_access_follows_the_declaration_and_one_shot_approval(broker
     assert handle["writable"] is True
     import asyncio
 
-    from tests.core.test_chat_services import pending as pending_action
+    from tests.core.test_vault_services import pending as pending_action
     run = asyncio.create_task(broker.run("chat", handle["id"], "http",
                                          {"method": "POST", "path": "/items", "body": "{}"}))
     action = await pending_action(broker)
@@ -327,10 +327,10 @@ async def test_write_access_follows_the_declaration_and_one_shot_approval(broker
 
 async def test_the_tools_return_no_token(broker, service, trust, declared, oauth, monkeypatch):
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
-    from app.mcp import chat_access_sdk as sdk
+    from app.mcp import vault_sdk as sdk
 
     monkeypatch.setattr(sdk, "broker", broker)
-    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
     response = await tools["RequestChatAccess"].handler(
         {"kind": "service", "purpose": "Read the inventory", "plugin": PLUGIN, "service": SERVICE})
     pending = json.loads(response["content"][0]["text"])

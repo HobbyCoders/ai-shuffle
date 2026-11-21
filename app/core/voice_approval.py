@@ -17,7 +17,7 @@ audio turn after the question was put to them:
 
 The answer goes through ``permission_handler.respond`` (the same call a tap on
 the card makes) after the tap's authority checks are re-run for the call's
-caller. Requests the app keeps on screen (private access, anything carrying a
+caller. Requests the app keeps on screen (Vault, anything carrying a
 secret) are never answered by voice; the voice says they need the screen.
 On a conversation another network worker runs, the answer is forwarded to
 that worker (``control.answer_permission``), as a tap there would be (#700).
@@ -75,7 +75,7 @@ def classify_spoken_answer(text: str) -> str:
     return owner_confirm.classify(text)
 
 
-# Tools whose approval belongs to the private-access card, and argument names
+# Tools whose approval belongs to the Vault card, and argument names
 # that mean a secret travels with the request. Neither is answered by voice.
 _SCREEN_TOOLS = frozenset({
     "RequestChatAccess", "ChatResources", "ChatRunCommand", "ChatWriteFile",
@@ -102,8 +102,9 @@ def needs_screen(request: Dict[str, Any]) -> Optional[str]:
     """Why this request must be answered on screen, or None when voice may."""
     name = str(request.get("tool_name") or "")
     short = name.rsplit("__", 1)[-1]
+    # The Vault's tools are on the ``chat-access`` server (see vault_sdk.SERVER).
     if short in _SCREEN_TOOLS or "chat-access" in name or "chat_access" in name:
-        return "Private access is approved in its card on screen."
+        return "Vault access is approved in its card on screen."
     if _has_secret(request.get("tool_input")):
         return "It carries a secret, which is only handled on screen."
     return None

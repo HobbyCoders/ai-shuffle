@@ -49,15 +49,15 @@ def _tool(name: str, marker: str = ""):
     )
 
 
-def test_real_chat_access_tools_have_serializable_provider_schemas():
+def test_real_vault_access_tools_have_serializable_provider_schemas():
     import json
-    from app.mcp.chat_access_sdk import create_chat_access_server
+    from app.mcp.vault_sdk import create_vault_server
     from fluid.providers.base import ProviderRequest
     from fluid.messages import Message, Text
     from fluid.providers.openai_responses.serialize import build_request_body
 
     registry = ToolRegistry()
-    register_recorded_sdk_servers(registry, {"chat-access": create_chat_access_server("schema-test")})
+    register_recorded_sdk_servers(registry, {"chat-access": create_vault_server("schema-test")})
     request = registry.get("mcp__chat-access__RequestChatAccess")
     assert request.input_schema == {
         "type": "object",
