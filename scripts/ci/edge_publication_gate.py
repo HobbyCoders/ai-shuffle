@@ -34,8 +34,9 @@ MAIN_SUITE_PATH = ".github/workflows/ci.yml"
 MAIN_SUITE_NAME = "CI"
 MAIN_SUITE_AGGREGATE = "CI"
 COMMAND = "python scripts/local_ci.py full --attest"
-# desktop-source.yml's only schedule: 12:00 AM America/New_York. GitHub puts
-# the cron, without the time zone, in the schedule event.
+# desktop-source.yml's only schedule: 12:00 AM America/New_York. The schedule
+# event carries the cron; GitHub does not document whether it appends the time
+# zone, so only the five cron fields are compared.
 NIGHTLY_CRON = "0 0 * * *"
 
 
@@ -399,7 +400,8 @@ def event_allowed(env, event):
         return False
     kind = env.get("GITHUB_EVENT_NAME")
     if kind == "schedule":
-        return event.get("schedule") == NIGHTLY_CRON
+        schedule = event.get("schedule")
+        return isinstance(schedule, str) and schedule.split()[:5] == NIGHTLY_CRON.split()
     if kind == "workflow_dispatch":
         return (env.get("GITHUB_ACTOR_ID") == OWNER_ID and bool(env.get("GITHUB_ACTOR"))
                 and env.get("GITHUB_TRIGGERING_ACTOR") == env["GITHUB_ACTOR"])

@@ -307,6 +307,9 @@ def test_event_predicate():
     assert not gate.event_allowed(env(), {"schedule": "0 7 * * *"})
     # The old 06:00 UTC schedule no longer authorizes a run.
     assert not gate.event_allowed(env(), {"schedule": "0 6 * * *"})
+    assert not gate.event_allowed(env(), {"schedule": None})
+    # Accepted whether or not GitHub appends the schedule's time zone.
+    assert gate.event_allowed(env(), {"schedule": "0 0 * * * America/New_York"})
     for name in ["pull_request", "workflow_run", "status", "push"]:
         assert not gate.event_allowed(env(GITHUB_EVENT_NAME=name), status_event())
     assert not gate.event_allowed(env(GITHUB_REF="refs/heads/feature"), status_event())
