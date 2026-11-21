@@ -132,6 +132,28 @@ await runJourney({
 			}
 		},
 		{
+			// Settings > System: the "?" beside a label. It is drawn 18px on every
+			// screen, so a label with help is as tall as one without; a phone
+			// widens only the area that answers.
+			name: 'help-tip',
+			async setup(ctx) {
+				await gotoApp(ctx.page, ctx.status);
+				await (await openSettings(ctx.page)).getByRole('button', { name: 'System', exact: true }).click();
+				await ctx.page.getByRole('button', { name: /^About / }).first().waitFor({ timeout: 20_000 });
+			},
+			async act(ctx) {
+				await ctx.mark('probe each help button');
+				const tips = await ctx.page.getByRole('button', { name: /^About / }).filter({ visible: true }).all();
+				expect(tips.length >= 2, `System shows its help buttons (${tips.length})`);
+				for (const tip of tips) {
+					const name = `help "${await tip.getAttribute('aria-label')}"`;
+					await check(ctx, name, tip);
+					const { width, height } = await probe(tip);
+					expect(width === 18 && height === 18, `${name} is drawn 18px (drawn ${width}x${height})`);
+				}
+			}
+		},
+		{
 			// Context and usage: the hide button beside a usage section's header.
 			name: 'usage-hide',
 			async setup(ctx) {

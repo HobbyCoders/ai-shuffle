@@ -55,6 +55,20 @@ export function levelName(level: string): string {
 	return l.charAt(0).toUpperCase() + l.slice(1);
 }
 
+/**
+ * A line's own text, for its list row. The worker sends each message as
+ * "<date> <time> - <logger> - <LEVEL> - <text>"; the row already shows those
+ * three as its time, second line and dot, and repeating them left a phone row
+ * no room for the text. A message in any other shape comes back unchanged.
+ */
+export function logText(line: LogLine): string {
+	const prefix = ` - ${line.logger_name} - ${line.level} - `;
+	const at = line.message.indexOf(prefix);
+	if (at < 0 || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(,\d+)?$/.test(line.message.slice(0, at))) return line.message;
+	const text = line.message.slice(at + prefix.length);
+	return text.trim() ? text : line.message;
+}
+
 function pad(n: number, width = 2): string {
 	return String(n).padStart(width, '0');
 }

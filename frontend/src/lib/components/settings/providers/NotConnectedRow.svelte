@@ -81,4 +81,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* Phone: the sign-in kinds wrap instead of ending in an ellipsis. */
+	:global(.settings-shell[data-stacked]) .tx > .sm { white-space: normal; }
 </style>

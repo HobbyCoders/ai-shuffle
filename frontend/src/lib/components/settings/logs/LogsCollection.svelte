@@ -16,7 +16,7 @@
 	import SelectField from '../rows/SelectField.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import LogDetail from './LogDetail.svelte';
-	import { LOG_POLL_MS, formatLogTime, levelTone, logsModel, type LogsModel } from './logs-model.svelte';
+	import { LOG_POLL_MS, formatLogTime, levelTone, logText, logsModel, type LogsModel } from './logs-model.svelte';
 
 	interface Props {
 		/** Tests pass their own model. */
@@ -136,8 +136,8 @@
 					category={CATEGORY}
 					variant="log"
 					mono
-					name={line.message}
-					summary={line.logger_name}
+					name={logText(line)}
+					summary={`${line.level} · ${line.logger_name}`}
 					meta={formatLogTime(line.timestamp).slice(0, 8)}
 					status={levelTone(line.level)}
 					onselect={select}
