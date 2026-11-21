@@ -1,6 +1,7 @@
 """Main-only flaky-journey reporting, without a browser, database or public writes."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -19,9 +20,18 @@ RUN = reporter.Run("example/project", 401, "a" * 40)
 CASE = reporter.FlakyCase("copy", "copy@phone-slow", "fail", "pass")
 METADATA = {
     "id": RUN.id, "event": "push", "head_branch": "main", "name": "CI",
-    "path": ".github/workflows/ci.yml", "head_sha": RUN.commit,
+    "path": ".github/workflows/ci.yml", "head_sha": RUN.commit, "created_at": "2026-11-20T10:00:00Z",
     "repository": {"full_name": RUN.repository}, "head_repository": {"full_name": RUN.repository},
 }
+
+
+@pytest.fixture(autouse=True)
+def report_every_occurrence(monkeypatch):
+    """Matching and deduplication tests report at the first occurrence (no ledger).
+
+    The tests at the end of this file ask for `ledger_threshold` and cover the default.
+    """
+    monkeypatch.setattr(reporter, "THRESHOLD", 1)
 
 
 def receipt(case=CASE, status="passed-on-retry"):
@@ -438,6 +448,13 @@ def test_non_main_push_sources_are_rejected(key, value):
     assert reporter.eligible_run(RUN.repository, RUN.id, {**METADATA, key: value}) is None
 
 
+def test_eligible_run_carries_when_the_run_was_created():
+    run = reporter.eligible_run(RUN.repository, RUN.id, METADATA)
+    assert run.created == datetime(2026, 11, 20, 10, tzinfo=timezone.utc)
+    with pytest.raises(ValueError):
+        reporter.eligible_run(RUN.repository, RUN.id, {**METADATA, "created_at": None})
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_ineligible_real_run_warns_but_dry_run_is_plain_log(dry_run, monkeypatch, capsys):
     api = FakeGitHub()
@@ -579,3 +596,196 @@ def test_all_real_journey_case_ids_including_dynamic_overlays_are_reportable(tmp
         overlays.extend(id for id in ids if id.startswith("overlay-"))
     assert overlays, "the dynamic overlay-* template must be included in the contract"
     assert "overlay-usage-opening-reading-growth@phone-slow" in overlays
+
+
+# --- Occurrence threshold: one retry is recorded in the ledger, not reported ---
+
+DEFAULT_THRESHOLD = reporter.THRESHOLD
+NOW = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+BOT = {"login": "github-actions[bot]"}
+LEDGER = 900
+
+
+@pytest.fixture
+def ledger_threshold(monkeypatch, report_every_occurrence):
+    assert DEFAULT_THRESHOLD == 3 and reporter.WINDOW_DAYS == 14
+    monkeypatch.setattr(reporter, "THRESHOLD", DEFAULT_THRESHOLD)
+
+
+def stamp(days_ago):
+    return (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def seen(run_id, days_ago=1, case=CASE, user=BOT):
+    """A ledger comment recording `case` in an earlier main run."""
+    run = reporter.Run(RUN.repository, run_id, RUN.commit)
+    return {"body": reporter.ledger_comment(run, [case]), "created_at": stamp(days_ago), "user": user}
+
+
+class LedgerGitHub(FakeGitHub):
+    def __init__(self, issues=(), ledger=(), *, has_ledger=True, **kwargs):
+        ledger_issue = {"number": LEDGER, "state": "closed", "title": reporter.LEDGER_TITLE,
+                        "body": reporter.LEDGER_BODY, "user": BOT}
+        super().__init__([*issues, *([ledger_issue] if has_ledger else [])], **kwargs)
+        self.ledger = list(ledger)
+        self.since = []
+
+    def comments(self, number, since=""):
+        if number in {LEDGER, LEDGER + 1}:
+            self.since.append(since)
+            return [entry for entry in self.ledger if not entry["created_at"] or entry["created_at"] >= since]
+        return self.history
+
+    def request(self, route, *, method="GET", data=None):
+        response = super().request(route, method=method, data=data)
+        if route == "issues" and data["title"] == reporter.LEDGER_TITLE:
+            response["number"] = LEDGER + 1
+        return response
+
+    def writes(self):
+        return [(route, method) for route, method, _ in self.calls]
+
+
+RECORD = (f"issues/{LEDGER}/comments", "POST")
+
+
+def test_first_occurrences_are_recorded_and_the_third_run_opens_the_issue(ledger_threshold):
+    api = LedgerGitHub()
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [RECORD]
+    body = api.calls[0][2]["body"]
+    assert reporter.run_marker(CASE, RUN) in body and RUN.url in body and CASE.case in body
+    assert CASE.marker not in body, "a ledger comment must not look like a case issue"
+    assert "DO NOT PUBLISH" not in body and "private-detail" not in body
+    assert api.since == [stamp(reporter.WINDOW_DAYS)]
+
+    api = LedgerGitHub(ledger=[seen(399)])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [RECORD]
+
+    api = LedgerGitHub(ledger=[seen(398, 13), seen(399)])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [RECORD, ("issues", "POST")]
+    assert api.calls[1][2]["title"] == CASE.title
+    assert reporter.run_marker(CASE, RUN) in api.calls[1][2]["body"]
+
+
+@pytest.mark.parametrize("ledger", [
+    pytest.param([seen(398, 15), seen(399, 15)], id="outside-the-window"),
+    pytest.param([seen(398, user={"login": "someone-else"}), seen(399, user=None)], id="not-the-bot"),
+    pytest.param([seen(399), seen(399)], id="same-run-twice"),
+    pytest.param([seen(398, case=reporter.FlakyCase("copy", "copy@desktop-slow", "fail", "pass")),
+                  seen(399)], id="another-case"),
+    pytest.param([{**seen(398), "created_at": None}, seen(399)], id="undated"),
+])
+def test_only_the_bots_own_recent_distinct_runs_of_the_case_count(ledger, ledger_threshold):
+    api = LedgerGitHub(ledger=ledger)
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [RECORD]
+
+
+@pytest.mark.parametrize("closed_days_ago,reopens", [(1, False), (5, True)])
+def test_closed_issue_reopens_only_after_enough_runs_since_it_was_closed(closed_days_ago, reopens, ledger_threshold):
+    issue = {**existing("closed"), "closed_at": stamp(closed_days_ago)}
+    api = LedgerGitHub([issue], [seen(398, 3), seen(399, 2)])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    expected = [RECORD, ("issues/17", "PATCH"), ("issues/17/comments", "POST")] if reopens else [RECORD]
+    assert api.writes() == expected
+    if reopens:
+        assert "came back" in api.calls[-1][2]["body"]
+
+
+def test_open_issue_still_gets_every_occurrence(ledger_threshold):
+    api = LedgerGitHub([existing()])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [RECORD, ("issues/17/comments", "POST")]
+
+
+@pytest.mark.parametrize("earlier", [0, 2])
+def test_rerun_of_the_same_run_is_not_recorded_or_reported_twice(earlier, ledger_threshold):
+    issue = existing(body=CASE.marker + reporter.run_marker(CASE, RUN))
+    api = LedgerGitHub([issue] if earlier else [], [seen(398), seen(399)][:earlier] + [seen(RUN.id, 0)])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == []
+
+
+def test_rerun_finishes_a_report_whose_issue_write_failed(ledger_threshold):
+    api = LedgerGitHub(ledger=[seen(398), seen(399), seen(RUN.id, 0)])
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [("issues", "POST")]
+
+
+@pytest.mark.parametrize("own_entry_days_ago,expected", [
+    pytest.param(6, [], id="recorded-before-the-issue-was-closed"),
+    pytest.param(16, [], id="recorded-before-the-window"),
+    pytest.param(31, [], id="recorded-before-the-rerun-limit"),
+    pytest.param(4, [("issues/17", "PATCH"), ("issues/17/comments", "POST")], id="recorded-after-the-close"),
+])
+def test_rerun_counts_only_when_its_own_ledger_entry_still_counts(own_entry_days_ago, expected, ledger_threshold):
+    issue = {**existing("closed"), "closed_at": stamp(5)}
+    api = LedgerGitHub([issue], [seen(RUN.id, own_entry_days_ago), seen(398, 3), seen(399, 2)])
+    created = NOW - timedelta(days=own_entry_days_ago, hours=1)
+    reporter.report(api, reporter.Run(RUN.repository, RUN.id, RUN.commit, created), [receipt()], now=NOW)
+    assert api.writes() == expected, "a rerun is never recorded again and adds no occurrence of its own"
+    assert api.since == [min(stamp(reporter.WINDOW_DAYS), created.strftime("%Y-%m-%dT%H:%M:%SZ"))]
+
+
+@pytest.mark.parametrize("stranger", [False, True])
+def test_missing_ledger_is_created_closed_and_used(stranger, ledger_threshold):
+    forged = {"number": 5, "state": "open", "title": reporter.LEDGER_TITLE, "body": reporter.LEDGER_BODY,
+              "user": {"login": "someone-else"}}
+    api = LedgerGitHub([forged] if stranger else [], has_ledger=False)
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [("issues", "POST"), (f"issues/{LEDGER + 1}", "PATCH"),
+                            (f"issues/{LEDGER + 1}/comments", "POST")]
+    assert reporter.LEDGER_MARKER in api.calls[0][2]["body"] and api.calls[0][2]["labels"] == []
+    assert api.calls[1][2] == {"state": "closed", "state_reason": "not_planned"}
+
+
+def test_ledger_left_open_is_closed_again(ledger_threshold):
+    api = LedgerGitHub()
+    api.existing[-1]["state"] = "open"
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == [(f"issues/{LEDGER}", "PATCH"), RECORD]
+    assert api.calls[0][2] == {"state": "closed", "state_reason": "not_planned"}
+
+    api = LedgerGitHub()
+    api.existing[-1]["state"] = "open"
+    reporter.report(api, RUN, [receipt()], dry_run=True, now=NOW)
+    assert api.writes() == []
+
+
+@pytest.mark.parametrize("has_ledger", [False, True])
+def test_dry_run_counts_the_ledger_but_writes_nothing(has_ledger, ledger_threshold, capsys):
+    api = LedgerGitHub(ledger=[seen(398), seen(399)], has_ledger=has_ledger)
+    reporter.report(api, RUN, [receipt()], dry_run=True, now=NOW)
+    assert api.writes() == []
+    assert f'"action": "{"create" if has_ledger else "record"}"' in capsys.readouterr().out
+
+
+def test_unreadable_ledger_warns_and_opens_nothing(ledger_threshold, monkeypatch, capsys):
+    api = LedgerGitHub(ledger=[seen(398), seen(399)])
+    def fail(number, since=""):
+        raise RuntimeError("DO NOT PUBLISH: API error details")
+    monkeypatch.setattr(api, "comments", fail)
+    reporter.report(api, RUN, [receipt()], now=NOW)
+    assert api.writes() == []
+    output = capsys.readouterr().out
+    assert "::warning" in output and "DO NOT PUBLISH" not in output
+
+
+def test_ledger_comments_are_chunked_and_read_since_the_window(ledger_threshold, monkeypatch):
+    cases = [reporter.FlakyCase("copy", f"case-{index}@phone-slow", "fail", "pass")
+             for index in range(reporter.LEDGER_CHUNK * 2 + 1)]
+    api = LedgerGitHub()
+    reporter.report(api, RUN, [receipt(case) for case in cases], now=NOW)
+    assert api.writes() == [RECORD] * 3
+    recorded = "".join(data["body"] for _, _, data in api.calls)
+    assert all(recorded.count(reporter.run_marker(case, RUN)) == 1 for case in cases)
+
+    routes = []
+    transport = reporter.GitHub(RUN.repository)
+    monkeypatch.setattr(transport, "request", lambda route, **kwargs: routes.append(route) or [[]])
+    transport.comments(LEDGER, since=stamp(14))
+    transport.comments(17)
+    assert routes == [f"issues/{LEDGER}/comments?per_page=100&since={stamp(14)}", "issues/17/comments?per_page=100"]

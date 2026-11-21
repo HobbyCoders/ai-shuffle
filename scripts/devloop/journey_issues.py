@@ -1,5 +1,8 @@
 """Best-effort, main-only issue reporting from structured journey retry receipts.
 
+One retry is recorded in a closed ledger issue, not reported. A case gets its
+own issue (or a closed one reopens) only after THRESHOLD runs inside WINDOW_DAYS.
+
 No logs, error details, paths or screenshots enter an issue. Decisions are pure;
 GitHub access uses bounded gh calls, never a shell or artifact-supplied commands.
 """
@@ -7,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -15,6 +19,19 @@ from pathlib import Path
 import re
 import subprocess
 import zipfile
+
+# Distinct push-to-main runs, this one included, before a case without an open
+# issue is reported. 1 reports every occurrence and uses no ledger.
+THRESHOLD = 3
+WINDOW_DAYS = 14
+LEDGER_TITLE = "UI journey retries on main (occurrence ledger)"
+LEDGER_MARKER = "<!-- ui-journey-flake-ledger:v1 -->"
+LEDGER_BODY = "\n".join([
+    "CI records here each UI journey case that passed only on its automatic retry in a push-to-main run.",
+    f"A case gets its own issue once that happens in {THRESHOLD} runs within {WINDOW_DAYS} days.",
+    "This issue stays closed: it is a record, not a task.", "", LEDGER_MARKER,
+])
+LEDGER_CHUNK = 50
 
 
 @dataclass(frozen=True)
@@ -43,6 +60,8 @@ class Run:
     repository: str
     id: int
     commit: str
+    # When the workflow run was first created; a rerun keeps it.
+    created: datetime | None = None
 
     @property
     def url(self) -> str:
@@ -111,7 +130,10 @@ def eligible_run(repository: str, run_id: int, metadata: dict) -> Run | None:
     commit = metadata.get("head_sha", "")
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("invalid commit")
-    return Run(repository, run_id, commit)
+    created = _time(metadata.get("created_at"))
+    if created is None:
+        raise ValueError("invalid creation time")
+    return Run(repository, run_id, commit, created)
 
 
 def bot_authored(entry: dict) -> bool:
@@ -131,12 +153,52 @@ def already_reported(case: FlakyCase, run: Run, entries: list[dict]) -> bool:
     return any(bot_authored(entry) and marker in (entry.get("body") or "") for entry in entries)
 
 
-def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict]) -> Decision:
-    """Only the bot's own issue body/comments can deduplicate a case in a run."""
+def _time(value) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def ledger_issue(issues: list[dict]) -> dict | None:
+    found = [issue for issue in issues if bot_authored(issue) and LEDGER_MARKER in (issue.get("body") or "")]
+    return min(found, key=lambda issue: issue["number"]) if found else None
+
+
+def ledger_runs(case: FlakyCase, entries: list[dict], after: datetime) -> set[int]:
+    """Runs the bot's own ledger comments recorded for this case after `after`."""
+    pattern = re.compile(rf"<!-- ui-journey-flake-run:([1-9][0-9]*):{case.identity_hash} -->")
+    runs = set()
+    for entry in entries:
+        created = _time(entry.get("created_at"))
+        if bot_authored(entry) and created is not None and created > after:
+            runs.update(int(run_id) for run_id in pattern.findall(entry.get("body") or ""))
+    return runs
+
+
+def ledger_comment(run: Run, cases: list[FlakyCase]) -> str:
+    return "\n".join([
+        f"Main run [{run.id}]({run.url}) at `{run.commit}` accepted these UI journey cases only on retry:", "",
+        *[f"- `{case.journey}` / `{case.case}`: `{case.first}` then `{case.retry}`" for case in cases], "",
+        *[run_marker(case, run) for case in cases],
+    ])
+
+
+def decide(case: FlakyCase, run: Run, issue: dict | None, comments: list[dict],
+           occurrences: int | None = None) -> Decision:
+    """Only the bot's own issue body/comments can deduplicate a case in a run.
+
+    `occurrences` is how many main runs of this case count toward THRESHOLD,
+    this one included: recorded inside the window and, for a closed issue,
+    after it was closed. None applies no threshold.
+    """
     if issue is not None and not bot_authored(issue):
         issue = None
     if issue is not None and already_reported(case, run, [issue, *comments]):
         return Decision("skip")
+    if occurrences is not None and occurrences < THRESHOLD and (issue is None or issue["state"] == "closed"):
+        return Decision("record")
     action = "create" if issue is None else "reopen" if issue["state"] == "closed" else "comment"
     lead = ("This flaky UI journey came back after this issue was closed; reopening it."
             if action == "reopen" else "This UI journey failed initially and was accepted only on its automatic retry.")
@@ -177,9 +239,9 @@ class GitHub:
         return [issue for page in self.request("issues?state=all&per_page=100", pages=True)
                 for issue in page if "pull_request" not in issue]
 
-    def comments(self, number: int) -> list[dict]:
-        return [comment for page in self.request(f"issues/{number}/comments?per_page=100", pages=True)
-                for comment in page]
+    def comments(self, number: int, since: str = "") -> list[dict]:
+        route = f"issues/{number}/comments?per_page=100" + (f"&since={since}" if since else "")
+        return [comment for page in self.request(route, pages=True) for comment in page]
 
     def labels(self) -> list[str]:
         names = {label["name"] for page in self.request("labels?per_page=100", pages=True) for label in page}
@@ -211,7 +273,33 @@ class GitHub:
                 warning("A journey artifact could not supply a usable retry receipt; skipped it.")
 
 
-def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
+def read_ledger(api: GitHub, run: Run, cases: list[FlakyCase], issues: list[dict],
+                since: datetime, dry_run: bool) -> tuple[list[dict], set[str]]:
+    """Record this run's cases in the ledger.
+
+    Returns its comments since `since` and the markers of the cases this call
+    recorded (or, on a dry run, would have recorded) for the first time.
+    """
+    ledger = ledger_issue(issues)
+    if ledger is None:
+        if dry_run:
+            return [], {case.marker for case in cases}
+        ledger = api.request("issues", method="POST", data={
+            "title": LEDGER_TITLE, "body": LEDGER_BODY, "labels": []})
+    if ledger.get("state") != "closed" and not dry_run:
+        api.request(f"issues/{ledger['number']}", method="PATCH",
+                    data={"state": "closed", "state_reason": "not_planned"})
+    entries = api.comments(ledger["number"], since=since.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    # Attempts of the same workflow run are recorded once.
+    new = [case for case in cases if not already_reported(case, run, entries)]
+    if not dry_run:
+        for start in range(0, len(new), LEDGER_CHUNK):
+            api.request(f"issues/{ledger['number']}/comments", method="POST",
+                        data={"body": ledger_comment(run, new[start:start + LEDGER_CHUNK])})
+    return entries, {case.marker for case in new}
+
+
+def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False, now: datetime | None = None) -> None:
     cases = {}
     for receipt in receipts:
         try:
@@ -223,6 +311,18 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
     if not cases:
         return
     issues = api.issues()
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(days=WINDOW_DAYS)
+    ledger, recorded = [], set()
+    if THRESHOLD > 1:
+        try:
+            # A rerun's own entry can be older than the window but never older
+            # than its run, so read back to whichever is earlier.
+            ledger, recorded = read_ledger(api, run, list(cases.values()), issues,
+                                           min(since, run.created) if run.created else since, dry_run)
+        except Exception:
+            # Without the ledger no occurrence counts, so nothing new is opened.
+            warning("The journey retry ledger could not be read or updated; earlier occurrences are not counted.")
     labels = None
     for case in cases.values():
         try:
@@ -237,10 +337,17 @@ def report(api: GitHub, run: Run, receipts, *, dry_run: bool = False) -> None:
                 issue, decision = None, Decision("skip")
             else:
                 issue = min(matches, key=lambda item: (item["state"] != "open", item["number"])) if matches else None
-                decision = decide(case, run, issue, histories[issue["number"]] if issue else [])
+                closed = _time(issue.get("closed_at")) if issue and issue["state"] == "closed" else None
+                occurrences = None
+                if THRESHOLD > 1:
+                    # This run counts when it was recorded just now, or when its
+                    # earlier ledger entry is itself after the cutoff (a rerun).
+                    counted = ledger_runs(case, ledger, max(since, closed) if closed else since)
+                    occurrences = len(counted | ({run.id} if case.marker in recorded else set()))
+                decision = decide(case, run, issue, histories[issue["number"]] if issue else [], occurrences)
             print(json.dumps({"action": decision.action, "journey": case.journey, "case": case.case,
                               "run": run.url, "commit": run.commit, "dry_run": dry_run}), flush=True)
-            if dry_run or decision.action == "skip":
+            if dry_run or decision.action in {"skip", "record"}:
                 continue
             if decision.action == "create":
                 if labels is None:
