@@ -1,7 +1,8 @@
-// Real-browser check of the Vault approval card (#1267): a command on a
-// folder grant reads as a sandboxed command with the folder's write effect, a
-// command on a machine grant still reads as remote, and the card fits and
-// approves at desktop and phone widths. The API is answered here.
+// Real-browser check of the Vault's one-time approval card: it shows inline
+// above the composer (no panel to open), names the resource and the account,
+// states the effect, fits and approves at desktop and phone widths, and the
+// composer's Vault chip opens the panel upward inside the viewport. The API is
+// answered here.
 //
 // Run from frontend/ while the fixture is serving:
 //   npx vite dev --config tests/vite.vault.config.js --host 127.0.0.1 --port 6917 --strictPort
@@ -24,14 +25,19 @@ const browser = await chromium.launch({
 });
 const url = process.env.VAULT_FIXTURE_URL || 'http://127.0.0.1:6917/tests/vault.html?session=fixture-session';
 const shots = process.env.SCREENSHOT_DIR;
-const SANDBOX = 'Runs once in an isolated sandbox that sees only this folder and has no network.';
 const scenarios = [
-	{ name: 'folder-writable', grant: { kind: 'folder', label: 'Notes', target: '/home/me/notes', writable: true },
-		title: 'Approve this sandboxed command?', hint: `${SANDBOX} It can change files in the folder.` },
-	{ name: 'folder-read-only', grant: { kind: 'folder', label: 'Notes', target: '/home/me/notes', writable: false },
-		title: 'Approve this sandboxed command?', hint: `${SANDBOX} The folder is read-only to it.` },
-	{ name: 'machine', grant: { kind: 'machine', label: 'NAS', target: 'admin@10.0.0.5:22', writable: true },
-		title: 'Approve this remote command?', hint: 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' },
+	{ name: 'machine-command', grant: { kind: 'machine', label: 'NAS', target: 'admin@10.0.0.5:22', writable: true },
+		action: { operation: 'command', arguments: { command: 'grep -rn "TODO" . | head -20' } }, shown: '$ grep -rn "TODO" . | head -20',
+		title: 'Run this on NAS?', scope: 'Once, as admin@10.0.0.5:22', button: 'Run once',
+		hint: 'It runs with that account’s authority and can change files on that machine. The next command asks again.' },
+	{ name: 'service-change', grant: { kind: 'service', label: 'Inventory', target: 'https://api.example.com/v1', writable: true },
+		action: { operation: 'http', arguments: { method: 'POST', path: '/items', body: '{"n":1}', content_type: 'application/json' } }, shown: 'POST /items\napplication/json\n\n{"n":1}',
+		title: 'Send this to Inventory?', scope: 'Once, to https://api.example.com/v1', button: 'Send once',
+		hint: 'It is sent with the sign-in attached, which the agent never sees. The next change asks again.' },
+	{ name: 'folder-write', grant: { kind: 'folder', label: 'Notes', target: '/home/me/notes', writable: true },
+		action: { operation: 'write', arguments: { path: 'todo.md', content: '- call the plumber' } }, shown: 'todo.md\n\n- call the plumber',
+		title: 'Write this file on Notes?', scope: 'Once, in /home/me/notes', button: 'Write once',
+		hint: 'It writes this text once. The next write asks again.' },
 ];
 let passed = 0;
 
@@ -45,11 +51,11 @@ for (const [viewport, touch] of [[{ width: 1280, height: 800 }, false], [{ width
 		const context = await browser.newContext({ viewport, isMobile: touch, hasTouch: touch, deviceScaleFactor: 1, serviceWorkers: 'block' });
 		const decisions = [];
 		const grant = { id: 'g1', expires_at: 9999999999, fingerprint: '', ...scenario.grant };
-		let actions = [{ id: 'a1', grant_id: 'g1', operation: 'command', arguments: { command: 'grep -rn "TODO" . | head -20' }, expires_at: 9999999999 }];
+		let actions = [{ id: 'a1', grant_id: 'g1', expires_at: 9999999999, ...scenario.action }];
 		await context.route((u) => u.pathname.startsWith('/api/'), async (route) => {
 			const request = route.request();
 			const path = new URL(request.url()).pathname;
-			if (path.endsWith('/sessions/fixture-session')) return route.fulfill({ json: { mode: 'chat' } });
+			if (path.endsWith('/v1/sessions/fixture-session')) return route.fulfill({ json: { mode: 'chat' } });
 			if (request.method() === 'POST' && path.endsWith('/vault/sessions/fixture-session/actions/a1')) {
 				decisions.push(request.postDataJSON());
 				actions = [];
@@ -66,26 +72,41 @@ for (const [viewport, touch] of [[{ width: 1280, height: 800 }, false], [{ width
 		const open = page.getByRole('button', { name: /^Vault/ }).first();
 		await open.waitFor();
 		await page.waitForFunction(() => document.querySelector('button[aria-label="Vault: 1 waiting for you"]'));
-		if (touch) await open.tap(); else await open.click();
-		const card = page.getByRole('region', { name: 'One-shot action approval' });
+		// Inline above the composer: nothing to open before answering.
+		const card = page.getByRole('group', { name: 'Vault: waiting for you' }).getByRole('region', { name: 'One-time approval' });
 		await card.waitFor();
+		check(await page.locator('.pa-pop:not([hidden])').count() === 0, 'the panel stays closed');
 		check(await card.getByText(scenario.title).isVisible(), 'title', scenario.title);
 		check((await card.locator('.pa-hint').textContent()) === scenario.hint, 'hint', await card.locator('.pa-hint').textContent());
-		check((await card.locator('pre.pa-mono').textContent()) === '$ grep -rn "TODO" . | head -20', 'command shown verbatim');
-		check(await card.getByText(`${grant.label} · ${grant.target}`).isVisible(), 'grant scope');
+		check((await card.locator('pre.pa-mono').textContent()) === scenario.shown, 'action shown verbatim', await card.locator('pre.pa-mono').textContent());
+		check(await card.getByText(scenario.scope, { exact: true }).isVisible(), 'grant scope', scenario.scope);
 		const fit = await page.evaluate(() => {
-			const dialog = document.querySelector('.pa-pop:not([hidden])');
-			const box = dialog.getBoundingClientRect();
-			return { left: box.left, right: box.right, width: innerWidth, scroll: document.documentElement.scrollWidth,
+			const box = document.querySelector('.pa-lane').getBoundingClientRect();
+			const composer = document.querySelector('.composer').getBoundingClientRect();
+			return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, composerTop: composer.top, composerBottom: composer.bottom,
+				width: innerWidth, height: innerHeight, scroll: document.documentElement.scrollWidth,
 				hint: document.querySelector('.pa-hint').scrollWidth <= document.querySelector('.pa-hint').clientWidth };
 		});
-		check(fit.left >= 0 && fit.right <= fit.width && fit.scroll <= fit.width && fit.hint, 'panel and hint fit the viewport', fit);
-		const approve = card.getByRole('button', { name: 'Approve once' });
+		check(fit.left >= 0 && fit.right <= fit.width && fit.scroll <= fit.width && fit.hint, 'card and hint fit the viewport', fit);
+		check(fit.top >= 0 && fit.bottom <= fit.composerTop + 1 && fit.composerBottom <= fit.height, 'card sits above a composer that stays on screen', fit);
+		// The chip opens the panel inside the viewport: upward on desktop, a sheet on touch.
+		if (touch) await open.tap(); else await open.click();
+		const panel = page.getByRole('dialog', { name: 'Vault' });
+		await panel.waitFor();
+		await page.waitForTimeout(300);
+		const pop = await panel.boundingBox();
+		check(pop.x >= 0 && pop.y >= 0 && pop.x + pop.width <= viewport.width + 1 && pop.y + pop.height <= viewport.height + 1, 'panel fits the viewport', pop);
+		check(await panel.getByText(grant.label, { exact: true }).isVisible(), 'panel lists the active access');
+		check(await panel.getByRole('button', { name: /Manage saved sign-ins in Settings/ }).isVisible(), 'panel links to Settings');
+		if (shots) await page.screenshot({ path: join(shots, `vault-${label.replace(/\s+/g, '-')}-panel.png`) });
+		await panel.getByRole('button', { name: 'Close Vault' }).last().click();
+		await panel.waitFor({ state: 'hidden' });
+		const approve = card.getByRole('button', { name: scenario.button });
 		const size = await approve.boundingBox();
 		check(!touch || size.height >= 32, 'approve button is tappable', size);
 		if (shots) await page.screenshot({ path: join(shots, `vault-${label.replace(/\s+/g, '-')}.png`) });
 		if (touch) await approve.tap(); else await approve.click();
-		await page.waitForFunction(() => !document.querySelector('[aria-label="One-shot action approval"]'));
+		await page.waitForFunction(() => !document.querySelector('[aria-label="One-time approval"]'));
 		check(JSON.stringify(decisions) === JSON.stringify([{ allow: true }]), 'approve posts one decision', decisions);
 		check(errors.length === 0, 'no page errors', errors);
 		await context.close();

@@ -126,9 +126,9 @@ describe('shouldShowGithubGitActions', () => {
 	});
 });
 
-// #1816: Vault left the Git panel. The header's Vault icon is
-// the one place to approve, review and revoke on every lane, so MainPanel always
-// renders VaultPanel (icon + panel), and no standalone Swarm button.
+// #1816: Vault left the Git panel, and then the header: it lives with the
+// composer on every lane (ChatView mounts VaultPanel; the composer row carries
+// its chip). The header has no Vault control and no standalone Swarm button.
 describe('chat header Vault and swarms', () => {
 	const mainPanel = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8')
 		.replace(/<!--[\s\S]*?-->/g, '');
@@ -139,8 +139,11 @@ describe('chat header Vault and swarms', () => {
 		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
 	});
 
-	it('gives every session its own Vault control', () => {
-		expect(mainPanel).toContain('<VaultPanel sessionId={activeTab.sessionId} />');
+	it('keeps the Vault out of the header: every session gets it by the composer', () => {
+		expect(mainPanel).not.toContain('VaultPanel');
+		const chatView = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/ChatView.svelte'), 'utf8');
+		expect(chatView).toContain('<VaultPanel sessionId={$activeSession.sessionId} />');
+		expect(readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8')).toContain('<VaultChip />');
 	});
 
 	it('renders no swarm dropdown in the header', () => {

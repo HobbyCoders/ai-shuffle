@@ -34,7 +34,8 @@ type HeaderDropdownId =
 	| 'session-title'
 	// The chat header's one Export button.
 	| 'chat-export'
-	// The chat header's Vault panel (VaultPanel).
+	// The Vault panel above the composer (VaultPanel), opened by the composer's
+	// Vault chip. Not in the header, but one panel at a time still holds.
 	| 'vault'
 	// The chat header's git panel (one button opens it) and the option popovers
 	// for the actions inside it. A popover id implies the panel is open too:

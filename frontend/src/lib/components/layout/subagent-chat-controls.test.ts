@@ -3,8 +3,8 @@
  * and messaging the subagent: no Git rail and no Vault control. Its
  * Vault requests show in its main chat instead (VaultPanel.test.ts).
  *
- * MainPanel pulls in the whole session/store graph, so, as in
- * chatview-mode-lanes.test.ts, these pin its source; the gates themselves are
+ * MainPanel and ChatView pull in the whole session/store graph, so, as in
+ * chatview-mode-lanes.test.ts, these pin their source; the gates themselves are
  * rendered in git-header-visibility.test.ts, ContextPillBar.test.ts and
  * VaultPanel.test.ts.
  */
@@ -18,6 +18,7 @@ const read = (rel: string) => readFileSync(resolve(process.cwd(), 'src/lib', rel
 const stripComments = (source: string) =>
 	source.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const mainPanel = stripComments(read('components/layout/MainPanel.svelte'));
+const chatView = stripComments(read('components/layout/ChatView.svelte'));
 
 describe('subagent chat controls in MainPanel', () => {
 	it('decides subagent-ness from the shared marker, not a branch-name heuristic', () => {
@@ -26,9 +27,11 @@ describe('subagent chat controls in MainPanel', () => {
 	});
 
 	it('mounts the Vault control only outside a subagent chat', () => {
-		const mount = mainPanel.match(/\{#if ([^}]*)\}\s*\{#key activeTab\.sessionId\}\s*<VaultPanel /);
-		expect(mount?.[1]).toContain('!activeIsSubagent');
-		expect(mainPanel.match(/<VaultPanel /g)).toHaveLength(1);
+		// With the composer, not in the header: one mount, gated on the shared marker.
+		const mount = chatView.match(/\{#if ([^}]*)\}\s*\{#key \$activeSession\.sessionId\}\s*<VaultPanel /);
+		expect(mount?.[1]).toContain('!$subagentChats.has($activeSession.sessionId)');
+		expect(chatView.match(/<VaultPanel /g)).toHaveLength(1);
+		expect(mainPanel).not.toContain('VaultPanel');
 	});
 
 	it('hides the Git rail and stops loading Git for a subagent chat', () => {

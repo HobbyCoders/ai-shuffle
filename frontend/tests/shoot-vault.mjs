@@ -54,7 +54,7 @@ for (const themeSpec of themes) {
 			const snapshot = make();
 			await context.route((u) => u.pathname.startsWith('/api/'), (route) => {
 				const path = new URL(route.request().url()).pathname;
-				if (path.endsWith('/sessions/fixture-session')) return route.fulfill({ json: { mode: 'chat' } });
+				if (path.endsWith('/v1/sessions/fixture-session')) return route.fulfill({ json: { mode: 'chat' } });
 				if (path.endsWith('/vault/sessions/fixture-session')) return route.fulfill({ json: snapshot });
 				return route.fulfill({ json: {} });
 			});

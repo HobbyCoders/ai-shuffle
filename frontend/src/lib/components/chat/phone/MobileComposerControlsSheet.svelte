@@ -60,6 +60,7 @@
 	import { closeDropdown } from '$lib/stores/header-dropdowns';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
+	import VaultChip from '$lib/components/chat/VaultChip.svelte';
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
@@ -894,6 +895,9 @@
 				{#if permissionUpdating || (permissionPending && !shownAccess)}<LoaderCircle size={14} class="mcc-spin qchev" aria-hidden="true" />{:else}<ChevronDown size={14} class="qchev" aria-hidden="true" />{/if}
 			</button>
 		{/if}
+
+		<!-- The Vault: only when this chat has a request, access or a saved sign-in. -->
+		<VaultChip variant="cell" />
 
 		<!-- Always mounted: this cell measures usage and hosts its details sheet.
 		     Only the ring is hidden while there is nothing to act on; the same numbers

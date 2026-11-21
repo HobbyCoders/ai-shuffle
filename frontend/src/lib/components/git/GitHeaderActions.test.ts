@@ -1431,8 +1431,7 @@ describe('GitHeaderActions handler wiring', () => {
 	});
 
 	// #1816: the panel is Git only. Swarms and agent transcripts moved to the
-	// running-tasks list; Vault lives on the header's Vault icon
-	// and in the chat's own prompt.
+	// running-tasks list; the Vault lives with the composer.
 	it('renders no Vault row, even with grants and requests waiting', async () => {
 		dirtyFeatureBranch();
 		vaultSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 1, error: false, open: vi.fn() });

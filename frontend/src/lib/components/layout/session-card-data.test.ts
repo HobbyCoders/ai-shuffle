@@ -927,7 +927,7 @@ describe('needsYouCount (spec §5)', () => {
 
 	it('counts each of the five sources alone as one', () => {
 		// QuestionTray question, PermissionQueue permission, an assistant confirm
-		// (a permission request asked in the conversation), VaultPrompt,
+		// (a permission request asked in the conversation), a Vault request,
 		// and a prose question.
 		expect(needsYouCount(local, null, 0, open({ pendingQuestions: [{ request_id: 'q1' }] }))).toBe(1);
 		expect(needsYouCount(local, null, 0, open({ pendingPermissions: [{ request_id: 'p1' }] }))).toBe(1);

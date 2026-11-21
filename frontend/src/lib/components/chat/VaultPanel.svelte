@@ -1,12 +1,18 @@
 <script lang="ts">
 	/**
-	 * Vault for the open chat: a quiet icon in the chat header and the
-	 * panel it opens. The panel follows the header's other secondary panels (the
-	 * Git panel): anchored under the icon on desktop, a bottom sheet on phones
-	 * and touch screens, and only one header panel open at a time
-	 * (openHeaderDropdown). Waiting requests also show in the chat above the
-	 * composer (VaultPrompt / the mobile prompt dock), whose Review opens
-	 * this panel through vaultSummary.open.
+	 * Vault for the open chat, mounted above the composer. Nothing of it lives
+	 * in the chat header.
+	 *
+	 * - What waits on the owner (a request for a sign-in, a one-time approval)
+	 *   shows as a card right above the composer, where the answer is typed.
+	 *   The native phone shell docks those in its own prompt dock instead and
+	 *   opens this panel for the ones that need private input.
+	 * - What is already shared is one click away: the Vault chip in the
+	 *   composer row (VaultChip) opens this panel through vaultSummary. It hangs
+	 *   above the composer on desktop and is a bottom sheet on phones and touch
+	 *   screens. Only one such panel is open at a time (openHeaderDropdown).
+	 * - Saved sign-ins are managed in Settings > Vault. A mirrored chat keeps
+	 *   its list here, because those sign-ins live on the device it runs on.
 	 *
 	 * A subagent's chat mounts none of this. Its requests, one-shot approvals
 	 * and grants arrive in its main chat's snapshot carrying `session_id` (the
@@ -15,7 +21,7 @@
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import { obscuresTranscript } from './transcript-reading-area';
-	import { Shield, ShieldAlert, ShieldCheck, X } from 'lucide-svelte';
+	import { Settings2, Vault, X } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
@@ -25,6 +31,7 @@
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { buildShell } from '$lib/utils/platform';
 	import { focusableWithin } from '$lib/components/ui/focus-trap';
+	import { openSettings } from '$lib/settings/navigation.svelte';
 	import VaultRequest from './VaultRequest.svelte';
 	import SavedConnectionEditor, { type SavedConnection, type EditResult } from './SavedConnectionEditor.svelte';
 	import '../deck/cards/card-design-system.css';
@@ -38,7 +45,7 @@
 	type Saved = SavedConnection;
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
-	/** The saved connection whose row is expanded into its edit form. */
+	/** The saved sign-in whose row is expanded into its edit form (mirrored chats). */
 	let editingSaved = $state<string | null>(null);
 	/** What the last edit did, shown once under the saved list. */
 	let editNotice = $state('');
@@ -52,12 +59,12 @@
 		].filter(Boolean).join(' ');
 		await refresh();
 	}
-	/** The device a mirrored conversation runs on, where its grants and saved connections live. */
+	/** The device a mirrored conversation runs on, where its grants and saved sign-ins live. */
 	let owner = $state<string | null>(null);
 	async function removeSaved(id: string) {
 		busy = true; error = '';
 		try { await api.delete(`${base}/saved/${id}`); confirmingDelete = null; await refresh(); }
-		catch (e) { error = getErrorMessage(e, 'Could not remove the saved connection.'); }
+		catch (e) { error = getErrorMessage(e, 'Could not remove the saved sign-in.'); }
 		finally { busy = false; }
 	}
 	let clearSecretsKey = $state(0);
@@ -65,17 +72,26 @@
 	let error = $state('');
 	const hasContent = $derived(pendingCount > 0 || data.grants.length > 0 || data.saved_connections.length > 0 || !!error);
 
+	// The web UI answers requests in place, above the composer. The native
+	// phone shell has its own prompt dock for them and uses the sheet.
+	const inlineRequests = buildShell() !== 'mobile';
+	// Closing the panel wipes what was typed into the forms inside it. A form
+	// shown inline is not in the panel, so the panel closing leaves it alone:
+	// its secrets go when it is sent, when the request ends or the chat is left.
+	const requestSecretsKey = $derived(inlineRequests ? 0 : clearSecretsKey);
+
 	// ── Panel ──────────────────────────────────────────────────────────────
 	// Opening belongs to the user: refreshes, streaming and new requests never
-	// open it (a waiting request shows in the chat and on the icon instead).
+	// open it (a waiting request shows above the composer and on the chip).
 	const panelOpen = $derived($openHeaderDropdown === 'vault');
 	const panelId = $props.id();
-	let triggerRef = $state<HTMLButtonElement | null>(null);
 	let panelRef = $state<HTMLDivElement | null>(null);
-	// An open from outside the panel (the chat's Review button) happens during
-	// that click, before the window click listener runs; this marks the event
-	// turn so the outside-click check does not close what was just opened (or,
-	// when it is already open, what Review asked to show).
+	/** The Vault chip in the composer row, which opens and closes this panel. */
+	const chip = () => document.querySelector<HTMLElement>('[data-vault-chip]');
+	// An open from outside the panel (the chip, the phone dock's Review) happens
+	// during that click, before the window click listener runs; this marks the
+	// event turn so the outside-click check does not close what was just opened
+	// (or, when it is already open, what Review asked to show).
 	let openedFromOutside = false;
 	function openPanel() {
 		if (!hasContent) return;
@@ -87,10 +103,15 @@
 		cancelSheetDrag();
 		const focusInside = !!panelRef && panelRef.contains(document.activeElement);
 		closeDropdown('vault');
-		if (restoreFocus || focusInside) triggerRef?.focus({ preventScroll: true });
+		if (restoreFocus || focusInside) chip()?.focus({ preventScroll: true });
 	}
 	const togglePanel = () => (panelOpen ? closePanel() : openPanel());
-	// Every way of closing (button, Escape, outside click, another header panel
+	/** Saved sign-ins of this worker are edited in Settings, not in a chat. */
+	function manageSaved() {
+		closePanel();
+		openSettings({ category: 'vault' });
+	}
+	// Every way of closing (button, Escape, outside click, another panel
 	// opening) drops typed secrets and unconfirmed consent, as the old dialog's
 	// close did. Non-secret progress (a service setup step) is kept so a pending
 	// preparation can be reopened where it was left.
@@ -99,7 +120,7 @@
 		const open = panelOpen;
 		untrack(() => {
 			if (wasOpen && !open) { clearSecretsKey++; cancelSheetDrag(); editingSaved = null; editNotice = ''; }
-			if (!wasOpen && open) void tick().then(() => { if (panelOpen) { placePanel(); panelRef?.focus({ preventScroll: true }); } });
+			if (!wasOpen && open) void tick().then(() => { if (panelOpen) panelRef?.focus({ preventScroll: true }); });
 			wasOpen = open;
 		});
 	});
@@ -120,16 +141,6 @@
 		media.addEventListener('change', update);
 		return () => media.removeEventListener('change', update);
 	});
-	// The anchored panel hangs right-aligned under the icon, which sits left of
-	// the Git button. On a narrow desktop window a wide Git label can push its
-	// left edge off-screen: shift it right just enough to stay 12px inside.
-	let panelShift = $state(0);
-	function placePanel() {
-		const anchor = panelRef?.parentElement;
-		if (!panelRef || !anchor || !panelOpen || sheetLayout) { panelShift = 0; return; }
-		panelShift = Math.max(0, Math.round(12 - (anchor.getBoundingClientRect().right - panelRef.offsetWidth)));
-	}
-	$effect(() => { void sheetLayout; untrack(placePanel); });
 	let sheetOffset = $state(0);
 	let draggingSheet = $state(false);
 	let dragPointer: number | null = null;
@@ -170,7 +181,8 @@
 		// The path captured at dispatch: a Keep/Revoke swap can detach the
 		// clicked button from the panel before this window listener runs.
 		const path = e.composedPath();
-		if ((panelRef && path.includes(panelRef)) || (triggerRef && path.includes(triggerRef))) return;
+		const onChip = chip();
+		if ((panelRef && path.includes(panelRef)) || (onChip && path.includes(onChip))) return;
 		closePanel();
 	}
 	function handleKeydown(event: KeyboardEvent) {
@@ -196,22 +208,14 @@
 
 	// ── Indicator ──────────────────────────────────────────────────────────
 	const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-	const status = $derived(
-		pendingCount ? `${pendingCount} waiting for you`
-			: error ? 'unavailable'
-			: data.grants.length ? `${data.grants.length} active`
-			: ''
-	);
-	const triggerLabel = $derived(status ? `Vault: ${status}` : 'Vault');
 	const panelSummary = $derived(
 		[
-			pendingCount && `${pendingCount} waiting for you`,
-			data.grants.length && `${data.grants.length} active`,
-			data.saved_connections.length && plural(data.saved_connections.length, 'saved connection')
-		].filter(Boolean).join(' · ') || (error ? 'Unavailable right now' : 'Nothing active')
+			!inlineRequests && pendingCount && `${pendingCount} waiting for you`,
+			data.grants.length && `${data.grants.length} active`
+		].filter(Boolean).join(' · ') || (error ? 'Unavailable right now' : 'Nothing shared with this chat')
 	);
 	const expiry = (at: number) => new Date(at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-	// What is waiting, for the chat's own prompt (VaultPrompt, #1807).
+	// What is waiting, for the phone shell's prompt dock and the sidebar (#1807).
 	const items = $derived<PendingAccessItem[]>([
 		...data.requests.map((r) => ({
 			id: r.id,
@@ -236,7 +240,11 @@
 			active: data.grants.length,
 			saved: data.saved_connections.length,
 			error: !!error,
+			owner,
+			manageable: hasContent,
+			panelId,
 			open: openPanel,
+			toggle: togglePanel,
 			decide
 		});
 	});
@@ -245,7 +253,7 @@
 	let busy = $state(false);
 	// Refreshes are event-driven: the broker sends a session-scoped
 	// vault_changed on every request, action and grant change (including
-	// expiry), plus the owner-wide `vault` resource when a saved connection
+	// expiry), plus the owner-wide `vault` resource when a saved sign-in
 	// is saved or deleted (every session's panel lists them), and live-sync
 	// invalidates every resource after a reconnect or on
 	// return to the tab. A timer runs only as a safety net while a request or
@@ -402,7 +410,7 @@
 </script>
 
 
-<svelte:window onkeydowncapture={handleKeydown} onclick={handleClickOutside} onresize={placePanel} />
+<svelte:window onkeydowncapture={handleKeydown} onclick={handleClickOutside} />
 
 {#snippet serverIcon()}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" /><path stroke-linecap="round" d="M7 7.5h.01M7 16.5h.01" /></svg>
@@ -417,37 +425,62 @@
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /></svg>
 {/snippet}
 
+{#snippet waiting()}
+	{#each data.requests as request (request.id)}
+		{@render fromSubagent(request.subagent)}
+		<VaultRequest sessionId={request.session_id ?? sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} clearSecretsKey={requestSecretsKey} onComplete={() => void refresh()} />
+	{/each}
+	{#each data.actions as action (action.id)}
+		{@const grant = data.grants.find(g => g.id === action.grant_id)}
+		{@const where = grant?.label ?? 'this resource'}
+		{@render fromSubagent(action.subagent)}
+		<section class="pa-card" aria-label="One-time approval">
+			<header class="pa-head">
+				<div class="pa-icon" aria-hidden="true">
+					{#if action.operation === 'command'}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+					{:else if action.operation === 'http'}
+						{@render serviceIcon()}
+					{:else}
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11.8 15H9v-2.8l8.6-8.6z" /></svg>
+					{/if}
+				</div>
+				<div class="pa-title">
+					<h3><span>{action.operation === 'command' ? `Run this on ${where}?` : action.operation === 'http' ? `Send this to ${where}?` : `Write this file on ${where}?`}</span></h3>
+					<p class="pa-subtitle">Once{grant ? `, ${action.operation === 'command' ? 'as' : action.operation === 'http' ? 'to' : 'in'} ${grant.target}` : ''}</p>
+				</div>
+			</header>
+			<div class="pa-body">
+				{#if action.operation === 'command'}
+					<pre class="pa-mono"><span class="prompt">$ </span>{action.arguments.command}</pre>
+				{:else if action.operation === 'http'}
+					<pre class="pa-mono"><span class="prompt">{action.arguments.method} </span>{action.arguments.path}{action.arguments.body ? `\n${action.arguments.content_type}\n\n${action.arguments.body}` : ''}</pre>
+				{:else}
+					<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
+				{/if}
+				<p class="pa-hint">{action.operation === 'command' ? 'It runs with that account’s authority and can change files on that machine. The next command asks again.' : action.operation === 'http' ? 'It is sent with the sign-in attached, which the agent never sees. The next change asks again.' : 'It writes this text once. The next write asks again.'}</p>
+			</div>
+			<div class="pa-section">
+				<div class="pa-actions">
+					<button class="card-btn-secondary" disabled={busy} onclick={() => decide(action.id, false)}>Deny</button>
+					<button class="card-btn-primary" disabled={busy} onclick={() => decide(action.id, true)}>{action.operation === 'command' ? 'Run once' : action.operation === 'http' ? 'Send once' : 'Write once'}</button>
+				</div>
+			</div>
+		</section>
+	{/each}
+{/snippet}
+
 {#if hasContent}
 <div class="pa-anchor" class:sheet-layout={sheetLayout}>
-	<!-- Icon-sized like the header's other chat controls. It speaks only when
-	     something is happening: a count for requests/approvals waiting, a dot
-	     for active access or an error, nothing for saved connections alone. -->
-	<button
-		bind:this={triggerRef}
-		type="button"
-		class="pa-trigger"
-		class:open={panelOpen}
-		class:waiting={pendingCount > 0}
-		onclick={togglePanel}
-		aria-label={triggerLabel}
-		title={triggerLabel}
-		aria-haspopup="dialog"
-		aria-expanded={panelOpen}
-		aria-controls={panelId}
-	>
-		<span class="pa-glyph">
-			{#if error && !pendingCount}<ShieldAlert size={16} strokeWidth={1.5} />
-			{:else if data.grants.length}<ShieldCheck size={16} strokeWidth={1.5} />
-			{:else}<Shield size={16} strokeWidth={1.5} />{/if}
-			{#if pendingCount}
-				<span class="pa-count" aria-hidden="true">{pendingCount > 9 ? '9+' : pendingCount}</span>
-			{:else if error}
-				<span class="pa-dot error" aria-hidden="true"></span>
-			{:else if data.grants.length}
-				<span class="pa-dot active" aria-hidden="true"></span>
-			{/if}
-		</span>
-	</button>
+<div class="pa-column">
+	{#if inlineRequests && pendingCount}
+		<!-- In the chat, right above the composer: the answer is given where the
+		     question is read, with no panel to open first. -->
+		<div class="pa-lane card-system" role="group" aria-label="Vault: waiting for you">
+			{#if error && !panelOpen}<p class="pa-error" role="alert">{error}</p>{/if}
+			{@render waiting()}
+		</div>
+	{/if}
 
 	{#if panelOpen}
 		<!-- Only shown in the bottom-sheet layout (see CSS). -->
@@ -462,7 +495,6 @@
 		class="pa-pop card-system"
 		class:dragging-sheet={draggingSheet}
 		style:--sheet-offset={`${sheetOffset}px`}
-		style:right={panelShift ? `${-panelShift}px` : undefined}
 		hidden={!panelOpen}
 		role="dialog"
 		aria-modal={sheetLayout ? 'true' : undefined}
@@ -481,7 +513,7 @@
 			onclick={activateSheetHandle}
 		><span></span></button>
 		<header class="pa-pop-head">
-			<span class="pa-pop-icon" aria-hidden="true"><Shield size={15} strokeWidth={1.6} /></span>
+			<span class="pa-pop-icon" aria-hidden="true"><Vault size={15} strokeWidth={1.6} /></span>
 			<div class="pa-pop-titles">
 				<h2 id="{panelId}-title">Vault</h2>
 				<p>{panelSummary}{#if owner} · on {owner}{/if}</p>
@@ -489,53 +521,13 @@
 			<button type="button" class="pa-pop-close" aria-label="Close Vault" onclick={() => closePanel(true)}><X size={16} /></button>
 		</header>
 
-		<div class="pa-pop-body" aria-label="Temporary access in this conversation">
+		<div class="pa-pop-body" aria-label="Access in this conversation">
 			{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 
-			{#if pendingCount}
+			{#if !inlineRequests && pendingCount}
 				<h3 class="pa-group">Waiting for you</h3>
+				{@render waiting()}
 			{/if}
-			{#each data.requests as request (request.id)}
-				{@render fromSubagent(request.subagent)}
-				<VaultRequest sessionId={request.session_id ?? sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} {clearSecretsKey} onComplete={() => void refresh()} />
-			{/each}
-			{#each data.actions as action (action.id)}
-				{@const grant = data.grants.find(g => g.id === action.grant_id)}
-				{@render fromSubagent(action.subagent)}
-				<section class="pa-card" aria-label="One-shot action approval">
-					<header class="pa-head">
-						<div class="pa-icon" aria-hidden="true">
-							{#if action.operation === 'command'}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-							{:else if action.operation === 'http'}
-								{@render serviceIcon()}
-							{:else}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11.8 15H9v-2.8l8.6-8.6z" /></svg>
-							{/if}
-						</div>
-						<div class="pa-title">
-							<h3><span>Approve this {action.operation === 'command' ? 'remote command' : action.operation === 'http' ? 'API request' : 'file write'}?</span><span class="card-badge card-badge--muted">Once</span></h3>
-							<p class="pa-subtitle">{grant ? `${grant.label} · ${grant.target}` : 'Temporary resource'}</p>
-						</div>
-					</header>
-					<div class="pa-body">
-						{#if action.operation === 'command'}
-							<pre class="pa-mono"><span class="prompt">$ </span>{action.arguments.command}</pre>
-						{:else if action.operation === 'http'}
-							<pre class="pa-mono"><span class="prompt">{action.arguments.method} </span>{action.arguments.path}{action.arguments.body ? `\n${action.arguments.content_type}\n\n${action.arguments.body}` : ''}</pre>
-						{:else}
-							<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
-						{/if}
-						<p class="pa-hint">{action.operation === 'command' ? 'Runs once on the server with this account’s authority. It can change files and use the server’s network.' : action.operation === 'http' ? 'Sends this request once with the granted credential attached. Later changes ask again.' : 'Writes this text once. Later writes ask again.'}</p>
-					</div>
-					<div class="pa-section">
-						<div class="pa-actions">
-							<button class="card-btn-secondary" disabled={busy} onclick={() => decide(action.id, false)}>Deny</button>
-							<button class="card-btn-primary" disabled={busy} onclick={() => decide(action.id, true)}>Approve once</button>
-						</div>
-					</div>
-				</section>
-			{/each}
 
 			{#if data.grants.length}
 				<h3 class="pa-group">Active in this chat</h3>
@@ -559,136 +551,93 @@
 						</li>
 					{/each}
 				</ul>
-			{:else if !pendingCount && !error}
-				<p class="pa-empty">Nothing is shared with this chat right now. When the agent needs a machine, folder or service, it asks here and in the chat.</p>
+				<p class="pa-hint pa-foot">Access ends when it expires or the worker restarts. Revoking closes open connections but can’t undo changes already made.</p>
+			{:else if !error}
+				<p class="pa-empty">Nothing is shared with this chat right now. When the agent needs a machine, folder or service, it asks above the composer.</p>
 			{/if}
 
-			{#if data.saved_connections.length}
-				<h3 class="pa-group">Saved connections</h3>
-				<ul class="pa-list" aria-label="Saved connections">
-					{#each data.saved_connections as saved (saved.id)}
-						{@const editing = editingSaved === saved.id}
-						<li class="pa-row" class:editing>
-							<span class="pa-icon row-icon">{#if saved.kind === 'service'}{@render serviceIcon()}{:else}{@render serverIcon()}{/if}</span>
-							<div class="pa-row-main">
-								<strong>{saved.label}</strong>
-								<code>{saved.target}</code>
-								<small>Encrypted on {owner ?? 'this worker'}{#if saved.fingerprint}{` · host key ${saved.fingerprint.slice(0, 19)}…`}{/if}</small>
-							</div>
-							{#if editing}
-								<!-- The row itself opens into the form: no nested popover. -->
-								<SavedConnectionEditor endpoint={`${base}/saved`} {saved} {owner} {clearSecretsKey} onSaved={savedEdited} onCancel={() => editSaved(null)} />
-							{:else}
-								<div class="pa-row-actions">
-									{#if confirmingDelete === saved.id}
-										<button class="pa-small-btn" onclick={() => confirmingDelete = null}>Keep</button>
-										<button class="pa-small-btn danger solid" disabled={busy} onclick={() => removeSaved(saved.id)}>Delete</button>
-									{:else}
-										<button class="pa-small-btn" aria-label="Edit {saved.label}" onclick={() => editSaved(saved.id)}>Edit</button>
-										<button class="pa-small-btn danger" aria-label="Delete {saved.label}" onclick={() => confirmingDelete = saved.id}>Delete</button>
-									{/if}
+			{#if owner}
+				<!-- A mirrored chat: its sign-ins live on the device it runs on, out
+				     of reach of this worker's Settings, so they are managed here. -->
+				{#if data.saved_connections.length}
+					<h3 class="pa-group">Saved sign-ins on {owner}</h3>
+					<ul class="pa-list" aria-label="Saved sign-ins">
+						{#each data.saved_connections as saved (saved.id)}
+							{@const editing = editingSaved === saved.id}
+							<li class="pa-row" class:editing>
+								<span class="pa-icon row-icon">{#if saved.kind === 'service'}{@render serviceIcon()}{:else}{@render serverIcon()}{/if}</span>
+								<div class="pa-row-main">
+									<strong>{saved.label}</strong>
+									<code>{saved.target}</code>
+									<small>Encrypted on {owner}{#if saved.fingerprint}{` · host key ${saved.fingerprint.slice(0, 19)}…`}{/if}</small>
 								</div>
-							{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-
-			{#if editNotice}<p class="pa-hint pa-foot" role="status">{editNotice}</p>{/if}
-			{#if data.grants.length || data.saved_connections.length}
-				<p class="pa-hint pa-foot">Worker restart or expiry ends access. Revoking closes open connections but can’t undo changes already made. Deleting a saved connection, or editing more than its name, also revokes access that uses it.</p>
+								{#if editing}
+									<!-- The row itself opens into the form: no nested popover. -->
+									<SavedConnectionEditor endpoint={`${base}/saved`} {saved} {owner} {clearSecretsKey} onSaved={savedEdited} onCancel={() => editSaved(null)} />
+								{:else}
+									<div class="pa-row-actions">
+										{#if confirmingDelete === saved.id}
+											<button class="pa-small-btn" onclick={() => confirmingDelete = null}>Keep</button>
+											<button class="pa-small-btn danger solid" disabled={busy} onclick={() => removeSaved(saved.id)}>Remove</button>
+										{:else}
+											<button class="pa-small-btn" aria-label="Edit {saved.label}" onclick={() => editSaved(saved.id)}>Edit</button>
+											<button class="pa-small-btn danger" aria-label="Remove {saved.label}" onclick={() => confirmingDelete = saved.id}>Remove</button>
+										{/if}
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+					{#if editNotice}<p class="pa-hint pa-foot" role="status">{editNotice}</p>{/if}
+					<p class="pa-hint pa-foot">Removing a saved sign-in, or changing more than its name, ends access that uses it.</p>
+				{/if}
+			{:else}
+				<button type="button" class="pa-manage" onclick={manageSaved}>
+					<Settings2 size={14} strokeWidth={1.7} aria-hidden="true" />
+					<span>Manage saved sign-ins in Settings › Vault</span>
+					{#if data.saved_connections.length}<small>{data.saved_connections.length} saved</small>{/if}
+				</button>
 			{/if}
 		</div>
 	</div>
 </div>
+</div>
 {/if}
 
 <style>
-	/* ── Entry point: the header's icon-button size (ChatExportActions) ──── */
-	.pa-anchor { position: relative; display: flex; align-items: center; }
+	/* ── Above the composer: requests inline, the panel opening upward ───── */
+	/* The composer's own gutters and column, so cards line up with it. */
+	.pa-anchor { min-width: 0; padding: 0 0.75rem; }
+	:global(html[data-platform='desktop']) .pa-anchor { padding-right: 1.5rem; padding-left: 1.5rem; }
+	.pa-column { position: relative; min-width: 0; max-width: var(--column-width); margin: 0 auto; }
 	/* Who asked, above a subagent's card in its main chat. */
 	.pa-from { margin: 0 0 -0.25rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: var(--muted-foreground); }
 	.pa-from strong { font-weight: 600; color: var(--foreground); }
-	.pa-trigger {
+	/* The questions waiting for the owner, answered where they are read. The
+	   lane scrolls on its own so a long form never pushes the composer away. */
+	.pa-lane {
 		display: grid;
-		place-items: center;
-		width: 28px;
-		height: 28px;
-		flex-shrink: 0;
-		padding: 0;
-		border: 0;
-		border-radius: calc(var(--radius, 0.75rem) * 0.5);
-		background: transparent;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background-color 150ms ease, color 150ms ease;
-		-webkit-tap-highlight-color: transparent;
+		grid-template-columns: minmax(0, 1fr);
+		grid-auto-rows: max-content;
+		gap: 0.5rem;
+		max-height: min(56dvh, 36rem);
+		margin-bottom: 0.625rem;
+		overflow: auto;
+		overscroll-behavior: contain;
 	}
-	.pa-trigger:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.pa-trigger:active { transform: translateY(1px); }
-	.pa-trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	.pa-trigger.waiting { color: var(--foreground); }
-	/* Open reads like the header's other icon toggles (the notification bell):
-	   a neutral overlay. Theme accents (cyan, neon, saturated blue in several
-	   presets) filled the whole icon square and hid the glyph. */
-	.pa-trigger.open, .pa-trigger.open:hover { background: var(--active-overlay, var(--hover-overlay)); color: var(--foreground); }
-	.pa-glyph { position: relative; display: grid; place-items: center; width: 16px; height: 16px; }
-	/* The ring in the header's own colour keeps the mark legible on the icon. */
-	.pa-count {
-		position: absolute;
-		top: -7px;
-		left: 9px;
-		box-sizing: border-box;
-		min-width: 15px;
-		height: 15px;
-		padding: 0 4px;
-		border-radius: 999px;
-		background: var(--warning);
-		color: var(--warning-foreground);
-		box-shadow: 0 0 0 2px var(--background);
-		font-size: 0.59375rem;
-		font-weight: 700;
-		line-height: 15px;
-		text-align: center;
-		font-variant-numeric: tabular-nums;
-	}
-	/* A short ping when something starts waiting; it settles, never loops. */
-	.pa-count::after {
-		content: '';
-		position: absolute;
-		inset: -2px;
-		border-radius: inherit;
-		border: 1.5px solid var(--warning);
-		opacity: 0;
-		animation: pa-ping 1.4s ease-out 3;
-	}
-	@keyframes pa-ping {
-		0% { opacity: 0.8; transform: scale(1); }
-		100% { opacity: 0; transform: scale(1.8); }
-	}
-	.pa-dot {
-		position: absolute;
-		top: -2px;
-		right: -3px;
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		box-shadow: 0 0 0 2px var(--background);
-	}
-	.pa-dot.active { background: var(--success); }
-	.pa-dot.error { background: var(--destructive); }
+	.pa-lane :global(.pa-card) { box-shadow: none; }
 
-	/* ── Panel: anchored under the icon (the Git panel's shape) ──────────── */
+	/* ── Panel: opens upward from the composer, at its right edge ────────── */
 	.pa-pop {
 		position: absolute;
-		top: calc(100% + 8px);
+		bottom: calc(100% + 8px);
 		right: 0;
 		z-index: 150;
 		box-sizing: border-box;
 		display: flex;
 		flex-direction: column;
-		width: min(30rem, calc(100vw - 24px));
-		max-height: min(calc(100dvh - 80px), 46rem);
+		width: min(30rem, 100%);
+		max-height: min(calc(100dvh - 14rem), 40rem);
 		overflow: hidden;
 		background: var(--popover, var(--card));
 		color: var(--popover-foreground, var(--foreground));
@@ -697,12 +646,14 @@
 		box-shadow: var(--shadow-l);
 		text-align: left;
 		animation: pa-pop-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
-		transform-origin: top right;
+		transform-origin: bottom right;
 	}
+	/* With requests in the lane the panel sits over them, not above them. */
+	.pa-lane ~ .pa-pop { bottom: 8px; }
 	.pa-pop[hidden] { display: none; }
 	.pa-pop:focus { outline: none; }
 	@keyframes pa-pop-in {
-		from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+		from { opacity: 0; transform: translateY(4px) scale(0.985); }
 		to { opacity: 1; transform: none; }
 	}
 	.pa-scrim, .sheet-handle { display: none; }
@@ -784,7 +735,7 @@
 		overflow: hidden;
 	}
 	.pa-list > .pa-row:first-child { border-top: 0; }
-	/* A saved connection being edited opens its form inside the row, full width. */
+	/* A saved sign-in being edited opens its form inside the row, full width. */
 	.pa-row.editing { flex-wrap: wrap; align-items: flex-start; }
 	.row-icon { width: 2rem; height: 2rem; border-radius: 0.5rem; }
 	.row-icon :global(svg) { width: 0.9rem; height: 0.9rem; }
@@ -798,10 +749,29 @@
 		color: var(--muted-foreground);
 	}
 	.pa-foot { padding: 0 0.25rem; }
+	/* Saved sign-ins of this worker are managed in Settings, one tap away. */
+	.pa-manage {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		width: 100%;
+		min-height: 2.5rem;
+		padding: 0.5rem 0.75rem;
+		border: 1px solid var(--border);
+		border-radius: 0.875rem;
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 0.75rem;
+		text-align: left;
+		cursor: pointer;
+	}
+	.pa-manage:hover { background: var(--hover-overlay); }
+	.pa-manage:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.pa-manage span { flex: 1; min-width: 0; }
+	.pa-manage small { flex: none; font-size: 0.6875rem; color: var(--muted-foreground); }
 
 	/* ── Phones, touch screens and the native shell: a bottom sheet ──────── */
-	@media (max-width: 639px) { .pa-trigger { width: 44px; height: 44px; } }
-	.sheet-layout .pa-trigger { width: 44px; height: 44px; }
 	.sheet-layout .pa-scrim {
 		display: block;
 		position: fixed;
@@ -811,7 +781,7 @@
 		animation: pa-scrim-in 180ms ease;
 	}
 	@keyframes pa-scrim-in { from { opacity: 0; } to { opacity: 1; } }
-	.sheet-layout .pa-pop {
+	.sheet-layout .pa-pop, .sheet-layout .pa-lane ~ .pa-pop {
 		position: fixed;
 		top: auto;
 		left: 0;
@@ -853,10 +823,9 @@
 	.sheet-layout .pa-pop-titles p { font-size: 0.75rem; white-space: normal; }
 	.sheet-layout .pa-pop-close { width: 44px; height: 44px; }
 	.sheet-layout .pa-pop-body { padding: 0.75rem 0.75rem 1rem; }
+	.sheet-layout .pa-manage { min-height: 2.75rem; font-size: 0.8125rem; }
 
 	@media (prefers-reduced-motion: reduce) {
-		.pa-trigger { transition: none; }
-		.pa-count::after { animation: none; }
 		.pa-pop, .pa-scrim, .sheet-layout .pa-pop, .sheet-layout .pa-scrim { animation: none; transition: none; }
 	}
 </style>

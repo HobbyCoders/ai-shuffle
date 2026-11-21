@@ -35,7 +35,8 @@
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
-	import VaultPrompt from '$lib/components/chat/VaultPrompt.svelte';
+	import VaultPanel from '$lib/components/chat/VaultPanel.svelte';
+	import { subagentChats } from '$lib/stores/subagent-chats';
 	import NewSessionHero from './NewSessionHero.svelte';
 	import ChatUnavailableNotice from './ChatUnavailableNotice.svelte';
 	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
@@ -632,6 +633,16 @@
 			{/if}
 			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 				{#key $sessionOwnerBoundary}
+					<!-- The Vault lives with the composer on every lane: requests are
+					     answered right above it and the composer's Vault chip opens
+					     the list of active access (a bottom sheet on phones). Not in
+					     a subagent's chat: its requests show in its main chat,
+					     labelled with the subagent. -->
+					{#if $activeSession.sessionId && !$subagentChats.has($activeSession.sessionId)}
+						{#key $activeSession.sessionId}
+							<VaultPanel sessionId={$activeSession.sessionId} />
+						{/key}
+					{/if}
 					{#if PromptDock}
 						<PromptDock
 							sessionId={$activeSession.sessionId}
@@ -643,7 +654,6 @@
 							onQuestion={handleQuestionResponse}
 						/>
 					{:else}
-						<VaultPrompt sessionId={$activeSession.sessionId} />
 						<QuestionTray requests={$activeSession.pendingQuestions ?? []} sent={$sentQuestions} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 					{/if}
 					<ChatInput compact={!showEmptyHero} newSession={showNewSessionHero} {onBrowserToggle} {onBrowserPreload} {browserOpen} {terminal} />

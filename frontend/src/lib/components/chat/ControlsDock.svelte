@@ -39,6 +39,7 @@
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
 	import ContextUsageBar from './ContextUsageBar.svelte';
+	import VaultChip from './VaultChip.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
@@ -676,6 +677,11 @@
 				<SquareTerminal size={16} strokeWidth={1.75} aria-hidden="true" />
 			</button>
 		{/if}
+
+		<!-- What this chat can reach through the Vault. Renders only when the chat
+		     has a request, active access or a saved sign-in to offer. The phone
+		     shell's quick bar carries its own. -->
+		{#if !ControlsSheet}<VaultChip />{/if}
 
 
 	</div>
