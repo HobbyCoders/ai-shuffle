@@ -352,7 +352,7 @@ async def test_grep_rg_limit_is_global_across_files(tmp_path, monkeypatch) -> No
     # Two files, two matches each: rg honoured --max-count per file, so four
     # lines come back even though the caller asked for three in total.
     stdout = b"".join(
-        f"/repo/{name}:{n}:needle\n".encode() for name in ("a.py", "b.py") for n in (1, 2)
+        f"/repo/{name}\x00{n}:needle\n".encode() for name in ("a.py", "b.py") for n in (1, 2)
     )
 
     async def fake_exec(*args, **kwargs):
@@ -386,7 +386,7 @@ async def test_grep_rg_under_limit_has_no_note(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
 
     async def fake_exec(*args, **kwargs):
-        return _FakeProc(0, b"/repo/a.py:1:needle\n", b"")
+        return _FakeProc(0, b"/repo/a.py\x001:needle\n", b"")
 
     monkeypatch.setattr(_asyncio, "create_subprocess_exec", fake_exec)
 

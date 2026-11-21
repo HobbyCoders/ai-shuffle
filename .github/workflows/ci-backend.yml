@@ -496,12 +496,14 @@ jobs:
           python -m pip install pip-audit==2.10.1
           python scripts/pip_audit_retry.py --skip-editable
           python scripts/pip_audit_retry.py -r requirements-voice.lock
+      # 1.7.12 or newer: older releases reject a schedule's `timezone` key,
+      # which the nightly (desktop-source.yml) uses.
       - name: Lint all workflow syntax/actions (pinned actionlint)
         run: |
           lint_dir="$(mktemp -d)"
           trap 'rm -rf "$lint_dir"' EXIT
-          curl --fail --location --retry 2 --max-time 120 https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz -o "$lint_dir/actionlint.tar.gz"
-          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $lint_dir/actionlint.tar.gz" | sha256sum -c -
+          curl --fail --location --retry 2 --max-time 120 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$lint_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $lint_dir/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$lint_dir/actionlint.tar.gz" -C "$lint_dir" actionlint
           "$lint_dir/actionlint" -shellcheck=
 

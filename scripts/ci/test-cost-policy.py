@@ -27,7 +27,8 @@ CALLED = {
 ANDROID = {"android.yml", "ci-android-minified.yml"}
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
-    "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
+    # The nightly: 12:00 AM New York time or the owner's dispatch, never a merge.
+    "desktop-source.yml": {"schedule", "workflow_dispatch"},
     "ci.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
@@ -243,7 +244,8 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_stable_release_requires_explicit_dispatch(self):
         self.assertEqual(triggers(workflow("release.yml")), {"workflow_dispatch"})
-        self.assertEqual(workflow("desktop-source.yml")["on"]["schedule"], [{"cron": "0 6 * * *"}])
+        self.assertEqual(workflow("desktop-source.yml")["on"]["schedule"],
+                         [{"cron": "0 0 * * *", "timezone": "America/New_York"}])
 
     def test_no_pr_only_machinery_is_left(self):
         for path in sorted(WORKFLOWS.glob("*.yml")):
@@ -255,7 +257,7 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
-        self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch", "workflow_run"})
+        self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch"})
         # A started publish is never cancelled; a newer trigger replaces only a waiting one.
         self.assertEqual(config["concurrency"]["cancel-in-progress"], "false")
         gate = config["jobs"]["gate"]
@@ -272,9 +274,12 @@ class CostPolicyTests(unittest.TestCase):
         cases = {
             "schedule": ({**main, "event_name": "schedule"}, "desktop-source"),
             "owner dispatch": ({**main, **owner, "event_name": "workflow_dispatch"}, "desktop-source"),
-            "green push CI": ({**main, "event_name": "workflow_run", "event": {"workflow_run": green_ci}}, "desktop-source"),
+            # A merge's green CI run no longer starts a nightly.
+            "green push CI": ({**main, "event_name": "workflow_run", "event": {"workflow_run": green_ci}},
+                              "desktop-source-skipped-7"),
             "green dispatched CI": ({**main, "event_name": "workflow_run",
-                                    "event": {"workflow_run": {**green_ci, "event": "workflow_dispatch"}}}, "desktop-source"),
+                                    "event": {"workflow_run": {**green_ci, "event": "workflow_dispatch"}}},
+                                    "desktop-source-skipped-7"),
             "failed CI": ({**main, "event_name": "workflow_run",
                            "event": {"workflow_run": {**green_ci, "conclusion": "failure"}}}, "desktop-source-skipped-7"),
             "CI off main": ({**main, "event_name": "workflow_run",

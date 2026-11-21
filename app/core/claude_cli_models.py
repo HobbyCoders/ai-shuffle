@@ -373,18 +373,24 @@ def set_model_enabled(model_id: str, enabled: bool) -> List[str]:
 
 
 def subscription_catalog_rows() -> Dict[str, Any]:
-    """Full (unfiltered) subscription model list for Settings > Claude > Models."""
+    """Full (unfiltered) subscription model list for Settings > Claude > Models.
+
+    ``id`` is the value pickers and the opt-out key use (an alias stays
+    ``opus``); ``slug`` is the concrete model it runs (``claude-opus-5-5``)
+    as the CLI reported it, else the id itself."""
     from app.core.model_registry import MODELS, get_model
 
     with pinned():
         snapshot = catalog()
         listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
+        targets = alias_targets()
         disabled = set(disabled_models())
         rows: List[Dict[str, Any]] = []
         for m in MODELS:
             option = (get_model(m.value) if m.value in listed else None) or m
             rows.append({
                 "id": m.value,
+                "slug": targets.get(m.value) or m.value,
                 "label": option.label,
                 "enabled": m.value not in disabled,
             })
@@ -394,6 +400,7 @@ def subscription_catalog_rows() -> Dict[str, Any]:
                 continue
             rows.append({
                 "id": item["value"],
+                "slug": item["value"],
                 "label": option.label,
                 "enabled": item["value"] not in disabled,
             })
