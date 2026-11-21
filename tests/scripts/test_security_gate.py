@@ -662,12 +662,12 @@ def test_a_secret_finding_withholds_an_owner_detail_in_the_file_name(tmp_path, m
 
 
 @pytest.mark.parametrize("remote,base,expected", [
-    ("origin", "origin/main", ["refs/remotes/origin/main"]),
-    ("origin", "origin/topic", []),  # its main was unavailable: the configured comparison base
+    ("origin", "origin/main", ["origin"]),
+    ("origin", "origin/topic", ["origin"]),  # the comparison base has no say: the remote is asked itself
     ("https://example.invalid/repo.git", "origin/main", []),  # a URL push names no remote
     ("mirrors/demo", "mirrors/demo/main", []),  # a pushed path spelt like the remote mirrors' demo/main
 ])
-def test_only_the_push_remotes_main_can_upgrade_the_installed_hook(monkeypatch, remote, base, expected):
+def test_only_a_named_push_remote_can_upgrade_the_installed_hook(monkeypatch, remote, base, expected):
     """The fallback base is whatever branch a developer configured. A branch
     that never merged must not raise the hook every worktree shares."""
     monkeypatch.setattr(local_ci, "git", lambda *args: "origin\nmirrors" if args == ("remote",) else "head")
@@ -749,9 +749,15 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     source = tmp_path / ".githooks/pre-push"
     source.parent.mkdir()
     source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n")
-    git(tmp_path, "update-ref", "refs/remotes/origin/main", commit(tmp_path))
+    # The remote is this repository itself: its branch main is what it reports.
+    git(tmp_path, "remote", "add", "origin", str(tmp_path))
+    on_main = commit(tmp_path)
+    git(tmp_path, "checkout", "-q", "-b", "topic")
+    git(tmp_path, "branch", "-f", "main", on_main)
     if not source_on_main:
         source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n# changed on this branch\n")
+        # A tracking ref that already has the change is not the remote's word.
+        git(tmp_path, "update-ref", "refs/remotes/origin/main", commit(tmp_path))
     text = {"foreign": "#!/bin/sh\necho mine\n", None: None}.get(
         installed, f"#!/bin/sh\n{local_ci.HOOK_MARKER} {installed}\n")
     if text is not None:
@@ -759,7 +765,7 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
         (hooks / "pre-push").write_text(text)
     monkeypatch.setattr(local_ci, "ROOT", tmp_path)
     monkeypatch.setattr(local_ci, "HOOK_SOURCE", source)
-    local_ci.upgrade_installed_hook("refs/remotes/origin/main")
+    local_ci.upgrade_installed_hook("origin")
     upgraded = installed == "v4" and source_on_main
     assert ("updated the installed hook from v4 to v5" in capsys.readouterr().out) is upgraded
     if expected is None:

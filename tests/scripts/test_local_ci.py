@@ -874,6 +874,22 @@ def test_a_failed_install_leaves_an_earlier_hook_running(tmp_path, monkeypatch):
     assert (tmp_path / "pre-push.user").read_text(encoding="utf-8") == theirs
     assert sorted(path.name for path in tmp_path.iterdir()) == ["pre-push", "pre-push.user"]
 
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_install_keeps_an_earlier_hook_that_is_a_link_as_a_link(tmp_path):
+    """A hook linked to a shared script must keep following that script."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    shared = tmp_path / "shared-policy.sh"
+    shared.write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
+    (hooks / "pre-push").symlink_to(shared)
+    local_ci.install_hook(hooks)
+    assert os.readlink(hooks / "pre-push.user") == str(shared)
+    assert not (hooks / "pre-push").is_symlink()
+    assert local_ci.HOOK_MARKER in (hooks / "pre-push").read_text(encoding="utf-8")
+    assert shared.read_text(encoding="utf-8") == "#!/bin/sh\necho theirs\n"
+
+
 @pytest.mark.parametrize("state,labels,gh_error,expected,note", [
     (None, [], "no pull requests found for branch", 0, "no PR exists"),
     (True, [], "", 0, "PR is a draft"),

@@ -1227,12 +1227,9 @@ def cmd_pre_push(args) -> int:
         return 0
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
-    base = fetch_push_base(push_remote)
-    if push_remote in git("remote").splitlines() and base == f"{push_remote}/main":
-        # Only a named push remote's own main: the fallback base can be any
-        # branch a developer configured, including one that never merged, and
-        # a pushed path can spell the same as such a branch.
-        upgrade_installed_hook(f"refs/remotes/{base}")
+    fetch_push_base(push_remote)
+    if push_remote in git("remote").splitlines():
+        upgrade_installed_hook(push_remote)
     for local_sha, remote_ref in branches:
         # Labels and draft state are live policy, checked on every push.
         push_update_reach(local_sha, remote_ref)
@@ -1262,7 +1259,8 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     target, kept = directory / "pre-push", directory / "pre-push.user"
     source = HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n")
     if target.exists():
-        installed = target.read_text(encoding="utf-8", errors="replace")
+        current = target.read_bytes()
+        installed = current.decode("utf-8", errors="replace")
         version_pattern = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
         current_version = re.search(version_pattern, installed)
         source_version = re.search(version_pattern, source.decode("utf-8"))
@@ -1271,14 +1269,22 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
             raise Failure(f"{target} has newer hook v{current_version[1]}; refusing to replace it "
                           f"with v{source_version[1]}. Use install --force to downgrade explicitly.")
         if HOOK_MARKER not in installed:
-            # A copy left by an install that failed before the swap is reused.
-            if kept.exists() and kept.read_bytes() != target.read_bytes():
-                raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
             # Copied, not moved: the earlier hook stays the active one until
             # the swap below, so a failed install never leaves a push unchecked.
-            backup = directory / f"pre-push.{os.getpid()}.user"
-            shutil.copy2(target, backup)
-            backup.replace(kept)
+            # The copy holds the bytes just judged, never a re-read: another
+            # install may have swapped this hook in meanwhile, and saving that
+            # as the earlier hook would make it run itself.
+            if kept.exists():
+                if kept.read_bytes() != current:  # equal: left by an install that failed before the swap
+                    raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
+            else:
+                backup = directory / f"pre-push.{os.getpid()}.user"
+                if target.is_symlink():
+                    backup.symlink_to(os.readlink(target))  # still the shared script it points at
+                else:
+                    backup.write_bytes(current)
+                    shutil.copymode(target, backup)
+                backup.replace(kept)
     # Swap the file in whole: a push in progress may be running the old one,
     # and a shell reads its script as it goes. The staging file is this
     # process's own, so two installs cannot rename each other's half-written one.
@@ -1292,8 +1298,8 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
 
 
-def upgrade_installed_hook(main: str) -> None:
-    """Bring this clone's older installed hook up to the version ``main`` carries.
+def upgrade_installed_hook(remote: str) -> None:
+    """Bring this clone's older installed hook up to the version ``remote``'s main carries.
 
     The scans run from the checkout being pushed, but only the installed hook
     can refuse a branch that predates one of them, and install is run once per
@@ -1303,12 +1309,17 @@ def upgrade_installed_hook(main: str) -> None:
     """
     target = hooks_dir() / "pre-push"
     version = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
+    main = f"{remote}/main"
     try:
         installed = re.search(version, target.read_text(encoding="utf-8", errors="replace"))
         source = re.search(version, HOOK_SOURCE.read_text(encoding="utf-8"))
         if not (installed and source and int(installed[1]) < int(source[1])):
             return
-        if git("rev-parse", f"{main}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
+        # Ask the remote itself where its main is. A tracking ref can be
+        # stale, a configured comparison branch, or written by another remote
+        # whose name overlaps this one.
+        tip = git("ls-remote", "--exit-code", "--", remote, "refs/heads/main").split()[0]
+        if git("rev-parse", f"{tip}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
             return
         install_hook(target.parent)
     except FileNotFoundError:
