@@ -36,13 +36,16 @@ await runJourney({
 			const { authenticated, is_admin, preview_access } = await auth.json();
 			expect(authenticated === true && is_admin === true && preview_access === false,
 				'loopback must be an authenticated owner, not a preview grant');
+			// From this process, not the page: cleanup runs after the page has closed.
+			// A loopback caller is the owner here, exactly as the page is.
 			const entries = new URL('/api/v1/vault/entries', ui).href;
 			const removeOurs = async () => {
-				const listed = await page.request.get(entries);
-				if (!listed.ok()) return;
+				const listed = await fetch(entries);
+				if (!listed.ok) throw new Error(`listing the Vault returned ${listed.status}`);
 				for (const entry of (await listed.json()).entries.filter(({ label }) => label === LABEL)) {
-					await page.request.delete(`${entries}/${entry.id}`,
-						{ headers: { Origin: new URL(ui).origin, 'Sec-Fetch-Site': 'same-origin' } });
+					const removed = await fetch(`${entries}/${entry.id}`,
+						{ method: 'DELETE', headers: { Origin: new URL(ui).origin, 'Sec-Fetch-Site': 'same-origin' } });
+					if (!removed.ok) throw new Error(`removing the journey's sign-in returned ${removed.status}`);
 				}
 			};
 			await removeOurs();
