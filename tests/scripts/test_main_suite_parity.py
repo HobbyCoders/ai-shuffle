@@ -256,8 +256,11 @@ def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
     names = [step.get("id") or step.get("name") for step in gate["steps"]]
     assert names.index("verdict") < names.index("report")
     assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["ci"]
-    # Publishing checks the whole workflow; the reporter step can never fail it.
-    assert "github.event.workflow_run.conclusion == 'success'" in workflow("desktop-source.yml")["jobs"]["gate"]["if"]
+    # Publishing checks the whole workflow run's conclusion (the gate script's
+    # hosted proof, tested in test_edge_publication_gate); the reporter step can
+    # never fail it.
+    select = next(step for step in workflow("desktop-source.yml")["jobs"]["gate"]["steps"] if step.get("id") == "ci")
+    assert select["run"] == "python scripts/ci/edge_publication_gate.py --select"
     uploader = next(step for step in workflow("ci-frontend.yml")["jobs"]["journeys"]["steps"]
                     if step.get("name") == "Upload journey timelines")
     assert uploader["with"]["name"] == "ui-journeys-${{ matrix.shard }}"
