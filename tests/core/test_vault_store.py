@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
+from pydantic import SecretStr
 
 from app.core import vault_store, encryption
 from app.core.vault_access import GrantInput
@@ -385,51 +386,73 @@ def test_pin_fingerprint_only_fills_a_blank_pin_on_unchanged_details(vault):
     assert vault[entry] == before and pin.startswith(vault_store.PIN_PREFIX) and len(vault) == 2
     assert "vault-only-password" not in encryption.decrypt_value(vault[pin])
     vault_store.delete(owner, connection_id)
-    assert not vault_store.pin_fingerprint(owner, connection_id, unpinned, key) and not vault
+    # The recorded key is not removed with the sign-in (tests/core/network/test_vault_sync.py says why).
+    assert not vault_store.pin_fingerprint(owner, connection_id, unpinned, key) and set(vault) == {pin}
 
 
-def test_a_recorded_host_key_holds_for_the_version_it_was_verified_with_and_an_edit_keeps_it(vault):
+def test_a_recorded_host_key_stays_with_the_address_it_was_verified_at(vault):
     owner = ("local", "worker", None)
     connection_id = vault_store.save(owner, spec().model_copy(update={"fingerprint": ""}))
     key, entry = "SHA256:" + "b" * 43, vault_store.key(owner, connection_id)
+
+    def inside():
+        return json.loads(encryption.decrypt_value(vault[entry]))
+
+    def shown():
+        assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [vault_store.load(owner, connection_id).fingerprint]
+        return vault_store.load(owner, connection_id).fingerprint
+
+    trust = inside()["trust"]
+    # A rename made before the key is known here (another worker may have recorded one) keeps its place.
+    vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"label": "Renamed first"}))
+    assert inside()["trust"] == trust and shown() == ""
     assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), key)
     pin = next(k for k in vault if k != entry)
-    # Its row is named for that one version, by a digest: the version itself
-    # stays inside the encrypted entry.
-    version = json.loads(encryption.decrypt_value(vault[entry]))["version"]
-    assert pin == vault_store._pin_key(owner, connection_id, version) and version not in pin
+    # Its row is named by a digest of a random value that stays inside the encrypted entry.
+    assert pin == vault_store._pin_key(owner, connection_id, trust) and trust not in pin and inside()["version"] not in pin
     assert vault_store.connection_id_of(pin) == vault_store.connection_id_of(entry) == connection_id
     assert vault_store.connection_id_of(entry + "_params") == vault_store.connection_id_of("tts_model") == ""
     kept = vault[pin]
-    # An edit that keeps the key stores it in the entry itself; the replaced version's row goes with it.
-    old, new = vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"label": "Renamed"}))
-    assert (old.fingerprint, new.fingerprint) == (key, key)
-    assert pin not in vault and vault_store.load(owner, connection_id).fingerprint == key
-    # A row for a version that has since been replaced (as when it arrives from
-    # a worker that had not heard of a new password) applies to nothing.
+    # A rename, another account and a new password keep the key: it is stored
+    # in the entry too, and its own row is left where it was.
+    for change in ({"label": "Renamed"}, {"username": "deploy"}, {"password": SecretStr("replacement-only")}):
+        old, new = vault_store.update(owner, connection_id, lambda current: current.model_copy(update=change))
+        assert (old.fingerprint, new.fingerprint) == (key, key)
+        assert inside()["trust"] == trust and vault[pin] == kept and shown() == key
+    # Clearing the key the owner sees asks for the next connection to be trusted
+    # afresh: the old row is left, and no longer read.
     vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"fingerprint": ""}))
-    vault[pin] = kept
-    assert vault_store.load(owner, connection_id).fingerprint == ""
-    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
-    # Nor is it in the way of the key recorded for the current version, which has a row of its own.
+    assert inside()["trust"] != trust and vault[pin] == kept and shown() == ""
     newer = "SHA256:" + "c" * 43
     assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), newer)
-    assert vault_store.load(owner, connection_id).fingerprint == newer
-    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [newer]
-    current = next(k for k in vault if k.startswith(vault_store.PIN_PREFIX) and k != pin)
-    assert vault[pin] == kept
-    # A row moved from another version's place, or one that cannot be read, is no key either;
-    # the next first connection writes over it.
+    assert shown() == newer and vault[pin] == kept
+    # A row that cannot be read, or was moved from another row's place, is no
+    # key; the next first connection writes over it.
+    current = vault_store._pin_key(owner, connection_id, inside()["trust"])
     for unreadable in (kept, "corrupt"):
         vault[current] = unreadable
-        assert vault_store.load(owner, connection_id).fingerprint == ""
-        assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
+        assert shown() == ""
     assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), newer)
-    assert vault_store.load(owner, connection_id).fingerprint == newer
-    # Removing the sign-in takes the row of the version removed; the one left
-    # for a version long gone stays, with no credentials in it.
-    vault_store.delete(owner, connection_id)
-    assert set(vault) == {pin}
+    assert shown() == newer
+
+
+@pytest.mark.parametrize("moved", [{"host": "192.168.1.21"}, {"port": 2222}])
+def test_a_host_key_recorded_for_another_address_is_not_read(vault, moved):
+    owner = ("local", "worker", None)
+    connection_id = vault_store.save(owner, spec().model_copy(update={"fingerprint": ""}))
+    entry = vault_store.key(owner, connection_id)
+    old = json.loads(encryption.decrypt_value(vault[entry]))["trust"]
+    vault_store.update(owner, connection_id, lambda current: current.model_copy(update=moved))
+    assert json.loads(encryption.decrypt_value(vault[entry]))["trust"] != old
+    # As it arrives from a worker that connected before it heard of the move.
+    late = vault_store._pin_key(owner, connection_id, old)
+    vault[late] = vault_store._seal(late, {"fingerprint": "SHA256:" + "b" * 43})
+    assert vault_store.load(owner, connection_id).fingerprint == ""
+    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
+    # The first connection to the new address records its own, beside the other.
+    newer = "SHA256:" + "c" * 43
+    assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), newer)
+    assert vault_store.load(owner, connection_id).fingerprint == newer and late in vault
 
 
 def test_every_stored_version_carries_a_random_value_of_its_own(vault):

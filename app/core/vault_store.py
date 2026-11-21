@@ -33,12 +33,16 @@ SHARED_PREFIX = "vault_entry:"
 # as a row of its own. Sync keeps one whole row when two workers wrote it apart,
 # so a worker that had not yet heard of a removal or a new password must never
 # rewrite the entry to record a key: that would bring the old credentials back
-# on every worker. This row holds no credentials, and each version of an entry
-# has its own (see ``_pin_key``): a key recorded for a version that another
-# worker has since replaced is a different row, so it cannot take the place of
-# the key recorded for the current one. It is removed only with the version it
-# names; one that arrives later for a version already gone stays and applies
-# to nothing.
+# on every worker. This row holds no credentials. It is named by a random value
+# the entry carries for as long as its address and its host key field stay as
+# they are (see ``_same_host``), so a rename or a new password on one worker
+# keeps the key another worker recorded, and a key recorded for an address the
+# entry has since left is another row, which nothing reads.
+#
+# These rows are never removed. A removal would be published, and it could land
+# on an entry that is still in use: one a later edit on another worker kept or
+# brought back would lose its key and trust whichever host answered next. A row
+# left behind holds one host key fingerprint, and no address or credentials.
 PIN_PREFIX = "vault_pin:"
 #: Settings keys whose arrival from another worker changes what the Vault holds.
 SYNCED_PREFIXES = (SHARED_PREFIX, PIN_PREFIX)
@@ -83,14 +87,13 @@ def key(owner: tuple, connection_id: str) -> str:
     return prefix(owner) + connection_id
 
 
-def _pin_key(owner: tuple, connection_id: str, version: str) -> str:
-    """Where the host key recorded for one version of an entry is stored.
+def _pin_key(owner: tuple, connection_id: str, trust: str) -> str:
+    """Where the host key recorded for an entry is stored, given the entry's ``trust`` value.
 
-    Named by a digest of the version, never the version: that random value is
-    what keeps the hash sync stores of an entry from confirming a guessed
-    password, so it must not leave the encrypted entry.
+    Named by a digest of it: nothing from inside the encrypted entry is
+    repeated outside it.
     """
-    mark = hashlib.sha256(f"{PIN_PREFIX}{version}".encode()).hexdigest()
+    mark = hashlib.sha256(f"{PIN_PREFIX}{trust}".encode()).hexdigest()
     return f"{PIN_PREFIX}{key(owner, connection_id)[len(SHARED_PREFIX):]}:{mark}"
 
 
@@ -104,7 +107,7 @@ def connection_id_of(setting_key: str) -> str:
 
 
 def _entry(binding: str, ciphertext: str):
-    """The connection in an envelope stored under ``binding`` (and no other key), with its version."""
+    """The connection in an envelope stored under ``binding`` (and no other key), with its ``trust`` value."""
     if not encryption.is_encryption_ready() or not encryption.is_encrypted(ciphertext):
         raise AccessDenied("The Vault is locked or unavailable on this worker.")
     try:
@@ -115,8 +118,8 @@ def _entry(binding: str, ciphertext: str):
         spec = GrantInput.model_validate(data["connection"])
         if spec.kind not in SAVABLE_KINDS:
             raise ValueError("kind")
-        version = data.get("version", "")
-        return spec, version if isinstance(version, str) else ""
+        trust = data.get("trust", "")
+        return spec, trust if isinstance(trust, str) and re.fullmatch(r"[0-9a-f]{32}", trust) else ""
     except Exception:
         raise AccessDenied("This saved sign-in could not be unlocked on this worker.") from None
 
@@ -145,16 +148,16 @@ def _pin_value(binding: str, raw) -> str:
     return ""
 
 
-def _pinned(owner: tuple, connection_id: str, spec, version: str, pin=_UNREAD):
-    """``spec`` with the host key a first connection recorded for exactly this version of it.
+def _pinned(owner: tuple, connection_id: str, spec, trust: str, pin=_UNREAD):
+    """``spec`` with the host key a first connection recorded for it.
 
-    ``pin`` is that version's stored pin row when the caller already read it.
-    A row that is missing or unreadable leaves the entry unpinned; one written
-    for another version is another row and is never looked at.
+    ``pin`` is the stored pin row for ``trust`` when the caller already read
+    it. A row that is missing or unreadable leaves the entry unpinned; one
+    written under another ``trust`` is another row and is never looked at.
     """
-    if spec.kind != "machine" or spec.fingerprint.strip() or not version:
+    if spec.kind != "machine" or spec.fingerprint.strip() or not trust:
         return spec
-    binding = _pin_key(owner, connection_id, version)
+    binding = _pin_key(owner, connection_id, trust)
     fingerprint = _pin_value(binding, database.get_system_setting(binding) if pin is _UNREAD else pin)
     return spec.model_copy(update={"fingerprint": fingerprint}) if fingerprint else spec
 
@@ -163,7 +166,7 @@ def _rows(scope: str, widths: tuple = (32,)) -> dict[str, str]:
     """Stored values by what follows ``scope`` in their key, for the keys that are exactly ``scope`` plus that.
 
     What follows is hex of the given ``widths``, joined by colons: an entry's
-    id, or an id and a version mark for a host key. Matched in the query, so
+    id, or an id and the mark that names a host key's row. Matched in the query, so
     nothing is cut off: LIKE reads "_" as any one character, hence the escapes
     and the hex spelled as that many of them. Another setting whose name merely
     starts like one of these (the model-parameters API appends to a caller's
@@ -227,13 +230,13 @@ def catalog(owner: tuple, *, cache_empty: bool = False) -> list[dict]:
                 _empty_catalog[scope] = time.monotonic() + _EMPTY_CATALOG_TTL
     result, pins = [], None
     for connection_id, value in rows.items():
-        spec, version = _entry(scope + connection_id, value)
-        if spec.kind == "machine" and not spec.fingerprint.strip() and version:
+        spec, trust = _entry(scope + connection_id, value)
+        if spec.kind == "machine" and not spec.fingerprint.strip() and trust:
             pin_scope = PIN_PREFIX + scope[len(SHARED_PREFIX):]
             if pins is None:
                 pins = _rows(pin_scope, (32, 64))
-            binding = _pin_key(owner, connection_id, version)
-            spec = _pinned(owner, connection_id, spec, version, pins.get(binding[len(pin_scope):]))
+            binding = _pin_key(owner, connection_id, trust)
+            spec = _pinned(owner, connection_id, spec, trust, pins.get(binding[len(pin_scope):]))
         result.append({"id": connection_id, **describe(spec)})
     return result
 
@@ -243,8 +246,8 @@ def load(owner: tuple, connection_id: str):
     raw = database.get_system_setting(binding)
     if not raw:
         raise AccessDenied("Unknown saved connection on this worker.")
-    spec, version = _entry(binding, raw)
-    return _pinned(owner, connection_id, spec, version)
+    spec, trust = _entry(binding, raw)
+    return _pinned(owner, connection_id, spec, trust)
 
 
 def _seal(binding: str, body: dict) -> str:
@@ -254,18 +257,23 @@ def _seal(binding: str, body: dict) -> str:
     return ciphertext
 
 
-def _sealed(binding: str, spec) -> str:
+def _sealed(binding: str, spec, trust: str = "") -> str:
     """``spec`` (secrets included) encrypted under its owner-scoped binding.
 
     Each stored version carries a random value of its own. Worker sync keeps a
     hash of what it decrypted, in its own tables and in what it sends; without
     this, that hash would let someone holding a database backup test guesses
-    of a weak password without the data key. A host-key pin names it too.
+    of a weak password without the data key.
+
+    ``trust`` is a second random value, which names the row of the host key
+    recorded for the entry (``_pin_key``). An edit passes the one it read to
+    keep that key, and nothing to start without one.
     """
     from app.core.vault_access import SECRET_FIELDS
     payload = spec.model_dump(exclude=set(SECRET_FIELDS))
     payload.update({name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS})
-    return _seal(binding, {"connection": payload, "version": secrets.token_hex(16)})
+    return _seal(binding, {"connection": payload, "version": secrets.token_hex(16),
+                           "trust": trust or secrets.token_hex(16)})
 
 
 def _store(binding: str, spec) -> None:
@@ -273,16 +281,16 @@ def _store(binding: str, spec) -> None:
 
 
 def _read(owner: tuple, connection_id: str):
-    """An entry, the stored row it was read from (for ``_replace``) and that row's version."""
+    """An entry, the stored row it was read from (for ``_replace``) and that row's ``trust`` value."""
     binding = key(owner, connection_id)
     row = database.get_system_setting_snapshot(binding)
     if row is None or not row.value:
         raise AccessDenied("Unknown saved connection on this worker.")
-    spec, version = _entry(binding, row.value)
-    return _pinned(owner, connection_id, spec, version), row, version
+    spec, trust = _entry(binding, row.value)
+    return _pinned(owner, connection_id, spec, trust), row, trust
 
 
-def _replace(owner: tuple, connection_id: str, spec, row) -> bool:
+def _replace(owner: tuple, connection_id: str, spec, row, trust: str) -> bool:
     """Rewrite an entry only if its row is still the one ``_read`` returned.
 
     Worker sync applies another worker's edit or removal without taking
@@ -290,7 +298,20 @@ def _replace(owner: tuple, connection_id: str, spec, row) -> bool:
     undo a password change, and publish the stale one to every worker.
     """
     binding = key(owner, connection_id)
-    return database.set_system_setting_if_unchanged(binding, _sealed(binding, spec), row)
+    return database.set_system_setting_if_unchanged(binding, _sealed(binding, spec, trust), row)
+
+
+def _same_host(old, new) -> bool:
+    """Whether an edit left alone what a recorded host key rests on: the address, and the key field itself.
+
+    A rename, another account or a new secret does, and keeps the key, as the
+    edit form promises: also the key another worker recorded and this one has
+    not received yet. Another address, or a key the owner cleared or replaced,
+    starts again from the next connection.
+    """
+    from app.core.vault_access import _same_address
+    return (old.kind == new.kind == "machine" and old.port == new.port
+            and old.fingerprint == new.fingerprint and _same_address(old.host, new.host))
 
 
 def _label_taken(owner: tuple, label: str, *, except_id: str = "") -> bool:
@@ -330,22 +351,19 @@ def update(owner: tuple, connection_id: str, change):
     ``change`` validates and raises ``AccessDenied``; nothing is written then.
     The id, and so the binding, stays the same. A host key recorded by a first
     connection is part of ``current``, so an edit that keeps it stores it in
-    the entry itself.
+    the entry itself; the recorded row stays too (see ``PIN_PREFIX``).
     """
     if not encryption.is_encryption_ready():
         raise AccessDenied("The Vault is locked or unavailable on this worker.")
     with _write_lock:
-        current, row, version = _read(owner, connection_id)
+        current, row, trust = _read(owner, connection_id)
         new = change(current)
         if new.kind != current.kind or new.kind not in SAVABLE_KINDS:
             raise AccessDenied("A saved sign-in keeps its type.")
         if new.label.casefold() != current.label.casefold() and _label_taken(owner, new.label, except_id=connection_id):
             raise AccessDenied("The Vault already has a sign-in with that name. Choose a different name.")
-        if not _replace(owner, connection_id, new, row):
+        if not _replace(owner, connection_id, new, row, trust if _same_host(current, new) else ""):
             raise AccessDenied("This sign-in was just changed or removed on another worker. Check it and try again.")
-        if version:
-            # The replaced version's host key row, and no other: its key, where kept, is in ``new``.
-            database.delete_system_setting(_pin_key(owner, connection_id, version))
     _written()
     return current, new
 
@@ -356,23 +374,23 @@ def pin_fingerprint(owner: tuple, connection_id: str, expected, fingerprint: str
     Only when the entry still holds exactly ``expected`` (no edit or delete in
     between) and still has no pinned key; later uses then verify against it.
     The entry is not rewritten (see ``PIN_PREFIX``): the key is stored beside
-    it, in the row of the version read here. If that version is gone by the
-    time the row is written or reaches another worker, the row applies to
-    nothing, and it is never the row of any other version. A key another
-    worker recorded for this version in the meantime stands.
+    it, in the row the entry read here names. If the entry is at another
+    address, or gone, by the time the row is written or reaches another
+    worker, nothing reads the row. A key another worker recorded for the same
+    address in the meantime stands.
     """
     fingerprint = (fingerprint or "").rstrip("=")
     if not _HOST_KEY.fullmatch(fingerprint):
         return False
     with _write_lock:
         try:
-            current, _row, version = _read(owner, connection_id)
+            current, _row, trust = _read(owner, connection_id)
         except AccessDenied:
             return False
-        if (current.kind != "machine" or current.fingerprint.strip() or not version
+        if (current.kind != "machine" or current.fingerprint.strip() or not trust
                 or not same_connection(current, expected)):
             return False
-        binding = _pin_key(owner, connection_id, version)
+        binding = _pin_key(owner, connection_id, trust)
         held = database.get_system_setting_snapshot(binding)
         if held is not None and _pin_value(binding, held.value):
             return False
@@ -385,16 +403,9 @@ def pin_fingerprint(owner: tuple, connection_id: str, expected, fingerprint: str
 
 def delete(owner: tuple, connection_id: str):
     with _write_lock:
-        binding = key(owner, connection_id)
-        raw = database.get_system_setting(binding)
-        if not database.delete_system_setting(binding):
+        # The entry only: a host key recorded for it stays (see ``PIN_PREFIX``).
+        if not database.delete_system_setting(key(owner, connection_id)):
             raise AccessDenied("Unknown saved connection.")
-        try:
-            version = _entry(binding, raw)[1] if raw else ""
-        except AccessDenied:  # not one this worker can unlock: nothing here says which host key row was its
-            version = ""
-        if version:
-            database.delete_system_setting(_pin_key(owner, connection_id, version))
     _written()
 
 

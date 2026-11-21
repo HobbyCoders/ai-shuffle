@@ -61,9 +61,9 @@ def opened(worker, value):
 
 
 def pin_key(worker, connection_id):
-    """The row for the host key recorded with the version of an entry this worker holds."""
-    version = json.loads(opened(worker, rows(worker)[vault_store.key(OWNER, connection_id)]))["version"]
-    return vault_store._pin_key(OWNER, connection_id, version)
+    """The row for the host key recorded for an entry as this worker holds it."""
+    trust = json.loads(opened(worker, rows(worker)[vault_store.key(OWNER, connection_id)]))["trust"]
+    return vault_store._pin_key(OWNER, connection_id, trust)
 
 
 def full_copy(sender, receiver, folder):
@@ -319,8 +319,7 @@ def test_a_write_here_never_goes_over_what_another_worker_changed_meanwhile(work
                 exchange(a, b)  # lands between the pin's read and its write
                 return same_connection(current, expected)
             monkeypatch.setattr(vault_store, "same_connection", compared)
-            # The key is recorded beside the entry, for the version the pin
-            # read, which is gone: the entry itself is never rewritten.
+            # The key is recorded beside the entry: the entry itself is never rewritten.
             vault_store.pin_fingerprint(OWNER, saved, connecting, HOST_KEY)
         assert held() == stands
         scan()
@@ -329,7 +328,8 @@ def test_a_write_here_never_goes_over_what_another_worker_changed_meanwhile(work
         with worker.active():
             # Nothing stale was published back: the other worker's change stands on both.
             assert held() == stands
-            assert stands is None or vault_store.load(OWNER, saved).fingerprint == ""
+            # The host key verified at the address, which the new password left alone, is kept with it.
+            assert stands is None or vault_store.load(OWNER, saved).fingerprint == (HOST_KEY if write == "a host key pin" else "")
 
 
 @pytest.mark.parametrize("arrives", ["a removal", "a new password"])
@@ -369,27 +369,118 @@ def test_a_host_key_recorded_while_cut_off_restores_nothing_another_worker_remov
                     vault_store.load(OWNER, saved)
             else:
                 held = vault_store.load(OWNER, saved)
-                # The new password, and no host key: none was verified with it.
-                assert (held.password.get_secret_value(), held.fingerprint) == ("replacement-only", "")
-                assert [item["fingerprint"] for item in vault_store.catalog(OWNER)] == [""]
+                # The new password, with the host key verified at the address it still has.
+                assert (held.password.get_secret_value(), held.fingerprint) == ("replacement-only", HOST_KEY)
+                assert [item["fingerprint"] for item in vault_store.catalog(OWNER)] == [HOST_KEY]
         # No row of either kind holds the old password under this worker's key.
         assert all(PASSWORD not in opened(worker, value) for value in rows(worker).values())
 
 
+EDITS = {"a new name": {"label": "Renamed"}, "a new password": {"password": "replacement-only"},
+         "another account": {"username": "deploy"}}
+
+
 @pytest.mark.parametrize("by", ["an exchange", "a full copy"])
-def test_a_host_key_recorded_for_a_replaced_version_never_displaces_the_current_one(workers, tmp_path, by):
-    """One worker changes a sign-in's password, and its next connection records
-    the host key. Another, out of reach, then connects with the version it
-    still holds and records one too, which is the later write. Kept in one row,
-    the later one would win, read as stale, and leave the current sign-in with
-    no host key on every worker: trusted afresh on its next use."""
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_an_edit_that_keeps_the_address_keeps_the_host_key_another_worker_recorded_meanwhile(workers, tmp_path, by, edit):
+    """One worker's first connection records the host key while another, which
+    has not heard of it, renames the sign-in or changes its account or
+    password. The key belongs to the address, which the edit left alone:
+    dropping it would have the next connection trust whichever host answers."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        scan()
+    exchange(a, b)
+    with b.active():
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        scan()
+    with a.active():
+        assert vault_store.load(OWNER, saved).fingerprint == ""
+        vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", **EDITS[edit]))
+        scan()
+    exchange(b, a)
+    if by == "an exchange":
+        exchange(a, b)
+    else:
+        full_copy(a, b, tmp_path)
+    exchange(b, a)
+    for worker in (a, b):
+        with worker.active():
+            assert vault_store.same_connection(vault_store.load(OWNER, saved), machine(fingerprint=HOST_KEY, **EDITS[edit]))
+            assert [item["fingerprint"] for item in vault_store.catalog(OWNER)] == [HOST_KEY]
+
+
+def test_a_host_key_recorded_for_an_address_the_sign_in_has_left_is_not_used(workers):
     a, b = pair(workers)
     with a.active():
         saved = vault_store.save(OWNER, machine(fingerprint=""))
         scan()
     exchange(a, b)
     with a.active():
-        vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
+        vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", host="192.168.1.30"))
+        scan()
+    writes_later(b, than=a)
+    with b.active():
+        # Out of reach of that edit, and the later write: verified at the old address.
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        scan()
+    exchange(b, a)
+    exchange(a, b)
+    for worker in (a, b):
+        with worker.active():
+            held = vault_store.load(OWNER, saved)
+            assert (held.host, held.fingerprint) == ("192.168.1.30", "")
+    with a.active():
+        # The first connection to the new address records its own.
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), "SHA256:" + "c" * 43)
+        scan()
+    exchange(a, b)
+    with b.active():
+        assert vault_store.load(OWNER, saved).fingerprint == "SHA256:" + "c" * 43
+
+
+def test_a_sign_in_that_a_later_edit_elsewhere_brings_back_still_has_its_host_key(workers):
+    """Why a removal leaves the recorded host key: sync keeps the later write,
+    so a rename made out of reach after the removal brings the sign-in back.
+    Had the removal taken the key with it, that sign-in would trust whichever
+    host answered next."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        scan()
+    exchange(a, b)
+    with a.active():
+        vault_store.delete(OWNER, saved)
+        scan()
+    writes_later(b, than=a)
+    with b.active():
+        vault_store.update(OWNER, saved, lambda current: current.model_copy(update={"label": "Renamed"}))
+        scan()
+    exchange(a, b)
+    exchange(b, a)
+    for worker in (a, b):
+        with worker.active():
+            held = vault_store.load(OWNER, saved)
+            assert (held.label, held.fingerprint) == ("Renamed", HOST_KEY)
+
+
+@pytest.mark.parametrize("by", ["an exchange", "a full copy"])
+@pytest.mark.parametrize("meanwhile", ["nothing else", "a new password"])
+def test_two_workers_recording_a_host_key_for_the_same_address_settle_on_one(workers, tmp_path, by, meanwhile):
+    """Both connect first, apart, one of them perhaps after changing the
+    password. One key stands on both, never none; a grant that verified the
+    other ends (tests/core/test_vault_access.py), so a different key is never
+    accepted quietly."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        scan()
+    exchange(a, b)
+    with a.active():
+        if meanwhile == "a new password":
+            vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
         assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
         scan()
     writes_later(b, than=a)
@@ -402,37 +493,14 @@ def test_a_host_key_recorded_for_a_replaced_version_never_displaces_the_current_
     else:
         full_copy(a, b, tmp_path)
     exchange(b, a)
-    for worker in (a, b):
-        with worker.active():
-            held = vault_store.load(OWNER, saved)
-            assert (held.password.get_secret_value(), held.fingerprint) == ("replacement-only", HOST_KEY)
-            assert [item["fingerprint"] for item in vault_store.catalog(OWNER)] == [HOST_KEY]
-
-
-def test_two_workers_recording_a_host_key_for_the_same_version_settle_on_one(workers):
-    """The one case left where two workers write the same row: both connect
-    first, apart. One key stands on both; a grant that verified the other ends
-    (tests/core/test_vault_access.py), so a different key is never accepted quietly."""
-    a, b = pair(workers)
-    with a.active():
-        saved = vault_store.save(OWNER, machine(fingerprint=""))
-        scan()
-    exchange(a, b)
-    with a.active():
-        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
-        scan()
-    writes_later(b, than=a)
-    with b.active():
-        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), "SHA256:" + "c" * 43)
-        scan()
-    exchange(b, a)
-    exchange(a, b)
     assert set(rows(a)) == set(rows(b)) == {vault_store.key(OWNER, saved), pin_key(a, saved)}
     for worker in (a, b):
         with worker.active():
-            assert vault_store.load(OWNER, saved).fingerprint == "SHA256:" + "c" * 43
+            held = vault_store.load(OWNER, saved)
+            assert held.fingerprint == "SHA256:" + "c" * 43
+            assert held.password.get_secret_value() == (PASSWORD if meanwhile == "nothing else" else "replacement-only")
             # Recorded: a later first connection here does not write another over it.
-            assert not vault_store.pin_fingerprint(OWNER, saved, machine(fingerprint=""), HOST_KEY)
+            assert not vault_store.pin_fingerprint(OWNER, saved, held.model_copy(update={"fingerprint": ""}), HOST_KEY)
 
 
 def test_a_recorded_host_key_holds_no_credentials_and_follows_its_sign_in(workers):
@@ -459,10 +527,16 @@ def test_a_recorded_host_key_holds_no_credentials_and_follows_its_sign_in(worker
     # worker: the hash sync keeps of an entry is no test for a guessed password.
     versions = {json.loads(opened(worker, rows(worker)[entry]))["version"] for worker in (a, b)}
     assert len(versions) == 1 and len(next(iter(versions))) == 32
-    # So it stays inside the encrypted rows: the host key's row is named by a digest of it.
-    assert versions.pop() not in pin + opened(a, rows(a)[pin])
+    # Neither that value nor the one naming the host key's row leaves the encrypted entry.
+    trust = json.loads(opened(a, rows(a)[entry]))["trust"]
+    assert all(value not in pin + opened(a, rows(a)[pin]) for value in (versions.pop(), trust))
     with a.active():
         vault_store.delete(OWNER, saved)
         scan()
     exchange(a, b)
-    assert rows(a) == rows(b) == {}
+    # The sign-in is gone everywhere. The host key recorded for it is not removed
+    # with it: that removal could land on a sign-in another worker still edits.
+    assert set(rows(a)) == set(rows(b)) == {pin}
+    for worker in (a, b):
+        with worker.active():
+            assert vault_store.catalog(OWNER) == []
