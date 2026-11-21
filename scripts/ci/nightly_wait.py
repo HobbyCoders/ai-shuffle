@@ -9,9 +9,16 @@ run tests a main revision that contains the commit, and the publisher ships
 the newest proven revision with everything before it. A replaced run is
 therefore not an event and is not reported here.
 
+The nightly is published once a night at 12:00 AM New York time, or when the
+owner dispatches the publisher; a merge never starts it. A commit that main's
+CI has proven therefore waits for the next nightly, and this script says so
+and exits instead of waiting for hours.
+
 Exit codes: 0 the published nightly contains the commit; 1 nothing in flight
 can publish it (act on the printed reason); 2 timed out while still in flight;
-3 ``--once`` and not published yet. One line is printed per change of state.
+3 ``--once`` and not published yet; 4 proven, and the next nightly (12:00 AM
+New York time, or an owner dispatch) will publish it. One line is printed per
+change of state.
 """
 from __future__ import annotations
 
@@ -45,8 +52,9 @@ MAIN_EVENTS = ("push", "workflow_dispatch")
 # A pushed commit's run takes a moment to register, and a failed run may be
 # re-run: a state with nothing in flight must persist this long before exit 1.
 SETTLE_SECONDS = 300
-# The publisher follows a green run within minutes (signing takes 2-12).
-PUBLISH_SECONDS = 1800
+# The publisher's runs that can ship a proven commit.
+PUBLISHER_EVENTS = ("schedule", "workflow_dispatch")
+SCHEDULED = 4
 # A long wait survives brief GitHub or pointer outages (each read already retries).
 READ_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, urllib.error.URLError, TimeoutError)
 MAX_FAILED_POLLS = 5
@@ -109,37 +117,50 @@ def _active(api, workflow, events=None):
 
 
 def suite_state(api, commit, *, now, cache=None):
-    """(state, detail). States: testing, publishing, unpublished, failed, none.
+    """(state, detail). States: testing, publishing, scheduled, unpublished, failed, none.
 
     A run covers the commit when its head is the commit or a descendant. That is
     asked of each run's own head, never of a commit list read earlier: a merge
     landing mid-poll must not make its replacement run look unrelated.
     """
     cache = {} if cache is None else cache
-    for run in _active(api, "ci.yml", MAIN_EVENTS):
-        if contains(api, commit, run["head_sha"], cache):
-            return "testing", f"CI is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
-    finished, seen = [], set()
-    for run in _runs(api, "ci.yml", "completed", MAIN_EVENTS):
-        sha = run["head_sha"]
-        if sha in seen:
-            continue  # newest run per commit, as the publication gate reads it
-        seen.add(sha)
-        if not contains(api, commit, sha, cache):
-            break  # main is linear: every older run is on an older revision
-        finished.append(run)
+    # Each revision counts by its latest run, active or finished, as the
+    # publication gate reads it. Active runs are read first so a run finishing
+    # between the two reads is still seen; its finished copy then wins.
+    latest = {}
+    for run in _active(api, "ci.yml", MAIN_EVENTS) + _runs(api, "ci.yml", "completed", MAIN_EVENTS):
+        held = latest.get(run["head_sha"])
+        if held is None or run.get("id", 0) >= held.get("id", 0):
+            latest[run["head_sha"]] = run
+    covering = []
+    for run in sorted(latest.values(), key=lambda run: run.get("id", 0), reverse=True):
+        if not contains(api, commit, run["head_sha"], cache):
+            if run.get("status") == "completed":
+                break  # main is linear: every older run is on an older revision
+            continue  # an active run on an older revision says nothing
+        covering.append(run)
+    finished = [run for run in covering if run.get("status") == "completed"]
     passed = next((run for run in finished if run.get("conclusion") == "success"), None)
-    age = now - _epoch(passed.get("updated_at")) if passed else 0
-    if passed and age < PUBLISH_SECONDS:
-        return "publishing", f"CI passed on {passed['head_sha'][:9]}; waiting for the publisher"
-    # The publisher also runs on a schedule, on owner dispatch and from an owner
-    # local pass: while one is in flight the commit may still ship.
+    # Any covering revision whose latest run passed proves the commit for the
+    # next nightly; a run still testing matters only when none has.
+    testing = next((run for run in covering if run.get("status") != "completed"), None)
+    if testing and not passed:
+        return "testing", f"CI is {testing['status'].replace('_', ' ')} on {testing['head_sha'][:9]}: {testing['html_url']}"
+    # The publisher runs at 12:00 AM New York time or on owner dispatch, and may
+    # also ship an owner local pass: while one is in flight the commit may ship.
     publishers = _active(api, "desktop-source.yml")
     if publishers:
         return "publishing", f"A nightly publisher run is in flight: {publishers[0]['html_url']}"
     if passed:
-        return "unpublished", (f"CI passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
-                               f"contains it. Check the publisher's latest run for a refusal: {PUBLISHER_URL}")
+        proven = _epoch(passed.get("updated_at"))
+        later = next((run for run in _runs(api, "desktop-source.yml", "completed", PUBLISHER_EVENTS)
+                      if _epoch(run.get("created_at") or run.get("updated_at")) > proven), None)
+        if not later:
+            return "scheduled", (f"CI passed on {passed['head_sha'][:9]}. The next nightly publishes it: 12:00 AM "
+                                 f"New York time, or sooner if the owner runs the publisher: {PUBLISHER_URL}")
+        age = now - proven
+        return "unpublished", (f"CI passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago, and the nightly "
+                               f"publisher ran since without shipping it. Check that run for a refusal: {later['html_url']}")
     # A replaced waiting run ("cancelled", no jobs) is not a failure; only report
     # a run that ran. A run stopped on its first failed job is also "cancelled".
     run = next((run for run in finished if run.get("conclusion") != "cancelled" or _started(api, run)), None)
@@ -204,6 +225,8 @@ def _poll(api, commit, fetch, last, stalled, clock, say, cache):
     if state != last:
         say(detail if state != "testing" else f"Not in a nightly yet (live: {version}). {detail}")
         last, stalled = state, clock()
+    if state == "scheduled":
+        return SCHEDULED, last, stalled, version
     return None, last, stalled, version
 
 
