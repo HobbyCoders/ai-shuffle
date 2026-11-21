@@ -89,6 +89,39 @@ def test_an_explicit_api_version_runs_itself(monkeypatch, picked):
     assert credential_gate._claude_api_default(family) == (cap.CLAUDE_API_PROVIDER_ID, f"{picked}-5")
 
 
+def test_claude_api_models_report_the_native_effort_table(key, authenticated_client):
+    """#1881: the key's models take the native API's documented effort levels
+    in /api/v1/models, and a turn bound to the key accepts and defaults to them."""
+    from app.core.provider.harness_adapter import _effective_effort, model_default_effort
+    from app.core.provider.types import SessionOptions
+
+    claude_auth_mode.set_mode("subscription")
+    cap.remember_models(KEY, [{"id": i, "label": i} for i in (
+        "claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001", "claude-live-1")])
+    registry = authenticated_client.get("/api/v1/models").json()
+    row = next(p for p in registry["providers"] if p["id"] == cap.CLAUDE_API_PROVIDER_ID)
+    models = {m["id"]: m for m in row["models"]}
+    ladder = ["low", "medium", "high", "xhigh", "max"]
+    assert (models["claude-opus-5-5"]["effort_levels"], models["claude-opus-5-5"]["default_effort"]) == (ladder, "medium")
+    assert (models["claude-fable-5-2"]["effort_levels"], models["claude-fable-5-2"]["default_effort"]) == (ladder, "high")
+    assert models["claude-sonnet-4-6"]["effort_levels"] == ["low", "medium", "high", "max"]
+    assert models["claude-haiku-4-5-20251001"]["effort_levels"] == []
+    # A model the table does not know stays unknown, never guessed from its name.
+    assert models["claude-live-1"]["effort_levels"] is None
+
+    def bound(model):
+        return SessionOptions(model=model, extra={"provider_id": cap.CLAUDE_API_PROVIDER_ID})
+
+    assert model_default_effort(bound("claude-opus-5-5")) == "medium"
+    assert model_default_effort(bound("opus")) == "medium"  # the native alias, Opus 5.5
+    assert _effective_effort(bound("claude-opus-5-5"), "xhigh") == "xhigh"
+    # A level the model lacks is refused on a live pick and fitted on a remembered one.
+    assert _effective_effort(bound("claude-sonnet-4-6"), "xhigh") is None
+    assert _effective_effort(bound("claude-sonnet-4-6"), "xhigh", fit=True) == "high"
+    assert _effective_effort(bound("claude-live-1"), "xhigh") == "xhigh"
+
+
 def test_off_mode_hides_the_row(key):
     claude_auth_mode.set_mode("off")
     assert cap.virtual_row() is None
