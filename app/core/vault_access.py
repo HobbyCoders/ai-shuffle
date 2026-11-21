@@ -228,6 +228,72 @@ def apply_saved_edit(current: GrantInput, edit: SavedConnectionEdit) -> GrantInp
     return current.model_copy(update=update)
 
 
+FINGERPRINT_HELP = ("A host-key fingerprint looks like SHA256: followed by 43 characters. "
+                    "Leave it blank to trust the key the server presents at the first connection.")
+
+
+def new_entry(spec: GrantInput) -> GrantInput:
+    """A sign-in the owner adds in Settings, validated like the Vault card.
+
+    Nothing is contacted here. A machine's host key is checked against the
+    fingerprint entered now, or pinned by the first connection the owner
+    approves, as after an address edit; a service's certificate is verified
+    when access is granted. Only the fields of the entry's own kind are kept,
+    and error messages never quote the submitted values.
+    """
+    label = spec.label.strip()
+    if not label:
+        raise AccessDenied("Give the sign-in a name.")
+    blank = GrantInput(kind=spec.kind, label=label)
+    secrets = {name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS}
+    if spec.kind == "machine":
+        if (spec.path or spec.writable or spec.url or secrets["secret"]
+                or spec.auth_header != blank.auth_header or spec.auth_scheme != blank.auth_scheme):
+            raise AccessDenied("Those settings do not apply to an SSH machine sign-in.")
+        username = spec.username.strip()
+        if not POSIX_USERNAME.fullmatch(username):
+            raise AccessDenied("Enter a POSIX username: letters, digits, dot, dash or underscore.")
+        fingerprint = spec.fingerprint.strip()
+        if fingerprint and not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint):
+            raise AccessDenied(FINGERPRINT_HELP)
+        password, key, passphrase = secrets["password"], secrets["private_key"], secrets["passphrase"]
+        if not password and not key:
+            raise AccessDenied("Enter the password or the private key this machine signs in with.")
+        if password and (key or passphrase):
+            raise AccessDenied("Enter a password or a private key, not both.")
+        if passphrase and not key:
+            raise AccessDenied("A key passphrase needs its private key.")
+        if key:
+            import asyncssh
+            try:
+                asyncssh.import_private_key(key, passphrase or None)
+            except (asyncssh.KeyImportError, ValueError, TypeError):
+                raise AccessDenied("The private key could not be read. Check the key and its passphrase.") from None
+        return blank.model_copy(update={
+            "host": machine_address(spec.host.strip()), "port": spec.port, "username": username,
+            "fingerprint": fingerprint.rstrip("="), "password": spec.password,
+            "private_key": spec.private_key, "passphrase": spec.passphrase})
+    if spec.kind == "service":
+        if (spec.path or spec.host or spec.username or spec.port != blank.port
+                or secrets["password"] or secrets["private_key"] or secrets["passphrase"]):
+            raise AccessDenied("Those settings do not apply to a web service sign-in.")
+        header, _ = vault_services.credential_header(spec.auth_header, spec.auth_scheme, secrets["secret"])
+        return blank.model_copy(update={
+            "url": vault_services.parse_origin(spec.url.strip()).url, "auth_header": header,
+            "auth_scheme": spec.auth_scheme.strip(), "writable": spec.writable, "secret": spec.secret,
+            "fingerprint": vault_services.certificate_pin(spec.fingerprint)})
+    raise AccessDenied("Only SSH machine and web service sign-ins are kept in the Vault.")
+
+
+def vault_owner(api_user_id: str | None = None) -> tuple:
+    """The principal whose Vault is managed with no session open (Settings).
+
+    Saved sign-ins and the grants built on them are matched by principal
+    alone (index 2); ``None`` is the install owner.
+    """
+    return (None, None, api_user_id)
+
+
 class RequestUnavailable(AccessDenied):
     """A terminal request failure, distinct from correctable private inputs."""
 
@@ -552,6 +618,24 @@ async def publish_change(session_id: str, api_user_id: str | None, *, saved: boo
         await sync_engine._broadcast_user_message(api_user_id or "admin", message)
     except Exception:
         logger.debug("Access refresh notification unavailable", exc_info=True)
+
+
+async def publish_saved_change(api_user_id: str | None) -> None:
+    """Tell this principal's UI that its saved sign-ins changed, with no session involved.
+
+    Only an invalidation is published: Settings and every open chat's panel
+    refetch through the Vault API, which still enforces its own policy.
+    """
+    try:
+        from app.core.global_events import global_events
+        from app.core.preference_identity import principal_preference_identity
+        from app.db.async_database import run_sync
+        principal = ({"kind": "api_user", "principal_id": api_user_id}
+                     if api_user_id is not None else {"kind": "admin"})
+        kind, identity = await run_sync(principal_preference_identity, principal)
+        global_events.resources_changed("vault", user_type=kind, user_id=identity)
+    except Exception:
+        logger.debug("Vault refresh notification unavailable", exc_info=True)
 
 
 def grant_failure(exc: BaseException) -> tuple[int, str]:
@@ -1001,15 +1085,49 @@ class Broker:
         finally:
             request.claiming = False
 
-    async def forget(self, session_id: str, connection_id: str):
-        """Delete one of the owner's saved connections and revoke grants that use it."""
-        from app.core import vault_store
-        from app.db.async_database import run_sync
-        owner = await session_owner(session_id)
-        await run_sync(vault_store.delete, owner, connection_id)
+    def _revoke_saved(self, owner: tuple, connection_id: str) -> int:
+        """Revoke every grant of this principal built on a saved sign-in, in any session."""
+        revoked = 0
         for grant in list(self.grants.values()):
             if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
                 self.revoke(grant.session_id, grant.id)
+                revoked += 1
+        return revoked
+
+    def _notify_saved(self, owner: tuple) -> None:
+        """The saved list changed with no session involved: refresh this principal's UI."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        from app.network import vault_routing
+        task = loop.create_task(publish_saved_change(owner[2] if len(owner) > 2 else None))
+        self._notifications.add(task)
+        task.add_done_callback(self._notifications.discard)
+        # Devices showing one of this worker's sessions as a mirror list the saved sign-ins too.
+        vault_routing.notify_watchers("", saved=True)
+
+    async def _forget(self, owner: tuple, connection_id: str) -> int:
+        from app.core import vault_store
+        from app.db.async_database import run_sync
+        await run_sync(vault_store.delete, owner, connection_id)
+        return self._revoke_saved(owner, connection_id)
+
+    async def _edit_saved(self, owner: tuple, connection_id: str, edit: SavedConnectionEdit) -> dict:
+        from app.core import vault_store
+        from app.db.async_database import run_sync
+        old, new = await run_sync(vault_store.update, owner, connection_id,
+                                  lambda current: apply_saved_edit(current, edit))
+        revoked = 0
+        if not vault_store.same_connection(old.model_copy(update={"label": new.label}), new):
+            revoked = self._revoke_saved(owner, connection_id)
+        return {"updated": True, "revoked": revoked,
+                "host_key_cleared": bool(old.fingerprint) and not new.fingerprint}
+
+    async def forget(self, session_id: str, connection_id: str):
+        """Delete one of the owner's saved connections and revoke grants that use it."""
+        owner = await session_owner(session_id)
+        await self._forget(owner, connection_id)
         # Clients no longer poll empty snapshots, so tell every panel of this
         # owner (on any session) that the saved list changed.
         self._notify(session_id, owner, saved=True)
@@ -1022,20 +1140,36 @@ class Broker:
         is never silently re-pointed. A rename keeps them. The result carries
         no secret and no submitted value.
         """
+        owner = await session_owner(session_id)
+        result = await self._edit_saved(owner, connection_id, edit)
+        self._notify(session_id, owner, saved=True)
+        return result
+
+    # The same Vault with no session open (Settings). ``owner`` is ``vault_owner()``.
+
+    async def entries(self, owner: tuple) -> list[dict]:
+        """The principal's saved sign-ins as the owner sees them. Never a secret."""
         from app.core import vault_store
         from app.db.async_database import run_sync
-        owner = await session_owner(session_id)
-        old, new = await run_sync(vault_store.update, owner, connection_id,
-                                  lambda current: apply_saved_edit(current, edit))
-        revoked = 0
-        if not vault_store.same_connection(old.model_copy(update={"label": new.label}), new):
-            for grant in list(self.grants.values()):
-                if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
-                    self.revoke(grant.session_id, grant.id)
-                    revoked += 1
-        self._notify(session_id, owner, saved=True)
-        return {"updated": True, "revoked": revoked,
-                "host_key_cleared": bool(old.fingerprint) and not new.fingerprint}
+        return await run_sync(vault_store.catalog, owner)
+
+    async def add_entry(self, owner: tuple, spec: GrantInput) -> str:
+        """Save a sign-in the owner typed in Settings. Using it still needs a request and approval."""
+        from app.core import vault_store
+        from app.db.async_database import run_sync
+        connection_id = await run_sync(vault_store.save, owner, new_entry(spec))
+        self._notify_saved(owner)
+        return connection_id
+
+    async def edit_entry(self, owner: tuple, connection_id: str, edit: SavedConnectionEdit) -> dict:
+        result = await self._edit_saved(owner, connection_id, edit)
+        self._notify_saved(owner)
+        return result
+
+    async def remove_entry(self, owner: tuple, connection_id: str) -> int:
+        revoked = await self._forget(owner, connection_id)
+        self._notify_saved(owner)
+        return revoked
 
     def snapshot_pending(self, session_id: str) -> tuple[list, list]:
         """Capture identities, never a future session-wide dismissal selector."""
