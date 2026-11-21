@@ -443,9 +443,10 @@ describe('Vault', () => {
 		await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith('a1', true));
 	});
 
-	it('sends a request that needs private inputs to the access panel', async () => {
+	it('sends a request that needs private inputs to the Vault panel', async () => {
 		const { open, decide } = access([{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths' }]);
 		renderDock({ permissions: [] });
+		expect(screen.getByText('Vault request')).toBeTruthy();
 		expect(screen.queryByRole('slider')).toBeNull();
 		await fireEvent.click(screen.getByRole('button', { name: 'Review' }));
 		expect(open).toHaveBeenCalledOnce();

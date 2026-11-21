@@ -64,8 +64,8 @@ async def forward(owner: str, session_id: str, operation: str, payload: dict | N
                             "stays on that device; try again when it is online.") from None
     except control.ControlRefused as exc:
         if str(exc) == UNSUPPORTED_OWNER:
-            raise HTTPException(409, "Update the device that runs this conversation to manage its private "
-                                "access from here.") from None
+            raise HTTPException(409, "Update the device that runs this conversation to manage its Vault "
+                                "from here.") from None
         raise HTTPException(409, str(exc)) from None
 
 

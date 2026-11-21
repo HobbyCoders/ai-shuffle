@@ -8,8 +8,8 @@
 	 * Permission and one-shot access approvals are answered by sliding the
 	 * knob right (approve) or left (deny), or by tapping Deny / Approve, with
 	 * a choice of how long the answer lasts above them (Once, This chat,
-	 * Always) when the server offers one. An access request that needs private
-	 * inputs opens the header's access panel (a bottom sheet) through Review. A question shows
+	 * Always) when the server offers one. A Vault request that needs private
+	 * inputs opens the Vault panel (a bottom sheet) through Review. A question shows
 	 * its options as large buttons plus "Type an answer" and "Skip this
 	 * question"; a multi-part, multi-select or model-picker question falls back
 	 * to the shared question form. Several waiting items show "1 of N", which
@@ -342,7 +342,7 @@
 				{@const item = current.item}
 				<div class="p-head">
 					<KeyRound size={17} class="t-ico keyc" aria-hidden="true" />
-					<strong>{item.kind === 'action' ? 'Approval' : 'Access request'}</strong>
+					<strong>{item.kind === 'action' ? 'Approval' : 'Vault request'}</strong>
 					<span class="what">{KIND_LABEL[item.kind]}</span>
 					{#if queue.length > 1}
 						<button type="button" class="count" onclick={next} aria-label={`${position} of ${queue.length}. Show the next request`}>{position} of {queue.length}<ChevronRight size={14} aria-hidden="true" /></button>
