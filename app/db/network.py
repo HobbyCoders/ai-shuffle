@@ -396,6 +396,7 @@ def _ensure_columns(cursor) -> None:
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
                 ("network_session_active", "snoozed_until", "TEXT"),
+                ("sync_records", "quorum_free_hash", "TEXT"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
                 ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
     if type(cursor).__module__.startswith("psycopg2"):
@@ -663,6 +664,9 @@ def rename_member(device_id: str, name: str) -> Optional[dict]:
 
     with get_db() as conn:
         cursor = conn.cursor()
+        # network_state before the name row, the order an incoming apply
+        # takes them; engine.record below would otherwise wait for it holding it.
+        lock_state(cursor)
         cursor.execute("UPDATE network_members SET name = %s, updated_at = %s WHERE device_id = %s",
                        (name, _now(), device_id))
         if not cursor.rowcount:
@@ -1459,15 +1463,15 @@ def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
 
 
 def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_device_id: str, content_hash: str,
-               deleted: bool, order_seq: Optional[int] = None) -> None:
+               deleted: bool, order_seq: Optional[int] = None, quorum_free_hash: Optional[str] = None) -> None:
     cursor.execute(
-        """INSERT INTO sync_records (collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq, updated_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """INSERT INTO sync_records (collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq, updated_at, quorum_free_hash)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (collection, record_id) DO UPDATE SET
                clock = EXCLUDED.clock, origin_device_id = EXCLUDED.origin_device_id,
                content_hash = EXCLUDED.content_hash, deleted = EXCLUDED.deleted,
-               order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at""",
-        (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now()))
+               order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at, quorum_free_hash = EXCLUDED.quorum_free_hash""",
+        (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now(), quorum_free_hash))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
@@ -1729,6 +1733,14 @@ def get_op(cursor, origin: str, incarnation: int, seq: int, *, at_or_after: bool
                    f"AND seq {comparison} %s ORDER BY seq {order} LIMIT 1", (origin, incarnation, seq))
     row = cursor.fetchone()
     return _load(row["envelope"], {}) if row else None
+
+
+def record_ops(cursor, collection: str, record_id: str, *, origin_device_id: str, clock: int) -> List[dict]:
+    """The retained envelopes that carry this version (origin and clock) of a record."""
+    cursor.execute("SELECT envelope FROM sync_ops WHERE collection = %s AND record_id = %s "
+                   "AND origin_device_id = %s AND clock = %s ORDER BY ingest_id DESC LIMIT 4",
+                   (collection, record_id, origin_device_id, clock))
+    return [_load(row["envelope"], {}) for row in cursor.fetchall()]
 
 
 def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> List[dict]:

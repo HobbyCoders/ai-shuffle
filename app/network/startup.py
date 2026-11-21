@@ -626,6 +626,15 @@ async def start() -> List[asyncio.Task]:
     global _unsubscribe_applied, _refused_loop
     with _reconcile_guard:
         _refused_loop = None  # a stop() earlier in this process refused them
+    if engine.context() is not None:
+        try:
+            # Credential storage is unlocked by now (main.lifespan) and no loop
+            # below has published presence or applied a peer op yet: prove
+            # upgrade baselines while nested secrets decrypt and the quorum
+            # is still the one they were signed under (#1605).
+            engine.backfill_quorum_baselines()
+        except Exception:  # noqa: BLE001 - unproven rows are kept, as before
+            logger.warning("Could not backfill quorum-free sync baselines", exc_info=True)
     # One subscription per lifecycle: stop() (or a failed start) removes it,
     # and a start without a stop replaces it, so applies are never delivered
     # twice (#2097).

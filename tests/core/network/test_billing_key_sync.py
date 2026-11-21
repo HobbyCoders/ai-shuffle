@@ -163,8 +163,14 @@ def test_mixed_version_allowlists_and_upgrade_do_not_wipe_keys(workers, monkeypa
     with a.active():
         assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
         # Applying the omission must leave the merged row dirty, without a
-        # manual edit or a re-save of the same plaintext key.
-        assert scan() == 1
+        # manual edit or a re-save of the same plaintext key. It is published
+        # by this scan, or already by the apply: a later version from B is
+        # never ordered against the merged row before that row is signed
+        # (#1605), and which of the two wins a tie is up to the device ids.
+        scan()
+        assert scan() == 0
+        with db.get_db() as conn:
+            assert store.get_record(conn.cursor(), "model_providers", PROVIDER)["origin_device_id"] == a.device_id
     exchange(a, b)
     with b.active():
         assert encryption.decrypt_value(row()["balance_key"]) == "billing-test"
@@ -347,7 +353,8 @@ def test_explicit_clear_advances_stream_with_unreadable_local_secrets(workers, s
                 conn.cursor().execute("UPDATE model_providers SET balance_key = %s WHERE id = %s",
                                       ("enc:invalid-balance", PROVIDER))
     # A legacy/partial writer need not resend inference credentials along with
-    # an explicit billing clear. The receiving store must not block that clear.
+    # an explicit billing clear. A receiving store it cannot read for good must
+    # not block that clear; a locked one holds it only until it is unlocked.
     with version(replace(modern, fields=tuple(f for f in modern.fields if f != "auth_token"))), a.active():
         bind(None)
         scan()
@@ -357,8 +364,17 @@ def test_explicit_clear_advances_stream_with_unreadable_local_secrets(workers, s
         marks = store.local_watermarks()
     with a.active():
         ops, _, _ = store.exchange_batch(marks, exclude_origin=b.device_id)
-    with b.active(), patch.object(encryption, "_encryption_key", None if storage == "locked" else encryption._encryption_key):
-        result = engine.apply_batch(ops)
+    with b.active():
+        with patch.object(encryption, "_encryption_key", None if storage == "locked" else encryption._encryption_key):
+            result = engine.apply_batch(ops)
+            if storage == "locked":
+                # B cannot tell whether a row it cannot read holds a change it
+                # has not published, so nothing replaces that row yet (#1605).
+                # A locked store cannot use the key either.
+                assert (result.applied, result.retry, result.rejected) == (0, 1, 0), result.reasons
+                assert row()["balance_key"] is not None and row()["name"] != "After clear"
+        if storage == "locked":
+            result = engine.apply_batch(ops)  # unlocked: the peer's next pass applies the clear
         assert result.retry == result.rejected == result.pending == 0
         assert result.applied >= 2
         assert row()["balance_key"] is None

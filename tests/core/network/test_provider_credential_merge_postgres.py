@@ -6,6 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -55,8 +56,9 @@ def test_timestamp_comparison_and_atomic_write(cluster, losing_row):
             conn.cursor().execute("SET statement_timeout TO 10000")
             started.set()
             if losing_row:
+                # No network: nothing here is a scanned local change.
                 assert engine._merge_losing_provider_credentials(
-                    conn.cursor(), coll, provider, newer, {"deleted": False})
+                    conn.cursor(), SimpleNamespace(bootstrap_state=None), coll, provider, newer, {"deleted": False})
                 return engine._read_row(conn.cursor(), coll, provider)
             return engine.materialize(conn.cursor(), coll, provider, {**old, "name": "Edited"})
 
@@ -102,6 +104,13 @@ def test_applied_bundle_does_not_echo_across_timezones(cluster, workers, monkeyp
             cursor.execute("SELECT set_config('TimeZone', %s, false)", (session_zone,))
             store.create_state(network_id=ctx.network_id, name=ctx.name,
                                founder_device_id=ctx.founder_device_id, keyring={}, _conn=conn)
+            # The row here is the sender's earlier version, not an unscanned
+            # local change (#1605): give it that sync record, hashed as this
+            # session's scan would hash it.
+            held = engine.serialize_row(coll, engine._read_row(cursor, coll, provider), cursor=cursor)
+            store.put_record(cursor, coll.name, provider, clock=env.clock - 1,
+                             origin_device_id=env.origin_device_id,
+                             content_hash=engine.content_hash(coll, held), deleted=False)
             monkeypatch.setattr(engine, "get_db", lambda: nullcontext(conn))
             if delivery == "envelope":
                 result = engine.ApplyResult()
