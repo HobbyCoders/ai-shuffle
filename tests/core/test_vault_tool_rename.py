@@ -259,6 +259,27 @@ def test_a_saved_list_reads_under_the_current_names():
     assert read(untouched) == untouched
 
 
+def test_an_exported_agent_carries_the_earlier_names():
+    import asyncio
+    import json
+    from unittest.mock import MagicMock
+
+    from app.api import agents
+
+    profile = {"id": "p", "name": "P", "description": None, "is_builtin": False, "config": {
+        "tool_selection_mode": "disallow", "disallowed_tools": [NEW_RUN, "Bash", "mcp__app-vault__*"]}}
+    with patch("app.api.agents.database") as db, \
+            patch("app.api.agents.get_api_user_from_request", return_value=None):
+        db.get_profile.return_value = profile
+        body = json.loads(asyncio.run(agents.export_profile(MagicMock(), "p", token="t")).body)
+    exported = body["agent"]["disallowed_tools"]
+    # A version from before the rename blocks the tools it knows...
+    assert exported == [OLD_RUN, "Bash", "mcp__chat-access__*"]
+    # ...and this one reads the import back as the same block.
+    assert tool_access.current_tool_names(exported) == [NEW_RUN, "Bash", "mcp__app-vault__*"]
+    assert body["agent"]["allowed_tools"] is None
+
+
 def test_a_saved_rule_is_listed_under_the_current_name():
     import asyncio
 

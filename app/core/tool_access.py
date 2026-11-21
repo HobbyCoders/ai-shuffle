@@ -235,7 +235,8 @@ def shared_tool_matcher(pattern: Any) -> Any:
         old for old, new in _RENAMED_SPELLINGS.items()
         if matcher.fullmatch(new) and not matcher.fullmatch(old)
     ]
-    return "|".join([pattern, *(re.escape(old) for old in missing)]) if missing else pattern
+    # Tool names are letters, digits, ``_`` and ``-``: nothing to escape.
+    return "|".join([pattern, *missing]) if missing else pattern
 
 
 def widened_by_rename(tool_names: Iterable[Any]) -> List[str]:
