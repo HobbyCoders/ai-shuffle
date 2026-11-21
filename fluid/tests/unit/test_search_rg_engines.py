@@ -394,6 +394,80 @@ async def test_grep_withholds_credential_hits_in_both_engines(tmp_path, monkeypa
             assert absent not in text
 
 
+async def _grep_each_engine(cwd: Path, monkeypatch, **input) -> list[str]:
+    texts = []
+    for engine in ([RG] if RG else []) + [None]:
+        monkeypatch.setattr(grep_mod.shutil, "which", lambda _name, e=engine: e)
+        out = await grep_mod.handler({"pattern": "needle", **input}, ToolCtx(cwd=str(cwd)))
+        assert not out.is_error, out.text
+        texts.append(out.text)
+    return texts
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+
+async def test_grep_checks_hits_under_an_absolute_symlinked_root(tmp_path, monkeypatch) -> None:
+    """#1778: an absolute root that is a symlink to ``~/.aws``. The hit prints
+    as ``<link>/credentials``; its resolved path is ``.aws/credentials``."""
+    _write(tmp_path, "home/.aws/credentials", "needle-aws-secret\n")
+    _write(tmp_path, "home/.aws/notes.txt", "needle in notes\n")
+    link = tmp_path / "aws-link"
+    _symlink_or_skip(link, tmp_path / "home" / ".aws")
+    for text in await _grep_each_engine(tmp_path, monkeypatch, path=str(link)):
+        assert "needle-aws-secret" not in text, text
+        assert "hits in credential-pattern files" in text, text
+        assert f"{link}{os.sep}notes.txt:1:needle in notes" in text, text
+
+
+async def test_grep_checks_symlinked_files_inside_the_tree(tmp_path, monkeypatch) -> None:
+    """A file under the root that links to ``.env`` is withheld by its target."""
+    _write(tmp_path, "secrets/.env", "API_TOKEN=needle-secret\n")
+    _write(tmp_path, "proj/app.py", "needle here\n")
+    _symlink_or_skip(tmp_path / "proj" / "notes.txt", tmp_path / "secrets" / ".env")
+    for text in await _grep_each_engine(tmp_path, monkeypatch, path=str(tmp_path / "proj")):
+        assert "needle-secret" not in text, text
+        assert "app.py:1:needle here" in text, text
+
+
+async def test_grep_withholds_a_credential_file_with_a_newline_in_its_name(
+    tmp_path, monkeypatch
+) -> None:
+    """#1778: rg prints ``./.env.site\\nconfig\\0<line>``; splitting on the
+    newline first saw only ``config`` and returned the secret."""
+    try:
+        _write(tmp_path, ".env.site\nconfig", "API_TOKEN=needle-secret\n")
+    except OSError:
+        pytest.skip("file names cannot hold a newline here")
+    _write(tmp_path, "app.py", "needle here\n")
+    for text in await _grep_each_engine(tmp_path, monkeypatch, no_ignore=True):
+        assert "needle-secret" not in text, text
+        assert "hits in credential-pattern files" in text, text
+        assert f"{tmp_path}{os.sep}app.py:1:needle here" in text, text
+
+
+@needs_rg
+async def test_grep_rg_output_ignores_the_users_rg_config(tmp_path, monkeypatch) -> None:
+    """A user config with ``--context=1`` makes rg print bare ``--`` separators
+    and context lines with no NUL, which the path framing would read as the
+    start of the next file name."""
+    config = tmp_path / "rgrc"
+    config.write_text("--context=1\n--column\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    root = tmp_path / "tree"
+    _write(root, "a.py", "x\nneedle a\ny\n\n\n\nz\n")
+    _write(root, "b.py", "x\nneedle b\ny\n")
+    out = await grep_mod.handler({"pattern": "needle"}, ToolCtx(cwd=str(root)))
+    lines, notes = _body(out.text)
+    assert sorted(lines) == [
+        f"{root}{os.sep}a.py:2:needle a", f"{root}{os.sep}b.py:2:needle b",
+    ], out.text
+
+
 @needs_rg
 async def test_grep_rg_prunes_heavy_dirs_only_under_no_ignore(tmp_path) -> None:
     # No .gitignore here: without no_ignore rg's own rules decide (hidden .git
@@ -443,7 +517,7 @@ async def test_grep_rg_early_exit_does_not_wait_for_eof(tmp_path, monkeypatch) -
     procs: list[FakeRgProc] = []
 
     async def fake_exec(*args, **kwargs):
-        stdout = b"".join(f"./f{i}.py:1:needle\n".encode() for i in range(5))
+        stdout = b"".join(f"./f{i}.py\x001:needle\n".encode() for i in range(5))
         procs.append(FakeRgProc(stdout=stdout, hang=True))
         return procs[-1]
 
@@ -461,7 +535,7 @@ async def test_grep_rg_exactly_at_the_limit_has_no_note(tmp_path, monkeypatch) -
     procs: list[FakeRgProc] = []
 
     async def fake_exec(*args, **kwargs):
-        stdout = b"".join(f"./f{i}.py:1:needle\n".encode() for i in range(3))
+        stdout = b"".join(f"./f{i}.py\x001:needle\n".encode() for i in range(3))
         procs.append(FakeRgProc(stdout=stdout))
         return procs[-1]
 
@@ -474,10 +548,10 @@ async def test_grep_rg_exactly_at_the_limit_has_no_note(tmp_path, monkeypatch) -
 async def test_grep_rg_reassembles_lines_split_across_reads(tmp_path, monkeypatch) -> None:
     """A long match line spans many 64KB reads and has no trailing newline."""
     monkeypatch.setattr(grep_mod.shutil, "which", lambda _name: "/usr/bin/rg")
-    long_line = "./min.js:1:" + "needle," * 30_000
+    long_line = "./min.js\x001:" + "needle," * 30_000
 
     async def fake_exec(*args, **kwargs):
-        return FakeRgProc(stdout=f"./a.py:2:needle\n{long_line}".encode())
+        return FakeRgProc(stdout=f"./a.py\x002:needle\n{long_line}".encode())
 
     monkeypatch.setattr(grep_mod.asyncio, "create_subprocess_exec", fake_exec)
     out = await grep_mod.handler({"pattern": "needle"}, ToolCtx(cwd=str(tmp_path)))
