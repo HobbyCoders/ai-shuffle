@@ -170,8 +170,7 @@ async def test_a_claim_is_dropped_unless_both_quotes_are_in_their_own_rule(tmp_p
         rule(store, text)
     invented = clash(OPUS, SOL, "Code reviews must always be done by Opus", "code reviews are done by Sol")
     swapped = clash(OPUS, SOL, "code reviews are done by Sol", "Code reviews are done by Opus")
-    same = clash(OPUS, SOL, "reviews are done by", "reviews are done by")
-    for claims in (invented, swapped, same):
+    for claims in (invented, swapped):
         root = tmp_path / str(id(claims))
         copy = SkillStore(root)
         for text in (OPUS, SOL, DEPLOY):
@@ -182,6 +181,21 @@ async def test_a_claim_is_dropped_unless_both_quotes_are_in_their_own_rule(tmp_p
         assert not model.confirms and waiting(copy) == []
         assert result.reviewed == 3, "an unverifiable claim is no conflict, and the rules were reviewed"
         assert log_rows(copy)[-1]["error"] == "1 unverified claims dropped"
+
+
+async def test_passages_that_read_the_same_are_left_to_the_second_look(tmp_path):
+    """The parser checks that a quote stands in its rule, never what two
+    passages mean: the second look sees both whole rules and decides."""
+    marked = "Set the status to “Draft” with the curly quotation marks included."
+    plain = "Set the status to Draft without quotation marks."
+    for agree in (True, False):
+        store = SkillStore(tmp_path / str(agree))
+        old, new = rule(store, marked), rule(store, plain)
+        model = Model(clash(marked, plain, '"Draft"', "Draft"), agree=agree)
+        result = await review.run(learner(store, model))
+        assert (result.calls, result.found, result.rejected) == (2, int(agree), int(not agree))
+        assert [p["first"]["text"] for p in model.confirms[0]["pairs"]] == [marked]
+        assert [(c["a"]["id"], c["b"]["id"]) for c in waiting(store)] == ([(old.id, new.id)] if agree else [])
 
 
 async def test_the_second_look_can_overrule_the_claim(tmp_path):
@@ -434,8 +448,7 @@ def test_passages_that_differ_only_in_capitals_are_two_instructions():
     assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == (
         "Set BUILD_MODE to dev", "Set BUILD_MODE to DEV")
 
-    # A capital at the start of the passage is a difference like any other;
-    # only the very same characters from both rules are refused.
+    # A capital at the start of the passage is a difference like any other.
     first = lower | {"text": "dev is the only allowed spelling for BUILD_MODE."}
     other = upper | {"text": "Dev is the only allowed spelling for BUILD_MODE."}
     batch = review.Batch(subjects=[other], shown={"r1": other, "r2": first})
@@ -444,10 +457,6 @@ def test_passages_that_differ_only_in_capitals_are_two_instructions():
          "b_quote": "dev is the only allowed spelling"}]}), batch)
     assert rejected == 0 and (claims[0]["a_quote"], claims[0]["b_quote"]) == (
         "dev is the only allowed spelling", "Dev is the only allowed spelling")
-    same = lower | {"id": "m3", "text": "Always set BUILD_MODE to dev."}
-    batch = review.Batch(subjects=[same], shown={"r1": same, "r2": lower})
-    assert review.parse(json.dumps({"conflicts": [
-        {"a": "r1", "b": "r2", "a_quote": "BUILD_MODE to dev", "b_quote": "BUILD_MODE to dev"}]}), batch) == ([], 1)
 
 
 # ─── the store changes while the model answers ─────────────────────────────

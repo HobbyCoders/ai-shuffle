@@ -480,14 +480,14 @@ def parse(text: str, batch: Batch) -> tuple[list[dict], int]:
             continue
         pair = frozenset((global_id(a), global_id(b)))
         a_quote, b_quote = locate(item.get("a_quote"), a["text"]), locate(item.get("b_quote"), b["text"])
-        # The same characters quoted from both rules are no clash. Whether two
-        # passages that differ at all (a capital included) say the same thing
-        # is the second look's judgment, never this code's. A later call of an
+        # A quote only has to stand in its rule. Whether the two passages
+        # clash, even when they read the same, is the second look's judgment
+        # of the two whole rules and never this code's. A later call of an
         # unfinished scope showed its subjects to each other already: only a
         # pair with a newly shown rule is news, and repeats must not use up
         # this call's claims.
         if (pair in seen or not pair & subjects or not a_quote or not b_quote
-                or a_quote == b_quote or (batch.carried and pair <= subjects)):
+                or (batch.carried and pair <= subjects)):
             rejected += 1
             continue
         seen.add(pair)
