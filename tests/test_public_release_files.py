@@ -3,12 +3,15 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import tomllib
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import secret_scan  # noqa: E402
 PACKAGES = ("desktop", "frontend", "mobile", "browser-mcp", "tools")
 
 
@@ -123,52 +126,12 @@ def test_private_agent_files_and_working_notes_are_not_tracked():
     assert tracked == [], f"keep these out of the public repo: {tracked}"
 
 
-# Hash the original values, not substitutes: regressions must still catch a
-# real leak without publishing the sensitive strings in the guard itself.
-OWNER_DETAIL_HASHES = frozenset({
-    "8be0b5445fca6eb16d14c6f4eaff1cf1d1a3362ef660bfb2b66e74bf309b7e61",  # machine-one
-    "6baff1894abb437cfa6086c13670ed2dd5ecfb8178a36f1b8b42fc7c6f588912",  # machine-two
-    "8e08b724734fcbc0af03e2469bbe556b37c8330296e4a4a7736a0572bf39522e",  # private-address
-    "167ed9eb3a83f4f32378c4b195f745ee5c16116f74d7cc8afe5a09a1d77f219f",  # tailnet-address
-    "660bd4b3315cfd8a19cf6050f83741778bd1ee5b9fb25e9c7907c92cad322986",  # home-folder
-    "4be591bebbdaca82fab8546a25738a9c9d4e3a6b02fe55bfe2d3636ef455da3b",  # tailnet-name-1
-    "b3abbaeb6353ff23d26dbe1dd39f47933d15f686d8d82ca5fe84c9ef0b99220a",  # tailnet-name-2
-    "c23fbc9537dd5bb88eef798b887c4948c17c349f729583146d9883fdfd21f634",  # research-artifact-1
-    "87274b4f9f72acc805c05b3ced451499c0aa1d795c399112f2c0cbac55b43bb9",  # research-branch-1
-    "a68c1f4657a0416721a8148a20443e0a70c383344b91bd4772a96b49d3d51f21",  # research-worktree-1
-    "61e1affb401d8062e7732e625e1ca1c8c5937a383681b4ce3baa576bd0eac126",  # research-memory-path-1
-    "ed79ee2278242f7851224d74a17df3b97d6dcab6e1db5bd87289a41ea8d800c6",  # research-artifact-2
-    "95119a49a78b052307fa0511a5386deb6409bbcb4850571268243a1e298c00b9",  # research-checkout-1
-    "9038006871154a43afa40dafaaac8edb4d0f919a2e4a6c57b88d0e2c7f8d4a10",  # research-branch-2
-    "003dcea77b63d29547399dac003a401a27fe26235d87a6c405205b47016cc42e",  # research-worktree-2
-    "83da9489f41a8387e4504781d8948da4356fc07b6eb9b931100192e882d877d3",  # credential-location-command-1
-    "ecb1bdcd5b485a522660951ad0fee754e45566f74e996046bbff0ff8e3a0f199",  # research-checkout-2
-    "6a5a14cb2b2845c24b94719b2b91b8940be56590c40a719bcdee59629f14603c",  # credential-location-command-2
-})
-OWNER_DETAIL_PATTERNS = (
-    r"\b\w+\b",  # worker words, also inside URLs and hyphenated names
-    r"\b(?:\d{1,3}\\?\.){3}\d{1,3}\b",  # IPv4, including regex literals
-    r"\b(?=([\w-]+(?:\.[\w-]+)*\.ts\.net)\b)",  # overlapping hostname suffixes
-    r"/home/[\w.-]+",  # the home directory prefix, including in a longer path
-    r"(?:https?://|[A-Z]:[\\/]|~[/\\]|\.claude/)[^\s`<>\"()]+",  # URLs and local paths
-    r"\b[\w.-]+(?:/[\w.-]+)+",  # branch and worktree path tokens
-    r"`([^`\n]+)`",  # code-quoted setup commands, including embedded spaces
-)
-
-
-def _has_owner_detail(text):
-    return any(
-        hashlib.sha256(token.replace(r"\.", ".").rstrip(".,;:").casefold().encode()).hexdigest()
-        in OWNER_DETAIL_HASHES
-        for pattern in OWNER_DETAIL_PATTERNS
-        for token in re.findall(pattern, text, re.I)
-    )
-
-
+# The digests and the matcher live in scripts/secret_scan.py: the pre-push hook
+# runs the same check on every outgoing commit, before anything is published.
 def test_owner_setup_details_stay_out_of_tracked_files():
     hits = [
         path for path in _tracked_files()
-        if _has_owner_detail((ROOT / path).read_bytes().decode("utf-8", errors="ignore"))
+        if any(secret_scan.owner_details((ROOT / path).read_bytes().decode("utf-8", errors="ignore")))
     ]
     # No exemption for this test file, and no private contents in failure output.
     assert hits == [], f"remove owner-specific details from tracked files: {hits}"
@@ -220,7 +183,7 @@ def test_owner_detail_guard_checks_actual_tracked_content(tmp_path, monkeypatch,
         "~/.claude/projects/example/memory/review.md",
         '[Environment]::GetEnvironmentVariable("EXAMPLE_API_KEY", "User")',
     )
-    monkeypatch.setitem(globals(), "OWNER_DETAIL_HASHES", OWNER_DETAIL_HASHES | {
+    monkeypatch.setattr(secret_scan, "OWNER_DETAIL_HASHES", secret_scan.OWNER_DETAIL_HASHES | {
         hashlib.sha256(value.casefold().encode()).hexdigest() for value in fixture_values
     })
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)

@@ -1,8 +1,9 @@
 #!/bin/sh
-# LOCAL-CI-PRE-PUSH v4
-# The local push gate is the offline secret scan (scripts/local_ci.py): every
-# outgoing ref, every push, no cache. Branch pushes also get a working-tree
-# scan and the update-reach policy. Tests run on GitHub CI for every PR.
+# LOCAL-CI-PRE-PUSH v5
+# The local push gate is the offline secret and owner-detail scan
+# (scripts/local_ci.py): every outgoing ref, every push, no cache. Branch
+# pushes also get a working-tree secret scan and the update-reach policy.
+# Tests run on GitHub CI for every PR.
 # `python scripts/local_ci.py install` copies it into the clone's hooks
 # directory and keeps any earlier pre-push hook as pre-push.user.
 refs=$(cat)
@@ -12,6 +13,12 @@ root=$(git rev-parse --show-toplevel) || exit 1
 if [ ! -f "$root/scripts/secret_scan.py" ] || [ ! -f "$root/.gitleaks.toml" ] ||
    ! grep -q '^SECURITY_GATE_VERSION = 2[[:space:]]*$' "$root/scripts/local_ci.py" 2>/dev/null; then
   echo "pre-push: checkout lacks the required security gate; update this branch before pushing." >&2
+  exit 1
+fi
+# Likewise for a branch that predates the owner-detail scan: its scanner would
+# let the maintainer's machine names and addresses through.
+if ! grep -q '^OWNER_DETAIL_GATE = 1[[:space:]]*$' "$root/scripts/secret_scan.py" 2>/dev/null; then
+  echo "pre-push: checkout lacks the owner-detail scan; merge the current main into this branch before pushing." >&2
   exit 1
 fi
 if [ -f "$root/scripts/local_ci.py" ]; then
@@ -39,6 +46,7 @@ if [ -f "$root/scripts/local_ci.py" ]; then
   # $1 is the remote being pushed to. It bounds a new branch's secret scan by
   # what that remote's main already holds. It goes in the environment because
   # an older checkout's local_ci.py would reject an extra argument.
+  # LOCAL_CI_HOOK=4 names that environment protocol, not this file's version.
   printf '%s\n' "$refs" | LOCAL_CI_HOOK=4 LOCAL_CI_PUSH_REMOTE="$1" "$python" "$root/scripts/local_ci.py" pre-push || exit 1
 fi
 user_hook="$(dirname "$0")/pre-push.user"

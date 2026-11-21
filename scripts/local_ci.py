@@ -989,8 +989,8 @@ def security_check(python: str, strict: bool = False, *, audit: bool = True) -> 
 
 
 def scan_push(local_sha: str, remote_sha: str, push_remote: str | None = None) -> None:
-    # Always runs, even for a cached tree: a secret added then deleted in the
-    # outgoing history must not slip through a clean final-tree pass.
+    # Always runs, even for a cached tree: a secret or owner detail added then
+    # deleted in the outgoing history must not slip through a clean final tree.
     # ``push_remote`` (the hook's $1) bounds a new branch's scan by what that
     # remote's main already holds; see secret_scan.new_ref_boundary.
     target = ["--push-remote", push_remote] if push_remote else []
@@ -1188,9 +1188,9 @@ def cmd_pre_push(args) -> int:
     """Called by the pre-push hook with git's ref lines on stdin.
 
     The push gate runs no test suites: every pull request runs them on GitHub
-    CI. It runs the offline secret scan on every outgoing ref, first and with
-    no cache, then a whole-tree scan and the live update-reach policy for
-    branch pushes. No pass record can skip any of these.
+    CI. It runs the offline secret and owner-detail scan on every outgoing
+    ref, first and with no cache, then a whole-tree secret scan and the live
+    update-reach policy for branch pushes. No pass record can skip any of these.
 
     The hook passes the remote being pushed to in PUSH_REMOTE_ENV, not as an
     argument: the installed hook is shared by every worktree of the clone,
@@ -1228,10 +1228,12 @@ def cmd_pre_push(args) -> int:
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
     fetch_push_base(push_remote)
+    if push_remote in git("remote").splitlines():
+        upgrade_installed_hook(push_remote)
     for local_sha, remote_ref in branches:
         # Labels and draft state are live policy, checked on every push.
         push_update_reach(local_sha, remote_ref)
-    print("pre-push: secret scan and update-reach passed; tests run in PR CI.")
+    print("pre-push: secret scan, owner-detail scan and update-reach passed; tests run in PR CI.")
     return 0
 
 
@@ -1257,7 +1259,8 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     target, kept = directory / "pre-push", directory / "pre-push.user"
     source = HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n")
     if target.exists():
-        installed = target.read_text(encoding="utf-8", errors="replace")
+        current = target.read_bytes()
+        installed = current.decode("utf-8", errors="replace")
         version_pattern = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
         current_version = re.search(version_pattern, installed)
         source_version = re.search(version_pattern, source.decode("utf-8"))
@@ -1266,12 +1269,74 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
             raise Failure(f"{target} has newer hook v{current_version[1]}; refusing to replace it "
                           f"with v{source_version[1]}. Use install --force to downgrade explicitly.")
         if HOOK_MARKER not in installed:
+            # Copied, not moved: the earlier hook stays the active one until
+            # the swap below, so a failed install never leaves a push unchecked.
+            # The copy holds the bytes just judged, never a re-read: another
+            # install may have swapped this hook in meanwhile, and saving that
+            # as the earlier hook would make it run itself.
             if kept.exists():
-                raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
-            target.replace(kept)
-    target.write_bytes(source)
-    target.chmod(0o755)
+                if kept.read_bytes() != current:  # equal: left by an install that failed before the swap
+                    raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
+            else:
+                backup = directory / f"pre-push.{os.getpid()}.user"
+                if target.is_symlink():
+                    backup.symlink_to(os.readlink(target))  # still the shared script it points at
+                else:
+                    backup.write_bytes(current)
+                    shutil.copymode(target, backup)
+                backup.replace(kept)
+    # Swap the file in whole: a push in progress may be running the old one,
+    # and a shell reads its script as it goes. The staging file is this
+    # process's own, so two installs cannot rename each other's half-written one.
+    staged = directory / f"pre-push.{os.getpid()}.new"
+    try:
+        staged.write_bytes(source)
+        staged.chmod(0o755)
+        staged.replace(target)
+    finally:
+        staged.unlink(missing_ok=True)
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
+
+
+def upgrade_installed_hook(remote: str) -> None:
+    """Bring this clone's older installed hook up to the version ``remote``'s main carries.
+
+    The scans run from the checkout being pushed, but only the installed hook
+    can refuse a branch that predates one of them, and install is run once per
+    clone. A branch that changes the hook does not qualify until it merges:
+    every worktree shares the installed hook, and the others could not satisfy
+    a requirement that main does not have yet.
+    """
+    target = hooks_dir() / "pre-push"
+    version = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
+    try:
+        installed = re.search(version, target.read_text(encoding="utf-8", errors="replace"))
+        source = re.search(version, HOOK_SOURCE.read_text(encoding="utf-8"))
+        if not (installed and source and int(installed[1]) < int(source[1])):
+            return
+        # Ask the repository being pushed to where its main is. A tracking ref
+        # can be stale, a configured comparison branch, or written by another
+        # remote whose name overlaps this one.
+        urls = git("remote", "get-url", "--push", "--all", remote).split("\n")
+        if len(urls) != 1:
+            return  # several push destinations: no single main to follow
+        # ls-remote matches a pattern by its last path components, so only the
+        # exact ref name counts. Its separators are a tab and a line feed,
+        # which a ref name cannot contain; other white space it can.
+        tips = [row[0] for row in (line.split("\t") for line in git("ls-remote", "--", urls[0], "refs/heads/main").split("\n"))
+                if row[1:] == ["refs/heads/main"]]
+        if not tips:
+            return  # that repository has no main: nothing there to catch up to
+        if git("rev-parse", f"{tips[0]}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
+            return
+        install_hook(target.parent)
+    except FileNotFoundError:
+        return  # no hook installed here: nothing to upgrade
+    except (OSError, UnicodeError, subprocess.CalledProcessError, Failure):
+        # Not "run install": this checkout's hook may be one main does not have yet.
+        print(f"pre-push: could not check the installed hook against {remote}'s main; the next push tries again.")
+        return
+    print(f"pre-push: updated the installed hook from v{installed[1]} to v{source[1]} ({target}).")
 
 
 def can_run_tests(python: str) -> bool:
