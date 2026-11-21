@@ -873,10 +873,13 @@
 			]
 		},
 		{
-			"why": "Claude Code compaction: the card, the context meter, and the delegated leg and mod that turn the CLI's compaction frames into them",
+			"why": "Claude Code compaction: the card, the context meter, the work fold that holds mid-turn cards, and the delegated leg and mod that turn the CLI's compaction frames into them",
 			"journeys": ["compaction"],
 			"globs": [
 				"frontend/src/lib/components/SystemMessage.svelte",
+				"frontend/src/lib/utils/work-log.ts",
+				"frontend/src/lib/components/chat/WorkLogGroup.svelte",
+				"scripts/devloop/fake_claude/scenarios/compact*.json",
 				"frontend/src/lib/components/chat/ContextUsageBar.svelte",
 				"app/core/provider/harness_adapter.py",
 				"fluid/fluid/engine/delegated.py",

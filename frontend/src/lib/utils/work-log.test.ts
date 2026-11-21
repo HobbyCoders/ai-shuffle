@@ -1668,6 +1668,36 @@ describe('context compaction inside a turn', () => {
 		expect(settledFolds(items)).toEqual([]);
 		expect(collapsedVisibleMessages(items)).toContain(card);
 	});
+
+	it.each(['compact_boundary', 'microcompact_boundary'])(
+		'keeps live work one run across mid-turn %s cards',
+		(subtype) => {
+			const first = compacted(subtype);
+			const second = compacted(subtype);
+			const progress = text('Tests pass. Checking the baseline next.');
+			const messages = [user('go'), tool(), first, tool(), tool(), second, tool(), progress];
+			const log = liveLog(buildDisplayItems(messages, LIVE))!;
+			// One fold for the whole stretch of work, not one per compaction.
+			expect(log.runs).toHaveLength(1);
+			expect(log.runs![0].folded.map((entry) => entry.message)).toEqual(messages.slice(1, 7));
+			expect(log.runs![0].summary).toBe('Ran 4 commands and compacted the context 2 times');
+			expect(collapsedVisibleMessages([log])).toEqual([progress]);
+		}
+	);
+
+	it('shows a live compaction the turn has not worked past yet', () => {
+		const card = compacted();
+		const messages = [user('go'), tool(), text('Looking at the store.'), tool(), card];
+		const log = liveLog(buildDisplayItems(messages, LIVE))!;
+		expect(collapsedVisibleMessages([log])).toContain(card);
+		// Work arriving after it folds the card with the rest of its run.
+		const next = [...messages, tool(), text('Found it.')];
+		const later = liveLog(buildDisplayItems(next, LIVE))!;
+		expect(collapsedVisibleMessages([later])).not.toContain(card);
+		// The one-line narration folds too once newer prose replaces it.
+		expect(later.runs).toHaveLength(1);
+		expect(later.runs![0].folded.map((entry) => entry.message)).toEqual(next.slice(1, 6));
+	});
 });
 
 describe('settled work log identity', () => {

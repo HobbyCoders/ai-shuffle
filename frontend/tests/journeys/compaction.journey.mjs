@@ -19,6 +19,8 @@
 //   message-before-compact
 //               a message typed while a tool runs, then an automatic compaction
 //               at once: the fake's next model call can still read it (#996)
+//   twice-live  one long turn compacts twice while it works: one work fold
+//               while it runs and once it settles, both cards inside it
 //   reload-after-auto, reload-after-manual
 //               the chat of `auto` or `manual`, built in setup, then reloaded
 import { readFileSync } from 'node:fs';
@@ -374,10 +376,59 @@ const messageBeforeCompact = (name, script) => ({
 	}
 });
 
+/**
+ * One work fold for the whole turn, naming `times` compactions, with every
+ * card inside it and none outside. `when` labels the failure messages.
+ */
+async function expectOneFoldAcross(page, times, when) {
+	const folds = page.getByRole('button', { name: /^(Show|Hide) work details/ });
+	const hide = page.getByRole('button', { name: /^Hide work details/ });
+	if (await hide.count()) await hide.first().click();
+	const n = await folds.count();
+	const names = await folds.evaluateAll((els) => els.map((el) => el.getAttribute('aria-label') || el.textContent.trim()));
+	expect(n === 1, `${when}: one work fold for the turn (${n}: ${JSON.stringify(names)})`);
+	const outside = await cards(page).count();
+	expect(outside === 0, `${when}: no compaction card outside the closed fold (${outside})`);
+	const named = page.getByRole('button', { name: new RegExp(`^Show work details: .*compacted the context ${times} times`, 'i') });
+	expect((await named.count()) === 1, `${when}: the fold names ${times} compactions (${JSON.stringify(names)})`);
+	await named.click();
+	await cards(page).first().waitFor({ timeout: 10_000 });
+	const inside = await cards(page).count();
+	expect(inside === times, `${when}: the opened fold holds ${times} compaction cards (${inside})`);
+	await hide.first().click();
+	await cards(page).first().waitFor({ state: 'detached', timeout: 10_000 }).catch(() => {});
+}
+
+/**
+ * A long turn compacts twice while it works: the live turn keeps one work fold
+ * (the cards never split it into three), and so does the settled turn.
+ */
+const twiceLiveCase = {
+	name: 'twice-live',
+	setup: openClaudeChat,
+	async act({ page, mark }) {
+		const token = uniq();
+		await mark('send');
+		await typeAndSend(page, `keep going ${token} [script:compact-twice]`);
+		// The scenario holds its last tool for 20 s after this line.
+		await page.getByText('Tests pass. Checking the baseline next.').first().waitFor({ timeout: 60_000 });
+		await mark('live fold');
+		const stop = page.getByRole('button', { name: 'Stop generating' });
+		expect(await stop.isVisible(), 'the turn is still running when the live fold is checked');
+		await expectOneFoldAcross(page, 2, 'live');
+		expect(await stop.isVisible(), 'the turn was still running through the live check');
+
+		await mark('settled fold');
+		await waitTurnSettled(page, { text: 'Done after two compactions.', messagesAtLeast: 2 });
+		await expectOneFoldAcross(page, 2, 'settled');
+	}
+};
+
 await runJourney({
 	name: 'compaction',
 	cases: [
 		scratchCase,
+		twiceLiveCase,
 		compactionCase('auto', AUTO),
 		compactionCase('manual', MANUAL),
 		compactionCase('after-tool', {
