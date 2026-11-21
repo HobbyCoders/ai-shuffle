@@ -598,6 +598,7 @@ def push_through_hook(root, tip, ref, remote_tip="0" * 40):
 @pytest.mark.parametrize("where,place,count", [
     ("file", "planted.txt: line 2", 1),
     ("file name", "[REDACTED].txt: file name", 1),
+    ("submodule name", "[REDACTED]: file name", 1),  # a gitlink has no blob here, only its path
     ("message", "(commit message and author): line", 1),
     ("author", "(commit message and author): line", 2),  # the author and committer lines
 ])
@@ -611,6 +612,8 @@ def test_actual_hook_blocks_an_owner_detail_in_any_outgoing_commit(where, place,
         planted = root / (f"{OWNER_FIXTURE}.txt" if where == "file name" else "planted.txt")
         planted.write_text(f"placeholder\nhost = {OWNER_FIXTURE.lower()}\n" if where == "file" else "placeholder\n")
         git(root, "add", ".")
+        if where == "submodule name":
+            git(root, "update-index", "--add", "--cacheinfo", f"160000,{base},{OWNER_FIXTURE}")
         identity = ["-c", f"user.email=dev@{OWNER_FIXTURE}.local"] if where == "author" else []
         message = f"Deploy to {OWNER_FIXTURE}" if where == "message" else "Scratch fixture"
         git(root, *identity, "commit", "-qm", message)
@@ -624,6 +627,60 @@ def test_actual_hook_blocks_an_owner_detail_in_any_outgoing_commit(where, place,
             assert f"Owner detail scan (machine names, addresses, local paths): {count} finding(s)" in result.stdout
             assert OWNER_FIXTURE.casefold() not in output.casefold()
             assert OWNER_FIXTURE_DIGEST not in output
+
+
+@pytest.mark.parametrize("where", ["message", "tagger"])
+def test_actual_hook_blocks_an_owner_detail_in_an_annotated_tag(where):
+    """A tag object is published on its own: here every commit under it is
+    already on the remote's main, so there is no outgoing commit to read."""
+    with tempfile.TemporaryDirectory(prefix="owner-hook-tag-") as directory:
+        root = Path(directory)
+        owner_fixture_checkout(root)
+        git(root, "remote", "add", "origin", "https://example.invalid/repo.git")  # origin/main is the boundary
+        identity = ["-c", f"user.email=dev@{OWNER_FIXTURE}.local"] if where == "tagger" else []
+        message = f"Built on {OWNER_FIXTURE}" if where == "message" else "Scratch release"
+        git(root, *identity, "tag", "--no-sign", "-a", "scratch", "-m", message)
+        result = push_through_hook(root, git(root, "rev-parse", "refs/tags/scratch"), "refs/tags/scratch")
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "Secret scan: 0 outgoing commit(s)" in result.stdout, output
+        assert 'owner detail: "(tag message and tagger)": line' in result.stdout, output
+        assert OWNER_FIXTURE.casefold() not in output.casefold()
+
+
+def test_a_secret_finding_withholds_an_owner_detail_in_the_file_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(secret_scan, "OWNER_DETAIL_HASHES", secret_scan.OWNER_DETAIL_HASHES | {OWNER_FIXTURE_DIGEST})
+    init(tmp_path)
+    base = commit(tmp_path)
+    (tmp_path / f"{OWNER_FIXTURE}.env").write_text("ghp_" + "a" * 36)
+    tip = commit(tmp_path)
+    assert secret_scan.scan(tmp_path, tip, base) == 1
+    assert secret_scan.scan(tmp_path) == 1  # the tree scan prints the same diagnostic
+    output = capsys.readouterr().out
+    assert output.count('secret scan: "github-token": "[REDACTED].env":1') == 2, output
+    assert OWNER_FIXTURE.casefold() not in output.casefold()
+
+
+@pytest.mark.parametrize("remote,base,expected", [
+    ("origin", "origin/main", ["refs/remotes/origin/main"]),
+    ("origin", "origin/topic", []),  # its main was unavailable: the configured comparison base
+    ("https://example.invalid/repo.git", "origin/main", []),  # a URL push names no remote
+])
+def test_only_the_push_remotes_main_can_upgrade_the_installed_hook(monkeypatch, remote, base, expected):
+    """The fallback base is whatever branch a developer configured. A branch
+    that never merged must not raise the hook every worktree shares."""
+    monkeypatch.setattr(local_ci, "git", lambda *args: "head")
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setenv("LOCAL_CI_HOOK", "4")
+    monkeypatch.setenv(local_ci.PUSH_REMOTE_ENV, remote)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("refs/heads/a head refs/heads/a remote\n"))
+    for name in ("scan_push", "security_check", "push_update_reach"):
+        monkeypatch.setattr(local_ci, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(local_ci, "fetch_push_base", lambda push_remote: base)
+    calls = []
+    monkeypatch.setattr(local_ci, "upgrade_installed_hook", calls.append)
+    assert local_ci.cmd_pre_push(argparse.Namespace()) == 0
+    assert calls == expected
 
 
 def test_actual_hook_passes_a_push_without_owner_details():
@@ -701,7 +758,7 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
         (hooks / "pre-push").write_text(text)
     monkeypatch.setattr(local_ci, "ROOT", tmp_path)
     monkeypatch.setattr(local_ci, "HOOK_SOURCE", source)
-    local_ci.upgrade_installed_hook("origin/main")
+    local_ci.upgrade_installed_hook("refs/remotes/origin/main")
     upgraded = installed == "v4" and source_on_main
     assert ("updated the installed hook from v4 to v5" in capsys.readouterr().out) is upgraded
     if expected is None:
@@ -709,6 +766,6 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     elif upgraded:
         assert (hooks / "pre-push").read_bytes() == source.read_bytes()
         assert os.name == "nt" or os.access(hooks / "pre-push", os.X_OK)
-        assert not (hooks / "pre-push.new").exists()
+        assert [path.name for path in hooks.iterdir()] == ["pre-push"]  # no staging file left
     else:
         assert (hooks / "pre-push").read_text() == text

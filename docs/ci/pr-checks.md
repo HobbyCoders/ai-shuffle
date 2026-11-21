@@ -1079,9 +1079,10 @@ maintainer's own setup details: machine names, private addresses and local
 paths. `scripts/secret_scan.py` holds only SHA-256 digests of them
 (`OWNER_DETAIL_HASHES`), so the guard does not publish what it guards.
 
-For every outgoing commit the hook checks the changed files, their names, the
-commit message and the author and committer identity (an unset Git identity
-falls back to the machine's host name). A detail added in one commit and removed
+For every outgoing commit the hook checks the changed files, their names
+(submodule paths included), the commit message and the author and committer
+identity (an unset Git identity falls back to the machine's host name). A pushed
+annotated tag's message and tagger are checked too. A detail added in one commit and removed
 in a later one still blocks the push: replace it with a generic example in the
 commit that introduced it. Findings name the file, line and commit, never the
 value. There is no allowlist.

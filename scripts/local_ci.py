@@ -1227,7 +1227,11 @@ def cmd_pre_push(args) -> int:
         return 0
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
-    upgrade_installed_hook(fetch_push_base(push_remote))
+    base = fetch_push_base(push_remote)
+    if push_remote and base == f"{push_remote}/main":
+        # Only the push remote's own main: the fallback base can be any
+        # branch a developer configured, including one that never merged.
+        upgrade_installed_hook(f"refs/remotes/{base}")
     for local_sha, remote_ref in branches:
         # Labels and draft state are live policy, checked on every push.
         push_update_reach(local_sha, remote_ref)
@@ -1256,6 +1260,7 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     target, kept = directory / "pre-push", directory / "pre-push.user"
     source = HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n")
+    foreign = False
     if target.exists():
         installed = target.read_text(encoding="utf-8", errors="replace")
         version_pattern = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
@@ -1268,13 +1273,19 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
         if HOOK_MARKER not in installed:
             if kept.exists():
                 raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
-            target.replace(kept)
+            foreign = True
     # Swap the file in whole: a push in progress may be running the old one,
-    # and a shell reads its script as it goes.
-    staged = directory / "pre-push.new"
-    staged.write_bytes(source)
-    staged.chmod(0o755)
-    staged.replace(target)
+    # and a shell reads its script as it goes. The staging file is this
+    # process's own, so two installs cannot rename each other's half-written one.
+    staged = directory / f"pre-push.{os.getpid()}.new"
+    try:
+        staged.write_bytes(source)
+        staged.chmod(0o755)
+        if foreign:
+            target.replace(kept)
+        staged.replace(target)
+    finally:
+        staged.unlink(missing_ok=True)
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
 
 

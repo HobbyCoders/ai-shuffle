@@ -146,10 +146,18 @@ def new_ref_boundary(root: Path, push_remote: str | None) -> str | None:
 
 
 COMMIT_OBJECT = "(commit message and author)"  # not a path: no allowlist can match it
+TAG_OBJECT = "(tag message and tagger)"
 
 
 def commit_files(root: Path, local: str, remote: str, push_remote: str | None = None):
     git(root, "cat-file", "-e", local + "^{commit}")
+    # An annotated tag is an object of its own, published with the push even
+    # when every commit under it is already on the remote.
+    tag = local
+    while git(root, "cat-file", "-t", tag).strip() == b"tag":
+        text = git(root, "cat-file", "tag", tag).decode("utf-8", "replace")
+        yield TAG_OBJECT, text, tag[:12]
+        tag = text.split(None, 2)[1]  # a tag object starts "object <id>"
     revisions = [local]
     if remote != "0" * 40:
         git(root, "cat-file", "-e", remote + "^{commit}")
@@ -174,12 +182,12 @@ def commit_files(root: Path, local: str, remote: str, push_remote: str | None = 
         # text patches it handles binary-marked files and quoted paths safely.
         changes = git(root, "diff-tree", "--root", "-m", "-r", "--no-commit-id",
                       "--raw", "--diff-filter=AMT", "--no-renames", "-z", commit, "--").split(b"\0")
-        # Gitlinks point at submodule commits, not blobs in this repository.
-        names = {changes[i + 1] for i in range(0, len(changes) - 1, 2)
-                 if changes[i].split()[1] != b"160000"}
-        for name in sorted(names):
+        # Gitlinks point at submodule commits, not blobs in this repository:
+        # only their names are published from here.
+        names = {changes[i + 1]: changes[i].split()[1] == b"160000" for i in range(0, len(changes) - 1, 2)}
+        for name, gitlink in sorted(names.items()):
             path = name.decode("utf-8", "surrogateescape")
-            text = git(root, "cat-file", "blob", f"{commit}:{path}").decode("utf-8", "replace")
+            text = "" if gitlink else git(root, "cat-file", "blob", f"{commit}:{path}").decode("utf-8", "replace")
             yield path, text, commit[:12]
 
 
@@ -213,8 +221,10 @@ def scan(root: Path = ROOT, local: str | None = None, remote: str | None = None,
     count = owner_count = 0
     for path, text, source_revision in sources:
         for rule_id, line in findings(rules, path, text):
-            # Never print matching lines, tokens, or hashes of their values.
-            metadata = [safe_metadata(rules, value, text) for value in (rule_id, path, source_revision)]
+            # Never print matching lines, tokens, or hashes of their values,
+            # nor an owner detail in the file's own name.
+            metadata = [safe_metadata(rules, without_owner_details(value), text)
+                        for value in (rule_id, path, source_revision)]
             print(f"secret scan: {metadata[0]}: {metadata[1]}:{line} ({metadata[2]}; value redacted)")
             count += 1
         if not local:
