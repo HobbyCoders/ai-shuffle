@@ -312,6 +312,7 @@ def _needles(secret: str, header_value: str) -> list[bytes]:
         quote_plus(secret),  # a password may hold spaces; forms echo them as "+"
         json.dumps(secret)[1:-1],
         json.dumps(secret)[1:-1].replace("/", "\\/"),
+        json.dumps(secret, ensure_ascii=False)[1:-1],  # JSON that keeps non-ASCII characters
         base64.b64encode(secret.encode()).decode(),
         base64.b64encode(header_value.encode()).decode(),
     }

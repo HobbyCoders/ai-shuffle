@@ -634,6 +634,15 @@ def test_a_non_ascii_password_echoed_in_latin_1_in_the_body_is_redacted():
     assert vault_services.redact(body, needles) == b"signed in with [redacted]"
 
 
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+def test_a_password_echoed_inside_json_is_redacted_however_it_is_escaped(ensure_ascii):
+    password = 'caf\u00e9 "quoted" \\ pass'
+    pair = base64.b64encode(f"admin:{password}".encode()).decode()
+    needles = vault_services._needles(password, f"Basic {pair}")
+    body = json.dumps({"echo": password}, ensure_ascii=ensure_ascii).encode()
+    assert vault_services.redact(body, needles) == b'{"echo": "[redacted]"}'
+
+
 async def test_a_username_needs_the_basic_scheme_before_anything_is_contacted(broker, service, trust):
     with pytest.raises(AccessDenied, match="Basic scheme"):
         await broker.create("chat", spec(service, username="admin", secret=PASSWORD))
