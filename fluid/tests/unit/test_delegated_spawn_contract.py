@@ -205,6 +205,32 @@ def test_the_skill_list_description_cap_is_a_default_the_host_can_change() -> No
     assert wide._setting_request("apply_flag_settings")["settings"]["skillListingMaxDescChars"] == 1536
 
 
+@pytest.mark.parametrize("scope, sources, capped", [
+    ("user", None, False),
+    ("project", None, False),
+    ("local", ("user", "project", "local"), False),
+    # A file of a source the CLI is told not to load sets nothing.
+    ("project", ("user",), True),
+    ("user", (), True),
+])
+def test_a_claude_settings_file_keeps_its_own_skill_list_cap(tmp_path, scope, sources, capped) -> None:
+    """The flag layer outranks the CLI's settings files, so the default is not
+    sent when an enabled one already sets the key."""
+    home, project = tmp_path / "home", tmp_path / "project"
+    path = {
+        "user": home / "settings.json",
+        "project": project / ".claude" / "settings.json",
+        "local": project / ".claude" / "settings.local.json",
+    }[scope]
+    home.mkdir()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"skillListingMaxDescChars": 1536}', encoding="utf-8")
+    loop = DelegatedLoop(store=MemoryStore(), model="m", cwd=str(project),
+                         env={"CLAUDE_CONFIG_DIR": str(home)}, setting_sources=sources)
+    for settings in (_settings(loop), loop._setting_request("apply_flag_settings")["settings"]):
+        assert settings.get("skillListingMaxDescChars") == (SKILL_LISTING_DESC_CHARS if capped else None)
+
+
 def test_a_settings_env_block_cannot_undo_the_override() -> None:
     loop = DelegatedLoop(
         store=MemoryStore(), model="m",

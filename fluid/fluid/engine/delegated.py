@@ -809,6 +809,33 @@ def _cli_older_than(version: str | None, minimum: str) -> bool:
 SKILL_LISTING_DESC_CHARS = 300
 
 
+def _cli_settings_file_names(
+    key: str, config_dir: str, cwd: str, sources: Any,
+) -> bool:
+    """Whether a Claude Code settings file of an enabled source sets ``key``.
+
+    The ``--settings`` layer outranks those files, so a default sent there
+    would override a value the user chose in one. Never raises.
+    """
+    from pathlib import Path
+
+    from fluid.context.settings_stack import _load_json, project_dirs
+
+    enabled = ("user", "project", "local") if sources is None else sources
+    paths: list[Path] = []
+    try:
+        if "user" in enabled:
+            paths.append(Path(config_dir) / "settings.json")
+        dirs = project_dirs(cwd)
+        if "project" in enabled:
+            paths += [d / ".claude" / "settings.json" for d in dirs]
+        if "local" in enabled:
+            paths += [d / ".claude" / "settings.local.json" for d in dirs]
+        return any(key in (_load_json(path) or {}) for path in paths)
+    except Exception:  # noqa: BLE001 - an unreadable file sets nothing
+        return False
+
+
 def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
     """``settings`` with ``FORCED_CHILD_ENV`` on top of its ``env`` block."""
     env = settings.get("env")
@@ -1554,7 +1581,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         The CLI accepts file paths too, but those cannot enforce this policy.
         The skill list's description cap (``SKILL_LISTING_DESC_CHARS``) is a
-        default: a value the host's settings name is kept.
+        default: it is left out when the host's settings, or a Claude Code
+        settings file of an enabled source, set the key.
         """
         raw = getattr(self, "settings", None)
         try:
@@ -1565,11 +1593,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return None
         from fluid.context.attribution import cli_attribution
 
-        return {
-            "skillListingMaxDescChars": SKILL_LISTING_DESC_CHARS,
-            **parsed,
-            "attribution": cli_attribution(self.commit_attribution),
-        }
+        settings = {**parsed, "attribution": cli_attribution(self.commit_attribution)}
+        key = "skillListingMaxDescChars"
+        if key not in parsed and not _cli_settings_file_names(
+            key,
+            self._child_env().get("CLAUDE_CONFIG_DIR")
+            or os.path.join(os.path.expanduser("~"), ".claude"),
+            self.cwd or os.getcwd(),
+            self.setting_sources,
+        ):
+            settings[key] = SKILL_LISTING_DESC_CHARS
+        return settings
 
     async def aclose(self) -> None:
         """End the session and give back everything the loop holds.
