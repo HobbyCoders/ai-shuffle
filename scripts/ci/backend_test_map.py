@@ -654,7 +654,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 selector.python_change(path)
                 selector.subprocess_users(path)
             else:
-                selector.other_change(path, main_only=path in main_only)
+                selector.other_change(path, main_only=path in main_only and p.suffix != ".py")
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):
@@ -699,6 +699,9 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD",
         changed = changed_names(base, head)
         own = set(changed_names(git("rev-parse", main_rev).strip(), head)) if main_rev else set(changed)
         main_only = frozenset(path for path in changed if path not in own)
+        # A file the pull request sets back to the map's version is missing
+        # from the change since the map, yet the pull request still changes it.
+        changed += sorted(own - set(changed))
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None

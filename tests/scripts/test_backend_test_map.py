@@ -472,6 +472,30 @@ def test_dependencies_conftests_and_test_data_main_changed_still_run_everything(
     assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
 
 
+def test_main_only_python_nothing_names_still_runs_everything(pull_request):
+    # Python outside the mapped folders is not an unread file: something may import it.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", "tools/research/probe.py", "X = 1\n")
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
+def test_the_pull_request_setting_a_file_back_to_the_maps_version_still_counts(pull_request):
+    # Main adds the workflow after the map; the pull request removes it again,
+    # so the change since the map no longer holds it, but the pull request changes it.
+    repo, map_path, commit, merge = pull_request
+    commit("main", ".github/workflows/ci-backend.yml", "jobs: {}\n")
+    commit("main", UNREAD_DOC, "nothing reads this\n")
+    commit("pr", "app/a.py", CHANGED_F)
+    run_git(repo, "merge", "-q", "-m", "sync", "main")
+    run_git(repo, "rm", "-q", ".github/workflows/ci-backend.yml")
+    run_git(repo, "commit", "-q", "-m", "revert workflow")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and "ci-backend.yml" in reasons[1]
+
+
 def test_a_file_both_changed_counts_as_the_pull_requests(pull_request):
     _, map_path, commit, merge = pull_request
     commit("main", UNREAD_DOC, "main's text\n")
