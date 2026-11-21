@@ -276,6 +276,30 @@ def test_allow_rule_ignores_the_real_cwd_relative_form(tmp_path) -> None:
     assert not rule.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
 
 
+@pytest.mark.skipif(os.sep == "\\", reason="a trailing space in a file name is POSIX-only")
+def test_allow_rule_has_no_relative_form_when_the_cwd_is_not_canonical(tmp_path) -> None:
+    """cwd ``work/link/..`` spells ``work`` but is really ``checkout``.
+    ``granted/report `` opens ``checkout/granted/report ``, a link to
+    ``work/granted/report``: relative to ``work`` that reads ``granted/report``,
+    but the rule means ``checkout/granted/report``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    (checkout / "granted").mkdir()
+    (work / "granted").mkdir(parents=True)
+    (checkout / "granted" / "report").write_text("inside the real cwd")
+    (work / "granted" / "report").write_text("outside the real cwd")
+    _symlink_or_skip(checkout / "granted" / "report ", work / "granted" / "report")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    cwd = str(work / "link") + os.sep + ".."
+    allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "granted/report"})
+    assert not allow.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+    # Ask and deny keep every form.
+    deny = Rule(tool="Read", decision="deny", input_globs={"file_path": "granted/report"})
+    assert deny.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+    # A plain cwd keeps ordinary relative allow rules working.
+    assert allow.matches("Read", {"file_path": "granted/report"}, cwd=str(checkout))
+
+
 def test_ask_rule_keeps_the_resolved_path_when_it_cannot_be_reached(
     tmp_path, monkeypatch
 ) -> None:

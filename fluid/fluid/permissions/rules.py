@@ -112,16 +112,24 @@ def _resolved_forms(resolved: str, root: str, relative: bool) -> set[str]:
 def _opened_forms(value: str, cwd: str | None, *, for_allow: bool) -> set[str] | None:
     """:func:`_opened_path` as rule candidates; None when it cannot resolve.
 
-    Ask and deny rules get every form, best effort. An allow rule gets only
-    the absolute form and the one relative to the cwd as spelled, and nothing
-    for a path that cannot be reached.
+    Ask and deny rules get every form, best effort. An allow rule gets the
+    absolute form, plus the cwd-relative one only when the cwd as spelled is
+    the real cwd, and nothing for a path that cannot be reached.
     """
     opened = _opened_path(value, cwd)
     if opened is None or (for_allow and not _openable(opened)):
         return None
     relative = bool(cwd) or not os.path.isabs(value)
     base = cwd or os.getcwd()
-    forms = _resolved_forms(opened, os.path.abspath(base), relative)
+    spelled = os.path.abspath(base)
+    if for_allow and relative:
+        # ``work/link/..`` collapses to ``work`` but is really the link's
+        # parent; a form relative to ``work`` would name the wrong file.
+        try:
+            relative = os.path.normcase(spelled) == os.path.normcase(os.path.realpath(base))
+        except (OSError, ValueError):
+            relative = False
+    forms = _resolved_forms(opened, spelled, relative)
     if not for_allow:
         # The opened path has no links in it, so under a symlinked cwd only
         # the real directory gives the relative form ``secrets/*`` is written
