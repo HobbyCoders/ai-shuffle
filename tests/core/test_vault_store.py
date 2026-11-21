@@ -190,7 +190,7 @@ def test_entries_are_network_shared_and_rows_from_before_stay_local():
     owner = ("local", "worker", None)
     assert is_shared_setting_key(vault_store.key(owner, "a" * 32))
     # So is the host key a first connection recorded for one.
-    assert is_shared_setting_key(vault_store._pin_key(owner, "a" * 32))
+    assert is_shared_setting_key(vault_store._pin_key(owner, "a" * 32, "b" * 32))
     assert not is_shared_setting_key("chat_connection:worker:scope:abc")
 
 
@@ -394,24 +394,42 @@ def test_a_recorded_host_key_holds_for_the_version_it_was_verified_with_and_an_e
     key, entry = "SHA256:" + "b" * 43, vault_store.key(owner, connection_id)
     assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), key)
     pin = next(k for k in vault if k != entry)
-    # An edit that keeps the key stores it in the entry itself, so it no longer rests on the pin row.
+    # Its row is named for that one version, by a digest: the version itself
+    # stays inside the encrypted entry.
+    version = json.loads(encryption.decrypt_value(vault[entry]))["version"]
+    assert pin == vault_store._pin_key(owner, connection_id, version) and version not in pin
+    assert vault_store.connection_id_of(pin) == vault_store.connection_id_of(entry) == connection_id
+    assert vault_store.connection_id_of(entry + "_params") == vault_store.connection_id_of("tts_model") == ""
+    kept = vault[pin]
+    # An edit that keeps the key stores it in the entry itself; the replaced version's row goes with it.
     old, new = vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"label": "Renamed"}))
     assert (old.fingerprint, new.fingerprint) == (key, key)
-    kept = vault.pop(pin)
-    assert vault_store.load(owner, connection_id).fingerprint == key
-    # A pin written for a version that has since been replaced (as when another
-    # worker changed the password) applies to nothing.
+    assert pin not in vault and vault_store.load(owner, connection_id).fingerprint == key
+    # A row for a version that has since been replaced (as when it arrives from
+    # a worker that had not heard of a new password) applies to nothing.
     vault_store.update(owner, connection_id, lambda current: current.model_copy(update={"fingerprint": ""}))
     vault[pin] = kept
     assert vault_store.load(owner, connection_id).fingerprint == ""
     assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
-    # Nor does one bound to another row, or one that cannot be read.
-    other = vault_store.save(owner, spec().model_copy(update={"fingerprint": "", "label": "Other"}))
-    assert vault_store.pin_fingerprint(owner, other, vault_store.load(owner, other), key)
-    vault[pin] = vault[next(k for k in vault if k.startswith(vault_store.PIN_PREFIX) and k != pin)]
-    assert vault_store.load(owner, connection_id).fingerprint == ""
-    vault[pin] = "corrupt"
-    assert vault_store.load(owner, connection_id).fingerprint == ""
+    # Nor is it in the way of the key recorded for the current version, which has a row of its own.
+    newer = "SHA256:" + "c" * 43
+    assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), newer)
+    assert vault_store.load(owner, connection_id).fingerprint == newer
+    assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [newer]
+    current = next(k for k in vault if k.startswith(vault_store.PIN_PREFIX) and k != pin)
+    assert vault[pin] == kept
+    # A row moved from another version's place, or one that cannot be read, is no key either;
+    # the next first connection writes over it.
+    for unreadable in (kept, "corrupt"):
+        vault[current] = unreadable
+        assert vault_store.load(owner, connection_id).fingerprint == ""
+        assert [item["fingerprint"] for item in vault_store.catalog(owner)] == [""]
+    assert vault_store.pin_fingerprint(owner, connection_id, vault_store.load(owner, connection_id), newer)
+    assert vault_store.load(owner, connection_id).fingerprint == newer
+    # Removing the sign-in takes the row of the version removed; the one left
+    # for a version long gone stays, with no credentials in it.
+    vault_store.delete(owner, connection_id)
+    assert set(vault) == {pin}
 
 
 def test_every_stored_version_carries_a_random_value_of_its_own(vault):

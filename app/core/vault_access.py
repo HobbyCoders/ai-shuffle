@@ -1856,7 +1856,7 @@ def saved_changed_elsewhere(keys) -> None:
     loop = getattr(global_events, "_loop", None)
     if loop and not loop.is_closed():
         asyncio.run_coroutine_threadsafe(
-            broker.saved_changed_elsewhere({key.rsplit(":", 1)[-1] for key in keys}), loop)
+            broker.saved_changed_elsewhere({vault_store.connection_id_of(key) for key in keys} - {""}), loop)
 
 
 async def _plugin_config(plugin_id: str, service: str):

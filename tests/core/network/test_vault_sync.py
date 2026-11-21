@@ -60,6 +60,33 @@ def opened(worker, value):
         return encryption.decrypt_value(value)
 
 
+def pin_key(worker, connection_id):
+    """The row for the host key recorded with the version of an entry this worker holds."""
+    version = json.loads(opened(worker, rows(worker)[vault_store.key(OWNER, connection_id)]))["version"]
+    return vault_store._pin_key(OWNER, connection_id, version)
+
+
+def full_copy(sender, receiver, folder):
+    """``receiver`` catches up by a whole copy of what ``sender`` holds, as a worker that was away does."""
+    from app.network import peer_snapshot
+    with sender.active():
+        manifest = peer_snapshot.capture(receiver.device_id)
+        for index in range(len(manifest["pages"])):
+            (folder / f"{index}.json").write_bytes(peer_snapshot.page(receiver.device_id, manifest["transfer"], index))
+    with receiver.active():
+        peer_snapshot.apply(manifest, folder, sender.device_id)
+
+
+def writes_later(worker, than):
+    """Sync keeps the write with the higher clock: make ``worker``'s next ones the later."""
+    with worker.active():
+        for voice in range(6):
+            database.set_system_setting("tts_model", f"voice-{voice}")
+            scan()
+    clock = {each.name: each.sql("SELECT clock FROM network_state")[0]["clock"] for each in (worker, than)}
+    assert clock[worker.name] > clock[than.name]
+
+
 def pair(workers):
     a, b = workers("a"), workers("b")
     with a.active():
@@ -203,7 +230,8 @@ def test_arriving_entries_clear_cached_absence_and_refresh_open_vault_lists(work
         assert vault_store.pin_fingerprint(OWNER, unpinned, vault_store.load(OWNER, unpinned), HOST_KEY)
         scan()
     exchange(a, b)
-    grants.assert_called_once_with([vault_store._pin_key(OWNER, unpinned)])
+    grants.assert_called_once_with([pin_key(a, unpinned)])
+    assert vault_store.connection_id_of(pin_key(a, unpinned)) == unpinned
     # Other shared settings do not touch the Vault.
     grants.reset_mock()
     emit.reset_mock()
@@ -248,7 +276,7 @@ def test_a_full_copy_from_a_peer_reports_changed_and_removed_sign_ins_by_key(wor
     assert ("system_settings", vault_store.key(OWNER, removed), "delete") in committed
     assert ("system_settings", vault_store.key(OWNER, changed), "upsert") in committed
     # The host key recorded for it too: a grant here may have verified another.
-    assert ("system_settings", vault_store._pin_key(OWNER, changed), "upsert") in committed
+    assert ("system_settings", pin_key(a, changed), "upsert") in committed
     assert set(vault_store.SYNCED_PREFIXES) <= set(peer_snapshot._RECORD_SETTINGS)
 
 
@@ -311,7 +339,6 @@ def test_a_host_key_recorded_while_cut_off_restores_nothing_another_worker_remov
     """One worker removes a sign-in or changes its password while another, out
     of reach, connects with the copy it still holds and records the host key.
     That write is the later one, and must not carry the old credentials back."""
-    from app.network import peer_snapshot
     a, b = pair(workers)
     with a.active():
         saved = vault_store.save(OWNER, machine(fingerprint=""))
@@ -323,6 +350,7 @@ def test_a_host_key_recorded_while_cut_off_restores_nothing_another_worker_remov
         else:
             vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
         scan()
+    writes_later(b, than=a)
     with b.active():
         assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
         assert vault_store.load(OWNER, saved).fingerprint == HOST_KEY
@@ -331,12 +359,7 @@ def test_a_host_key_recorded_while_cut_off_restores_nothing_another_worker_remov
     if by == "an exchange":
         exchange(a, b)
     else:
-        with a.active():
-            manifest = peer_snapshot.capture(b.device_id)
-            for index in range(len(manifest["pages"])):
-                (tmp_path / f"{index}.json").write_bytes(peer_snapshot.page(b.device_id, manifest["transfer"], index))
-        with b.active():
-            peer_snapshot.apply(manifest, tmp_path, a.device_id)
+        full_copy(a, b, tmp_path)
     exchange(b, a)
     for worker in (a, b):
         with worker.active():
@@ -353,13 +376,72 @@ def test_a_host_key_recorded_while_cut_off_restores_nothing_another_worker_remov
         assert all(PASSWORD not in opened(worker, value) for value in rows(worker).values())
 
 
+@pytest.mark.parametrize("by", ["an exchange", "a full copy"])
+def test_a_host_key_recorded_for_a_replaced_version_never_displaces_the_current_one(workers, tmp_path, by):
+    """One worker changes a sign-in's password, and its next connection records
+    the host key. Another, out of reach, then connects with the version it
+    still holds and records one too, which is the later write. Kept in one row,
+    the later one would win, read as stale, and leave the current sign-in with
+    no host key on every worker: trusted afresh on its next use."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        scan()
+    exchange(a, b)
+    with a.active():
+        vault_store.update(OWNER, saved, lambda current: machine(fingerprint="", password="replacement-only"))
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        scan()
+    writes_later(b, than=a)
+    with b.active():
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), "SHA256:" + "c" * 43)
+        scan()
+    exchange(b, a)
+    if by == "an exchange":
+        exchange(a, b)
+    else:
+        full_copy(a, b, tmp_path)
+    exchange(b, a)
+    for worker in (a, b):
+        with worker.active():
+            held = vault_store.load(OWNER, saved)
+            assert (held.password.get_secret_value(), held.fingerprint) == ("replacement-only", HOST_KEY)
+            assert [item["fingerprint"] for item in vault_store.catalog(OWNER)] == [HOST_KEY]
+
+
+def test_two_workers_recording_a_host_key_for_the_same_version_settle_on_one(workers):
+    """The one case left where two workers write the same row: both connect
+    first, apart. One key stands on both; a grant that verified the other ends
+    (tests/core/test_vault_access.py), so a different key is never accepted quietly."""
+    a, b = pair(workers)
+    with a.active():
+        saved = vault_store.save(OWNER, machine(fingerprint=""))
+        scan()
+    exchange(a, b)
+    with a.active():
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
+        scan()
+    writes_later(b, than=a)
+    with b.active():
+        assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), "SHA256:" + "c" * 43)
+        scan()
+    exchange(b, a)
+    exchange(a, b)
+    assert set(rows(a)) == set(rows(b)) == {vault_store.key(OWNER, saved), pin_key(a, saved)}
+    for worker in (a, b):
+        with worker.active():
+            assert vault_store.load(OWNER, saved).fingerprint == "SHA256:" + "c" * 43
+            # Recorded: a later first connection here does not write another over it.
+            assert not vault_store.pin_fingerprint(OWNER, saved, machine(fingerprint=""), HOST_KEY)
+
+
 def test_a_recorded_host_key_holds_no_credentials_and_follows_its_sign_in(workers):
     a, b = pair(workers)
     with a.active():
         saved = vault_store.save(OWNER, machine(fingerprint=""))
         scan()
     exchange(a, b)
-    entry, pin = vault_store.key(OWNER, saved), vault_store._pin_key(OWNER, saved)
+    entry, pin = vault_store.key(OWNER, saved), pin_key(b, saved)
     before = rows(b)[entry]
     with b.active():
         assert vault_store.pin_fingerprint(OWNER, saved, vault_store.load(OWNER, saved), HOST_KEY)
@@ -376,7 +458,9 @@ def test_a_recorded_host_key_holds_no_credentials_and_follows_its_sign_in(worker
     # Each stored version has a random value of its own, the same on every
     # worker: the hash sync keeps of an entry is no test for a guessed password.
     versions = {json.loads(opened(worker, rows(worker)[entry]))["version"] for worker in (a, b)}
-    assert len(versions) == 1 and len(versions.pop()) == 32
+    assert len(versions) == 1 and len(next(iter(versions))) == 32
+    # So it stays inside the encrypted rows: the host key's row is named by a digest of it.
+    assert versions.pop() not in pin + opened(a, rows(a)[pin])
     with a.active():
         vault_store.delete(OWNER, saved)
         scan()
