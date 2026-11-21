@@ -705,9 +705,10 @@ The pre-push hook is the local push gate and runs no test suites: every PR runs
 them on GitHub CI (the workflows above). For every pushed ref, in order:
 
 1. The offline secret scan of every outgoing commit (see
-   [local security checks](#local-security-checks)). It runs first, on every
-   push, with no cache; a finding refuses the push. Tags and pr-assets refs get
-   it like any branch; deletions need no scan.
+   [local security checks](#local-security-checks)), which also refuses the
+   maintainer's own setup details (see [owner details](#owner-details)). It runs
+   first, on every push, with no cache; a finding refuses the push. Tags and
+   pr-assets refs get it like any branch; deletions need no scan.
 2. For branch pushes, an offline scan of the whole working tree (tracked plus
    non-ignored untracked files), as `check` and `full` run.
 3. For branch pushes, the live update-reach check: a ready PR missing an owner
@@ -1061,11 +1062,37 @@ longer has. That limitation also applied to the previous `origin/main` boundary.
 The installed hook refuses a checkout missing the scanner/config or the required
 security-gate version, including branches that predate these checks: update that
 branch before pushing. Re-run `python scripts/local_ci.py install` to upgrade an
-older installed hook. The installer refuses to replace a newer shared hook unless
+older installed hook. A branch push from a checkout whose hook is the one the
+push remote's `main` carries also upgrades an older installed hook, so a new
+requirement reaches a clone without anyone re-running install; a branch that
+changes the hook does not, until it merges. The installer refuses to replace a newer shared hook unless
 `install --force` is given. Installers on branches predating that version check
 cannot enforce it; update those branches before running install. Each scanner
 invocation has a 120-second deadline and its Git subprocesses have 15-second
 deadlines; timeouts block rather than pass.
+
+### Owner details
+
+The repository is public, so a pushed commit publishes whatever it holds, even
+on a branch that never merges. The push scan therefore also refuses the
+maintainer's own setup details: machine names, private addresses and local
+paths. `scripts/secret_scan.py` holds only SHA-256 digests of them
+(`OWNER_DETAIL_HASHES`), so the guard does not publish what it guards.
+
+For every outgoing commit the hook checks the changed files, their names, the
+commit message and the author and committer identity (an unset Git identity
+falls back to the machine's host name). A detail added in one commit and removed
+in a later one still blocks the push: replace it with a generic example in the
+commit that introduced it. Findings name the file, line and commit, never the
+value. There is no allowlist.
+
+`tests/test_public_release_files.py` runs the same matcher over every tracked
+file in CI. That check needs about 15 seconds for the whole tree and sees only
+the final tree after the push, so the hook reads the outgoing commits instead
+and the working-tree scan stays a secret scan. The installed hook (v5) refuses a
+checkout whose scanner predates this check: merge the current `main` into that
+branch first. The hook cannot see pull request titles, descriptions or comments,
+or a push made with `--no-verify`.
 
 The vendored stdlib fallback, `scripts/secret_scan.py`, reads the deliberately
 small gitleaks-compatible `.gitleaks.toml` ruleset. Gitleaks is not bundled or

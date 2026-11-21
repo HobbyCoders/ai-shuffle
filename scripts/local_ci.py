@@ -989,8 +989,8 @@ def security_check(python: str, strict: bool = False, *, audit: bool = True) -> 
 
 
 def scan_push(local_sha: str, remote_sha: str, push_remote: str | None = None) -> None:
-    # Always runs, even for a cached tree: a secret added then deleted in the
-    # outgoing history must not slip through a clean final-tree pass.
+    # Always runs, even for a cached tree: a secret or owner detail added then
+    # deleted in the outgoing history must not slip through a clean final tree.
     # ``push_remote`` (the hook's $1) bounds a new branch's scan by what that
     # remote's main already holds; see secret_scan.new_ref_boundary.
     target = ["--push-remote", push_remote] if push_remote else []
@@ -1188,9 +1188,9 @@ def cmd_pre_push(args) -> int:
     """Called by the pre-push hook with git's ref lines on stdin.
 
     The push gate runs no test suites: every pull request runs them on GitHub
-    CI. It runs the offline secret scan on every outgoing ref, first and with
-    no cache, then a whole-tree scan and the live update-reach policy for
-    branch pushes. No pass record can skip any of these.
+    CI. It runs the offline secret and owner-detail scan on every outgoing
+    ref, first and with no cache, then a whole-tree secret scan and the live
+    update-reach policy for branch pushes. No pass record can skip any of these.
 
     The hook passes the remote being pushed to in PUSH_REMOTE_ENV, not as an
     argument: the installed hook is shared by every worktree of the clone,
@@ -1227,11 +1227,11 @@ def cmd_pre_push(args) -> int:
         return 0
     # Refresh the push remote's main (the next new-branch scan boundary) or,
     # for a URL or a remote without main, the configured comparison base.
-    fetch_push_base(push_remote)
+    upgrade_installed_hook(fetch_push_base(push_remote))
     for local_sha, remote_ref in branches:
         # Labels and draft state are live policy, checked on every push.
         push_update_reach(local_sha, remote_ref)
-    print("pre-push: secret scan and update-reach passed; tests run in PR CI.")
+    print("pre-push: secret scan, owner-detail scan and update-reach passed; tests run in PR CI.")
     return 0
 
 
@@ -1269,9 +1269,41 @@ def install_hook(directory: Path, *, force: bool = False) -> str:
             if kept.exists():
                 raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
             target.replace(kept)
-    target.write_bytes(source)
-    target.chmod(0o755)
+    # Swap the file in whole: a push in progress may be running the old one,
+    # and a shell reads its script as it goes.
+    staged = directory / "pre-push.new"
+    staged.write_bytes(source)
+    staged.chmod(0o755)
+    staged.replace(target)
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
+
+
+def upgrade_installed_hook(main: str) -> None:
+    """Bring this clone's older installed hook up to the version ``main`` carries.
+
+    The scans run from the checkout being pushed, but only the installed hook
+    can refuse a branch that predates one of them, and install is run once per
+    clone. A branch that changes the hook does not qualify until it merges:
+    every worktree shares the installed hook, and the others could not satisfy
+    a requirement that main does not have yet.
+    """
+    target = hooks_dir() / "pre-push"
+    version = rf"(?m)^{re.escape(HOOK_MARKER)} v(\d+)\s*$"
+    try:
+        installed = re.search(version, target.read_text(encoding="utf-8", errors="replace"))
+        source = re.search(version, HOOK_SOURCE.read_text(encoding="utf-8"))
+        if not (installed and source and int(installed[1]) < int(source[1])):
+            return
+        if git("rev-parse", f"{main}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
+            return
+        install_hook(target.parent)
+    except FileNotFoundError:
+        return  # no hook installed here: nothing to upgrade
+    except (OSError, subprocess.CalledProcessError, Failure):
+        print(f"pre-push: the installed hook is older than {main}'s and could not be updated; "
+              "run `python scripts/local_ci.py install`.")
+        return
+    print(f"pre-push: updated the installed hook from v{installed[1]} to v{source[1]} ({target}).")
 
 
 def can_run_tests(python: str) -> bool:
