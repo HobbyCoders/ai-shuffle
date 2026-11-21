@@ -299,16 +299,23 @@ def screenshot(chat: Chat) -> int:
     return len(chat.stored) - 1
 
 
-def test_shorter_inputs_do_not_make_a_checkpoint_that_holds_a_screenshot_as_text():
-    """Whole, the writes before the screenshot put a checkpoint through the
-    trimmed result after it over the size limit, and none was written. Cut,
-    they fit. The checkpoint still may not reach the screenshot: its rows are
-    text, and a replay from them skips the stored node that has the image."""
+def big_writes(chat: Chat, n: int = 23) -> None:
+    """Writes whose inputs alone are over the checkpoint's size limit."""
+    for _ in range(n):
+        chat.call("Write", {"file_path": f"src/big_{chat.calls}.py",
+                            "content": f"BODY-{chat.calls} " + "x" * 18_000}, result="File created")
+
+
+def test_shorter_inputs_do_not_add_a_checkpoint_that_holds_a_screenshot_as_text():
+    """A checkpoint's rows are text: it stands for a screenshot as its caption
+    and a replay from it skips the stored node that has the image. With the
+    inputs whole there was none here (auto: the compaction saved too little
+    to be answered; manual: the checkpoint was over its size limit). The cut
+    makes the answer worth giving and the checkpoint small enough; the answer
+    is given, the checkpoint still is not written."""
     for trigger in ("auto", "manual"):
         chat = Chat()
-        for n in range(23):
-            chat.call("Write", {"file_path": f"src/big_{n}.py", "content": f"BODY-{n} " + "x" * 18_000},
-                      result="File created")
+        big_writes(chat)
         screenshot(chat)
         held = chat.cli[-1]
         chat.call("Read", {"file_path": "src/big.py"}, result="x" * 60_000)  # trimmed by the ladder
@@ -316,23 +323,41 @@ def test_shorter_inputs_do_not_make_a_checkpoint_that_holds_a_screenshot_as_text
         out, report = chat.compact(trigger)
         assert report["input_tokens_cut"] > 23 * 18_000 // 4
         assert held in out  # the live answer keeps Claude Code's row, image and all
-        assert chat.checkpoint == {}
+        assert "rows" not in chat.checkpoint and "through" not in chat.checkpoint
 
 
-def test_a_checkpoint_ends_before_a_screenshot_and_keeps_what_came_before():
-    """What was compacted before the screenshot is still portable: the
-    checkpoint ends there, and the stored nodes replayed after it carry the
-    image and the calls that followed."""
+def test_inputs_an_earlier_compaction_cut_do_not_add_that_checkpoint_either():
+    """By the next compaction Claude Code holds the cut inputs as its own
+    rows. The checkpoint is still judged with every input as stored."""
+    chat = Chat()
+    big_writes(chat)
+    chat.write(8)
+    chat.compact()
+    assert all(CUT in json.dumps(row["toolUses"]) for row in chat.cli[1:47:2])
+    screenshot(chat)
+    chat.call("Read", {"file_path": "src/big.py"}, result="x" * 60_000)
+    chat.write(8)
+    _, report = chat.compact("manual")
+    assert report["input_tokens_cut"] < 23 * 18_000 // 4  # the big inputs were cut before
+    assert "rows" not in chat.checkpoint and "through" not in chat.checkpoint
+
+
+def test_a_checkpoint_the_whole_inputs_also_gave_is_written_as_it_was():
+    """Where the answer with whole inputs writes a checkpoint too, it is the
+    one it was: through the last compacted row, with the rows only Claude
+    Code holds (the instructions of a skill being followed)."""
     chat = Chat()
     chat.call("Read", {"file_path": "src/first.py"}, result="x" * 60_000)  # trimmed by the ladder
-    shot = screenshot(chat)
+    screenshot(chat)
+    chat.cli.append({"role": "user", "text": "SKILL-INSTRUCTIONS: follow these steps in order.",
+                     "toolUses": [], "handle": "claude-only"})
     chat.call("Read", {"file_path": "src/second.py"}, result="y" * 60_000)  # trimmed too
+    second = len(chat.stored) - 1
     chat.write(30)
-    chat.compact()
-    through = next(i for i, node in enumerate(chat.stored)
-                   if node.node_id == chat.checkpoint["through"])
-    assert through == 2 < shot
-    assert "Screenshot of the page" not in json.dumps(chat.checkpoint["rows"])
+    out, _ = chat.compact()
+    assert any("SKILL-INSTRUCTIONS" in row["text"] for row in out)
+    assert chat.checkpoint["through"] == chat.stored[second].node_id
+    assert "SKILL-INSTRUCTIONS" in json.dumps(chat.checkpoint["rows"])
 
 
 def test_the_newest_calls_are_counted_call_by_call_in_a_parallel_row():
