@@ -112,7 +112,7 @@ describe('owner runtime state', () => {
 			attention: null, isActive: true })).toBe(expected);
 	});
 	// #1807: a pending Vault request outranks the owner's run state,
-	// which reads `working` while the RequestVaultAccess call waits.
+	// which reads `working` while the RequestChatAccess call waits.
 	it.each(['working', 'idle', 'unknown', null] as const)('a waiting Vault request reads as needing the owner over %s', (remoteRuntimeState) => {
 		expect(deriveStatus({ remoteRuntimeState, streaming: true, vault: true,
 			attention: null, isActive: true })).toBe('needs_permission');

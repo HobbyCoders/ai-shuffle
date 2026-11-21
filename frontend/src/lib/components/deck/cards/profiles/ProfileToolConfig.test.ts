@@ -363,14 +363,14 @@ describe('Vault group', () => {
 	afterEach(() => cleanup());
 
 	const names = [
-		'mcp__app-vault__RequestVaultAccess',
-		'mcp__app-vault__VaultResources'
+		'mcp__chat-access__RequestChatAccess',
+		'mcp__chat-access__ChatResources'
 	];
 	const vault: ToolSurfaceGroup = {
 		id: 'vault',
 		label: 'Vault',
 		kind: 'vault',
-		server: 'app-vault',
+		server: 'chat-access',
 		available: true,
 		admin_only: false,
 		note: 'Machines, folders and services you approve in a private card',
@@ -406,7 +406,7 @@ describe('Vault group', () => {
 		expect(saved.list).toEqual(['Read', ...names]);
 	});
 
-	it('labels tiles without the mcp__app-vault__ prefix', async () => {
+	it('labels tiles without the mcp__chat-access__ prefix', async () => {
 		const toggled: string[] = [];
 		const { getByRole, queryByText } = render(ProfileToolConfig, {
 			props: {
@@ -423,11 +423,11 @@ describe('Vault group', () => {
 		});
 		await fireEvent.click(getByRole('button', { name: /Toggle Vault section/ }));
 		// Accessible name stays exact; only the visible label drops the prefix.
-		const tile = getByRole('checkbox', { name: 'mcp__app-vault__RequestVaultAccess' });
-		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestVaultAccess');
-		expect(queryByText('mcp__app-vault__RequestVaultAccess')).toBeNull();
+		const tile = getByRole('checkbox', { name: 'mcp__chat-access__RequestChatAccess' });
+		expect(tile.querySelector('.tname')?.textContent?.trim()).toBe('RequestChatAccess');
+		expect(queryByText('mcp__chat-access__RequestChatAccess')).toBeNull();
 		await fireEvent.click(tile);
 		// The saved entry is still the exact runtime name.
-		expect(toggled).toEqual(['mcp__app-vault__RequestVaultAccess']);
+		expect(toggled).toEqual(['mcp__chat-access__RequestChatAccess']);
 	});
 });

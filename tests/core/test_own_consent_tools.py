@@ -24,18 +24,18 @@ from app.mcp.computer_use import access as cu_access
 from tests.core.test_assistant_permissions import ROOT, SCOPE, _spec
 from tests.core.test_vault_access import broker, pending, ssh_target  # noqa: F401 — fixtures
 
-CHAT = "mcp__app-vault__"
+CHAT = "mcp__chat-access__"
 REQUEST_ACCESS = "mcp__computer-use__request_access"
 
 # Calls whose own card or grant is the owner's consent outside Bypass.
 OWN_CONSENT_CALLS = [
-    (CHAT + "RequestVaultAccess", {"kind": "machine", "purpose": "Check the GPU", "saved_id": "s1"}),
-    (CHAT + "VaultListFiles", {"grant_id": "g", "path": ""}),
-    (CHAT + "VaultReadFile", {"grant_id": "g", "path": "notes.txt"}),
-    (CHAT + "VaultHttpRequest", {"grant_id": "g", "method": "GET", "path": "/zones", "body": "", "content_type": ""}),
-    (CHAT + "VaultHttpRequest", {"grant_id": "g", "method": "POST", "path": "/x", "body": "{}", "content_type": ""}),
-    (CHAT + "VaultRunCommand", {"grant_id": "g", "command": "docker inspect tdarr"}),
-    (CHAT + "VaultWriteFile", {"grant_id": "g", "path": "notes.txt", "content": "x"}),
+    (CHAT + "RequestChatAccess", {"kind": "machine", "purpose": "Check the GPU", "saved_id": "s1"}),
+    (CHAT + "ChatListFiles", {"grant_id": "g", "path": ""}),
+    (CHAT + "ChatReadFile", {"grant_id": "g", "path": "notes.txt"}),
+    (CHAT + "ChatHttpRequest", {"grant_id": "g", "method": "GET", "path": "/zones", "body": "", "content_type": ""}),
+    (CHAT + "ChatHttpRequest", {"grant_id": "g", "method": "POST", "path": "/x", "body": "{}", "content_type": ""}),
+    (CHAT + "ChatRunCommand", {"grant_id": "g", "command": "docker inspect tdarr"}),
+    (CHAT + "ChatWriteFile", {"grant_id": "g", "path": "notes.txt", "content": "x"}),
     (REQUEST_ACCESS, {"apps": ["Notepad"], "reason": "Type the notes"}),
 ]
 
@@ -55,15 +55,15 @@ def test_ask_mode_does_not_ask_before_a_tool_that_asks_itself(name, data, mode):
 
 @pytest.mark.parametrize("name,data,asks", [
     # The private card and the grant apply in every mode.
-    (CHAT + "RequestVaultAccess", {"kind": "machine", "purpose": "x"}, False),
-    (CHAT + "VaultReadFile", {"grant_id": "g", "path": "a"}, False),
-    (CHAT + "VaultListFiles", {"grant_id": "g", "path": ""}, False),
-    (CHAT + "VaultHttpRequest", {"grant_id": "g", "method": "head", "path": "/"}, False),
+    (CHAT + "RequestChatAccess", {"kind": "machine", "purpose": "x"}, False),
+    (CHAT + "ChatReadFile", {"grant_id": "g", "path": "a"}, False),
+    (CHAT + "ChatListFiles", {"grant_id": "g", "path": ""}, False),
+    (CHAT + "ChatHttpRequest", {"grant_id": "g", "method": "head", "path": "/"}, False),
     # Bypass skips the broker's one-shot card and repeat screen-access cards,
     # so the owner gate still asks for these.
-    (CHAT + "VaultRunCommand", {"grant_id": "g", "command": "ls"}, True),
-    (CHAT + "VaultWriteFile", {"grant_id": "g", "path": "a", "content": "x"}, True),
-    (CHAT + "VaultHttpRequest", {"grant_id": "g", "method": "DELETE", "path": "/x"}, True),
+    (CHAT + "ChatRunCommand", {"grant_id": "g", "command": "ls"}, True),
+    (CHAT + "ChatWriteFile", {"grant_id": "g", "path": "a", "content": "x"}, True),
+    (CHAT + "ChatHttpRequest", {"grant_id": "g", "method": "DELETE", "path": "/x"}, True),
     (REQUEST_ACCESS, {"apps": ["Notepad"]}, True),
 ])
 def test_bypass_keeps_the_gate_where_the_tools_own_card_is_skipped(name, data, asks):
@@ -99,7 +99,7 @@ _BLANK = {"grant_id": "", "method": "", "path": "", "body": "", "content_type": 
     ({**_POST, "requests": None}, True),
 ])
 def test_batched_http_is_covered_only_when_every_request_reads(data, asks_in_bypass):
-    name = CHAT + "VaultHttpRequest"
+    name = CHAT + "ChatHttpRequest"
     assert ap.needs_owner(name, data, SCOPE, permission_mode="bypassPermissions") is asks_in_bypass
     # Outside Bypass a write's own one-shot card is the consent either way.
     for mode in ("default", "acceptEdits"):
@@ -108,7 +108,7 @@ def test_batched_http_is_covered_only_when_every_request_reads(data, asks_in_byp
 
 def test_auto_keeps_the_gate_for_screen_access_only():
     assert ap.needs_owner(REQUEST_ACCESS, {"apps": ["x"]}, SCOPE, permission_mode="auto")
-    assert not ap.needs_owner(CHAT + "VaultRunCommand", {"command": "ls"}, SCOPE, permission_mode="auto")
+    assert not ap.needs_owner(CHAT + "ChatRunCommand", {"command": "ls"}, SCOPE, permission_mode="auto")
 
 
 def test_ordinary_tools_still_ask_and_questions_never_did():
@@ -116,14 +116,14 @@ def test_ordinary_tools_still_ask_and_questions_never_did():
         assert ap.needs_owner("Bash", {"command": "gh pr merge 3"}, SCOPE, permission_mode=mode)
         assert ap.needs_owner("mcp__browser__browser_act", {"ref": "e1"}, SCOPE, permission_mode=mode)
         assert not ap.needs_owner("AskUserQuestion", {"questions": []}, SCOPE, permission_mode=mode)
-    assert not ap.has_own_consent("Bash") and not ap.has_own_consent(CHAT + "VaultResources")
+    assert not ap.has_own_consent("Bash") and not ap.has_own_consent(CHAT + "ChatResources")
 
 
 def test_a_failing_rule_keeps_the_owners_yes(monkeypatch):
     def broken(data, mode):
         raise RuntimeError("bad rule")
-    monkeypatch.setitem(ap.OWN_CONSENT_TOOLS, CHAT + "VaultRunCommand", broken)
-    assert ap.needs_owner(CHAT + "VaultRunCommand", {"command": "ls"}, SCOPE, permission_mode="default")
+    monkeypatch.setitem(ap.OWN_CONSENT_TOOLS, CHAT + "ChatRunCommand", broken)
+    assert ap.needs_owner(CHAT + "ChatRunCommand", {"command": "ls"}, SCOPE, permission_mode="default")
 
 
 def test_every_allowlisted_tool_is_a_declared_tool():
@@ -137,14 +137,14 @@ def test_every_allowlisted_tool_is_a_declared_tool():
 def test_native_engine_leaves_the_tools_own_consent_alone():
     ask = ha._AssistantPermissionEngine(SCOPE, approval_policy="on_write")
     # The app rates vault "safe": the broker is its gate, so nothing asks.
-    assert ask.decide(_spec(CHAT + "VaultRunCommand", "safe"), {"command": "ls"}, cwd=ROOT).decision == "allow"
-    assert ask.decide(_spec(CHAT + "RequestVaultAccess", "safe"), {"kind": "machine"}, cwd=ROOT).decision == "allow"
+    assert ask.decide(_spec(CHAT + "ChatRunCommand", "safe"), {"command": "ls"}, cwd=ROOT).decision == "allow"
+    assert ask.decide(_spec(CHAT + "RequestChatAccess", "safe"), {"kind": "machine"}, cwd=ROOT).decision == "allow"
     # The access request still reaches the approver, which shows its own card.
     assert ask.decide(_spec(REQUEST_ACCESS), {"apps": ["x"]}, cwd=ROOT).decision == "ask"
     assert ask.decide(_spec("Bash"), {"command": "gh pr merge 1"}, cwd=ROOT).decision == "ask"
     bypass = ha._AssistantPermissionEngine(SCOPE, approval_policy="never_ask")
-    assert bypass.decide(_spec(CHAT + "VaultReadFile", "safe"), {"path": "a"}, cwd=ROOT).decision == "allow"
-    assert bypass.decide(_spec(CHAT + "VaultRunCommand", "safe"), {"command": "ls"}, cwd=ROOT).decision == "ask"
+    assert bypass.decide(_spec(CHAT + "ChatReadFile", "safe"), {"path": "a"}, cwd=ROOT).decision == "allow"
+    assert bypass.decide(_spec(CHAT + "ChatRunCommand", "safe"), {"command": "ls"}, cwd=ROOT).decision == "ask"
 
 
 def _adapter(mode, answer=None, *, delegated=True):
@@ -172,21 +172,21 @@ def _registry(adapter, *names, native=False, handler=None):
 
 async def test_a_granted_machine_runs_several_commands_without_a_yes_no():
     adapter = _adapter("default")
-    registry, ran = _registry(adapter, CHAT + "VaultRunCommand")
+    registry, ran = _registry(adapter, CHAT + "ChatRunCommand")
     for command in ("lscpu", "free -g", "docker inspect tdarr"):
-        assert not (await registry.dispatch(CHAT + "VaultRunCommand", {"grant_id": "g", "command": command})).is_error
+        assert not (await registry.dispatch(CHAT + "ChatRunCommand", {"grant_id": "g", "command": command})).is_error
     assert [r["command"] for r in ran] == ["lscpu", "free -g", "docker inspect tdarr"]
     adapter._can_use_tool.assert_not_awaited()
 
 
 async def test_bypass_still_asks_the_owner_before_a_command():
     adapter = _adapter("bypassPermissions", PermissionResultDeny(message="Declined by the owner"))
-    registry, ran = _registry(adapter, CHAT + "VaultRunCommand", CHAT + "VaultReadFile")
-    denied = await registry.dispatch(CHAT + "VaultRunCommand", {"grant_id": "g", "command": "rm -rf x"})
+    registry, ran = _registry(adapter, CHAT + "ChatRunCommand", CHAT + "ChatReadFile")
+    denied = await registry.dispatch(CHAT + "ChatRunCommand", {"grant_id": "g", "command": "rm -rf x"})
     assert denied.is_error and "Declined" in denied.text and not ran
     assert adapter._can_use_tool.await_args.args[2].assistant_owner is True
     adapter._can_use_tool.reset_mock()
-    assert not (await registry.dispatch(CHAT + "VaultReadFile", {"grant_id": "g", "path": "a"})).is_error
+    assert not (await registry.dispatch(CHAT + "ChatReadFile", {"grant_id": "g", "path": "a"})).is_error
     adapter._can_use_tool.assert_not_awaited()
 
 
@@ -194,8 +194,8 @@ async def test_bypass_still_asks_the_owner_before_a_command():
 async def test_a_saved_deny_on_an_exempted_tool_still_denies(native):
     adapter = _adapter("default", delegated=not native)
     adapter._saved_rule_decision = AsyncMock(return_value="deny")
-    registry, ran = _registry(adapter, CHAT + "RequestVaultAccess", "ListSessions", native=native)
-    denied = await registry.dispatch(CHAT + "RequestVaultAccess", {"kind": "machine", "purpose": "x"})
+    registry, ran = _registry(adapter, CHAT + "RequestChatAccess", "ListSessions", native=native)
+    denied = await registry.dispatch(CHAT + "RequestChatAccess", {"kind": "machine", "purpose": "x"})
     assert denied.is_error and denied.text == SAVED_RULE_DENIAL and not ran
     # Only the exempted tools are looked up here; ordinary low tools run as before.
     assert not (await registry.dispatch("ListSessions", {})).is_error and ran
@@ -205,8 +205,8 @@ async def test_a_saved_deny_on_an_exempted_tool_still_denies(native):
 async def test_a_failed_rule_lookup_denies_an_exempted_tool():
     adapter = _adapter("default")
     adapter._saved_rule_decision = AsyncMock(side_effect=RuntimeError("db down"))
-    registry, ran = _registry(adapter, CHAT + "VaultReadFile")
-    denied = await registry.dispatch(CHAT + "VaultReadFile", {"grant_id": "g", "path": "a"})
+    registry, ran = _registry(adapter, CHAT + "ChatReadFile")
+    denied = await registry.dispatch(CHAT + "ChatReadFile", {"grant_id": "g", "path": "a"})
     assert denied.is_error and not ran
 
 
@@ -230,8 +230,8 @@ async def test_request_vault_access_shows_only_its_private_card(broker):  # noqa
         from fluid.tools.registry import ToolOutcome
         await broker.request("chat", data["kind"], data["purpose"])
         return ToolOutcome(text="granted")
-    registry, _ = _registry(adapter, CHAT + "RequestVaultAccess", handler=request)
-    call = asyncio.create_task(registry.dispatch(CHAT + "RequestVaultAccess", {"kind": "machine", "purpose": "x"}))
+    registry, _ = _registry(adapter, CHAT + "RequestChatAccess", handler=request)
+    call = asyncio.create_task(registry.dispatch(CHAT + "RequestChatAccess", {"kind": "machine", "purpose": "x"}))
     async with asyncio.timeout(3):
         while not broker.requests:
             await asyncio.sleep(0)
@@ -251,9 +251,9 @@ async def test_each_command_still_waits_for_the_brokers_own_card(broker, ssh_tar
     async def run(data, ctx):
         from fluid.tools.registry import ToolOutcome
         return ToolOutcome(text=str(await broker.run("chat", data["grant_id"], "command", data)))
-    registry, _ = _registry(adapter, CHAT + "VaultRunCommand", handler=run)
+    registry, _ = _registry(adapter, CHAT + "ChatRunCommand", handler=run)
     for command in ("one", "two"):
-        call = asyncio.create_task(registry.dispatch(CHAT + "VaultRunCommand",
+        call = asyncio.create_task(registry.dispatch(CHAT + "ChatRunCommand",
                                                      {"grant_id": grant["id"], "command": command}))
         action = await pending(broker)
         assert command not in commands  # nothing runs before the owner's card
@@ -262,7 +262,7 @@ async def test_each_command_still_waits_for_the_brokers_own_card(broker, ssh_tar
     assert commands == ["one", "two"]
     adapter._can_use_tool.assert_not_awaited()
     broker.grants[grant["id"]].expires_at = 0
-    refused = await registry.dispatch(CHAT + "VaultRunCommand", {"grant_id": grant["id"], "command": "three"})
+    refused = await registry.dispatch(CHAT + "ChatRunCommand", {"grant_id": grant["id"], "command": "three"})
     assert refused.is_error and commands == ["one", "two"] and not broker.actions
     with pytest.raises(AccessDenied):
         await broker.get("chat", grant["id"])

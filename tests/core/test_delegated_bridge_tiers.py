@@ -72,7 +72,7 @@ def _servers(cwd: str) -> dict:
             model="opus", provider_id=None, cwd=cwd,
         ),
         "app-config": create_app_config_server(is_admin=True, project_dir=cwd),
-        "app-vault": create_vault_server(SID),
+        "chat-access": create_vault_server(SID),
         "ai-tools": create_ai_tools_server(
             {key: True for key in (
                 "image_generation", "image_editing", "video_generation",
@@ -166,7 +166,7 @@ async def test_rarely_used_tools_are_deferred(tmp_path):
         "mcp__builtins__InstallPlugin", "mcp__builtins__WorktreeReport",
         "mcp__app-config__getConfigCapabilities", "mcp__app-config__createAutomation",
         "mcp__ai-tools__generateImage", "mcp__ai-tools__runFalModel",
-        "mcp__app-vault__VaultHttpRequest", "mcp__app-vault__VaultRunCommand",
+        "mcp__chat-access__ChatHttpRequest", "mcp__chat-access__ChatRunCommand",
     ):
         assert name in by_name, name
         assert _is_deferred(by_name[name]), name
@@ -194,7 +194,7 @@ async def test_tools_the_prompt_names_are_on_the_bridge(tmp_path):
     # The background-work routing the prompt leads with stays loaded.
     assert {"Task", "Monitor"} <= loaded
     # The Vault guidance's tools are all bridged.
-    for name in set(re.findall(r"\b(RequestVaultAccess|Vault[A-Z]\w+)\b", GUIDANCE)):
+    for name in set(re.findall(r"\b(RequestChatAccess|Vault[A-Z]\w+)\b", GUIDANCE)):
         assert name in listed, name
 
 

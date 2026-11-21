@@ -1,4 +1,4 @@
-"""Plugin service grants: RequestVaultAccess(plugin, service) and VaultHttpRequest
+"""Plugin service grants: RequestChatAccess(plugin, service) and ChatHttpRequest
 with the owner's OAuth sign-in (app/core/vault_access.py).
 
 The API is the TLS test service from test_vault_services; the token endpoint is
@@ -121,7 +121,7 @@ async def test_sdk_plugin_placeholders_open_declared_service_card(broker, declar
 
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE,
         "saved_id": None, "service_provider": "custom", "suggested_url": url,
         "suggested_host": "", "suggested_port": 22, "suggested_username": "", "suggested_path": "",
@@ -147,7 +147,7 @@ async def test_sdk_plugin_real_hints_are_refused(broker, declared, oauth, monkey
 
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Read inventory", "plugin": PLUGIN, "service": SERVICE, **hints,
     })
     assert response.get("isError")
@@ -331,14 +331,14 @@ async def test_the_tools_return_no_token(broker, service, trust, declared, oauth
 
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler(
+    response = await tools["RequestChatAccess"].handler(
         {"kind": "service", "purpose": "Read the inventory", "plugin": PLUGIN, "service": SERVICE})
     pending = json.loads(response["content"][0]["text"])
     assert pending["status"] == "awaiting_user"
     _sign_in(declared)
     await broker.fulfill("chat", pending["request_id"], GrantSubmission(sign_in=True))
     handle = (await broker.resources("chat"))["grants"][0]
-    response = await tools["VaultHttpRequest"].handler(
+    response = await tools["ChatHttpRequest"].handler(
         {"grant_id": handle["id"], "method": "GET", "path": "/echo", "body": "", "content_type": ""})
     assert not response.get("isError") and json.loads(response["content"][0]["text"])["status"] == 200
-    _clean(response, await tools["VaultResources"].handler({}))
+    _clean(response, await tools["ChatResources"].handler({}))

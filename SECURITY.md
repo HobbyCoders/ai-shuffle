@@ -12,7 +12,7 @@ An agent with shell access can read or change files that the app's user can acce
 
 A malicious repository, web page or tool response can try to persuade an agent to misuse this access. Permission prompts and agent instructions reduce accidental actions but are not a boundary against malicious code once it runs. Treat enabling shell access as trusting the agent and the code it executes with the app user's access.
 
-Folder grants allow only list/read/write file operations; `VaultRunCommand` refuses them without running a local command. Commands require an SSH machine grant and run with the approved remote account's authority, not in a folder sandbox.
+Folder grants allow only list/read/write file operations; `ChatRunCommand` refuses them without running a local command. Commands require an SSH machine grant and run with the approved remote account's authority, not in a folder sandbox.
 
 ### Restricting exposure
 

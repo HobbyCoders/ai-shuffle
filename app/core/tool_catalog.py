@@ -9,7 +9,7 @@ group           source                                            names
 harness         fluid's ``register_builtins`` into a throwaway
                 ``ToolRegistry``                                  bare (``Read``…)
 app             ``app.mcp.builtin_tools`` server definitions      ``mcp__builtins__*``
-vault           ``app.mcp.vault_sdk`` server definitions          ``mcp__app-vault__*``
+vault           ``app.mcp.vault_sdk`` server definitions          ``mcp__chat-access__*``
 ai              ``app.mcp.ai_tools_sdk`` (``TOOL_CONFIG_MAP``)    ``mcp__ai-tools__*``
 computer_use    ``app.mcp.computer_use_sdk._TOOL_NAMES``          ``mcp__computer-use__*``
 browser         the bundled browser server's ``list_tools``       ``mcp__browser__*``
@@ -410,7 +410,7 @@ VAULT_NOTE = "Machines, folders and services you approve in a Vault card"
 
 
 def vault_tools() -> List[Dict[str, Any]]:
-    """``mcp__app-vault__*`` — the Vault tools (RequestVaultAccess…).
+    """``mcp__chat-access__*`` — the Vault tools (RequestChatAccess…).
 
     ``query_options`` attaches the vault server only when at least one
     of these names is permitted by the agent's tool lists, so an agent in
@@ -418,7 +418,7 @@ def vault_tools() -> List[Dict[str, Any]]:
     The server factory only closes over the session id (used when a tool is
     called, never at construction), so an empty id yields the real
     definitions. Rows keep the server's own order, which leads with
-    RequestVaultAccess and VaultResources.
+    RequestChatAccess and ChatResources.
     """
     from app.mcp.vault_sdk import TOOL_NAMES, create_vault_server
 
@@ -426,7 +426,7 @@ def vault_tools() -> List[Dict[str, Any]]:
     try:
         server = create_vault_server("")
         for t in _sdk_server_tools(server):
-            described[f"mcp__app-vault__{t.name}"] = t.description
+            described[f"mcp__chat-access__{t.name}"] = t.description
     except Exception:
         logger.warning("could not build the vault server for discovery", exc_info=True)
 
@@ -581,7 +581,7 @@ async def build_tool_surface(*, refresh: bool = False) -> Dict[str, Any]:
             "Vault",
             "vault",
             vault or [],
-            server="app-vault",
+            server="chat-access",
             note=VAULT_NOTE,
         )
     )

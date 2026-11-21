@@ -89,7 +89,7 @@ def _default_servers(session_id: str, cwd: str) -> dict:
             model="gpt-5.4", provider_id=None, cwd=cwd,
         ),
         "app-config": create_app_config_server(is_admin=True, project_dir=cwd),
-        "app-vault": create_vault_server(session_id),
+        "chat-access": create_vault_server(session_id),
         "ai-tools": create_ai_tools_server(
             {key: True for key in (
                 "image_generation", "image_editing", "video_generation",
@@ -408,7 +408,7 @@ async def test_only_the_core_is_eager_and_the_rest_is_announced(
     assert {"Remember", "Recall"} <= registered - deferred
     # Deferred now, still callable: peer sessions, Vault and the
     # rarely used owner-request tools (plus the task tools under code mode).
-    for name in ("StartSession", "mcp__app-vault__RequestVaultAccess",
+    for name in ("StartSession", "mcp__chat-access__RequestChatAccess",
                  "mcp__builtins__AndroidAction", "mcp__app-config__createAutomation"):
         assert name in deferred, name
     for name in ("SessionSearch", "mcp__builtins__TaskOutput"):
@@ -463,7 +463,7 @@ async def test_chat_lane_defers_only_what_its_toolsearch_can_load(monkeypatch, t
         assert name in sent, (name, sorted(sent))
     assert not [n for n in sent if n.startswith(("mcp__app-config__", "mcp__ai-tools__"))]
     reachable = {s.name for s in engine.registry.deferred_tools() if engine._tool_wired(s.name)}
-    assert "mcp__app-vault__RequestVaultAccess" in reachable | sent
+    assert "mcp__chat-access__RequestChatAccess" in reachable | sent
     for name in sorted(reachable):
         out = await engine.registry.dispatch("ToolSearch", {"query": f"select:{name}"}, engine.ctx)
         assert not out.is_error, (name, out.text)
@@ -480,7 +480,7 @@ async def test_allowlist_without_tool_search_defers_nothing_it_permits(
     that omits ToolSearch: every permitted tool stays loaded, because a
     code-mode session whose kernel fails falls back to JSON tool calls."""
     allow = ["Read", "Edit", "Bash", "SessionSearch", "Remember",
-             "mcp__builtins__TaskOutput", "mcp__app-vault__VaultResources"]
+             "mcp__builtins__TaskOutput", "mcp__chat-access__ChatResources"]
     engine, request, _reported = await _first_request(
         monkeypatch, tmp_path, code_mode=code_mode, tool_allowlist=allow,
     )

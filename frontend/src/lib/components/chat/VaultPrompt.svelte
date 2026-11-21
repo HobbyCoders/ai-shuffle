@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * A Vault request (RequestVaultAccess) or one-shot approval waiting
+	 * A Vault request (RequestChatAccess) or one-shot approval waiting
 	 * in the open chat, shown above the composer where the owner is reading
 	 * (#1807). The private inputs stay in the header's access panel: Review
 	 * opens it (a bottom sheet on phones).

@@ -15,7 +15,7 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Monitor (DELEGATED_LOADED_TOOLS): 34,012 -> 7,458 chars of schemas on every
 # CLI request. The full catalog is unchanged: deferred docs load on demand.
 # Second pass (wording, no rule dropped): rarely needed mechanics moved into
-# the tool docs that need them (RequestVaultAccess, getConfigCapabilities,
+# the tool docs that need them (RequestChatAccess, getConfigCapabilities,
 # Swarm), skill summaries capped, duplicated paragraphs merged:
 # eager 58,635 -> 51,071; delegated append 16,307 -> 12,761 (including the
 # memory block's save and correction rules, restored after review).
@@ -155,8 +155,8 @@ def test_vault_guidance_has_one_owner(native):
     ):
         assert rule in system, rule
     # The grant mechanics live once, in the description the model reads
-    # before its first RequestVaultAccess call (deferred on both legs).
-    request = next(s for s in specs if s.name.endswith("__RequestVaultAccess")).description
+    # before its first RequestChatAccess call (deferred on both legs).
+    request = next(s for s in specs if s.name.endswith("__RequestChatAccess")).description
     for rule in (
         "saved IDs, kinds and owner-chosen labels, never addresses or credentials",
         "Reuse via saved_id; unrelated sessions need their own grant",
@@ -206,8 +206,8 @@ def test_workflow_duplicates_have_one_owner(native):
     assert "Follow MessageSession's peer-coordination rules" in by_leaf["StartSession"].description
     assert "Follow MessageSession's peer-coordination rules" in by_leaf["ListSessions"].description
     for phrase in ("24 hours", "cancelled/expired cards", "Docker: container path"):
-        assert phrase in by_leaf["RequestVaultAccess"].description
-    assert "detached processes may survive" in by_leaf["VaultRunCommand"].description
+        assert phrase in by_leaf["RequestChatAccess"].description
+    assert "detached processes may survive" in by_leaf["ChatRunCommand"].description
 
 
 @pytest.mark.parametrize("native", [True, False], ids=["native", "delegated"])

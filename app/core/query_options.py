@@ -1870,7 +1870,7 @@ def build_options_from_profile(
 
     if vault_names:
         from app.mcp.vault_sdk import create_vault_server, GUIDANCE, CHAT_GUIDANCE
-        mcp_servers_dict["app-vault"] = create_vault_server(session_id)
+        mcp_servers_dict["chat-access"] = create_vault_server(session_id)
         guidance = GUIDANCE
         if session_mode == "chat":
             guidance = CHAT_GUIDANCE + guidance
@@ -1981,8 +1981,8 @@ def build_options_from_profile(
     if session_mode == "chat":
         # Do not spawn project/user MCP processes just to hide their tools.
         mcp_servers_dict = {name: server for name, server in mcp_servers_dict.items()
-                            if name in ({"builtins", "app-vault", "app-config"} if owner_coordinator
-                                        else {"builtins", "app-vault"})}
+                            if name in ({"builtins", "chat-access", "app-config"} if owner_coordinator
+                                        else {"builtins", "chat-access"})}
 
     # Build options with all AgentOptions fields
     options = AgentOptions(

@@ -260,9 +260,9 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "provider-agent": PROVIDER_AGENT_RISK_MAP,
     # The broker enforces grants and per-action confirmation outside Bypass.
     # Gating writes/commands here too would ask the user twice.
-    "app-vault": {
-        "RequestVaultAccess": "safe", "VaultResources": "safe", "VaultListFiles": "safe", "VaultReadFile": "safe",
-        "VaultWriteFile": "safe", "VaultRunCommand": "safe", "VaultHttpRequest": "safe",
+    "chat-access": {
+        "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
+        "ChatWriteFile": "safe", "ChatRunCommand": "safe", "ChatHttpRequest": "safe",
     },
 }
 

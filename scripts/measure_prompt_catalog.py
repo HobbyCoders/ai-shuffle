@@ -75,7 +75,7 @@ def compile_fixture(*, native=True, environment_text=None):
         servers = {
             "builtins": create_builtin_tools_server(is_admin=True, cwd="/fixture", workflow_guidance=True),
             "app-config": create_app_config_server(is_admin=True),
-            "app-vault": create_vault_server("fixture"),
+            "chat-access": create_vault_server("fixture"),
             "ai-tools": create_ai_tools_server(dict.fromkeys((
                 "image_generation", "image_editing", "image_reference", "video_generation",
                 "image_to_video", "video_with_audio", "text_to_3d", "image_to_3d",
@@ -180,7 +180,7 @@ def main():
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print("Fixture: owner code chat; bundled builtins/app-config/app-vault/ai-tools; no external MCPs")
+        print("Fixture: owner code chat; bundled builtins/app-config/chat-access/ai-tools; no external MCPs")
         print("Characters / approximate tokens (chars/4; not provider billing):")
         for group in ("sections", "tools", "delegated_loaded_tools", "worker_sections", "totals"):
             if group not in result:

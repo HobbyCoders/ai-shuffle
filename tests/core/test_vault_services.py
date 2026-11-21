@@ -862,7 +862,7 @@ async def test_service_sdk_prefills_public_context_without_granting(broker, monk
     mode = AsyncMock(return_value=bypass)
     monkeypatch.setattr(vault_access, "session_bypasses_confirmation", mode)
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Read DNS inventory", "service_provider": "cloudflare",
     })
     pending = json.loads(response["content"][0]["text"])
@@ -1130,7 +1130,7 @@ async def test_sdk_tool_returns_redacted_result_and_errors_without_secret(
         for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))
     }
     grant = await broker.create("chat", spec(service))
-    response = await tools["VaultHttpRequest"].handler(
+    response = await tools["ChatHttpRequest"].handler(
         {
             "grant_id": grant["id"],
             "method": "GET",
@@ -1141,7 +1141,7 @@ async def test_sdk_tool_returns_redacted_result_and_errors_without_secret(
     )
     assert not response.get("isError") and SECRET not in json.dumps(response)
     assert json.loads(response["content"][0]["text"])["status"] == 200
-    response = await tools["VaultHttpRequest"].handler(
+    response = await tools["ChatHttpRequest"].handler(
         {
             "grant_id": grant["id"],
             "method": "POST",
@@ -1151,14 +1151,14 @@ async def test_sdk_tool_returns_redacted_result_and_errors_without_secret(
         }
     )
     assert response["isError"] and "read-only" in response["content"][0]["text"]
-    resources = await tools["VaultResources"].handler({})
+    resources = await tools["ChatResources"].handler({})
     assert SECRET not in json.dumps(resources) and str(service.port) not in json.dumps(
         resources
     )
     broker.revoke("chat", grant["id"])
 
 
-# --- Batched VaultHttpRequest -------------------------------------------------
+# --- Batched ChatHttpRequest -------------------------------------------------
 
 
 def _http_tool(broker, monkeypatch):
@@ -1167,7 +1167,7 @@ def _http_tool(broker, monkeypatch):
 
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    return tools["VaultHttpRequest"].handler
+    return tools["ChatHttpRequest"].handler
 
 
 def _results(response):
@@ -1291,10 +1291,10 @@ def test_service_tool_is_on_every_scoped_surface_and_denied_to_background_work()
     )
     from app.mcp.vault_sdk import TOOL_NAMES
 
-    assert "mcp__app-vault__VaultHttpRequest" in CHAT_MODE_RESOURCE_TOOLS
+    assert "mcp__chat-access__ChatHttpRequest" in CHAT_MODE_RESOURCE_TOOLS
     assert (
         set(TOOL_NAMES) == set(CHAT_MODE_RESOURCE_TOOLS) <= set(CHAT_MODE_TOOL_SURFACE)
     )
-    assert "VaultHttpRequest" in PROACTIVE_DENIED_TOOLS
+    assert "ChatHttpRequest" in PROACTIVE_DENIED_TOOLS
     # The broker's one-shot card is the approval; the generic gate would ask twice.
-    assert SERVER_RISK_MAPS["app-vault"]["VaultHttpRequest"] == "safe"
+    assert SERVER_RISK_MAPS["chat-access"]["ChatHttpRequest"] == "safe"

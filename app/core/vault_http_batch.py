@@ -1,4 +1,4 @@
-"""The batch form of VaultHttpRequest: one call, up to eight requests.
+"""The batch form of ChatHttpRequest: one call, up to eight requests.
 
 The tool handler, the owner gate (``background_permissions``) and saved
 permission rules (``permission_handler``) all read a call through

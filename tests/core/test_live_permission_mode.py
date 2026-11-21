@@ -221,7 +221,7 @@ async def test_mode_change_during_prompt_publication_is_rechecked(tmp_path, live
 async def test_non_policy_and_child_prompts_are_not_released(live):
     state, _ = live
     rows = [
-        {"payload": {"request_id": "private", "tool_name": "VaultRunCommand"}},
+        {"payload": {"request_id": "private", "tool_name": "ChatRunCommand"}},
         {"payload": {"request_id": "child", "tool_name": "Bash", "mode_managed": True, "provider_agent": {"worker_session_id": "child"}}},
     ]
     state.callback_refs["permission_mode"] = "bypassPermissions"

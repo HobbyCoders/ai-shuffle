@@ -28,7 +28,7 @@ async def test_sdk_suggestion_reaches_card_and_only_private_submission_opens_fol
     opened = Mock(side_effect=lambda path: os.open(descriptor_target, os.O_RDONLY))
     monkeypatch.setattr(vault_files, "open_root", opened)
     tools = {t.name: t for t in recorded_sdk_server_tools(vault_sdk.create_vault_server("chat"))}
-    tool = tools["RequestVaultAccess"]
+    tool = tools["RequestChatAccess"]
     assert "suggested_path" in tool.input_schema["properties"]
     assert "suggested_path" not in tool.input_schema["required"]
     requested = asyncio.create_task(tool.handler({

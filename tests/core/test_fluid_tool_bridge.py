@@ -57,8 +57,8 @@ def test_real_vault_access_tools_have_serializable_provider_schemas():
     from fluid.providers.openai_responses.serialize import build_request_body
 
     registry = ToolRegistry()
-    register_recorded_sdk_servers(registry, {"app-vault": create_vault_server("schema-test")})
-    request = registry.get("mcp__app-vault__RequestVaultAccess")
+    register_recorded_sdk_servers(registry, {"chat-access": create_vault_server("schema-test")})
+    request = registry.get("mcp__chat-access__RequestChatAccess")
     assert request.input_schema == {
         "type": "object",
         "properties": {
@@ -66,7 +66,7 @@ def test_real_vault_access_tools_have_serializable_provider_schemas():
             "purpose": {"type": "string"},
             "saved_id": {
                 "type": "string",
-                "description": "Saved connection ID from VaultResources, of the requested kind. Preselects the private approval card; never grants access. Pass saved_id alone, without connection hints or plugin/service. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named.",
+                "description": "Saved connection ID from ChatResources, of the requested kind. Preselects the private approval card; never grants access. Pass saved_id alone, without connection hints or plugin/service. Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named.",
             },
             "suggested_host": {
                 "type": "string", "maxLength": 64,
@@ -109,12 +109,12 @@ def test_real_vault_access_tools_have_serializable_provider_schemas():
                for tool in registry.list_tools()],
     ))
     encoded = json.dumps(wire)
-    assert "RequestVaultAccess" in encoded and "VaultWriteFile" in encoded
+    assert "RequestChatAccess" in encoded and "ChatWriteFile" in encoded
     for hint in ("suggested_path", "suggested_host", "suggested_port", "suggested_username"):
         assert hint in encoded
     # The broker's one-shot card is the approval; the generic gate would ask twice.
-    for name in ("VaultRunCommand", "VaultWriteFile"):
-        assert registry.get(f"mcp__app-vault__{name}").risk == "safe"
+    for name in ("ChatRunCommand", "ChatWriteFile"):
+        assert registry.get(f"mcp__chat-access__{name}").risk == "safe"
 
 
 def test_shorthand_schema_matches_pinned_sdk_semantics():

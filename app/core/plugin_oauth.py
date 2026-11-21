@@ -31,7 +31,7 @@ Errors are :class:`PluginOAuthError` with a fixed reason and fixed wording.
 Provider response bodies, codes, tokens and client secrets never reach a log,
 an exception message or a value meant for the model.
 
-Entry points for the sign-in routes and ``VaultHttpRequest`` (slice 2):
+Entry points for the sign-in routes and ``ChatHttpRequest`` (slice 2):
 :func:`installed_config`, :func:`config_from_manifest`, :func:`client_for_sign_in`,
 :func:`start_sign_in`, :func:`complete_sign_in`, :func:`access_token_for_use`, :func:`sign_out`,
 :func:`status`, and the client functions :func:`save_client`,
@@ -902,7 +902,7 @@ def status(config: OAuthConfig, *, now: float | None = None) -> dict[str, Any]:
     return out
 
 
-# ─── higher-level steps for the routes and VaultHttpRequest (slice 2) ─────────
+# ─── higher-level steps for the routes and ChatHttpRequest (slice 2) ─────────
 
 _locks: dict[str, asyncio.Lock] = {}
 

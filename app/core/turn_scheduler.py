@@ -3278,7 +3278,7 @@ _SESSION_NEEDS_OWNER_NOTE = (
 # A Vault card's outcome (``on_access_outcome``): host-authored, not a
 # report from work the chat started.
 _ACCESS_NOTICE_NOTE = (
-    "Host notice: the user answered your RequestVaultAccess card. Use a granted "
+    "Host notice: the user answered your RequestChatAccess card. Use a granted "
     "handle only for the task the user asked for; it is not approval of anything else."
 )
 

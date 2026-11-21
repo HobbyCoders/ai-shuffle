@@ -163,7 +163,7 @@ async def test_sdk_saved_connection_refuses_real_hints_without_comparing_targets
     monkeypatch.setattr(broker, "_saved_metadata", lookup)
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "machine", "purpose": "Inspect a different server", "saved_id": saved_id, **hints,
     })
     assert response.get("isError")
@@ -196,11 +196,11 @@ async def test_sdk_lists_and_requests_saved_service_without_private_details(
     tools = {tool.name: tool for tool in recorded_sdk_server_tools(vault_sdk.create_vault_server("chat"))}
     saved_id = vault_store.save(("local", "worker"), GrantInput(
         kind="service", label="Inventory", url="https://private.example/api", secret="vault-only-secret"))
-    response = await tools["VaultResources"].handler({})
+    response = await tools["ChatResources"].handler({})
     assert not response.get("isError")
     metadata = json.loads(response["content"][0]["text"])
     assert metadata["saved_connections"] == [{"id": saved_id, "kind": "service", "label": "Inventory"}]
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Inspect inventory", "saved_id": saved_id, **hints,
     })
     if conflicts:

@@ -20,7 +20,6 @@ from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
 from app.api.common import check_project_access
 from app.core.plugin_service import get_plugin_service
-from app.core.tool_access import current_tool_names, shared_tool_names
 from app.core.project_utils import get_project_working_dir_as_path, get_worktree_working_dir_as_path
 from app.core.project_agent_service import get_project_agent_service, get_user_agent_service
 
@@ -101,10 +100,6 @@ def _derived_profile_id(name: str, fallback: str) -> str:
 def _suffixed_profile_id(base_id: str, counter: int) -> str:
     suffix = f"-{counter}"
     return base_id[:PROFILE_ID_MAX_LENGTH - len(suffix)] + suffix
-
-
-def _exported_tools(tool_names):
-    return shared_tool_names(tool_names) if isinstance(tool_names, list) else tool_names
 
 
 def _check_profile_modified(profile: dict) -> None:
@@ -240,11 +235,7 @@ async def list_permission_rules(
     """List permanent saved decisions. A null pattern matches every tool call."""
     def _load() -> list[dict]:
         _require_rule_profile(profile_id)
-        # A rule saved for a tool before it was renamed, or received from
-        # another worker, is stored under the earlier name and still decides
-        # the tool: show it under the name the tool has now.
-        return [{**rule, "tool_name": current_tool_names([rule["tool_name"]])[0]}
-                for rule in database.get_permission_rules(profile_id=profile_id)]
+        return database.get_permission_rules(profile_id=profile_id)
 
     return await run_sync(_load)
 
@@ -1132,11 +1123,8 @@ def build_agent_export(profile: dict, profile_id: Optional[str] = None) -> Agent
         effort=config.get("effort"),
         max_turns=config.get("max_turns"),
         system_prompt_content=prompt_content or None,
-        # An export may be imported by a version that knows a renamed tool
-        # only under its earlier name, where a block under the new name would
-        # block nothing. This version reads the earlier names as the tools.
-        allowed_tools=_exported_tools(config.get("allowed_tools")),
-        disallowed_tools=_exported_tools(config.get("disallowed_tools")),
+        allowed_tools=config.get("allowed_tools"),
+        disallowed_tools=config.get("disallowed_tools"),
         tool_selection_mode=config.get("tool_selection_mode"),
         enabled_agents=config.get("enabled_agents"),
         agent_invoke_mode=config.get("agent_invoke_mode"),

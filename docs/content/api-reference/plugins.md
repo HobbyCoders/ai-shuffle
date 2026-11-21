@@ -509,7 +509,7 @@ A plugin can declare an outside service it needs and how the owner signs in to i
 
 Clients and tokens are stored encrypted on this worker and stay on it; each worker signs in on its own. No endpoint returns a client secret, an authorization code or a token.
 
-Only a plugin that is switched on and approved can start a sign-in. An agent cannot sign in, enter a client or read a token; it asks with `RequestVaultAccess(kind="service", plugin, service)` and receives a grant handle (see [Vault](/docs/api-reference/sessions#vault)).
+Only a plugin that is switched on and approved can start a sign-in. An agent cannot sign in, enter a client or read a token; it asks with `RequestChatAccess(kind="service", plugin, service)` and receives a grant handle (see [Vault](/docs/api-reference/sessions#vault)).
 
 **Return address.** With a client the owner entered or a registered client, the sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. It must be `https://` or `http://localhost` (or `127.0.0.1`, `[::1]`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://127.0.0.1:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address the client was not registered for. With a client you entered, register each exact URL in the provider's OAuth app. A registered client is registered for each address automatically. `GET /status` shows the address for the current connection in `redirect_uri`; it is the only address an owner ever registers.
 

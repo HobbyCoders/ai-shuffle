@@ -358,7 +358,7 @@ logger = logging.getLogger(__name__)
 SERVICE_PREPARATION_SECONDS = 24 * 3600
 CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4"
 
-# VaultResources is a read-only listing that must answer promptly. Its
+# ChatResources is a read-only listing that must answer promptly. Its
 # database reads run on this small pool instead of asyncio's shared default
 # executor, which every ``run_sync``/``to_thread`` caller in the process
 # queues on, and the lookup is bounded so a stall returns a clear error rather
@@ -1305,7 +1305,7 @@ class Broker:
     async def get(self, session_id: str, grant_id: str, *, preparing: bool = False) -> Grant:
         grant = self.grants.get(grant_id)
         if not grant or (not grant.ready and not preparing):
-            raise AccessDenied("No such handle in this session. Use RequestVaultAccess to ask privately.")
+            raise AccessDenied("No such handle in this session. Use RequestChatAccess to ask privately.")
         # A child cannot use a grant still being prepared, even if it knows the
         # id. Invalid child lookups must never revoke an ancestor's valid grant.
         if grant.session_id != session_id:
@@ -1354,7 +1354,7 @@ class Broker:
         """List handles and owner-scoped saved labels, never connection details.
 
         Database reads use the listing's own pool with bounded waits, so a
-        pending RequestVaultAccess or busy shared executor cannot hold them.
+        pending RequestChatAccess or busy shared executor cannot hold them.
         Timing logs carry no addresses, labels or credentials.
         """
         started = time.monotonic()
@@ -1367,17 +1367,17 @@ class Broker:
                     raise AccessDenied("Session ownership changed.")
         except TimeoutError:
             logger.warning(
-                "VaultResources listing timed out: session=%s owner_lookup=%.2fs default_executor=%s",
+                "ChatResources listing timed out: session=%s owner_lookup=%.2fs default_executor=%s",
                 session_id, time.monotonic() - started, _default_executor_load(),
             )
             raise AccessDenied(
                 f"Listing access handles timed out after {LISTING_TIMEOUT_SECONDS:g} seconds on this "
-                "worker. No access was requested or changed; try VaultResources again shortly."
+                "worker. No access was requested or changed; try ChatResources again shortly."
             ) from None
         except AccessDenied:
             raise
         except Exception as exc:
-            logger.warning("VaultResources owner lookup failed: session=%s error=%s",
+            logger.warning("ChatResources owner lookup failed: session=%s error=%s",
                            session_id, type(exc).__name__)
             raise AccessDenied(
                 "Listing access handles failed: this worker could not read the session. "
@@ -1390,7 +1390,7 @@ class Broker:
         finished = time.monotonic()
         total = finished - started
         log = logger.warning if total >= LISTING_SLOW_SECONDS else logger.info
-        log("VaultResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
+        log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
             "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
             finished - looked_up, total, _default_executor_load())
         result = {"grants": grants, "folder_available": folder_available,

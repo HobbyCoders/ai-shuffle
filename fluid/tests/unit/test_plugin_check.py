@@ -31,7 +31,7 @@ def _valid(root: Path) -> Path:
         }},
     }))
     _write(root / "skills" / "dns" / "SKILL.md",
-           "---\nname: dns\ndescription: List DNS records\n---\n1. Call VaultResources.\n")
+           "---\nname: dns\ndescription: List DNS records\n---\n1. Call ChatResources.\n")
     _write(root / "commands" / "zones.md", "---\ndescription: list zones\n---\nList zones $ARGUMENTS\n")
     _write(root / "agents" / "auditor.md",
            "---\nname: auditor\ndescription: audits records\ntools: Read, Grep\n---\nAudit.\n")

@@ -308,7 +308,7 @@ def _stub_groups(monkeypatch, *, cu=(True, None)):
     monkeypatch.setattr(tc, "app_tools", lambda: (_ for _ in ()).throw(RuntimeError("app broke")))
     monkeypatch.setattr(
         tc, "vault_tools",
-        lambda: [tc._tool_row("mcp__app-vault__RequestVaultAccess", "Asks.")],
+        lambda: [tc._tool_row("mcp__chat-access__RequestChatAccess", "Asks.")],
     )
     monkeypatch.setattr(tc, "ai_tools", lambda: ([tc._tool_row("mcp__ai-tools__x", None)], True))
     monkeypatch.setattr(tc, "computer_use_tools", lambda: ([], cu[0], cu[1]))
@@ -353,7 +353,7 @@ async def test_build_tool_surface_isolates_group_failures(monkeypatch):
     assert groups["ai"]["available"] is True
     assert groups["computer_use"]["available"] is False
     assert groups["app_config"]["admin_only"] is True
-    assert groups["vault"]["server"] == "app-vault"
+    assert groups["vault"]["server"] == "chat-access"
     assert groups["vault"]["note"] == tc.VAULT_NOTE
     assert groups["mcp:zeta"]["tools"][0]["name"] == "mcp__zeta__t"
     errors = {e["group"]: e["message"] for e in surface["errors"]}

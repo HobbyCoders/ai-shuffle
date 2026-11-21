@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * PluginServiceAccess: the Vault card for a service an installed
-	 * plugin declares with an OAuth sign-in (RequestVaultAccess with plugin and
+	 * plugin declares with an OAuth sign-in (RequestChatAccess with plugin and
 	 * service). One flow: the primary button signs in at the provider, then
 	 * becomes "Grant access" for this conversation. No key or token is typed
 	 * here; the grant is `{sign_in: true}` and the worker attaches the token.

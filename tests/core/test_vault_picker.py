@@ -1,4 +1,4 @@
-"""The agent editor's "Vault" group (mcp__app-vault__*).
+"""The agent editor's "Vault" group (mcp__chat-access__*).
 
 ``query_options`` attaches the vault server only when one of its tool
 names is permitted by the agent's lists. An agent in "Allow only selected"
@@ -20,7 +20,7 @@ def test_vault_rows_cover_every_vault_access_tool_with_real_descriptions():
     names = [r["name"] for r in rows]
     assert names == list(TOOL_NAMES)
     assert set(names) == set(CHAT_MODE_RESOURCE_TOOLS)
-    assert names[0] == "mcp__app-vault__RequestVaultAccess"
+    assert names[0] == "mcp__chat-access__RequestChatAccess"
     # Taken from the server's own @tool definitions, not hand-copied.
     assert all(r["description"] for r in rows)
     request = rows[0]["description"]
@@ -55,7 +55,7 @@ async def test_surface_places_vault_after_app_tools(monkeypatch):
     group = next(g for g in surface["groups"] if g["id"] == "vault")
     assert group["kind"] == "vault"
     assert group["label"] == "Vault"
-    assert group["server"] == "app-vault"
+    assert group["server"] == "chat-access"
     assert group["available"] is True and group["admin_only"] is False
     assert group["note"] == tc.VAULT_NOTE
     assert {t["name"] for t in group["tools"]} == set(CHAT_MODE_RESOURCE_TOOLS)
@@ -78,26 +78,26 @@ def _build(tmp_path, config):
 
 
 def test_allow_mode_without_vault_names_gets_no_vault_access(tmp_path):
-    """The reported defect: an allow-list agent silently has no RequestVaultAccess."""
+    """The reported defect: an allow-list agent silently has no RequestChatAccess."""
     options = _build(tmp_path, {"tool_selection_mode": "allow", "allowed_tools": ["Read", "Grep"]})
-    assert "app-vault" not in options.mcp_servers
+    assert "chat-access" not in options.mcp_servers
     assert not set(CHAT_MODE_RESOURCE_TOOLS).intersection(options.allowed_tools)
 
 
 def test_allow_mode_with_the_picked_vault_names_attaches_vault_access(tmp_path):
-    """What ticking the new group saves: the exact mcp__app-vault__* names."""
+    """What ticking the new group saves: the exact mcp__chat-access__* names."""
     options = _build(tmp_path, {
         "tool_selection_mode": "allow",
         "allowed_tools": ["Read", *CHAT_MODE_RESOURCE_TOOLS],
     })
-    assert "app-vault" in options.mcp_servers
+    assert "chat-access" in options.mcp_servers
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
 
 
 def test_allow_mode_with_only_some_vault_names_attaches_just_those(tmp_path):
-    picked = ["mcp__app-vault__RequestVaultAccess", "mcp__app-vault__VaultResources"]
+    picked = ["mcp__chat-access__RequestChatAccess", "mcp__chat-access__ChatResources"]
     options = _build(tmp_path, {"tool_selection_mode": "allow", "allowed_tools": ["Read", *picked]})
-    assert "app-vault" in options.mcp_servers
+    assert "chat-access" in options.mcp_servers
     granted = set(CHAT_MODE_RESOURCE_TOOLS).intersection(options.allowed_tools)
     assert granted == set(picked)
 
@@ -107,4 +107,4 @@ def test_disallowing_the_group_removes_vault(tmp_path):
         "tool_selection_mode": "disallow",
         "disallowed_tools": list(CHAT_MODE_RESOURCE_TOOLS),
     })
-    assert "app-vault" not in options.mcp_servers
+    assert "chat-access" not in options.mcp_servers

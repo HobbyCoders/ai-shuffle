@@ -143,8 +143,8 @@ async def test_an_answer_already_given_on_screen_is_reported_not_repeated(monkey
 
 
 @pytest.mark.parametrize("request_", [
-    {"request_id": "r", "tool_name": "mcp__app-vault__VaultRunCommand", "title": "Run a remote command"},
-    {"request_id": "r", "tool_name": "RequestVaultAccess"},
+    {"request_id": "r", "tool_name": "mcp__chat-access__ChatRunCommand", "title": "Run a remote command"},
+    {"request_id": "r", "tool_name": "RequestChatAccess"},
     {"request_id": "r", "tool_name": "mcp__svc__login", "tool_input": {"api_key": "sk-123"}},
     {"request_id": "r", "tool_name": "Write", "tool_input": {"nested": {"password": "hunter2"}}},
 ])

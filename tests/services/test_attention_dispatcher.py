@@ -304,7 +304,7 @@ async def test_private_action_producer_and_denial_clear(chat, monkeypatch):
     grant = vault_access.Grant("grant", "push-chat", owner, "Resource", "service", "redacted", attention.time.time() + 120)
     # The SDK producer records the canonical tool before requesting approval.
     session_events.append_events("push-chat", [{"type": "tool.use", "payload": {
-        "id": "sdk-private-action", "name": "mcp__ai_shuffle__VaultHttpRequest"}}])
+        "id": "sdk-private-action", "name": "mcp__ai_shuffle__ChatHttpRequest"}}])
     task = asyncio.create_task(broker.approve(grant, "http", {"private": "not transmitted"}))
     try:
         async with asyncio.timeout(2):

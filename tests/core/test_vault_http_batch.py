@@ -1,4 +1,4 @@
-"""Batched VaultHttpRequest: how a call is read, saved rules, and the bridged schema.
+"""Batched ChatHttpRequest: how a call is read, saved rules, and the bridged schema.
 
 The broker path and the owner gate are covered in test_vault_services.py and
 test_own_consent_tools.py.
@@ -12,7 +12,7 @@ from app.core import vault_http_batch
 from app.core.vault_files import AccessDenied
 from app.core.permission_handler import PermissionDecision, PermissionRule
 
-TOOL = "mcp__app-vault__VaultHttpRequest"
+TOOL = "mcp__chat-access__ChatHttpRequest"
 GET = {"grant_id": "g", "method": "GET", "path": "/zones"}
 POST = {"grant_id": "g", "method": "POST", "path": "/zones/1/purge", "body": "{}"}
 
@@ -92,7 +92,7 @@ def test_the_schema_survives_the_fluid_bridge_and_string_lists_are_coerced():
     from app.mcp.vault_sdk import create_vault_server
 
     tools = {t.name: t for t in recorded_sdk_server_tools(create_vault_server("chat"))}
-    schema = sdk_tool_to_inproc(tools["VaultHttpRequest"]).input_schema
+    schema = sdk_tool_to_inproc(tools["ChatHttpRequest"]).input_schema
     assert schema["type"] == "object" and "required" not in schema
     batch = schema["properties"]["requests"]
     assert batch["type"] == "array" and batch["maxItems"] == vault_http_batch.LIMIT
@@ -101,6 +101,6 @@ def test_the_schema_survives_the_fluid_bridge_and_string_lists_are_coerced():
     # Providers that send the list as JSON text get a list before the handler.
     assert coerce_args({"requests": json.dumps([GET])}, schema)["requests"] == [GET]
     registry = ToolRegistry()
-    register_sdk_tools(registry, "app-vault", list(tools.values()))
+    register_sdk_tools(registry, "chat-access", list(tools.values()))
     registered = registry.get(TOOL)
     assert registered is not None and registered.input_schema["properties"]["requests"] == batch

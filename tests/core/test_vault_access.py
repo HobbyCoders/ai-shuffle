@@ -135,7 +135,7 @@ async def test_live_mode_change_releases_pending_private_action_and_rechecks_nex
     grant = await broker.create("chat", spec)
 
     async def command(value):
-        return await tools["VaultRunCommand"].handler({"grant_id": grant["id"], "command": value})
+        return await tools["ChatRunCommand"].handler({"grant_id": grant["id"], "command": value})
 
     task = asyncio.create_task(command("pending"))
     await pending(broker)
@@ -633,8 +633,8 @@ def test_chat_options_never_resolve_project_or_load_project_settings(tmp_path, m
     assert "general-purpose assistant" in options.system_prompt
     from app.mcp.vault_sdk import GUIDANCE
     assert options.system_prompt.count(GUIDANCE) == 1
-    assert set(options.mcp_servers) == ({"builtins", "app-vault", "app-config"}
-                                        if owner else {"builtins", "app-vault"})
+    assert set(options.mcp_servers) == ({"builtins", "chat-access", "app-config"}
+                                        if owner else {"builtins", "chat-access"})
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
     assert "Bash" not in options.allowed_tools
 
@@ -660,7 +660,7 @@ async def test_sdk_folder_commands_refuse_before_approval_or_execution(
     ))
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
     try:
-        response = await tools["VaultRunCommand"].handler({
+        response = await tools["ChatRunCommand"].handler({
             "grant_id": grant["id"], "command": "touch should-not-exist",
         })
         assert response["isError"]
@@ -669,7 +669,7 @@ async def test_sdk_folder_commands_refuse_before_approval_or_execution(
         remote.assert_not_awaited()
         assert not broker.actions and not broker.grants[grant["id"]].tasks
         assert list(tmp_path.iterdir()) == []
-        listed = await tools["VaultListFiles"].handler({"grant_id": grant["id"], "path": "."})
+        listed = await tools["ChatListFiles"].handler({"grant_id": grant["id"], "path": "."})
         assert not listed.get("isError")
     finally:
         broker.revoke("chat", grant["id"])
@@ -692,7 +692,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
     monkeypatch.setattr(control, "owner_of", lambda row: None)
     spec, commands, _ = ssh_target
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    request_task = asyncio.create_task(tools["RequestVaultAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+    request_task = asyncio.create_task(tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
     async with asyncio.timeout(3):
         while not broker.requests:
             await asyncio.sleep(0)
@@ -701,7 +701,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
     response = await request_task
     assert "test-only-password" not in str(response)
     grant_id = next(iter(broker.grants))
-    task = asyncio.create_task(tools["VaultRunCommand"].handler({"grant_id": grant_id, "command": "sdk"}))
+    task = asyncio.create_task(tools["ChatRunCommand"].handler({"grant_id": grant_id, "command": "sdk"}))
     if permission_mode != "bypassPermissions":
         action = await pending(broker)
         assert commands == []
@@ -710,7 +710,7 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
     assert "remote:sdk" in response["content"][0]["text"]
     assert not broker.actions
     other = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("other"))}
-    response = await other["VaultRunCommand"].handler({"grant_id": grant_id, "command": "escape"})
+    response = await other["ChatRunCommand"].handler({"grant_id": grant_id, "command": "escape"})
     assert response["isError"] and commands == ["sdk"]
     broker.revoke("chat", grant_id)
 
@@ -791,7 +791,7 @@ async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, 
             "suggested_username": username}
     if port is not None:
         args["suggested_port"] = port
-    requested = asyncio.create_task(tools["RequestVaultAccess"].handler(args))
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
     await asyncio.sleep(0)
     try:
         card = (await broker.snapshot("chat"))["requests"][0]
@@ -847,7 +847,7 @@ async def test_chat_sdk_drops_placeholder_and_wrong_kind_hints(
     if kind == "folder":
         spec = GrantInput(kind="folder", label="Test folder", path=str(tmp_path))
     tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    requested = asyncio.create_task(tools["RequestVaultAccess"].handler(args))
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
     try:
         async with asyncio.timeout(3):
             while not broker.requests and not requested.done():
@@ -880,7 +880,7 @@ async def test_sdk_null_optional_identifiers_are_blank(broker, monkeypatch):
 
     monkeypatch.setattr(sdk, "broker", broker)
     tools = {tool.name: tool for tool in recorded_sdk_server_tools(sdk.create_vault_server("chat"))}
-    response = await tools["RequestVaultAccess"].handler({
+    response = await tools["RequestChatAccess"].handler({
         "kind": "service", "purpose": "Inspect inventory", "saved_id": None, "plugin": None, "service": None,
     })
     assert not response.get("isError")
@@ -911,11 +911,11 @@ async def test_sdk_keeps_only_meaningful_hints_for_kind(monkeypatch, kind, expec
     args = {"kind": kind, "purpose": "Inspect resource", "suggested_host": "192.0.2.1",
             "suggested_port": 2222, "suggested_username": "operator", "suggested_path": "/workspace/project",
             "service_provider": "custom", "suggested_url": "https://api.example"}
-    assert not (await tools["RequestVaultAccess"].handler(args)).get("isError")
+    assert not (await tools["RequestChatAccess"].handler(args)).get("isError")
     request.assert_awaited_once_with("chat", kind, "Inspect resource", **expected, plugin="", service="", saved_id="")
     request.reset_mock()
     args.update({field: blank for field in expected})
-    assert not (await tools["RequestVaultAccess"].handler(args)).get("isError")
+    assert not (await tools["RequestChatAccess"].handler(args)).get("isError")
     request.assert_awaited_once_with("chat", kind, "Inspect resource", plugin="", service="", saved_id="")
 
 
@@ -937,7 +937,7 @@ async def test_machine_card_hints_can_be_approved_unchanged(broker, ssh_target, 
     spec, commands, _ = ssh_target
     args = {"kind": "machine", "purpose": "Inspect server", "suggested_host": spec.host,
             "suggested_port": spec.port, "suggested_username": spec.username}
-    requested = asyncio.create_task(tools["RequestVaultAccess"].handler(args))
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
     await asyncio.sleep(0)
     try:
         card = (await broker.snapshot("chat"))["requests"][0]
@@ -1423,7 +1423,7 @@ def test_code_and_voice_options_include_private_tools_without_chat_restrictions(
     profile = {"id": "p", "config": {"model": "sonnet", "tools_preset": "claude_code", "tool_selection_mode": "all", "cwd": str(tmp_path)}}
     with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode, "project_id": "project"}), patch.object(qo, "get_security_instructions", return_value=""):
         options, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
-    assert "app-vault" in options.mcp_servers
+    assert "chat-access" in options.mcp_servers
     assert set(CHAT_MODE_RESOURCE_TOOLS) <= set(options.allowed_tools)
     from app.mcp.vault_sdk import GUIDANCE
     assert str(options.system_prompt).count(GUIDANCE) == 1
@@ -1432,7 +1432,7 @@ def test_code_and_voice_options_include_private_tools_without_chat_restrictions(
     profile["config"].update(tool_selection_mode="disallow", disallowed_tools=CHAT_MODE_RESOURCE_TOOLS)
     with patch.object(qo.database, "get_session", return_value={"id": "s", "mode": mode, "project_id": "project"}), patch.object(qo, "get_security_instructions", return_value=""):
         denied, _ = qo.build_options_from_profile(profile=profile, session_id="s", overrides={"cwd": str(tmp_path)})
-    assert "app-vault" not in denied.mcp_servers
+    assert "chat-access" not in denied.mcp_servers
     assert not set(CHAT_MODE_RESOURCE_TOOLS).intersection(denied.allowed_tools)
 
 
@@ -1449,7 +1449,7 @@ async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_targ
     })
     bridge = VoiceBridge("voice", "test", api_key="unused", model="gpt-realtime", max_call_minutes=1,
                          app_tools=recorded_sdk_server_tools(sdk.create_vault_server("voice")))
-    task = asyncio.create_task(bridge._tool_app("RequestVaultAccess", {"kind":"machine", "purpose":"Inspect server"}))
+    task = asyncio.create_task(bridge._tool_app("RequestChatAccess", {"kind":"machine", "purpose":"Inspect server"}))
     await asyncio.sleep(0)
     assert not task.done() and not broker.grants
     spec, commands, _ = ssh_target
@@ -1458,7 +1458,7 @@ async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_targ
     response = await task
     assert "test-only-password" not in str(response)
     grant_id = next(iter(broker.grants))
-    task = asyncio.create_task(bridge._tool_app("VaultRunCommand", {"grant_id":grant_id, "command":"voice"}))
+    task = asyncio.create_task(bridge._tool_app("ChatRunCommand", {"grant_id":grant_id, "command":"voice"}))
     if permission_mode == "default":
         action = await pending(broker)
         assert not task.done() and not commands
@@ -1472,7 +1472,7 @@ async def test_voice_bridge_private_grant_and_mode_confirmation(broker, ssh_targ
 
 
 def _listing_tools(monkeypatch, broker):
-    """VaultResources over the real owner lookup, a stubbed session row and no UI."""
+    """ChatResources over the real owner lookup, a stubbed session row and no UI."""
     from app.core import vault_store
     from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
     from app.db import database
@@ -1492,9 +1492,9 @@ def _listing_tools(monkeypatch, broker):
 async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_busy(broker, monkeypatch):
     """#1605: the listing must not queue behind the shared default executor.
 
-    A pending RequestVaultAccess waits up to 240 s, and every run_sync caller
+    A pending RequestChatAccess waits up to 240 s, and every run_sync caller
     in the process shares asyncio's default executor. With that executor
-    fully occupied, VaultResources still answers promptly, asks for nothing
+    fully occupied, ChatResources still answers promptly, asks for nothing
     and leaves the pending request untouched.
     """
     import concurrent.futures
@@ -1503,7 +1503,7 @@ async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_b
 
     tools = _listing_tools(monkeypatch, broker)
     request_task = asyncio.create_task(
-        tools["RequestVaultAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
+        tools["RequestChatAccess"].handler({"kind": "machine", "purpose": "Inspect server"}))
     async with asyncio.timeout(3):
         while not broker.requests:
             await asyncio.sleep(0.001)
@@ -1513,7 +1513,7 @@ async def test_chat_resources_answers_while_request_pending_and_shared_pool_is_b
     blocker = asyncio.create_task(asyncio.to_thread(release.wait, 30))
     try:
         await asyncio.sleep(0.05)  # the blocker now holds the only shared worker
-        response = await asyncio.wait_for(tools["VaultResources"].handler({}), 2)
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
         assert not response.get("isError"), response
         assert json.loads(response["content"][0]["text"]) == {
             "grants": [], "folder_available": vault_files.available(), "saved_connections": [],
@@ -1536,7 +1536,7 @@ async def test_chat_resources_returns_bounded_error_when_owner_lookup_stalls(bro
     monkeypatch.setattr(database, "get_session", lambda sid: release.wait(30) and {"mode": "chat"})
     monkeypatch.setattr(vault_access, "LISTING_TIMEOUT_SECONDS", 0.2)
     try:
-        response = await asyncio.wait_for(tools["VaultResources"].handler({}), 3)
+        response = await asyncio.wait_for(tools["ChatResources"].handler({}), 3)
     finally:
         release.set()
     assert response["isError"]
@@ -1558,7 +1558,7 @@ async def test_chat_resources_lists_only_live_grant_metadata(broker, monkeypatch
     other = vault_access.Grant("c" * 32, "other", owner, "Other", "folder", str(tmp_path), time.time() + 60)
     for grant in (live, expired, other):
         broker.grants[grant.id] = grant
-    response = await asyncio.wait_for(tools["VaultResources"].handler({}), 2)
+    response = await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
     text = response["content"][0]["text"]
     assert json.loads(text)["grants"] == [
         {"id": live.id, "kind": "folder", "expires_at": live.expires_at, "writable": True}]
@@ -1578,8 +1578,8 @@ async def test_chat_resources_logs_stage_timings_at_info_without_details(broker,
                               str(tmp_path), time.time() + 60)
     broker.grants[grant.id] = grant
     with caplog.at_level(logging.INFO, logger="app.core.vault_access"):
-        await asyncio.wait_for(tools["VaultResources"].handler({}), 2)
-    lines = [r for r in caplog.records if r.getMessage().startswith("VaultResources listing:")]
+        await asyncio.wait_for(tools["ChatResources"].handler({}), 2)
+    lines = [r for r in caplog.records if r.getMessage().startswith("ChatResources listing:")]
     assert len(lines) == 1 and lines[0].levelno == logging.INFO
     text = lines[0].getMessage()
     assert "grants=1" in text and "owner_lookup=" in text and "total=" in text

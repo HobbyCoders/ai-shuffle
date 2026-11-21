@@ -122,7 +122,7 @@ class PermissionRule:
         if not self.tool_pattern:
             return True
 
-        if str(tool_name or "").endswith(("app-vault__VaultHttpRequest", "chat-access__ChatHttpRequest")):
+        if str(tool_name or "").endswith("chat-access__ChatHttpRequest"):
             # A batched call carries its requests in a list the generic match
             # cannot see. A Deny that names any request covers the call; an
             # Allow (or Defer) only one that names every request. A malformed
@@ -1191,21 +1191,12 @@ class PermissionHandler:
         the registry tool, and those rules must keep deciding. A saved Deny
         in either spelling is also enforced ahead of this approver
         (``HarnessAdapter._saved_rule_decision``).
-
-        A rule saved under a name the tool had before it was renamed
-        (``tool_access.earlier_tool_names``: the Vault tools were the "chat
-        access" tools) applies the same way, and a Deny under an earlier name
-        beats an Allow under the current one: a rename must never lift a block.
         """
-        from app.core.tool_access import earlier_tool_names
-
         names = [tool_name]
         if not tool_name.startswith(_BRIDGE_PREFIX):
             names.append(_BRIDGE_PREFIX + tool_name)
-        db_rules: Optional[List[PermissionRule]] = None
-
-        def first(name: str) -> Optional[PermissionRule]:
-            nonlocal db_rules
+        db_rules = None
+        for name in names:
             # Check session-level rules first (more specific)
             for rule in self._session_rules.get(session_id, ()):
                 if rule.matches(name, tool_input):
@@ -1213,30 +1204,20 @@ class PermissionHandler:
 
             # Check profile-level rules from database
             if db_rules is None:
-                db_rules = [
-                    PermissionRule(
-                        id=rule_data["id"],
-                        session_id=None,
-                        profile_id=rule_data["profile_id"],
-                        tool_name=rule_data["tool_name"],
-                        tool_pattern=rule_data.get("tool_pattern"),
-                        decision=PermissionDecision(rule_data["decision"])
-                    )
-                    for rule_data in database.get_permission_rules(profile_id=profile_id)
-                ]
-            return next((rule for rule in db_rules if rule.matches(name, tool_input)), None)
+                db_rules = database.get_permission_rules(profile_id=profile_id)
+            for rule_data in db_rules:
+                rule = PermissionRule(
+                    id=rule_data["id"],
+                    session_id=None,
+                    profile_id=rule_data["profile_id"],
+                    tool_name=rule_data["tool_name"],
+                    tool_pattern=rule_data.get("tool_pattern"),
+                    decision=PermissionDecision(rule_data["decision"])
+                )
+                if rule.matches(name, tool_input):
+                    return rule
 
-        found = next((rule for rule in map(first, names) if rule is not None), None)
-        if found is not None and found.decision == PermissionDecision.DENY:
-            return found
-        for name in [earlier for current in names for earlier in earlier_tool_names(current)]:
-            rule = first(name)
-            if rule is None:
-                continue
-            if rule.decision == PermissionDecision.DENY:
-                return rule
-            found = found or rule
-        return found
+        return None
 
     def get_pending_requests(self, session_id: str) -> List[Dict[str, Any]]:
         """Get all pending permission requests for a session"""

@@ -535,7 +535,7 @@ def test_live_prompt_is_one_first_person_voice_that_tells_results():
     assert "then stop and let them react" in LIVE_INSTRUCTIONS
     assert "Never shorten it to an acknowledgement" in LIVE_INSTRUCTIONS
     # The safety contract stays.
-    for rule in ("once per request", "RequestVaultAccess", "credentials and approvals are entered on screen", "never said aloud", "The app decides approvals from the user's own voice",
+    for rule in ("once per request", "RequestChatAccess", "credentials and approvals are entered on screen", "never said aloud", "The app decides approvals from the user's own voice",
                  "never a request to carry out", "do not start new work just to check status"):
         assert rule in LIVE_INSTRUCTIONS
     # No contradiction left: the old "silence is fine" waiting rule is gone,

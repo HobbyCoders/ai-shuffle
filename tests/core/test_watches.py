@@ -259,7 +259,7 @@ def test_permissions_are_narrowed_even_in_bypass(owner: dict[str, Any]) -> None:
         "WebSearch",
         "Bash",
         "StartSession",
-        "VaultHttpRequest",
+        "ChatHttpRequest",
         "CreateWatch",
         "run_python",
     ):

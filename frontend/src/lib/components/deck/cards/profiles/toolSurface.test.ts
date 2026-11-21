@@ -82,20 +82,20 @@ const appConfig: ToolSurfaceGroup = {
 };
 
 const PRIVATE_NAMES = [
-	'mcp__app-vault__RequestVaultAccess',
-	'mcp__app-vault__VaultResources',
-	'mcp__app-vault__VaultListFiles',
-	'mcp__app-vault__VaultReadFile',
-	'mcp__app-vault__VaultWriteFile',
-	'mcp__app-vault__VaultRunCommand',
-	'mcp__app-vault__VaultHttpRequest'
+	'mcp__chat-access__RequestChatAccess',
+	'mcp__chat-access__ChatResources',
+	'mcp__chat-access__ChatListFiles',
+	'mcp__chat-access__ChatReadFile',
+	'mcp__chat-access__ChatWriteFile',
+	'mcp__chat-access__ChatRunCommand',
+	'mcp__chat-access__ChatHttpRequest'
 ];
 
 const vault: ToolSurfaceGroup = {
 	id: 'vault',
 	label: 'Vault',
 	kind: 'vault',
-	server: 'app-vault',
+	server: 'chat-access',
 	available: true,
 	admin_only: false,
 	note: 'Machines, folders and services you approve in a private card',
@@ -272,20 +272,6 @@ describe('pattern vs names on save', () => {
 		expect(next).toEqual(['Read', 'mcp__github__create_issue', 'mcp__github__close_issue']);
 	});
 
-	it('unticks a tool held by a whole-server pattern on a group that saves names', () => {
-		// A list saved as `mcp__chat-access__*` reads as `mcp__app-vault__*`.
-		const held = ['Bash', 'mcp__app-vault__*'];
-		expect(groupSelectionState(vault, held, OPEN)).toBe('all');
-		const next = toggleToolSelection(held, vault, 'mcp__app-vault__VaultReadFile', OPEN);
-		expect(next).toEqual([
-			'Bash',
-			...PRIVATE_NAMES.filter((name) => name !== 'mcp__app-vault__VaultReadFile')
-		]);
-		expect(toggleGroupSelection(held, vault, OPEN)).toEqual(['Bash']);
-		// Ticking everything again saves names: this group never writes a pattern.
-		expect(toggleGroupSelection(['Bash'], vault, OPEN)).toEqual(['Bash', ...PRIVATE_NAMES]);
-	});
-
 	it('adds and removes a single non-MCP tool', () => {
 		expect(toggleToolSelection([], harness, 'Bash', OPEN)).toEqual(['Bash']);
 		expect(toggleToolSelection(['Read', 'Bash'], harness, 'Bash', OPEN)).toEqual(['Read']);
@@ -382,8 +368,8 @@ describe('Vault group', () => {
 		const all = toggleGroupSelection(['Read'], vault, OPEN);
 		expect(all).toEqual(['Read', ...PRIVATE_NAMES]);
 		expect(groupSelectionState(vault, all, OPEN)).toBe('all');
-		const one = toggleToolSelection(['Read'], vault, 'mcp__app-vault__RequestVaultAccess', OPEN);
-		expect(one).toEqual(['Read', 'mcp__app-vault__RequestVaultAccess']);
+		const one = toggleToolSelection(['Read'], vault, 'mcp__chat-access__RequestChatAccess', OPEN);
+		expect(one).toEqual(['Read', 'mcp__chat-access__RequestChatAccess']);
 		expect(groupSelectionState(vault, one, OPEN)).toBe('some');
 		expect(toggleGroupSelection(all, vault, OPEN)).toEqual(['Read']);
 	});

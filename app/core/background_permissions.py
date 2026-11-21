@@ -535,13 +535,13 @@ TOOL_LEVELS: Dict[str, Level] = {
     "CheckPlugin": _check_plugin_rule,
     "InstallPlugin": HIGH,
     # Vault: folders, machines and service credentials.
-    "mcp__app-vault__VaultResources": LOW,
-    "mcp__app-vault__RequestVaultAccess": HIGH,
-    "mcp__app-vault__VaultListFiles": HIGH,
-    "mcp__app-vault__VaultReadFile": HIGH,
-    "mcp__app-vault__VaultWriteFile": HIGH,
-    "mcp__app-vault__VaultRunCommand": HIGH,
-    "mcp__app-vault__VaultHttpRequest": HIGH,
+    "mcp__chat-access__ChatResources": LOW,
+    "mcp__chat-access__RequestChatAccess": HIGH,
+    "mcp__chat-access__ChatListFiles": HIGH,
+    "mcp__chat-access__ChatReadFile": HIGH,
+    "mcp__chat-access__ChatWriteFile": HIGH,
+    "mcp__chat-access__ChatRunCommand": HIGH,
+    "mcp__chat-access__ChatHttpRequest": HIGH,
     # Paid generation (spending outside the model calls themselves).
     "mcp__ai-tools__searchModels": LOW,
     **{
@@ -772,12 +772,12 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #: Bypass skips saved rules for these tools as for every tool. Nothing here
 #: grants access: the card, the grant's scope, its expiry and Away mode decide.
 #:
-#: * RequestVaultAccess: the Vault card, in every mode. The owner
+#: * RequestChatAccess: the Vault card, in every mode. The owner
 #:   approves it there (and types any secret there); Away refuses it.
-#: * VaultListFiles, VaultReadFile, VaultHttpRequest GET/HEAD (every request of a
+#: * ChatListFiles, ChatReadFile, ChatHttpRequest GET/HEAD (every request of a
 #:   batch): inside a grant the owner approved; the broker refuses anything
 #:   outside it or after expiry.
-#: * VaultRunCommand, VaultWriteFile, other VaultHttpRequest methods: the broker's
+#: * ChatRunCommand, ChatWriteFile, other ChatHttpRequest methods: the broker's
 #:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
 #:   approval, so the owner gate asks as before.
 #: * computer-use request_access: the screen-access card on every request in
@@ -786,12 +786,12 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #:
 #: AskUser/AskUserQuestion are low already (questions never pass the gate).
 OWN_CONSENT_TOOLS: Dict[str, Callable[[Mapping[str, Any], Optional[str]], bool]] = {
-    "mcp__app-vault__RequestVaultAccess": _always,
-    "mcp__app-vault__VaultListFiles": _always,
-    "mcp__app-vault__VaultReadFile": _always,
-    "mcp__app-vault__VaultHttpRequest": _chat_http_consent,
-    "mcp__app-vault__VaultRunCommand": _outside_bypass,
-    "mcp__app-vault__VaultWriteFile": _outside_bypass,
+    "mcp__chat-access__RequestChatAccess": _always,
+    "mcp__chat-access__ChatListFiles": _always,
+    "mcp__chat-access__ChatReadFile": _always,
+    "mcp__chat-access__ChatHttpRequest": _chat_http_consent,
+    "mcp__chat-access__ChatRunCommand": _outside_bypass,
+    "mcp__chat-access__ChatWriteFile": _outside_bypass,
     "mcp__computer-use__request_access": _computer_access_consent,
 }
 

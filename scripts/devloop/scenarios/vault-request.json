@@ -1,11 +1,11 @@
 {
-  "description": "Turn 1 asks for Vault access to an SSH machine (RequestVaultAccess) and waits on the Vault card; the outcome (granted, declined or timed out) wakes it and it replies.",
+  "description": "Turn 1 asks for Vault access to an SSH machine (RequestChatAccess) and waits on the Vault card; the outcome (granted, declined or timed out) wakes it and it replies.",
   "steps": [
     {
       "text": "I need access to the build machine for this.",
       "tool_calls": [
         {
-          "name": "RequestVaultAccess",
+          "name": "RequestChatAccess",
           "input": {
             "kind": "machine",
             "purpose": "Read the build log on the build machine."

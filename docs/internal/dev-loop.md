@@ -351,7 +351,7 @@ It is chosen by the request alone, so it behaves the same after restarts:
   `claude` CLI does not play `AskUserQuestion`. `question-tray.journey.mjs`
   plays both.
 * `[script:vault-request]` asks for Vault access to an SSH machine
-  (`RequestVaultAccess`) and waits on the Vault card. Use a native **Dev
+  (`RequestChatAccess`) and waits on the Vault card. Use a native **Dev
   agent** chat attached to a project and approve the `run_python` request.
   The Vault is hidden from preview grants, so open the instance as the
   loopback owner (`up --no-vite`, then `http://localhost:<app.local_port>/`
