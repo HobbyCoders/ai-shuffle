@@ -181,6 +181,10 @@ describe('entries', () => {
 		await mount();
 		const row = document.querySelector('[data-settings-item]') as HTMLElement;
 		expect(row.querySelector('.nm')?.textContent).toBe('Slow request: GET /sessions');
+		// The level stays in words: the dot's colour is shared by several levels
+		// and says nothing to a screen reader.
+		expect(row.querySelector('.sm')?.textContent).toBe('WARNING · app.api.sessions');
+		expect(screen.getByRole('button', { name: /Slow request: GET \/sessions\s*WARNING · app\.api\.sessions/ })).toBe(row);
 		// The open entry still shows the line as the worker wrote it.
 		await fireEvent.click(row);
 		expect(screen.getByRole('region', { name: 'Details' }).textContent).toContain(sent.message);

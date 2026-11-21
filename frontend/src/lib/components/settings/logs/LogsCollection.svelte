@@ -137,7 +137,7 @@
 					variant="log"
 					mono
 					name={logText(line)}
-					summary={line.logger_name}
+					summary={`${line.level} · ${line.logger_name}`}
 					meta={formatLogTime(line.timestamp).slice(0, 8)}
 					status={levelTone(line.level)}
 					onselect={select}
