@@ -765,8 +765,8 @@ def short_input(value: Any, node_id: str) -> Any:
 
 
 def _cut_old_inputs(
-    out: list[dict[str, Any]], shrunk: list[bool], *, refs: dict[Any, str],
-    guarded: set[Any], fixed: set[int], shown: dict[Any, Any],
+    out: list[dict[str, Any]], *, refs: dict[Any, str], guarded: set[Any], fixed: set[int],
+    shown: dict[Any, Any],
 ) -> int:
     """Cut the long inputs of the old finished calls in ``out``
     (:func:`short_input`), in place; the JSON chars this compaction newly cut.
@@ -779,13 +779,24 @@ def _cut_old_inputs(
     calls before the recency tail). ``guarded`` holds the calls never cut and
     ``fixed`` the ``id`` of the rows never changed.
 
-    Only the input changes: the row keeps its text, its other calls and its
-    place, and loses its handle, so Claude Code builds it from what the row
-    says instead of reading its own copy. A row Claude Code already shows cut
-    (an earlier compaction did it) is equal to its cut and stays Claude Code's
-    own; a row rebuilt from the stored message, which has the whole input, is
-    cut again. ``shown`` is the input Claude Code holds for each call, for the
-    count.
+    Only a row that is tool calls and nothing else, which is how Claude Code
+    lists a call (7 days of real chats: 45,714 call rows, none with text). A
+    cut row gives up its handle, and the next compaction can then match it,
+    and with it its tool group, to the stored path by tool ids alone; text
+    beside a call has no stored node behind it there and a later rebuild
+    would drop it. So a row with text stays whole, and the caller guards the
+    calls of a tool group that has text in any row.
+
+    Only the input changes: the row keeps its other calls and its place, and
+    Claude Code builds it from what the row says instead of reading its own
+    copy. A row Claude Code already shows cut (an earlier compaction did it)
+    is equal to its cut and stays Claude Code's own; a row rebuilt from the
+    stored message, which has the whole input, is cut again. ``shown`` is the
+    input Claude Code holds for each call, for the count.
+
+    The rows are not marked as compacted: the portable checkpoint ends where
+    the ladder's work ends, as it did, and never moves past a row it cannot
+    reproduce (an image) because an input after it got shorter.
     """
     done = {result["tool_use_id"] for row in out for result in row.get("toolResults", [])
             if not result.get("isError", False)}
@@ -793,7 +804,7 @@ def _cut_old_inputs(
     recent = set(order[-KEEP_INPUT_CALLS:])
     saved = 0
     for i, row in enumerate(out):
-        if id(row) in fixed:
+        if id(row) in fixed or row["text"]:
             continue
         uses = []
         for use in row["toolUses"]:
@@ -808,7 +819,6 @@ def _cut_old_inputs(
             uses.append(use)
         if any(a is not b for a, b in zip(uses, row["toolUses"])):
             out[i] = {**{k: v for k, v in row.items() if k != "handle"}, "toolUses": uses}
-            shrunk[i] = True
     return saved
 
 
@@ -1092,16 +1102,17 @@ def compact_messages(
     mark(-1, False)
     # The long inputs of old calls are cut in the rows as they stand, whatever
     # the ladder did. Not in a tool group with a block only Claude Code holds
-    # (an image, a tool_reference): its rows stay exactly Claude Code's own.
+    # (an image, a tool_reference), nor in one with text in any of its rows:
+    # those rows stay exactly Claude Code's own (see :func:`_cut_old_inputs`).
     guarded: set[Any] = set()
     for start, end in _group_spans(rows):
         group = rows[start:end]
         keys = ([use["tool_use_id"] for row in group for use in row["toolUses"]]
                 + [f"result:{r['tool_use_id']}" for row in group for r in row.get("toolResults", [])])
-        if any(owners.get(key) in opaque for key in keys):
+        if any(row["text"] for row in group) or any(owners.get(key) in opaque for key in keys):
             guarded.update(use["tool_use_id"] for row in group for use in row["toolUses"])
     cut_chars = _cut_old_inputs(
-        out, shrunk,
+        out,
         refs={key: nodes[k].node_id for key, k in owners.items() if at.get(k, tail) < tail},
         guarded=guarded, fixed={id(row) for _, row in unknown},
         shown={use["tool_use_id"]: use["input"] for row in rows for use in row["toolUses"]},

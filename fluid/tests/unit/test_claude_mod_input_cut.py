@@ -66,8 +66,9 @@ class Chat:
     def compact(self, trigger: str = "auto") -> tuple[list[dict], dict]:
         posted = [dict(r) for r in self.cli]
         report: dict = {}
+        self.checkpoint: dict = {}
         out = compact_messages(posted, self.stored, context_window=200_000, trigger=trigger,
-                               report=report)
+                               report=report, checkpoint=self.checkpoint)
         assert_mod_accepts(out, posted)
         # Claude Code keeps a handled row as it is and builds the rest anew.
         self.cli = [r if "handle" in r else {**r, "handle": f"built{next(self._ids)}"} for r in out]
@@ -232,36 +233,62 @@ def test_only_the_input_changes_in_a_cut_row():
     assert len(kept) == 1 + 30 + KEEP_INPUT_CALLS  # the request, every result, the newest calls
 
 
-def test_text_streamed_with_a_call_survives_every_later_cut():
-    """One Claude Code row can be the text and the call of one streamed
-    message, stored as two nodes. Cutting the call's input, and later the
-    input of another call of its group, must not drop the text."""
-    chat = Chat()
-    chat.write(2)
-    said = "NOTE-FOR-LATER: these three scripts build the importer in order."
+def text_and_calls(chat: Chat, said: str, together: bool) -> dict:
+    """A streamed message stored as a text node and call nodes of one uuid:
+    Claude Code's row is the text with the first call (``together``: with
+    both calls). One result is long enough for a later compaction to trim."""
     row = chat.add(Message("assistant", [Text(said)]))
-    first = Message("assistant", [ToolUseBlock("g0", "Bash", script("g0"))])
-    first.provider_meta["claude_uuid"] = row["handle"]
-    chat.stored.append(SessionNode(f"node_{len(chat.stored):012x}", chat.stored[-1].node_id, first))
-    row["toolUses"] = project(first)["toolUses"]  # one row: the text and the call
-    for tid in ("g1", "g2"):
-        chat.add(Message("assistant", [ToolUseBlock(tid, "Bash", script(tid))]))
-    for tid in ("g0", "g1", "g2"):
-        chat.add(Message("user", [ToolResultBlock(tid, [Text("done")])]))
-    chat.write(KEEP_INPUT_CALLS - 1)  # g2 is still one of the newest calls
-    out, _ = chat.compact()
-    shown = inputs(out)
-    assert CUT in shown["g0"]["command"] and CUT in shown["g1"]["command"]
-    assert CUT not in shown["g2"]["command"]
-    assert sum(said in r["text"] for r in out) == 1
-    chat.write(20)  # g2 is old now: its group is cut again
-    out, _ = chat.compact()
-    shown = inputs(out)
-    assert all(CUT in shown[tid]["command"] for tid in ("g0", "g1", "g2"))
-    assert sum(said in r["text"] for r in out) == 1
-    chat.write(20)
-    out, _ = chat.compact()
-    assert sum(said in r["text"] for r in out) == 1
+    for n, tid in enumerate(("g0", "g1")):
+        message = Message("assistant", [ToolUseBlock(tid, "Bash", script(tid))])
+        if n == 0 or together:
+            message.provider_meta["claude_uuid"] = row["handle"]
+            chat.stored.append(SessionNode(f"node_{len(chat.stored):012x}", chat.stored[-1].node_id,
+                                           message))
+            row["toolUses"] += project(message)["toolUses"]
+        else:
+            chat.add(message)
+    chat.add(Message("user", [ToolResultBlock("g0", [Text("done")])]))
+    chat.add(Message("user", [ToolResultBlock("g1", [Text("RESULT " + "r" * 8_500)])]))
+    return row
+
+
+def test_a_tool_group_with_text_is_left_whole_so_the_text_is_never_dropped():
+    """A cut row is matched by its tool ids the next time, and so is its
+    group; text beside a call has no stored node there, and a rebuild of the
+    group (to trim a result) would drop it. Such a group is not cut."""
+    for together in (False, True):
+        chat = Chat()
+        chat.write(2)
+        said = "NOTE-FOR-LATER: these two scripts build the importer in order."
+        row = text_and_calls(chat, said, together)
+        chat.write(12)
+        for _ in range(3):
+            out, _ = chat.compact()
+            shown = inputs(out)
+            assert shown["g0"] == script("g0") and shown["g1"] == script("g1")
+            assert row in out  # Claude Code's own row, by its handle
+            assert CUT in shown["t0"]["content"]  # the calls around the group are cut
+            chat.write(20)
+
+
+def test_cut_inputs_do_not_move_the_portable_checkpoint():
+    """The checkpoint is rows another worker replays as text. It ends where
+    the ladder's work ends; a shorter input later on must not carry it past a
+    row it cannot reproduce (a screenshot in a result)."""
+    chat = Chat()
+    chat.call("Read", {"file_path": "src/big.py"}, result="x" * 60_000)  # trimmed by the ladder
+    chat.add(Message("assistant", [ToolUseBlock("shot", "mcp__browser__screenshot", {})]))
+    chat.add(Message("user", [ToolResultBlock(
+        "shot", [Text("Screenshot of the page"), Image(media_type="image/png", data="AAAA")],
+        is_error=True)]))
+    screenshot = len(chat.stored) - 1
+    chat.write(30)
+    _, report = chat.compact()
+    assert report["input_tokens_cut"] > 15_000
+    through = next(i for i, node in enumerate(chat.stored)
+                   if node.node_id == chat.checkpoint["through"])
+    assert through < screenshot
+    assert CUT not in json.dumps(chat.checkpoint["rows"])
 
 
 def test_the_newest_calls_are_counted_call_by_call_in_a_parallel_row():
