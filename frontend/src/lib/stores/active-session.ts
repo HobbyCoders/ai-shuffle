@@ -40,7 +40,8 @@ import {
 import type { SendReservation } from './session/send-order';
 import type { Creation } from './session/message-sender';
 import { resolveSessionProject } from './session/session-project';
-import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
+import { createSessionInit, setSkipRestore, bumpInitGeneration, getInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
+import { holdsDispatchedOpening } from './session/worktree-opening';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
@@ -1140,15 +1141,18 @@ export const activeSession = {
 		// `reopen` opens the chat already on screen again (boot re-reading a
 		// linked chat once its row has loaded): the user has not left it, so a
 		// send still waiting on that chat must go out, not be called off (#1350).
+		const leavingOpening = holdsDispatchedOpening(_state, getInitGeneration());
 		if (!(options.reopen && _state.sessionId === sessionId)) bumpInitGeneration();
-		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id);
+		void switcher.switchSession(sessionId, projectId, worktreeInfo, title, projectV2Id, leavingOpening);
 	},
 
 	newChat: (options?: { initialLanding?: boolean }) => {
 		clearUnavailableChat();
 		setSkipRestore(true);
+		// Before the bump below ends the opening's recovery (#1756).
+		const leavingOpening = holdsDispatchedOpening(_state, getInitGeneration());
 		bumpInitGeneration();
-		const { restoredDraft } = switcher.newChat(options);
+		const { restoredDraft } = switcher.newChat({ ...options, leavingOpening });
 		// The run binding follows the account defaults; the compose starts
 		// without a project. A kept draft keeps its place and binding as picked.
 		if (!restoredDraft) activeSession.applyComposerDefaults();

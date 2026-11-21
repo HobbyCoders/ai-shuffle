@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { api } from '$lib/api/client';
 
 // The draft prefix makes account changes clear the note with other tab drafts.
@@ -15,6 +15,19 @@ export function pendingOpening(): Opening | null {
 const initial = pendingOpening();
 export const recoveringOpening = writable<{ note: Opening; ready: boolean; adopt?: (id: string) => void } | null>(
 	initial?.dispatched ? { note: initial, ready: false } : null);
+/**
+ * The compose shows the recovery of a dispatched opening (ChatView's rule):
+ * its staged branch is that opening's, even with `isCreatingWorktree` false
+ * after a reload (#1756). Ask before navigation advances `generation`.
+ */
+export function holdsDispatchedOpening(place: { sessionId: string | null; project: string; projectV2Id: string | null },
+	generation: number): boolean {
+	const shown = get(recoveringOpening);
+	const note = pendingOpening();
+	return !!shown && !!note?.dispatched && note.id === shown.note.id && !place.sessionId
+		&& place.project === note.project && place.projectV2Id === note.shared
+		&& (!shown.ready || shown.note.generation === generation);
+}
 export function keepOpening(note: Opening) {
 	try { sessionStorage.setItem(key, JSON.stringify(note)); } catch { /* storage unavailable */ }
 }
