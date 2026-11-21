@@ -451,6 +451,24 @@ async def test_grep_withholds_a_credential_file_with_a_newline_in_its_name(
 
 
 @needs_rg
+async def test_grep_rg_output_ignores_the_users_rg_config(tmp_path, monkeypatch) -> None:
+    """A user config with ``--context=1`` makes rg print bare ``--`` separators
+    and context lines with no NUL, which the path framing would read as the
+    start of the next file name."""
+    config = tmp_path / "rgrc"
+    config.write_text("--context=1\n--column\n")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
+    root = tmp_path / "tree"
+    _write(root, "a.py", "x\nneedle a\ny\n\n\n\nz\n")
+    _write(root, "b.py", "x\nneedle b\ny\n")
+    out = await grep_mod.handler({"pattern": "needle"}, ToolCtx(cwd=str(root)))
+    lines, notes = _body(out.text)
+    assert sorted(lines) == [
+        f"{root}{os.sep}a.py:2:needle a", f"{root}{os.sep}b.py:2:needle b",
+    ], out.text
+
+
+@needs_rg
 async def test_grep_rg_prunes_heavy_dirs_only_under_no_ignore(tmp_path) -> None:
     # No .gitignore here: without no_ignore rg's own rules decide (hidden .git
     # is skipped, node_modules is searched), which is unchanged.

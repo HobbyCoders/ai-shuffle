@@ -337,8 +337,10 @@ async def _ripgrep(
     # ``--max-count`` is a PER-FILE bound, so it cannot enforce the global cap
     # on its own — a thousand files each return up to ``limit`` lines. It stays
     # as a cheap per-file bound; the global cap is enforced on the stream below.
+    # ``--no-config``: :func:`_rg_records` parses a fixed output format, and a
+    # user's RIPGREP_CONFIG_PATH (``--context``, ``--column``) would change it.
     args = [
-        rg, "-n", "--no-heading", "--color=never", "--null",
+        rg, "--no-config", "-n", "--no-heading", "--color=never", "--null",
         "--max-count", str(limit),
         "--max-filesize", _MAX_FILESIZE,
     ]

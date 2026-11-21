@@ -238,7 +238,65 @@ def test_symlink_loop_does_not_break_the_rule_check(tmp_path) -> None:
     _symlink_or_skip(tmp_path / "loop ", tmp_path / "loop ")
     assert evaluate_rules(_credential_rules(), "Read", {"file_path": "loop "}, cwd=str(tmp_path)) is None
     allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "**"})
-    allow.matches("Read", {"file_path": "loop "}, cwd=str(tmp_path))  # no exception
+    # A path that never resolves fails closed: the allow rule does not match.
+    assert not allow.matches("Read", {"file_path": "loop "}, cwd=str(tmp_path))
+    assert not allow.matches("Read", {"file_path": str(tmp_path / "loop ")}, cwd=str(tmp_path))
+    assert not allow.matches("Read", {"file_path": "loop /x"}, cwd=str(tmp_path))
+
+
+def test_credential_ask_follows_a_link_before_dotdot_in_the_cwd(tmp_path) -> None:
+    """The tool joins the cwd as given and resolves afterwards, so in
+    ``work/link/..`` the ``..`` leaves the link's target, not ``work``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    work.mkdir()
+    (checkout / ".env").write_text("SECRET=1")
+    _symlink_or_skip(checkout / "settings ", checkout / ".env")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    cwd = str(work / "link") + os.sep + ".."
+    decision = evaluate_rules(_credential_rules(), "Read", {"file_path": "settings "}, cwd=cwd)
+    assert decision == "ask"
+
+
+def test_relative_ask_rule_sees_the_opened_file_under_a_symlinked_cwd(tmp_path) -> None:
+    """``notes `` (trailing space) links to ``secrets/key``; the session cwd
+    is a symlink to the checkout, so the opened path is only under its target."""
+    checkout = tmp_path / "checkout"
+    (checkout / "secrets").mkdir(parents=True)
+    (checkout / "secrets" / "key").write_text("k")
+    _symlink_or_skip(checkout / "notes ", checkout / "secrets" / "key")
+    _symlink_or_skip(tmp_path / "cwd-link", checkout)
+    rule = Rule(tool="Read", decision="ask", input_globs={"file_path": "secrets/*"})
+    assert rule.matches("Read", {"file_path": "notes "}, cwd=str(tmp_path / "cwd-link"))
+
+
+def test_opened_path_agrees_with_the_tool_resolver(tmp_path, monkeypatch) -> None:
+    """``_opened_path`` must name the file ``_util.resolve`` hands the tool."""
+    from types import SimpleNamespace
+
+    from fluid.permissions.rules import _opened_path
+    from fluid.tools.builtins._util import resolve
+
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "x").write_text("x")
+    _symlink_or_skip(tmp_path / "link", real / "sub")
+    _symlink_or_skip(tmp_path / "cwdlink", real)
+    monkeypatch.chdir(real)
+    cases = [
+        ("x", str(real)),                              # plain cwd
+        ("x", str(tmp_path / "cwdlink")),              # cwd is a symlink
+        ("x", str(tmp_path / "link") + "/.."),         # link then .. in the cwd
+        ("link/../x", str(tmp_path)),                  # link then .. in the value
+        (str(real / "x"), str(tmp_path)),              # absolute value
+        ("~/x", str(real)),                            # ~ is not expanded
+        ("missing ", str(real)),                       # not there yet (Write)
+    ]
+    for value, cwd in cases:
+        assert _opened_path(value, cwd) == str(resolve(value, SimpleNamespace(cwd=cwd))), value
+    # No session cwd: the process cwd, as the tool would see it.
+    assert _opened_path("x", None) == str(resolve("x", SimpleNamespace(cwd=str(real))))
+    assert _opened_path("~/x", str(real)) == str(real / "~" / "x")
 
 
 def test_allow_rule_also_needs_the_exact_spelling_inside(tmp_path) -> None:

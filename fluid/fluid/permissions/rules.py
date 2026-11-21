@@ -63,19 +63,27 @@ def _opened_path(value: str, cwd: str | None) -> str | None:
 
     Mirrors ``fluid.tools.builtins._util.resolve``: the value exactly as given
     (no stripping), joined to the session cwd when relative, symlinks
-    followed. On Linux ``settings `` (trailing space) is a different file from
-    ``settings``; Windows drops the trailing space itself, so there this
-    equals the normalized spelling. A dangling link resolves to its target
-    (where Write would create the file); a symlink loop resolves as far as it
-    can, and the tool then fails to open it.
+    followed. The cwd is joined as given, not collapsed first: in
+    ``/work/link/..`` the ``..`` applies after ``link`` is followed. On Linux
+    ``settings `` (trailing space) is a different file from ``settings``;
+    Windows drops the trailing space itself, so there this equals the
+    normalized spelling. A missing path or a dangling link resolves to where
+    Write would create the file. A symlink loop (or a file used as a
+    directory) gives None: the tool cannot open it, and an allow rule must not
+    match a path that never resolved.
     """
     if not value:
         return None
     try:
         path = Path(value)
         if not path.is_absolute():
-            path = Path(os.path.abspath(cwd or os.getcwd())) / path
-        return os.path.realpath(path)
+            path = Path(cwd or os.getcwd()) / path
+        opened = os.path.realpath(path)
+        try:
+            os.stat(opened)
+        except FileNotFoundError:
+            pass
+        return opened
     except (OSError, ValueError):
         return None
 
@@ -98,7 +106,16 @@ def _opened_forms(value: str, cwd: str | None) -> set[str] | None:
     if opened is None:
         return None
     relative = bool(cwd) or not os.path.isabs(value)
-    return _resolved_forms(opened, os.path.abspath(cwd or os.getcwd()), relative)
+    base = cwd or os.getcwd()
+    # Relative to the cwd as spelled and to the directory it really is: the
+    # opened path has no links in it, so under a symlinked cwd only the real
+    # one gives the relative form a rule like ``secrets/*`` is written for.
+    forms = _resolved_forms(opened, os.path.abspath(base), relative)
+    try:
+        forms |= _resolved_forms(opened, os.path.realpath(base), relative)
+    except (OSError, ValueError):
+        pass
+    return forms
 
 
 def path_candidates(value: str, cwd: str | None = None) -> tuple[set[str], set[str]]:
