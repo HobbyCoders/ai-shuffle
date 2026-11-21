@@ -124,9 +124,10 @@ def suite_state(api, commit, *, now, cache=None):
     landing mid-poll must not make its replacement run look unrelated.
     """
     cache = {} if cache is None else cache
-    for run in _active(api, "ci.yml", MAIN_EVENTS):
-        if contains(api, commit, run["head_sha"], cache):
-            return "testing", f"CI is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
+    # Active runs are read before finished ones so a run finishing between the
+    # two reads is still seen.
+    testing = next((run for run in _active(api, "ci.yml", MAIN_EVENTS)
+                    if contains(api, commit, run["head_sha"], cache)), None)
     finished, seen = [], set()
     for run in _runs(api, "ci.yml", "completed", MAIN_EVENTS):
         sha = run["head_sha"]
@@ -137,6 +138,10 @@ def suite_state(api, commit, *, now, cache=None):
             break  # main is linear: every older run is on an older revision
         finished.append(run)
     passed = next((run for run in finished if run.get("conclusion") == "success"), None)
+    # A pass already proves the commit for the next nightly; a newer merge's run
+    # still testing does not change that.
+    if testing and not passed:
+        return "testing", f"CI is {testing['status'].replace('_', ' ')} on {testing['head_sha'][:9]}: {testing['html_url']}"
     # The publisher runs at 12:00 AM New York time or on owner dispatch, and may
     # also ship an owner local pass: while one is in flight the commit may ship.
     publishers = _active(api, "desktop-source.yml")

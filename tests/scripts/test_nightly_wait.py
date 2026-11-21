@@ -158,6 +158,18 @@ def test_a_proven_commit_waits_for_the_next_nightly_and_exits(publishers):
     assert wait(api, pointer(OLD), once=True)[0] == waiter.SCHEDULED
 
 
+def test_a_newer_merge_still_testing_does_not_hide_an_existing_pass():
+    api = Api([run(2, TIP, status="in_progress"), run(1, MINE, conclusion="success", age=3600)])
+    assert wait(api, pointer(OLD), once=True)[0] == waiter.SCHEDULED
+
+
+def test_a_publisher_run_created_before_the_pass_is_not_a_later_attempt():
+    started = {**run(5, OLD, conclusion="success", event="schedule", age=60), "created_at":
+               waiter.time.strftime("%Y-%m-%dT%H:%M:%SZ", waiter.time.gmtime(NOW - 7200))}
+    api = Api([run(1, MINE, conclusion="success", age=3600)], publishers=[started])
+    assert wait(api, pointer(OLD), once=True)[0] == waiter.SCHEDULED
+
+
 @pytest.mark.parametrize("event", ["schedule", "workflow_dispatch"])
 def test_a_pass_the_publisher_ran_after_but_did_not_ship_is_reported(event):
     api = Api([run(1, MINE, conclusion="success", age=3600)],

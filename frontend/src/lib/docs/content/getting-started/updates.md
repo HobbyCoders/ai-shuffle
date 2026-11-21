@@ -10,7 +10,7 @@ AI Shuffle never changes under you. Your install runs the version you chose unti
 
 ## Release channels
 
-**Stable** is the default: tested releases. **Nightly** follows yesterday's `main`: it may break. A signed nightly is published once a night at 12:00 AM New York time (or when the maintainer runs it by hand), only when `main` changed and that exact revision has a local full-suite pass. If the pass is missing, the previous nightly stays available. Both channels verify signatures before installing.
+**Stable** is the default: tested releases. **Nightly** follows yesterday's `main`: it may break. A signed nightly is published once a night at 12:00 AM New York time (or when the maintainer runs it by hand), only when `main` changed and a revision passed the full test suite (on GitHub CI or the maintainer's local run). If no new revision passed, the previous nightly stays available. Both channels verify signatures before installing.
 
 **Switching back to stable works only while this worker is not ahead of the current stable release.** Database migrations do not run backwards, so a worker running newer nightly code stays on nightly until a stable release catches up with it; the switch then works from Settings without a reinstall. A worker that runs the stable release itself, or an older version, can switch back at once. Keep a backup before switching; pointing an older stable version at a nightly database is not a downgrade path.
 

@@ -406,7 +406,6 @@ def test_workflow_wiring_matches_the_gate():
     # Once a night at 12:00 AM New York time, or the owner's dispatch; no merge starts it.
     assert set(config["on"]) == {"schedule", "workflow_dispatch"}
     assert config["on"]["schedule"] == [{"cron": gate.NIGHTLY_CRON, "timezone": "America/New_York"}]
-    assert "workflow_run" not in (ROOT / ".github/workflows/desktop-source.yml").read_text()
     assert config["env"]["SOURCE_CHANNEL"] == "nightly"
     steps = config["jobs"]["gate"]["steps"]
     assert steps[1]["run"] == "python3 scripts/ci/nightly_changed.py"
