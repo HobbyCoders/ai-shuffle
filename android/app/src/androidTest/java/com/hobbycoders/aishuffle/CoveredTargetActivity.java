@@ -13,6 +13,8 @@ public class CoveredTargetActivity extends android.app.Activity {
     /** The target answers no read until this uptime, and takes this long over its next action. */
     private volatile long stallReadsUntil = 0;
     private volatile int stallAction = 0;
+    /** The target's next accessibility read, whoever makes it, takes this long in full; reads after it answer at once. */
+    private volatile int slowRead = 0;
     private int noiseEvery = 0;
     /** An accessibility event with nothing changed, as a busy app sends. */
     private void sendNoise() { status.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED); }
@@ -42,6 +44,7 @@ public class CoveredTargetActivity extends android.app.Activity {
                 case "notify": sendNoise(); break;
                 case "noisy": noiseEvery = value; status.removeCallbacks(noise); if (value > 0) noise.run(); break;
                 case "stallread": stallReadsUntil = android.os.SystemClock.uptimeMillis() + value; break;
+                case "slowread": slowRead = value; break;
                 case "stallaction": stallAction = value; break;
                 default: layout.setPadding(32, MOVED_TOP, 32, 32);
             }
@@ -128,6 +131,8 @@ public class CoveredTargetActivity extends android.app.Activity {
             @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
                 super.onInitializeAccessibilityNodeInfo(host, info);
                 android.os.SystemClock.sleep(Math.max(0, stallReadsUntil - android.os.SystemClock.uptimeMillis()));
+                int slow = slowRead; slowRead = 0; // Commands and reads both run on this thread, so only one read takes it.
+                android.os.SystemClock.sleep(slow);
             }
             @Override public boolean performAccessibilityAction(android.view.View host, int action, android.os.Bundle args) {
                 int stall = stallAction; stallAction = 0;

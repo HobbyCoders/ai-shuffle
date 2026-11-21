@@ -166,7 +166,7 @@ class CrossAppFenceTest {
         fixture(command)
         await("No event reached the service after $command") { service.eventsSeen > seen }
     }
-    private fun holdEventChecks() { ShuffleAccessibilityService.eventCheckDelayMs = 1_500 }
+    private fun holdEventChecks(ms: Long = 1_500) { ShuffleAccessibilityService.eventCheckDelayMs = ms }
     /** How long the app's main thread took to run something posted now. */
     private fun mainThreadDelay(): Long {
         val ran = CountDownLatch(1); val started = android.os.SystemClock.uptimeMillis()
@@ -464,11 +464,20 @@ class CrossAppFenceTest {
     }
     @Test fun denseSlowScreenIsApprovedOnACleanRead() {
         fixture("dense:100")
-        // The read after each consent stalls once for 1 s, far past the 500 ms window yet inside the 2 s read limit, however
-        // many calls it makes. A per-row delay sums one sleep per call, and those reads measured 0.6 to over 2 s on CI.
-        onceClosed("stallread:1000")
-        val tapping = tap(read(waitSeconds = 15)); allow()
-        assertEquals("performed", status(tapping, 15).getString("status"))
+        // No event fence check runs in this test, so once the slow read is armed nothing but the tap's own reads reaches the target.
+        holdEventChecks(60_000)
+        val ref = read(waitSeconds = 15)
+        // The first read of the target after the tap's consent takes 700 ms at that one call: past the 500 ms window, yet with the
+        // ~100 rows still well inside the 2 s read limit, as no other call is slowed. A per-row delay sums one sleep per call, and
+        // those reads measured 0.6 to over 2 s on CI. Armed once the closing panel's events have arrived, so none lands in that read.
+        ShuffleAccessibilityService.afterConsentClosed = { delay(300); withContext(Dispatchers.IO) { fixture("slowread:700") } }
+        val readings = java.util.concurrent.CopyOnWriteArrayList<Reading>()
+        ShuffleAccessibilityService.beforeRetryWindow = { readings += it }
+        val tapping = tap(ref); allow()
+        assertEquals("Reads after consent: $readings", "performed", status(tapping, 15).getString("status"))
+        val first = readings.firstOrNull()
+        assertTrue("The first read after consent must be clean and take over ${AppControlFence.SETTLE_MS} ms, or this proves nothing: $readings",
+            first != null && first.verdict == FenceRead.SAME && (first.readMs ?: 0L) > AppControlFence.SETTLE_MS)
         assertTapped(1)
     }
     /** A screen where every read takes over 500 ms, and a reference to its target. */
