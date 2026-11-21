@@ -268,47 +268,47 @@ await runJourney({
 		}
 	}, {
 		name: 'saved-key-effort-levels',
-		async setup({ page, status }) {
-			status._claudeApiKeyId = await activateAnthropicApiKey(status);
-			await curateAnthropicApiKey(status, status._claudeApiKeyId, [...DEV_CLAUDE_API_MODELS, EFFORT_MODEL]);
+		async setup({ page, status, deferCleanup }) {
+			const keyId = await activateAnthropicApiKey(status);
+			status._claudeApiKeyId = keyId;
+			// Registered before the PUT so a failed gotoApp or recorder start still
+			// restores the two-model curation saved-key-catalog expects.
+			deferCleanup(() => resetAnthropicApiKeyCuration(status, keyId));
+			await curateAnthropicApiKey(status, keyId, [...DEV_CLAUDE_API_MODELS, EFFORT_MODEL]);
 			await gotoApp(page, status);
 		},
-		async act({ page, status, mark, log }) {
-			try {
-				await mark('pick a Claude API model that has documented effort levels');
-				await page.keyboard.press('Control+n');
-				await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
-				const picker = page.getByRole('dialog', { name: 'Choose model' });
-				await openPopup(page.getByRole('button', { name: /^Model:/ }).filter({ visible: true }).first(), picker);
-				await picker.getByRole('textbox', { name: 'Search models' }).fill('effort journey');
-				await picker.getByRole('option', { name: /Claude Opus 5\.5 \(effort journey\)/ }).first().click();
+		async act({ page, mark, log }) {
+			await mark('pick a Claude API model that has documented effort levels');
+			await page.keyboard.press('Control+n');
+			await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
+			const picker = page.getByRole('dialog', { name: 'Choose model' });
+			await openPopup(page.getByRole('button', { name: /^Model:/ }).filter({ visible: true }).first(), picker);
+			await picker.getByRole('textbox', { name: 'Search models' }).fill('effort journey');
+			await picker.getByRole('option', { name: /Claude Opus 5\.5 \(effort journey\)/ }).first().click();
 
-				await mark('open the effort control');
-				await page.getByRole('button', { name: /^(Effort: |All chat controls)/ }).filter({ visible: true }).first()
-					.click({ timeout: 8_000 });
-				// Desktop shows a slider, the phone sheet a row of radios.
-				const slider = page.getByRole('slider', { name: 'Reasoning effort', exact: true }).filter({ visible: true });
-				const radios = page.getByRole('radiogroup', { name: 'Reasoning effort', exact: true }).filter({ visible: true })
-					.getByRole('radio');
-				await slider.or(radios.first()).first().waitFor({ timeout: 8_000 });
-				if (await slider.count()) {
-					const max = await slider.getAttribute('max');
-					const shown = await slider.getAttribute('aria-valuetext');
-					log(`effort slider max=${max} value=${shown}`);
-					expect(max === '4', `Opus 5.5 on the API key offers five effort levels (slider max ${max})`);
-					expect(shown === 'Auto (Medium)', `the model default is Medium (shown ${shown})`);
-				} else {
-					const labels = await radios.allTextContents();
-					log(`effort radios ${JSON.stringify(labels)}`);
-					expect(JSON.stringify(labels.map((l) => l.trim())) === JSON.stringify(['Low', 'Medium', 'High', 'XHigh', 'Max']),
-						`Opus 5.5 on the API key offers the five documented levels (saw ${labels})`);
-					const medium = radios.filter({ hasText: /^\s*Medium\s*$/ });
-					expect(Boolean(await medium.getAttribute('aria-describedby')), 'Medium is marked as the model default');
-				}
-				await page.keyboard.press('Escape');
-			} finally {
-				await resetAnthropicApiKeyCuration(status, status._claudeApiKeyId);
+			await mark('open the effort control');
+			await page.getByRole('button', { name: /^(Effort: |All chat controls)/ }).filter({ visible: true }).first()
+				.click({ timeout: 8_000 });
+			// Desktop shows a slider, the phone sheet a row of radios.
+			const slider = page.getByRole('slider', { name: 'Reasoning effort', exact: true }).filter({ visible: true });
+			const radios = page.getByRole('radiogroup', { name: 'Reasoning effort', exact: true }).filter({ visible: true })
+				.getByRole('radio');
+			await slider.or(radios.first()).first().waitFor({ timeout: 8_000 });
+			if (await slider.count()) {
+				const max = await slider.getAttribute('max');
+				const shown = await slider.getAttribute('aria-valuetext');
+				log(`effort slider max=${max} value=${shown}`);
+				expect(max === '4', `Opus 5.5 on the API key offers five effort levels (slider max ${max})`);
+				expect(shown === 'Auto (Medium)', `the model default is Medium (shown ${shown})`);
+			} else {
+				const labels = await radios.allTextContents();
+				log(`effort radios ${JSON.stringify(labels)}`);
+				expect(JSON.stringify(labels.map((l) => l.trim())) === JSON.stringify(['Low', 'Medium', 'High', 'XHigh', 'Max']),
+					`Opus 5.5 on the API key offers the five documented levels (saw ${labels})`);
+				const medium = radios.filter({ hasText: /^\s*Medium\s*$/ });
+				expect(Boolean(await medium.getAttribute('aria-describedby')), 'Medium is marked as the model default');
 			}
+			await page.keyboard.press('Escape');
 		}
 	}]
 });
