@@ -187,11 +187,11 @@
 					</SettingRow>
 				{/if}
 				<SettingRow label="Name" hint="Shown when a chat asks">
-					<TextField bind:value={form.label} label="Name" placeholder={form.kind === 'service' ? 'Cloudflare' : 'HomeLab'} maxlength={80} width={260} />
+					<TextField bind:value={form.label} label="Name" placeholder={form.kind === 'service' ? 'Cloudflare' : 'Home server'} maxlength={80} width={260} />
 				</SettingRow>
 				{#if form.kind === 'machine'}
 					<SettingRow label="Address" hint="IP or hostname">
-						<TextField bind:value={form.host} label="Address" placeholder="10.0.0.251" mono maxlength={253} width={260} />
+						<TextField bind:value={form.host} label="Address" placeholder="192.168.1.20" mono maxlength={253} width={260} />
 					</SettingRow>
 					<SettingRow label="Port">
 						<NumberField bind:value={form.port} label="Port" min={1} max={65535} />

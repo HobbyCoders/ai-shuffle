@@ -14,7 +14,7 @@ from app.core.vault_access import AccessDenied, Broker, Grant, GrantInput, new_e
 from tests.core.test_vault_store import vault  # noqa: F401 - fixture
 
 FINGERPRINT = "SHA256:" + "a" * 43
-MACHINE = {"kind": "machine", "label": "HomeLab", "host": "10.0.0.20", "port": 2222, "username": "root",
+MACHINE = {"kind": "machine", "label": "Workshop", "host": "10.0.0.20", "port": 2222, "username": "root",
            "password": "MUST-NOT-ECHO"}
 SERVICE = {"kind": "service", "label": "Cloud API", "url": "https://api.example.com/v4",
            "secret": "MUST-NOT-ECHO-TOKEN"}
@@ -41,7 +41,7 @@ def client(scheme="https"):
 
 
 def grant_on(broker, session_id, saved_id, owner=("device", "worker", None)):
-    grant = Grant("g-" + session_id, session_id, owner, "HomeLab", "machine", "root@10.0.0.20:2222",
+    grant = Grant("g-" + session_id, session_id, owner, "Workshop", "machine", "root@10.0.0.20:2222",
                   time.time() + 600, saved_id=saved_id)
     broker.grants[grant.id] = grant
     return grant
@@ -50,10 +50,10 @@ def grant_on(broker, session_id, saved_id, owner=("device", "worker", None)):
 # --- validation ------------------------------------------------------------------------------
 
 def test_a_new_machine_sign_in_keeps_only_its_own_fields():
-    entry = new_entry(GrantInput.model_validate({**MACHINE, "label": "  HomeLab  ", "host": "HomeLab.Example ",
+    entry = new_entry(GrantInput.model_validate({**MACHINE, "label": "  Workshop  ", "host": "Workshop.Example ",
                                                  "fingerprint": FINGERPRINT + "="}))
     assert (entry.kind, entry.label, entry.host, entry.port, entry.username) == (
-        "machine", "HomeLab", "homelab.example", 2222, "root")
+        "machine", "Workshop", "workshop.example", 2222, "root")
     assert entry.fingerprint == FINGERPRINT and entry.password.get_secret_value() == "MUST-NOT-ECHO"
     assert not entry.url and not entry.secret.get_secret_value() and not entry.path and not entry.writable
     # No fingerprint is fine: the first connection the owner approves pins the key.
@@ -175,8 +175,8 @@ async def test_add_list_edit_remove_never_returns_a_secret(broker, vault):
         assert service.status_code == 200, service.text
         listed = await http.get("/api/v1/vault/entries")
         by_label = {entry["label"]: entry for entry in listed.json()["entries"]}
-        assert by_label["HomeLab"] == {
-            "id": machine_id, "kind": "machine", "label": "HomeLab", "target": "root@10.0.0.20:2222",
+        assert by_label["Workshop"] == {
+            "id": machine_id, "kind": "machine", "label": "Workshop", "target": "root@10.0.0.20:2222",
             "fingerprint": "", "host": "10.0.0.20", "port": 2222, "username": "root", "uses_key": False}
         assert by_label["Cloud API"]["target"] == "https://api.example.com/v4"
         edited = await http.patch(f"/api/v1/vault/entries/{machine_id}",
@@ -207,7 +207,7 @@ async def test_invalid_input_is_refused_without_echo(broker, vault):
         assert response.status_code == 400
         assert not vault
         entry_id = (await http.post("/api/v1/vault/entries", json=MACHINE)).json()["id"]
-        duplicate = await http.post("/api/v1/vault/entries", json={**MACHINE, "label": "homelab"})
+        duplicate = await http.post("/api/v1/vault/entries", json={**MACHINE, "label": "workshop"})
         assert duplicate.status_code == 400 and "MUST-NOT-ECHO" not in duplicate.text
         response = await http.patch(f"/api/v1/vault/entries/{entry_id}", json={"password": "MUST-NOT-ECHO", "port": "22"})
         assert response.status_code == 422 and "MUST-NOT-ECHO" not in response.text

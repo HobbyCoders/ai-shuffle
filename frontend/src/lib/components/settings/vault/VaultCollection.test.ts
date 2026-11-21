@@ -41,10 +41,10 @@ import {
 const machine = (over: Partial<VaultEntry> = {}): VaultEntry => ({
 	id: 'a'.repeat(32),
 	kind: 'machine',
-	label: 'HomeLab',
-	target: 'root@10.0.0.251:22',
+	label: 'Workshop',
+	target: 'root@192.168.1.20:22',
 	fingerprint: 'SHA256:' + 'A'.repeat(43),
-	host: '10.0.0.251',
+	host: '192.168.1.20',
 	port: 22,
 	username: 'root',
 	uses_key: false,
@@ -103,7 +103,7 @@ describe('Settings > Vault list', () => {
 	it('lists saved sign-ins by name and address, without a secret', async () => {
 		const { container } = await show();
 		expect(api.get).toHaveBeenCalledWith('/vault/entries');
-		expect(screen.getByRole('button', { name: /^HomeLab/ }).textContent).toContain('root@10.0.0.251:22');
+		expect(screen.getByRole('button', { name: /^Workshop/ }).textContent).toContain('root@192.168.1.20:22');
 		expect(screen.getByRole('button', { name: /^Cloudflare/ }).textContent).toContain('https://api.cloudflare.com');
 		expect(container.querySelector('input[type="password"]')).toBeNull();
 	});
@@ -111,8 +111,8 @@ describe('Settings > Vault list', () => {
 	it('covers the registry entry and reaches search by name and kind only', async () => {
 		await assertCategoryCoverage('vault', async () => (await show()).container);
 		await show();
-		await waitFor(() => expect(searchSource().map((s) => s.title)).toEqual(['Cloudflare', 'HomeLab']));
-		expect(JSON.stringify(searchSource())).not.toContain('10.0.0.251');
+		await waitFor(() => expect(searchSource().map((s) => s.title)).toEqual(['Cloudflare', 'Workshop']));
+		expect(JSON.stringify(searchSource())).not.toContain('192.168.1.20');
 	});
 
 	it('offers the first sign-in when the Vault is empty', async () => {
@@ -130,7 +130,7 @@ describe('Settings > Vault list', () => {
 		render(VaultCollection);
 		expect((await screen.findByRole('alert')).textContent).toContain('Could not load the Vault');
 		await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-		expect(await screen.findByRole('button', { name: /^HomeLab/ })).toBeTruthy();
+		expect(await screen.findByRole('button', { name: /^Workshop/ })).toBeTruthy();
 	});
 });
 
@@ -159,7 +159,7 @@ describe('Settings > Vault is not shown where a secret would be unsafe', () => {
 	it('shows why the worker refused this connection', async () => {
 		api.get.mockRejectedValue({ status: 403, detail: INSECURE_TEXT });
 		expect(await blocked()).toContain('not available on this connection');
-		expect(screen.queryByRole('button', { name: /^HomeLab/ })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Workshop/ })).toBeNull();
 	});
 
 	it('is read-only for a device that is not approved', async () => {
@@ -418,7 +418,7 @@ describe('Settings > Vault editing', () => {
 		await show(machine().id);
 		await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
 		expect(api.delete).not.toHaveBeenCalled();
-		expect(await screen.findByText('Remove HomeLab?')).toBeTruthy();
+		expect(await screen.findByText('Remove Workshop?')).toBeTruthy();
 		entries = [service()];
 		await fireEvent.click(button('Remove'));
 		await waitFor(() => expect(api.delete).toHaveBeenCalledWith(`/vault/entries/${machine().id}`));
