@@ -1314,20 +1314,25 @@ def upgrade_installed_hook(remote: str) -> None:
         source = re.search(version, HOOK_SOURCE.read_text(encoding="utf-8"))
         if not (installed and source and int(installed[1]) < int(source[1])):
             return
-        # Ask the remote itself where its main is. A tracking ref can be
-        # stale, a configured comparison branch, or written by another remote
-        # whose name overlaps this one. ls-remote matches a pattern by its
-        # last path components, so only the exact ref name counts.
-        tips = [fields[0] for fields in map(str.split, git("ls-remote", "--", remote, "refs/heads/main").splitlines())
-                if fields[1:] == ["refs/heads/main"]]
+        # Ask the repository being pushed to where its main is. A tracking ref
+        # can be stale, a configured comparison branch, or written by another
+        # remote whose name overlaps this one.
+        urls = git("remote", "get-url", "--push", "--all", remote).split("\n")
+        if len(urls) != 1:
+            return  # several push destinations: no single main to follow
+        # ls-remote matches a pattern by its last path components, so only the
+        # exact ref name counts. Its separators are a tab and a line feed,
+        # which a ref name cannot contain; other white space it can.
+        tips = [row[0] for row in (line.split("\t") for line in git("ls-remote", "--", urls[0], "refs/heads/main").split("\n"))
+                if row[1:] == ["refs/heads/main"]]
         if not tips:
-            return  # this remote has no main: nothing here to catch up to
+            return  # that repository has no main: nothing there to catch up to
         if git("rev-parse", f"{tips[0]}:.githooks/pre-push") != git("hash-object", "--", str(HOOK_SOURCE)):
             return
         install_hook(target.parent)
     except FileNotFoundError:
         return  # no hook installed here: nothing to upgrade
-    except (OSError, subprocess.CalledProcessError, Failure):
+    except (OSError, UnicodeError, subprocess.CalledProcessError, Failure):
         # Not "run install": this checkout's hook may be one main does not have yet.
         print(f"pre-push: could not check the installed hook against {remote}'s main; the next push tries again.")
         return

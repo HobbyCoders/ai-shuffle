@@ -737,6 +737,8 @@ def test_owner_details_are_checked_in_outgoing_commits_not_the_working_tree(tmp_
     ("v4", True, "v5"),      # main carries a newer hook: the clone catches up
     ("v4", False, "v4"),     # only this branch has it: the shared hook stays
     ("v4", "lookalike", "v4"),  # the remote has no main, only a branch whose name ends like it
+    ("v4", "split lookalike", "v4"),  # nor does a branch name that carries a made-up row
+    ("v4", "pushed elsewhere", "v4"),  # the push goes to a repository that has no main
     ("v5", True, "v5"),      # already current
     ("v6", True, "v6"),      # never a downgrade
     ("foreign", True, "foreign"),  # someone else's hook is left alone
@@ -754,12 +756,20 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     git(tmp_path, "remote", "add", "origin", str(tmp_path))
     on_main = commit(tmp_path)
     git(tmp_path, "checkout", "-q", "-b", "topic")
-    if source_on_main == "lookalike":
-        # ls-remote answers a query for refs/heads/main with this branch too.
-        git(tmp_path, "branch", "archive/refs/heads/main", on_main)
+    if source_on_main in ("lookalike", "split lookalike"):
+        # ls-remote answers a query for refs/heads/main with these branches
+        # too. The second reads as a row of its own when split on any white space.
+        name = ("archive/refs/heads/main" if source_on_main == "lookalike"
+                else f"q {on_main} refs/heads/main /refs/heads/main")
+        git(tmp_path, "update-ref", f"refs/heads/{name}", on_main)
         git(tmp_path, "update-ref", "-d", "refs/heads/main")
     else:
         git(tmp_path, "branch", "-f", "main", on_main)
+    if source_on_main == "pushed elsewhere":
+        # Pushes go to a repository without a main; fetches still see one.
+        pushed = tmp_path.with_name(tmp_path.name + "-pushed")
+        git(tmp_path, "init", "-q", "--bare", str(pushed))
+        git(tmp_path, "remote", "set-url", "--push", "origin", str(pushed))
     if source_on_main is False:
         source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n# changed on this branch\n")
         # A tracking ref that already has the change is not the remote's word.
