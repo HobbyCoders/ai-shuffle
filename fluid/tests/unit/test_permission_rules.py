@@ -182,3 +182,199 @@ def test_absolute_allow_does_not_need_a_same_drive_relative_form(tmp_path, monke
         raise ValueError("Paths are on different drives")
     monkeypatch.setattr("fluid.permissions.rules.os.path.commonpath", different_drives)
     assert rule.matches("Read", {"file_path": str(tmp_path / "file.txt")}, cwd=str(tmp_path))
+
+
+# ─── the spelling the tool opens (#1778) ─────────────────────────────────────
+
+
+def _symlink_or_skip(link, target) -> None:
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+
+
+def _credential_rules():
+    from fluid.config.loader import _sensitive_file_rules
+
+    return _sensitive_file_rules()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_credential_ask_resolves_the_trailing_space_spelling_the_tool_opens(
+    tmp_path, dangling
+) -> None:
+    """``settings `` (trailing space) is a symlink to ``.env``. The stripped
+    spelling ``settings`` is a different, missing file; Read, Edit and Write
+    open ``settings `` and reach ``.env``, so the credential ask must fire. A
+    dangling link is Write's case: it creates ``.env`` through the link."""
+    if not dangling:
+        (tmp_path / ".env").write_text("SECRET=1")
+    _symlink_or_skip(tmp_path / "settings ", tmp_path / ".env")
+    rules = _credential_rules()
+    for tool in ("Read", "Edit", "Write"):
+        for value in ("settings ", str(tmp_path / "settings ")):
+            decision = evaluate_rules(rules, tool, {"file_path": value}, cwd=str(tmp_path))
+            assert decision == "ask", (tool, value)
+
+
+def test_credential_ask_resolves_relative_paths_against_the_session_cwd(
+    tmp_path, monkeypatch
+) -> None:
+    """The tool joins a relative path to the session cwd, not the process cwd."""
+    session, elsewhere = tmp_path / "session", tmp_path / "elsewhere"
+    session.mkdir()
+    elsewhere.mkdir()
+    (session / ".env").write_text("SECRET=1")
+    _symlink_or_skip(session / "settings ", session / ".env")
+    (elsewhere / "settings ").write_text("harmless")
+    monkeypatch.chdir(elsewhere)
+    rules = _credential_rules()
+    assert evaluate_rules(rules, "Read", {"file_path": "settings "}, cwd=str(session)) == "ask"
+    assert evaluate_rules(rules, "Read", {"file_path": "settings "}, cwd=str(elsewhere)) is None
+
+
+def test_symlink_loop_does_not_break_the_rule_check(tmp_path) -> None:
+    _symlink_or_skip(tmp_path / "loop ", tmp_path / "loop ")
+    assert evaluate_rules(_credential_rules(), "Read", {"file_path": "loop "}, cwd=str(tmp_path)) is None
+    allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "**"})
+    # A path that never resolves fails closed: the allow rule does not match.
+    assert not allow.matches("Read", {"file_path": "loop "}, cwd=str(tmp_path))
+    assert not allow.matches("Read", {"file_path": str(tmp_path / "loop ")}, cwd=str(tmp_path))
+    assert not allow.matches("Read", {"file_path": "loop /x"}, cwd=str(tmp_path))
+
+
+def test_credential_ask_follows_a_link_before_dotdot_in_the_cwd(tmp_path) -> None:
+    """The tool joins the cwd as given and resolves afterwards, so in
+    ``work/link/..`` the ``..`` leaves the link's target, not ``work``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    work.mkdir()
+    (checkout / ".env").write_text("SECRET=1")
+    _symlink_or_skip(checkout / "settings ", checkout / ".env")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    cwd = str(work / "link") + os.sep + ".."
+    decision = evaluate_rules(_credential_rules(), "Read", {"file_path": "settings "}, cwd=cwd)
+    assert decision == "ask"
+
+
+@pytest.mark.skipif(os.sep == "\\", reason="a backslash in a file name is POSIX-only")
+def test_allow_rule_ignores_the_real_cwd_relative_form(tmp_path) -> None:
+    """cwd ``work/link/..`` spells ``work`` but is really ``checkout``.
+    ``granted/report `` links to ``checkout/granted\\report``, one file outside
+    ``granted``; measured from ``checkout`` and with ``\\`` read as ``/``, it
+    would pass for ``granted/report``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    (checkout / "granted").mkdir()
+    work.mkdir()
+    (checkout / "granted\\report").write_text("outside granted")
+    _symlink_or_skip(checkout / "granted" / "report ", checkout / "granted\\report")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": "granted/report"})
+    cwd = str(work / "link") + os.sep + ".."
+    assert not rule.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+
+
+@pytest.mark.skipif(os.sep == "\\", reason="a trailing space in a file name is POSIX-only")
+def test_allow_rule_has_no_relative_form_when_the_cwd_is_not_canonical(tmp_path) -> None:
+    """cwd ``work/link/..`` spells ``work`` but is really ``checkout``.
+    ``granted/report `` opens ``checkout/granted/report ``, a link to
+    ``work/granted/report``: relative to ``work`` that reads ``granted/report``,
+    but the rule means ``checkout/granted/report``."""
+    checkout, work = tmp_path / "checkout", tmp_path / "work"
+    (checkout / "subdir").mkdir(parents=True)
+    (checkout / "granted").mkdir()
+    (work / "granted").mkdir(parents=True)
+    (checkout / "granted" / "report").write_text("inside the real cwd")
+    (work / "granted" / "report").write_text("outside the real cwd")
+    _symlink_or_skip(checkout / "granted" / "report ", work / "granted" / "report")
+    _symlink_or_skip(work / "link", checkout / "subdir")
+    cwd = str(work / "link") + os.sep + ".."
+    allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "granted/report"})
+    assert not allow.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+    # Ask and deny keep every form.
+    deny = Rule(tool="Read", decision="deny", input_globs={"file_path": "granted/report"})
+    assert deny.matches("Read", {"file_path": "granted/report "}, cwd=cwd)
+    # A plain cwd keeps ordinary relative allow rules working.
+    assert allow.matches("Read", {"file_path": "granted/report"}, cwd=str(checkout))
+
+
+def test_ask_rule_keeps_the_resolved_path_when_it_cannot_be_reached(
+    tmp_path, monkeypatch
+) -> None:
+    """Ask and deny rules see the best-effort real path even where ``stat``
+    fails (a loop, a directory that lost search permission)."""
+    _symlink_or_skip(tmp_path / "loop ", tmp_path / "loop ")
+    ask = Rule(tool="Read", decision="ask", input_globs={"file_path": str(tmp_path / "loop ")})
+    assert ask.matches("Read", {"file_path": "loop "}, cwd=str(tmp_path))
+
+    (tmp_path / ".env").write_text("SECRET=1")
+    _symlink_or_skip(tmp_path / "settings ", tmp_path / ".env")
+
+    def sealed(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("fluid.permissions.rules.os.stat", sealed)
+    rules = _credential_rules()
+    assert evaluate_rules(rules, "Read", {"file_path": "settings "}, cwd=str(tmp_path)) == "ask"
+    deny = Rule(tool="Read", decision="deny", input_globs={"file_path": "*/.env"})
+    assert deny.matches("Read", {"file_path": "settings "}, cwd=str(tmp_path))
+    allow = Rule(tool="Read", decision="allow", input_globs={"file_path": "**"})
+    assert not allow.matches("Read", {"file_path": "settings "}, cwd=str(tmp_path))
+
+
+def test_relative_ask_rule_sees_the_opened_file_under_a_symlinked_cwd(tmp_path) -> None:
+    """``notes `` (trailing space) links to ``secrets/key``; the session cwd
+    is a symlink to the checkout, so the opened path is only under its target."""
+    checkout = tmp_path / "checkout"
+    (checkout / "secrets").mkdir(parents=True)
+    (checkout / "secrets" / "key").write_text("k")
+    _symlink_or_skip(checkout / "notes ", checkout / "secrets" / "key")
+    _symlink_or_skip(tmp_path / "cwd-link", checkout)
+    rule = Rule(tool="Read", decision="ask", input_globs={"file_path": "secrets/*"})
+    assert rule.matches("Read", {"file_path": "notes "}, cwd=str(tmp_path / "cwd-link"))
+
+
+def test_opened_path_agrees_with_the_tool_resolver(tmp_path, monkeypatch) -> None:
+    """``_opened_path`` must name the file ``_util.resolve`` hands the tool."""
+    from types import SimpleNamespace
+
+    from fluid.permissions.rules import _opened_path
+    from fluid.tools.builtins._util import resolve
+
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "x").write_text("x")
+    _symlink_or_skip(tmp_path / "link", real / "sub")
+    _symlink_or_skip(tmp_path / "cwdlink", real)
+    monkeypatch.chdir(real)
+    cases = [
+        ("x", str(real)),                              # plain cwd
+        ("x", str(tmp_path / "cwdlink")),              # cwd is a symlink
+        ("x", str(tmp_path / "link") + "/.."),         # link then .. in the cwd
+        ("link/../x", str(tmp_path)),                  # link then .. in the value
+        (str(real / "x"), str(tmp_path)),              # absolute value
+        ("~/x", str(real)),                            # ~ is not expanded
+        ("missing ", str(real)),                       # not there yet (Write)
+    ]
+    for value, cwd in cases:
+        assert _opened_path(value, cwd) == str(resolve(value, SimpleNamespace(cwd=cwd))), value
+    # No session cwd: the process cwd, as the tool would see it.
+    assert _opened_path("x", None) == str(resolve("x", SimpleNamespace(cwd=str(real))))
+    assert _opened_path("~/x", str(real)) == str(real / "~" / "x")
+
+
+def test_allow_rule_also_needs_the_exact_spelling_inside(tmp_path) -> None:
+    """``granted/notes `` points outside ``granted``; the stripped spelling
+    ``granted/notes`` does not exist and would resolve inside."""
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    (tmp_path / "outside.txt").write_text("outside")
+    _symlink_or_skip(granted / "notes ", tmp_path / "outside.txt")
+    (granted / "plain ").write_text("inside")
+    rule = Rule(tool="Read", decision="allow", input_globs={"file_path": "granted/**"})
+    cwd = str(tmp_path)
+    assert not rule.matches("Read", {"file_path": "granted/notes "}, cwd=cwd)
+    assert not rule.matches("Read", {"file_path": str(granted / "notes ")}, cwd=cwd)
+    assert rule.matches("Read", {"file_path": "granted/plain "}, cwd=cwd)

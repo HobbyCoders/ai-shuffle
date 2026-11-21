@@ -264,7 +264,7 @@ async def test_native_grep_child_runs_without_cloud_credentials(monkeypatch, tmp
     for name, value in CLOUD_ENV.items():
         monkeypatch.setenv(name, value)
     script = tmp_path / "grep_probe.py"
-    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean.txt:1:clean')\n")
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean.txt\\x001:clean')\n")
     original = asyncio.create_subprocess_exec
     async def launch(*args, **kwargs):
         return await original(sys.executable, str(script), **kwargs)
