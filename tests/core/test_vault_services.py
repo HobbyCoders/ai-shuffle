@@ -642,6 +642,17 @@ async def test_a_password_echoed_in_a_response_header_is_redacted(broker, servic
     broker.revoke("chat", grant["id"])
 
 
+async def test_a_header_is_scanned_as_the_bytes_the_service_sent(broker, service, trust):
+    # A credential of another scheme may be base64 of any text. httpx reads this
+    # header as UTF-8; scanning its text re-encoded as Latin-1 would miss the echo.
+    text = "caf\u00e9-secret-2026"
+    grant = await broker.create("chat", spec(service, secret=base64.b64encode(text.encode()).decode()))
+    service.etag = b'"' + text.encode() + b'"'
+    result = await broker.run("chat", grant["id"], "http", {"method": "GET", "path": "/etag"})
+    assert result["headers"]["etag"] == '"[redacted]"'
+    broker.revoke("chat", grant["id"])
+
+
 def test_a_pair_the_owner_encoded_is_redacted_where_the_service_decodes_it():
     # An owner may paste an already encoded pair as the credential.
     pair = base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
@@ -658,11 +669,13 @@ def test_a_pair_the_owner_encoded_is_redacted_where_the_service_decodes_it():
         "admin:caf\u00e9-secret-2026".encode("latin-1"),  # and as Latin-1
         b"admin:tab\tinside-it",
         b"no-colon-in-this-credential",
+        b"admin:aB3!",                                    # too short to be found in a response
+        b"x" * 129 + b":" + PASSWORD.encode(),
     ],
 )
 def test_a_pair_the_owner_encoded_is_held_to_the_same_rule(pair):
     # Otherwise an encoded pair would be a way to store a password whose echo
-    # has more than one spelling.
+    # has more than one spelling, or one too short to redact.
     encoded = base64.b64encode(pair).decode()
     for credential in (encoded, encoded.rstrip("=") + "*", "not-base64-at-all!"):
         with pytest.raises(AccessDenied) as error:

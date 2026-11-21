@@ -239,11 +239,11 @@ def credential_header(name: str, scheme: str, secret: str, username: str = "") -
             raise AccessDenied(
                 "A username and password sign in with the Authorization header and the Basic scheme."
             )
-        if len(username) > 128 or ":" in username or not _ascii(username):
+        if not _basic_username(username):
             raise AccessDenied(
                 "Enter the service username without a colon, using unaccented letters, digits and symbols."
             )
-        if not isinstance(secret, str) or not 8 <= len(secret) <= 8192 or not _ascii(secret):
+        if not _basic_password(secret):
             raise AccessDenied(
                 "Enter a password of 8 to 8,192 characters, using unaccented letters, digits, symbols and spaces."
             )
@@ -266,22 +266,30 @@ def credential_header(name: str, scheme: str, secret: str, username: str = "") -
         raise AccessDenied(
             "Enter a credential of 8 to 8,192 visible characters without spaces."
         )
-    if scheme.lower() == "basic" and not _ascii_pair(secret):
-        # A pair the owner encoded themselves is held to the rule above.
+    if scheme.lower() == "basic" and not _encoded_pair(secret):
+        # A pair the owner encoded themselves is held to the rules above.
         raise AccessDenied(
-            "A Basic credential is an encoded username and password in unaccented letters, digits "
-            "and symbols. Choose Username and password to enter them instead."
+            "A Basic credential is an encoded username and password: unaccented letters, digits and "
+            "symbols, and a password of at least 8 characters. Choose Username and password to enter them."
         )
     return name, f"{scheme} {secret}" if scheme else secret
 
 
-def _ascii_pair(credential: str) -> bool:
-    """Whether a Basic credential is the base64 form of an ASCII ``username:password``."""
+def _basic_username(value: str) -> bool:
+    return len(value) <= 128 and ":" not in value and _ascii(value)
+
+
+def _basic_password(value: object) -> bool:
+    return isinstance(value, str) and 8 <= len(value) <= 8192 and _ascii(value)
+
+
+def _encoded_pair(credential: str) -> bool:
+    """Whether a Basic credential is the base64 form of a username and password that could be typed."""
     try:
-        pair = base64.b64decode(credential, validate=True).decode("ascii")
+        username, colon, password = base64.b64decode(credential, validate=True).decode("ascii").partition(":")
     except ValueError:
         return False
-    return ":" in pair and _ascii(pair)
+    return bool(colon) and _basic_username(username) and _basic_password(password)
 
 
 def request_url(origin: Origin, path: str) -> str:
@@ -359,19 +367,6 @@ def _needles(secret: str, header_value: str) -> list[str]:
         pass
     # ``redact`` reads one character per byte.
     return sorted((value.encode().decode("latin-1") for value in values if len(value) >= 6), key=len, reverse=True)
-
-
-def _redact_header(value: str, needles: list[str]) -> str:
-    """Redact a response header however the service encoded what it echoes.
-
-    httpx reads header values as UTF-8 when all of them are valid UTF-8 and as
-    Latin-1 otherwise. Scan the bytes it received.
-    """
-    try:
-        charset, data = "latin-1", value.encode("latin-1")
-    except UnicodeEncodeError:
-        charset, data = "utf-8", value.encode()  # Characters outside Latin-1: it was read as UTF-8.
-    return redact(data, needles).decode(charset, "replace")
 
 
 # A response is scanned as characters, one per byte. An escape that holds a
@@ -692,8 +687,10 @@ async def perform(
                     truncated = True
                     break
             status = response.status_code
+            # The bytes the service sent: the charset httpx reads them in is a guess.
+            charset = response.headers.encoding
             returned = {
-                name: response.headers[name]
+                name: b", ".join(value for key, value in response.headers.raw if key.lower() == name.encode())
                 for name in RESPONSE_HEADERS
                 if name in response.headers
             }
@@ -725,7 +722,7 @@ async def perform(
     truncated = truncated or len(kept) > LIMIT
     return {
         "status": status,
-        "headers": {name: _redact_header(value, needles) for name, value in returned.items()},
+        "headers": {name: redact(value, needles).decode(charset, "replace") for name, value in returned.items()},
         "body": data.decode("utf-8", errors="replace"),
         "truncated": truncated,
     }
