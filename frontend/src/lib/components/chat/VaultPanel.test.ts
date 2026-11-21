@@ -702,8 +702,8 @@ describe('editing a saved sign-in of a mirrored chat inline', () => {
   expect(within(row('NAS')).getByRole('form', {name: 'Edit NAS'})).toBeTruthy();
   expect(within(row('NAS')).queryByRole('button', {name: 'Remove NAS'})).toBeNull();
   expect(screen.getByText('Saved sign-ins on Owner PC')).toBeTruthy();
-  // No link to this worker's Settings: these are not its sign-ins.
-  expect(screen.queryByRole('button', {name: /Manage saved sign-ins/})).toBeNull();
+  // This worker's Settings manages them as well: saved sign-ins sync.
+  expect(screen.getByRole('button', {name: 'Manage saved sign-ins in Settings › Vault'})).toBeTruthy();
   expect((form.getByLabelText('Name') as HTMLInputElement).value).toBe('NAS');
   expect((form.getByLabelText('Address') as HTMLInputElement).value).toBe('10.0.0.2');
   expect((form.getByLabelText('Port') as HTMLInputElement).value).toBe('22');

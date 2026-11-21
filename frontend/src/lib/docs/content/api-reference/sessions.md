@@ -795,7 +795,7 @@ Mirrored panels receive change notifications from the owning worker. As a fallba
 
 Service setup does not hold an agent tool open while the owner creates a token. `RequestChatAccess(kind="service")` returns immediately with `status: "awaiting_user"`, `request_id`, `kind` and a preparation `expires_at`. The private card can be reopened for 24 hours on the same running worker. Identical tool retries reuse the request without extending that deadline; cancellation, expiry, ownership change and worker restart invalidate it. Preparation grants no access. When the owner approves or declines the card, the host tells the requesting chat without an owner message: a notice at the next tool boundary of its running turn, or a new turn when it is idle. It names the approved handle (opaque ID, kind, permissions and expiry) or the decline, nothing else. A subagent's card shows in its main chat, so that chat gets the notice instead, naming the request and the subagent but not the handle; the subagent itself is never notified or restarted. Message it to continue. `ChatResources` also lists the handle. While preparation is pending, that tool can return `pending_requests` containing only request IDs, status, kind and expiry, never setup details or tokens.
 
-`ChatResources` also lists this owner's saved sign-ins on this worker as `id`, `kind` and owner-chosen `label` only, never addresses, authentication settings or secrets. Use `RequestChatAccess(kind="machine" or "service", saved_id="...")` without connection hints or plugin sign-in to preselect an owned entry (pass `saved_id` alone). Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named. Unknown or wrong-kind IDs are refused. The owner still reviews and approves the card; a saved entry is not a live grant. The owner snapshot includes `saved_id` on these requests.
+`ChatResources` also lists this owner's saved sign-ins as `id`, `kind` and owner-chosen `label` only, never addresses, authentication settings or secrets. Use `RequestChatAccess(kind="machine" or "service", saved_id="...")` without connection hints or plugin sign-in to preselect an owned entry (pass `saved_id` alone). Blank or known placeholder hints are ignored; other conflicting hints are refused with the field named. Unknown or wrong-kind IDs are refused. The owner still reviews and approves the card; a saved entry is not a live grant. The owner snapshot includes `saved_id` on these requests.
 
 Owners can enter an SSH hostname (up to 253 characters) in the private card. At approval the worker resolves it to exactly one unicast, non-loopback IP, pins that IP for the grant, and verifies the SSH host key as usual. Unresolvable or ambiguous names are refused; later DNS changes cannot redirect a live grant. The owner sees the pinned IP in the grant target. Agent-supplied `suggested_host` hints remain IP literals only.
 
@@ -852,15 +852,17 @@ Forget a saved sign-in and end any grant that uses it. Returns `{"deleted": true
 
 ### PATCH /api/v1/vault/sessions/{session_id}/saved/{connection_id}
 
-Change a saved sign-in from a chat. Same body, rules and result as [PATCH /api/v1/vault/entries/{entry_id}](#patch-apiv1vaultentriesentry_id). The app uses this for a chat that runs on another device, where the sign-in is stored; for a chat on this worker it links to **Settings › Vault** instead.
+Change a saved sign-in from a chat. Same body, rules and result as [PATCH /api/v1/vault/entries/{entry_id}](#patch-apiv1vaultentriesentry_id). The app uses this for a chat that runs on another device; for a chat on this worker it links to **Settings › Vault** instead.
 
 A cancelled, expired, answered, restarted or ownership-invalidated request cannot grant access and returns `409`, including late or duplicate submissions. A grant or action that no longer exists also returns `409`. Correctable connection/input failures return `400`, validation failures return `422`, and worker faults return `500`; retryable errors do not extend preparation. The same grant error statuses are preserved when forwarding between updated workers.
 
-For a session that runs on another device, these endpoints forward to that device over the worker network, and grants, approvals and saved connections stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved sign-in or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
+For a session that runs on another device, these endpoints forward to that device over the worker network, and grants and approvals stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved sign-in or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
 
 ### Saved sign-ins (Settings › Vault)
 
-The owner's saved sign-ins on this worker, managed without a chat open. These endpoints contact nothing and grant nothing: an agent can use a sign-in only through a request the owner approves in a chat. Secrets go in and never come back.
+The owner's saved sign-ins, managed without a chat open. These endpoints contact nothing and grant nothing: an agent can use a sign-in only through a request the owner approves in a chat. Secrets go in and never come back.
+
+In a [worker network](/docs/features/worker-network) the saved sign-ins sync to the owner's other workers, so every worker lists the same ones. They travel encrypted, and each worker stores them under its own encryption key. A change to the address, account or secret of a sign-in, or its removal, made on one worker ends the grants built on that sign-in on the others; a rename does not. A worker that saved sign-ins before they synced adds them to the shared list the first time it starts on a version that syncs them. A sign-in saved separately on two workers is then listed twice, under the same name, until one is removed.
 
 **Auth:** Owner only, over the same connections as the Vault card (see above); other connections get `403`. An API user's sign-ins are never listed or changed here.
 
@@ -870,7 +872,7 @@ Returns `{"entries": [...], "vault_available": true}`. A machine entry has `id`,
 
 ### POST /api/v1/vault/entries
 
-Save a sign-in. The body is the `connection` object of a grant (see [above](#post-apiv1vaultsessionssession_idrequestsrequest_id)) with `kind` `machine` or `service`; folders are not saved. `label` must be unique among the owner's sign-ins; up to 50 are kept. A machine needs a password or a private key (with its optional `passphrase`), not both. Returns `{"id": "..."}`. Invalid input returns `400` or `422` with a message that never quotes what was sent.
+Save a sign-in. The body is the `connection` object of a grant (see [above](#post-apiv1vaultsessionssession_idrequestsrequest_id)) with `kind` `machine` or `service`; folders are not saved. `label` must be unique among the owner's sign-ins, and a new one is refused while 50 or more are saved. A machine needs a password or a private key (with its optional `passphrase`), not both. Returns `{"id": "..."}`. Invalid input returns `400` or `422` with a message that never quotes what was sent.
 
 ### PATCH /api/v1/vault/entries/{entry_id}
 

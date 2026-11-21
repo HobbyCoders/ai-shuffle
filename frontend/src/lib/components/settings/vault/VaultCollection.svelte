@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * Settings > Vault: the owner's saved sign-ins on this worker (SSH machines
-	 * and web services). The agent never sees a password, key or token, and can use
+	 * Settings > Vault: the owner's saved sign-ins (SSH machines and web
+	 * services), the same list on every worker. The agent never sees a password, key or token, and can use
 	 * a sign-in only after the owner approves a request for it. Stored secrets never come back
 	 * to this page: a blank secret keeps the stored one.
 	 */
@@ -116,7 +116,7 @@
 			{/if}
 			{#if model.loaded && !model.blocked && !model.forbidden}
 				<p class="st-note">
-					Encrypted on this worker. An agent can use a sign-in only after you approve a request for it.
+					Encrypted, and synced to your other workers. An agent can use a sign-in only after you approve a request for it.
 				</p>
 			{/if}
 		</div>

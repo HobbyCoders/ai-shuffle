@@ -272,6 +272,17 @@ def init_encryption_and_sessions() -> None:
     """Phase 2: Initialize encryption key and manage sessions."""
     if encryption.initialize_server_key(database):
         logger.info("Credential storage initialized from private server key custody")
+        try:
+            # Saved Vault sign-ins used to stay on the worker that saved them.
+            # Sync starts after this phase, so it sees them already moved.
+            from app.core import vault_store
+            moved = vault_store.adopt_local_entries()
+            if moved:
+                logger.info("Moved %d saved Vault sign-in(s) into the Vault that syncs across workers", moved)
+        except Exception as exc:  # noqa: BLE001 - never block boot; the next start tries again
+            # The type only: a storage error can quote the row it failed on.
+            logger.warning("Could not move this worker's saved Vault sign-ins into the synced Vault: %s",
+                           type(exc).__name__)
     else:
         # Keep the local UI available for an honest recovery status. Auth and
         # secret writers must fail closed; sign-in cannot unlock server custody.

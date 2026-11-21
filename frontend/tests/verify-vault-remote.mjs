@@ -121,6 +121,7 @@ async function harness(viewport, touch) {
 	await page.waitForTimeout(300);
 	check(await dialog.getByText('Saved sign-ins on Owner PC').isVisible(), 'saved sign-ins are listed for the owning device');
 	check(await dialog.getByText(/Encrypted on Owner PC/).isVisible(), 'saved sign-ins say where they are stored');
+	check(await dialog.getByRole('button', { name: /Manage saved sign-ins in Settings/ }).isVisible(), 'the panel also links to this worker\'s Settings, which syncs');
 	check(!(await overflow()).page && !(await overflow()).dialog, 'the open panel fits the viewport', await overflow());
 	await shot('panel');
 	await tap(dialog.getByRole('button', { name: 'Revoke' }));

@@ -534,6 +534,17 @@ def _on_applied(touched) -> None:
         if loop and not loop.is_closed():
             from app.network.session_active import dismiss_replicated
             asyncio.run_coroutine_threadsafe(dismiss_replicated(settled_ids), loop)
+    from app.core import vault_store
+    vault_keys = [r for c, r, _ in touched if c == "system_settings" and r.startswith(vault_store.SYNCED_PREFIXES)]
+    if vault_keys:
+        # Saved Vault sign-ins added, changed or removed on another worker:
+        # grants built here on one that changed end, and open Vault lists refresh.
+        try:
+            from app.core import vault_access
+            vault_access.saved_changed_elsewhere(vault_keys)
+        except Exception:  # noqa: BLE001
+            logger.warning("Applying Vault changes from another worker failed", exc_info=True)
+        resources.add("vault")
     memory_ids = [r for c, r, _ in touched if c == "memory"]
     plugin_ids = [r for c, r, _ in touched if c == "plugins_desired"]
     if memory_ids:

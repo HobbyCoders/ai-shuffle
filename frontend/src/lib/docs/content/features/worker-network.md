@@ -29,7 +29,7 @@ Invites are meant for your home network or a VPN such as Tailscale. Workers sign
 
 ## What syncs
 
-**Shared:** preferences, settings, provider keys and accounts, agents, templates, tags, permission rules, hooks, MCP servers, webhooks, projects, notes, plugins, memory and skills, automations, connectors, and your chats.
+**Shared:** preferences, settings, provider keys and accounts, saved Vault sign-ins, agents, templates, tags, permission rules, hooks, MCP servers, webhooks, projects, notes, plugins, memory and skills, automations, connectors, and your chats.
 
 **Kept on each worker:** folders and project checkouts, ports and addresses, logs, usage numbers, and the work currently running there.
 
@@ -76,7 +76,7 @@ ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer ref
 
 Remove a worker, phone or browser from **Settings → Devices**. A removed worker stops receiving your settings. Its chats stay on your other workers as read-only copies, and **Fork here** continues them.
 
-If you remove a worker you no longer trust, also change the provider keys it had, in **Settings → Providers**.
+If you remove a worker you no longer trust, also change the provider keys it had, in **Settings → Providers**, and the passwords, keys and tokens of the sign-ins saved in **Settings → Vault**. A removed worker keeps what it had already received.
 
 ## Device-token upgrade protection
 

@@ -211,7 +211,7 @@ async def test_viewer_card_grant_approval_and_revocation_run_on_the_owner(pair, 
     assert set(network.control_paths()) == {"/api/v1/network/peer/control/chat-access"}
     assert [base for base, _, body in network.seen if PASSWORD.encode() in body] == [A_URL]
     assert not [row for row in pair.b.sql("SELECT key FROM system_settings")
-                if row["key"].startswith("chat_connection:")]
+                if row["key"].startswith(("vault_entry:", "vault_pin:", "chat_connection:"))]
 
 
 async def test_resumable_service_setup_routes_to_owner_with_retryable_and_terminal_statuses(pair, service, trust, monkeypatch):
@@ -247,7 +247,7 @@ async def test_resumable_service_setup_routes_to_owner_with_retryable_and_termin
     assert [base for base, _, body in network.seen if PASSWORD.encode() in body] == [A_URL, A_URL, A_URL]
     assert service.requests == []
     assert not [row for row in pair.b.sql("SELECT key FROM system_settings")
-                if row["key"].startswith("chat_connection:")]
+                if row["key"].startswith(("vault_entry:", "vault_pin:", "chat_connection:"))]
 
 
 async def test_private_inputs_never_cross_plain_http_but_answers_do(pair, ssh_target, monkeypatch):
