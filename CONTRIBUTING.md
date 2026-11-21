@@ -16,7 +16,7 @@ Contributions use the [Developer Certificate of Origin 1.1](https://developercer
 
 Tests run on GitHub CI. Every pull request, including drafts and fork contributions, runs the hosted PR checks in parallel: the full Linux suites and native Windows desktop tests. Desktop packaging, preview installers and macOS checks remain manual; see [where tests run](docs/ci/pr-checks.md) for the exact matrix. Merge requires green CI and review.
 
-Once per clone, run `python scripts/local_ci.py install` to install the pre-push hook. The hook is the local push gate: it runs the offline secret scan on every outgoing commit and on the working tree, plus the update-reach check for branch pushes. It runs no test suites. It selects a Python with pytest and PyYAML; pass `--python PATH` if you need to choose one. Worktrees share that hook.
+Once per clone, run `python scripts/local_ci.py install` to install the pre-push hook. The hook is the local push gate: it runs the offline secret scan on every outgoing commit and on the working tree, plus the update-reach check for branch pushes. The scan of outgoing commits also refuses the maintainer's private setup details (machine names, addresses, local paths). It runs no test suites. It selects a Python with pytest and PyYAML; pass `--python PATH` if you need to choose one. Worktrees share that hook.
 
 While working, run only the tests covering your change:
 

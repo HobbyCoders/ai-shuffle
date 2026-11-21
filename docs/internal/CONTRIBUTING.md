@@ -205,7 +205,10 @@ python scripts/local_ci.py install   # once per clone; worktrees share the hook
 
 The hook is the local push gate. It runs the offline secret scan on every
 outgoing commit of every pushed ref, with no cache, then for branch pushes a
-whole-working-tree scan and the live update-reach check. It runs no test
+whole-working-tree scan and the live update-reach check. The scan of outgoing
+commits also refuses the maintainer's private setup details (machine names,
+addresses, local paths) in files, file names, commit messages and author
+identities; see [owner details](../ci/pr-checks.md#owner-details). It runs no test
 suites and consults no pass record. Do not bypass the hook with `--no-verify`.
 Iterate on any failures reported by PR CI before merge. `fast` (affected tests),
 `check`, `full` and `--attest` stay available as explicit commands with their

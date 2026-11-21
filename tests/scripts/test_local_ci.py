@@ -851,6 +851,45 @@ def test_install_refuses_to_overwrite_two_foreign_hooks(tmp_path):
         local_ci.install_hook(tmp_path)
     assert (tmp_path / "pre-push").read_text(encoding="utf-8") == "theirs"
 
+
+def test_a_failed_install_leaves_an_earlier_hook_running(tmp_path, monkeypatch):
+    """The earlier hook is copied aside, not moved: it stays the active one
+    until the new hook is in place, and a retry finishes the install."""
+    theirs = "#!/bin/sh\necho theirs\n"
+    (tmp_path / "pre-push").write_text(theirs, encoding="utf-8")
+    replace = Path.replace
+
+    def refuse_the_swap(self, target):
+        if Path(target).name == "pre-push":
+            raise PermissionError("in use")
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refuse_the_swap)
+    with pytest.raises(PermissionError):
+        local_ci.install_hook(tmp_path)
+    assert (tmp_path / "pre-push").read_text(encoding="utf-8") == theirs
+    monkeypatch.setattr(Path, "replace", replace)
+    local_ci.install_hook(tmp_path)
+    assert local_ci.HOOK_MARKER in (tmp_path / "pre-push").read_text(encoding="utf-8")
+    assert (tmp_path / "pre-push.user").read_text(encoding="utf-8") == theirs
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["pre-push", "pre-push.user"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs a privilege on Windows")
+def test_install_keeps_an_earlier_hook_that_is_a_link_as_a_link(tmp_path):
+    """A hook linked to a shared script must keep following that script."""
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    shared = tmp_path / "shared-policy.sh"
+    shared.write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
+    (hooks / "pre-push").symlink_to(shared)
+    local_ci.install_hook(hooks)
+    assert os.readlink(hooks / "pre-push.user") == str(shared)
+    assert not (hooks / "pre-push").is_symlink()
+    assert local_ci.HOOK_MARKER in (hooks / "pre-push").read_text(encoding="utf-8")
+    assert shared.read_text(encoding="utf-8") == "#!/bin/sh\necho theirs\n"
+
+
 @pytest.mark.parametrize("state,labels,gh_error,expected,note", [
     (None, [], "no pull requests found for branch", 0, "no PR exists"),
     (True, [], "", 0, "PR is a draft"),

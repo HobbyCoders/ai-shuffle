@@ -304,6 +304,16 @@ function isTurnWork(msg: ChatMessage): boolean {
 	return msg.role === 'assistant' || msg.type === 'tool_use' || msg.type === 'subagent';
 }
 
+/**
+ * Compaction cards the turn has worked past: they fold with the work around
+ * them, live and settled. One with no work after it yet (still the newest
+ * event, or an idle or manual /compact after the answer) keeps its row.
+ */
+function midTurnCompactions<T extends { message: ChatMessage }>(response: readonly T[]): Set<T> {
+	const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
+	return new Set(response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message)));
+}
+
 /** Dedicated/decision-bearing tools retain their own presentation. */
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
@@ -341,8 +351,8 @@ function isRoutineTool(msg: ChatMessage, gallery = false, mediaShown = false): b
  * card, a decision-bearing tool (questions, todos, Task/Agent, swarm), or a
  * system notice that is not routine bookkeeping. Assistant mode keeps the same
  * rows inline. A compaction card counts too: one trailing the answer keeps its
- * row, and a mid-turn one is still folded by the settled turn's
- * `hiddenWhenCollapsed`.
+ * row, while a mid-turn one still folds with its work (`midTurnCompactions`)
+ * and never ends a live run.
  */
 export function isProtectedRow(msg: ChatMessage): boolean {
 	if (agentDelivery(msg)) return false;
@@ -1163,8 +1173,13 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// turn reads as prose between folds; only the work after the latest prose
 	// stays flat. A failed tool is routine work: it folds with its run and the
 	// run's summary counts it ("…, 1 failed").
+	// A compaction card is part of the work around it, as in the settled turn:
+	// it never cuts a run in two, and once the turn has worked past it, it folds
+	// with that run. Until then it stays on screen as the newest thing that
+	// happened.
+	const compactedMidTurn = midTurnCompactions(response);
 	const endsRun = (entry: Positioned) =>
-		isProtectedRow(entry.message) ||
+		(isProtectedRow(entry.message) && !isCompactionCard(entry.message)) ||
 		asking.has(entry) ||
 		entry === latest ||
 		(isAssistantText(entry.message) && !entry.message.streaming && (
@@ -1177,6 +1192,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		!terminal.has(entry) && !isTaskWake(entry.message) && (
 			isCompletedRoutineWork(entry.message) ||
 			isGroupableSystem(entry.message) ||
+			compactedMidTurn.has(entry) ||
 			entry.message.type === 'tool_result' ||
 			(isAssistantText(entry.message) && !entry.message.streaming)
 		);
@@ -1640,10 +1656,7 @@ export function buildTranscriptModel(
 		const askingProse = askingLeadIns(response);
 		// A compaction card the turn worked past is mid-turn; one trailing the
 		// answer (an idle or manual /compact) keeps its own row.
-		const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
-		const midTurnCompactions = new Set(
-			response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
-		);
+		const compactedMidTurn = midTurnCompactions(response);
 		const foldsAsProse = (entry: Positioned) =>
 			isAssistantText(entry.message) &&
 			!entry.message.streaming &&
@@ -1662,7 +1675,7 @@ export function buildTranscriptModel(
 			!isSteer(entry) && (
 				isCompletedRoutineWork(entry.message, galleryEntries.has(entry), media.get(entry)?.shown) ||
 				isGroupableSystem(entry.message) ||
-				midTurnCompactions.has(entry) ||
+				compactedMidTurn.has(entry) ||
 				entry.message.type === 'tool_result' ||
 				foldsAsProse(entry)
 			);
