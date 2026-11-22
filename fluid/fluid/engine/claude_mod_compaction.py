@@ -1202,7 +1202,10 @@ def _fit_pinned(
     each back) in this order until the answer fits: the earlier pinned
     request's, then the newest request's, oldest first. The newest
     request's first row (the instruction or attachment set it opened with)
-    stays unless it alone outweighs half the target. Edits
+    stays unless it alone outweighs half the target. A tool group leaves
+    whole or stays whole: mid-turn, the newest call and its result are
+    Claude Code's rows before the store has the result, and archiving one
+    without the other is an answer the mod refuses. Edits
     ``out``/``covers``/``shrunk``/``dropped`` in place.
     """
     total = _row_tokens(out)
@@ -1213,22 +1216,36 @@ def _fit_pinned(
         def owner(i: int) -> int | None:
             return _owner(requests, position_of[id(out[i])])
 
+        unit_of = {i: (i,) for i in range(len(out))}
+        for start, end in _group_spans(out):
+            for i in range(start, end):
+                unit_of[i] = tuple(range(start, end))
         earlier = [i for i in pinned if owner(i) != newest]
         current = [i for i in pinned if owner(i) == newest]
-        order = earlier + current[1:]
+        held = set(unit_of[current[0]]) if current else set()
         leave: set[int] = set()
-        for i in order:
+
+        def try_leave(i: int) -> int:
+            """Archive ``i``'s whole unit when every row of it may leave."""
+            members = unit_of[i]
+            if leave.issuperset(members) or held & set(members) or not all(
+                    id(out[k]) in position_of for k in members):
+                return 0
+            leave.update(members)
+            return _row_tokens([out[k] for k in members])
+
+        for i in earlier + current[1:]:
             if total <= target:
                 break
-            leave.add(i)
-            total -= _row_tokens([out[i]])
+            total -= try_leave(i)
         # A row that alone outweighs half the answer cannot be the work in
         # hand at this size: it leaves too, largest first, recallable.
-        for i in sorted(set(pinned) - leave, key=lambda i: -_row_tokens([out[i]])):
-            if total <= target or _row_tokens([out[i]]) <= target // 2:
+        held = set()
+        units = {unit_of[i] for i in pinned if i not in leave}
+        for members in sorted(units, key=lambda m: -_row_tokens([out[k] for k in m])):
+            if total <= target or _row_tokens([out[k] for k in members]) <= target // 2:
                 break
-            leave.add(i)
-            total -= _row_tokens([out[i]])
+            total -= try_leave(members[0])
         if leave:
             dropped.extend(out[i] for i in sorted(leave))
             keep = [i for i in range(len(out)) if i not in leave]
