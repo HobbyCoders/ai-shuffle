@@ -44,13 +44,13 @@ ANNOUNCED = [
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
-    from app.core import cli_tool_surface, guidance_surface
+    from app.core import cli_tool_surface
 
     home = tmp_path / "home"
     home.mkdir()
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
+    monkeypatch.setenv("FLUID_GUIDANCE_HOME", str(home))
     # The CLI carries its own Glob/Grep: no bundled copies, on any OS.
     monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
     cli_tool_surface.reset_cli_tools()

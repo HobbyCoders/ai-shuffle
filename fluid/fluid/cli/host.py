@@ -851,6 +851,7 @@ class CliHost:
         worker.worker_session_id = session_id
 
         body = (definition.body.strip() if definition is not None else "") or GENERIC_SUBAGENT_PROMPT
+        from fluid.cli.config import _session_model
         from fluid.codemode.skills import DEFAULT_SKILLS_ROOT
 
         compiled = compile_prompt(PromptInputs(
@@ -871,6 +872,10 @@ class CliHost:
                 else None
             ),
             setting_sources=self.config.setting_sources,
+            # The worker's own model picks its family's behaviour rules: its
+            # definition's, else the one build_engine gives it below.
+            model=(definition.model if definition is not None and definition.model
+                   else _session_model(self.config, self.provider_name)),
         ))
 
         registry = ToolRegistry()

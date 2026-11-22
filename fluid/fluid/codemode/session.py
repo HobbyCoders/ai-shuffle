@@ -41,7 +41,9 @@ from collections.abc import Callable
 from typing import Any
 
 from fluid.codemode.bridge import HostBridge
-from fluid.codemode.journal import FrictionDetector, append_friction, strip_reminders
+from fluid.codemode.journal import (
+    FrictionDetector, append_friction, conversation_entry, notify_learner,
+)
 from fluid.codemode.kernel import HostReply, current_host_call_salvage
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
@@ -826,7 +828,7 @@ class CodeModeSession:
             except Exception:
                 pass
 
-    def record_event(self, kind: str, text: str) -> None:
+    def record_event(self, kind: str, text: str, model: str | None = None) -> None:
         """Journal a conversation event — the episodic half of the journal.
 
         ``kind`` is ``"user"`` (the prompt that started a turn) or
@@ -835,24 +837,21 @@ class CodeModeSession:
         ran and whether the user accepted it. No-op without a store; never
         raises (called from the engine's turn path).
         """
-        if kind == "user":
-            # The prompt carries the app's memory snapshot and the engine's
-            # reminders; journaling them made learner evidence an echo of
-            # facts that are already saved.
-            text = strip_reminders(text)
-        if self._skills is None or not (text or "").strip():
+        # The prompt carries the app's memory snapshot and the engine's
+        # reminders; conversation_entry strips them so learner evidence is
+        # not an echo of facts that are already saved.
+        if self._skills is None:
+            return
+        entry = conversation_entry(kind, text, _JOURNAL_EVENT_CAP, model)
+        if entry is None:
             return
         try:
-            self._skills.journal_append({"kind": kind, "text": text[:_JOURNAL_EVENT_CAP]})
+            self._skills.journal_append(entry)
         except Exception:
             pass
-        # A finished turn is a natural synthesis boundary; user events just
-        # accumulate until then.
-        if kind == "assistant" and self._synthesizer is not None:
-            try:
-                self._synthesizer.kick()
-            except Exception:
-                pass
+        # A finished turn is the synthesis boundary; a frustrated user
+        # message raises urgency for the pass that turn's reply triggers.
+        notify_learner(self._synthesizer, entry)
 
     async def aclose(self) -> None:
         if self._synthesizer is not None:

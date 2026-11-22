@@ -20,7 +20,8 @@ import {
 	Server,
 	ScrollText,
 	Gauge,
-	Brain
+	Brain,
+	GraduationCap
 } from 'lucide-svelte';
 import { PAGE_TYPES, type CategoryGroup, type CategoryId, type PageType } from './types';
 
@@ -68,6 +69,7 @@ const ROWS: CategoryRow[] = [
 	// area (profiles). This page is the instructions every agent shares.
 	{ id: 'agents', label: 'Agent instructions', icon: BotMessageSquare, group: 'agents' },
 	{ id: 'memory', label: 'Memory', icon: Brain, group: 'agents' },
+	{ id: 'learning', label: 'Learned behaviour', icon: GraduationCap, group: 'agents' },
 	{ id: 'plugins', label: 'Plugins', icon: Puzzle, group: 'agents' },
 	{ id: 'mcp', label: 'MCP servers', icon: Cable, group: 'agents' },
 	{ id: 'hooks', label: 'Hooks', icon: Webhook, group: 'agents' },

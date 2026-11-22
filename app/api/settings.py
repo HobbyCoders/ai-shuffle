@@ -716,6 +716,7 @@ class OwnerPolicyUpdate(BaseModel):
     network_peer_terminals: Optional[bool] = None
     session_expire_days: Optional[int] = None
     learner_daily_calls: Optional[int] = None
+    learner_enabled: Optional[bool] = None
 
 
 @router.get("/owner-policy")

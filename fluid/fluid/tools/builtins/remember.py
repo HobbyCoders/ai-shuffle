@@ -41,7 +41,6 @@ SPEC = ToolSpec(
         "restore": {"type": "boolean"},
         "replaces": {"type": "array", "items": {"type": "string"},
                      "description": "IDs this fact supersedes (archived, not deleted)."},
-        "proposal": {"type": "string", "description": "Topic of the proposal this saves; closes it."},
     }, "required": ["text"]},
     requires_extra=("memory_store",),
 )
@@ -66,11 +65,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     replaces = input.get("replaces") or []
     if not isinstance(replaces, list):
         return ToolOutcome(text="replaces must be a list of memory IDs", is_error=True)
-    from fluid.codemode.preferences import valid_proposal
-    proposal = valid_proposal(input.get("proposal"))
-    if proposal is None:
-        return ToolOutcome(text="Not saved: proposal must be the topic of a [proposed, not saved; "
-                                "<topic>] memory line.", is_error=True)
+    from fluid.codemode.behavior import is_rule_key
+    if is_rule_key(input.get("key")) and not user_requested:
+        # A behaviour-rule key renders as an instruction in every session;
+        # only the owner (or the learner, from the owner's own words) adds one.
+        return ToolOutcome(text="Not saved: a behavior.* key is a learned behaviour rule and "
+                                "needs user_requested=true (the owner asked for it).",
+                           is_error=True)
     always = input.get("always")
     if always is not None and type(always) is not bool:
         return ToolOutcome(text="always must be true or false", is_error=True)
@@ -100,9 +101,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except Exception:  # noqa: BLE001 — a status read never fails a committed save
         stale = ""
     if stale:
-        # _close sees the same fact is not current and leaves the proposal open.
-        return ToolOutcome(text=f"Not saved as current: {stale}" + _receipt_notes(receipt)
-                           + await _close(store, proposal, saved, ctx), is_error=True)
+        return ToolOutcome(text=f"Not saved as current: {stale}" + _receipt_notes(receipt),
+                           is_error=True)
     kind = "kept until the user changes it" if saved.protected else (
         "agent-saved; renewed when recalled" if saved.durable else "learned")
     if saved.always:
@@ -112,27 +112,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         "Committed locally and available to new sessions now. Worker replication "
         "is asynchronous; this receipt does not confirm another worker received it."
     )
-    return ToolOutcome(text=text + _receipt_notes(receipt) + await _close(store, proposal, saved, ctx))
-
-
-async def _close(store: Any, proposal: str, saved: Any, ctx: ToolCtx) -> str:
-    """Close the named learner proposal after a committed save. Never fails
-    or undoes the save: a failure is reported in the receipt."""
-    if not proposal:
-        return ""
-    from fluid.codemode.preferences import close_proposal
-    from fluid.codemode.skills import project_key_for
-    project = ctx.extra.get("memory_project") or project_key_for(ctx.cwd)
-    try:
-        stale = await asyncio.to_thread(_not_current, store, saved)
-        if stale:
-            return (f"\nLearner proposal '{proposal}' stays open: {stale}. To apply the rule, "
-                    "Recall the current fact and correct it (memory_id, expected_revision) "
-                    f"with proposal='{proposal}'.")
-        return "\n" + await asyncio.to_thread(close_proposal, store, proposal, project, how="saved")
-    except Exception as exc:  # noqa: BLE001 — the save above already committed
-        return (f"\nThe save stands, but learner proposal '{proposal}' was not closed ({exc}); "
-                f"close it with Forget, proposal='{proposal}', confirm=true.")
+    return ToolOutcome(text=text + _receipt_notes(receipt))
 
 
 def _status(store: Any, saved: Any) -> tuple[str, str | None, Any]:
@@ -149,15 +129,6 @@ def _status(store: Any, saved: Any) -> tuple[str, str | None, Any]:
     if saved.id not in live:
         return "archived", None, None
     return ("conflicted" if entry.conflicted else ""), None, None
-
-
-def _not_current(store: Any, saved: Any) -> str:
-    """Why the fact a save returned is not a current rule ('' when it is).
-    Storage may return an archived or replaced match without reviving it."""
-    state, successor, _ = _status(store, saved)
-    return {"replaced": f"[{saved.id}] was replaced by [{successor}]",
-            "archived": f"[{saved.id}] is archived, not current",
-            "conflicted": f"[{saved.id}] is conflicted"}.get(state, "")
 
 
 def _not_made_current(store: Any, saved: Any) -> str:

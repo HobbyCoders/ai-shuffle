@@ -96,6 +96,7 @@ describe('SettingsShell index', () => {
 			'Usage',
 			'Agent instructions',
 			'Memory',
+			'Learned behaviour',
 			'Plugins',
 			'MCP servers',
 			'Hooks',

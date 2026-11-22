@@ -296,6 +296,51 @@ class FrictionDetector:
         }
 
 
+def conversation_entry(kind: str, text: str, cap: int,
+                       model: str | None = None) -> dict[str, Any] | None:
+    """The journal line for one conversation event, or None when empty.
+
+    A ``user`` message loses the app's reminders (they are echoes of saved
+    facts) and is checked for frustration (behavior.frustration_signal): a
+    hit is stamped ``frustration`` so the learner reads the turn as a
+    correction. ``model`` (the model the chat was talking to) is stamped on
+    a ``user`` entry: a behaviour rule for one model family must come from a
+    message to that family, and several chats share one journal."""
+    if kind == "user":
+        text = strip_reminders(text)
+    if not (text or "").strip():
+        return None
+    entry: dict[str, Any] = {"kind": kind, "text": text[:cap]}
+    if kind == "user" and model:
+        entry["model"] = str(model)[:80]
+    if kind == "user":
+        from fluid.codemode.behavior import frustration_signal
+        try:
+            signal = frustration_signal(text)
+        except Exception:  # noqa: BLE001 — a detector bug never drops the message
+            signal = None
+        if signal:
+            entry["frustration"] = signal
+    return entry
+
+
+def notify_learner(synthesizer: Any, entry: dict[str, Any]) -> None:
+    """Wake the learner after a conversation event. Never raises.
+
+    A finished turn (``assistant``) is the normal synthesis boundary. A
+    frustrated user message asks for an early pass, but only once the reply
+    it reacts to is in the journal: the next ``assistant`` event kicks."""
+    if synthesizer is None:
+        return
+    try:
+        if entry.get("frustration"):
+            synthesizer.note_frustration()
+        if entry.get("kind") == "assistant":
+            synthesizer.kick()
+    except Exception:
+        pass
+
+
 def append_friction(
     skills: SkillStore | None,
     entries: list[dict[str, Any]],
@@ -339,21 +384,17 @@ class ToolJournal:
         except Exception:
             pass
 
-    def record_event(self, kind: str, text: str) -> None:
-        """Journal a conversation event (``user`` prompt / ``assistant`` reply)."""
-        if kind == "user":
-            text = strip_reminders(text)
-        if not (text or "").strip():
+    def record_event(self, kind: str, text: str, model: str | None = None) -> None:
+        """Journal a conversation event (``user`` prompt / ``assistant`` reply).
+        ``model`` is the model the chat is talking to (see conversation_entry)."""
+        entry = conversation_entry(kind, text, _EVENT_CAP, model)
+        if entry is None:
             return
         try:
-            self._skills.journal_append({"kind": kind, "text": text[:_EVENT_CAP]})
+            self._skills.journal_append(entry)
         except Exception:
             pass
-        if kind == "assistant" and self._synthesizer is not None:
-            try:
-                self._synthesizer.kick()
-            except Exception:
-                pass
+        notify_learner(self._synthesizer, entry)
 
     def record_tool(
         self, name: str, input: dict[str, Any], output: str, is_error: bool

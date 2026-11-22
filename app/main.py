@@ -741,9 +741,10 @@ app.include_router(generation_choices_api.router)
 app.include_router(project_agents.router)
 app.include_router(project_plugins.router)
 app.include_router(project_memory.router)
-from app.api import learned_guidance, memories
+from app.api import memories
 app.include_router(memories.router)
-app.include_router(learned_guidance.router)
+from app.api import learner
+app.include_router(learner.router)
 app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)

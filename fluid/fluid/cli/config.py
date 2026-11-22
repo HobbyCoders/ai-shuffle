@@ -42,6 +42,7 @@ def resolved_prompt(
     provider_name: str | None = None,
     guidance_home: Path | None = None,
     wired: frozenset[str] | None = None,
+    model: str | None = None,
 ):
     """CLI prompt assembly, delegated to the shared compiler.
 
@@ -110,8 +111,35 @@ def resolved_prompt(
                 else None
             ),
             setting_sources=config.setting_sources,
+            # ``model`` (a /model switch) else the run's: picks the
+            # behaviour rules for that model's family.
+            model=model or _session_model(config, provider_name),
         )
     )
+
+
+def refresh_rules_for_model(engine: Any, previous: str | None, model: str) -> bool:
+    """After a /model switch to another model family, recompile the native
+    engine's system prompt so it carries that family's behaviour rules (the
+    learned rules are rendered per family). Same family, the delegated leg
+    (its CLI was spawned with its prompt), or an engine not built by
+    :func:`make_engine`: nothing changes. True when the prompt was rebuilt."""
+    from fluid.codemode.behavior import family_for
+
+    recompile = getattr(engine, "_cli_recompile", None)
+    if recompile is None or family_for(previous) == family_for(model):
+        return False
+    compiled = recompile(model)
+    engine.system, engine.system_sections = compiled.text, compiled
+    return True
+
+
+def _session_model(config: HarnessConfig, provider_name: str | None) -> str:
+    """The model this run uses, as the base prompt resolves it."""
+    try:
+        return config.model_for(provider_name)
+    except KeyError:
+        return config.default_model
 
 
 def resolved_system(
@@ -167,11 +195,11 @@ def make_engine(
     unavailable = code_mode_unavailable(config, provider_name)
     if unavailable:
         print(f"fluid: {unavailable}", file=sys.stderr)
+    wired = wired_capabilities(
+        config, store, provider_name=provider_name, background_host=background_host,
+    )
     compiled = resolved_prompt(
-        config, extra_system=extra_system, provider_name=provider_name,
-        wired=wired_capabilities(
-            config, store, provider_name=provider_name, background_host=background_host,
-        ),
+        config, extra_system=extra_system, provider_name=provider_name, wired=wired,
     )
     engine = build_engine(
         config,
@@ -185,6 +213,14 @@ def make_engine(
         registry=registry,
         claude_cmd=claude_cmd,
     )
+    from fluid.cli.prompt import is_delegated_provider
+
+    if not is_delegated_provider(config, provider_name):
+        # /model may switch families mid-session (refresh_rules_for_model).
+        engine._cli_recompile = lambda model: resolved_prompt(
+            config, extra_system=extra_system, provider_name=provider_name,
+            wired=wired, model=model,
+        )
     if background_host:
         from fluid.cli.host import CliHost
 

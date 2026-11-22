@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * Settings > Memory: everything agents have saved to remember, with search
-	 * and filters, plus two fixed items: Learned guidance and Memory health.
+	 * and filters, plus one fixed item: Memory health. Learned behaviour rules
+	 * have their own page (Settings > Learned behaviour).
 	 * Each memory is edited with an explicit Save. Unsaved edits are kept when
 	 * another row or page opens, and a tab close asks first.
 	 */
@@ -15,7 +16,6 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import MemoryDetail from './MemoryDetail.svelte';
-	import LearnedGuidance from './LearnedGuidance.svelte';
 	import MemoryHealthDetail from './MemoryHealthDetail.svelte';
 	import { memorySummary } from '../pages/memory-health';
 	import { memoryHealth } from '$lib/stores/memory-health.svelte';
@@ -32,7 +32,6 @@
 	import '../pages/editors/editors.css';
 
 	const CATEGORY = 'memory' as const;
-	const GUIDANCE = 'learned-guidance';
 	const HEALTH = MEMORY_HEALTH_ITEM;
 	const model = acquireMemoryModel();
 
@@ -113,7 +112,6 @@
 	{/snippet}
 	{#snippet list()}
 		<div class="mem-list" data-setting-anchor="memory.list">
-			<ListItem id={GUIDANCE} name="Learned guidance" category={CATEGORY} summary="Saved model instructions on this worker" />
 			<ListItem id={HEALTH} name="Memory health" category={CATEGORY} summary={healthSummary} status={healthTone} />
 			{#if model.loadError}
 				<InlineBanner tone="warn">
@@ -159,9 +157,7 @@
 		</div>
 	{/snippet}
 	{#snippet detail()}
-		{#if selected === GUIDANCE}
-			<LearnedGuidance />
-		{:else if selected === HEALTH}
+		{#if selected === HEALTH}
 			<MemoryHealthDetail />
 		{:else if selected && known}
 			{#key selected}

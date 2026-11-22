@@ -14,8 +14,8 @@ const seed = () => [
  memory('d', 'Two facts disagree about the staging address.', { needs_review: true }),
 ];
 const workspace = page => page.getByRole('navigation', { name: 'Workspace', exact: true });
-// Learned guidance and Memory health open their own panes; they are not saved memories.
-const MEMORY_ROW = '.mem-list [data-settings-item]:not([data-settings-item="learned-guidance"]):not([data-settings-item="health"])';
+// Memory health opens its own pane; it is not a saved memory.
+const MEMORY_ROW = '.mem-list [data-settings-item]:not([data-settings-item="health"])';
 const rows = page => page.locator(MEMORY_ROW).filter({ visible: true });
 const text = page => page.getByRole('textbox', { name: 'What to remember', exact: true }).filter({ visible: true });
 const button = (page, name) => page.getByRole('button', { name, exact: true }).filter({ visible: true }).first();

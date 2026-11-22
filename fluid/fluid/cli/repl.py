@@ -758,6 +758,7 @@ class Repl:
                 self.out.write(f"no running task {arg}\n")
         elif cmd == "/model":
             if arg:
+                previous = getattr(self.engine, "model", None)
                 try:
                     await set_model(self.engine, arg)
                 except RuntimeError as exc:
@@ -766,6 +767,9 @@ class Repl:
                     # old model.
                     self.out.write(f"model not changed: {exc}\n")
                 else:
+                    from fluid.cli.config import refresh_rules_for_model
+
+                    refresh_rules_for_model(self.engine, previous, arg)
                     self.out.write(f"model → {arg}\n")
             else:
                 self.out.write(f"model = {self.engine.model}\n")

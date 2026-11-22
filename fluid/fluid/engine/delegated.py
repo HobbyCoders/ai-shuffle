@@ -3055,7 +3055,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 getattr(block, "text", "") for block in content
                 if isinstance(block, Text)
             ).strip()
-            self._journal.record_event("user", text)
+            self._journal.record_event("user", text, self.model)
         except Exception:  # noqa: BLE001 — learning never breaks a turn
             logger.debug("journal turn start failed", exc_info=True)
 

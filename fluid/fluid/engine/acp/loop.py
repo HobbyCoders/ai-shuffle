@@ -263,6 +263,7 @@ class AcpLoop:
         connection_factory: Callable[..., AcpConnection] = AcpConnection,
         deferred: Callable[[str], bool] | None = None,
         on_models: Callable[[list[dict[str, Any]], str | None], Any] | None = None,
+        journal: Any = None,
     ) -> None:
         """``deferred`` names the registry tools the agent reaches only through
         the bridge's ``LoadTools``/``CallTool`` proxies (ACP has no deferral of
@@ -273,7 +274,12 @@ class AcpLoop:
         ``on_models(models, agent_version)`` hears the models the agent offers
         (``AcpAgentSpec.offered_models``) when a session starts and whenever
         that list changes; it may be a coroutine. A failure is logged only.
+
+        ``journal`` (fluid.codemode.journal.ToolJournal) hears each turn's user
+        text and final reply, as on the delegated leg, so the memory learner
+        learns from these chats too. None journals nothing.
         """
+        self._journal = journal
         self.store = store
         self.spec = spec
         self.provider = spec.provider
@@ -1017,6 +1023,8 @@ class AcpLoop:
                 await self._emit(ModelServed(session_id=sid, turn_id=turn_id,
                                              requested_model=self.model or "", served_model=instead,
                                              provider=self.provider, rerouted=True, reason="not_offered"))
+            if not isinstance(op, Resume):  # a retry's prompt is journaled already
+                self._journal_event("user", content)
             await self._drive(sid, turn_id, user_node, content)
         except asyncio.CancelledError:
             raise
@@ -1066,11 +1074,16 @@ class AcpLoop:
         for event in trailing:
             await self._emit(event)
         parent = user_node
+        reply: list[Any] = []
         for role, blocks in segments:
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
                                message=Message(role="assistant" if role == "assistant" else "user", content=blocks))
             await self.store.append(sid, node)
             parent = node
+            if role == "assistant":
+                reply.extend(blocks)
+        if failure is None:
+            self._journal_event("assistant", reply)
         usage, cost = self._usage(result, mapper)
         if usage:
             await self._emit(Usage(session_id=sid, turn_id=turn_id,
@@ -1147,6 +1160,19 @@ class AcpLoop:
         """A refused request is the turn's last step until it recovers."""
         if mapper is not None:
             mapper.stalled = (phrase, name)
+
+    def _journal_event(self, kind: str, blocks: Sequence[Any]) -> None:
+        """Hand one turn's user text or reply to the learner journal. Never
+        raises: learning never breaks a turn."""
+        if self._journal is None:
+            return
+        try:
+            if kind == "user":
+                self._journal.begin_turn()
+            text = " ".join(b.text for b in blocks if isinstance(b, Text)).strip()
+            self._journal.record_event(kind, text, self.model or self._current_config("model"))
+        except Exception:  # noqa: BLE001
+            logger.debug("ACP journal %s record failed", kind, exc_info=True)
 
     @staticmethod
     def _usage(result: Any, mapper: TurnMapper) -> tuple[dict[str, int], float | None]:

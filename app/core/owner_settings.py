@@ -22,6 +22,10 @@ class OwnerPolicy(BaseModel):
     # 200 when a pass runs on a flat-rate subscription row (ChatGPT, SuperGrok),
     # 48 on an API-key, metered or unknown provider. Read at pass time.
     learner_daily_calls: int = Field(default=0, ge=0, le=1000)
+    # The owner's on/off switch for the learner. Off, no learner pass calls a
+    # model on any worker (explicit Remember saves still work). Read at pass
+    # time, so it applies from the next pass without a restart.
+    learner_enabled: bool = True
 
 
 def _read(name: str):
@@ -54,6 +58,10 @@ def session_expire_days() -> int:
 
 def learner_daily_calls() -> int:
     return _read("learner_daily_calls")
+
+
+def learner_enabled() -> bool:
+    return _read("learner_enabled")
 
 
 def read() -> OwnerPolicy:

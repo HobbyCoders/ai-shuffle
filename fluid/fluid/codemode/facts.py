@@ -228,6 +228,114 @@ def fingerprint(text):
     return hashlib.sha256(" ".join(text.casefold().split()).encode()).hexdigest()
 
 
+def _is_rule_key(key):
+    """A behaviour rule's key (fluid.codemode.behavior.KEY_PREFIX)."""
+    from fluid.codemode.behavior import is_rule_key
+
+    return is_rule_key(key)
+
+
+def _fence_fingerprint(text, key=None):
+    """The text fingerprint a deletion barrier records and checks. A behaviour
+    rule's is per model family: deleting the GPT copy of a rule leaves the
+    same text for Claude (or moved to Gemini) savable."""
+    if _is_rule_key(key):
+        from fluid.codemode.behavior import rule_family
+
+        return fingerprint(f"{rule_family(key)}\x00{text}")
+    return fingerprint(text)
+
+
+# Wordings a rule remembers for its deletion fence (67 bytes each in the
+# synced document, which has a 2 MiB budget).
+MAX_RULE_FENCES = 12
+_FENCE = re.compile(r"[0-9a-f]{64}")
+
+
+def _bounded_fences(held, keep):
+    """At most MAX_RULE_FENCES fingerprints: every one in ``keep`` (the
+    current wordings, in order, at the end) and then the latest of ``held``."""
+    keep = list(dict.fromkeys(keep))[-MAX_RULE_FENCES:]
+    rest = [f for f in dict.fromkeys(held) if f not in keep]
+    room = MAX_RULE_FENCES - len(keep)
+    return (rest[-room:] if room > 0 else []) + keep
+
+
+def _rule_fences(entry, key, text, history, reserve=()):
+    """``{"fences": [...]}`` for a behaviour rule: the per-family fingerprint
+    of every wording it has held, kept apart from the bounded undo history so
+    a deletion still fences a wording that history has dropped. ``reserve``
+    names competing wordings that must survive the bound. ``{}`` for an
+    ordinary fact."""
+    if not _is_rule_key(key):
+        return {}
+    held = list(entry.get("fences") or [])
+    held += [_fence_fingerprint(h["text"], h.get("key") or key) for h in history if h.get("text")]
+    return {"fences": _bounded_fences(held, [*reserve, _fence_fingerprint(text, key)])}
+
+
+def _wording_fences(entry):
+    """Per-family fingerprints of every wording a rule copy has held: its
+    fences, its undo history and its current text."""
+    key = entry.get("key")
+    held = [f for f in entry.get("fences") or [] if isinstance(f, str) and _FENCE.fullmatch(f)]
+    held += [_fence_fingerprint(h["text"], h.get("key") or key)
+             for h in entry.get("history") or [] if isinstance(h, dict) and h.get("text")]
+    if entry.get("text"):
+        held.append(_fence_fingerprint(entry["text"], key))
+    return held
+
+
+def _contested(entry):
+    """Per-family fingerprints of the competing current wordings of an
+    unresolved sync conflict (``contested``), as each copy's own family
+    recorded them."""
+    return [f for f in entry.get("contested") or [] if isinstance(f, str) and _FENCE.fullmatch(f)]
+
+
+def _union_rule_fences(target, other):
+    """Keep the wordings of a rule copy a merge discards, so deleting the
+    surviving copy also stops the learner saving the discarded wording again.
+    Every competing current wording of the conflict, from however many
+    workers, is carried in ``contested`` under the family that held it and
+    always kept in the fences. The same lists whichever replica merges, and
+    bounded."""
+    if not (_is_rule_key(target.get("key")) and _is_rule_key(other.get("key"))):
+        return
+    current = {_fence_fingerprint(target["text"], target.get("key")),
+               _fence_fingerprint(other["text"], other.get("key"))}
+    contested = set(_contested(target)) | set(_contested(other))
+    if len(current) > 1:
+        contested |= current
+    keep = sorted(contested | current)[:MAX_RULE_FENCES]
+    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - set(keep))
+    target["fences"] = _bounded_fences(held[:MAX_RULE_FENCES - len(keep)], keep)
+    if contested:
+        target["contested"] = sorted(contested)[:MAX_RULE_FENCES]
+
+
+def _carry_contested(winner, loser):
+    """A newer copy replacing one that recorded a dispute keeps the disputed
+    wordings fenced (and, while it is still conflicted, recorded), even if
+    the newer copy's writer never saw them. Its text and clock still win."""
+    if not _is_rule_key(winner.get("key")):
+        return
+    disputed, recorded = set(_contested(loser)), set(_contested(winner))
+    # A resolution already fenced every disputed wording, then cleared
+    # `contested`: replaying the dispute changes nothing, so every replica
+    # keeps the resolved copy exactly as written.
+    unfenced = disputed - set(winner.get("fences") or [])
+    unrecorded = disputed - recorded if winner.get("conflicted") else set()
+    if unfenced:
+        # Every wording of the dispute, not just the missing ones: fencing
+        # one must not evict another the same dispute already fenced.
+        keep = sorted(recorded | disputed | {_fence_fingerprint(winner["text"], winner.get("key"))})
+        held = [f for f in winner.get("fences") or [] if isinstance(f, str) and f not in keep]
+        winner["fences"] = _bounded_fences(held, keep[-MAX_RULE_FENCES:])
+    if unrecorded:
+        winner["contested"] = sorted(recorded | unrecorded)[:MAX_RULE_FENCES]
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -814,15 +922,22 @@ class FactStore:
             # Only an answer that stays in its control namespace may ignore a
             # text fence. Rekeying it to an ordinary rule restores that fence.
             pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
-            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
-            if key:
+            fence = _fence_fingerprint(text, key)
+            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fence)
+            # A behaviour rule keeps the key its first wording gave it through
+            # every edit and family move, so a deleted rule's key names text
+            # that family may never have held. Its per-family text fences
+            # cover each wording it did hold; the key fence would block an
+            # unrelated rule.
+            slot_fenced = bool(key) and not _is_rule_key(key)
+            if slot_fenced:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
             if suppressed and not (protected and restore):
                 raise ValueError("This fact matches a deletion barrier; an explicit restore request is required")
             for t in doc["tombstones"]:
                 text_match = (not pair_answer and not str(t.get("key") or "").startswith("memory.coexist.")
-                              and fp in t.get("fingerprints", []))
-                if text_match or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
+                              and fence in t.get("fingerprints", []))
+                if text_match or (slot_fenced and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
             if old is None:
@@ -835,8 +950,25 @@ class FactStore:
                             and ((key and e.get("key") == key) or (
                                 not str(key or "").startswith("memory.coexist.")
                                 and not str(e.get("key") or "").startswith("memory.coexist.")
+                                # A behaviour rule matches only by its key: the
+                                # same text for another family is a separate
+                                # rule, and an ordinary fact with that text is
+                                # never turned into a rule (or back).
+                                and not (_is_rule_key(key) or _is_rule_key(e.get("key")))
                                 and fingerprint(e["text"]) == fp))), None)
             now = time.time()
+            # A behaviour rule moved to another model family keeps its text but
+            # changes its key: that is a revision, not a repeat of the same save.
+            rekey = bool(old) and _is_rule_key(key) and old.get("key") != key
+            if rekey:
+                # Two rows on one rule key replicate as a conflict and drop out
+                # of prompts: a move onto a slot another rule holds is refused,
+                # whoever makes it (the learner, the owner, an undo).
+                target_scope = scope or old.get("scope", "global")
+                if any(e["id"] != old["id"] and e.get("key") == key
+                       and e.get("scope", "global") == target_scope and visible_on(e, local)
+                       for e in doc["entries"]):
+                    raise ValueError(f"another rule already holds {key}; edit or delete that one instead")
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if replaces:
                 new_scope = scope or (old.get("scope", "global") if old else "global")
@@ -880,7 +1012,7 @@ class FactStore:
             # worker-tagged fact, even when its text/metadata did not change.
             same_authority = not old or not protected or (
                 not old.get("worker") and (not provenance or old.get("provenance") == provenance))
-            if (old and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
+            if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
                     and not targets and self._metadata_differs(old, when, always)
                     and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
@@ -894,7 +1026,7 @@ class FactStore:
                 if _document is None:
                     self._write(doc)
                 return self._entry(old)
-            if (old and not resolves and not old.get("conflicted") and old["text"] == text
+            if (old and not rekey and not resolves and not old.get("conflicted") and old["text"] == text
                     and same_authority and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
@@ -961,16 +1093,31 @@ class FactStore:
             if not old:
                 doc["next_id"] += 1
             history = list(entry.get("history", []))
-            if old and old["text"] != text:
+            if old and (old["text"] != text or rekey):
                 previous = {"text": old["text"], "at": now, "revision": old.get("revision", 1)}
                 if old.get("when"):
                     previous["when"] = old["when"]
+                if _is_rule_key(old.get("key")):
+                    # Every rule revision names its family, so undo brings the
+                    # family back and a deletion fences each text for the
+                    # family it was held under.
+                    previous["key"] = old["key"]
                 history.append(previous)
             clock = dict(entry.get("clock") or {entry["origin"]: entry["revision"]})
             slot = key or entry.get("key")
+            # Competing wordings a conflict-resolving save discards: they stay
+            # fenced with the survivor ahead of older history, so deleting it
+            # later stops them coming back. Each keeps the family that held it
+            # (recorded at merge), not this copy's family.
+            reserve = _contested(old) if old and old.get("conflicted") and _is_rule_key(old.get("key")) else []
             if old and old.get("conflicted") and protected and slot:
                 aliases = [e for e in all_entries if e["id"] != old["id"] and e.get("key") == slot
                            and e.get("scope", "global") == entry.get("scope", "global")]
+                if _is_rule_key(slot):
+                    discarded = [f for alias in aliases for f in _wording_fences(alias)]
+                    entry["fences"] = list(dict.fromkeys(discarded + list(entry.get("fences") or [])))
+                    for alias in aliases:
+                        reserve += _contested(alias) + [_fence_fingerprint(alias["text"], alias.get("key"))]
                 for alias in aliases:
                     for actor, counter in (alias.get("clock") or {alias["origin"]: alias.get("revision", 1)}).items():
                         clock[actor] = max(clock.get(actor, 0), counter)
@@ -987,8 +1134,10 @@ class FactStore:
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
+                         **_rule_fences(entry, key or entry.get("key"), text, history, reserve),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
+            entry.pop("contested", None)  # the conflict is resolved; its wordings are fenced
             # A rewrite of a fact that already expired into the archive is a
             # new observation, not a continuation of the old lifetime.
             if not protected and entry["expires_at"] and entry["expires_at"] <= now:
@@ -1382,7 +1531,7 @@ class FactStore:
                 self._write(doc)
             return changed
 
-    def forget(self, memory_id, *, explicit=False, expected_revision=None):
+    def forget(self, memory_id, *, explicit=False, expected_revision=None, purge=True):
         with file_transaction(self.lock):
             doc = self._prepare()
             old = next((e for e in doc["entries"] + doc["archived"] if e["id"] == memory_id), None)
@@ -1396,7 +1545,12 @@ class FactStore:
                          "revision": old.get("revision", 1) + 1, "key": old.get("key"),
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
                          "fingerprints": ([] if str(old.get("key") or "").startswith("memory.coexist.") else
-                                          [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])]),
+                                          list(dict.fromkeys(
+                                              # A rule's fences outlive its undo history.
+                                              [f for f in old.get("fences") or [] if isinstance(f, str)]
+                                              + [_fence_fingerprint(h["text"], h.get("key") or old.get("key"))
+                                                 for h in old.get("history", [])]
+                                              + [_fence_fingerprint(old["text"], old.get("key"))]))),
                          "source_session": old.get("source_session")}
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.
@@ -1411,11 +1565,13 @@ class FactStore:
             doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
             for bucket in ("entries", "archived"):
                 doc[bucket] = [e for e in doc[bucket] if e["id"] != memory_id]
-            if explicit:
+            if explicit and purge:
                 # Journal evidence older than this is purged and never shown
                 # to the learner again. Only a user Forget earns that; a
                 # learner delete setting it would let the next maintenance
-                # sweep wipe the journal anyway.
+                # sweep wipe the journal anyway. Deleting a behaviour rule
+                # passes purge=False: the barrier stops it being learned
+                # again, and unread evidence of other lessons stays.
                 doc["forgotten_before"] = time.time()
             self._maintain(doc)
             self._write(doc)
@@ -1538,6 +1694,17 @@ class FactStore:
                         # An unusable when-line is not worth refusing the
                         # replica for: the fact is listed by its text instead.
                         entry.pop("when", None)
+                fences = entry.get("fences")
+                if fences is not None and not (
+                        isinstance(fences, list) and len(fences) <= MAX_RULE_FENCES
+                        and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in fences)):
+                    # Unreadable fences: the rule's history still fences it.
+                    entry.pop("fences")
+                contested = entry.get("contested")
+                if contested is not None and not (
+                        isinstance(contested, list) and len(contested) <= MAX_RULE_FENCES
+                        and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in contested)):
+                    entry.pop("contested")
                 if type(entry.get("always", False)) is not bool:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):
@@ -1567,6 +1734,7 @@ class FactStore:
                 older = all(local_clock.get(k, 0) >= incoming_clock.get(k, 0) for k in actors)
                 if newer and not older:
                     entries[entry["id"]] = entry
+                    _carry_contested(entry, old)
                     # The newer value keeps a metadata edit only the local
                     # copy has (a backfill when-line, say).
                     self._merge_metadata(entry, old, entry, prefer=entry)
@@ -1578,6 +1746,7 @@ class FactStore:
                     claim = ("text", "scope", "key", "worker", "provenance", "protected", "durable", "superseded_by", "retired_reason")
                     same_claim = (all(old.get(k) == entry.get(k) for k in claim)
                                   and bool(old.get("retired_at")) == bool(entry.get("retired_at")))
+                    _union_rule_fences(old, entry)
                     if same_claim:
                         old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                         old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -1594,6 +1763,7 @@ class FactStore:
                     if (old.get("protected") and len(confirmed_copies) == 1
                             and all(old.get(k) == entry.get(k) for k in value_claim)):
                         winner = dict(confirmed_copies[0])
+                        _union_rule_fences(winner, old)
                         self._merge_metadata(winner, old, entry, prefer=winner)
                         winner["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                         winner["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -1610,6 +1780,7 @@ class FactStore:
                     # (a metadata-only edit leaves the clock as it is), so the
                     # value stays; a newer when-line/always stamp still lands.
                     self._merge_metadata(old, old, entry, prefer=None if newer else old)
+                    _carry_contested(old, entry)
             for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.
@@ -1623,8 +1794,14 @@ class FactStore:
             doc["archived"] = [e for e in kept if e.get("retired_at")]
             self._repair_supersession_links(doc)
             slots = {}
+            now = time.time()
             for e in doc["entries"]:
-                if e.get("key") and not e.get("superseded_by"):
+                # An expired copy is on its way back to the archive (see
+                # _maintain), so it does not contend for its old slot. A copy
+                # that capacity trimming would archive still does: which value
+                # holds a slot is a conflict, not a question of room.
+                expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
+                if e.get("key") and not e.get("superseded_by") and not expired:
                     # Each worker's copy of an environment fact is its own slot.
                     slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
             for group in slots.values():

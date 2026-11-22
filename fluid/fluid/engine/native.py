@@ -3049,9 +3049,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
         if self._codemode is not None:
             # Episodic half of the continual journal: the intent behind the turn.
-            self._codemode.record_event("user", _plain_text(content))
+            self._codemode.record_event("user", _plain_text(content), self.model)
         elif self._journal is not None:
-            self._journal.record_event("user", _plain_text(content))
+            self._journal.record_event("user", _plain_text(content), self.model)
         await self._start_and_loop(sid, turn_id, user_node)
 
     async def holds_pinned_block(

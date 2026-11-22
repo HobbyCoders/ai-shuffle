@@ -44,3 +44,6 @@ def test_import_then_sync_then_peer_restart_preserves_owner_choice(workers, monk
     for name in owner_settings.OwnerPolicy.model_fields:
         assert policy.is_shared_setting_key(owner_settings.PREFIX + name)
     assert not policy.is_shared_setting_key(legacy.MIGRATION_KEY)
+    # The old behaviour reviewer's call ledger stays local even though nothing
+    # reads it now: older peers may still publish it.
+    assert not policy.is_shared_setting_key("behavioral_review_budget_v1")

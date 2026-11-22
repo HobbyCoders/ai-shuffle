@@ -619,7 +619,8 @@ def test_a_spent_latch_rereads_the_budget_only_when_it_is_refreshed(tmp_path, mo
         assert not synth.due()
     assert resolves == [] and reads == [], "cached: no setting or store read per cell"
     clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
-    assert not synth.due() and len(resolves) == 2 and reads == [], "unchanged budget: still spent"
+    # One refresh reads the daily-call setting, the billing and the on/off switch.
+    assert not synth.due() and len(resolves) == 3 and reads == [], "unchanged budget: still spent"
     setting[0] = 12  # lowered: still spent
     clock[0] += continual_mod.BUDGET_REFRESH_SECONDS + 1
     assert not synth.due() and reads == []

@@ -56,8 +56,8 @@ Concurrency posture. Within one process journaling and reaping are
 synchronous and the synthesizer's background pass runs on the same event
 loop, so they cannot interleave. Across processes sharing a skills root:
 
-- Every JSON document rewrite (``meta.json``, ``memories.json``,
-  ``anchors.json``) and every log trim goes through a temp file in the same
+- Every JSON document rewrite (``meta.json``, ``memories.json``)
+  and every log trim goes through a temp file in the same
   directory plus ``os.replace`` (:func:`atomic_write_text`), so a crash or a
   lost race leaves the previous complete file, never a truncated one. A
   document that fails to parse on load is renamed aside as
@@ -1561,15 +1561,6 @@ class SkillStore:
             ("curation_log", lambda: trim_jsonl(
                 self.root / ".curation-log.jsonl", MAX_LOG_ENTRIES,
             )),
-            # The evolution gate's files live in the same root: parked
-            # proposals carry the full content and evidence of every failed
-            # gate, so unbounded they outgrow everything else here.
-            ("parked", lambda: trim_jsonl(
-                self.root / "parked.jsonl", MAX_LOG_ENTRIES,
-            )),
-            ("evolution_log", lambda: trim_jsonl(
-                self.root / ".evolution-log.jsonl", MAX_LOG_ENTRIES,
-            )),
             ("archived_skills", self._reap_archived_skills),
         ):
             try:
@@ -1775,14 +1766,17 @@ class SkillStore:
                                     expected_when_at=expected_when_at)
 
     def delete_memory(self, memory_id: str, *, explicit: bool = False,
-                      expected_revision: int | None = None) -> bool:
+                      expected_revision: int | None = None, purge_evidence: bool = True) -> bool:
         """Delete one fact. ``explicit`` means the user asked (the Forget
         tool); only that purges the journal evidence written before it. A
         learner or consolidation delete retires the fact and leaves the
-        journal and the synthesis cursor alone.
+        journal and the synthesis cursor alone. ``purge_evidence=False``
+        keeps an explicit delete's barrier without the purge (deleting a
+        behaviour rule is not a request to forget the chats behind it).
         """
-        deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
-        if deleted and explicit:
+        deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision,
+                                     purge=purge_evidence)
+        if deleted and explicit and purge_evidence:
             self.purge_forgotten_evidence()
         return deleted
 
@@ -1797,14 +1791,6 @@ class SkillStore:
                                     protected_conflict: bool = False) -> bool:
         return self._facts.propose_supersession(old_id, new_id, old_revision=old_revision, new_revision=new_revision,
                                                 protected_conflict=protected_conflict)
-
-    def learner_proposal_footer(self, project: str | None = None, entries: list | None = None) -> str:
-        """The ``# Memory`` footer's lines for open learner proposals (see
-        fluid.codemode.preferences): one line per proposed rule update,
-        "" when none. Never raises."""
-        from fluid.codemode.preferences import preference_proposal_lines
-        lines = preference_proposal_lines(self, project, entries=entries)
-        return "\n\n" + "\n".join(lines) if lines else ""
 
     def purge_forgotten_evidence(self) -> None:
         cutoff = self._facts.snapshot().get("forgotten_before", 0)
@@ -1847,7 +1833,7 @@ class SkillStore:
 
 
     def render_memory_section(self, project: str | None = None, *, checkout: str | None = None,
-                              task_query: str = "") -> str | None:
+                              task_query: str = "", model: str | None = None) -> str | None:
         """The compiled prompt's ``# Memory`` section (frozen snapshot).
 
         One style of memory: every fact has a when-line and its full text.
@@ -1871,14 +1857,22 @@ class SkillStore:
         (fluid.codemode.conflict_review) says so on its own line; Recall of
         either rule prints the two clashing passages.
         """
+        from fluid.codemode.behavior import is_rule_key, render_section
         from fluid.codemode.facts import visible_on
         # One read for live and archived facts, so the counts agree.
         doc = self._facts.snapshot()
         local = doc["store_id"]
         entries = [self._facts._entry(e) for e in doc["entries"] if visible_on(e, local)]
-        archived = [self._facts._entry(e) for e in doc["archived"] if visible_on(e, local)]
+        archived = [self._facts._entry(e) for e in doc["archived"]
+                    if visible_on(e, local) and not is_rule_key(e.get("key"))]
+        # Learned behaviour rules render in full in their own section for the
+        # session's model family, never as memory index lines.
+        rules = render_section([e for e in entries if is_rule_key(e.key)],
+                               project=project, model=model)
+        entries = [e for e in entries if not is_rule_key(e.key)]
+        rules_suffix = f"\n\n{rules}" if rules else ""
         if not entries and not archived:
-            return EMPTY_MEMORY_SECTION
+            return EMPTY_MEMORY_SECTION + rules_suffix
         plan = self.memory_snapshot_plan(project, checkout=checkout, entries=entries, archived=archived,
                                          task_query=task_query)
         shown = plan["lines"]
@@ -1913,9 +1907,8 @@ class SkillStore:
                 f"\n\n({in_archive} archived fact{'' if in_archive == 1 else 's'} not shown; "
                 f"Recall finds {'it' if in_archive == 1 else 'them'} by keyword.)"
             )
-        footer += self.learner_proposal_footer(project, entries)
         if not shown and not over_budget and not held and not in_archive:
-            return EMPTY_MEMORY_SECTION + footer
+            return EMPTY_MEMORY_SECTION + footer + rules_suffix
         if held:
             footer += (
                 f"\n\n({held} conflicted entr{'y' if held == 1 else 'ies'} "
@@ -1944,6 +1937,7 @@ class SkillStore:
             + "\n\n"
             + body
             + footer
+            + rules_suffix
         )
 
     def memory_snapshot_plan(self, project: str | None = None, *, checkout: str | None = None,

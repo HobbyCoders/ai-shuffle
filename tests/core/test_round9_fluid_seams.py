@@ -100,8 +100,8 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     ranked_queries = []
 
     class _Store:
-        def render_memory_section(self, project, *, checkout=None, task_query=""):
-            assert project == "project:x" and checkout == "."
+        def render_memory_section(self, project, *, checkout=None, task_query="", model=None):
+            assert project == "project:x" and checkout == "." and model == "m"
             ranked_queries.append(task_query)
             return "# Memory\n(no saved facts yet — Remember saves one, Recall searches)"
 
@@ -120,7 +120,7 @@ def test_memory_snapshot_passes_a_non_empty_placeholder_through(monkeypatch):
     assert ranked_queries == ["", "memory backend"]
 
     class _Empty(_Store):
-        def render_memory_section(self, project, *, checkout=None, task_query=""):
+        def render_memory_section(self, project, *, checkout=None, task_query="", model=None):
             assert project == "project:x" and checkout == "." and task_query == "memory backend"
             return None
 

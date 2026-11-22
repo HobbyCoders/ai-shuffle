@@ -16,7 +16,6 @@ from fluid.codemode import facts
 from fluid.codemode.facts import (
     ALWAYS_CHARS, DERIVED_WHEN_CHARS, MAX_WHEN_CHARS, derived_when, global_id, when_line)
 from fluid.codemode.memory_backfill import missing
-from fluid.codemode.preferences import PreferenceProposals, preference_proposal_lines
 from fluid.codemode.skills import ALWAYS_HEADING, INDEX_HEADING, MAX_MEMORY_CHARS, SkillStore
 from fluid.tools.builtins.recall import handler as recall
 from fluid.tools.builtins.remember import handler as remember
@@ -630,34 +629,3 @@ def test_eligible_lines_are_index_lines(tmp_path, monkeypatch):
     assert plan["omitted_ids"]
     assert all("More detail" not in line for line in plan["eligible_lines"])
     assert len(plan["eligible_lines"]) == 5
-
-
-# ─── learner proposals close without a key convention ─────────────────────
-
-def test_proposal_closes_when_an_owner_memory_on_its_topic_is_saved(tmp_path):
-    store = SkillStore(tmp_path)
-    queue = PreferenceProposals(store)
-    rule = "Risky code goes to Opus, bounded backend code goes to Sol, routine reviews to Sonnet."
-    assert queue.propose("subagent_models", rule) == "proposed"
-    [line] = preference_proposal_lines(store)
-    assert "pref." not in line and "subagent_models" in line and "replaces=[" in line
-    # An unrelated owner memory does not answer it.
-    store.save_memory("The website deploys from main after review.", protected=True,
-                      when="When deploying")
-    assert len(queue.open()) == 1
-    # An agent's own save does not answer it either.
-    store.save_memory("Owner rule: risky code goes to Opus, backend code to Sol, reviews to "
-                      "Sonnet.", durable=True, when=ROUTING_WHEN)
-    assert len(queue.open()) == 1
-    # The owner's memory on the same subject, no key, closes it.
-    store.save_memory("Owner rule: risky code goes to Opus, bounded backend code to Sol, "
-                      "routine reviews to Sonnet.", protected=True, when=ROUTING_WHEN)
-    assert queue.open() == []
-
-
-def test_proposal_also_closes_on_a_memory_keyed_by_its_topic(tmp_path):
-    store = SkillStore(tmp_path)
-    queue = PreferenceProposals(store)
-    queue.propose("deploy", "Deploy hub, then site, without asking.")
-    store.save_memory("Hub first.", protected=True, key="deploy", when=DEPLOY_WHEN)
-    assert queue.open() == []

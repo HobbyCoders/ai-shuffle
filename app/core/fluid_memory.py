@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -270,16 +271,29 @@ def learner_daily_calls() -> int:
     return owner_settings.learner_daily_calls()
 
 
+def learner_enabled() -> bool:
+    """The owner's learner switch (owner policy ``learner_enabled``). Off,
+    passes return before any model call; read at pass time."""
+    from app.core import owner_settings
+    return owner_settings.learner_enabled()
+
+
 def learner_billing(provider_type: str | None, auth_mode: str | None) -> str | None:
     """How a learner pass on a provider row of this shape is billed:
-    ``"subscription"`` for a flat-rate sign-in (ChatGPT, SuperGrok: the rows
-    ``credential_gate.subscription_provider_model`` picks), ``"metered"`` for
-    any other row, None when the pass has no row (unknown, so metered)."""
+    ``"subscription"`` for a flat-rate sign-in (ChatGPT, SuperGrok, a Claude
+    plan, an Antigravity Google sign-in:
+    ``credential_gate.provider_row_is_subscription``), ``"metered"`` for any
+    other row. No row means the pass runs on the Claude Code CLI leg, billed
+    as Claude's current auth mode is (``usage_attribution.claude_billing``);
+    None when that is unreadable (unknown, so capped as metered)."""
     if not provider_type and not auth_mode:
-        return None
-    from app.core.model_registry import _is_subscription_row
-    row = {"provider_type": provider_type, "auth_mode": auth_mode}
-    return "subscription" if _is_subscription_row(row) else "metered"
+        from app.core.usage_attribution import BILLING_SUBSCRIPTION, claude_billing
+        billing = claude_billing()
+        if billing is None:
+            return None
+        return "subscription" if billing == BILLING_SUBSCRIPTION else "metered"
+    from app.core.credential_gate import provider_row_is_subscription
+    return "subscription" if provider_row_is_subscription(provider_type, auth_mode) else "metered"
 
 
 def _learning_enabled() -> bool:
@@ -383,10 +397,111 @@ def sweep_memories(now: float | None = None) -> list[tuple[str, object, dict]]:
     return announce
 
 
+LEGACY_GUIDANCE_MARKER = ".migrated-to-rules"
+LEGACY_UNMIGRATED = "unmigrated-guidance.txt"
+_LEGACY_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+
+
+def _legacy_guidance_root() -> Path:
+    import os
+    override = (os.environ.get("FLUID_GUIDANCE_HOME") or "").strip()
+    return (Path(override) if override else Path.home()) / ".fluid" / "guidance"
+
+
+def migrate_legacy_guidance(store=None, root: Path | None = None) -> int:
+    """Once per install: the per-model guidance blocks the retired learner
+    saved (``<home>/.fluid/guidance/scoped/*.json``) become behaviour rules
+    for that model's family, one per bullet or line, so an upgrade keeps
+    them. A block the owner edited is kept (protected) like a rule the owner
+    saved; an automatic one is learner-tier and can be rewritten or undone.
+    Lines that are not valid rules (too long, granting permission) are
+    skipped. The files are left in place; a marker stops a second run.
+    Returns the number of rules saved."""
+    import json
+    import logging
+    import os
+
+    from fluid.codemode import behavior
+
+    root = root or _legacy_guidance_root()
+    scoped = root / "scoped"
+    if not scoped.is_dir() or (scoped / LEGACY_GUIDANCE_MARKER).exists():
+        return 0
+    store = store or store_for_owner("local")
+    saved = 0
+    skipped: list[str] = []
+    learned = sum(1 for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected)
+    for path in sorted(scoped.glob("*.json")):
+        try:
+            record = json.loads(path.read_text("utf-8"))
+            content, model = str(record["content"]), str(record["model"])
+        except (OSError, ValueError, KeyError, TypeError):
+            logging.getLogger(__name__).warning("Skipped unreadable legacy guidance %s", path.name)
+            continue
+        marker = "s-" + hashlib.sha256(os.fsencode(path.stem.strip().lower())).hexdigest()
+        kept = (root / ".manual" / marker).exists()
+        family = behavior.family_for(model)
+        pieces = [piece for raw in content.splitlines()
+                  for line in [_LEGACY_BULLET.sub("", raw).strip()]
+                  if line and not line.startswith("#")
+                  for piece in _rule_pieces(line, behavior.MAX_RULE_CHARS)]
+        for piece in pieces:
+            if not kept and learned >= behavior.MAX_LEARNED_RULES:
+                break
+            try:
+                body = behavior.validate_rule(piece)
+                store.save_memory(
+                    body, scope="global", provenance="user", key=behavior.rule_key(family, body),
+                    **({"protected": True} if kept else {"durable": True}),
+                    when="When working with the owner (learned behaviour rule)",
+                )
+            except ValueError as exc:
+                if kept:
+                    skipped.append(f"[{model}] {piece}  ({exc})")
+                continue
+            saved += 1
+            learned += 0 if kept else 1
+    if skipped:
+        # What the owner wrote and no rule could hold stays readable beside
+        # the old files, and the log names it.
+        (scoped / LEGACY_UNMIGRATED).write_text("\n".join(skipped) + "\n", encoding="utf-8")
+        logging.getLogger(__name__).warning(
+            "%d edited guidance line(s) could not become behaviour rules; see %s",
+            len(skipped), scoped / LEGACY_UNMIGRATED)
+    (scoped / LEGACY_GUIDANCE_MARKER).write_text(f"{saved}\n", encoding="utf-8")
+    return saved
+
+
+def _rule_pieces(line: str, limit: int) -> list[str]:
+    """A guidance line as rule-sized pieces: whole when it fits, otherwise its
+    sentences, in order, packed up to ``limit`` characters each. A single
+    sentence longer than that stays one (too long) piece."""
+    if len(line) <= limit:
+        return [line]
+    pieces: list[str] = []
+    current = ""
+    for sentence in re.split(r"(?<=[.!?])\s+", line):
+        joined = f"{current} {sentence}".strip()
+        if current and len(joined) > limit:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = joined
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 async def maintain_memories():
     """Finite maintenance batches, independent of chat or a learning model."""
     import asyncio
     import logging
+    try:
+        moved = await asyncio.to_thread(migrate_legacy_guidance)
+        if moved:
+            logging.getLogger(__name__).info("Moved %d saved guidance lines into behaviour rules", moved)
+    except Exception:
+        logging.getLogger(__name__).exception("Legacy guidance migration failed")
     while True:
         try:
             for owner, store, state in await asyncio.to_thread(sweep_memories):

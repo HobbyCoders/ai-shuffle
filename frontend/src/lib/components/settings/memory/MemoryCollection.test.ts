@@ -81,7 +81,7 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
-it('lists Memory health beside Learned guidance and opens its check', async () => {
+it('lists Memory health and opens its check', async () => {
 	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
 		: path === '/memory/health' ? { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] }
 		: {});
@@ -102,44 +102,6 @@ it('says Unavailable on the Memory health row when the check fails, without open
 		expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Unavailable')
 	);
 	memoryHealth.reset();
-});
-
-it('shows the same-account Text Generation requirement with no saved guidance', async () => {
-	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
-		: { blocks: [], max_chars: 4000 });
-	await show('learned-guidance');
-	await screen.findByText('No saved guidance on this worker.');
-	await screen.findByText(/Text Generation.*same ChatGPT provider and account/i);
-});
-
-it('manages learned guidance separately, retaining a stale draft until explicit reload', async () => {
-	const block = { id: 'saved-glm', stem: 'glm', model: 'glm', scope: 'model_substring',
-		provider: null, inactive_reason: null, content: 'Saved instructions', revision: 'r1' };
-	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
-		: { blocks: [block], max_chars: 4000 });
-	await show('learned-guidance');
-	await screen.findByText('Built-in model guidance');
-	const box = await screen.findByRole('textbox', { name: 'Guidance for glm' }) as HTMLTextAreaElement;
-	await fireEvent.input(box, { target: { value: ' ' } });
-	const save = screen.getByRole('button', { name: 'Save guidance' }) as HTMLButtonElement;
-	expect(save.disabled).toBe(true);
-	await fireEvent.input(box, { target: { value: 'My edit' } });
-	http.put.mockRejectedValueOnce({ detail: 'Saved guidance changed', status: 409 });
-	await fireEvent.click(save);
-	await screen.findByText(/Your draft is still here/);
-	expect(box.value).toBe('My edit');
-	expect(http.put).toHaveBeenCalledWith('/learned-guidance/saved-glm', { content: 'My edit', expected_revision: 'r1' });
-	block.content = 'New remote version';
-	block.revision = 'r2';
-	await fireEvent.click(screen.getByRole('button', { name: 'Load latest' }));
-	await waitFor(() => expect(box.value).toBe('New remote version'));
-	await fireEvent.click(screen.getByRole('button', { name: 'Delete guidance' }));
-	await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-	expect(http.delete).not.toHaveBeenCalled();
-	await fireEvent.click(screen.getByRole('button', { name: 'Delete guidance' }));
-	await fireEvent.click(screen.getByRole('button', { name: 'Confirm delete' }));
-	await screen.findByText('No saved guidance on this worker.');
-	expect(http.delete).toHaveBeenCalledWith('/learned-guidance/saved-glm?expected_revision=r2');
 });
 
 describe('memory rules', () => {

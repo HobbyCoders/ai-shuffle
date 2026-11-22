@@ -43,13 +43,13 @@ LOADED_BUDGET = 2_800
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
-    from app.core import cli_tool_surface, guidance_surface
+    from app.core import cli_tool_surface
     from app.core.config import settings
 
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
+    monkeypatch.setenv("FLUID_GUIDANCE_HOME", str(home))
     monkeypatch.delenv(BRIDGE_DEFER_ENV, raising=False)
     # Register the bundled Glob/Grep fallback, the larger surface.
     monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: False)

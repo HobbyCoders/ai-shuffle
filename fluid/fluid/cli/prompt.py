@@ -377,8 +377,8 @@ def profile_resolved_event(
     )
 
 
-# Shared with the synthesizer (raw sources for evidence-based proposals) and
-# the anchor-replay runner (candidate staging) — see fluid.context.guidance.
+# Location and caps for hand-written per-model guidance files; see
+# fluid.context.guidance.
 from fluid.context.guidance import (  # noqa: E402 — re-exported names
     GUIDANCE_DIR_MAX_FILES,
     GUIDANCE_FILE_MAX_CHARS,
@@ -528,8 +528,7 @@ def profile_for(
 ) -> PromptProfile:
     """Derive the prompt profile from a resolved config (once per session).
 
-    ``guidance_home`` redirects the user-guidance directory lookup (the
-    anchor-replay runner stages a candidate guidance state there); the
+    ``guidance_home`` redirects the user-guidance directory lookup; the
     ``setting_sources`` gate still applies, so a config that excludes user
     settings loads no guidance either way.
 
@@ -1212,7 +1211,7 @@ def default_base_prompt(
     apply: restricted tool surfaces drop the prose about missing tools, the
     identity layer resolves, and model guidance keys off the resolved model.
     Everything here is fixed at session start, so the result is byte-stable.
-    ``guidance_home`` redirects the user-guidance lookup (anchor replays).
+    ``guidance_home`` redirects the user-guidance lookup.
     """
     if config is None:
         return DEFAULT_BASE_PROMPT

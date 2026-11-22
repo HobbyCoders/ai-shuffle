@@ -57,7 +57,6 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     # The learner's daily call budget (None: the default for how its
     # provider bills a pass, see continual.learner_budget).
     "learner_daily_calls": None,
-    "anchor_budget": 1,
     "cwd": ".",
     "max_tokens": None,
     "max_model_calls": 200,
@@ -430,11 +429,6 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
         out["continual_model"] = env["FLUID_CONTINUAL_MODEL"]
     if "FLUID_CONTINUAL_PROVIDER" in env:
         out["continual_provider"] = env["FLUID_CONTINUAL_PROVIDER"]
-    if "FLUID_ANCHOR_BUDGET" in env:
-        try:
-            out["anchor_budget"] = int(env["FLUID_ANCHOR_BUDGET"])
-        except ValueError:
-            pass
     if "FLUID_MAX_TOKENS" in env:
         try:
             out["max_tokens"] = int(env["FLUID_MAX_TOKENS"])
@@ -803,20 +797,6 @@ def _wire_continual(
 
             on_change = _announce
 
-        # The synthesizer sees the SESSION model id (so a
-        # guidance-proposal stem can be validated against it) and the raw
-        # guidance file(s) currently matching it (so proposals amend the
-        # file instead of overwriting blind). Gated on the "user" setting
-        # source like the prompt-side guidance load.
-        guidance_snapshot: dict[str, str] = {}
-        if "user" in config.setting_sources:
-            try:
-                from fluid.context.guidance import guidance_sources
-
-                guidance_snapshot = guidance_sources(model)
-            except Exception:
-                pass
-
         # continual_model pins synthesis to one model so skill quality does
         # not drift with the session's provider choice. Passes are background
         # and best-effort (see continual.py).
@@ -827,7 +807,6 @@ def _wire_continual(
             session_id=session_id,
             on_change=on_change,
             session_model=model,
-            guidance_snapshot=guidance_snapshot or None,
             context_window=config.context_window if not config.continual_model else None,
             daily_calls=config.learner_daily_calls,
         )
