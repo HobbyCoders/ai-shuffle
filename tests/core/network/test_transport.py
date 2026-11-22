@@ -731,6 +731,34 @@ async def test_head_fetch_leaves_unreachable_owners_to_the_sync_loop(workers, mo
             assert link.failures == 0 and link.backoff_until == 0.0
 
 
+async def test_a_stalled_owner_holds_its_link_only_briefly_for_a_head_fetch(workers, monkeypatch):
+    """An owner that accepts the request but never answers: the head fetch lets
+    go of the link at its own short deadline, not the full read timeout, so the
+    sync pass woken for the same owner is not held up behind it."""
+    worker = workers("head-stalled")
+    monkeypatch.setattr(transport, "SESSION_HEAD_FETCH_SECONDS", 0.05)
+    with worker.active():
+        engine.create_network("Home")
+        link = transport.PeerLink("owner", ["https://owner.example.com"])
+        transport._note_session_interest("owner", "viewed")
+
+        async def ready(*_args, **_kwargs):
+            return None
+
+        async def never_answers(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(link, "open", ready)
+        monkeypatch.setattr(link, "call", never_answers)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(TimeoutError):
+                await link.fetch_heads(client, engine.context())
+        assert loop.time() - started < 1.0
+        assert not link._sync_lock.locked()
+
+
 async def test_head_fetch_without_an_owner_head_is_retried_once_per_window(workers, monkeypatch):
     """An owner that sends no head (an older peer) must not get an exchange per poll."""
     worker = workers("head-retry")

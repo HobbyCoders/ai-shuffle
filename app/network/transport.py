@@ -123,6 +123,11 @@ _session_watermarks: dict[tuple[str, str], dict] = {}
 # How long a sync check for a chat whose head is unknown waits for an exchange
 # with its owner (``fetch_session_head``) before it answers with what it has.
 SESSION_HEAD_WAIT_SECONDS = 1.5
+# The longest a head-only request may hold an owner's link (route, auth and
+# the request together). An owner that accepts connections but stops answering
+# would otherwise hold it for a full read timeout, and the sync pass, woken to
+# try the same owner, waits that out before it reaches the next worker.
+SESSION_HEAD_FETCH_SECONDS = 3.0
 # One out-of-band exchange per owner at a time, shared by every caller.
 _head_fetches: Dict[str, asyncio.Task] = {}
 # A chat whose owner sends no head (an older peer, a chat it no longer lists)
@@ -832,11 +837,12 @@ class PeerLink:
             if _heads_known(self.device_id):
                 return False
             session_ids = requested_session_watermarks(self.device_id)
-            await self.open(client, ctx)
-            marks = await asyncio.to_thread(store.local_watermarks)
-            exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange",
-                                       json_body=await self._exchange_body(ctx, session_ids, marks, limit=1,
-                                                                           flush=False))
+            async with asyncio.timeout(SESSION_HEAD_FETCH_SECONDS):  # see SESSION_HEAD_FETCH_SECONDS
+                await self.open(client, ctx)
+                marks = await asyncio.to_thread(store.local_watermarks)
+                exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange",
+                                           json_body=await self._exchange_body(ctx, session_ids, marks, limit=1,
+                                                                               flush=False))
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             return True
 
