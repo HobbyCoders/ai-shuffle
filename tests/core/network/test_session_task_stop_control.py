@@ -1,0 +1,322 @@
+"""The "x" on one running task of a chat that runs on another worker.
+
+The chat's Stop was forwarded to the worker that runs the chat, but the "x"
+on a single task was not: the viewing worker tried to stop it on its own
+read-only mirror, had nothing to stop, and answered "Couldn't stop the task".
+Two in-process workers over the real signed control endpoint.
+"""
+import asyncio
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from app.api import sessions as sessions_api
+from app.api import task_stop_owner
+from app.core import query_engine
+from app.core.task_registry import task_registry
+from app.db import database
+from app.network import catalog, control, engine, transport
+from tests.core.network.harness import _ACTIVE, converge, join
+from tests.core.network.test_transport import ServedBy
+
+SESSION = "s-owned-there"
+STOP_PATH = "/api/v1/network/peer/control/" + task_stop_owner.ACTION
+
+
+@pytest.fixture
+def pair(workers, monkeypatch):
+    owner, mirror = workers("owner"), workers("mirror")
+    with owner.active():
+        engine.create_network("Home", device_name="ServerWorker")
+    join(owner, mirror, name="Laptop")
+    with owner.active():
+        database.create_session(SESSION, "default", title="Runs on ServerWorker", is_active=True)
+        catalog.publish_owned()
+    converge([owner, mirror])
+    served = ServedBy(owner, "http://owner.local:8000")
+    real_async = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = served.transport()
+        return real_async(**kwargs)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    transport._links[owner.device_id] = transport.PeerLink(owner.device_id, [served.base_url])
+
+    # Which worker ran the stop: the registry is one per process here, so a
+    # stop on the mirror would also find the owner's row.
+    ran_on = []
+    real_stop = query_engine.stop_session_task
+
+    async def spy(session_id, task_id, **kwargs):
+        ran_on.append(_ACTIVE.get().name)
+        return await real_stop(session_id, task_id, **kwargs)
+    monkeypatch.setattr(query_engine, "stop_session_task", spy)
+
+    async def require_session(request, session_id):
+        return database.get_session(session_id)
+    monkeypatch.setattr(sessions_api, "require_session", require_session)
+    try:
+        yield owner, mirror, served, ran_on
+    finally:
+        task_registry.clear_session(SESSION)
+
+
+def press_x(task_id):
+    """The endpoint the "x" calls, as the viewing worker answers it."""
+    return asyncio.run(sessions_api.stop_session_background_task(None, SESSION, task_id, token="t"))
+
+
+def test_the_x_on_a_mirrored_chat_stops_the_task_where_it_runs(pair):
+    owner, mirror, served, ran_on = pair
+    with owner.active():
+        task_registry.start_task(SESSION, "shell-1", "shell", "npm run dev")
+    with mirror.active():
+        assert control.owner_of(database.get_session(SESSION)) == owner.device_id
+        result = press_x("shell-1")
+    assert result["ok"] is True, result
+    assert result["session_id"] == SESSION and result["task_id"] == "shell-1"
+    assert ran_on == ["owner"]
+    assert ("POST", STOP_PATH) in served.requests
+    with owner.active():
+        assert task_registry.get_task(SESSION, "shell-1")["status"] == "killed"
+
+
+def test_a_chat_on_this_worker_is_stopped_here(pair):
+    owner, mirror, served, ran_on = pair
+    with owner.active():
+        task_registry.start_task(SESSION, "shell-2", "shell", "sleep 900")
+        result = press_x("shell-2")
+    assert result["ok"] is True, result
+    assert ran_on == ["owner"]
+    assert ("POST", STOP_PATH) not in served.requests
+
+
+def test_an_owner_that_cannot_be_reached_is_named(pair, monkeypatch):
+    owner, mirror, served, ran_on = pair
+    monkeypatch.setattr(control, "call", AsyncMock(
+        side_effect=control.RunnerUnreachable("Couldn't reach ServerWorker from Laptop (connection refused).")))
+    with mirror.active():
+        result = press_x("shell-3")
+    assert result["ok"] is False
+    assert result["message"] == ("Couldn't stop the task. "
+                                 "Couldn't reach ServerWorker from Laptop (connection refused).")
+    assert ran_on == []  # never "stopped" on the mirror
+
+
+def test_an_older_owner_is_asked_to_update(pair, monkeypatch):
+    owner, mirror, served, ran_on = pair
+    original = control._LAZY_HANDLERS.pop(task_stop_owner.ACTION)
+    try:
+        with mirror.active():
+            result = press_x("shell-4")
+    finally:
+        control._LAZY_HANDLERS[task_stop_owner.ACTION] = original
+    assert result["ok"] is False
+    assert "ServerWorker needs an update to stop a single task" in result["message"]
+    assert ran_on == []
+
+
+def test_the_owner_refuses_a_stop_for_a_chat_it_does_not_run(pair):
+    owner, mirror, served, ran_on = pair
+    with mirror.active():
+        with pytest.raises(PermissionError, match="does not own"):
+            asyncio.run(control.handle(task_stop_owner.ACTION, {"session_id": SESSION, "task_id": "x"},
+                                       from_device=owner.device_id))
+        with pytest.raises(ValueError, match="Invalid task id"):
+            asyncio.run(control.handle(task_stop_owner.ACTION, {"session_id": SESSION, "task_id": ""},
+                                       from_device=owner.device_id))
+    assert ran_on == []
+
+
+# The swarm row's "x" cancels the workflow; its coordinator runs on the owner.
+SWARM_PATH = "/api/v1/network/peer/control/" + task_stop_owner.SWARM_ACTION
+
+
+@pytest.fixture
+def swarm_pair(pair, monkeypatch):
+    from app.api import swarms as swarms_api
+    from app.core import swarm
+
+    async def owned_session(request, session_id):
+        return database.get_session(session_id)
+    monkeypatch.setattr(swarms_api, "owned_session", owned_session)
+
+    async def may_read(request, session):
+        if request == "no-transcript":
+            raise HTTPException(status_code=403, detail="no")
+    monkeypatch.setattr(swarms_api, "check_transcript_access", may_read)
+    cancelled_on = []
+
+    async def cancel(session_id, key):
+        cancelled_on.append(_ACTIVE.get().name)
+        if key == "gone":
+            raise ValueError("Unknown swarm")
+        if key == "stuck":
+            raise swarm.SwarmUnavailableError("Couldn't read this swarm's workers right now; nothing was stopped.")
+        return {"id": key, "session_id": session_id, "status": "cancelled", "tasks": [{"report": "private"}]}
+    monkeypatch.setattr(swarm, "cancel", cancel)
+
+    # The mirror's synced copy (what the encrypted transcript sync delivered).
+    async def snapshots(session_id):
+        if _ACTIVE.get().name != "mirror":
+            return []
+        # Synced before the cancel landed, so it still says running.
+        return [{"id": "wf-1", "session_id": session_id, "status": "running", "tasks": [{"report": "synced"}]}]
+    monkeypatch.setattr(swarm, "snapshots", snapshots)
+
+    # What the owner actually put on the (plain HTTP) control link.
+    served = pair[2]
+    peer_bodies = []
+    real_handler = served.handler
+
+    def recording(request):
+        response = real_handler(request)
+        if str(request.url).endswith(SWARM_PATH):
+            peer_bodies.append(response.content)
+        return response
+    monkeypatch.setattr(served, "handler", recording)
+    return (*pair, cancelled_on, swarms_api, peer_bodies)
+
+
+def test_the_swarm_x_on_a_mirrored_chat_cancels_where_it_runs(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
+    with mirror.active():
+        result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-1", None, token="t"))
+    assert result["swarm"] == {"id": "wf-1", "session_id": SESSION, "status": "cancelled",
+                               "tasks": [{"report": "synced"}]}
+    assert cancelled_on == ["owner"]
+    assert ("POST", SWARM_PATH) in served.requests
+    # Briefs and reports never crossed the plain-HTTP link.
+    assert peer_bodies and all(b"private" not in body and b"tasks" not in body for body in peer_bodies)
+
+
+def test_a_mirror_without_a_synced_copy_answers_with_the_receipt(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
+    with mirror.active():
+        result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-new", None, token="t"))
+    assert result == {"swarm": {"id": "wf-new", "session_id": SESSION, "status": "cancelled"}}
+    assert cancelled_on == ["owner"]
+
+
+@pytest.mark.parametrize(("https", "has_tasks"), [(False, False), (True, True)])
+def test_the_owner_sends_task_reports_only_over_https(swarm_pair, https, has_tasks):
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
+    with owner.active():
+        token = control.inbound_https.set(https)
+        try:
+            answer = asyncio.run(control.handle(task_stop_owner.SWARM_ACTION,
+                                                {"session_id": SESSION, "swarm_id": "wf-5"},
+                                                from_device=mirror.device_id))
+        finally:
+            control.inbound_https.reset(token)
+    assert ("tasks" in answer["swarm"]) is has_tasks
+    assert answer["swarm"]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("viewer", ["mirror", "owner"])
+def test_a_caller_who_may_not_read_the_chat_gets_only_a_receipt(swarm_pair, viewer):
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
+    with {"owner": owner, "mirror": mirror}[viewer].active():
+        result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-9", "no-transcript", token="t"))
+    assert result == {"swarm": {"id": "wf-9", "session_id": SESSION, "status": "cancelled"}}
+
+
+@pytest.mark.parametrize(("key", "code"), [("gone", 404), ("stuck", 409)])
+def test_the_owners_swarm_refusal_keeps_its_status(swarm_pair, key, code):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
+    with mirror.active():
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(swarms_api.cancel_swarm(SESSION, key, None, token="t"))
+    assert caught.value.status_code == code
+    assert cancelled_on == ["owner"]
+
+
+def test_a_swarm_on_this_worker_is_cancelled_here(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
+    with owner.active():
+        asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-2", None, token="t"))
+    assert cancelled_on == ["owner"]
+    assert ("POST", SWARM_PATH) not in served.requests
+
+
+def test_an_older_owner_is_asked_to_update_for_a_swarm(swarm_pair):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
+    original = control._LAZY_HANDLERS.pop(task_stop_owner.SWARM_ACTION)
+    try:
+        with mirror.active():
+            with pytest.raises(HTTPException) as caught:
+                asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-3", None, token="t"))
+    finally:
+        control._LAZY_HANDLERS[task_stop_owner.SWARM_ACTION] = original
+    assert caught.value.status_code == 409
+    assert "ServerWorker needs an update to cancel a swarm" in caught.value.detail
+    assert cancelled_on == []
+
+
+# A row paused by a usage limit: its "x" cancels the resume armed on the owner.
+RESUME_PATH = "/api/v1/network/peer/control/" + task_stop_owner.RESUME_ACTION
+
+
+@pytest.fixture
+def paused_pair(pair, monkeypatch):
+    from app.core import limit_resume
+    cancelled_on = []
+
+    def paused_workers_of(session_id):
+        # Only the owner holds the wakeup.
+        return ["w-paused"] if _ACTIVE.get().name == "owner" and session_id == SESSION else []
+    monkeypatch.setattr(limit_resume, "paused_workers_of", paused_workers_of)
+
+    async def cancel(target, **kwargs):
+        cancelled_on.append((_ACTIVE.get().name, target))
+        return True
+    monkeypatch.setattr(limit_resume, "cancel", cancel)
+    return (*pair, cancelled_on)
+
+
+def cancel_paused(task_id):
+    return asyncio.run(sessions_api.cancel_session_limit_resume(None, SESSION, task_id, token="t"))
+
+
+def test_the_x_on_a_paused_row_of_a_mirrored_chat_cancels_on_the_owner(paused_pair):
+    owner, mirror, served, _, cancelled_on = paused_pair
+    with mirror.active():
+        result = cancel_paused("w-paused")
+    assert result == {"session_id": SESSION, "task_id": "w-paused", "cancelled": True}
+    assert cancelled_on == [("owner", "w-paused")]
+    assert ("POST", RESUME_PATH) in served.requests
+
+
+def test_the_owner_cancels_only_a_paused_worker_of_that_chat(paused_pair):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on = paused_pair
+    with mirror.active():
+        with pytest.raises(HTTPException) as caught:
+            cancel_paused("another-chats-worker")
+    assert caught.value.status_code == 404
+    assert cancelled_on == []
+
+
+def test_a_paused_row_on_this_worker_is_cancelled_here(paused_pair):
+    owner, mirror, served, _, cancelled_on = paused_pair
+    with owner.active():
+        assert cancel_paused("w-paused")["cancelled"] is True
+    assert cancelled_on == [("owner", "w-paused")]
+    assert ("POST", RESUME_PATH) not in served.requests
+
+
+def test_an_unreachable_owner_is_a_409_for_a_paused_row(paused_pair, monkeypatch):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on = paused_pair
+    monkeypatch.setattr(control, "call", AsyncMock(
+        side_effect=control.RunnerUnreachable("Couldn't reach ServerWorker from Laptop (connection refused).")))
+    with mirror.active():
+        with pytest.raises(HTTPException) as caught:
+            cancel_paused("w-paused")
+    assert caught.value.status_code == 409
+    assert "Couldn't reach ServerWorker" in caught.value.detail
+    assert cancelled_on == []

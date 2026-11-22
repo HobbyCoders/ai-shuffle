@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { apiUrl, withAuth } from '$lib/api/runtime';
-import { parseSwarm, newestSwarm, type SwarmSnapshot } from '$lib/utils/swarm';
+import { parseSwarm, newestSwarm, isSwarmStatus, type SwarmSnapshot } from '$lib/utils/swarm';
 import { recheckAuthOn401 } from '$lib/api/client';
 
 interface SwarmState { bySession: Record<string, Record<string, SwarmSnapshot>>; errors: Record<string, string>; }
@@ -11,7 +11,11 @@ const base = (id: string) => apiUrl(`/api/sessions/${encodeURIComponent(id)}/swa
 async function request(url: string, method = 'GET'): Promise<unknown> {
  const response = await fetch(url, withAuth({ method, headers: { Accept: 'application/json' } }));
  if (response.status === 401) recheckAuthOn401();
- if (!response.ok) throw new Error(`Swarm request failed (${response.status}). Try again.`);
+ if (!response.ok) {
+  // A 409 says why (the chat's worker could not be reached, or needs an update).
+  const detail = response.status === 409 ? await response.json().then((b) => b?.detail, () => null) : null;
+  throw new Error(typeof detail === 'string' && detail ? detail : `Swarm request failed (${response.status}). Try again.`);
+ }
  return response.json();
 }
 function receive(value: unknown, sessionId?: string) {
@@ -47,9 +51,17 @@ function hydrate(sessionId: string): Promise<void> {
 export const swarms = {
  subscribe: state.subscribe, receive, hydrate,
  async cancel(sessionId: string, swarmId: string) {
-  const result = parseSwarm(await request(`${base(sessionId)}/${encodeURIComponent(swarmId)}/cancel`, 'POST'));
-  if (!result || result.id !== swarmId || result.session_id !== sessionId) throw new Error('Cancellation was not confirmed. Refresh the workflow and try again.');
-  receive(result, sessionId);
+  const body = await request(`${base(sessionId)}/${encodeURIComponent(swarmId)}/cancel`, 'POST');
+  const result = parseSwarm(body);
+  if (result && result.id === swarmId && result.session_id === sessionId) { receive(result, sessionId); return; }
+  // A receipt without tasks (from a worker whose copy has not synced yet):
+  // the cancel landed, and the full workflow arrives with the next refresh.
+  const receipt = body && typeof body === 'object' && 'swarm' in body ? (body as { swarm: unknown }).swarm : null;
+  if (receipt && typeof receipt === 'object' && !('tasks' in receipt)) {
+   const r = receipt as { id?: unknown; session_id?: unknown; status?: unknown };
+   if (r.id === swarmId && r.session_id === sessionId && isSwarmStatus(r.status)) { void hydrate(sessionId); return; }
+  }
+  throw new Error('Cancellation was not confirmed. Refresh the workflow and try again.');
  },
  /** Reconnect refresh is scoped to sessions with workflows, not every chat. */
  refreshKnown(sessionId: string) {

@@ -38,11 +38,13 @@ const mocks = vi.hoisted(() => {
 		streaming: store<Set<string>>(new Set()),
 		mobile: false,
 		stopSessionTask: vi.fn(),
+		cancelLimitResume: vi.fn(),
 		interruptSession: vi.fn(),
 		cancel: vi.fn(),
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
 		notifyError: vi.fn(),
+		notifyBanner: vi.fn(),
 		savePreference: vi.fn()
 	};
 });
@@ -66,6 +68,7 @@ vi.mock('$lib/stores/swarms', () => ({
 }));
 vi.mock('$lib/stores/usage-target', () => ({ usageTargetDeviceName: mocks.deviceName }));
 vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask, interruptSession: mocks.interruptSession }));
+vi.mock('$lib/api/limit-resume', () => ({ cancelLimitResume: mocks.cancelLimitResume }));
 // No watches here (RunningTasksList.watches.test.ts covers them).
 vi.mock('$lib/api/watches', () => ({
 	listWatches: vi.fn(async () => ({ watches: [], preferredWorkerId: null })),
@@ -73,7 +76,10 @@ vi.mock('$lib/api/watches', () => ({
 	moveWatch: vi.fn(),
 	setWatchPreference: vi.fn()
 }));
-vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.notifyError } }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.notifyError, banner: mocks.notifyBanner } }));
+/** A stop failure is an on-page error banner that also stays in the bell. */
+const stopFailedWith = (message: string) =>
+	expect(mocks.notifyBanner).toHaveBeenCalledWith(message, expect.objectContaining({ severity: 'error', persist: true }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession, openSessionLink: vi.fn() }));
 vi.mock('$lib/utils/platform', () => ({ buildShell: () => (mocks.mobile ? 'mobile' : 'desktop') }));
 
@@ -131,6 +137,7 @@ beforeEach(() => {
 	mocks.cancel.mockReset().mockResolvedValue(undefined);
 	mocks.openSession.mockReset();
 	mocks.notifyError.mockReset();
+	mocks.notifyBanner.mockReset();
 });
 
 afterEach(() => cleanup());
@@ -408,8 +415,83 @@ describe('RunningTasksList stopping', () => {
 		setTasks([task('a')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
-		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalled());
+		await waitFor(() => stopFailedWith("Couldn't stop the task. It may have already finished."));
+		expect(mocks.notifyError).not.toHaveBeenCalled();
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
+	});
+
+	it("says why, in the server's words, when the chat's worker could not stop it", async () => {
+		const message = "Couldn't stop the task. Couldn't reach ServerWorker from Laptop (connection refused).";
+		mocks.stopSessionTask.mockResolvedValue({ ok: false, message });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => stopFailedWith(message));
+		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
+	});
+
+	it('shows a stop failure inside the open sheet, which covers the banner, until a retry', async () => {
+		const message = "Couldn't stop the task. The worker running this chat did not answer in time.";
+		mocks.stopSessionTask.mockResolvedValue({ ok: false, message });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		const alert = await screen.findByTestId('sheet-stop-error');
+		expect(screen.getByRole('dialog').contains(alert)).toBe(true);
+		expect(alert.getAttribute('role')).toBe('alert');
+		expect(alert.textContent).toContain(message);
+		expect(mocks.notifyBanner).toHaveBeenCalledTimes(1);
+		mocks.stopSessionTask.mockResolvedValue({ ok: true });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => expect(screen.queryByTestId('sheet-stop-error')).toBeNull());
+	});
+
+	it('leaves a stop failure on the controls page to the banner, which shows above it', async () => {
+		mocks.stopSessionTask.mockResolvedValue({ ok: false });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'page' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => stopFailedWith("Couldn't stop the task. It may have already finished."));
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+	});
+
+	it('dismisses the in-sheet stop failure', async () => {
+		mocks.stopSessionTask.mockResolvedValue({ ok: false });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await screen.findByTestId('sheet-stop-error');
+		const dismiss = screen.getByRole('button', { name: 'Dismiss' });
+		dismiss.focus();
+		await fireEvent.click(dismiss);
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+		expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+	});
+
+	it("keeps a late stop failure out of another chat's sheet", async () => {
+		let finish!: (value: { ok: boolean }) => void;
+		mocks.stopSessionTask.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+		setTasks([task('a')]);
+		const view = render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		mocks.active.set({ sessionId: 's2', activeTasks: [task('b')], messages: [] });
+		await view.rerender({ sessionId: 's2', variant: 'sheet' });
+		finish({ ok: false });
+		await waitFor(() => expect(mocks.notifyBanner).toHaveBeenCalledTimes(1));
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+	});
+
+	it("says why a paused task could not be stopped when the chat's worker explains", async () => {
+		const detail = "Couldn't reach ServerWorker from Laptop (connection refused).";
+		mocks.cancelLimitResume.mockRejectedValue({ status: 409, detail });
+		const pause = { id: 'p1', role: 'system', type: 'system', content: '', systemSubtype: 'limit_resume',
+			systemData: { status: 'scheduled', resume_at: 2_000_000_000, task_id: 'a' } };
+		setTasks([task('a')], [pause]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel: Task a' }));
+		expect(mocks.cancelLimitResume).toHaveBeenCalledWith('s1', 'a');
+		expect(mocks.stopSessionTask).not.toHaveBeenCalled();
+		await waitFor(() => stopFailedWith(`Couldn't stop the task. ${detail}`));
 	});
 
 	it('Stop all confirms with the count and stops only the filtered rows', async () => {

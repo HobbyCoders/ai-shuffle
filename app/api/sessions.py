@@ -1741,13 +1741,19 @@ async def stop_session_background_task(
     Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
     (a shell whose processes survived) rather than an error; a task that
     already finished is ok=True with ``detail: "already finished"``.
-    """
-    await require_session(request, session_id)
 
+    A chat that runs on another worker is a mirror here, with none of its
+    tasks: the stop is forwarded to that worker, as the chat's Stop is.
+    """
+    session = await require_session(request, session_id)
+
+    from app.api.task_stop_owner import forward_task_stop
     from app.core.query_engine import stop_session_task
 
     async with api_error_handler("stop background task"):
-        result = await stop_session_task(session_id, task_id)
+        result = await forward_task_stop(session, task_id)
+        if result is None:
+            result = await stop_session_task(session_id, task_id)
         return {"session_id": session_id, "task_id": task_id, **result}
 
 
@@ -2237,8 +2243,18 @@ async def cancel_session_limit_resume(
     """Cancel the resume this chat (or one of its paused Task workers) has
     scheduled. A cancelled worker settles as stopped. ``cancelled`` is false
     when nothing was scheduled."""
-    await require_session(request, session_id)
+    session = await require_session(request, session_id)
     from app.core import limit_resume
+
+    if task_id:
+        # A paused worker's resume is armed on the worker that runs the chat.
+        from app.api.task_stop_owner import forward_paused_task_cancel
+        forwarded = await forward_paused_task_cancel(session, task_id)
+        if forwarded is not None:
+            if "error" in forwarded:
+                raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
+                                    detail=forwarded["detail"])
+            return {"session_id": session_id, "task_id": task_id, "cancelled": forwarded["cancelled"]}
 
     target = session_id
     if task_id:
