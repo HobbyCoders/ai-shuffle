@@ -104,7 +104,7 @@ The existing fold row (`.wlrow.fold`) is also rendered as the **header** of an o
 
 ## 8. Running work
 
-`RunningTasksList` (inline) and `BackgroundWorkStrip` (assistant mode) stay. Two fixes feed them:
+`RunningTasksList` (inline) stays, and lists the chats this one started (StartSession) beside its agents, each with a chat icon. Two fixes feed it:
 - a stopped or finished resumed agent leaves the list within seconds and its elapsed counts from the current assignment (#2233);
 - when an agent finishes, the list row goes away and the **card in the turn** (§4) is where its result is; the list links "Open" to that card (scroll + flash), not only to the separate transcript.
 

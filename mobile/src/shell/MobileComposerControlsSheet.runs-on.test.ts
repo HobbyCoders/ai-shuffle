@@ -22,7 +22,7 @@ const { session, appSessions, listInstallsMock } = vi.hoisted(() => ({
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	session.store = writable({});
-	return { activeSession: session.store };
+	return { activeSession: session.store, streamingSessions: writable(new Set<string>()) };
 });
 vi.mock('$lib/stores/app-data.svelte', () => {
 	const sessions = writable([]);

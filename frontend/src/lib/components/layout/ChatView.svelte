@@ -8,13 +8,9 @@
 	import { MediaQuery } from 'svelte/reactivity';
 	import { NO_CALL_ROOM, nextCallRoom, type CallRoom } from './callDockRoom';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
-	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
+	import { activeSession, activeWsConnected } from '$lib/stores/active-session';
 	import { attachRefusals } from '$lib/stores/session/attach-refusals';
 	import { sessions } from '$lib/stores/app-data.svelte';
-	import { openSession } from '$lib/services/session-navigation';
-	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
-	import { buildBackgroundJobs, type BackgroundJob } from '$lib/utils/background-work';
-	import BackgroundWorkStrip from '$lib/components/chat/BackgroundWorkStrip.svelte';
 	import { tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { rememberEmptyChat, wasLastSeenEmpty } from '$lib/stores/session/empty-chat-memory';
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
@@ -178,36 +174,6 @@
 	// New Chat it fell back to. Binding any chat hides it.
 	const unavailable = $derived($activeSession.sessionId ? null : $unavailableChat);
 
-	// Chats this one started (StartSession) that are still working, as plain
-	// lines beside the composer, in every chat. Its own background tasks stay
-	// in the transcript's running-tasks list, so they are not repeated here.
-	const backgroundJobs = $derived(
-		buildBackgroundJobs({
-			tasks: [],
-			messages: $activeSession.messages,
-			sessions: $sessions,
-			streaming: $streamingSessions
-		})
-	);
-	function openJob(job: BackgroundJob) {
-		if (job.sessionId) openSession(job.sessionId);
-	}
-	async function stopJob(job: BackgroundJob): Promise<boolean> {
-		try {
-			if (job.stop.kind === 'task') {
-				const owner = $activeSession.sessionId;
-				if (!owner) return false;
-				const result = await stopSessionTask(owner, job.stop.taskId);
-				if (!result.ok) notify.error(result.message || 'Could not stop that job. It may have finished.');
-				return result.ok;
-			}
-			await interruptSession(job.stop.sessionId);
-			return true;
-		} catch {
-			notify.error('Could not stop that job. It may have finished.');
-			return false;
-		}
-	}
 	// The bound hero's heading: the header's rule (chatHeaderTitle), so a chat
 	// whose name is not known yet reads "Loading…", never "New Chat" (the
 	// switcher's placeholder), while it opens.
@@ -631,7 +597,6 @@
 			{#if voiceCallActive && $activeSession.sessionId}
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
-			<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 				{#key $sessionOwnerBoundary}
 					<!-- The Vault lives with the composer on every lane: requests are
 					     answered right above it and the composer's Vault chip opens

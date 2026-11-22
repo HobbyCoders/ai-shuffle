@@ -43,8 +43,52 @@ async function newChatSpeed(page, tier) {
   const picker = page.getByRole('dialog', { name: 'Choose model' });
   await picker.getByRole('option', { name: /^GPT-6\.1 Sol/ }).click();
   await page.getByRole('button', { name: /^(Effort: |All chat controls)/ }).filter({ visible: true }).click({ timeout: 8_000 });
-  const selected = page.getByRole('radiogroup', { name: 'Speed', exact: true }).getByRole('radio', { name: tier, exact: true, checked: true });
-  await selected.waitFor();
+  // Desktop: the effort card's corner bolt names the tier. Phone: the sheet's Speed segments.
+  const bolt = page.getByRole('button', { name: `Speed: ${tier}`, exact: true }).filter({ visible: true });
+  const segment = page.getByRole('radiogroup', { name: 'Speed', exact: true }).getByRole('radio', { name: tier, exact: true, checked: true });
+  await bolt.or(segment).first().waitFor();
+  await page.keyboard.press('Escape');
+}
+
+async function waitSaved(page, values) {
+  for (let i = 0; ; i++) {
+    const { preferences } = await api(page, 'GET', '/preferences/all');
+    if (keys.every((key, k) => (preferences[key] ?? null) === values[k])) return;
+    if (i >= 25) return checkSaved(page, values);
+    await page.waitForTimeout(200);
+  }
+}
+
+// Desktop only: the effort card's corner bolt steps Standard → Fast → Ultrafast
+// → Standard, and a new chat's pick is the model's saved speed.
+async function boltCycle(page) {
+  await page.getByRole('button', { name: /^Effort: / }).filter({ visible: true }).click({ timeout: 8_000 });
+  const bolt = page.getByTestId('speed-bolt').filter({ visible: true });
+  await bolt.and(page.getByRole('button', { name: 'Speed: Standard', exact: true })).waitFor();
+  const tier = (name) => bolt.and(page.getByRole('button', { name: `Speed: ${name}`, exact: true })).waitFor();
+  // Clicks on one spot, as a person does: the bolt must not move mid-cycle.
+  let box = await bolt.boundingBox();
+  let spot = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await spot();
+  await spot();
+  await tier('Ultrafast');
+  expect(await bolt.locator('svg').count() === 2, 'Ultrafast shows two bolts');
+  await waitSaved(page, [true, 'ultrafast']);
+  // Then a whole cycle on one spot near the left edge of the Ultrafast bolt,
+  // its widest look: the bolt must not narrow once it shows one bolt again.
+  box = await bolt.boundingBox();
+  spot = () => page.mouse.click(box.x + 4, box.y + box.height / 2);
+  await spot();
+  await tier('Standard');
+  expect(await page.locator('.effort-pop-card').count() === 1, 'the card stays open after leaving Ultrafast');
+  await waitSaved(page, [false, null]);
+  await spot();
+  await tier('Fast');
+  await spot();
+  await tier('Ultrafast');
+  await spot();
+  await tier('Standard');
+  await waitSaved(page, [false, null]);
   await page.keyboard.press('Escape');
 }
 
@@ -128,6 +172,10 @@ runJourney({ name: 'model-tuning-speed', cases: [{
       }
       await newChatSpeed(page, tier);
     }
+    // The phone composer opens its sheet instead of the effort card.
+    const cycled = await page.getByRole('button', { name: /^Effort: / }).filter({ visible: true }).count() > 0;
+    expect(cycled || page.viewportSize().width < 768, 'the desktop composer offers the effort card');
+    if (cycled) await boltCycle(page);
     await openTuning(page);
     await modelList(page);
     await item(page, model).click();
@@ -136,6 +184,6 @@ runJourney({ name: 'model-tuning-speed', cases: [{
     await speed(page).focus();
     await save(page, [0, 1], () => button(page, 'Reset Speed to default').click(), [null, null]);
     expect(await speed(page).inputValue() === '', 'reset restores Not picked');
-    log('Worker prefs accepted and reloaded; new chats selected Ultrafast, Fast and Standard; reset cleared both records.');
+    log(`Worker prefs accepted and reloaded; new chats selected Ultrafast, Fast and Standard;${cycled ? ' the corner bolt saved Ultrafast, then Standard;' : ''} reset cleared both records.`);
   }
 }] });
