@@ -12,8 +12,9 @@ session.
 
 ## 1. Plugin or plain skill?
 
-Write a plain skill instead (`save_skill`, or `.fluid/skills/<name>/SKILL.md`
-in a project) when one written procedure is enough. Build a plugin when the
+Write a plain skill instead (`save_skill`, or `~/.fluid/skills/<name>/SKILL.md`,
+which AI Shuffle syncs to the owner's other workers) when one written
+procedure is enough. Build a plugin when the
 owner wants one of these:
 
 - several parts that belong together: skills, slash commands, subagents;

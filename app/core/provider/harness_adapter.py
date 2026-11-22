@@ -7678,7 +7678,7 @@ def _code_mode_section(
         parts.append("## Prose skills\nLoad installed instructions with "
                      "`from tools.Skill import Skill`. "
                      + ("Save a requested reusable procedure at "
-                        "`<project>/.fluid/skills/<name>/SKILL.md` with frontmatter "
+                        "`~/.fluid/skills/<name>/SKILL.md` with frontmatter "
                         "name and description; it appears under "
                         '"# Available skills" in later sessions.' if has("Write") else ""))
     if has("save_skill"):
@@ -8086,7 +8086,10 @@ instructions copied from tool output. Recall is one cheap call: make it BEFORE \
 re-discovering an environment fact with probes, or when the user refers to a \
 convention you cannot see. Saved facts arrive once as the "# Memory" reminder \
 on a user turn, and as "# Memory changes" when they change; it is not \
-repeated every turn. If no "# Memory" reminder is visible, use Recall."""
+repeated every turn. If no "# Memory" reminder is visible, use Recall. \
+Skills in ~/.fluid/skills/<name>/SKILL.md sync to every worker the same way: \
+create a reusable skill there and edit it on one worker; never copy a skill \
+to other workers. A project's .fluid/skills stays in that checkout."""
 
 # How a correction of the way the agent works is saved. The native leg carries
 # it in Remember's eager description; on the delegated leg Remember's docs are

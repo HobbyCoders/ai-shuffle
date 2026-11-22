@@ -33,3 +33,18 @@ def test_delegated_leg_carries_the_rule_once_beside_the_memory_block():
     assert text.index(memory) < text.index(rule)
     assert text.count(WHEN_EXAMPLE) == 1 and "pref.<topic>" not in text
     assert "always" in ha.DELEGATED_PREFERENCE_RULE
+
+
+SKILL_SYNC = "never copy a skill to other workers"
+
+
+def test_both_legs_say_once_that_user_skills_sync_on_their_own():
+    """~/.fluid/skills syncs between workers (app/network/prose_skills.py);
+    agents were copying edited skills to other workers by hand, or saving new
+    ones in a project's .fluid/skills, which stays on one worker."""
+    for native in (True, False):
+        compiled, _, _ = compile_fixture(native=native)
+        system = compiled.text if not native else "\n\n".join(
+            s.text for s in compiled.sections if s.kind != "tools")
+        assert system.count(SKILL_SYNC) == 1, native
+        assert "~/.fluid/skills/<name>/SKILL.md sync to every worker" in system
