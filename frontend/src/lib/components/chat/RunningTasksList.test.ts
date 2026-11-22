@@ -367,6 +367,15 @@ describe('RunningTasksList stopping', () => {
 		await waitFor(() => expect(screen.queryByTestId('sheet-stop-error')).toBeNull());
 	});
 
+	it('leaves a stop failure on the controls page to the banner, which shows above it', async () => {
+		mocks.stopSessionTask.mockResolvedValue({ ok: false });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'page' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => stopFailedWith("Couldn't stop the task. It may have already finished."));
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+	});
+
 	it('dismisses the in-sheet stop failure', async () => {
 		mocks.stopSessionTask.mockResolvedValue({ ok: false });
 		setTasks([task('a')]);

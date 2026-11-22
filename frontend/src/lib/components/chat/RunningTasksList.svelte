@@ -374,11 +374,12 @@
 
 	/**
 	 * A stop failure shows on the page (a phone has no bell on screen) and stays in
-	 * the bell. The sheet sits above the banner, so it also shows the failure itself.
+	 * the bell. The full-screen sheet sits above the banner, so it also shows the
+	 * failure itself. The phone's controls page sits below it and does not.
 	 */
 	function stopFailed(message: string) {
 		notify.banner(message, { severity: 'error', persist: true, duration_ms: 8000 });
-		if (sheetVisible) sheetStopError = message;
+		if (variant === 'sheet' || ownSheetOpen) sheetStopError = message;
 	}
 
 	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
