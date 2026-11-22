@@ -291,6 +291,20 @@ _LOGIN_IDLE_SECONDS = 15 * 60
 _LOGIN_COMPLETE_SECONDS = 90
 _PROBE_SECONDS = 20
 _USAGE_SECONDS = 25
+_WINDOWS = sys.platform == "win32"
+#: ``subprocess.CREATE_NO_WINDOW`` (the name exists only on Windows).
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def _no_window() -> Dict[str, Any]:
+    """Spawn options that keep a run of the binary from opening a console window.
+
+    On Windows a console program such as ``agy.exe`` can get a console window
+    of its own when the worker starts it. Every run here pipes its output, so
+    none needs one: without this, each usage-panel refresh flashed a terminal
+    open and shut while ``agy -p /usage`` ran.
+    """
+    return {"creationflags": _CREATE_NO_WINDOW} if _WINDOWS else {}
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +366,7 @@ async def binary_version(binary: str) -> Optional[str]:
         proc = await asyncio.create_subprocess_exec(
             binary, "--version", stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            env=agy_spec.agent_env(tempfile.gettempdir()),
+            env=agy_spec.agent_env(tempfile.gettempdir()), **_no_window(),
         )
     except OSError:
         return None
@@ -943,7 +957,7 @@ async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
         login.proc = await asyncio.create_subprocess_exec(
             binary, "acp", "--login", cwd=home, env=agy_spec.agent_env(home),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=os.name == "posix",
+            stderr=asyncio.subprocess.STDOUT, start_new_session=os.name == "posix", **_no_window(),
         )
         _logins[login.id] = login
         login.timer = asyncio.get_running_loop().call_later(_LOGIN_IDLE_SECONDS, _expire, login.id)
@@ -1546,7 +1560,7 @@ async def list_models(row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
         proc = await asyncio.create_subprocess_exec(
             spec.argv[0], "models", cwd=home, env=spec.env,
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix",
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix", **_no_window(),
         )
     except OSError:
         return None
@@ -1638,7 +1652,7 @@ async def read_usage(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         proc = await asyncio.create_subprocess_exec(
             spec.argv[0], "-p", "/usage", "--output-format", "json", cwd=home, env=spec.env,
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix",
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix", **_no_window(),
         )
     except OSError:
         return None

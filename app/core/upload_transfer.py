@@ -645,10 +645,16 @@ def lift_paths_to_blobs(
 
 
 def materialize_blobs_for_turn(
-    blob_ids: List[str], working_dir: str
+    blob_ids: List[str], working_dir: str, *, keep_bytes: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Write each blob into ``<working_dir>/uploads/`` and return
     ``{source_path: local_path}`` for the prompt rewrite.
+
+    ``keep_bytes``, when given, leaves each blob's bytes in place and fills it
+    with ``{blob_id: local_path}`` instead: a steer is not delivered yet, and a
+    steer that never lands must leave the message's own turn able to write the
+    file again. The caller passes those pairs to :func:`clear_materialized`
+    once the model has the message.
 
     Already-materialized rows (``data`` NULL) are skipped IF their recorded
     local file is still present — the turn is a retry and the file is already on
@@ -696,12 +702,23 @@ def materialize_blobs_for_turn(
             raise UploadLiftError(
                 f"Could not write attachment '{filename}' to {target_dir}: {exc}"
             ) from exc
-        upload_blobs_db.clear_data(blob_id, str(dest))
+        if keep_bytes is None:
+            upload_blobs_db.clear_data(blob_id, str(dest))
+        else:
+            keep_bytes[blob_id] = str(dest)
         mapping[source_path] = str(dest)
     logger.info(
         "Materialized %d upload blob(s) into %s", len(mapping), target_dir
     )
     return mapping
+
+
+def clear_materialized(written: Dict[str, str]) -> None:
+    """Drop the bytes of blobs written with ``keep_bytes``, now delivered."""
+    from app.db import upload_blobs as upload_blobs_db
+
+    for blob_id, local_path in written.items():
+        upload_blobs_db.clear_data(blob_id, local_path)
 
 
 def rewrite_prompt(prompt: str, mapping: Dict[str, str]) -> str:

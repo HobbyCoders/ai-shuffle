@@ -2421,17 +2421,22 @@ async def get_session_sync_status(
     Initial transcript downloads remain syncing. Until a local copy and an
     owner session watermark are available (including older peers), ``scope=owner``
     retains the conservative owner-wide operation count and state fallback.
+    When the owner's head for this session is not known yet, this first
+    exchanges with the owner for up to ``SESSION_HEAD_WAIT_SECONDS``.
     """
     session = await require_session(request, session_id)
     from app.network import transcripts
-    from app.network.transport import session_sync_status
+    from app.network.transport import fetch_session_head, session_sync_status
     if await run_sync(transcripts.prioritise, session_id):
         # A worker that just joined has not copied this transcript yet; it is next.
         return {"state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner"}
     target_parts = (initial_seq, initial_epoch, initial_tail_id)
-    if any(part is not None for part in target_parts):
-        if any(part is None for part in target_parts):
-            raise HTTPException(status_code=422, detail="Supply all three initial checkpoint fields")
+    if any(part is not None for part in target_parts) and any(part is None for part in target_parts):
+        raise HTTPException(status_code=422, detail="Supply all three initial checkpoint fields")
+    # Ask the owner now rather than answer with owner-wide freshness, which is
+    # "syncing" whenever the owner has unpublished events in any chat.
+    await fetch_session_head(session_id, session.get("owner_device_id"))
+    if initial_seq is not None:
         return await run_sync(session_sync_status, session_id, session.get("owner_device_id"),
                               initial_target={"seq": initial_seq, "epoch": initial_epoch, "tail_id": initial_tail_id})
     return await run_sync(session_sync_status, session_id, session.get("owner_device_id"))

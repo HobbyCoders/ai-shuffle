@@ -1884,18 +1884,33 @@ class TestGetSyncChanges:
 
 
 class TestGetSessionSyncStatus:
-    def test_returns_session_freshness(self, client, mock_database, sample_session):
+    @pytest.fixture(autouse=True)
+    def head_fetch(self):
+        with patch("app.network.transport.fetch_session_head", new_callable=AsyncMock) as fetch:
+            yield fetch
+
+    def test_returns_session_freshness(self, client, mock_database, sample_session, head_fetch):
         sample_session["owner_device_id"] = "peer-owner"
         mock_database.get_session.return_value = sample_session
         status = {"state": "syncing", "pending_updates": 12, "scope": "session",
                   "seq": 3, "epoch": "log-id", "owner_seq": 15, "owner_epoch": "log-id"}
-        with patch("app.network.transport.session_sync_status", return_value=status) as freshness:
+        order = []
+        head_fetch.side_effect = lambda *args: order.append("fetch")
+
+        def freshness_now(*args, **kwargs):
+            order.append("status")
+            return status
+
+        with patch("app.network.transport.session_sync_status", side_effect=freshness_now) as freshness:
             response = client.get("/api/v1/sessions/test-session-id/sync-status")
         assert response.status_code == 200
         assert response.json() == status
+        # The owner's head is asked for before freshness is answered.
+        head_fetch.assert_awaited_once_with("test-session-id", "peer-owner")
         freshness.assert_called_once_with("test-session-id", "peer-owner")
+        assert order == ["fetch", "status"]
 
-    def test_passes_viewer_checkpoint(self, client, mock_database, sample_session):
+    def test_passes_viewer_checkpoint(self, client, mock_database, sample_session, head_fetch):
         sample_session["owner_device_id"] = "peer-owner"
         mock_database.get_session.return_value = sample_session
         with patch("app.network.transport.session_sync_status", return_value={"state": "syncing"}) as freshness:
@@ -1903,6 +1918,7 @@ class TestGetSessionSyncStatus:
                 "initial_seq": 4, "initial_epoch": "epoch", "initial_tail_id": "tail",
             })
         assert response.status_code == 200
+        head_fetch.assert_awaited_once_with("test-session-id", "peer-owner")
         freshness.assert_called_once_with("test-session-id", "peer-owner", initial_target={
             "seq": 4, "epoch": "epoch", "tail_id": "tail",
         })
@@ -1915,14 +1931,15 @@ class TestGetSessionSyncStatus:
         {"initial_seq": 1, "initial_epoch": "", "initial_tail_id": "tail"},
         {"initial_seq": 1, "initial_epoch": "epoch", "initial_tail_id": "t" * 129},
     ])
-    def test_rejects_invalid_checkpoint(self, client, mock_database, sample_session, params):
+    def test_rejects_invalid_checkpoint(self, client, mock_database, sample_session, params, head_fetch):
         mock_database.get_session.return_value = sample_session
         with patch("app.network.transport.session_sync_status") as freshness:
             response = client.get("/api/v1/sessions/test-session-id/sync-status", params=params)
         assert response.status_code == 422
         freshness.assert_not_called()
+        head_fetch.assert_not_awaited()
 
-    def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session):
+    def test_initial_transcript_download_stays_syncing(self, client, mock_database, sample_session, head_fetch):
         mock_database.get_session.return_value = sample_session
         with patch("app.network.transcripts.prioritise", return_value=True), patch(
             "app.network.transport.session_sync_status"
@@ -1933,6 +1950,7 @@ class TestGetSessionSyncStatus:
             "state": "syncing", "pending_updates": 0, "transcript": "downloading", "scope": "owner",
         }
         freshness.assert_not_called()
+        head_fetch.assert_not_awaited()
 
     def test_missing_session(self, client, mock_database):
         mock_database.get_session.return_value = None

@@ -335,10 +335,16 @@ def _pull_claimed_elsewhere(pr: Any, session: dict, project_id: Optional[str]) -
     return False
 
 
+# Content matching for republished work reads at most this many own commits
+# and asks GitHub about at most this many matching branch names.
+_MAX_OWN_TREES = 200
+_MAX_REPUBLISHED_REFS = 5
+
+
 def find_pull_for_checkout_fallback(
     github_service: Any, repo: str, branch: str, working_dir: str, *,
     session_id: Optional[str] = None, project_id: Optional[str] = None,
-    bypass_negative_cache: bool = False,
+    bypass_negative_cache: bool = False, match_content: bool = False,
 ) -> Any:
     """Discover only a PR containing work made AFTER this branch was created.
 
@@ -348,8 +354,20 @@ def find_pull_for_checkout_fallback(
     Inherited main/parent commits are not this session's work. A PR head may
     precede HEAD because the agent made more local commits after its last push.
 
+    Last, with ``match_content`` (sidebar reconcile only; Ship It still acts on
+    the exact branch, so the Git header must not offer a PR it cannot merge),
+    republished work: an agent that rewrites its commits (to fix sign-off
+    trailers, say) and pushes them under a NEW branch name leaves no shared
+    commit. A same-repository PR from a local or remote-tracking branch whose
+    head has exactly the tree of one of this branch's own commits is this work.
+    Own commits exclude anything reachable from a base ref (main merged in
+    brings other PRs' squash commits), and a matching commit must differ from
+    its merge base with the base refs: base content restored by a revert, or
+    main merged in after one, is not this session's work.
+
     Local git gates precede gh calls. A five-minute negative cache is keyed by
-    checkout, HEAD and upstream (plus branch/base identity); failures and primary
+    checkout, HEAD, upstream and the content-matching branch names (plus
+    branch/base identity); failures and primary
     ownership rejections are never negative-cached. Turn ends bypass misses.
     An unscoped call is only a read-only discovery probe; production callers
     supply session/project scope.
@@ -396,7 +414,60 @@ def find_pull_for_checkout_fallback(
     upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else ""
     upstream_branch = upstream_name.partition("/")[2]
-    cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha, tuple(sorted(bases)))
+
+    # Republished work: the same content pushed again under another name with
+    # rewritten commits (fixed sign-offs, squashed history). No PR commit is
+    # then on this branch, so only content identity can prove ownership.
+    own_trees: set[str] = set()
+    republished: list[str] = []
+    if match_content:
+        refs = []
+        for line in git(
+            "for-each-ref", "--format=%(refname)%00%(objectname)%00%(tree)",
+            "refs/heads", "refs/remotes", check=True,
+        ).stdout.splitlines():
+            ref, _, rest = line.partition("\0")
+            sha, _, tree = rest.partition("\0")
+            if ref.startswith("refs/heads/"):
+                name = ref.removeprefix("refs/heads/")
+            else:
+                name = ref.removeprefix("refs/remotes/").partition("/")[2]
+            refs.append((name, sha, tree))
+        # Commits merged in from a base (main merged into this branch) are
+        # someone else's work, e.g. another PR's squash commit.
+        base_shas = sorted({sha for name, sha, _ in refs if name in bases and sha})
+        commits_for_tree: dict[str, list[str]] = {}
+        for line in git(
+            "log", "--format=%T %H", f"--max-count={_MAX_OWN_TREES}", head_sha,
+            "--not", creation_sha, *base_shas, check=True,
+        ).stdout.splitlines():
+            tree, _, commit = line.partition(" ")
+            commits_for_tree.setdefault(tree, []).append(commit)
+
+        def carries_own_change(commit: str) -> bool:
+            # Content equal to where the commit meets the base (a revert, or
+            # main merged in after one) holds nothing of this session's own.
+            meet = git("merge-base", commit, *(base_shas or [creation_sha]), check=True).stdout.strip()
+            diff = git("diff", "--quiet", meet, commit)
+            if diff.returncode not in (0, 1):
+                diff.check_returncode()
+            return diff.returncode == 1
+
+        skip_names = bases | {branch, upstream_branch, "HEAD"}
+        matches = {
+            name: tree for name, _, tree in refs
+            if name and name not in skip_names and tree in commits_for_tree
+        }
+        # Any commit with the tree may prove it: main merged back in after the
+        # session's own PR landed has the same tree but no change of its own.
+        own_trees = {
+            tree for tree in set(matches.values())
+            if any(carries_own_change(c) for c in commits_for_tree[tree])
+        }
+        republished = sorted(n for n, t in matches.items() if t in own_trees)[:_MAX_REPUBLISHED_REFS]
+
+    cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha,
+                 tuple(sorted(bases)), match_content, tuple(republished))
     if not bypass_negative_cache and _fallback_misses.get(cache_key):
         return None
 
@@ -429,6 +500,25 @@ def find_pull_for_checkout_fallback(
         ]
     if not discovered:
         discovered = [pr for pr in github_service.list_commit_pulls(repo, head_sha) if owned(pr)]
+
+    def same_content(pr: Any) -> bool:
+        sha = getattr(pr, "head_sha", None)
+        if (not sha or getattr(pr, "base_branch", None) in (branch, getattr(pr, "head_branch", None))
+                or (getattr(pr, "head_repo", None) or "").lower() != repo.lower()):
+            return False
+        tree = git("rev-parse", "--verify", "--quiet", f"{sha}^{{tree}}")
+        if tree.returncode not in (0, 1, 128):
+            tree.check_returncode()
+        # Content already on the base before this branch existed is not ours.
+        return tree.returncode == 0 and tree.stdout.strip() in own_trees and not ancestor(sha, creation_sha)
+
+    if not discovered:
+        # Every matching name: a closed republish must not hide its replacement.
+        for name in republished:
+            discovered += [
+                pr for pr in github_service.list_pulls(repo, state="all", limit=100, head=name)
+                if getattr(pr, "head_branch", None) == name and same_content(pr)
+            ]
     if not discovered:
         _fallback_misses.set(cache_key, True)
         return None
@@ -577,7 +667,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                     pr = await asyncio.to_thread(
                         find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
-                        bypass_negative_cache=force,
+                        bypass_negative_cache=force, match_content=True,
                     )
             if (pr is None and pr_number and (not branch or not checkout_available)
                     and _repo_owns_url(repo, session.get("pr_url"))):
