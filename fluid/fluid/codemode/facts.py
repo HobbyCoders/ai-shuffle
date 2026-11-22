@@ -252,17 +252,26 @@ MAX_RULE_FENCES = 12
 _FENCE = re.compile(r"[0-9a-f]{64}")
 
 
-def _rule_fences(entry, key, text, history):
+def _bounded_fences(held, keep):
+    """At most MAX_RULE_FENCES fingerprints: every one in ``keep`` (the
+    current wordings, in order, at the end) and then the latest of ``held``."""
+    keep = list(dict.fromkeys(keep))[-MAX_RULE_FENCES:]
+    rest = [f for f in dict.fromkeys(held) if f not in keep]
+    room = MAX_RULE_FENCES - len(keep)
+    return (rest[-room:] if room > 0 else []) + keep
+
+
+def _rule_fences(entry, key, text, history, reserve=()):
     """``{"fences": [...]}`` for a behaviour rule: the per-family fingerprint
     of every wording it has held, kept apart from the bounded undo history so
-    a deletion still fences a wording that history has dropped. ``{}`` for an
+    a deletion still fences a wording that history has dropped. ``reserve``
+    names competing wordings that must survive the bound. ``{}`` for an
     ordinary fact."""
     if not _is_rule_key(key):
         return {}
     held = list(entry.get("fences") or [])
     held += [_fence_fingerprint(h["text"], h.get("key") or key) for h in history if h.get("text")]
-    held.append(_fence_fingerprint(text, key))
-    return {"fences": list(dict.fromkeys(held))[-MAX_RULE_FENCES:]}
+    return {"fences": _bounded_fences(held, [*reserve, _fence_fingerprint(text, key)])}
 
 
 def _wording_fences(entry):
@@ -280,13 +289,14 @@ def _wording_fences(entry):
 def _union_rule_fences(target, other):
     """Keep the wordings of a rule copy a merge discards, so deleting the
     surviving copy also stops the learner saving the discarded wording again.
-    Deterministic whichever replica merges, and bounded: the target's current
-    wording always stays."""
+    The same set whichever replica merges, and bounded: both copies' current
+    wordings always stay."""
     if not (_is_rule_key(target.get("key")) and _is_rule_key(other.get("key"))):
         return
-    own = _fence_fingerprint(target["text"], target.get("key"))
-    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - {own})
-    target["fences"] = held[:MAX_RULE_FENCES - 1] + [own]
+    current = sorted({_fence_fingerprint(target["text"], target.get("key")),
+                      _fence_fingerprint(other["text"], other.get("key"))})
+    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - set(current))
+    target["fences"] = _bounded_fences(held[:MAX_RULE_FENCES - len(current)], current)
 
 
 def canonical_key(text):
@@ -1058,14 +1068,19 @@ class FactStore:
                 history.append(previous)
             clock = dict(entry.get("clock") or {entry["origin"]: entry["revision"]})
             slot = key or entry.get("key")
+            # Competing wordings a conflict-resolving save discards: they stay
+            # fenced with the survivor ahead of older history, so deleting it
+            # later stops them coming back.
+            reserve = ([_fence_fingerprint(t, old.get("key")) for t in old.get("alternatives") or []
+                        if isinstance(t, str)]
+                       if old and old.get("conflicted") and _is_rule_key(old.get("key")) else [])
             if old and old.get("conflicted") and protected and slot:
                 aliases = [e for e in all_entries if e["id"] != old["id"] and e.get("key") == slot
                            and e.get("scope", "global") == entry.get("scope", "global")]
                 if _is_rule_key(slot):
-                    # The discarded copies' wordings stay fenced with the
-                    # survivor, so deleting it later stops them coming back.
                     discarded = [f for alias in aliases for f in _wording_fences(alias)]
                     entry["fences"] = list(dict.fromkeys(discarded + list(entry.get("fences") or [])))
+                    reserve += [_fence_fingerprint(a["text"], a.get("key")) for a in aliases if a.get("text")]
                 for alias in aliases:
                     for actor, counter in (alias.get("clock") or {alias["origin"]: alias.get("revision", 1)}).items():
                         clock[actor] = max(clock.get(actor, 0), counter)
@@ -1082,7 +1097,7 @@ class FactStore:
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
-                         **_rule_fences(entry, key or entry.get("key"), text, history),
+                         **_rule_fences(entry, key or entry.get("key"), text, history, reserve),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
             # A rewrite of a fact that already expired into the archive is a
@@ -1733,17 +1748,20 @@ class FactStore:
             doc["entries"] = [e for e in kept if not e.get("retired_at")]
             doc["archived"] = [e for e in kept if e.get("retired_at")]
             self._repair_supersession_links(doc)
-            self._maintain(doc, arrived={e["id"] for e in kept} - held)
-            # Only live copies contend for a slot: maintenance has already put
-            # expired ones back in the archive, so a value that moved into a
-            # slot an expired copy used to hold is not flagged against it.
             slots = {}
+            now = time.time()
             for e in doc["entries"]:
-                if e.get("key") and not e.get("superseded_by"):
+                # An expired copy is on its way back to the archive (see
+                # _maintain), so it does not contend for its old slot. A copy
+                # that capacity trimming would archive still does: which value
+                # holds a slot is a conflict, not a question of room.
+                expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
+                if e.get("key") and not e.get("superseded_by") and not expired:
                     # Each worker's copy of an environment fact is its own slot.
                     slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
             for group in slots.values():
                 if len({e["text"] for e in group}) > 1:
                     for e in group:
                         e["conflicted"] = True
+            self._maintain(doc, arrived={e["id"] for e in kept} - held)
             self._write(doc)

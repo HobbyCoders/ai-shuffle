@@ -326,6 +326,89 @@ def test_merged_rule_fences_are_the_same_whichever_worker_merges(tmp_path):
     assert fences(a) == fences(b) and len(fences(a)) == 3
 
 
+def _rule_at_the_fence_cap(store):
+    """A GPT rule whose fences are full: it has held MAX_RULE_FENCES wordings."""
+    from fluid.codemode import facts
+
+    wordings = [f"When reporting: lead with the result, take {n}." for n in range(facts.MAX_RULE_FENCES + 1)]
+    rule = store.save_memory(wordings[0], provenance="user", durable=True,
+                             key=behavior.rule_key("gpt", wordings[0]), when=OWNER_WHEN)
+    for text in wordings[1:]:
+        store.save_memory(text, memory_id=rule.id, provenance="user", durable=True, key=rule.key)
+    entry = next(e for e in store._facts._load(read_only=True)["entries"] if e["id"] == rule.id)
+    assert len(entry["fences"]) == facts.MAX_RULE_FENCES
+    return rule, wordings[-1], entry["fences"]
+
+
+def _sorts_after(held):
+    """A competing wording whose GPT fingerprint sorts after every held one,
+    so a sorted bound that does not reserve it would drop it."""
+    from fluid.codemode import facts
+
+    for n in range(500):
+        text = f"When reporting: lead with the blocker, case {n}."
+        if facts._fence_fingerprint(text, behavior.rule_key("gpt", text)) > max(held):
+            return text
+    raise AssertionError("no candidate wording")
+
+
+def _resolve_and_delete(store, rule_key):
+    current = next(m for m in store.memories() if m.key == rule_key)
+    assert current.conflicted
+    kept = store.save_memory("When reporting: lead with the outcome.", memory_id=current.id,
+                             expected_revision=current.revision, provenance="user",
+                             protected=True, key=rule_key)
+    assert store.delete_memory(kept.id, explicit=True, purge_evidence=False)
+
+
+def test_at_the_fence_cap_a_merge_keeps_both_workers_current_wordings(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    first = "When reporting: lead with the result, take 0."
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    b._facts.merge(a._facts.export())
+    from fluid.codemode import facts
+
+    wordings = [f"When reporting: lead with the result, take {n}." for n in range(1, facts.MAX_RULE_FENCES + 1)]
+    for text in wordings:
+        a.save_memory(text, memory_id=rule.id, provenance="user", durable=True, key=rule.key)
+    held = next(e for e in a._facts._load(read_only=True)["entries"] if e["id"] == rule.id)["fences"]
+    assert len(held) == facts.MAX_RULE_FENCES
+    theirs = _sorts_after(held)
+    b.save_memory(theirs, memory_id=_peer_id(b, rule), provenance="user", durable=True, key=rule.key)
+    a_doc, b_doc = a._facts.export(), b._facts.export()
+    a._facts.merge(b_doc)
+    b._facts.merge(a_doc)
+    for store in (a, b):
+        _resolve_and_delete(store, rule.key)
+        for text in (theirs, wordings[-1]):
+            _refused(store, "gpt", text)
+
+
+def test_at_the_fence_cap_resolving_a_slot_conflict_keeps_the_discarded_wording(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    rule, _, held = _rule_at_the_fence_cap(a)
+    theirs = _sorts_after(held)
+    b.save_memory(theirs, provenance="user", durable=True, key=rule.key, when=OWNER_WHEN)
+    a._facts.merge(b._facts.export())
+    _resolve_and_delete(a, rule.key)
+    _refused(a, "gpt", theirs)
+
+
+def test_keyed_facts_that_disagree_are_flagged_even_when_one_is_trimmed_for_room(tmp_path, monkeypatch):
+    from fluid.codemode import skills
+
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name")
+    a.save_memory("The owner works on AI Shuffle.", provenance="session")
+    monkeypatch.setattr(skills, "MAX_MEMORIES", 2)
+    a._facts.merge(b._facts.export())
+    doc = a._facts._load(read_only=True)
+    copies = [e for e in doc["entries"] + doc["archived"] if e.get("key") == "profile.name"]
+    assert len(copies) == 2 and all(e.get("conflicted") for e in copies)
+
+
 def test_an_expired_copy_does_not_hide_a_rule_moved_into_its_slot(tmp_path, monkeypatch):
     import time as time_mod
     from fluid.codemode import facts
