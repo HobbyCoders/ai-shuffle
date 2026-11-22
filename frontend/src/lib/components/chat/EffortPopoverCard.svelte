@@ -8,8 +8,8 @@
 	 * names, and Faster / Smarter end labels. The Fast service tier rides along
 	 * in the header when the picked model carries it, so the compact card never
 	 * hides a knob the full controls popover offers. Where the route also offers
-	 * OpenAI's Ultrafast, the bolt becomes a Standard / Fast / Ultrafast picker
-	 * under the header; everywhere else the bolt stays as it is.
+	 * OpenAI's Ultrafast, the same bolt cycles Standard → Fast (one bolt) →
+	 * Ultrafast (two bolts) → Standard; everywhere else it toggles Fast.
 	 *
 	 * `value === null` means no level is pinned for the chat — the model runs at
 	 * its own default. The slider still needs a resting position, so the thumb
@@ -17,7 +17,7 @@
 	 * drag pins a level. The header's Auto toggle unpins it again (#1579).
 	 */
 	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
-	import { SPEED_OPTIONS, pickedSpeed, ultrafastCost, type ComposerSpeed, type UltrafastBilling } from './speed-tier';
+	import { SPEED_NAMES, SPEED_OPTIONS, nextSpeed, pickedSpeed, ultrafastCost, type ComposerSpeed, type UltrafastBilling } from './speed-tier';
 	import { Zap } from 'lucide-svelte';
 	import { NO_ADJUSTABLE_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 
@@ -43,7 +43,7 @@
 		/** The worker said the running turn keeps its speed until the next message. */
 		fastWaitsForNextMessage?: boolean;
 		onToggleFast?: () => void;
-		/** The route also carries Ultrafast: show the three-way speed picker. */
+		/** The route also carries Ultrafast: the bolt cycles through three tiers. */
 		ultrafastSupported?: boolean;
 		/** The chat's Fast runs as Ultrafast. */
 		ultrafastEnabled?: boolean;
@@ -73,6 +73,22 @@
 	const speedPicker = $derived(fastSupported && ultrafastSupported);
 	const costNote = $derived(ultrafastCost(ultrafastBilling));
 	const speed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
+	const upcoming = $derived(nextSpeed(speed, speedPicker));
+	const boltLabel = $derived(fastPending ? (speedPicker ? 'Speed: loading' : 'Fast mode: loading')
+		: speedPicker ? `Speed: ${SPEED_NAMES[speed]}` : 'Fast mode');
+	const boltTitle = $derived.by(() => {
+		if (fastPending) return `${speedPicker ? 'Speed' : 'Fast mode'}: loading this chat's own setting`;
+		if (!speedPicker) return 'Fast mode: faster output at a higher price. Switching clears the prompt cache.';
+		const next = upcoming === 'standard' ? 'Click to go back to Standard.'
+			: `Click for ${SPEED_OPTIONS.find((option) => option.value === upcoming)?.title}`;
+		return `Speed: ${SPEED_NAMES[speed]}. ${next}`;
+	});
+
+	function clickBolt() {
+		if (fastPending) return;
+		if (speedPicker) onSelectSpeed?.(upcoming);
+		else onToggleFast?.();
+	}
 
 	const pinnedIndex = $derived(options.findIndex((option) => option.value === value));
 	const pinned = $derived(pinnedIndex >= 0);
@@ -112,43 +128,31 @@
 				onclick={() => { if (pinned) onSelect(null); }}
 			>Auto</button>
 		{/if}
-		{#if fastSupported && !speedPicker}
+		{#if fastSupported}
+			<!-- One bolt for Fast, two for Ultrafast. Where the route carries
+			     Ultrafast each click moves one tier on and wraps to Standard. -->
 			<button
 				type="button"
 				class="fast-toggle"
-				class:on={fastEnabled && !fastPending}
+				class:on={speed !== 'standard' && !fastPending}
 				class:pending={fastPending}
 				disabled={fastPending}
-				onclick={() => { if (!fastPending) onToggleFast?.(); }}
-				aria-pressed={fastPending ? 'mixed' : fastEnabled}
+				onclick={clickBolt}
+				aria-pressed={fastPending ? 'mixed' : speed !== 'standard'}
 				aria-busy={fastPending || undefined}
-				aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
-				title={fastPending ? "Fast mode: loading this chat's own setting" : 'Fast mode: faster output at a higher price. Switching clears the prompt cache.'}
+				aria-label={boltLabel}
+				title={boltTitle}
+				data-speed={fastPending ? undefined : speed}
+				data-testid="speed-bolt"
 			>
 				<Zap size={13} strokeWidth={2} aria-hidden="true" />
+				{#if speedPicker && speed === 'ultrafast' && !fastPending}<Zap size={13} strokeWidth={2} aria-hidden="true" />{/if}
 			</button>
 		{/if}
 	</div>
 
-	{#if speedPicker}
-		<!-- One pick among three; while the chat's own value loads, none is. -->
-		<div class="speed-seg" role="radiogroup" aria-label="Speed" aria-busy={fastPending || undefined}
-			class:pending={fastPending} data-testid="speed-picker">
-			{#each SPEED_OPTIONS as option (option.value)}
-				<button
-					type="button"
-					role="radio"
-					aria-checked={!fastPending && speed === option.value}
-					disabled={fastPending}
-					title={fastPending ? "Speed: loading this chat's own setting" : option.title}
-					data-speed={option.value}
-					onclick={() => { if (!fastPending && option.value !== speed) onSelectSpeed?.(option.value); }}
-				>{#if option.value !== 'standard'}<span class="seg-bolts" aria-hidden="true"><Zap size={11} strokeWidth={2} />{#if option.value === 'ultrafast'}<Zap size={11} strokeWidth={2} />{/if}</span>{/if}{option.label}</button>
-			{/each}
-		</div>
-		{#if costNote}
-			<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
-		{/if}
+	{#if speedPicker && speed === 'ultrafast' && !fastPending && costNote}
+		<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
 	{/if}
 
 	<div aria-live="polite">
@@ -322,12 +326,13 @@
 	.auto-toggle + .fast-toggle { margin-left: 0; }
 
 	.fast-toggle {
-		display: grid;
-		place-items: center;
-		width: 20px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 20px;
 		height: 20px;
 		margin-left: auto;
-		padding: 0;
+		padding: 0 3px;
 		background: transparent;
 		border: 0;
 		border-radius: 6px;
@@ -350,6 +355,18 @@
 	.fast-toggle.on :global(svg) {
 		fill: currentColor;
 		animation: fast-bolt-charge 480ms ease-out;
+	}
+
+	/* The click always lands on the button itself. Leaving Ultrafast removes
+	   the second bolt mid-click, and the dock's click-outside check would read
+	   a detached target as a click outside the popover and close it. */
+	.fast-toggle :global(svg) {
+		pointer-events: none;
+	}
+
+	/* Ultrafast: the second bolt tucks behind the first. */
+	.fast-toggle :global(svg + svg) {
+		margin-left: -5px;
 	}
 
 	@keyframes fast-bolt-charge {
@@ -379,69 +396,7 @@
 		outline-offset: 2px;
 	}
 
-	/* ── Speed picker (Ultrafast routes) ────────────────────────────────
-	   Neutral: the selected tier is raised, not coloured, so Ultrafast does
-	   not read as a recommendation. */
-	.speed-seg {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		gap: 2px;
-		margin: -4px 0 12px;
-		padding: 2px;
-		border-radius: 8px;
-		background: var(--muted);
-	}
-
-	.speed-seg button {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 3px;
-		min-height: 24px;
-		padding: 2px 6px;
-		border: 0;
-		border-radius: 6px;
-		background: transparent;
-		color: var(--muted-foreground);
-		font-size: 12px;
-		line-height: 18px;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background-color 0.12s ease, color 0.12s ease;
-	}
-
-	.speed-seg button:hover:not(:disabled) {
-		color: var(--foreground);
-	}
-
-	.speed-seg button[aria-checked='true'] {
-		background: var(--segment-selected, var(--card));
-		color: var(--foreground);
-		box-shadow: 0 1px 2px color-mix(in oklch, #000 22%, transparent);
-	}
-
-	.seg-bolts {
-		display: inline-flex;
-	}
-
-	.seg-bolts :global(svg + svg) {
-		margin-left: -4px;
-	}
-
-	.speed-seg button[aria-checked='true'] .seg-bolts :global(svg) {
-		fill: currentColor;
-	}
-
-	.speed-seg.pending button {
-		cursor: progress;
-		animation: fast-pending 1.4s ease-in-out infinite;
-	}
-
-	.speed-seg button:focus-visible {
-		outline: 1px solid var(--primary);
-		outline-offset: 1px;
-	}
-
+	/* Ultrafast's cost, said while it is the picked tier. */
 	.speed-cost {
 		margin: -6px 0 12px;
 		font-size: 11.5px;
@@ -593,13 +548,11 @@
 		.pop-value,
 		.fast-active::after,
 		.fast-toggle.on :global(svg),
-		.fast-toggle.pending,
-		.speed-seg.pending button {
+		.fast-toggle.pending {
 			animation: none;
 		}
 
 		.fast-toggle,
-		.speed-seg button,
 		.auto-toggle,
 		.fill {
 			transition: none;

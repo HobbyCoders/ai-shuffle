@@ -43,8 +43,10 @@ async function newChatSpeed(page, tier) {
   const picker = page.getByRole('dialog', { name: 'Choose model' });
   await picker.getByRole('option', { name: /^GPT-6\.1 Sol/ }).click();
   await page.getByRole('button', { name: /^(Effort: |All chat controls)/ }).filter({ visible: true }).click({ timeout: 8_000 });
-  const selected = page.getByRole('radiogroup', { name: 'Speed', exact: true }).getByRole('radio', { name: tier, exact: true, checked: true });
-  await selected.waitFor();
+  // Desktop: the effort card's corner bolt names the tier. Phone: the sheet's Speed segments.
+  const bolt = page.getByRole('button', { name: `Speed: ${tier}`, exact: true }).filter({ visible: true });
+  const segment = page.getByRole('radiogroup', { name: 'Speed', exact: true }).getByRole('radio', { name: tier, exact: true, checked: true });
+  await bolt.or(segment).first().waitFor();
   await page.keyboard.press('Escape');
 }
 

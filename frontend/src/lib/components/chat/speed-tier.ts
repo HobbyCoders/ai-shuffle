@@ -58,6 +58,16 @@ export function pickedSpeed(s: SpeedShownInput): ComposerSpeed {
 	return s.ultrafastSupported && s.ultrafastEnabled ? 'ultrafast' : 'fast';
 }
 
+/**
+ * The tier one click on the corner bolt moves to: Standard → Fast → Standard,
+ * or Standard → Fast → Ultrafast → Standard where the route carries Ultrafast.
+ */
+export function nextSpeed(current: ComposerSpeed, ultrafastSupported: boolean): ComposerSpeed {
+	if (current === 'standard') return 'fast';
+	if (current === 'fast' && ultrafastSupported) return 'ultrafast';
+	return 'standard';
+}
+
 /** "Effort: High", "Effort: High, Ultrafast". */
 export function effortSpeedLabel(prefix: string, effort: string, speed: ComposerSpeed): string {
 	return speed === 'standard' ? `${prefix}${effort}` : `${prefix}${effort}, ${SPEED_NAMES[speed]}`;
