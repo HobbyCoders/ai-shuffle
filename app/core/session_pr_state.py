@@ -335,6 +335,12 @@ def _pull_claimed_elsewhere(pr: Any, session: dict, project_id: Optional[str]) -
     return False
 
 
+# Content matching for republished work reads at most this many own commits
+# and asks GitHub about at most this many matching branch names.
+_MAX_OWN_TREES = 200
+_MAX_REPUBLISHED_REFS = 5
+
+
 def find_pull_for_checkout_fallback(
     github_service: Any, repo: str, branch: str, working_dir: str, *,
     session_id: Optional[str] = None, project_id: Optional[str] = None,
@@ -348,8 +354,15 @@ def find_pull_for_checkout_fallback(
     Inherited main/parent commits are not this session's work. A PR head may
     precede HEAD because the agent made more local commits after its last push.
 
+    Last, republished work: an agent that rewrites its commits (to fix sign-off
+    trailers, say) and pushes them under a NEW branch name leaves no shared
+    commit. A same-repository PR from a local or remote-tracking branch whose
+    head has exactly the tree of one of this branch's own commits (never the
+    creation point's tree, never content already on the base) is this work.
+
     Local git gates precede gh calls. A five-minute negative cache is keyed by
-    checkout, HEAD and upstream (plus branch/base identity); failures and primary
+    checkout, HEAD, upstream and the content-matching branch names (plus
+    branch/base identity); failures and primary
     ownership rejections are never negative-cached. Turn ends bypass misses.
     An unscoped call is only a read-only discovery probe; production callers
     supply session/project scope.
@@ -396,7 +409,32 @@ def find_pull_for_checkout_fallback(
     upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else ""
     upstream_branch = upstream_name.partition("/")[2]
-    cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha, tuple(sorted(bases)))
+
+    # Republished work: the same content pushed again under another name with
+    # rewritten commits (fixed sign-offs, squashed history). No PR commit is
+    # then on this branch, so only content identity can prove ownership.
+    own_trees = set(git(
+        "log", "--format=%T", f"--max-count={_MAX_OWN_TREES}", f"{creation_sha}..{head_sha}", check=True,
+    ).stdout.split())
+    own_trees.discard(git("rev-parse", f"{creation_sha}^{{tree}}", check=True).stdout.strip())
+    skip_names = bases | {branch, upstream_branch, "HEAD"}
+    republished_names: set[str] = set()
+    for line in git(
+        "for-each-ref", "--format=%(refname)%00%(tree)", "refs/heads", "refs/remotes", check=True,
+    ).stdout.splitlines():
+        ref, _, tree = line.partition("\0")
+        if tree not in own_trees:
+            continue
+        if ref.startswith("refs/heads/"):
+            name = ref.removeprefix("refs/heads/")
+        else:
+            name = ref.removeprefix("refs/remotes/").partition("/")[2]
+        if name and name not in skip_names:
+            republished_names.add(name)
+    republished = sorted(republished_names)[:_MAX_REPUBLISHED_REFS]
+
+    cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha,
+                 tuple(sorted(bases)), tuple(republished))
     if not bypass_negative_cache and _fallback_misses.get(cache_key):
         return None
 
@@ -429,6 +467,25 @@ def find_pull_for_checkout_fallback(
         ]
     if not discovered:
         discovered = [pr for pr in github_service.list_commit_pulls(repo, head_sha) if owned(pr)]
+
+    def same_content(pr: Any) -> bool:
+        sha = getattr(pr, "head_sha", None)
+        if (not sha or getattr(pr, "base_branch", None) in (branch, getattr(pr, "head_branch", None))
+                or (getattr(pr, "head_repo", None) or "").lower() != repo.lower()):
+            return False
+        tree = git("rev-parse", "--verify", "--quiet", f"{sha}^{{tree}}")
+        if tree.returncode not in (0, 1, 128):
+            tree.check_returncode()
+        # Content already on the base before this branch existed is not ours.
+        return tree.returncode == 0 and tree.stdout.strip() in own_trees and not ancestor(sha, creation_sha)
+
+    for name in republished:
+        if discovered:
+            break
+        discovered = [
+            pr for pr in github_service.list_pulls(repo, state="all", limit=100, head=name)
+            if getattr(pr, "head_branch", None) == name and same_content(pr)
+        ]
     if not discovered:
         _fallback_misses.set(cache_key, True)
         return None
