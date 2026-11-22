@@ -52,7 +52,15 @@ describe('the page-side design preview script', () => {
 		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
 		expect(el('#one').style.getPropertyPriority('color')).toBe('important');
 		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').getAttribute('style') ?? '').toBe('');
+		// No empty style attribute is left on an element that never had one.
+		expect(el('#one').hasAttribute('style')).toBe(false);
+	});
+
+	it('keeps a style attribute the page wrote itself, even an empty one', () => {
+		el('#two').setAttribute('style', '');
+		style('k1', '#two', { color: 'rgb(0, 0, 255)' });
+		run({ op: 'reset', key: 'k1' });
+		expect(el('#two').getAttribute('style')).toBe('');
 	});
 
 	it('keeps overlapping changes: one on every match, one on a single element', () => {

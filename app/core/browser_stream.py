@@ -520,7 +520,11 @@ _DESIGN_JS_TEMPLATE = """
   // cannot swallow an inline longhand the page set itself.
   const remember = (el, prop) => {
     let saved = reg.base.get(el);
-    if (!saved) { saved = new Map(); reg.base.set(el, saved); }
+    if (!saved) {
+      saved = new Map();
+      saved.hadStyle = el.hasAttribute('style');
+      reg.base.set(el, saved);
+    }
     for (const p of LONGHANDS[prop] || [prop]) {
       if (!saved.has(p)) saved.set(p, [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)]);
     }
@@ -532,6 +536,8 @@ _DESIGN_JS_TEMPLATE = """
       if (value) el.style.setProperty(p, value, priority);
       else el.style.removeProperty(p);
     }
+    // An element that had no style attribute gets none left behind.
+    if (!saved.hadStyle && !el.style.length) el.removeAttribute('style');
     reg.base.delete(el);
   };
   const targetsOf = (owner, into) => {
