@@ -286,17 +286,32 @@ def _wording_fences(entry):
     return held
 
 
+def _contested(entry):
+    """Per-family fingerprints of the competing current wordings of an
+    unresolved sync conflict (``contested``), as each copy's own family
+    recorded them."""
+    return [f for f in entry.get("contested") or [] if isinstance(f, str) and _FENCE.fullmatch(f)]
+
+
 def _union_rule_fences(target, other):
     """Keep the wordings of a rule copy a merge discards, so deleting the
     surviving copy also stops the learner saving the discarded wording again.
-    The same set whichever replica merges, and bounded: both copies' current
-    wordings always stay."""
+    Every competing current wording of the conflict, from however many
+    workers, is carried in ``contested`` under the family that held it and
+    always kept in the fences. The same lists whichever replica merges, and
+    bounded."""
     if not (_is_rule_key(target.get("key")) and _is_rule_key(other.get("key"))):
         return
-    current = sorted({_fence_fingerprint(target["text"], target.get("key")),
-                      _fence_fingerprint(other["text"], other.get("key"))})
-    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - set(current))
-    target["fences"] = _bounded_fences(held[:MAX_RULE_FENCES - len(current)], current)
+    current = {_fence_fingerprint(target["text"], target.get("key")),
+               _fence_fingerprint(other["text"], other.get("key"))}
+    contested = set(_contested(target)) | set(_contested(other))
+    if len(current) > 1:
+        contested |= current
+    keep = sorted(contested | current)[:MAX_RULE_FENCES]
+    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - set(keep))
+    target["fences"] = _bounded_fences(held[:MAX_RULE_FENCES - len(keep)], keep)
+    if contested:
+        target["contested"] = sorted(contested)[:MAX_RULE_FENCES]
 
 
 def canonical_key(text):
@@ -1070,17 +1085,17 @@ class FactStore:
             slot = key or entry.get("key")
             # Competing wordings a conflict-resolving save discards: they stay
             # fenced with the survivor ahead of older history, so deleting it
-            # later stops them coming back.
-            reserve = ([_fence_fingerprint(t, old.get("key")) for t in old.get("alternatives") or []
-                        if isinstance(t, str)]
-                       if old and old.get("conflicted") and _is_rule_key(old.get("key")) else [])
+            # later stops them coming back. Each keeps the family that held it
+            # (recorded at merge), not this copy's family.
+            reserve = _contested(old) if old and old.get("conflicted") and _is_rule_key(old.get("key")) else []
             if old and old.get("conflicted") and protected and slot:
                 aliases = [e for e in all_entries if e["id"] != old["id"] and e.get("key") == slot
                            and e.get("scope", "global") == entry.get("scope", "global")]
                 if _is_rule_key(slot):
                     discarded = [f for alias in aliases for f in _wording_fences(alias)]
                     entry["fences"] = list(dict.fromkeys(discarded + list(entry.get("fences") or [])))
-                    reserve += [_fence_fingerprint(a["text"], a.get("key")) for a in aliases if a.get("text")]
+                    for alias in aliases:
+                        reserve += _contested(alias) + [_fence_fingerprint(alias["text"], alias.get("key"))]
                 for alias in aliases:
                     for actor, counter in (alias.get("clock") or {alias["origin"]: alias.get("revision", 1)}).items():
                         clock[actor] = max(clock.get(actor, 0), counter)
@@ -1100,6 +1115,7 @@ class FactStore:
                          **_rule_fences(entry, key or entry.get("key"), text, history, reserve),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
+            entry.pop("contested", None)  # the conflict is resolved; its wordings are fenced
             # A rewrite of a fact that already expired into the archive is a
             # new observation, not a continuation of the old lifetime.
             if not protected and entry["expires_at"] and entry["expires_at"] <= now:
@@ -1662,6 +1678,11 @@ class FactStore:
                         and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in fences)):
                     # Unreadable fences: the rule's history still fences it.
                     entry.pop("fences")
+                contested = entry.get("contested")
+                if contested is not None and not (
+                        isinstance(contested, list) and len(contested) <= MAX_RULE_FENCES
+                        and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in contested)):
+                    entry.pop("contested")
                 if type(entry.get("always", False)) is not bool:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):

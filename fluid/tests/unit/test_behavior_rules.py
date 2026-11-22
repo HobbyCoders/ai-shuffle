@@ -395,6 +395,55 @@ def test_at_the_fence_cap_resolving_a_slot_conflict_keeps_the_discarded_wording(
     _refused(a, "gpt", theirs)
 
 
+def test_at_the_fence_cap_every_workers_competing_wording_stays_fenced(tmp_path):
+    from fluid.codemode import facts
+
+    a, b, c = (SkillStore(tmp_path / name) for name in "abc")
+    first = "When reporting: lead with the result, take 0."
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    for peer in (b, c):
+        peer._facts.merge(a._facts.export())
+    for n in range(1, facts.MAX_RULE_FENCES + 1):
+        a.save_memory(f"When reporting: lead with the result, take {n}.", memory_id=rule.id,
+                      provenance="user", durable=True, key=rule.key)
+    held = next(e for e in a._facts._load(read_only=True)["entries"] if e["id"] == rule.id)["fences"]
+    theirs = {}
+    # B's wording sorts out of the two shown alternatives once C's arrives,
+    # and its fingerprint after every held one.
+    for name, peer in (("zeta", b), ("beta", c)):
+        candidates = (f"When reporting: lead with the {name} summary, case {n}." for n in range(500))
+        theirs[name] = next(t for t in candidates
+                            if facts._fence_fingerprint(t, rule.key) > max(held))
+        peer.save_memory(theirs[name], memory_id=_peer_id(peer, rule), provenance="user",
+                         durable=True, key=rule.key)
+    a._facts.merge(b._facts.export())
+    a._facts.merge(c._facts.export())
+    _resolve_and_delete(a, rule.key)
+    for text in theirs.values():
+        _refused(a, "gpt", text)
+
+
+def test_resolving_a_cross_family_conflict_fences_each_wording_for_its_own_family(tmp_path):
+    first = "When reporting: lead with the result."
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    b._facts.merge(a._facts.export())
+    a.save_memory("When reporting: lead with the result and the risk.", memory_id=rule.id,
+                  provenance="user", durable=True, key=rule.key)
+    digest = rule.key.rsplit(".", 1)[-1]
+    theirs = "When reporting: lead with the blocker."
+    b.save_memory(theirs, memory_id=_peer_id(b, rule), provenance="user", durable=True,
+                  key=f"{behavior.KEY_PREFIX}claude.{digest}")
+    a._facts.merge(b._facts.export())
+    _resolve_and_delete(a, rule.key)
+    # Only Claude ever held that wording: it stays fenced for Claude alone.
+    _refused(a, "claude", theirs)
+    a.save_memory(theirs, provenance="user", durable=True,
+                  key=behavior.rule_key("gpt", theirs), when=OWNER_WHEN)
+
+
 def test_keyed_facts_that_disagree_are_flagged_even_when_one_is_trimmed_for_room(tmp_path, monkeypatch):
     from fluid.codemode import skills
 
