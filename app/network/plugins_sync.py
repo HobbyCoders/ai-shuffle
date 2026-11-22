@@ -261,10 +261,43 @@ def publish(*, ctx: Optional[engine.NetworkContext] = None) -> int:
 
 
 def apply_desired(record_ids: Iterable[str]) -> int:
-    """Make the local installation match desired rows that just changed."""
+    """Make the local installation match desired rows that just changed.
+
+    Runs on the plugin I/O thread: an uninstall or toggle can wait for a
+    plugin lock a running clone holds, and the sync thread must not. The one
+    thread also orders a change received during an install after it. Without
+    an app loop (tests, scripts) it runs here and returns how many it applied.
+    """
     ids = list(record_ids)
     if not ids:
         return 0
+    if _on_plugin_thread(_apply_now, ids):
+        return 0
+    return _apply_now(ids)
+
+
+def _on_plugin_thread(fn, *args) -> bool:
+    """Queue ``fn`` on the plugin I/O thread without waiting; False without an app loop."""
+    from app.core.global_events import global_events
+    loop = getattr(global_events, "_loop", None)
+    if not loop or loop.is_closed():
+        return False
+
+    async def run():
+        from app.db.async_database import run_plugin_io
+        try:
+            await run_plugin_io(fn, *args)
+        except Exception:  # noqa: BLE001
+            logger.warning("Plugin sync job %s failed", getattr(fn, "__name__", fn), exc_info=True)
+
+    try:
+        asyncio.run_coroutine_threadsafe(run(), loop)
+    except RuntimeError:  # the loop closed in between
+        return False
+    return True
+
+
+def _apply_now(ids) -> int:
     try:
         service = _service()
     except Exception:  # noqa: BLE001
@@ -339,6 +372,9 @@ def _ensure_marketplace(service, plugin_id: str, row) -> None:
             logger.info("Fetching plugin marketplace %s to install %s", marketplace_id, plugin_id)
             service.sync_marketplace(marketplace_id)
         return
+    from app.core.plugin_marketplace import DEFAULT_SOURCE_ID
+    if marketplace_id == DEFAULT_SOURCE_ID:
+        return  # the app registers it on every worker once; missing means removed here
     source = _config(row).get("marketplace")
     if not isinstance(source, dict) or source.get("id") != marketplace_id:
         return  # the install fails with "Marketplace not found" and is retried later
@@ -420,7 +456,8 @@ def reconcile_missing(only: Optional[Iterable[str]] = None) -> int:
             (logger.warning if first else logger.debug)(
                 "Could not install %s to match the owner's other workers (retrying later): %s", plugin_id, exc)
             continue
-        if _current_row(plugin_id) is None:
+        after = _current_row(plugin_id)
+        if after is None:
             # Removed while it installed: the removal found nothing to
             # uninstall then, and is never applied again.
             logger.info("%s was removed on another worker while it installed; uninstalling", plugin_id)
@@ -429,6 +466,13 @@ def reconcile_missing(only: Optional[Iterable[str]] = None) -> int:
             except Exception:  # noqa: BLE001
                 logger.warning("Uninstalling %s after its removal failed", plugin_id, exc_info=True)
             continue
+        if bool(after.get("enabled", True)) != bool(row.get("enabled", True)):
+            # Turned on or off elsewhere while it installed: match that, or
+            # the next scan would publish the old state back.
+            try:
+                (service.enable_plugin if after.get("enabled") else service.disable_plugin)(plugin_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("Matching the enabled state of %s failed", plugin_id, exc_info=True)
         installed += 1
         logger.info("Installed %s to match the plugins on the owner's other workers", plugin_id)
     return installed

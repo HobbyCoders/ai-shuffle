@@ -280,9 +280,72 @@ def test_a_received_install_runs_on_the_plugin_thread_not_the_sync_thread(worker
     plugins_sync._retry[PID] = (3, float("inf"))  # backing off from earlier failures
     with b.active():
         plugins_sync.apply_desired([PID])
+        wait_for(lambda: PID in b_service.installed)
         wait_idle()
     assert PID in b_service.installed  # a received change is tried at once
     assert install_threads and sync_thread not in install_threads
+
+
+def wait_for(condition):
+    for _ in range(100):
+        if condition():
+            return
+        threading.Event().wait(0.05)
+    pytest.fail("condition not met")
+
+
+def test_received_toggles_and_uninstalls_run_on_the_plugin_thread(workers, monkeypatch, app_loop):
+    """They can wait on a plugin lock a clone holds; the sync thread must not."""
+    kept, gone = "kept@community", "gone@community"
+    a_service = Service([FakePlugin(kept, "1"), FakePlugin(gone, "1")], [mp("community", URL)])
+    b_service = Service([FakePlugin(kept, "1"), FakePlugin(gone, "1")], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    sync_thread = threading.get_ident()
+    threads = []
+    for name in ("disable_plugin", "uninstall_plugin"):
+        real = getattr(b_service, name)
+        setattr(b_service, name, lambda pid, real=real: threads.append(threading.get_ident()) or real(pid))
+    with b.active():
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))
+        b.sql("DELETE FROM network_plugins_desired WHERE id = ?", (gone,))
+        assert plugins_sync.apply_desired([kept, gone]) == 0  # queued, not applied here
+        wait_for(lambda: len(threads) == 2)
+    assert b_service.enabled[kept] is False and gone not in b_service.installed
+    assert sync_thread not in threads
+
+
+def test_a_disable_that_lands_during_the_install_is_kept(workers, monkeypatch):
+    a_service = Service([FakePlugin(PID, "1")], [mp("community", URL)])
+    b_service = Service([], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    real_install = b_service.install_plugin
+
+    def install(plugin_id, scope="user", enable=True):
+        plugin = real_install(plugin_id, scope, enable)
+        # Turned off on A meanwhile; that change found nothing installed here.
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, plugin_id))
+        return plugin
+
+    b_service.install_plugin = install
+    with b.active():
+        assert plugins_sync.reconcile_missing() == 1
+        assert b_service.enabled[PID] is False
+        plugins_sync.publish()  # nothing stale to send back
+        assert not b.sql("SELECT enabled FROM network_plugins_desired WHERE id = ?", (PID,))[0]["enabled"]
+
+
+def test_the_shipped_default_source_is_never_added_back(workers, monkeypatch):
+    """Every worker registers it once; a worker without it removed it."""
+    from app.core.plugin_marketplace import DEFAULT_SOURCE_ID, DEFAULT_SOURCE_URL
+
+    pid = "review@" + DEFAULT_SOURCE_ID
+    a_service = Service([FakePlugin(pid, "1")], [mp(DEFAULT_SOURCE_ID, DEFAULT_SOURCE_URL)])
+    b_service = Service()
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    with b.active():
+        assert plugins_sync.reconcile_missing() == 0
+    assert ("add_marketplace", DEFAULT_SOURCE_ID, DEFAULT_SOURCE_URL) not in b_service.calls
+    assert pid not in b_service.installed
 
 
 def test_a_removal_that_lands_during_the_install_uninstalls_it(workers, monkeypatch):
