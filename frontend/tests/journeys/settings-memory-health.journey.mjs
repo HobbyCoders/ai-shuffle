@@ -223,9 +223,7 @@ await runJourney({
 	// The service worker would answer the health request before page.route sees it.
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: [
-		...DEV_INSTANCE_NOISE,
-		{ kind: 'failed_requests', status: 403, url: /\/terminals(\?|$)/, reason: 'the preview cookie may not use terminals (require_terminal_owner refuses preview access by design)' },
-		{ kind: 'failed_requests', status: 403, url: /\/updates\/channel(\?|$)/, reason: 'the preview cookie may not read the update channel (owner-only by design)' }
+		...DEV_INSTANCE_NOISE
 	],
 	cases: [
 		{

@@ -22,7 +22,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'memory.health',
 		category: 'memory',
-		section: 'Memory health',
+		section: 'Latest check',
 		item: MEMORY_HEALTH_ITEM,
 		label: 'Memory health',
 		hint: 'Checks itself every hour',

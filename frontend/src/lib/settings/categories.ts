@@ -43,6 +43,11 @@ type CategoryRow = Omit<CategoryDef, 'type'>;
  * (other devices, the cloud account, GitHub and API keys) and what may reach
  * or control it (sign-in, agent computer access, saved sign-ins). System and
  * data: the worker itself, its data, updates and logs.
+ *
+ * Borderline calls: Integrations (GitHub, API keys) goes with Connections,
+ * because both halves link this worker to something outside it. Vault goes with
+ * Security, because it holds secrets. Import goes beside Export in System >
+ * Your data, because it moves data in; it doesn't install tools.
  */
 export const CATEGORY_GROUPS: { id: CategoryGroup; label: string }[] = [
 	{ id: 'personal', label: 'Personal' },
