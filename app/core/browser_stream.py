@@ -336,9 +336,10 @@ _INSPECT_JS_TEMPLATE = """
       ((el.innerText || el.textContent || '') + '').trim().replace(/\\s+/g, ' '),
       200,
     );
-    out.html = cap(el.outerHTML, 800);
+    // Without the marker a design preview puts on the elements it styles.
+    out.html = cap(el.outerHTML.replace(/ data-ais-design="[c0-9 ]*"/g, ''), 800);
     const attrs = {};
-    for (const a of Array.from(el.attributes).slice(0, 12)) {
+    for (const a of Array.from(el.attributes).filter((a) => a.name !== 'data-ais-design').slice(0, 12)) {
       attrs[cap(a.name, 60)] = cap(a.value, 160);
     }
     out.attrs = attrs;
@@ -448,15 +449,16 @@ _INSPECT_JS_TEMPLATE = """
 # Design mode (live style preview on the inspected page)
 # ---------------------------------------------------------------------------
 # A design request previews a change on the page without touching source: it
-# sets inline styles on an element picked through inspect, reports where the
-# picked elements are now, or puts the page back. The agent makes the real
-# edit in code; this is only the "try it first" step.
+# styles an element picked through inspect, reports where the picked elements
+# are now, or puts the page back. The agent makes the real edit in code; this
+# is only the "try it first" step.
 #
-# The page keeps one record per queued change (per viewer and element key) and
-# the inline styles it had before any preview. What shows is always those
-# original styles plus every visible change, in the order the changes were
-# made, so changes that overlap on an element never erase one another and
-# removing one leaves the rest. The scripts are exercised against a DOM in
+# The page keeps one record per queued change (per viewer and element key).
+# A preview never writes to an element's own style: each change is a rule in
+# one stylesheet the script adds to the page, and its elements carry a marker
+# attribute. So changes that overlap on an element never erase one another,
+# removing one leaves the rest, and putting the page back is deleting the
+# rules and the markers. The scripts are exercised against a DOM in
 # frontend/src/lib/browser-panel/design-page-script.test.ts.
 _VALID_DESIGN_OPS = {"style", "rects", "reset", "peek"}
 _DESIGN_PROPS = frozenset({
@@ -473,21 +475,14 @@ _MAX_DESIGN_ITEMS = 40
 _DESIGN_REGISTRY_JS = """const S = Symbol.for('ais.design');
       const reg = window[S] || (window[S] = {
         n: Math.floor(Math.random() * 9000000), els: new Map(),
-        changes: new Map(), base: new Map(), hidden: new Set(),
+        changes: new Map(), hidden: new Set(), seq: 0, sheet: null, roots: new Set(),
       });"""
 
 _DESIGN_JS_TEMPLATE = """
 (() => {
   const a = __ARGS__;
   __REGISTRY__
-  const LONGHANDS = {
-    padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
-    'border-radius': [
-      'border-top-left-radius', 'border-top-right-radius',
-      'border-bottom-right-radius', 'border-bottom-left-radius',
-    ],
-    gap: ['row-gap', 'column-gap'],
-  };
+  const MARK = 'data-ais-design';
   const find = (key, selector) => {
     let el = key ? reg.els.get(key) : null;
     if (el && !el.isConnected) el = null;
@@ -516,88 +511,74 @@ _DESIGN_JS_TEMPLATE = """
       return all;
     } catch (e) { return [el]; }
   };
-  const read = (el, p) => [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)];
-  // What the page's own inline style was before a preview touched the
-  // element: the attribute's text (a shorthand written with var() has no
-  // longhand values, and the browser cannot always write one back out), and
-  // each longhand, so one the page set itself is not swallowed.
-  const remember = (el, prop) => {
-    let saved = reg.base.get(el);
-    if (!saved) {
-      saved = {
-        hadStyle: el.hasAttribute('style'), text: el.getAttribute('style') || '',
-        props: new Map(), shorthands: new Map(), written: null,
-      };
-      reg.base.set(el, saved);
-    }
-    const longhands = LONGHANDS[prop];
-    for (const p of longhands || [prop]) {
-      if (!saved.props.has(p)) saved.props.set(p, { had: read(el, p), wrote: null });
-    }
-    // A shorthand the page wrote with var() has no longhand values to keep.
-    if (longhands && !saved.shorthands.has(prop)) saved.shorthands.set(prop, read(el, prop));
-  };
-  // Note what the preview left on the element, to tell it from a later
-  // change by the page itself.
-  const seal = (el) => {
-    const saved = reg.base.get(el);
-    if (!saved) return;
-    for (const [p, entry] of saved.props) entry.wrote = read(el, p);
-    saved.written = el.style.cssText;
-  };
-  const restore = (el) => {
-    const saved = reg.base.get(el);
-    if (!saved) return;
-    reg.base.delete(el);
-    if (el.style.cssText === saved.written) {
-      // Only the preview changed it: the page's own text goes back as it was.
-      el.style.cssText = saved.text;
-    } else {
-      // The page changed its inline style meanwhile. Take off only what the
-      // preview wrote and the page has not replaced since.
-      const kept = new Set();
-      for (const [p, { had, wrote }] of saved.props) {
-        const now = read(el, p);
-        if (!wrote || now[0] !== wrote[0] || now[1] !== wrote[1]) kept.add(p);
-        else if (had[0]) el.style.setProperty(p, had[0], had[1]);
-        else el.style.removeProperty(p);
-      }
-      for (const [prop, [value, priority]] of saved.shorthands) {
-        const longhands = LONGHANDS[prop];
-        if (!value || longhands.some((p) => kept.has(p) || saved.props.get(p).had[0])) continue;
-        el.style.setProperty(prop, value, priority);
-      }
-    }
-    // An element that had no style attribute gets none left behind. Chromium
-    // writes the attribute lazily, so it is read first: removing it before
-    // it exists does nothing, and the next read would bring back style="".
-    if (!saved.hadStyle && !el.style.length && el.hasAttribute('style')) {
-      el.removeAttribute('style');
-    }
-  };
   const targetsOf = (owner, into) => {
     for (const c of reg.changes.values()) {
       if (owner === null || c.owner === owner) for (const t of c.targets) into.add(t);
     }
     return into;
   };
-  // Put `els` back to the page's own styles, then lay every visible change
-  // over them again in the order the changes were made.
+  // A preview never touches an element's own style. Each change is one rule
+  // in a stylesheet this script owns, and the elements it applies to carry
+  // the change's token in MARK. Taking a preview off is deleting the rule and
+  // the token, so there is nothing of the page's to save or put back.
+  // The rule outweighs the page's own rules and its normal inline styles. It
+  // does not outweigh an inline !important declaration or an !important one
+  // in a cascade layer: there the preview does not show, and the page is
+  // still left as it was.
   const render = (els) => {
-    for (const el of els) restore(el);
-    const styled = new Set();
+    const tokens = new Map();
+    const roots = new Set();
+    const live = new Set();
     for (const c of reg.changes.values()) {
-      if (reg.hidden.has(c.owner)) continue;
+      live.add(c.token);
       for (const t of c.targets) {
-        if (!els.has(t) || !t.isConnected) continue;
-        for (const [prop, value] of Object.entries(c.styles)) {
-          remember(t, prop);
-          t.style.setProperty(prop, value, 'important');
-        }
-        styled.add(t);
+        if (!t.isConnected) continue;
+        const root = t.getRootNode();
+        if (root && root.adoptedStyleSheets) roots.add(root);
+        if (!els.has(t)) continue;
+        if (!tokens.has(t)) tokens.set(t, []);
+        tokens.get(t).push(c.token);
       }
     }
-    for (const el of styled) seal(el);
+    for (const el of els) {
+      const mine = tokens.get(el);
+      if (mine) el.setAttribute(MARK, mine.join(' '));
+      else el.removeAttribute(MARK);
+    }
+    if (reg.changes.size && !reg.sheet) reg.sheet = new CSSStyleSheet();
+    if (reg.sheet) {
+      reg.sheet.replaceSync('');
+      for (const c of reg.changes.values()) {
+        if (reg.hidden.has(c.owner)) continue;
+        // :is() lends the rule the weight of four ids without matching on
+        // them. Each value is set on its own, so one the browser does not
+        // accept is dropped and cannot spill into another change's rule.
+        const at = reg.sheet.insertRule(
+          '[' + MARK + '~="' + c.token + '"]:is(*, #a#a#a#a) {}', reg.sheet.cssRules.length);
+        const rule = reg.sheet.cssRules[at];
+        for (const [prop, value] of Object.entries(c.styles)) {
+          rule.style.setProperty(prop, value, 'important');
+        }
+      }
+    }
+    // The sheet sits last in each tree that has a marked element, and leaves
+    // with the last change.
+    for (const root of new Set([...reg.roots, ...roots])) {
+      const others = Array.from(root.adoptedStyleSheets).filter((sheet) => sheet !== reg.sheet);
+      const want = reg.changes.size && roots.has(root);
+      const has = others.length !== root.adoptedStyleSheets.length;
+      const last = root.adoptedStyleSheets[root.adoptedStyleSheets.length - 1] === reg.sheet;
+      if (want ? !last : has) root.adoptedStyleSheets = want ? [...others, reg.sheet] : others;
+      // A copy the page made of a marked element keeps no token of a change
+      // that is gone.
+      for (const el of root.querySelectorAll('[' + MARK + ']')) {
+        const mine = (el.getAttribute(MARK) || '').split(' ').filter((token) => live.has(token));
+        if (!mine.length) el.removeAttribute(MARK);
+        else if (mine.join(' ') !== el.getAttribute(MARK)) el.setAttribute(MARK, mine.join(' '));
+      }
+    }
+    reg.roots = reg.changes.size ? roots : new Set();
+    if (!reg.changes.size) reg.sheet = null;
   };
   if (a.op === 'rects') {
     const rects = {};
@@ -644,7 +625,7 @@ _DESIGN_JS_TEMPLATE = """
   for (const t of targets) els.add(t);
   if (!Object.keys(a.styles).length) reg.changes.delete(id);
   else if (before) { before.targets = targets; before.styles = a.styles; }
-  else reg.changes.set(id, { owner: a.owner, targets, styles: a.styles });
+  else reg.changes.set(id, { owner: a.owner, targets, styles: a.styles, token: 'c' + (++reg.seq) });
   render(els);
   return { key: a.key, rect: rectOf(el), count: targets.length };
 })()
@@ -1155,8 +1136,8 @@ class BrowserStreamHub:
 
         Same request and reply pairing as a hit-test: the page script runs
         through ``Runtime.evaluate`` and the pump loop answers the requesting
-        viewer with a ``design-result`` frame. It only ever sets or restores
-        inline styles on elements already picked through inspect.
+        viewer with a ``design-result`` frame. It only ever adds or removes
+        preview rules for elements already picked through inspect.
         """
         ws = self._upstream
         op = args["op"]

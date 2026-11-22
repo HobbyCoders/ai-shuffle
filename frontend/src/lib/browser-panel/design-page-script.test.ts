@@ -4,6 +4,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 // The preview script runs inside the inspected page, so the worker keeps it as
 // text (app/core/browser_stream.py). These tests run that exact text against a
 // DOM: what a preview does to the page, and that the page really goes back.
+//
+// A preview is a rule in a stylesheet the script adds to the page, matched by
+// a marker attribute on the element. jsdom has no such stylesheets and does
+// not apply them, so the tests keep a small stand-in and read the cascade
+// themselves: `shown` is what the preview rules give an element.
 const source = readFileSync('../app/core/browser_stream.py', 'utf8');
 
 function pythonText(name: string): string {
@@ -32,12 +37,65 @@ function style(key: string, selector: string, styles: Record<string, string>, ex
 
 const el = (selector: string) => document.querySelector(selector) as HTMLElement;
 
+const MARK = 'data-ais-design';
+
+type RuleModel = { token: string; style: { values: Map<string, string>; setProperty(name: string, value: string, priority: string): void } };
+
+class SheetModel {
+	cssRules: RuleModel[] = [];
+	replaceSync(text: string) {
+		if (text !== '') throw new Error('the script only ever empties its sheet this way');
+		this.cssRules = [];
+	}
+	insertRule(text: string, index: number): number {
+		const match = /^\[data-ais-design~="(c\d+)"\]:is\(\*, #a#a#a#a\) \{\}$/.exec(text);
+		if (!match) throw new Error(`unexpected rule: ${text}`);
+		const values = new Map<string, string>();
+		this.cssRules.splice(index, 0, {
+			token: match[1],
+			style: {
+				values,
+				setProperty: (name, value, priority) => {
+					// A browser drops a value it cannot parse; unbalanced brackets stand in for that here.
+					if (value.split('(').length !== value.split(')').length) return;
+					values.set(name, priority ? `${value} !${priority}` : value);
+				}
+			}
+		});
+		return index;
+	}
+}
+
+type Adopting = { adoptedStyleSheets: SheetModel[] };
+const adopted = () => (document as unknown as Adopting).adoptedStyleSheets;
+
+/** The preview value an element gets for a property: the last matching rule wins. */
+function shown(target: Element, prop: string): string {
+	const tokens = (target.getAttribute(MARK) ?? '').split(' ').filter(Boolean);
+	let value = '';
+	for (const sheet of adopted()) {
+		for (const rule of sheet.cssRules) {
+			if (tokens.includes(rule.token)) value = rule.style.values.get(prop) ?? value;
+		}
+	}
+	return value;
+}
+
+/** Everything a preview may have left on the page. */
+function leftovers(): string[] {
+	const found = Array.from(document.querySelectorAll(`[${MARK}]`)).map((node) => `marker on ${node.id}`);
+	if (adopted().length) found.push('stylesheet');
+	return found;
+}
+
 beforeEach(() => {
 	delete (window as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
 	// jsdom has no CSS.escape; class names here need no escaping.
 	if (!globalThis.CSS?.escape) {
 		(globalThis as unknown as { CSS: unknown }).CSS = { ...(globalThis.CSS ?? {}), escape: (s: string) => s };
 	}
+	(globalThis as unknown as { CSSStyleSheet: unknown }).CSSStyleSheet = SheetModel;
+	(document as unknown as Adopting).adoptedStyleSheets = [];
 	document.body.innerHTML = `
 		<button id="one" class="btn">One</button>
 		<button id="two" class="btn">Two</button>
@@ -49,178 +107,151 @@ describe('the page-side design preview script', () => {
 	it('previews a value and puts the page back', () => {
 		const result = style('k1', '#one', { color: 'rgb(0, 0, 255)' });
 		expect(result.count).toBe(1);
-		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
-		expect(el('#one').style.getPropertyPriority('color')).toBe('important');
+		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#two'), 'color')).toBe('');
 		run({ op: 'reset', key: 'k1' });
-		// No empty style attribute is left on an element that never had one.
-		expect(el('#one').hasAttribute('style')).toBe(false);
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(leftovers()).toEqual([]);
 	});
 
-	it('reads the style attribute before removing it, which Chromium needs', () => {
-		// Chromium writes the style attribute lazily. After a change through
-		// el.style, removeAttribute misses it until something has read it, and
-		// the next read then shows style="". jsdom is eager, so model the rule.
-		const target = el('#one');
-		let unread = false;
-		for (const name of ['setProperty', 'removeProperty'] as const) {
-			const real = target.style[name].bind(target.style) as (...args: string[]) => unknown;
-			target.style[name] = ((...args: string[]) => {
-				unread = true;
-				return real(...args);
-			}) as never;
+	it("never writes to an element's own style", () => {
+		// A shorthand written with a variable next to a longhand cannot be read
+		// back out of a browser and written in again, so it is never touched:
+		// not by a preview, not by taking it off, however often.
+		const own = '--pad: 16px; padding: var(--pad); padding-left: 4px';
+		el('#one').setAttribute('style', own);
+		for (let round = 0; round < 3; round++) {
+			style('k1', '#one', { padding: '24px', color: 'rgb(0, 0, 255)' });
+			expect(shown(el('#one'), 'padding')).toBe('24px !important');
+			expect(el('#one').getAttribute('style')).toBe(own);
+			run({ op: 'reset', key: 'k1' });
+			expect(el('#one').getAttribute('style')).toBe(own);
 		}
-		const text = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target.style), 'cssText');
-		if (text?.set) {
-			Object.defineProperty(target.style, 'cssText', {
-				configurable: true,
-				get: () => text.get?.call(target.style),
-				set: (value: string) => {
-					unread = true;
-					text.set?.call(target.style, value);
-				},
-			});
-		}
-		const has = target.hasAttribute.bind(target);
-		target.hasAttribute = (name) => {
-			unread = false;
-			return has(name);
-		};
-		const remove = target.removeAttribute.bind(target);
-		target.removeAttribute = (name) => {
-			if (!unread) remove(name);
-		};
-		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
-		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
-		run({ op: 'reset', key: 'k1' });
-		expect(has('style')).toBe(false);
+		// An element with no style attribute never gets one.
+		style('k2', '#two', { color: 'rgb(0, 0, 255)' });
+		expect(el('#two').hasAttribute('style')).toBe(false);
+		run({ op: 'reset', key: null });
+		expect(el('#two').hasAttribute('style')).toBe(false);
+		expect(leftovers()).toEqual([]);
 	});
 
-	it('keeps a style attribute the page wrote itself, even an empty one', () => {
-		el('#two').setAttribute('style', '');
-		style('k1', '#two', { color: 'rgb(0, 0, 255)' });
+	it('leaves alone what the page does to its own style while a preview is on', () => {
+		el('#one').setAttribute('style', 'font-size: 16px');
+		style('k1', '#one', { 'font-size': '24px' });
+		// The page's own code runs, as a resize handler would.
+		el('#one').style.setProperty('font-size', '20px');
+		style('k1', '#one', { 'font-size': '28px' });
+		expect(shown(el('#one'), 'font-size')).toBe('28px !important');
 		run({ op: 'reset', key: 'k1' });
-		expect(el('#two').getAttribute('style')).toBe('');
+		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
+		expect(leftovers()).toEqual([]);
 	});
 
 	it('keeps overlapping changes: one on every match, one on a single element', () => {
 		style('k1', '#one', { 'background-color': 'rgb(0, 0, 255)' }, { scope: 'all' });
 		style('k2', '#two', { 'font-size': '20px' });
 		// The single-element change did not cost the button its shared colour.
-		expect(el('#two').style.getPropertyValue('background-color')).toBe('rgb(0, 0, 255)');
-		expect(el('#two').style.getPropertyValue('font-size')).toBe('20px');
+		expect(shown(el('#two'), 'background-color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#two'), 'font-size')).toBe('20px !important');
 		// Removing either one leaves the other.
 		run({ op: 'reset', key: 'k1' });
-		expect(el('#two').style.getPropertyValue('background-color')).toBe('');
-		expect(el('#two').style.getPropertyValue('font-size')).toBe('20px');
-		expect(el('#one').getAttribute('style') ?? '').toBe('');
-		expect(el('#three').getAttribute('style') ?? '').toBe('');
+		expect(shown(el('#two'), 'background-color')).toBe('');
+		expect(shown(el('#two'), 'font-size')).toBe('20px !important');
+		expect(el('#one').hasAttribute(MARK)).toBe(false);
+		expect(el('#three').hasAttribute(MARK)).toBe(false);
 	});
 
 	it('lets the later change win where two set the same property, and falls back when it goes', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' }, { scope: 'all' });
 		style('k2', '#two', { color: 'rgb(255, 0, 0)' });
-		expect(el('#two').style.getPropertyValue('color')).toBe('rgb(255, 0, 0)');
+		expect(shown(el('#two'), 'color')).toBe('rgb(255, 0, 0) !important');
 		run({ op: 'reset', key: 'k2' });
-		expect(el('#two').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
+		expect(shown(el('#two'), 'color')).toBe('rgb(0, 0, 255) !important');
 	});
 
 	it('drops a property that is no longer in the change', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)', 'font-size': '20px' });
 		style('k1', '#one', { 'font-size': '22px' });
-		expect(el('#one').style.getPropertyValue('color')).toBe('');
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('22px');
-		// Nothing left to preview: the change is gone and so is its style.
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(shown(el('#one'), 'font-size')).toBe('22px !important');
+		// Nothing left to preview: the change is gone and so is everything it added.
 		style('k1', '#one', {});
-		expect(el('#one').getAttribute('style') ?? '').toBe('');
+		expect(leftovers()).toEqual([]);
 	});
 
 	it('narrows a change from every match back to one element', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' }, { scope: 'all' });
-		expect(el('#three').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
+		expect(shown(el('#three'), 'color')).toBe('rgb(0, 0, 255) !important');
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
-		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
-		expect(el('#three').style.getPropertyValue('color')).toBe('');
+		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#three'), 'color')).toBe('');
+		expect(el('#three').hasAttribute(MARK)).toBe(false);
 	});
 
 	it('removes one change while the original page is showing without losing the rest', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
 		style('k2', '#text', { 'font-size': '20px' });
 		expect(run({ op: 'peek', on: true }).peek).toBe(true);
-		expect(el('#one').style.getPropertyValue('color')).toBe('');
-		expect(el('#text').style.getPropertyValue('font-size')).toBe('');
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(shown(el('#text'), 'font-size')).toBe('');
 		run({ op: 'reset', key: 'k1' });
 		expect(run({ op: 'peek', on: false }).peek).toBe(false);
-		expect(el('#text').style.getPropertyValue('font-size')).toBe('20px');
-		expect(el('#one').style.getPropertyValue('color')).toBe('');
+		expect(shown(el('#text'), 'font-size')).toBe('20px !important');
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(el('#one').hasAttribute(MARK)).toBe(false);
 	});
 
 	it('shows the changes again when a new value is tried while the original is showing', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
 		run({ op: 'peek', on: true });
 		style('k2', '#text', { 'font-size': '20px' });
-		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
-		expect(el('#text').style.getPropertyValue('font-size')).toBe('20px');
+		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#text'), 'font-size')).toBe('20px !important');
 	});
 
-	it('restores the inline styles the page set itself, with their priority', () => {
-		el('#one').setAttribute('style', 'color: rgb(255, 0, 0) !important; padding-left: 4px');
-		style('k1', '#one', { color: 'rgb(0, 0, 255)', padding: '20px' });
-		expect(el('#one').style.getPropertyValue('padding-left')).toBe('20px');
-		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(255, 0, 0)');
-		expect(el('#one').style.getPropertyPriority('color')).toBe('important');
-		// The shorthand preview did not swallow the page's own longhand.
-		expect(el('#one').style.getPropertyValue('padding-left')).toBe('4px');
-		expect(el('#one').style.getPropertyValue('padding-top')).toBe('');
+	it('drops a value the browser does not accept without losing the other changes', () => {
+		style('k1', '#one', { color: 'rgb(0, 0', 'font-size': '20px' });
+		style('k2', '#text', { color: 'rgb(255, 0, 0)' });
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(shown(el('#one'), 'font-size')).toBe('20px !important');
+		expect(shown(el('#text'), 'color')).toBe('rgb(255, 0, 0) !important');
 	});
 
-	it('puts back a shorthand the page wrote with a variable', () => {
-		// The longhands of `padding: var(--pad)` read as empty, so they cannot
-		// be what is kept: the page's own text is.
-		el('#one').setAttribute('style', '--pad: 16px; padding: var(--pad)');
-		const before = el('#one').style.cssText;
-		style('k1', '#one', { padding: '24px' });
-		expect(el('#one').style.getPropertyValue('padding-top')).toBe('24px');
+	it('clears the marker from a copy the page made of a previewed element', () => {
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		style('k2', '#two', { color: 'rgb(255, 0, 0)' });
+		const copy = el('#one').cloneNode(true) as HTMLElement;
+		copy.id = 'copy';
+		document.body.appendChild(copy);
 		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').style.cssText).toBe(before);
-		expect(el('#one').style.getPropertyValue('padding')).toBe('var(--pad)');
+		expect(copy.hasAttribute(MARK)).toBe(false);
+		expect(shown(el('#two'), 'color')).toBe('rgb(255, 0, 0) !important');
+		run({ op: 'reset', key: null });
+		expect(leftovers()).toEqual([]);
 	});
 
-	it('keeps an inline value the page set itself while the preview was on', () => {
-		el('#one').setAttribute('style', 'font-size: 16px');
-		style('k1', '#one', { 'font-size': '24px', color: 'rgb(0, 0, 255)' });
-		// The page's own code runs, as a resize handler would.
-		el('#one').style.setProperty('font-size', '20px');
-		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
-		expect(el('#one').style.getPropertyValue('color')).toBe('');
-	});
-
-	it('previews again over a value the page set while the preview was on', () => {
-		el('#one').setAttribute('style', 'font-size: 16px');
-		style('k1', '#one', { 'font-size': '24px' });
-		el('#one').style.setProperty('font-size', '20px');
-		style('k1', '#one', { 'font-size': '28px' });
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('28px');
-		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
-	});
-
-	it('puts a variable shorthand back even when the page changed something else', () => {
-		el('#one').setAttribute('style', '--pad: 16px; padding: var(--pad)');
-		style('k1', '#one', { padding: '24px' });
-		el('#one').style.setProperty('color', 'rgb(255, 0, 0)');
-		run({ op: 'reset', key: 'k1' });
-		expect(el('#one').style.getPropertyValue('padding')).toBe('var(--pad)');
-		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(255, 0, 0)');
+	it('keeps its stylesheet last and beside the ones the page adopted itself', () => {
+		const pages = new SheetModel();
+		(document as unknown as Adopting).adoptedStyleSheets = [pages];
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		expect(adopted()).toHaveLength(2);
+		expect(adopted()[0]).toBe(pages);
+		// The page adopts another sheet, dropping the preview's; the next change puts it back, last.
+		const later = new SheetModel();
+		(document as unknown as Adopting).adoptedStyleSheets = [pages, later];
+		style('k1', '#one', { color: 'rgb(255, 0, 0)' });
+		expect(adopted().slice(0, 2)).toEqual([pages, later]);
+		expect(shown(el('#one'), 'color')).toBe('rgb(255, 0, 0) !important');
+		run({ op: 'reset', key: null });
+		expect(adopted()).toEqual([pages, later]);
 	});
 
 	it('always includes the picked element when a change applies to every match', () => {
 		document.body.innerHTML = Array.from({ length: 1005 }, (_, i) => `<i id="r${i}" class="row"></i>`).join('');
 		const result = style('k1', '#r1004', { color: 'rgb(0, 0, 255)' }, { scope: 'all' });
 		expect(result.count).toBe(999);
-		expect(el('#r1004').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
-		expect(el('#r0').style.getPropertyValue('color')).toBe('rgb(0, 0, 255)');
+		expect(shown(el('#r1004'), 'color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#r0'), 'color')).toBe('rgb(0, 0, 255) !important');
 	});
 
 	it("takes one viewer's previews off without touching another viewer's", () => {
@@ -228,13 +259,13 @@ describe('the page-side design preview script', () => {
 		style('k1', '#one', { 'font-size': '20px' }, { owner: 'viewer-b' });
 		// Hiding and removing are per viewer: the same key is a different change.
 		run({ op: 'peek', on: true });
-		expect(el('#one').style.getPropertyValue('color')).toBe('');
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
+		expect(shown(el('#one'), 'color')).toBe('');
+		expect(shown(el('#one'), 'font-size')).toBe('20px !important');
 		run({ op: 'reset', key: null });
-		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
+		expect(shown(el('#one'), 'font-size')).toBe('20px !important');
 		// The worker's own reset (no viewer) clears everything that is left.
 		run({ op: 'reset', key: null, owner: null });
-		expect(el('#one').getAttribute('style') ?? '').toBe('');
+		expect(leftovers()).toEqual([]);
 	});
 
 	it('reports a marked element that is no longer on the page', () => {
