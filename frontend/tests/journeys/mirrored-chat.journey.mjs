@@ -28,6 +28,12 @@
 //   unreachable-from-new  the sync check keeps failing (#814): after a few
 //                      failures the chat shows what it has with a "Can't
 //                      reach" notice, and Retry clears it once the owner answers
+//   stalled-from-new   the owner's last two updates never arrive: after the
+//                      stall time (8s) the chat shows what this worker has with
+//                      the sync pill, and the late catch-up clears the pill
+//   downloading-from-new  an empty mirror whose first transcript download is
+//                      still running stays in the syncing hero past the stall
+//                      time (never a false "Conversation cleared"), then opens
 import { runJourney } from './runner.mjs';
 import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -35,8 +41,10 @@ import { expectComposerPositions, expectNeverDecreases, frames, markTime } from 
 
 const PEER = 'Peer worker';
 const OPEN = 'open the mirrored chat from the sidebar';
-/** "Syncing" answers before the owner reports the opening checkpoint caught up. */
-const SYNCING_POLLS = 2;
+/** "Syncing" answers before the owner reports the opening checkpoint caught up.
+ *  A hidden chat is re-checked every 500ms, so this holds the hero ~4s: long
+ *  enough to read, short of the 8s stall reveal (MIRROR_SYNC_STALL_REVEAL_MS). */
+const SYNCING_POLLS = 8;
 
 /**
  * Make the page see seeded chat `key` as mirrored from PEER, and script its
@@ -44,13 +52,16 @@ const SYNCING_POLLS = 2;
  * makes the requests page.route would see (see withoutSavedAgentPick). Call
  * before the page loads; `syncPolls(page)` reads how often it was polled.
  */
-async function simulateMirroredChat(page, status, key, { untitled = false, failing = false } = {}) {
+async function simulateMirroredChat(page, status, key, { untitled = false, failing = false, held = null } = {}) {
 	await page.addInitScript(
-		({ id, peer, syncingPolls, untitled, failing }) => {
+		({ id, peer, syncingPolls, untitled, failing, held }) => {
 			const original = window.fetch.bind(window);
 			window.__mirrorSyncPolls = 0;
 			// A failing check answers 503 until the journey sets this.
 			window.__mirrorSyncHealthy = !failing;
+			// A held check ('stalled': the last updates never arrive;
+			// 'downloading': a first transcript download) until the journey sets this.
+			window.__mirrorDelivered = false;
 			window.__mirrorReaders = [];
 			const pathOf = (input) => {
 				try {
@@ -78,6 +89,12 @@ async function simulateMirroredChat(page, status, key, { untitled = false, faili
 					window.__mirrorSyncPolls += 1;
 					if (!window.__mirrorSyncHealthy) return new Response('unavailable', { status: 503 });
 					const target = { seq: 1, epoch: 'simulated', tail_id: 'simulated' };
+					if (held && !window.__mirrorDelivered) {
+						return json(held === 'downloading'
+							? { state: 'syncing', pending_updates: 0, transcript: 'downloading', scope: 'owner' }
+							: { state: 'syncing', scope: 'session', initial_target: target, initial_caught_up: false, initial_pending_updates: 2, pending_updates: 2 });
+					}
+					if (held) return json({ state: 'current', scope: 'session', initial_caught_up: true, pending_updates: 0 });
 					return json(
 						window.__mirrorSyncPolls <= syncingPolls
 							? { state: 'syncing', scope: 'session', initial_target: target, initial_caught_up: false, initial_pending_updates: 3, pending_updates: 3 }
@@ -93,7 +110,7 @@ async function simulateMirroredChat(page, status, key, { untitled = false, faili
 				return new Response(JSON.stringify(markRemote(body)), { status: response.status, headers: response.headers });
 			};
 		},
-		{ id: seededChatId(status, key), peer: PEER, syncingPolls: failing ? 0 : SYNCING_POLLS, untitled, failing }
+		{ id: seededChatId(status, key), peer: PEER, syncingPolls: failing ? 0 : SYNCING_POLLS, untitled, failing, held }
 	);
 }
 
@@ -276,6 +293,54 @@ await runJourney({
 			},
 			verify({ recording }) {
 				expectComposerPositions(recording, ['centre', 'bottom']);
+				expectSyncedInTheHero(recording);
+			}
+		},
+		{
+			// An owner that never delivers the last updates: the hero holds for
+			// the stall time, then the chat shows what this worker has with the
+			// pill, and the late catch-up clears the pill.
+			name: 'stalled-from-new',
+			setup: fromNew('long', { held: 'stalled' }),
+			async act({ page, mark }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.long);
+				await expectSyncingHero(page);
+				const heroAt = Date.now();
+				await waitChatOpen(page, { messagesAtLeast: 50, hold: 0 });
+				const held = Date.now() - heroAt;
+				expect(held >= 6_000, `the hero held until the stall time, not a moment's lull (${held}ms)`);
+				const pill = page.locator('.mirror-pill:not(.offline)', { hasText: `Syncing updates from ${PEER}… 2 updates remaining` });
+				await pill.waitFor({ timeout: 5_000 });
+				await page.evaluate(() => { window.__mirrorDelivered = true; });
+				await pill.waitFor({ state: 'detached', timeout: 10_000 });
+			},
+			verify({ recording }) {
+				expectComposerPositions(recording, ['centre', 'bottom']);
+				expectSyncedInTheHero(recording);
+				expectNeverDecreases(recording, 'rows', { from: markTime(recording, OPEN) });
+			}
+		},
+		{
+			// A first transcript download on a newly joined worker: there is no
+			// local copy yet, so the stall time must not reveal an empty chat as
+			// "Conversation cleared". It opens once the download ends.
+			name: 'downloading-from-new',
+			setup: fromNew('cleared', { held: 'downloading' }),
+			async act({ page, mark }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.cleared);
+				await expectSyncingHero(page);
+				await page.waitForTimeout(10_000); // past the 8s stall time
+				const cleared = await page.getByText('Conversation cleared', { exact: false }).count();
+				expect(cleared === 0, 'a running first download showed "Conversation cleared" at the stall time');
+				await page.locator('.cleared-hero').getByText(`Syncing from ${PEER}…`).waitFor({ timeout: 1_000 });
+				await page.evaluate(() => { window.__mirrorDelivered = true; });
+				await waitChat(page, { surface: 'cleared', loading: 'false', composer: 'centre', session: /^s:/ }, { timeout: 30_000 });
+				await page.getByText('Conversation cleared', { exact: false }).waitFor();
+			},
+			verify({ recording }) {
+				expectComposerPositions(recording, ['centre']);
 				expectSyncedInTheHero(recording);
 			}
 		}

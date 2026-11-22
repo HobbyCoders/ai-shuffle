@@ -3,6 +3,7 @@ import { cleanup, render, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import { fromStore, writable } from 'svelte/store';
 import MirrorSyncGate from './MirrorSyncGate.svelte';
+import { MIRROR_SYNC_POLL_MS, MIRROR_SYNC_WAITING_POLL_MS } from './mirror-sync.svelte';
 
 const children = createRawSnippet(() => ({ render: () => '<div>2 running tasks, 2 agents</div>' }));
 const status = (state: string, pending_updates = 0) => new Response(JSON.stringify({ state, pending_updates }));
@@ -63,7 +64,8 @@ describe('mirrored session freshness', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('4 updates remaining')).toBeTruthy();
 		expect(screen.getByText('2 running tasks, 2 agents').closest('[aria-hidden="true"]')).not.toBeNull();
-		await vi.advanceTimersByTimeAsync(4000);
+		// A quick re-check while hidden fails; the retry after it comes at the normal pace.
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS + MIRROR_SYNC_POLL_MS);
 		expect(screen.getByText('2 updates remaining')).toBeTruthy();
 		expect(onCaughtUp).not.toHaveBeenCalled();
 		for (const call of fetch.mock.calls.slice(1)) {

@@ -191,9 +191,12 @@ preserved. `scope` identifies the comparison:
 
 The authenticated peer exchange supplies requested owner-only transcript heads,
 including committed events not yet published to the replication outbox. Interest
-is bounded to 128 viewed sessions per receiving worker and expires 120 seconds
-without polling; the first poll wakes the exchange. Heads refresh with ordinary
-peer exchanges, not a new remote request per UI poll. Failed exchanges retain
+is bounded to 128 viewed sessions per receiving worker and expires 600 seconds
+without polling. While a viewed session's head is unknown, a poll first exchanges
+with the owner directly and waits up to 1.5 seconds for that head (one exchange
+per owner, shared by concurrent polls; slower exchanges finish in the
+background), so opening a chat does not wait for the next sync pass. Once known,
+heads refresh with ordinary peer exchanges, not a new remote request per UI poll. Failed exchanges retain
 known backlog. `current` means caught up to the last observed head, not proof
 that the owner is online or has made no writes since that exchange. Locally owned
 sessions return `scope: session`, `state: current` without comparison fields.
