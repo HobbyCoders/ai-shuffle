@@ -265,6 +265,18 @@ def _find_rule(store, rule_id):
     raise HTTPException(404, _NOT_FOUND)
 
 
+def _require_free_key(store, key, scope, rule_id) -> None:
+    """Refuse to give a rule a key another rule already holds in its scope:
+    two rows sharing one key would replicate as a conflict and drop both from
+    prompts."""
+    doc = store._facts.snapshot(read_only=True)
+    for entry in doc["entries"]:
+        if (entry["id"] != rule_id and entry.get("key") == key
+                and entry.get("scope", "global") == scope and _visible(entry, doc["store_id"])):
+            raise HTTPException(409, "Another rule already says this for those models. "
+                                     "Edit or delete that one instead.")
+
+
 def _applies(raw) -> str:
     applies = behavior.normalize_applies_to(raw)
     if applies is None:
@@ -300,11 +312,12 @@ def _update(rule_id, body: RuleUpdate):
         old = _find_rule(store, rule_id)
         _require_metadata_version(old, body.expected_metadata_version)
         digest = str(old["key"]).rsplit(".", 1)[-1]
+        key = f"{behavior.KEY_PREFIX}{applies}.{digest}"
+        _require_free_key(store, key, old.get("scope", "global"), rule_id)
         # Saved by the owner, the rule is kept: the learner reads it but
         # never rewrites it, and it no longer fades.
         saved = store.save_memory(text, memory_id=rule_id, expected_revision=body.expected_revision,
-                                  provenance="user", protected=True,
-                                  key=f"{behavior.KEY_PREFIX}{applies}.{digest}", when=_RULE_WHEN)
+                                  provenance="user", protected=True, key=key, when=_RULE_WHEN)
         return _saved(store, saved.id)
 
 
@@ -323,10 +336,11 @@ def _undo(rule_id, body: RuleVersion):
         history = old.get("history") or []
         if history and history[-1].get("text"):
             # A family move recorded the rule's previous key: restore both.
+            key = history[-1].get("key") or old["key"]
+            _require_free_key(store, key, old.get("scope", "global"), rule_id)
             store.save_memory(history[-1]["text"], memory_id=rule_id,
                               expected_revision=body.expected_revision, provenance=old.get("provenance"),
-                              durable=True, key=history[-1].get("key") or old["key"],
-                              when=old.get("when") or _RULE_WHEN)
+                              durable=True, key=key, when=old.get("when") or _RULE_WHEN)
             return {"restored": _saved(store, rule_id)}
         if not _forget_rule(store, rule_id, body.expected_revision):
             raise HTTPException(404, _NOT_FOUND)

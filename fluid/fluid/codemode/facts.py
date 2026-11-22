@@ -834,14 +834,20 @@ class FactStore:
             pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
             fence = _fence_fingerprint(text, key)
             suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fence)
-            if key:
+            # A behaviour rule keeps the key its first wording gave it through
+            # every edit and family move, so a deleted rule's key names text
+            # that family may never have held. Its per-family text fences
+            # cover each wording it did hold; the key fence would block an
+            # unrelated rule.
+            slot_fenced = bool(key) and not _is_rule_key(key)
+            if slot_fenced:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
             if suppressed and not (protected and restore):
                 raise ValueError("This fact matches a deletion barrier; an explicit restore request is required")
             for t in doc["tombstones"]:
                 text_match = (not pair_answer and not str(t.get("key") or "").startswith("memory.coexist.")
                               and fence in t.get("fingerprints", []))
-                if text_match or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
+                if text_match or (slot_fenced and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
             if old is None:
@@ -854,9 +860,11 @@ class FactStore:
                             and ((key and e.get("key") == key) or (
                                 not str(key or "").startswith("memory.coexist.")
                                 and not str(e.get("key") or "").startswith("memory.coexist.")
-                                # The same rule text for another model family is
-                                # a separate rule, not this one.
-                                and not (_is_rule_key(key) and _is_rule_key(e.get("key")))
+                                # A behaviour rule matches only by its key: the
+                                # same text for another family is a separate
+                                # rule, and an ordinary fact with that text is
+                                # never turned into a rule (or back).
+                                and not (_is_rule_key(key) or _is_rule_key(e.get("key")))
                                 and fingerprint(e["text"]) == fp))), None)
             now = time.time()
             # A behaviour rule moved to another model family keeps its text but
@@ -990,8 +998,10 @@ class FactStore:
                 previous = {"text": old["text"], "at": now, "revision": old.get("revision", 1)}
                 if old.get("when"):
                     previous["when"] = old["when"]
-                if rekey:
-                    # A rule moved between families: undo brings the family back.
+                if _is_rule_key(old.get("key")):
+                    # Every rule revision names its family, so undo brings the
+                    # family back and a deletion fences each text for the
+                    # family it was held under.
                     previous["key"] = old["key"]
                 history.append(previous)
             clock = dict(entry.get("clock") or {entry["origin"]: entry["revision"]})

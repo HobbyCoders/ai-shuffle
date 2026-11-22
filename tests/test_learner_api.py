@@ -157,6 +157,22 @@ def test_undo_moves_a_rule_back_to_the_family_the_learner_moved_it_from(world):
     assert restored["applies_to"] == "all" and restored["text"] == text
 
 
+def test_undo_refuses_to_move_a_rule_onto_a_family_slot_another_rule_holds(world):
+    client, store = world
+    text = "When reporting: lead with the result."
+    entry = learned(store, text)
+    digest = entry.key.rsplit(".", 1)[-1]
+    store.save_memory(text, memory_id=entry.id, provenance="user", durable=True,
+                      key=f"{behavior.KEY_PREFIX}gpt.{digest}")
+    # The owner then wrote their own All-models rule in that slot.
+    kept = store.save_memory("When reporting: lead with the blocker.", provenance="user", protected=True,
+                             key=entry.key, when="When working with the owner")
+    response = client.post(f"{BASE}/rules/{entry.id}/undo", json=version(rule(client, entry.id)))
+    assert response.status_code == 409
+    assert rule(client, entry.id)["applies_to"] == "gpt"
+    assert rule(client, kept.id)["text"] == "When reporting: lead with the blocker."
+
+
 def test_undo_closes_three_days_after_the_learner_changed_a_rule(world, monkeypatch):
     client, store = world
     entry = learned(store, "When reporting: lead with the result.")

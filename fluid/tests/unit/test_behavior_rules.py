@@ -205,6 +205,40 @@ def test_deleting_one_familys_copy_of_a_rule_leaves_the_others_free(tmp_path):
                           key=behavior.rule_key("gpt", text) + "x")
 
 
+def test_a_deleted_rule_fences_each_old_wording_for_the_family_it_was_held_under(tmp_path):
+    store = SkillStore(tmp_path)
+    first, second = "When reporting: lead with the result.", "When reporting: lead with the result and the blocker."
+    rule = store.save_memory(first, provenance="user", durable=True,
+                             key=behavior.rule_key("claude", first), when="When working with the owner")
+    digest = rule.key.rsplit(".", 1)[-1]
+    store.save_memory(second, memory_id=rule.id, provenance="user", durable=True, key=rule.key)
+    store.save_memory(second, memory_id=rule.id, provenance="user", durable=True,
+                      key=f"{behavior.KEY_PREFIX}gpt.{digest}")
+    assert store.delete_memory(rule.id, explicit=True, purge_evidence=False)
+    # The first wording was only ever a Claude rule: GPT may still learn it.
+    store.save_memory(first, provenance="user", durable=True,
+                      key=behavior.rule_key("gpt", first), when="When working with the owner")
+    # Each wording stays fenced for the family that held it.
+    for family, text in (("claude", first), ("claude", second), ("gpt", second)):
+        with pytest.raises(ValueError):
+            store.save_memory(text, provenance="user", durable=True,
+                              key=behavior.rule_key(family, text), when="When working with the owner")
+
+
+def test_a_rule_and_an_ordinary_fact_with_the_same_text_stay_separate(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    fact = store.save_memory(text, provenance="agent")
+    rule = store.save_memory(text, provenance="user", durable=True,
+                             key=behavior.rule_key("gpt", text), when="When working with the owner")
+    assert rule.id != fact.id
+    again = store.save_memory(text, provenance="agent")
+    assert again.id == fact.id
+    entries = {e["id"]: e for e in store._facts._load(read_only=True)["entries"]}
+    assert entries[fact.id].get("key") is None
+    assert behavior.rule_family(entries[rule.id]["key"]) == "gpt"
+
+
 def test_a_family_move_is_history_undo_can_restore(tmp_path):
     store = SkillStore(tmp_path)
     text = "When reporting: lead with the result."
