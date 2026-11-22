@@ -62,7 +62,7 @@ def mp(mp_id, url, source="git"):
 @pytest.fixture(autouse=True)
 def fresh_retries(monkeypatch):
     monkeypatch.setattr(plugins_sync, "_retry", {})
-    monkeypatch.setattr(plugins_sync, "_received_resumed", True)
+    monkeypatch.setattr(plugins_sync, "_resumed", True)
     monkeypatch.setattr(engine, "_outbox_held", False)
 
 
@@ -339,30 +339,55 @@ def test_a_scan_while_a_received_disable_waits_does_not_undo_it(workers, monkeyp
     b_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
     _, b, _ = network(workers, monkeypatch, a_service, b_service)
     with b.active():
-        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))  # from A
-        plugins_sync.apply_desired([kept])
-        assert busy_plugin_thread  # queued behind the clone
-        plugins_sync.refresh_desired_from_installed()  # still enabled here: not an edit
+        assert plugins_sync.refresh_desired_from_installed() == 0  # B's earlier scans agree
+        # A's disable is in the table; its apply job has not even been queued
+        # yet (the moment between the commit and the hook) or waits behind a clone.
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))
+        assert plugins_sync.refresh_desired_from_installed() == 0  # still enabled here: not an edit
         assert desired_enabled(b, kept) is False
+        plugins_sync.apply_desired([kept])
         run_queued(busy_plugin_thread)
         assert b_service.enabled[kept] is False
         assert plugins_sync.refresh_desired_from_installed() == 0
-        assert not b.sql("SELECT key FROM system_settings WHERE key LIKE 'network_plugin_received:%'")
+        assert desired_enabled(b, kept) is False
 
 
 def test_a_received_removal_cut_off_by_a_restart_is_applied_after_it(workers, monkeypatch, busy_plugin_thread):
     gone = "gone@community"
     a_service = Service([FakePlugin(gone, "1")], [mp("community", URL)])
     b_service = Service([FakePlugin(gone, "1")], [mp("community", URL)])
-    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    a, b, current = network(workers, monkeypatch, a_service, b_service)
+    current["name"] = "a"
+    with a.active():
+        plugins_sync.request_uninstall(gone)
+        a_service.uninstall_plugin(gone)
+        plugins_sync.publish()
+    converge([a, b])
+    current["name"] = "b"
     with b.active():
-        b.sql("DELETE FROM network_plugins_desired WHERE id = ?", (gone,))  # A's tombstone
         plugins_sync.apply_desired([gone])
         busy_plugin_thread.clear()  # the process stops before the job runs
         monkeypatch.setattr(plugins_sync, "_on_plugin_thread", lambda fn, *args: False)
-        monkeypatch.setattr(plugins_sync, "_received_resumed", False)  # a new process
+        monkeypatch.setattr(plugins_sync, "_resumed", False)  # a new process
         plugins_sync.publish()
     assert gone not in b_service.installed
+
+
+def test_a_received_toggle_cut_off_by_a_restart_is_applied_after_it(workers, monkeypatch, busy_plugin_thread):
+    kept = "kept@community"
+    a_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
+    b_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    with b.active():
+        plugins_sync.refresh_desired_from_installed()
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))  # from A
+        plugins_sync.apply_desired([kept])
+        busy_plugin_thread.clear()  # the process stops before the job runs
+        monkeypatch.setattr(plugins_sync, "_on_plugin_thread", lambda fn, *args: False)
+        monkeypatch.setattr(plugins_sync, "_resumed", False)  # a new process
+        plugins_sync.publish()
+        assert b_service.enabled[kept] is False
+        assert desired_enabled(b, kept) is False
 
 
 def test_the_owners_toggle_here_outranks_a_queued_received_one(workers, monkeypatch, busy_plugin_thread):
@@ -371,14 +396,16 @@ def test_the_owners_toggle_here_outranks_a_queued_received_one(workers, monkeypa
     b_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
     _, b, _ = network(workers, monkeypatch, a_service, b_service)
     with b.active():
-        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))  # from A
+        plugins_sync.refresh_desired_from_installed()
+        # A turned it off and on again; B's job for that is still queued.
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (True, kept))
         plugins_sync.apply_desired([kept])
-        plugins_sync.note_local_change(kept)  # the owner turns it on here meanwhile
-        b_service.enable_plugin(kept)
+        b_service.disable_plugin(kept)  # meanwhile the owner turns it off here
         run_queued(busy_plugin_thread)
-        assert b_service.enabled[kept] is True  # the queued change did not undo it
+        assert b_service.enabled[kept] is False  # the queued change did not undo it
         assert plugins_sync.refresh_desired_from_installed() == 1  # and theirs is published
-        assert desired_enabled(b, kept) is True
+        assert desired_enabled(b, kept) is False
 
 
 def test_a_disable_that_lands_during_the_install_is_kept(workers, monkeypatch):

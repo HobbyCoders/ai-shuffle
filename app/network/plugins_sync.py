@@ -42,7 +42,6 @@ import logging
 import re
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -62,35 +61,29 @@ _retry: Dict[str, tuple] = {}  # plugin id -> (failures, next attempt on time.mo
 _reconcile_lock = threading.Lock()
 _reconcile_running = False
 _reconcile_again = False
-# A received change not yet applied here (local only, like every network_*
-# setting). The value is a token: a job clears only the marker it read.
-_RECEIVED_PREFIX = "network_plugin_received:"
-_received_resumed = False
+# The enabled state this worker last agreed with the shared row on (local
+# only, like every network_* setting). A plugin whose state here moved away
+# from it was changed here and is published; one where only the row moved has
+# a received change still waiting to be applied, and the scan leaves it alone.
+# Set wherever sync itself changes a plugin; never by the owner's own toggle.
+_SYNCED_PREFIX = "network_plugin_synced:"
+_resumed = False  # received changes a restart cut off are applied once per process
 
 
-def _received(cursor) -> Dict[str, str]:
-    cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s", (_RECEIVED_PREFIX + "%",))
-    return {row["key"][len(_RECEIVED_PREFIX):]: row["value"] for row in cursor.fetchall()}
+def _synced(cursor) -> Dict[str, bool]:
+    cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s", (_SYNCED_PREFIX + "%",))
+    return {row["key"][len(_SYNCED_PREFIX):]: row["value"] == "1" for row in cursor.fetchall()}
 
 
-def _mark_received(ids) -> Dict[str, str]:
-    tokens = {plugin_id: uuid.uuid4().hex for plugin_id in ids if not _authored(plugin_id)}
+def _set_synced(cursor, plugin_id: str, enabled) -> None:
+    cursor.execute("""INSERT INTO system_settings (key, value, updated_at) VALUES (%s, %s, NOW())
+                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
+                   (_SYNCED_PREFIX + plugin_id, "1" if enabled else "0"))
+
+
+def _note_synced(plugin_id: str, enabled) -> None:
     with get_db() as conn:
-        cursor = conn.cursor()
-        for plugin_id, token in tokens.items():
-            cursor.execute("""INSERT INTO system_settings (key, value, updated_at) VALUES (%s, %s, NOW())
-                              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
-                           (_RECEIVED_PREFIX + plugin_id, token))
-    return tokens
-
-
-def note_local_change(plugin_id: str) -> None:
-    """The owner changed this plugin here: that outranks a received change not yet applied."""
-    try:
-        with get_db() as conn:
-            conn.cursor().execute("DELETE FROM system_settings WHERE key = %s", (_RECEIVED_PREFIX + plugin_id,))
-    except Exception:  # noqa: BLE001 — the owner's change itself goes ahead
-        logger.warning("Clearing the received plugin change for %s failed", plugin_id, exc_info=True)
+        _set_synced(conn.cursor(), plugin_id, enabled)
 
 
 def _pending_removals(cursor):
@@ -104,7 +97,6 @@ def request_uninstall(plugin_id: str) -> None:
     """Persist an explicit removal, even before this plugin's first publish."""
     if _authored(plugin_id):
         return
-    note_local_change(plugin_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM network_plugins_desired WHERE id = %s", (plugin_id,))
@@ -117,7 +109,6 @@ def request_install(plugin_id: str, *, version: str, enabled: bool) -> None:
     """An explicit install or owner approval may replace a tombstone."""
     if _authored(plugin_id):
         return
-    note_local_change(plugin_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (_REMOVAL_PREFIX + plugin_id,))
@@ -125,6 +116,7 @@ def request_install(plugin_id: str, *, version: str, enabled: bool) -> None:
                           VALUES (%s, %s, %s, %s, NOW()) ON CONFLICT (id) DO UPDATE SET
                           version = EXCLUDED.version, enabled = EXCLUDED.enabled, updated_at = NOW()""",
                        (plugin_id, version, enabled, json.dumps({})))
+        _set_synced(cursor, plugin_id, enabled)
 
 
 def install_plugin(service, plugin_id: str, scope: str, enable: bool):
@@ -236,18 +228,19 @@ def refresh_desired_from_installed() -> int:
         pass
     installed = _installed(service)
     sources = _marketplace_sources(service) if service is not None else {}
+    global _resumed
     changed = 0
+    waiting = []
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, version, enabled, config FROM network_plugins_desired")
         desired = {r["id"]: dict(r) for r in cursor.fetchall()}
         removed = _pending_removals(cursor) | {
             pid for pid, row in store.records_for_collection(cursor, "plugins_desired").items() if row["deleted"]}
-        # A received change waiting for the plugin thread: the state here is
-        # older than the row, not an edit to publish over it.
-        waiting = set(_received(cursor))
+        synced = _synced(cursor)
         for plugin_id, info in installed.items():
-            if plugin_id in removed or plugin_id in waiting:
+            if plugin_id in removed:
+                waiting.append(plugin_id)
                 continue  # it may still be installed while reconciliation is queued or failing
             current = desired.get(plugin_id)
             config = _config(current)
@@ -258,7 +251,15 @@ def refresh_desired_from_installed() -> int:
             # ``apply_desired`` never reinstalls to match a version, so workers
             # holding different versions would overwrite each other's row on
             # every scan. Only a new plugin or an enabled change is published.
-            if current and bool(current.get("enabled")) == info["enabled"] and not add_source:
+            if current and bool(current.get("enabled")) == info["enabled"]:
+                if synced.get(plugin_id) != info["enabled"]:
+                    _set_synced(cursor, plugin_id, info["enabled"])
+                if not add_source:
+                    continue
+            elif current and synced.get(plugin_id) == info["enabled"]:
+                # Unchanged here since the last agreement: only the row moved,
+                # so this is a received change not applied yet, not an edit.
+                waiting.append(plugin_id)
                 continue
             if add_source:
                 config = {**config, "marketplace": source}
@@ -268,7 +269,14 @@ def refresh_desired_from_installed() -> int:
                    ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, enabled = EXCLUDED.enabled,
                        config = EXCLUDED.config, updated_at = NOW()""",
                 (plugin_id, info["version"], info["enabled"], json.dumps(config)))
+            _set_synced(cursor, plugin_id, info["enabled"])
             changed += 1
+    if service is not None and not _resumed:
+        # The first scan of a process: a restart may have cut these off.
+        _resumed = True
+        if waiting:
+            logger.info("Applying %d plugin change(s) still waiting from before the restart", len(waiting))
+            apply_desired(waiting)
     return changed
 
 
@@ -276,7 +284,6 @@ def publish(*, ctx: Optional[engine.NetworkContext] = None) -> int:
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
-    _resume_received()
     refresh_desired_from_installed()
     # After the refresh, so a change made here is in the table first.
     schedule_reconcile()
@@ -307,27 +314,9 @@ def apply_desired(record_ids: Iterable[str]) -> int:
     ids = list(record_ids)
     if not ids:
         return 0
-    tokens: Dict[str, str] = {}
-    try:
-        tokens = _mark_received(ids)  # until applied, the inventory scan leaves these alone
-    except Exception:  # noqa: BLE001
-        logger.warning("Recording received plugin changes failed", exc_info=True)
-    if _on_plugin_thread(_apply_now, ids, tokens):
+    if _on_plugin_thread(_apply_now, ids):
         return 0
-    return _apply_now(ids, tokens)
-
-
-def _resume_received() -> None:
-    """Once per process: apply received changes a restart cut off."""
-    global _received_resumed
-    if _received_resumed:
-        return
-    _received_resumed = True
-    with get_db() as conn:
-        waiting = sorted(_received(conn.cursor()))
-    if waiting:
-        logger.info("Applying %d plugin change(s) received before the restart", len(waiting))
-        apply_desired(waiting)
+    return _apply_now(ids)
 
 
 def _on_plugin_thread(fn, *args) -> bool:
@@ -351,8 +340,7 @@ def _on_plugin_thread(fn, *args) -> bool:
     return True
 
 
-def _apply_now(ids, tokens=None) -> int:
-    tokens = tokens or {}
+def _apply_now(ids) -> int:
     try:
         service = _service()
     except Exception:  # noqa: BLE001
@@ -366,36 +354,17 @@ def _apply_now(ids, tokens=None) -> int:
                        % ",".join(["%s"] * len(ids)), tuple(ids))
         rows = {r["id"]: dict(r) for r in cursor.fetchall()}
         pending = _pending_removals(cursor)
-        waiting = _received(cursor)
+        synced = _synced(cursor)
     to_install = []
-    try:
-        for plugin_id in ids:
-            if _authored(plugin_id):
-                continue  # never installed or enabled from this table
-            if plugin_id in tokens and plugin_id not in waiting:
-                continue  # the owner changed it here since it arrived; theirs stands
-            row = None if plugin_id in pending else rows.get(plugin_id)
-            applied += _apply_one(service, plugin_id, row, installed, present, to_install)
-    finally:
-        _clear_received(tokens)
+    for plugin_id in ids:
+        if _authored(plugin_id):
+            continue  # never installed or enabled from this table
+        row = None if plugin_id in pending else rows.get(plugin_id)
+        applied += _apply_one(service, plugin_id, row, installed, present, to_install, synced)
     return applied + _request_installs(to_install)
 
 
-def _clear_received(tokens: Dict[str, str]) -> None:
-    """Clear the markers this job wrote; a newer change for the same plugin keeps its own."""
-    if not tokens:
-        return
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            for plugin_id, token in tokens.items():
-                cursor.execute("DELETE FROM system_settings WHERE key = %s AND value = %s",
-                               (_RECEIVED_PREFIX + plugin_id, token))
-    except Exception:  # noqa: BLE001 — a leftover marker is applied again after a restart
-        logger.warning("Clearing received plugin changes failed", exc_info=True)
-
-
-def _apply_one(service, plugin_id, row, installed, present, to_install) -> int:
+def _apply_one(service, plugin_id, row, installed, present, to_install, synced) -> int:
     """Uninstall, toggle, or queue the install of one plugin; 1 if it uninstalled."""
     try:
         if row is None:
@@ -406,10 +375,12 @@ def _apply_one(service, plugin_id, row, installed, present, to_install) -> int:
         if plugin_id not in present:
             to_install.append(plugin_id)  # cloning goes to the reconcile pass
             return 0
-        if bool(row.get("enabled")):
-            service.enable_plugin(plugin_id)
-        else:
-            service.disable_plugin(plugin_id)
+        here = installed.get(plugin_id)
+        if here is not None and plugin_id in synced and here["enabled"] != synced[plugin_id]:
+            return 0  # the owner changed it here since; the scan publishes theirs
+        enabled = bool(row.get("enabled"))
+        if (service.enable_plugin if enabled else service.disable_plugin)(plugin_id) is not False:
+            _note_synced(plugin_id, enabled)
     except Exception:  # noqa: BLE001 — a failed change shows in the plugin UI; sync goes on
         logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
     return 0
@@ -468,7 +439,11 @@ def _ensure_marketplace(service, plugin_id: str, row) -> None:
 def _install_desired(service, plugin_id: str, row) -> None:
     """Install a desired plugin the way the row says (not an explicit install: no publish)."""
     _ensure_marketplace(service, plugin_id, row)
-    service.install_plugin(plugin_id, "user", enable=bool(row.get("enabled", True)))
+    enabled = bool(row.get("enabled", True))
+    # Before the install: a scan right after it must see the row's state as
+    # agreed, so a change that lands meanwhile is applied, not published over.
+    _note_synced(plugin_id, enabled)
+    service.install_plugin(plugin_id, "user", enable=enabled)
     with _retry_lock:
         _retry.pop(plugin_id, None)
 
@@ -547,10 +522,11 @@ def reconcile_missing(only: Optional[Iterable[str]] = None) -> int:
                 logger.warning("Uninstalling %s after its removal failed", plugin_id, exc_info=True)
             continue
         if bool(after.get("enabled", True)) != bool(row.get("enabled", True)):
-            # Turned on or off elsewhere while it installed: match that, or
-            # the next scan would publish the old state back.
+            # Turned on or off elsewhere while it installed: match that now.
             try:
-                (service.enable_plugin if after.get("enabled") else service.disable_plugin)(plugin_id)
+                enabled = bool(after.get("enabled"))
+                if (service.enable_plugin if enabled else service.disable_plugin)(plugin_id) is not False:
+                    _note_synced(plugin_id, enabled)
             except Exception:  # noqa: BLE001
                 logger.warning("Matching the enabled state of %s failed", plugin_id, exc_info=True)
         installed += 1
