@@ -265,19 +265,23 @@ def _find_rule(store, rule_id):
     raise HTTPException(404, _NOT_FOUND)
 
 
-def _require_free_key(store, old, key) -> None:
+def _require_free_key(store, old, key, *, owner_edit=True) -> None:
     """Refuse to move a rule onto a key another rule already holds in its
     scope: two rows sharing one key would replicate as a conflict and drop
     both from prompts. (The fact store refuses it too; this gives the owner
-    a clear message.) Keeping the key is always allowed, so an edit can
-    still resolve copies of one rule that conflicted on sync."""
-    if old.get("key") == key:
+    a clear message.) An owner edit may keep the key, because saving it
+    resolves copies of one rule that conflicted on sync. Undo does not
+    resolve them, so it needs the slot to itself."""
+    if owner_edit and old.get("key") == key:
         return
     rule_id, scope = old["id"], old.get("scope", "global")
     doc = store._facts.snapshot(read_only=True)
     for entry in doc["entries"]:
         if (entry["id"] != rule_id and entry.get("key") == key
                 and entry.get("scope", "global") == scope and _visible(entry, doc["store_id"])):
+            if old.get("key") == key:
+                raise HTTPException(409, "Another worker saved a different version of this rule. "
+                                         "Edit the one you want to keep instead.")
             raise HTTPException(409, "Another rule already says this for those models. "
                                      "Edit or delete that one instead.")
 
@@ -342,7 +346,7 @@ def _undo(rule_id, body: RuleVersion):
         if history and history[-1].get("text"):
             # A family move recorded the rule's previous key: restore both.
             key = history[-1].get("key") or old["key"]
-            _require_free_key(store, old, key)
+            _require_free_key(store, old, key, owner_edit=False)
             store.save_memory(history[-1]["text"], memory_id=rule_id,
                               expected_revision=body.expected_revision, provenance=old.get("provenance"),
                               durable=True, key=key, when=old.get("when") or _RULE_WHEN)

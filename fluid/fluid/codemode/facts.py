@@ -265,6 +265,30 @@ def _rule_fences(entry, key, text, history):
     return {"fences": list(dict.fromkeys(held))[-MAX_RULE_FENCES:]}
 
 
+def _wording_fences(entry):
+    """Per-family fingerprints of every wording a rule copy has held: its
+    fences, its undo history and its current text."""
+    key = entry.get("key")
+    held = [f for f in entry.get("fences") or [] if isinstance(f, str) and _FENCE.fullmatch(f)]
+    held += [_fence_fingerprint(h["text"], h.get("key") or key)
+             for h in entry.get("history") or [] if isinstance(h, dict) and h.get("text")]
+    if entry.get("text"):
+        held.append(_fence_fingerprint(entry["text"], key))
+    return held
+
+
+def _union_rule_fences(target, other):
+    """Keep the wordings of a rule copy a merge discards, so deleting the
+    surviving copy also stops the learner saving the discarded wording again.
+    Deterministic whichever replica merges, and bounded: the target's current
+    wording always stays."""
+    if not (_is_rule_key(target.get("key")) and _is_rule_key(other.get("key"))):
+        return
+    own = _fence_fingerprint(target["text"], target.get("key"))
+    held = sorted(set(_wording_fences(target) + _wording_fences(other)) - {own})
+    target["fences"] = held[:MAX_RULE_FENCES - 1] + [own]
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -1037,6 +1061,11 @@ class FactStore:
             if old and old.get("conflicted") and protected and slot:
                 aliases = [e for e in all_entries if e["id"] != old["id"] and e.get("key") == slot
                            and e.get("scope", "global") == entry.get("scope", "global")]
+                if _is_rule_key(slot):
+                    # The discarded copies' wordings stay fenced with the
+                    # survivor, so deleting it later stops them coming back.
+                    discarded = [f for alias in aliases for f in _wording_fences(alias)]
+                    entry["fences"] = list(dict.fromkeys(discarded + list(entry.get("fences") or [])))
                 for alias in aliases:
                     for actor, counter in (alias.get("clock") or {alias["origin"]: alias.get("revision", 1)}).items():
                         clock[actor] = max(clock.get(actor, 0), counter)
@@ -1658,6 +1687,7 @@ class FactStore:
                     claim = ("text", "scope", "key", "worker", "provenance", "protected", "durable", "superseded_by", "retired_reason")
                     same_claim = (all(old.get(k) == entry.get(k) for k in claim)
                                   and bool(old.get("retired_at")) == bool(entry.get("retired_at")))
+                    _union_rule_fences(old, entry)
                     if same_claim:
                         old["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                         old["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -1674,6 +1704,7 @@ class FactStore:
                     if (old.get("protected") and len(confirmed_copies) == 1
                             and all(old.get(k) == entry.get(k) for k in value_claim)):
                         winner = dict(confirmed_copies[0])
+                        _union_rule_fences(winner, old)
                         self._merge_metadata(winner, old, entry, prefer=winner)
                         winner["clock"] = {k: max(local_clock.get(k, 0), incoming_clock.get(k, 0)) for k in actors}
                         winner["revision"] = max(old.get("revision", 1), entry.get("revision", 1))
@@ -1702,6 +1733,10 @@ class FactStore:
             doc["entries"] = [e for e in kept if not e.get("retired_at")]
             doc["archived"] = [e for e in kept if e.get("retired_at")]
             self._repair_supersession_links(doc)
+            self._maintain(doc, arrived={e["id"] for e in kept} - held)
+            # Only live copies contend for a slot: maintenance has already put
+            # expired ones back in the archive, so a value that moved into a
+            # slot an expired copy used to hold is not flagged against it.
             slots = {}
             for e in doc["entries"]:
                 if e.get("key") and not e.get("superseded_by"):
@@ -1711,5 +1746,4 @@ class FactStore:
                 if len({e["text"] for e in group}) > 1:
                     for e in group:
                         e["conflicted"] = True
-            self._maintain(doc, arrived={e["id"] for e in kept} - held)
             self._write(doc)

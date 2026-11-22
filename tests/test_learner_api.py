@@ -192,6 +192,23 @@ def test_editing_a_rule_that_conflicted_on_sync_resolves_it(world, tmp_path):
     assert [r["text"] for r in client.get(BASE).json()["rules"]] == [text]
 
 
+def test_undo_refuses_a_rule_another_worker_holds_a_different_copy_of(world, tmp_path):
+    client, store = world
+    key = behavior.rule_key("all", "When reporting: lead with the result.")
+    mine = store.save_memory("When reporting: lead with the result.", provenance="user",
+                             durable=True, key=key, when="When working with the owner")
+    store.save_memory("When reporting: lead with the result, then the blocker.", memory_id=mine.id,
+                      provenance="user", durable=True, key=key)
+    peer = SkillStore(tmp_path / "peer")
+    peer.save_memory("When reporting: lead with the blocker.", provenance="user", durable=True,
+                     key=key, when="When working with the owner")
+    store._facts.merge(peer._facts.export())
+    # Undo would leave both copies in the slot, so neither would reach prompts.
+    response = client.post(f"{BASE}/rules/{mine.id}/undo", json=version(rule(client, mine.id)))
+    assert response.status_code == 409 and "Edit the one you want to keep" in response.json()["detail"]
+    assert rule(client, mine.id)["text"] == "When reporting: lead with the result, then the blocker."
+
+
 def test_undo_closes_three_days_after_the_learner_changed_a_rule(world, monkeypatch):
     client, store = world
     entry = learned(store, "When reporting: lead with the result.")

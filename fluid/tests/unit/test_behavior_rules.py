@@ -256,6 +256,97 @@ def test_no_one_can_move_a_rule_onto_a_slot_another_rule_holds(tmp_path):
     assert by_id[learned.id].key == learned.key and not by_id[kept.id].conflicted
 
 
+OWNER_WHEN = "When working with the owner"
+
+
+def _refused(store, family, text):
+    with pytest.raises(ValueError):
+        store.save_memory(text, provenance="user", durable=True,
+                          key=behavior.rule_key(family, text), when=OWNER_WHEN)
+
+
+def _peer_id(store, rule):
+    """The ID a synced copy of ``rule`` has on another worker."""
+    return next(m.id for m in store.memories() if m.key == rule.key)
+
+
+def test_a_rule_copy_an_owner_edit_discards_stays_fenced_after_a_delete(tmp_path):
+    first, theirs = "When reporting: lead with the result.", "When reporting: lead with the blocker."
+    key = behavior.rule_key("gpt", first)
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    mine = a.save_memory(first, provenance="user", durable=True, key=key, when=OWNER_WHEN)
+    b.save_memory(theirs, provenance="user", durable=True, key=key, when=OWNER_WHEN)
+    a._facts.merge(b._facts.export())
+    current = next(m for m in a.memories() if m.id == mine.id)
+    assert current.conflicted
+    # The owner resolves the conflict by editing their copy, then deletes it.
+    kept = a.save_memory("When reporting: lead with the result, then the blocker.", memory_id=mine.id,
+                         expected_revision=current.revision, provenance="user", protected=True, key=key)
+    assert a.delete_memory(kept.id, explicit=True, purge_evidence=False)
+    _refused(a, "gpt", theirs)
+
+
+def test_concurrent_revisions_of_one_rule_keep_both_wordings_fenced(tmp_path):
+    first = "When reporting: lead with the result."
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    b._facts.merge(a._facts.export())
+    a.save_memory("When reporting: lead with the result and the risk.", memory_id=rule.id,
+                  provenance="user", durable=True, key=rule.key)
+    theirs = "When reporting: lead with the blocker."
+    b.save_memory(theirs, memory_id=_peer_id(b, rule), provenance="user", durable=True, key=rule.key)
+    a._facts.merge(b._facts.export())
+    current = next(m for m in a.memories() if m.id == rule.id)
+    assert current.conflicted
+    kept = a.save_memory("When reporting: lead with the result, then the blocker.", memory_id=rule.id,
+                         expected_revision=current.revision, provenance="user", protected=True, key=rule.key)
+    assert a.delete_memory(kept.id, explicit=True, purge_evidence=False)
+    _refused(a, "gpt", theirs)
+
+
+def test_merged_rule_fences_are_the_same_whichever_worker_merges(tmp_path):
+    first = "When reporting: lead with the result."
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    b._facts.merge(a._facts.export())
+    a.save_memory("When reporting: lead with the risk.", memory_id=rule.id,
+                  provenance="user", durable=True, key=rule.key)
+    b.save_memory("When reporting: lead with the blocker.", memory_id=_peer_id(b, rule),
+                  provenance="user", durable=True, key=rule.key)
+    a_doc, b_doc = a._facts.export(), b._facts.export()
+    a._facts.merge(b_doc)
+    b._facts.merge(a_doc)
+
+    def fences(store):
+        entry = next(e for e in store._facts._load(read_only=True)["entries"] if e.get("key") == rule.key)
+        return set(entry["fences"])
+
+    assert fences(a) == fences(b) and len(fences(a)) == 3
+
+
+def test_an_expired_copy_does_not_hide_a_rule_moved_into_its_slot(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    store = SkillStore(tmp_path)
+    old_text = "When reporting: lead with the result."
+    gpt_key = behavior.rule_key("gpt", old_text)
+    store.save_memory(old_text, provenance="user", durable=True, key=gpt_key, when=OWNER_WHEN)
+    real = time_mod.time
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.DURABLE_TTL + 86400)
+    assert not [m for m in store.memories() if m.key == gpt_key]  # expired into the archive
+    moving = store.save_memory("When reporting: lead with the blocker.", provenance="user",
+                               protected=True, key=behavior.rule_key("all", "x"), when=OWNER_WHEN)
+    moved = store.save_memory("When reporting: lead with the blocker.", memory_id=moving.id,
+                              expected_revision=moving.revision, provenance="user",
+                              protected=True, key=gpt_key)
+    store._facts.merge(store._facts.export())
+    live = next(m for m in store.memories() if m.id == moved.id)
+    assert live.key == gpt_key and not live.conflicted
+
+
 def test_health_repair_keeps_a_rule_that_shares_text_with_a_fact_or_another_family(tmp_path):
     from fluid.codemode import memory_health
 
