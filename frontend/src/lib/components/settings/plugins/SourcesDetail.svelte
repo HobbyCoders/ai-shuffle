@@ -205,7 +205,7 @@
 					</button>
 					<InlineConfirm
 						label="Remove"
-						question="Remove {m.id} everywhere?"
+						question="Remove here, and its plugins everywhere?"
 						variant="ghost"
 						size="sm"
 						onConfirm={() => model.removeSource(m.id)}

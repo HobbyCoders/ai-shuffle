@@ -608,8 +608,10 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 # arrives here ends the row's running agents (an edit that
                 # changes nothing an agent holds keeps them). Saved Vault
                 # sign-ins too: one removed or changed elsewhere ends the
-                # grants built on it here.
-                touched.extend(t for t in page_touched if t[0] in ("provider_billing", "model_providers") or
+                # grants built on it here. Plugin rows by id too: an uninstall
+                # that arrives only here is applied nowhere else.
+                touched.extend(t for t in page_touched
+                               if t[0] in ("provider_billing", "model_providers", "plugins_desired") or
                                (t[0] == "system_settings" and t[1].startswith(_RECORD_SETTINGS)))
                 index += 1
             if index >= len(pages):

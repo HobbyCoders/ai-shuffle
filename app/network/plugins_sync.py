@@ -17,15 +17,16 @@ install what is desired and missing, enable or disable to match, uninstall
 what a tombstone removed. Project-scope plugins live with the checkout and
 stay local.
 
-A received change is applied once (``apply_desired``). Because that one try
-can fail (marketplace not added yet, offline, a worker that joined later),
-``publish`` also schedules ``reconcile_missing``: every desired plugin that
-is not installed here is installed, retried with a growing delay while it
-keeps failing. It never uninstalls and never changes an installed plugin's
-enabled state; those follow received changes only, so a local toggle that
-has not been published yet is never reverted. Removing a marketplace records
-an uninstall for each of its plugins, otherwise the next reconcile would add
-the marketplace back and reinstall them.
+A received change (``apply_desired``) uninstalls, enables or disables at
+once; a plugin to install is handed to ``reconcile_missing`` on the plugin
+I/O thread, because installing can clone from git. ``publish`` schedules the
+same pass, so whatever a worker missed (marketplace not added yet, offline,
+joined later) is installed eventually, retried with a growing delay while it
+keeps failing. That pass never uninstalls and never changes an installed
+plugin's enabled state; those follow received changes only, so a local
+toggle that has not been published yet is never reverted. Removing a
+marketplace records an uninstall for each of its plugins, otherwise the next
+pass would add the marketplace back and reinstall them.
 
 Agent-authored plugins (``<name>@authored``) are not part of this table:
 their drafts and the owner's content-pinned approvals travel as memory
@@ -41,6 +42,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from app.db.base import get_db
@@ -57,7 +59,8 @@ _RETRY_MAX_SECONDS = 6 * 3600.0
 _retry_lock = threading.Lock()
 _retry: Dict[str, tuple] = {}  # plugin id -> (failures, next attempt on time.monotonic())
 _reconcile_lock = threading.Lock()
-_reconcile_scheduled = False
+_reconcile_running = False
+_reconcile_again = False
 
 
 def _pending_removals(cursor):
@@ -266,7 +269,8 @@ def apply_desired(record_ids: Iterable[str]) -> int:
         service = _service()
     except Exception:  # noqa: BLE001
         return 0
-    installed = _installed()
+    installed = _installed(service)
+    present = _user_scope_ids(service)
     applied = 0
     with get_db() as conn:
         cursor = conn.cursor()
@@ -274,6 +278,7 @@ def apply_desired(record_ids: Iterable[str]) -> int:
                        % ",".join(["%s"] * len(ids)), tuple(ids))
         rows = {r["id"]: dict(r) for r in cursor.fetchall()}
         pending = _pending_removals(cursor)
+    to_install = []
     for plugin_id in ids:
         if _authored(plugin_id):
             continue  # never installed or enabled from this table
@@ -284,17 +289,29 @@ def apply_desired(record_ids: Iterable[str]) -> int:
                     service.uninstall_plugin(plugin_id)
                     applied += 1
                 continue
-            if plugin_id not in installed:
-                _install_desired(service, plugin_id, row)
-                applied += 1
+            if plugin_id not in present:
+                # Installing can clone from git: never on the sync thread.
+                to_install.append(plugin_id)
+                continue
             if bool(row.get("enabled")):
                 service.enable_plugin(plugin_id)
             else:
                 service.disable_plugin(plugin_id)
-        except Exception:  # noqa: BLE001 — a failed install shows in the plugin UI; sync goes on
+        except Exception:  # noqa: BLE001 — a failed change shows in the plugin UI; sync goes on
             logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
-            _note_failure(plugin_id)
-    return applied
+    return applied + _request_installs(to_install)
+
+
+def _request_installs(plugin_ids) -> int:
+    """Install received plugins on the plugin I/O thread, tried at once."""
+    if not plugin_ids:
+        return 0
+    with _retry_lock:
+        for plugin_id in plugin_ids:
+            _retry.pop(plugin_id, None)
+    if schedule_reconcile():
+        return len(plugin_ids)
+    return reconcile_missing(only=plugin_ids)  # no app loop (tests, scripts): here
 
 
 def _connector(plugin_id: str) -> bool:
@@ -311,10 +328,16 @@ def _ensure_marketplace(service, plugin_id: str, row) -> None:
     if _connector(plugin_id):
         return  # connector packages install from the app's own catalog
     try:
-        known = {mp.id for mp in service.get_marketplaces()}
+        known = {mp.id: mp for mp in service.get_marketplaces()}
     except Exception:  # noqa: BLE001 — let the install report what is wrong
         return
     if marketplace_id in known:
+        location = getattr(known[marketplace_id], "install_location", None)
+        if location is not None and not Path(location).is_dir():
+            # Registered but never downloaded (the shipped default source
+            # is fetched only when plugins are browsed).
+            logger.info("Fetching plugin marketplace %s to install %s", marketplace_id, plugin_id)
+            service.sync_marketplace(marketplace_id)
         return
     source = _config(row).get("marketplace")
     if not isinstance(source, dict) or source.get("id") != marketplace_id:
@@ -347,74 +370,110 @@ def _due(plugin_id: str) -> bool:
     return entry is None or time.monotonic() >= entry[1]
 
 
-def reconcile_missing() -> int:
-    """Install every desired plugin that is not installed here; return how many.
+def _current_row(plugin_id: str) -> Optional[dict]:
+    """The desired row as it is now; ``None`` once removed (tombstone or local marker)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM system_settings WHERE key = %s", (_REMOVAL_PREFIX + plugin_id,))
+        if cursor.fetchone():
+            return None
+        cursor.execute("SELECT id, version, enabled, config FROM network_plugins_desired WHERE id = %s",
+                       (plugin_id,))
+        row = cursor.fetchone()
+    return dict(row) if row else None
 
-    Catches up what a single ``apply_desired`` try missed. A plugin that keeps
-    failing waits longer between tries (5 minutes, doubling to 6 hours; a
-    restart tries again at once). Never uninstalls and never changes the
-    enabled state of an installed plugin.
+
+def reconcile_missing(only: Optional[Iterable[str]] = None) -> int:
+    """Install every desired plugin (or each of ``only``) not installed here; return how many.
+
+    Catches up what was missed: a worker that joined later, was offline, or
+    lacked the marketplace. A plugin that keeps failing waits longer between
+    tries (5 minutes, doubling to 6 hours; a restart or a newly received
+    change tries again at once). Never uninstalls a plugin it did not just
+    install and never changes the enabled state of an installed plugin.
     """
     try:
         service = _service()
     except Exception:  # noqa: BLE001
         return 0
     present = _user_scope_ids(service)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, version, enabled, config FROM network_plugins_desired")
-        rows = [dict(r) for r in cursor.fetchall()]
-        pending = _pending_removals(cursor)
+    if only is None:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM network_plugins_desired")
+            only = [r["id"] for r in cursor.fetchall()]
     installed = 0
-    for row in sorted(rows, key=lambda r: r["id"]):
-        plugin_id = row["id"]
-        if plugin_id in present or plugin_id in pending or _authored(plugin_id) or not _due(plugin_id):
+    for plugin_id in sorted(set(only)):
+        if plugin_id in present or _authored(plugin_id) or not _due(plugin_id):
+            continue
+        # Read each row just before its install: an earlier install can take
+        # minutes, and a removal may land meanwhile.
+        row = _current_row(plugin_id)
+        if row is None:
             continue
         try:
             _install_desired(service, plugin_id, row)
-            installed += 1
-            logger.info("Installed %s to match the plugins on the owner's other workers", plugin_id)
         except Exception as exc:  # noqa: BLE001 — one failure must not stop the others
             first = plugin_id not in _retry
             _note_failure(plugin_id)
             # One warning per plugin per process; retries log at debug.
             (logger.warning if first else logger.debug)(
                 "Could not install %s to match the owner's other workers (retrying later): %s", plugin_id, exc)
+            continue
+        if _current_row(plugin_id) is None:
+            # Removed while it installed: the removal found nothing to
+            # uninstall then, and is never applied again.
+            logger.info("%s was removed on another worker while it installed; uninstalling", plugin_id)
+            try:
+                service.uninstall_plugin(plugin_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("Uninstalling %s after its removal failed", plugin_id, exc_info=True)
+            continue
+        installed += 1
+        logger.info("Installed %s to match the plugins on the owner's other workers", plugin_id)
     return installed
 
 
-def schedule_reconcile() -> None:
-    """Run ``reconcile_missing`` on the plugin I/O thread, once at a time.
+def schedule_reconcile() -> bool:
+    """Run ``reconcile_missing`` on the plugin I/O thread, one pass at a time.
 
-    Installs can clone from git, so they never run on the sync thread. With
-    no app loop (tests, scripts) nothing is scheduled.
+    Installs can clone from git, so they never run on the sync thread. A
+    request while a pass runs queues one more pass, so a row that arrived
+    after the running pass listed the table is not missed. Returns False when
+    there is no app loop (tests, scripts) and nothing was scheduled.
     """
-    global _reconcile_scheduled
+    global _reconcile_running, _reconcile_again
     from app.core.global_events import global_events
     loop = getattr(global_events, "_loop", None)
     if not loop or loop.is_closed():
-        return
+        return False
     with _reconcile_lock:
-        if _reconcile_scheduled:
-            return
-        _reconcile_scheduled = True
+        if _reconcile_running:
+            _reconcile_again = True
+            return True
+        _reconcile_running = True
 
     async def run():
-        global _reconcile_scheduled
+        global _reconcile_running, _reconcile_again
         from app.db.async_database import run_plugin_io
-        try:
-            await run_plugin_io(reconcile_missing)
-        except Exception:  # noqa: BLE001
-            logger.warning("Plugin reconcile failed", exc_info=True)
-        finally:
+        while True:
+            try:
+                await run_plugin_io(reconcile_missing)
+            except Exception:  # noqa: BLE001
+                logger.warning("Plugin reconcile failed", exc_info=True)
             with _reconcile_lock:
-                _reconcile_scheduled = False
+                if not _reconcile_again:
+                    _reconcile_running = False
+                    return
+                _reconcile_again = False
 
     try:
         asyncio.run_coroutine_threadsafe(run(), loop)
     except RuntimeError:  # the loop closed in between
         with _reconcile_lock:
-            _reconcile_scheduled = False
+            _reconcile_running = False
+        return False
+    return True
 
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync

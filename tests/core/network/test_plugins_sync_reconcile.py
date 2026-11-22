@@ -211,12 +211,31 @@ def test_removing_a_marketplace_uninstalls_its_plugins_everywhere(workers, monke
     assert set(a_service.installed) == {other}
 
 
-def test_schedule_runs_one_reconcile_at_a_time_on_the_app_loop(monkeypatch):
+@pytest.fixture
+def app_loop(monkeypatch):
     from app.core.global_events import global_events
 
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
+    monkeypatch.setattr(global_events, "_loop", loop)
+    monkeypatch.setattr(plugins_sync, "_reconcile_running", False)
+    monkeypatch.setattr(plugins_sync, "_reconcile_again", False)
+    yield loop
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
+
+
+def wait_idle():
+    for _ in range(100):
+        if not plugins_sync._reconcile_running:
+            return
+        threading.Event().wait(0.05)
+    pytest.fail("reconcile still running")
+
+
+def test_schedule_runs_one_pass_at_a_time_and_one_more_if_asked_meanwhile(app_loop, monkeypatch):
     started, release, runs = threading.Event(), threading.Event(), []
 
     def reconcile():
@@ -226,22 +245,15 @@ def test_schedule_runs_one_reconcile_at_a_time_on_the_app_loop(monkeypatch):
         return 0
 
     monkeypatch.setattr(plugins_sync, "reconcile_missing", reconcile)
-    monkeypatch.setattr(global_events, "_loop", loop)
-    try:
-        plugins_sync.schedule_reconcile()
-        assert started.wait(5)
-        plugins_sync.schedule_reconcile()  # one is running: not queued again
-        release.set()
-        for _ in range(100):
-            if not plugins_sync._reconcile_scheduled:
-                break
-            threading.Event().wait(0.05)
-        assert runs == [1]
-        assert plugins_sync._reconcile_scheduled is False
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(5)
-        loop.close()
+    assert plugins_sync.schedule_reconcile() is True
+    assert started.wait(5)
+    # A row that arrives now was not in the running pass's list: one more pass.
+    assert plugins_sync.schedule_reconcile() is True
+    assert plugins_sync.schedule_reconcile() is True
+    release.set()
+    wait_idle()
+    assert runs == [1, 1]
+    assert plugins_sync._reconcile_again is False
 
 
 def test_schedule_is_a_no_op_without_an_app_loop(monkeypatch):
@@ -249,4 +261,94 @@ def test_schedule_is_a_no_op_without_an_app_loop(monkeypatch):
 
     monkeypatch.setattr(global_events, "_loop", None)
     monkeypatch.setattr(plugins_sync, "reconcile_missing", lambda: pytest.fail("ran without a loop"))
-    plugins_sync.schedule_reconcile()
+    assert plugins_sync.schedule_reconcile() is False
+
+
+def test_a_received_install_runs_on_the_plugin_thread_not_the_sync_thread(workers, monkeypatch, app_loop):
+    a_service = Service([FakePlugin(PID, "1")], [mp("community", URL)])
+    b_service = Service()
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    sync_thread = threading.get_ident()
+    install_threads = []
+    real_install = b_service.install_plugin
+
+    def install(plugin_id, scope="user", enable=True):
+        install_threads.append(threading.get_ident())
+        return real_install(plugin_id, scope, enable)
+
+    b_service.install_plugin = install
+    plugins_sync._retry[PID] = (3, float("inf"))  # backing off from earlier failures
+    with b.active():
+        plugins_sync.apply_desired([PID])
+        wait_idle()
+    assert PID in b_service.installed  # a received change is tried at once
+    assert install_threads and sync_thread not in install_threads
+
+
+def test_a_removal_that_lands_during_the_install_uninstalls_it(workers, monkeypatch):
+    a_service = Service([FakePlugin(PID, "1")], [mp("community", URL)])
+    b_service = Service([], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    real_install = b_service.install_plugin
+
+    def install(plugin_id, scope="user", enable=True):
+        plugin = real_install(plugin_id, scope, enable)
+        # The tombstone is applied here meanwhile; it found nothing to uninstall.
+        b.sql("DELETE FROM network_plugins_desired WHERE id = ?", (plugin_id,))
+        return plugin
+
+    b_service.install_plugin = install
+    with b.active():
+        assert plugins_sync.reconcile_missing() == 0
+    assert PID not in b_service.installed
+    assert b_service.calls[-1] == ("uninstall", PID)
+
+
+def test_a_row_removed_before_its_turn_is_not_installed(workers, monkeypatch):
+    first, second = "a-first@community", "b-second@community"
+    a_service = Service([FakePlugin(first, "1"), FakePlugin(second, "1")], [mp("community", URL)])
+    b_service = Service([], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    real_install = b_service.install_plugin
+
+    def install(plugin_id, scope="user", enable=True):
+        if plugin_id == first:  # a slow clone; the second plugin's removal lands
+            b.sql("DELETE FROM network_plugins_desired WHERE id = ?", (second,))
+        return real_install(plugin_id, scope, enable)
+
+    b_service.install_plugin = install
+    with b.active():
+        assert plugins_sync.reconcile_missing() == 1
+    assert set(b_service.installed) == {first}
+
+
+def test_a_registered_source_that_was_never_downloaded_is_fetched_first(workers, monkeypatch, tmp_path):
+    a_service = Service([FakePlugin(PID, "1")], [mp("community", URL)])
+    registered = SimpleNamespace(id="community", source="git", url=URL, install_location=str(tmp_path / "absent"))
+    b_service = Service([], [registered])
+    b_service.sync_marketplace = lambda mp_id: b_service.calls.append(("sync_marketplace", mp_id)) or True
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    with b.active():
+        assert plugins_sync.reconcile_missing() == 1
+    assert b_service.calls == [("sync_marketplace", "community"), ("install", PID, True)]
+
+
+def test_a_snapshot_tombstone_reaches_the_plugin_callback_by_id(workers, monkeypatch, tmp_path):
+    """A worker back after the uninstall op was pruned gets the tombstone only in a snapshot."""
+    from app.network import peer_snapshot
+
+    a_service = Service([FakePlugin(PID, "1")], [mp("community", URL)])
+    a, b, current = network(workers, monkeypatch, a_service, Service())
+    current["name"] = "a"
+    with a.active():
+        plugins_sync.request_uninstall(PID)
+        assert plugins_sync.publish() == 1
+        manifest = peer_snapshot.capture(b.device_id)
+        for index in range(len(manifest["pages"])):
+            (tmp_path / f"{index}.json").write_bytes(peer_snapshot.page(b.device_id, manifest["transfer"], index))
+    notified = []
+    real_notify = engine._notify
+    monkeypatch.setattr(engine, "_notify", lambda touched: notified.extend(touched) or real_notify(touched))
+    with b.active():
+        peer_snapshot.apply(manifest, tmp_path, a.device_id)
+    assert any(c == "plugins_desired" and r == PID for c, r, _op in notified)
