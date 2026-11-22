@@ -313,8 +313,8 @@ describe('Claude', () => {
 			[CLAUDE_KEY_ITEM, 'ok', 'Active for Claude API']
 		]);
 		expect(attentionCount(views)).toBe(1);
-		// The key still runs Claude API while the subscription is signed out.
-		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
+		// The saved key is reported, not shown as Claude running.
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not signed in · API key saved' });
 	});
 
 	it('is not connected when off with nothing signed in or stored', () => {
@@ -386,7 +386,7 @@ describe('claudeGateNotice', () => {
 	it('reports a saved key and the CLI sign-in separately', () => {
 		// The gate's credential is the CLI's; the key runs Claude API without it.
 		const summary = claudeSummary({ mode: 'subscription', gate: { ...gate, claude_credential_ready: false } });
-		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not signed in · API key saved' });
 		expect(claudeGateNotice(summary)).toBe(
 			'Claude subscription cannot run: the Claude Code CLI is not signed in on this worker. Claude API models run on the saved key.'
 		);

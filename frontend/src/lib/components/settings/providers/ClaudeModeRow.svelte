@@ -25,7 +25,7 @@
 </script>
 
 <RowGroup title="Claude Code mode">
-	<SettingRow id="providers.claudeMode" hint="The Subscription choice syncs. Update all workers before relying on a switch: older workers may keep using their previous account. Cloud and Off apply only here. A saved API key runs beside any of these as Claude · API models.">
+	<SettingRow id="providers.claudeMode" hint="The Subscription choice syncs. Update all workers before relying on a switch: older workers may keep using their previous account. Cloud and Off apply only here. A saved API key runs beside Subscription or Cloud as Claude · API models; Off turns both off.">
 		<Segmented options={MODE_OPTIONS} value={mode} disabled={!claude || access.readOnly} onchange={(v: ClaudeAuthMode) => pickClaudeMode(provider, v)} />
 	</SettingRow>
 </RowGroup>

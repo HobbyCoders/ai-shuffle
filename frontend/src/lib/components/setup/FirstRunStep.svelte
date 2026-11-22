@@ -12,7 +12,10 @@
 	 *
 	 * When no ready provider has a model to run (a key saved without picking
 	 * one), the step says which provider needs one and links back to the
-	 * provider step instead of sending a run the worker would refuse.
+	 * provider step instead of sending a run the worker would refuse. The
+	 * Anthropic API key is never picked for this run (it runs only when a
+	 * Claude · API model is chosen), so with only the key ready the step says
+	 * so and lets the owner continue.
 	 *
 	 * A turn the credential gate refuses (`agent_setup_required`) or the loop
 	 * guard holds (`loop_guard_confirm`) shows the worker's own message, with a
@@ -29,7 +32,7 @@
 	import { buildProviders } from '$lib/components/settings/providers/providers-model';
 	import { setupReadiness } from './provider-readiness';
 	import {
-		ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, pickFirstRunModel, SETUP_REQUIRED_CODE,
+		CLAUDE_API_BRAND, ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, pickFirstRunModel, SETUP_REQUIRED_CODE,
 		startFirstAgentRun, type FirstRunHandle, type FirstRunModel, type FirstRunState
 	} from '$lib/services/first-agent-run';
 
@@ -50,6 +53,8 @@
 	let picking = $state(true);
 	/** Ready providers with no model picked, by name, when nothing can run. */
 	let needsModel = $state<string[]>([]);
+	/** Only the Anthropic API key is ready, and it is never picked for this run. */
+	let keyOnly = $state(false);
 	const BRAND_NAMES: Record<string, string> = { openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter' };
 	let handle: FirstRunHandle | null = null;
 	let outputEl = $state<HTMLDivElement | null>(null);
@@ -84,8 +89,9 @@
 				ready: readiness.ready, preferred: preferredProvider, rows: s.providers, registry: getProviders(),
 				defaultModel: getDefaultModel(), claudeModels: getModels(),
 			});
-			needsModel = pick ? [] : readiness.needsModel.map((id) =>
+			needsModel = pick ? [] : readiness.needsModel.filter((id) => id !== CLAUDE_API_BRAND).map((id) =>
 				BRAND_NAMES[id] ?? s.providers.find((r) => `gw:${r.id}` === id)?.name ?? 'Your gateway');
+			keyOnly = !pick && !needsModel.length && readiness.ready.includes(CLAUDE_API_BRAND);
 		} catch {
 			pick = null;
 		} finally {
@@ -132,7 +138,7 @@
 		<div class="border-t border-border pt-2" data-testid="setup-first-run-model">
 			<p class="text-xs text-muted-foreground mb-1">Runs on</p>
 			<p class="text-sm text-foreground">
-				{#if !picking && needsModel.length}<span class="text-muted-foreground">No model picked yet.</span>{:else if picking}<span class="inline-flex items-center gap-2 text-muted-foreground"><Loader2 size={12} class="animate-spin" /> Checking your providers…</span>{:else}{payer}, billed to your own account with that provider.{/if}
+				{#if !picking && (needsModel.length || keyOnly)}<span class="text-muted-foreground">No model picked yet.</span>{:else if picking}<span class="inline-flex items-center gap-2 text-muted-foreground"><Loader2 size={12} class="animate-spin" /> Checking your providers…</span>{:else}{payer}, billed to your own account with that provider.{/if}
 			</p>
 		</div>
 	</div>
@@ -147,6 +153,12 @@
 				{needsModel.length > 1 ? 'They are' : 'It is'} connected, but no model is picked, so there is nothing to run.
 				{#if onFixProvider}<button type="button" class="text-primary underline" onclick={onFixProvider}>Go back to AI provider</button>, open {needsModel[0]} and pick a model.{/if}
 			</p>
+		</div>
+	{/if}
+
+	{#if !picking && keyOnly}
+		<div role="status" class="bg-muted/30 border border-border px-4 py-3 rounded-lg text-sm" data-testid="setup-first-run-key-only">
+			<p class="text-muted-foreground">Your Anthropic API key runs only when you pick a <strong class="text-foreground">Claude · API</strong> model, so this test is skipped. Pick one in the model menu of any chat.</p>
 		</div>
 	{/if}
 
@@ -178,13 +190,13 @@
 	<div class="flex gap-3">
 		{#if onBack}<button type="button" onclick={onBack} class="ui-button flex-1 py-3" disabled={running}>Back</button>{/if}
 		{#if !succeeded}
-			<button type="button" onclick={start} class="btn {attempted ? 'btn-secondary' : 'btn-primary'} flex-1 py-3" disabled={running || picking || (!pick && needsModel.length > 0)}>
+			<button type="button" onclick={start} class="btn {attempted ? 'btn-secondary' : 'btn-primary'} flex-1 py-3" disabled={running || picking || (!pick && (needsModel.length > 0 || keyOnly))}>
 				{#if running}<Loader2 size={16} class="inline-block animate-spin mr-2" />Running…{:else}<Play size={16} class="inline-block mr-2" />{attempted ? 'Try again' : 'Run it'}{/if}
 			</button>
 		{/if}
-		{#if succeeded || attempted || (!pick && needsModel.length > 0)}
-			<button type="button" onclick={onContinue} class="btn {succeeded ? 'btn-primary' : 'btn-secondary'} flex-1 py-3" disabled={running}>
-				{succeeded ? 'Continue' : 'Continue anyway'}
+		{#if succeeded || attempted || keyOnly || (!pick && needsModel.length > 0)}
+			<button type="button" onclick={onContinue} class="btn {succeeded || keyOnly ? 'btn-primary' : 'btn-secondary'} flex-1 py-3" disabled={running}>
+				{succeeded || keyOnly ? 'Continue' : 'Continue anyway'}
 			</button>
 		{/if}
 	</div>

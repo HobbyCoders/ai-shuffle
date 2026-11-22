@@ -916,12 +916,11 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
 		: claude.mode === 'subscription'
 			? !!claude.cli.signed_in
 			: !!claude.cloud?.ready;
-	// The key runs natively (Claude API), never through the CLI, so it still
-	// runs while the subscription is not signed in. A cloud setup is a
-	// deliberate choice, so a broken one stays a warning.
+	// The key is its own provider (Claude API) and runs only when a Claude ·
+	// API model is picked, so a saved key is reported, not counted as ready.
 	if (!ready) {
 		return claude.api_key.set && claude.mode === 'subscription'
-			? { status: 'ok', text: 'Runs on API key' }
+			? { status: 'warn', text: 'Not signed in · API key saved' }
 			: { status: 'warn', text: 'Not ready' };
 	}
 	if (claude.mode === 'cloud') return { status: 'ok', text: `Runs on ${claude.cloud?.method_label || 'cloud provider'}` };

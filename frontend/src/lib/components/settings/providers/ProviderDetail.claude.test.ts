@@ -123,7 +123,7 @@ it('keeps Claude API running on the saved key while the subscription is signed o
 	summary.cli = { ...summary.cli, signed_in: false, email: null, org_name: null, plan: null };
 	worker.state.claude = summary;
 	await show();
-	expect(screen.getByText('Runs on API key')).toBeTruthy();
+	expect(screen.getByText('Not signed in · API key saved')).toBeTruthy();
 	expect(screen.getByText(/Claude subscription cannot run: the Claude Code CLI is not signed in on this worker\. Claude API models run on the saved key\./)).toBeTruthy();
 });
 
