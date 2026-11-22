@@ -56,6 +56,34 @@ describe('the page-side design preview script', () => {
 		expect(el('#one').hasAttribute('style')).toBe(false);
 	});
 
+	it('reads the style attribute before removing it, which Chromium needs', () => {
+		// Chromium writes the style attribute lazily. After a change through
+		// el.style, removeAttribute misses it until something has read it, and
+		// the next read then shows style="". jsdom is eager, so model the rule.
+		const target = el('#one');
+		let unread = false;
+		for (const name of ['setProperty', 'removeProperty'] as const) {
+			const real = target.style[name].bind(target.style) as (...args: string[]) => unknown;
+			target.style[name] = ((...args: string[]) => {
+				unread = true;
+				return real(...args);
+			}) as never;
+		}
+		const has = target.hasAttribute.bind(target);
+		target.hasAttribute = (name) => {
+			unread = false;
+			return has(name);
+		};
+		const remove = target.removeAttribute.bind(target);
+		target.removeAttribute = (name) => {
+			if (!unread) remove(name);
+		};
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		run({ op: 'reset', key: 'k1' });
+		expect(has('style')).toBe(false);
+	});
+
 	it('keeps a style attribute the page wrote itself, even an empty one', () => {
 		el('#two').setAttribute('style', '');
 		style('k1', '#two', { color: 'rgb(0, 0, 255)' });

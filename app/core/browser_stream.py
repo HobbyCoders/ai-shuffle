@@ -536,8 +536,12 @@ _DESIGN_JS_TEMPLATE = """
       if (value) el.style.setProperty(p, value, priority);
       else el.style.removeProperty(p);
     }
-    // An element that had no style attribute gets none left behind.
-    if (!saved.hadStyle && !el.style.length) el.removeAttribute('style');
+    // An element that had no style attribute gets none left behind. Chromium
+    // writes the attribute lazily, so it is read first: removing it before
+    // it exists does nothing, and the next read would bring back style="".
+    if (!saved.hadStyle && !el.style.length && el.hasAttribute('style')) {
+      el.removeAttribute('style');
+    }
     reg.base.delete(el);
   };
   const targetsOf = (owner, into) => {
