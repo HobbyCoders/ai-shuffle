@@ -834,7 +834,7 @@
 
 	/** A row's edges in the column, so its picker opens beside it, not at the top. */
 	function rowAnchor(id: string): SheetAnchor | null {
-		const row = listRef?.querySelector<HTMLElement>(`[data-session-card="${CSS.escape(id)}"]`);
+		const row = [...(listRef?.querySelectorAll<HTMLElement>('[data-session-card]') ?? [])].find((el) => el.dataset.sessionCard === id);
 		if (!row || !colRef) return null;
 		const col = colRef.getBoundingClientRect();
 		const r = row.getBoundingClientRect();
