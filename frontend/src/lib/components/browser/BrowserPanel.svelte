@@ -149,8 +149,13 @@
 		return detail.key ? change.detail.key === detail.key : change.element.selector === el.selector;
 	}
 
-	function sendDesign(payload: Record<string, unknown>) {
-		if (streamOpen && frameMatchesWorkspace) sendIdentified({ type: 'design', ...payload });
+	/** True while this panel may have left a preview on the page. */
+	let designOnPage = false;
+	function sendDesign(payload: Record<string, unknown>): boolean {
+		if (!streamOpen || !frameMatchesWorkspace) return false;
+		const sent = sendIdentified({ type: 'design', ...payload }) !== false;
+		if (sent && payload.op === 'style') designOnPage = true;
+		return sent;
 	}
 
 	/** Put a change's previewed styles on the page (an empty set puts it back). */
@@ -260,8 +265,8 @@
 		sendDesign({ op: 'peek', on: original });
 	}
 
-	function clearDesign(resetPage: boolean) {
-		if (resetPage && designHasPreviews) sendDesign({ op: 'reset' });
+	/** Empty the list. Its previews come off the page as soon as the page can be reached. */
+	function clearDesign() {
 		designChanges = [];
 		designDraft = null;
 		designRects = {};
@@ -296,7 +301,7 @@
 			if (operation !== scope) return;
 			if (!sent) throw new Error('Could not send your changes. They are still in the list; try again.');
 			// The page goes back to the real code so the agent's edit is what shows next.
-			clearDesign(true);
+			clearDesign();
 			designSent = list.length;
 		} catch (error) {
 			if (operation === scope) commandError = error instanceof Error ? error.message : 'Could not send your changes. Try again.';
@@ -458,6 +463,7 @@
 			onClose: (wasClean) => {
 				if (!active) return;
 				streamOpen = false;
+				designOnPage = false; // the worker put the page back when this viewer left
 				if (!wasClean) browserPanel.setStatus('disconnected', undefined, sid);
 			},
 		});
@@ -479,32 +485,24 @@
 			navigationPending = false;
 			c.destroy();
 			streamOpen = false;
+			designOnPage = false;
 			if (client === c) client = null;
 		};
 		});
 	});
 
-	// Cross-page navigation ends the list: the marked elements belong to the
-	// page they were picked on. A reload of the same address keeps it, and the
-	// previews are put back once the page has loaded again.
+	// Another address ends the list: the marked elements belong to the page
+	// they were picked on. The previews come off with it, because an app that
+	// changes route without loading a new page keeps the styled elements.
 	let designUrl: string | null = null;
-	let designWasLoading = false;
 	$effect(() => {
 		const u = url;
-		const busy = pageLoading;
 		untrack(() => {
-			if (designRows.length === 0) {
-				designUrl = u;
-			} else if (designUrl === null) {
-				designUrl = u;
-			} else if (u !== designUrl) {
-				designUrl = u;
+			if (designRows.length > 0 && designUrl !== null && u !== designUrl) {
 				hoverRect = null;
-				clearDesign(false);
-			} else if (designWasLoading && !busy) {
-				for (const change of designRows) if (Object.keys(change.tweaks).length > 0) previewChange(change);
+				clearDesign();
 			}
-			designWasLoading = busy;
+			designUrl = u;
 		});
 	});
 
@@ -697,7 +695,8 @@
 	function exitInspect() {
 		hoverRect = null;
 		settleDraft();
-		if (designOriginal) compareDesign(false);
+		// The list is kept for next time; its previews come off the page (below).
+		designOriginal = false;
 		browserPanel.setInspectMode(false, sessionId);
 		if (expandedForDesign) browserPanel.setExpanded(sessionId, false);
 		expandedForDesign = false;
@@ -966,6 +965,32 @@
 			!!workspace.active_tab_id &&
 			status === 'live',
 	);
+
+	// Previews are on the page only while Design mode is open with something to
+	// show. Each time the page can be reached again (the mode opens, the panel
+	// reconnects, the page reloads) the queued values go back on; once nothing
+	// should show (the mode closed, the list was sent or emptied) they come off,
+	// as soon as the page can be reached. A panel that closes or loses its
+	// connection cannot ask, so the worker puts the page back for it.
+	const designReachable = $derived(isLive && frameMatchesWorkspace && !pageLoading);
+	const designWanted = $derived(inspectMode && designHasPreviews);
+	let designShown = false;
+	$effect(() => {
+		const reachable = designReachable;
+		const wanted = designWanted;
+		untrack(() => {
+			if (!reachable) {
+				designShown = false;
+			} else if (wanted && !designShown) {
+				designShown = true;
+				designOriginal = false;
+				for (const change of designRows) if (Object.keys(change.tweaks).length > 0) previewChange(change);
+			} else if (!wanted) {
+				designShown = false;
+				if (designOnPage && sendDesign({ op: 'reset' })) designOnPage = false;
+			}
+		});
+	});
 	const keyboardEnabled = $derived(isLive && canInteract && !!latestFrame && latestFrame.metadata.runtime_id === workspace?.runtime_id && latestFrame.metadata.tab_id === workspace?.active_tab_id);
 	/** A frame is on the canvas — keep showing it, whatever the socket is doing. */
 	const hasFrame = $derived(latestFrame !== null);

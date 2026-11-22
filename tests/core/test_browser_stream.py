@@ -484,9 +484,90 @@ class TestDesign:
                 "styles": {"padding": "12px"},
             }
         )
-        expr = browser_stream.build_design_expression(args)
-        assert "__ARGS__" not in expr
-        assert json.dumps(args) in expr
+        expr = browser_stream.build_design_expression(args, "viewer-a")
+        assert "__ARGS__" not in expr and "__REGISTRY__" not in expr
+        assert json.dumps({**args, "owner": "viewer-a"}) in expr
+
+    def test_owner_is_chosen_by_the_server_not_the_client(self):
+        args = browser_stream.parse_design({"op": "reset", "owner": "someone-else"})
+        assert "owner" not in args
+
+    @staticmethod
+    def _design_calls(fake):
+        """(op, owner) of every design script sent to the page, in order."""
+        calls = []
+        for message in fake.sent:
+            expression = message.get("params", {}).get("expression", "")
+            marker = "const a = "
+            if message["method"] != "Runtime.evaluate" or marker not in expression:
+                continue
+            start = expression.index(marker) + len(marker)
+            args = json.loads(expression[start : expression.index(";\n", start)])
+            if "op" in args:
+                calls.append((args["op"], args["owner"]))
+        return calls
+
+    async def test_a_page_is_cleared_of_stale_previews_before_anything_else(
+        self, monkeypatch
+    ):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        try:
+            assert fake.methods()[:2] == ["Runtime.evaluate", "Page.enable"]
+            assert self._design_calls(fake) == [("reset", None)]
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_previews_leave_the_page_with_the_viewer_that_made_them(
+        self, monkeypatch
+    ):
+        hub, first, fake = await _hub_with_fake_upstream(monkeypatch)
+        second = await hub.add_viewer(FakeViewerWS())
+        style = browser_stream.parse_design(
+            {
+                "op": "style",
+                "key": "k1",
+                "selector": "h1",
+                "scope": "one",
+                "styles": {"color": "#000000"},
+            }
+        )
+        try:
+            await hub.dispatch_design(first, style)
+            await hub.dispatch_design(second, {"op": "rects", "items": []})
+            # A viewer that only looked leaves nothing to put back.
+            await hub.remove_viewer(second)
+            assert self._design_calls(fake)[1:] == [
+                ("style", first.design_owner),
+                ("rects", second.design_owner),
+            ]
+            # Closing the panel restores the page: only this viewer's changes.
+            await browser_stream.detach_viewer("hub-cmd", first)
+            assert self._design_calls(fake)[-1] == ("reset", first.design_owner)
+            assert first.design_owner != second.design_owner
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", first)
+
+    async def test_switching_page_puts_the_old_page_back(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        try:
+            await hub.dispatch_design(
+                viewer,
+                browser_stream.parse_design(
+                    {
+                        "op": "style",
+                        "key": "k1",
+                        "selector": "h1",
+                        "scope": "one",
+                        "styles": {"padding": "12px"},
+                    }
+                ),
+            )
+            fake.feed_close()
+            await _wait_for(lambda: fake.closed)
+            assert self._design_calls(fake)[-1] == ("reset", None)
+            assert viewer.design_active is False
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", viewer)
 
 
 # ===========================================================================
@@ -543,7 +624,7 @@ class TestInspect:
         )
         await hub.dispatch_inspect(viewer, inspect)
 
-        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        ev = [m for m in fake.sent if m["method"] == "Runtime.evaluate"][-1]
         assert ev["params"]["returnByValue"] is True
         assert "document.elementFromPoint(10.0, 20.0)" in ev["params"]["expression"]
 
@@ -570,7 +651,7 @@ class TestInspect:
             {"type": "inspect", "x": 1, "y": 1, "mode": "hover"}
         )
         await hub.dispatch_inspect(viewer, inspect)
-        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        ev = [m for m in fake.sent if m["method"] == "Runtime.evaluate"][-1]
         fake._incoming.put_nowait(
             json.dumps(
                 {

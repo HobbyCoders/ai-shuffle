@@ -444,9 +444,22 @@ async def serve_browser_panel(
                                 "Stale inspection target"
                             )
                         if mtype == "design":
-                            await hub.dispatch_design(
-                                viewer, browser_stream.parse_design(data)
-                            )
+                            design = browser_stream.parse_design(data)
+                            # A preview restyles the shared page. Whoever has
+                            # taken control is clicking on it, so another
+                            # viewer may look and put its own previews back,
+                            # but not move things under their pointer.
+                            control = broker.state["control"]
+                            if (
+                                design["op"] in ("style", "peek")
+                                and control.get("owner") == "human"
+                                and control.get("viewer_id") != viewer_id
+                            ):
+                                raise browser_control.ControlError(
+                                    "Another device is controlling this browser. "
+                                    "Previews wait until it returns control."
+                                )
+                            await hub.dispatch_design(viewer, design)
                         else:
                             inspect = browser_stream.parse_inspect(data)
                             await hub.dispatch_inspect(viewer, inspect)

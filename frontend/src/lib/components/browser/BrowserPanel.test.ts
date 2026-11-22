@@ -48,9 +48,11 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('design changes delivery', () => {
  const note = 'Make this button blue';
+ /** The preview key the page hands out for each marked element. */
+ const KEYS: Record<string, string> = { cta: 'k1', other: 'k2', late: 'k3', row: 'k4' };
  const hit = (id: string) => ({
   selector: `#${id}`, tag: 'button', id, classes: [], rect: { x: 0, y: 0, width: 80, height: 30 },
-  key: `k${id}`, label: 'Save', styles: {}, similar: 1, tokens: [],
+  key: KEYS[id], label: 'Save', styles: {}, similar: 1, tokens: [],
  });
  /** Mark an element on the page the way the stream reports a click in Design mode. */
  async function mark(id: string) {
@@ -162,6 +164,71 @@ describe('design changes delivery', () => {
   await tick();
   expect(sentStatus(view)).toBeNull();
   expect(view.queryByText(note)).toBeNull();
+ });
+
+ /** The design requests the panel made to the page, pin tracking aside. */
+ const pageRequests = () => mocks.send.mock.calls
+  .map(([payload]) => payload as Record<string, unknown>)
+  .filter((payload) => payload.type === 'design' && payload.op !== 'rects');
+ type View = Awaited<ReturnType<typeof setupDesign>>;
+ /** Open the style controls of the change being edited, if they are closed. */
+ async function openControls(view: View) {
+  const toggle = view.getByRole('button', { name: 'Try it on the page' });
+  if (toggle.getAttribute('aria-expanded') !== 'true') await fireEvent.click(toggle);
+ }
+ async function previewCorners(view: View) {
+  await openControls(view);
+  await fireEvent.input(view.getByLabelText('Corners'), { target: { value: '12' } });
+  await waitFor(() => expect(pageRequests().at(-1)).toMatchObject({
+   op: 'style', key: 'k1', selector: '#cta', scope: 'one', styles: { 'border-radius': '12px' },
+  }));
+ }
+ it('puts the queued previews back on the page after the panel reconnects', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  // The worker took this viewer's previews off when its connection dropped.
+  mocks.config!.onClose?.(false);
+  await tick();
+  mocks.send.mockClear();
+  mocks.config!.onOpen?.();
+  await tick();
+  expect(pageRequests()).toEqual([expect.objectContaining({
+   op: 'style', key: 'k1', styles: { 'border-radius': '12px' },
+  })]);
+ });
+ it('takes the previews off the page once the list is sent', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  mocks.send.mockClear();
+  await fireEvent.click(view.send());
+  await waitFor(() => expect(sentStatus(view)?.textContent).toContain('Sent 1 change'));
+  expect(pageRequests()).toEqual([expect.objectContaining({ op: 'reset' })]);
+  expect(pageRequests()[0].key).toBeUndefined();
+ });
+ it('waits to take sent previews off until the page can be reached again', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  // The page is showing another size than the panel knows: requests would be refused.
+  mocks.config!.onWorkspace?.({ ...state('human'), viewport: { mode: 'fixed', width: 900, height: 700 } });
+  await tick();
+  mocks.send.mockClear();
+  await fireEvent.click(view.send());
+  await waitFor(() => expect(sentStatus(view)?.textContent).toContain('Sent 1 change'));
+  expect(pageRequests()).toEqual([]);
+  mocks.config!.onFrame('AA==', { deviceWidth: 900, deviceHeight: 700, runtime_id: 'runtime', tab_id: 'tab' });
+  await tick();
+  expect(pageRequests()).toEqual([expect.objectContaining({ op: 'reset' })]);
+ });
+ it('offers space between children only on an element that lays children out', async () => {
+  const view = await setupDesign();
+  await openControls(view);
+  expect(view.getByLabelText('Corners')).toBeTruthy();
+  expect(view.queryByLabelText('Space between')).toBeNull();
+  mocks.config!.onInspectHit?.('select', { ...hit('row'), styles: { display: 'flex', gap: '8px' } });
+  await tick();
+  await openControls(view);
+  await fireEvent.input(view.getByLabelText('Space between'), { target: { value: '24' } });
+  await waitFor(() => expect(pageRequests().at(-1)).toMatchObject({ op: 'style', key: 'k4', styles: { gap: '24px' } }));
  });
 });
 

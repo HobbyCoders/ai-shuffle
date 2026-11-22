@@ -22,6 +22,7 @@
 		propLabel,
 		safeValue,
 		sourceLabel,
+		spacesChildren,
 		toHex,
 		toHsl,
 		type DesignChange,
@@ -111,8 +112,13 @@
 	const BOX_SLIDERS: Slider[] = [
 		{ prop: 'padding', min: 0, max: 64 },
 		{ prop: 'border-radius', min: 0, max: 48 },
+		{ prop: 'gap', min: 0, max: 64 },
 		{ prop: 'margin-bottom', min: 0, max: 96 },
 	];
+	/** Space between children only means something on a row, column or grid. */
+	function boxSliders(change: DesignChange): Slider[] {
+		return BOX_SLIDERS.filter((s) => s.prop !== 'gap' || spacesChildren(change.detail));
+	}
 
 	function title(change: DesignChange): string {
 		const words = elementWords(change.element, change.detail);
@@ -480,7 +486,7 @@
 										{/if}
 										<div class="group">
 											{@render colourRow(change, 'background-color')}
-											{#each BOX_SLIDERS as slider (slider.prop)}
+											{#each boxSliders(change) as slider (slider.prop)}
 												{@render sliderRow(change, slider)}
 											{/each}
 										</div>

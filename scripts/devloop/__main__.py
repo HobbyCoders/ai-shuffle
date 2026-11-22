@@ -499,9 +499,11 @@ def application_environment(args: argparse.Namespace, directory: Path, port: int
 def browser_environment(port: int) -> dict:
     """Opt the copy into the Browser panel against a separately launched Chromium.
 
-    The copy never starts or shares the worker's own browser: the caller runs a
-    throwaway Chromium (docker/start-chrome.sh, its own HOME and port) and names
-    its loopback DevTools port here.
+    The copy never starts a browser: the caller runs a throwaway Chromium
+    (docker/start-chrome.sh, its own HOME and port) and names its loopback
+    DevTools port here. The worker's known port is refused; a port number
+    cannot prove whose browser it is, so naming a throwaway one is the caller's
+    job (docs/internal/dev-loop.md).
     """
     own = int(os.environ.get("CHROME_CDP_PORT") or 9221)
     if port == own or not 1024 <= port <= 65535:
@@ -892,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
                        help="Opt into dark transcript production in this disposable instance only")
     start.add_argument("--browser-cdp-port", type=int,
                        help="Turn the Browser panel on against a throwaway Chromium you started "
-                            "on this loopback DevTools port (never the worker's own browser)")
+                            "on this loopback DevTools port. Never name a browser a real chat uses")
     start.add_argument("--seed", default="default", help="Seed name: default, long (performance), or none")
     start.add_argument("--latency-ms", type=float, default=0.0,
                        help="Fake AI delay before each reply")
