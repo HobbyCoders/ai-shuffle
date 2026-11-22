@@ -66,6 +66,15 @@ describe('swarm live store', () => {
   const { swarms } = await import('./swarms');
   await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow('Cancellation was not confirmed');
  });
+ it('rejects a matching object that is not a receipt', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+   .mockResolvedValueOnce(new Response(JSON.stringify({ swarm: { id: snapshot.id, session_id: snapshot.session_id } }), { status: 200 }))
+   .mockResolvedValueOnce(new Response(JSON.stringify(
+    { swarm: { id: snapshot.id, session_id: snapshot.session_id, status: 'cancelled', tasks: 'bad' } }), { status: 200 })));
+  const { swarms } = await import('./swarms');
+  await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow('Cancellation was not confirmed');
+  await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow('Cancellation was not confirmed');
+ });
  it("says why a cancel was refused when the chat's worker explains", async () => {
   const detail = 'ServerWorker needs an update to cancel a swarm from here. Update it, or use Stop to stop everything in this chat.';
   vi.stubGlobal('fetch', vi.fn()

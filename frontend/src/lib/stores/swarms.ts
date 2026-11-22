@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { apiUrl, withAuth } from '$lib/api/runtime';
-import { parseSwarm, newestSwarm, type SwarmSnapshot } from '$lib/utils/swarm';
+import { parseSwarm, newestSwarm, isSwarmStatus, type SwarmSnapshot } from '$lib/utils/swarm';
 import { recheckAuthOn401 } from '$lib/api/client';
 
 interface SwarmState { bySession: Record<string, Record<string, SwarmSnapshot>>; errors: Record<string, string>; }
@@ -57,8 +57,10 @@ export const swarms = {
   // A receipt without tasks (from a worker whose copy has not synced yet):
   // the cancel landed, and the full workflow arrives with the next refresh.
   const receipt = body && typeof body === 'object' && 'swarm' in body ? (body as { swarm: unknown }).swarm : null;
-  if (receipt && typeof receipt === 'object' && (receipt as { id?: unknown }).id === swarmId &&
-   (receipt as { session_id?: unknown }).session_id === sessionId) { void hydrate(sessionId); return; }
+  if (receipt && typeof receipt === 'object' && !('tasks' in receipt)) {
+   const r = receipt as { id?: unknown; session_id?: unknown; status?: unknown };
+   if (r.id === swarmId && r.session_id === sessionId && isSwarmStatus(r.status)) { void hydrate(sessionId); return; }
+  }
   throw new Error('Cancellation was not confirmed. Refresh the workflow and try again.');
  },
  /** Reconnect refresh is scoped to sessions with workflows, not every chat. */

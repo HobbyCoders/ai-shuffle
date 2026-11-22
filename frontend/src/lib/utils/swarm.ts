@@ -7,6 +7,7 @@ export type SwarmStatus = WireSwarmSnapshot['status'];
 export type SwarmTask = Known<WireSwarmTask> & { depends_on: string[] };
 export type SwarmSnapshot = Omit<Known<WireSwarmSnapshot>, 'tasks'> & { tasks: SwarmTask[] };
 const statuses = new Set(['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted']);
+export const isSwarmStatus = (v: unknown): v is SwarmStatus => typeof v === 'string' && statuses.has(v);
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 export function isSwarmTool(name: string): boolean {
  return name.split('__').at(-1)?.toLowerCase() === 'swarm';
