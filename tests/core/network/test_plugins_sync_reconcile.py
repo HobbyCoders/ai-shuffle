@@ -390,6 +390,35 @@ def test_a_received_toggle_cut_off_by_a_restart_is_applied_after_it(workers, mon
         assert desired_enabled(b, kept) is False
 
 
+def test_a_received_toggle_that_failed_is_retried_on_a_later_scan(workers, monkeypatch):
+    # A connector still in use refuses to switch off; once it is free a later
+    # scan applies the change instead of publishing the old state back.
+    kept = "kept@community"
+    a_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
+    b_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])
+    _, b, _ = network(workers, monkeypatch, a_service, b_service)
+    with b.active():
+        plugins_sync.refresh_desired_from_installed()
+        b.sql("UPDATE network_plugins_desired SET enabled = ? WHERE id = ?", (False, kept))  # from A
+        real_disable = b_service.disable_plugin
+
+        def in_use(plugin_id):
+            raise ValueError("Connector plugin is in use")
+
+        monkeypatch.setattr(b_service, "disable_plugin", in_use)
+        plugins_sync.apply_desired([kept])
+        assert b_service.enabled[kept] is True
+        monkeypatch.setattr(b_service, "disable_plugin", real_disable)
+        plugins_sync.publish()  # backed off: not tried yet, and the row keeps A's change
+        assert b_service.enabled[kept] is True
+        assert desired_enabled(b, kept) is False
+        plugins_sync._retry[kept] = (1, 0.0)  # the backoff has passed
+        plugins_sync.publish()
+        assert b_service.enabled[kept] is False
+        assert desired_enabled(b, kept) is False
+        assert kept not in plugins_sync._retry  # a success clears the backoff
+
+
 def test_the_owners_toggle_here_outranks_a_queued_received_one(workers, monkeypatch, busy_plugin_thread):
     kept = "kept@community"
     a_service = Service([FakePlugin(kept, "1")], [mp("community", URL)])

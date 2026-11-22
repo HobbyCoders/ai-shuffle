@@ -271,12 +271,20 @@ def refresh_desired_from_installed() -> int:
                 (plugin_id, info["version"], info["enabled"], json.dumps(config)))
             _set_synced(cursor, plugin_id, info["enabled"])
             changed += 1
-    if service is not None and not _resumed:
-        # The first scan of a process: a restart may have cut these off.
+    if service is not None and waiting:
+        if not _resumed:
+            # The first scan of a process: a restart may have cut these off.
+            due = waiting
+            logger.info("Applying %d plugin change(s) still waiting from before the restart", len(due))
+        else:
+            # A received change whose apply failed (a connector still in use
+            # refuses to switch off) is retried on the install backoff. A newly
+            # received one is left to the job the receive path queued.
+            due = [plugin_id for plugin_id in waiting if _failed_and_due(plugin_id)]
+        if due:
+            apply_desired(due)
+    if service is not None:
         _resumed = True
-        if waiting:
-            logger.info("Applying %d plugin change(s) still waiting from before the restart", len(waiting))
-            apply_desired(waiting)
     return changed
 
 
@@ -370,6 +378,7 @@ def _apply_one(service, plugin_id, row, installed, present, to_install, synced) 
         if row is None:
             if plugin_id in installed:
                 service.uninstall_plugin(plugin_id)
+                _clear_retry(plugin_id)
                 return 1
             return 0
         if plugin_id not in present:
@@ -381,18 +390,26 @@ def _apply_one(service, plugin_id, row, installed, present, to_install, synced) 
         enabled = bool(row.get("enabled"))
         if (service.enable_plugin if enabled else service.disable_plugin)(plugin_id) is not False:
             _note_synced(plugin_id, enabled)
+            _clear_retry(plugin_id)
+        else:
+            _note_failure(plugin_id)  # a later scan tries again
     except Exception:  # noqa: BLE001 — a failed change shows in the plugin UI; sync goes on
+        _note_failure(plugin_id)
         logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
     return 0
+
+
+def _clear_retry(plugin_id: str) -> None:
+    with _retry_lock:
+        _retry.pop(plugin_id, None)
 
 
 def _request_installs(plugin_ids) -> int:
     """Install received plugins on the plugin I/O thread, tried at once."""
     if not plugin_ids:
         return 0
-    with _retry_lock:
-        for plugin_id in plugin_ids:
-            _retry.pop(plugin_id, None)
+    for plugin_id in plugin_ids:
+        _clear_retry(plugin_id)
     if schedule_reconcile():
         return len(plugin_ids)
     return reconcile_missing(only=plugin_ids)  # no app loop (tests, scripts): here
@@ -459,6 +476,12 @@ def _due(plugin_id: str) -> bool:
     with _retry_lock:
         entry = _retry.get(plugin_id)
     return entry is None or time.monotonic() >= entry[1]
+
+
+def _failed_and_due(plugin_id: str) -> bool:
+    with _retry_lock:
+        entry = _retry.get(plugin_id)
+    return entry is not None and time.monotonic() >= entry[1]
 
 
 def _current_row(plugin_id: str) -> Optional[dict]:

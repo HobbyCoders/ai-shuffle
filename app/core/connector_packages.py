@@ -142,7 +142,9 @@ def _bundled_source(filename: str) -> bytes:
     return _read_package_file(_SOURCE_DIR / filename)
 
 
-def install(kind: str, scope: str = "user") -> PluginInfo:
+def install(kind: str, scope: str = "user", enabled: bool = True) -> PluginInfo:
+    """Install or update a connector runtime. ``enabled`` applies to a first
+    install only; an update keeps the state the owner left it in."""
     if kind not in CATALOG["packages"] or scope != "user":
         raise ValueError("Connector plugins are installed for this host in user scope")
     _require_offered(kind)
@@ -188,7 +190,7 @@ def install(kind: str, scope: str = "user") -> PluginInfo:
                         if old and old.get("release") != CATALOG["release"] else (old or {}).get("previous"))
             _publish(kind, {"revision": CATALOG["revision"], "release": CATALOG["release"], "sdk": 1,
                             "spec": CATALOG["packages"][kind], "previous": previous,
-                            "enabled": old.get("enabled", True) if old else True,
+                            "enabled": old.get("enabled", True) if old else bool(enabled),
                             "installed_at": (old or {}).get("installed_at", datetime.now(timezone.utc).isoformat())})
     return info(kind)
 
