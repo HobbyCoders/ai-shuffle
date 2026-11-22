@@ -19,7 +19,8 @@ import {
 	Server,
 	ScrollText,
 	Gauge,
-	Brain
+	Brain,
+	GraduationCap
 } from 'lucide-svelte';
 import { PAGE_TYPES, type CategoryGroup, type CategoryId, type PageType } from './types';
 
@@ -49,6 +50,7 @@ const ROWS: CategoryRow[] = [
 	{ id: 'tuning', label: 'Model tuning', icon: SlidersVertical, group: 'ai' },
 	{ id: 'usage', label: 'Usage', icon: Gauge, group: 'ai' },
 	{ id: 'memory', label: 'Memory', icon: Brain, group: 'ai' },
+	{ id: 'learning', label: 'Learned behaviour', icon: GraduationCap, group: 'ai' },
 	{ id: 'integrations', label: 'Integrations', icon: Plug, group: 'ai' },
 	{ id: 'plugins', label: 'Plugins', icon: Puzzle, group: 'ai' },
 	{ id: 'mcp', label: 'MCP servers', icon: Cable, group: 'ai' },

@@ -313,33 +313,6 @@ async def test_opencode_learner_keeps_bound_or_scope_identity_across_passes(tmp_
     assert all("prompt_cache_key" not in json.loads(r.content) for r in seen)
 
 
-async def test_opencode_harvest_uses_stable_project_scope(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-    from fluid.cli.evolve import draft_anchors
-    from fluid.config import loader
-    from fluid.store.base import project_root_for
-
-    config = SimpleNamespace(cwd=tmp_path, default_provider="p", continual_model=None, model_for=lambda _: "test")
-    project = project_root_for(tmp_path)
-    store = SimpleNamespace(
-        recent_sessions=AsyncMock(return_value=[SimpleNamespace(project_root=project, session_id="s")]),
-        session_slice=AsyncMock(return_value=SimpleNamespace(messages=[SimpleNamespace(
-            role="user", tools=[], text="completed migration")]))
-    )
-    seen = []
-    def respond(request):
-        seen.append(request.headers["x-opencode-session"])
-        return httpx.Response(200, text=stream(), headers={"content-type": "text/event-stream"})
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-        client = AnthropicClient(api_key="fake", compatible_provider="opencode", user_agent="ai-shuffle/test", http_client=http)
-        monkeypatch.setattr(loader, "_build_provider_client", lambda *_: client)
-        for _ in range(2):
-            await draft_anchors(config, store)
-    assert len(seen) == 2 and seen[0] == seen[1]
-    assert seen[0].startswith("harvest:") and project not in seen[0]
-
-
 async def test_text_tools_wrapper_preserves_opencode_conversation_identity():
     from fluid.providers.base import WireState
     from fluid.providers.local.text_tools import TextToolsAdapter

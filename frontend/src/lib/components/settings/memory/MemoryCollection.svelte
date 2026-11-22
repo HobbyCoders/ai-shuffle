@@ -14,7 +14,6 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import SelectField from '../rows/SelectField.svelte';
 	import MemoryDetail from './MemoryDetail.svelte';
-	import LearnedGuidance from './LearnedGuidance.svelte';
 	import {
 		FILTER_OPTIONS,
 		acquireMemoryModel,
@@ -26,7 +25,6 @@
 	import '../pages/editors/editors.css';
 
 	const CATEGORY = 'memory' as const;
-	const GUIDANCE = 'learned-guidance';
 	const model = acquireMemoryModel();
 
 	onMount(() => void model.load());
@@ -82,7 +80,6 @@
 	{/snippet}
 	{#snippet list()}
 		<div class="mem-list" data-setting-anchor="memory.list">
-			<ListItem id={GUIDANCE} name="Learned guidance" category={CATEGORY} summary="Saved model instructions on this worker" />
 			{#if model.loadError}
 				<InlineBanner tone="warn">
 					<span role="alert">{model.loadError}</span>
@@ -127,9 +124,7 @@
 		</div>
 	{/snippet}
 	{#snippet detail()}
-		{#if selected === GUIDANCE}
-			<LearnedGuidance />
-		{:else if selected && known}
+		{#if selected && known}
 			{#key selected}
 				<MemoryDetail {model} id={selected} />
 			{/key}

@@ -5,9 +5,14 @@ import json
 import os
 import sys
 
-from fluid.codemode.skills import SkillStore
+from pathlib import Path
+
+from fluid.codemode.skills import DEFAULT_SKILLS_ROOT, SkillStore
 from fluid.codemode.workflows import WorkflowProposals
-from fluid.cli.evolve import skills_root
+
+
+def skills_root(config) -> Path:
+    return Path(config.skills_dir or DEFAULT_SKILLS_ROOT)
 
 
 def cmd_workflows(args, config):

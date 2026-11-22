@@ -34,6 +34,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
+from fluid.codemode.behavior import is_rule_key
 from fluid.codemode.facts import MAX_INFERENCE_CALLS_PER_DAY
 from fluid.codemode.skills import (
     JOURNAL_MAX_BYTES,
@@ -102,11 +103,23 @@ split independent facts, and omit transient detail rather than exceeding the
 limit. A user's task-specific choice is not automatically a general habit;
 retain its scope and exceptions. Facts do not grant permission for actions.
 
-A [user] entry correcting HOW the agent works (model per job, delegation,
-reviews, CI, deploys, process) is a standing-preference proposal, not a
-memory: the whole current rule in the user's words, under a short snake_case
-topic name (subagent_models, deploy). The owner confirms it. Skip a rule an
-explicit memory already states, and an exception for one task or PR.
+Behaviour rules — a memory says what is TRUE; a behaviour rule changes HOW
+the agent works. Write one when a [user] entry corrects the agent's way of
+working (it ignored an instruction, asked when it should have acted, did
+something the user had to undo, kept repeating a mistake) or the user is
+plainly frustrated with it (a [user] entry marked "frustrated" is the harness
+flagging swearing or angry words: read the [assistant] turn before it to find
+what went wrong). A rule is one line, "When <situation>: <what to do>", in
+the imperative, at most 300 characters, general enough to apply next time
+but keeping the user's scope and exceptions. It must carry quote="..." copied
+word for word from that [user] entry (the words that show the correction);
+a rule without a real quote is refused. applies_to is "all" unless the
+failure is specific to the session's model family (listed below): then that
+family. Prefer rewriting a listed rule (its id) over adding a near-duplicate;
+delete one the user contradicted. A rule never grants permission (no "without
+asking", "skip review"). Do not write a rule for a one-task exception, an
+environment failure, or something an explicit memory or rule already says.
+Most journals need no rule; a frustrated correction almost always needs one.
 
 A journal entry marked [friction] is the HARNESS's own mechanical record of a
 call that wasted work — a path that did not exist, one tool failing over and
@@ -115,37 +128,9 @@ nothing re-run with near-identical arguments. It carries facts, never the
 agent's interpretation, and deciding what (if anything) it means is your job.
 Friction that repeats usually points at a durable fact about this environment
 worth a memory (where an output actually arrives, what a path is really
-called); friction that is the model mis-driving the harness the same way twice
-belongs in a model-guidance proposal. A single one-off is noise — say nothing,
-and never turn friction into a negative claim about a tool.
-
-Channel rule: a recurring mechanical failure of the MODEL itself (the kinds
-listed under model guidance below) is not fixed by a memory (a memory tells the next session
-what is true; it cannot change how the model behaves). That evidence belongs
-in a model-guidance proposal (below), optionally alongside a memory about the
-user's preference.
-
-Model guidance proposals — the harness keeps a per-model-family guidance file
-(shown to you when one exists) that steers HOW a given model family behaves in
-the harness. When the journal shows a RECURRING mechanical failure specific to
-this model — describing an intended action instead of calling the tool,
-repeatedly malformed calls of the same shape, drifting from a stated output
-convention, stopping after a stub — you may propose an edit. This is rare:
-most journals need none, and a one-off mistake never qualifies. But when the
-user rejects the SAME mechanical behavior more than once in a journal, that
-is exactly the recurring evidence this channel exists for — propose the edit
-rather than only noting the preference as a memory. Proposals are
-NOT applied; they are queued and committed only if they survive a replay gate
-against regression anchors, so every proposal must carry a motivation: a
-natural task prompt that reproduces the failure (never naming a tool) and
-checks that detect the fixed behavior. The motivation replays in a fresh,
-EMPTY workspace — include a "setup" object of seed files whenever the task
-needs content to act on. Write checks that detect the fix robustly: assert
-the flow fired ({"kind": "tool_called", ...}) or forbid the failure's own
-phrasing ({"kind": "not_contains", ...}); never guess at reply vocabulary —
-a wording-specific "contains" fails even when the behavior is fixed. Propose
-the FULL replacement file (short imperative lines), with stem = a lowercase
-substring of the session model id.
+called). Friction alone never makes a behaviour rule (rules need the user's
+words). A single one-off is noise — say nothing, and never turn friction into
+a negative claim about a tool.
 
 Do NOT capture (these become persistent self-imposed constraints that bite
 later, when the environment has changed):
@@ -181,16 +166,11 @@ Output format — nothing else:
 - newer listed fact replaces older non-explicit (same subject, not temporary): <supersede-memory old="m3" new="m4"/>
 - a memory listed as "explicit" was saved on the user's request: never
   rewrite or delete it, and do not add a new memory that repeats it
-- standing preference: <preference topic="subagent_models">rule</preference>
-- to propose a model-guidance edit (queued for the replay gate, not applied):
-  <guidance stem="glm">
-  {"content": "full replacement guidance file",
-   "why": "one line of journal evidence",
-   "motivation": {"prompt": "task that reproduced the failure",
-                  "setup": {"relative/path.py": "seed file content the task needs"},
-                  "checks": [{"kind": "tool_called", "name": "ToolTheFlowUses"},
-                             {"kind": "not_contains", "pattern": "regex of the failure's phrasing"}]}}
-  </guidance>
+- new behaviour rule:
+  <rule applies_to="all" quote="exact words from the [user] entry">When X: do Y.</rule>
+- to rewrite a listed rule: <rule id="m7" applies_to="gpt" quote="...">When X: do Y.</rule>
+- to remove a rule: <delete-memory id="m7"/>
+- a rule listed as "user-kept" was edited by the owner: never rewrite or delete it
 - if nothing is worth keeping: NO_CHANGES
 """
 
@@ -246,12 +226,9 @@ _ATTR_RE = re.compile(r'([a-z_]+)="([^"]*)"')
 _MEMORY_ID_RE = re.compile(r"[A-Za-z0-9_:.\-]{1,160}")
 _DELETE_MEMORY_RE = re.compile(r'<delete-memory id="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
 _SUPERSEDE_RE = re.compile(r'<supersede-memory old="([A-Za-z0-9_:.\-]{1,160})" new="([A-Za-z0-9_:.\-]{1,160})"\s*/>')
-_GUIDANCE_RE = re.compile(
-    r'<guidance stem="([^"]{1,64})">\n?(.*?)</guidance>', re.DOTALL
-)
-_PREFERENCE_RE = re.compile(
-    r'<preference((?:\s+[a-z_]+="[^"]*")*)\s*>\n?(.*?)</preference>', re.DOTALL
-)
+_RULE_RE = re.compile(r'<rule((?:\s+[a-z_]+="[^"]*")*)\s*>\n?(.*?)</rule>', re.DOTALL)
+# New or rewritten behaviour rules one pass may apply.
+MAX_RULES_PER_PASS = 3
 
 _WORD_RE = re.compile(r"[a-z0-9]{4,}")
 # Journal kinds whose text a user wrote (or asked to have remembered).
@@ -401,6 +378,9 @@ MAX_ENTRIES_PER_PASS = 400
 # which is what lets a day's paced passes read a busy day's journal.
 PROMPT_CHAR_LIMIT = 32_000
 LARGE_PROMPT_CHAR_LIMIT = 96_000
+# The most a pass billed per token reads (about 8k input tokens), whatever
+# the model's window: cost per pass stays flat as chats grow.
+METERED_PROMPT_CHAR_LIMIT = PROMPT_CHAR_LIMIT
 PROMPT_CHARS_PER_TOKEN = 2
 SYSTEM_PROMPT_TOKENS = 4_000
 MEMORY_PROMPT_CHARS = 6_000
@@ -680,7 +660,7 @@ class Synthesizer:
         close_timeout: float = 90.0,
         session_model: str | None = None,
         session_id: str | None = None,
-        guidance_snapshot: dict[str, str] | None = None,
+        enabled: bool | Callable[[], Any] = True,
         context_window: int | None = None,
         workflow_cwd: str | None = None,
         daily_calls: int | Callable[[], Any] | None = None,
@@ -708,14 +688,14 @@ class Synthesizer:
             # scope is stable across passes/restarts, without exposing paths.
             scope = [str(store.root.resolve()), store._facts.owner, project]
             self._session_id = "learner:" + hashlib.sha256(json.dumps(scope).encode()).hexdigest()
-        # The SESSION's model id (may differ from the synthesis
-        # model above) — a guidance proposal's stem must be a substring of it
-        # to ever load — and the current guidance file(s) matching it, shown
-        # in the prompt so proposals amend rather than overwrite blindly.
-        # ``None`` disables guidance proposals entirely (embedding hosts that
-        # don't wire it keep today's behavior).
+        # The SESSION's model id (may differ from the synthesis model
+        # above): the prompt names its rule family so a behaviour rule about
+        # this model's own habits can target it (fluid.codemode.behavior).
         self._session_model = session_model
-        self._guidance_snapshot = dict(guidance_snapshot or {})
+        # ``enabled`` (a bool or a callable read before every pass) is the
+        # owner's on/off switch: off means no model call at all, explicit
+        # Remember saves keep working.
+        self._enabled = enabled
         self._on_change = on_change
         self._min_new = max(1, min_new_entries)
         self._max_entries = max_entries
@@ -822,7 +802,35 @@ class Synthesizer:
         except Exception:  # noqa: BLE001 — unknown: the next pass clears it
             pass
 
+    def note_frustration(self) -> bool:
+        """A user message read as frustrated (behavior.frustration_signal)
+        was journaled: ask for a prompt pass, at most once per
+        FRUSTRATION_COOLDOWN. True when urgency was raised. Pacing is
+        skipped; the daily call budget still holds."""
+        from fluid.codemode.behavior import FRUSTRATION_COOLDOWN
+
+        now = time.time()
+        if now - getattr(self, "_frustration_at", float("-inf")) < FRUSTRATION_COOLDOWN:
+            return False
+        self._frustration_at = now
+        self.mark_urgent()
+        return True
+
+    def enabled(self, *, refresh: bool = False) -> bool:
+        """The owner's learner switch (``enabled``); a callable that raises
+        reads as on, so a broken setting read cannot silently stop memory.
+        Read afresh before every pass (``refresh``) and otherwise with the
+        budget (at most every BUDGET_REFRESH_SECONDS), so ``due()`` (run per
+        journaled cell) does not read the setting each time."""
+        if refresh:
+            self._enabled_value = self._resolve(self._enabled) is not False
+        else:
+            self._budget()
+        return getattr(self, "_enabled_value", True)
+
     def due(self, *, closing: bool = False) -> bool:
+        if not self.enabled():
+            return False
         if self._budget_spent_day is not None:
             if (int(time.time() // 86400) == self._budget_spent_day
                     and not self._budget_raised()):
@@ -886,23 +894,32 @@ class Synthesizer:
                 or now - self._budget_at >= BUDGET_REFRESH_SECONDS):
             setting = self._resolve(self._daily_calls)
             billing = self._resolve(self._billing)
+            self.enabled(refresh=True)  # the switch shares this cadence
             self._resolved_budget = learner_budget(
                 setting, billing if isinstance(billing, str) else None,
             )
             self._budget_at = now
+            # A fresh read may have raised the cap: a spent latch re-checks.
+            self._latch_checked = False
         return self._resolved_budget
 
     def _size_request(self) -> None:
         """Size this pass's request. With no known window a learner billed
         as a subscription is a hosted model: it gets
         SUBSCRIPTION_ASSUMED_WINDOW instead of the small local-model
-        default. A limit set on purpose (not the one the window gave) is
-        left alone."""
-        if self._window or self._prompt_limit != self._window_limit:
+        default. A pass billed per token (metered or unknown) never reads
+        more than METERED_PROMPT_CHAR_LIMIT, however large the window: a
+        long chat is read over several small passes, never one big one. A
+        limit set on purpose (not the one the window gave) is left alone."""
+        if self._prompt_limit != self._window_limit:
             return
         billing = self._resolve(self._billing)
-        window = SUBSCRIPTION_ASSUMED_WINDOW if billing == BILLING_SUBSCRIPTION else None
-        self._prompt_limit = self._window_limit = prompt_char_limit(window, self._max_tokens)
+        subscription = billing == BILLING_SUBSCRIPTION
+        window = self._window or (SUBSCRIPTION_ASSUMED_WINDOW if subscription else None)
+        limit = prompt_char_limit(window, self._max_tokens)
+        if not subscription:
+            limit = min(limit, METERED_PROMPT_CHAR_LIMIT)
+        self._prompt_limit = self._window_limit = limit
 
     def _journal_pressure(self) -> bool:
         """True when the journal is heading for the overflow reap (past
@@ -1195,6 +1212,11 @@ class Synthesizer:
         """
         self.last_pass_failed = False
         self.last_pass_skipped = False
+        if not self.enabled(refresh=True):
+            # Switched off: no call, and the cursor stays put so the slice is
+            # still read if learning is switched back on before it is reaped.
+            self.last_pass_skipped = True
+            return []
         self._budget(refresh=True)  # a changed setting applies from this pass on
         self._size_request()
         with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
@@ -1576,11 +1598,16 @@ class Synthesizer:
             self._store.reap()
         except Exception:  # cleanup is opportunistic, never fatal
             pass
+        if not self.enabled(refresh=True):
+            return []
         # The model below may not touch user-kept facts at all. Whether two
         # of them contradict each other is conflict_review's separate call.
         lines = ["## Memory store (id, recalls, age, scope, tier, text), grouped by topic"]
         now = time.time()
-        everything = [m for m in self._store.memories() if not m.conflicted]
+        # Behaviour rules are curated by the synthesis pass that sees the
+        # user's words behind them (their quote check), not here.
+        everything = [m for m in self._store.memories()
+                      if not m.conflicted and not is_rule_key(m.key)]
         # Grouped by scope and key/topic so a fact sits beside the facts that
         # could supersede it, and read from a rotating offset so a store too
         # large for one pass is reviewed in full over successive passes
@@ -1750,7 +1777,8 @@ class Synthesizer:
         project = self._project
         memories = [
             m for m in self._store.memories()
-            if m.scope == "global" or (project is not None and m.scope == project)
+            if (m.scope == "global" or (project is not None and m.scope == project))
+            and not is_rule_key(m.key)
         ]
         if not memories:
             lines.append("(empty)")
@@ -1782,6 +1810,7 @@ class Synthesizer:
             scope_hint = (
                 f" (scope={e['scope']})"
                 if kind == "remember" and e.get("scope")
+                else " (frustrated)" if kind == "user" and e.get("frustration")
                 else ""
             )
             return [f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}"]
@@ -1828,9 +1857,9 @@ class Synthesizer:
 
     def _journal_budget(self) -> int:
         """Characters the journal may use in one pass's prompt: the request
-        limit minus the memory budget, the guidance section and a reserve
+        limit minus the memory budget, the rules section and a reserve
         for the skill library (only as much as the library needs)."""
-        guidance = len("\n".join(self._guidance_lines()))
+        guidance = len("\n".join(self._rule_lines()))
         try:
             library = sum(len(s.source) + 80 for s in self._store.list())
         except Exception:
@@ -1884,17 +1913,34 @@ class Synthesizer:
             lines.append(rendered)
         return lines
 
-    def _guidance_lines(self) -> list[str]:
-        if self._session_model is None:
-            return []
-        lines = ["", f"## Session model: {self._session_model}"]
-        if self._guidance_snapshot:
-            lines.append("Current model-guidance file(s) — a proposal replaces the whole file:")
-            for stem, content in sorted(self._guidance_snapshot.items()):
-                lines.append(f"### {stem}.md")
-                lines.append(content)
-        else:
-            lines.append("(no model-guidance file exists for this model yet)")
+    def _rule_lines(self) -> list[str]:
+        """The current behaviour rules in scope (id, applies_to, owner flag,
+        text) and the session model's rule family. Bounded by
+        behavior.RULES_PROMPT_CHARS, like the section sessions render."""
+        from fluid.codemode.behavior import RULES_PROMPT_CHARS, family_for, rule_family
+
+        family = family_for(self._session_model)
+        project = self._project
+        rules = [m for m in self._store.memories()
+                 if is_rule_key(m.key) and not m.conflicted
+                 and (m.scope == "global" or (project is not None and m.scope == project))]
+        rules.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
+        self._rule_revisions = {}
+        if not rules:
+            # Most passes have no rules yet: one short line keeps ordinary
+            # requests near their old size while still naming the family.
+            return ["", f"Rules: none (family {family})"]
+        lines = ["", f"## Behaviour rules (session model {self._session_model or 'unknown'}, "
+                     f"family {family})"]
+        budget = RULES_PROMPT_CHARS
+        for m in rules:
+            flag = " user-kept" if m.protected else ""
+            line = f"[{m.id}] applies_to={rule_family(m.key)}{flag}: {m.text}"
+            if len(line) + 1 > budget:
+                break
+            budget -= len(line) + 1
+            self._rule_revisions[m.id] = m
+            lines.append(line)
         return lines
 
     def _synthesis_input(self, entries: list[dict]) -> tuple[str, str, list[dict]]:
@@ -1964,14 +2010,14 @@ Never claim a workflow is installed because it was proposed."""
         """The user message of one pass, at most ``self._prompt_limit`` chars
         for any journal slice :meth:`_fit_journal` admitted: the journal and
         the memory list have their own budgets and the skill library gets
-        what is left. The model-guidance section goes last, so the only text
-        a final safety cut could remove is guidance, never the journal."""
+        what is left. The behaviour-rule list is bounded too
+        (behavior.RULES_PROMPT_CHARS) and is charged to the journal budget."""
         memory = self._memory_lines()
+        rules = self._rule_lines()
         journal = self._journal_lines(entries)
-        guidance = self._guidance_lines()
-        fixed = len("\n".join(memory + [""] + journal + guidance)) + 2
+        fixed = len("\n".join(memory + rules + [""] + journal)) + 2
         library = self._library_lines(entries, self._prompt_limit - fixed)
-        return "\n".join(library + [""] + memory + [""] + journal + guidance)
+        return "\n".join(library + [""] + memory + rules + [""] + journal)
 
     async def _complete(
         self, prompt: str, system: str = _SYNTH_SYSTEM, *, reserve: int | None = None,
@@ -1998,8 +2044,8 @@ Never claim a workflow is installed because it was proposed."""
         if not self._store._facts.claim_inference_call(**claim):
             raise InferenceBudgetExhausted(BUDGET_SPENT_MESSAGE)
         if len(prompt) > self._prompt_limit:
-            # _prompt keeps the journal inside the limit; reaching this cut
-            # means an oversized guidance file, and it is worth a line.
+            # _prompt keeps every section inside the limit; reaching this
+            # cut means a budget is wrong, and it is worth a line.
             _log.warning(
                 "Memory learner prompt of %d chars cut to %d (model=%s, store=%s)",
                 len(prompt), self._prompt_limit, self._model, self._store_label(),
@@ -2059,38 +2105,71 @@ Never claim a workflow is installed because it was proposed."""
                 errors.append(f"supersession: {exc}")
         return changed
 
-    def _apply_preference_proposals(self, text: str, entries: list[dict] | None,
-                                    errors: list[str]) -> list[str]:
-        """Queue each ``<preference topic=...>`` the output proposes (see
-        fluid.codemode.preferences); never saves a fact. A proposal must be
-        in the user's own words from this slice (``memory_provenance`` says
-        ``user``): the model that proposes it is the one tool output may
-        have steered."""
-        from fluid.codemode.preferences import PreferenceProposals
-        tags = list(_PREFERENCE_RE.finditer(text or ""))
+    def _apply_rules(self, text: str, entries: list[dict] | None,
+                     errors: list[str]) -> list[str]:
+        """Save each ``<rule>`` the output writes as a behaviour-rule fact
+        (fluid.codemode.behavior). A rule needs a ``quote`` found in what the
+        user wrote in this slice: the model that proposes it is the one tool
+        output may have steered. A rewrite must name a rule listed this pass
+        (``_rule_lines``) that the owner has not kept. Learner rules are
+        agent-tier (``durable``) and fade unless re-learned."""
+        from fluid.codemode import behavior
+
+        tags = list(_RULE_RE.finditer(text or ""))
         if not tags:
             return []
+        if entries is None:
+            errors.append("rule: no journal slice to check its quote against")
+            return []
+        listed = getattr(self, "_rule_revisions", {})
+        session = next((str(e["session"]) for e in reversed(entries)
+                        if e.get("kind") == "user" and e.get("session")), None)
         changed: list[str] = []
-        queue = PreferenceProposals(self._store)
-        sessions = list(dict.fromkeys(
-            str(e["session"]) for e in entries or () if e.get("kind") == "user" and e.get("session")))
-        for match in tags[:3]:
+        for match in tags[:MAX_RULES_PER_PASS]:
             attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
-            topic, body = attrs.get("topic"), " ".join(match.group(2).split())
-            if entries is None or memory_provenance(body, entries) != "user":
-                errors.append(f"preference {str(topic)[:40]}: not in a [user] entry's words")
+            rule_id = attrs.get("id")
+            applies_to = behavior.normalize_applies_to(attrs.get("applies_to"))
+            label = f"rule {rule_id or match.group(2)[:30]!r}"
+            if applies_to is None:
+                errors.append(f"{label}: applies_to must be one of {', '.join(behavior.APPLIES_TO)}")
+                continue
+            if not behavior.quote_in_user_text(attrs.get("quote"), entries):
+                errors.append(f"{label}: quote is not in a [user] entry")
                 continue
             try:
-                outcome = queue.propose(
-                    topic, body, scope=self._resolve_scope(attrs.get("scope")) or "global",
-                    sessions=sessions,
+                body = behavior.validate_rule(match.group(2))
+            except ValueError as exc:
+                errors.append(f"{label}: {exc}")
+                continue
+            old = listed.get(rule_id) if rule_id else None
+            if rule_id and old is None:
+                errors.append(f"{label}: not a rule listed this pass")
+                continue
+            if old is not None and old.protected:
+                errors.append(f"{label}: kept by the owner")
+                continue
+            if old is None:
+                learned = sum(1 for m in self._store.memories()
+                              if behavior.is_rule_key(m.key) and not m.protected)
+                if learned >= behavior.MAX_LEARNED_RULES:
+                    errors.append(f"{label}: {behavior.MAX_LEARNED_RULES} learned rules already; "
+                                  "merge into a listed rule instead")
+                    continue
+                key = behavior.rule_key(applies_to, body)
+            else:
+                digest = str(old.key).rsplit(".", 1)[-1]
+                key = f"{behavior.KEY_PREFIX}{applies_to}.{digest}"
+            try:
+                saved = self._store.save_memory(
+                    body, memory_id=rule_id if old is not None else None,
+                    scope=self._resolve_scope(attrs.get("scope")), provenance="user",
+                    durable=True, key=key, source_session=session,
+                    when="When working with the owner (learned behaviour rule)",
                 )
             except ValueError as exc:
-                errors.append(f"preference {str(topic)[:40]}: {exc}")
+                errors.append(f"{label}: {exc}")
                 continue
-            if outcome == "proposed":
-                from fluid.codemode.preferences import normalize_topic
-                changed.append(f"preference-proposal:{normalize_topic(topic)}")
+            changed.append(f"rule:{saved.id}")
         return changed
 
     async def _apply(self, text: str, entries: list[dict] | None = None, *,
@@ -2141,9 +2220,13 @@ Never claim a workflow is installed because it was proposed."""
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
+        rule_ids = {m.id for m in self._store.memories() if is_rule_key(m.key)}
         for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
             if problem:
                 errors.append(problem)
+                continue
+            if memory_id in rule_ids:
+                errors.append(f"memory {memory_id}: a behaviour rule is rewritten with <rule id=...>")
                 continue
             provenance = (
                 memory_provenance(memory_text, entries) if entries is not None else None
@@ -2173,7 +2256,7 @@ Never claim a workflow is installed because it was proposed."""
                 errors.append(f"memory {match.group(1)}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
-        changed.extend(self._apply_preference_proposals(text, entries, errors))
+        changed.extend(self._apply_rules(text, entries, errors))
         # Prose workflows are queued only: synthesis cannot install, approve
         # permissions or overwrite an existing prose skill.
         from fluid.codemode.workflows import WorkflowProposals
@@ -2190,32 +2273,5 @@ Never claim a workflow is installed because it was proposed."""
                     changed.append(f"workflow-proposal:{proposal['id']}")
             except (ValueError, OSError) as exc:
                 errors.append(f"workflow: {exc}")
-        for match in _GUIDANCE_RE.finditer(text or ""):
-            # Guidance edits are PROPOSED, never applied here.
-            # Queue-time validation is cheap; the commit gate (validity →
-            # improvement → retention over the anchor set) runs out-of-band
-            # via `fluid evolve run`, because gating replays a live model.
-            stem, raw = match.group(1), match.group(2).strip()
-            if self._session_model is None:
-                errors.append(f"guidance:{stem}: no session model wired")
-                continue
-            try:
-                body = json.loads(raw)
-            except ValueError as exc:
-                errors.append(f"guidance:{stem}: body is not valid JSON ({exc})")
-                continue
-            from fluid.codemode.evolution import (
-                draft_guidance_proposal,
-                queue_pending,
-            )
-
-            result = draft_guidance_proposal(
-                stem=stem, body=body, session_model=self._session_model,
-            )
-            if isinstance(result, str):
-                errors.append(f"guidance:{stem}: {result}")
-                continue
-            queue_pending(self._store.root, result)
-            changed.append(f"guidance-proposal:{result.target}")
         self.last_error = "; ".join(errors) if errors else None
         return changed

@@ -30,6 +30,7 @@ export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	models: () => import('../models/ModelsCollection.svelte'),
 	tuning: () => import('../tuning/TuningCollection.svelte'),
 	memory: () => import('../memory/MemoryCollection.svelte'),
+	learning: () => import('../learning/LearningCollection.svelte'),
 	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
 	plugins: () => import('../plugins/PluginsCollection.svelte'),
 	mcp: () => import('../mcp/McpCollection.svelte'),

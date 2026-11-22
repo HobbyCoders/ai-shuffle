@@ -12,6 +12,7 @@ import * as models from './entries/models';
 import * as tuning from './entries/tuning';
 import * as usage from './entries/usage';
 import * as memory from './entries/memory';
+import * as learning from './entries/learning';
 import * as integrations from './entries/integrations';
 import * as plugins from './entries/plugins';
 import * as mcp from './entries/mcp';
@@ -32,6 +33,7 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	tuning,
 	usage,
 	memory,
+	learning,
 	integrations,
 	plugins,
 	mcp,

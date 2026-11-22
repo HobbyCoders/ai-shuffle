@@ -270,6 +270,13 @@ def learner_daily_calls() -> int:
     return owner_settings.learner_daily_calls()
 
 
+def learner_enabled() -> bool:
+    """The owner's learner switch (owner policy ``learner_enabled``). Off,
+    passes return before any model call; read at pass time."""
+    from app.core import owner_settings
+    return owner_settings.learner_enabled()
+
+
 def learner_billing(provider_type: str | None, auth_mode: str | None) -> str | None:
     """How a learner pass on a provider row of this shape is billed:
     ``"subscription"`` for a flat-rate sign-in (ChatGPT, SuperGrok: the rows

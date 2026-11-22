@@ -3,7 +3,7 @@
 // an empty detail page with no way back.
 //
 // Every Vault route refuses the preview grant by design, so this journey runs
-// as the disposable dev instance's loopback owner (as settings-learned-guidance
+// as the disposable dev instance's loopback owner (as settings-learned-behaviour
 // does). Adding a sign-in contacts nothing and grants nothing.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';

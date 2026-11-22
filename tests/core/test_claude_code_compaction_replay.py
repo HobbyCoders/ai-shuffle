@@ -49,9 +49,7 @@ def _isolated_home(monkeypatch, tmp_path):
     home.mkdir()
     (tmp_path / "ws" / ".git").mkdir(parents=True)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    from app.core import guidance_surface
-
-    monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
+    monkeypatch.setenv("FLUID_GUIDANCE_HOME", str(home))
 
 
 async def _adapter(monkeypatch, tmp_path: Path, *, fluid: bool = True) -> ha.HarnessAdapter:

@@ -843,33 +843,23 @@ def _saves_signal(store, now) -> dict:
 
 
 def _proposals_signal(store, live, now) -> dict:
-    """What the learner is waiting to ask the owner: proposed rule
-    updates and pairs of user-kept rules its model found to contradict each
-    other. Informational: the sessions ask, so this never raises attention."""
+    """What the learner is waiting to ask the owner: pairs of user-kept
+    rules its model found to contradict each other. Informational: the
+    sessions ask, so this never raises attention."""
     from fluid.codemode.conflict_review import open_conflicts
-    from fluid.codemode.preferences import PreferenceProposals
-    try:
-        proposals = PreferenceProposals(store).open(None, entries=live, now=now)
-    except Exception:  # noqa: BLE001 — an unreadable queue has nothing to ask
-        proposals = []
     try:
         conflicts = len(open_conflicts(live, store.root))
     except Exception:  # noqa: BLE001 — an unreadable verdict file has nothing to ask
         conflicts = 0
-    detail = {"preference_proposals": len(proposals), "conflicts": conflicts,
-              "topics": sorted({str(r.get("topic")) for r in proposals})}
-    parts = []
-    if proposals:
-        parts.append(_plural(len(proposals), "proposed preference update"))
-    if conflicts:
-        parts.append(_plural(conflicts, "pair of saved rules that contradict each other",
-                             "pairs of saved rules that contradict each other"))
-    if not parts:
+    detail = {"conflicts": conflicts}
+    if not conflicts:
         return _signal("proposals", False, "Nothing is waiting for your answer.", **detail)
-    waiting = "is" if len(proposals) + conflicts == 1 else "are"
+    pairs = _plural(conflicts, "pair of saved rules that contradict each other",
+                    "pairs of saved rules that contradict each other")
+    waiting = "is" if conflicts == 1 else "are"
     return _signal("proposals", False,
-                   f"{' and '.join(parts)} {waiting} waiting for your answer; sessions ask you "
-                   "about them.", **detail)
+                   f"{pairs} {waiting} waiting for your answer; sessions ask you about them.",
+                   **detail)
 
 
 # ─── the scheduled run ─────────────────────────────────────────────────────

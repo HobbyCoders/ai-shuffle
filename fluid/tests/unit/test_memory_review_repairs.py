@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from fluid.codemode import conflict_review as review
-from fluid.codemode.facts import fingerprint, global_id
+from fluid.codemode.facts import global_id
 from fluid.codemode.skills import SkillStore
 
 
@@ -113,17 +113,6 @@ def test_concurrent_owner_confirmation_beats_metadata_withdrawal_both_orders(tmp
         assert row.supersession_confirmed and row.superseded_by == global_id(vars(new))
         assert not row.conflicted
         assert old.text not in dest.render_memory_section()
-
-
-def test_missing_successor_still_answers_a_saved_preference(tmp_path):
-    from fluid.codemode.preferences import PreferenceProposals
-    store = SkillStore(tmp_path)
-    old = store.save_memory("Owner rule: backend code uses Sol.", protected=True)
-    doc = store._facts._load()
-    doc["entries"][0].update(superseded_by="f" * 32 + ":m99", supersession_confirmed=False)
-    store._facts._write(doc)
-    saved = PreferenceProposals(store)._saved_preferences(None)
-    assert any(row[3] == fingerprint(old.text) for row in saved)
 
 
 def test_shared_words_or_a_shared_key_open_no_question_until_a_verdict(tmp_path):

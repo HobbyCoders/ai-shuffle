@@ -135,7 +135,8 @@ const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
  * each item and tab.
  */
 const COVERED_WITH_DATA: Partial<Record<CategoryId, string>> = {
-	providers: 'components/settings/providers/ProvidersCollection.test.ts'
+	providers: 'components/settings/providers/ProvidersCollection.test.ts',
+	learning: 'components/settings/learning/LearningCollection.test.ts'
 };
 
 describe('every category page matches the registry', () => {

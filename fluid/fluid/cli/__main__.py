@@ -1,11 +1,9 @@
-"""``fluid`` console entry — chat, run, sessions, config, anchors, evolve, and migration.
+"""``fluid`` console entry — chat, run, sessions, config, workflows, and migration.
 
   fluid chat [--tui]        interactive REPL (or Textual TUI)
   fluid run "<prompt>"      one-shot: stream the reply, then exit
   fluid sessions [--limit]  list persisted sessions from the JSONL store
   fluid config              print the resolved layered config
-  fluid anchors ...         manage the replay-anchor retention set
-  fluid evolve ...          guarded harness evolution: propose, run, review
   fluid import-settings     preview an explicit provider-to-Fluid migration
 
 ``chat`` and ``run`` accept ``--resume <session-id>`` to pick up an existing
@@ -363,89 +361,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_config = sub.add_parser("config", help="print the resolved config")
     _add_common(p_config)
 
-    p_anchors = sub.add_parser(
-        "anchors", help="manage replay anchors (guarded-evolution retention set)"
-    )
-    anchors_sub = p_anchors.add_subparsers(dest="anchors_command", required=True)
-    a_list = anchors_sub.add_parser("list", help="show the anchor set")
-    _add_common(a_list)
-    a_add = anchors_sub.add_parser("add", help="add one anchor manually")
-    _add_common(a_add)
-    a_add.add_argument("prompt", help="the task prompt to replay (natural phrasing; never name a tool)")
-    a_add.add_argument("--title", default=None, help="short behavior description")
-    a_add.add_argument("--expect", action="append", metavar="REGEX",
-                       help="final reply must match; repeatable")
-    a_add.add_argument("--forbid", action="append", metavar="REGEX",
-                       help="final reply must NOT match; repeatable")
-    a_add.add_argument("--tool", action="append", metavar="NAME",
-                       help="this tool must have been called; repeatable")
-    a_add.add_argument("--check-file", action="append", dest="check_file",
-                       metavar="PATH[:REGEX]",
-                       help="workspace file must exist (and match); repeatable")
-    a_add.add_argument("--tools", default=None,
-                       help="comma list overriding the replay tool surface")
-    a_add.add_argument("--anchor-model", default=None, dest="anchor_model",
-                       help="pin the replay model (per-family anchors)")
-    a_rm = anchors_sub.add_parser("rm", help="remove an anchor")
-    _add_common(a_rm)
-    a_rm.add_argument("id", help="anchor id (a1, a2, …)")
-    a_run = anchors_sub.add_parser(
-        "run", help="replay anchors against the live model and record baselines"
-    )
-    _add_common(a_run)
-    a_run.add_argument("id", nargs="?", default=None, help="replay only this anchor")
-    a_harvest = anchors_sub.add_parser(
-        "harvest", help="draft anchor candidates from recent project sessions"
-    )
-    _add_common(a_harvest)
-    a_harvest.add_argument("--limit", type=int, default=None,
-                           help="sessions to consider (default 10)")
-    a_harvest.add_argument("--yes", action="store_true",
-                           help="accept every valid draft without confirming")
-
-    p_evolve = sub.add_parser(
-        "evolve", help="guarded harness evolution: propose, parked, log"
-    )
-    evolve_sub = p_evolve.add_subparsers(dest="evolve_command", required=True)
-    e_propose = evolve_sub.add_parser(
-        "propose", help="propose a guidance edit through the commit gate"
-    )
-    _add_common(e_propose)
-    e_propose.add_argument("--stem", required=True,
-                           help="guidance file stem matched against model names (e.g. glm)")
-    e_propose.add_argument("--file", default=None, help="markdown file with the proposed content")
-    e_propose.add_argument("--content", default=None, help="inline proposed content")
-    e_propose.add_argument("--why", default=None, help="rationale, recorded in the log")
-    e_propose.add_argument("--motivation-prompt", default=None, dest="motivation_prompt",
-                           help="prompt reproducing the failure this edit fixes")
-    e_propose.add_argument("--motivation-expect", action="append", dest="motivation_expect",
-                           metavar="REGEX", help="motivating case: reply must match; repeatable")
-    e_propose.add_argument("--motivation-tool", action="append", dest="motivation_tool",
-                           metavar="NAME", help="motivating case: tool must fire; repeatable")
-    e_propose.add_argument("--no-motivation", action="store_true", dest="no_motivation",
-                           help="waive the improvement stage (deliberate human proposals only)")
-    e_propose.add_argument("--budget", type=int, default=None,
-                           help="anchor regression budget for this evaluation (default: config anchor_budget)")
-    e_propose.add_argument("--allow-no-anchors", action="store_true", dest="allow_no_anchors",
-                           help="commit even though no anchor has a passing baseline "
-                                "(the retention stage then checks nothing)")
-    e_run = evolve_sub.add_parser(
-        "run", help="evaluate synthesizer-queued proposals through the gate (live replays)"
-    )
-    _add_common(e_run)
-    e_run.add_argument("--budget", type=int, default=None,
-                       help="anchor regression budget (default: config anchor_budget)")
-    e_run.add_argument("--allow-no-anchors", action="store_true", dest="allow_no_anchors",
-                       help="commit even though no anchor has a passing baseline "
-                            "(the retention stage then checks nothing)")
-    for name, help_text in (
-        ("pending", "list synthesizer-drafted proposals awaiting the gate"),
-        ("parked", "list proposals the gate refused, with reasons"),
-        ("log", "list committed evolutions"),
-    ):
-        e_sub = evolve_sub.add_parser(name, help=help_text)
-        _add_common(e_sub)
-
     p_workflows = sub.add_parser("workflows", help="review grounded prose skill proposals (never auto-install)")
     workflows_sub = p_workflows.add_subparsers(dest="workflows_command", required=True)
     for name in ("list", "show", "approve", "reject"):
@@ -551,18 +466,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_config(args)
     if args.command in {"import-settings", "import-claude", "import-codex"}:
         return _cmd_import_settings(args)
-    if args.command == "anchors":
-        from fluid.cli.evolve import cmd_anchors
-
-        return cmd_anchors(args, _resolve_config(args))
     if args.command == "workflows":
         from fluid.cli.workflows import cmd_workflows
 
         return cmd_workflows(args, _resolve_config(args))
-    if args.command == "evolve":
-        from fluid.cli.evolve import cmd_evolve
-
-        return cmd_evolve(args, _resolve_config(args))
 
     config = _resolve_config(args)
     store_dir = getattr(args, "store", None)

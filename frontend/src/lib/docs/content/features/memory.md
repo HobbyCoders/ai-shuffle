@@ -20,21 +20,19 @@ Open a memory, edit it, and choose **Save**. **When this applies** tells agents 
 
 If the memory changed somewhere else while you were editing, your text stays on screen and you can choose **Load latest** to replace it with the saved version.
 
-## Rules an agent suggests
+## Learned behaviour
 
-When you correct how agents work, for example which model handles which job, or how reviews, CI or deploys run, the background learner can suggest the whole rule as a memory. It never saves the rule itself: new chats see the suggestion and the agent asks you about it. Say yes and the agent saves it, and the suggestion goes away. Say no, or if a memory already says the same thing, the agent dismisses it, and the learner does not suggest the same wording again for 14 days. A differently worded rule on the same subject can still be suggested. The learner does not suggest a rule a memory already says word for word, unless a newer memory on the same subject says something different. A suggestion nobody answers expires after 14 days. Suggestions stay on the worker whose learner made them.
+One background learner reads your chats and saves two things: facts (the memories on this page) and behaviour rules, short "When X: do Y" instructions about how you want agents to work. Rules come from your corrections, for example "stop opening draft PRs" or "lead with the result". Every rule must quote words you actually wrote, and a rule can never grant permission for something; it only describes how to work.
 
-## Learned guidance
+Open **Settings → Learned behaviour** to see them. Each rule applies to every model or to one model family (Claude, GPT, Gemini, Grok or other models), and new chats with a matching model get the rule in full. A rule the learner just wrote shows **New** for three days. **Undo** removes a new rule, or brings back the text it had before the learner changed it. Saving a rule makes it yours, and the learner never rewrites it. **Delete** removes it on all your workers. You can also add a rule yourself with **Add rule**. Rules sync to all your workers like memories.
 
-Open **Settings → Memory → Learned guidance** to manage saved model instructions. Each block shows which model or models it applies to. These blocks are local to the worker you’re using, not synced like saved memories. Built-in model guidance ships with AI Shuffle and is not editable here.
+The learner runs when a chat goes quiet, and sooner when you sound frustrated: swearing, words like "useless" or "this sucks", phrases like "I told you" or "how many times", or a message in capitals. Words inside code don't count.
 
-For eligible owner chats in Code mode, AI Shuffle can learn how you want it to report progress or handle routine work you already authorized. It can learn from clear corrections after a plain reply, even if no tools ran. An explicit correction about future behavior or the same expectation in two separate exchanges can support a rule. Status questions, one-off requests, and quoted examples don't count on their own. A separate review checks that the evidence supports the rule; if the reviews disagree or the evidence is unclear, nothing is saved. A clear correction can replace a conflicting rule even when all four slots in the block are in use.
+### Cost
 
-To enable this for a ChatGPT chat, choose a Text Generation model in **Settings → Models → Text tasks** using the same ChatGPT provider and account as the chat. With no matching setup, the learner skips that chat. Automatic learning also requires Fluid's continual learning to be on.
+The learner runs on your **Text generation** model (**Settings → Models → Text tasks**), on any provider. It reads compact excerpts of new activity, never a whole chat, and it skips routine file reads. On a pay-per-use provider each pass reads at most about 32,000 characters. Larger excerpts are used only on a flat-rate subscription.
 
-The worker uses at most six review calls in a rolling 24 hours and at most four in a rolling eight hours. Both limits count proposals and verifications. A proposal starts only when both limits have room for two calls. Eight hours after a burst, there's room for a fresh proposal and verification if the 24-hour budget still has room for both calls. Skipped candidates aren't queued, so pacing can still miss a correction. The worker doesn't look for particular words or signs of frustration when deciding when to review.
-
-Choose **Save guidance** to keep an edit, or **Delete guidance** and confirm to remove a block. Automatic learning can’t overwrite your edit or restore a deleted block. These changes affect future prompts, not past chats.
+**Setup** on the Learned behaviour page shows today's calls against the daily limit. By default the limit is 48 calls a day on a pay-per-use provider and 200 on a flat-rate subscription. Set **Daily learning calls** to choose your own (0 picks the default). Turn off **Learn from chats** to stop the learner completely. While it's off it makes no model calls, and when you turn it back on it picks up from where it stopped. **Recent activity** lists the latest passes and what each one saved, and **Built-in guidance** shows the instructions that ship with AI Shuffle for each model family. They can't be edited.
 
 ## Deleting a memory
 

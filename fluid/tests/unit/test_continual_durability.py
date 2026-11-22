@@ -2,11 +2,11 @@
 
 Three failure modes that used to lose data silently:
 
-1. ``meta.json`` / ``memories.json`` / ``anchors.json`` were rewritten with
+1. ``meta.json`` / ``memories.json`` were rewritten with
    a plain open-truncate-write, and a load that failed to parse returned an
    empty document — so a truncated file emptied the store and the next save
    overwrote the evidence with colliding ids.
-2. ``parked.jsonl`` and ``.evolution-log.jsonl`` grew without a cap.
+2. The store's logs grew without a cap.
 3. ``reap_journal`` replaced the journal from a snapshot; a line appended in
    between vanished.
 """
@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 
 from fluid.codemode import skills as skills_mod
-from fluid.codemode.anchors import AnchorStore
 from fluid.codemode.skills import SkillStore, journal_lock
 
 
@@ -55,23 +54,13 @@ def test_truncated_memories_file_is_set_aside_not_overwritten(tmp_path, caplog) 
     assert aside[0].exists()
 
 
-def test_meta_and_anchors_documents_get_the_same_quarantine(tmp_path, caplog) -> None:
+def test_meta_document_gets_the_same_quarantine(tmp_path, caplog) -> None:
     store = SkillStore(tmp_path)
     store.set_synth_cursor(42)
     (tmp_path / "meta.json").write_text('{"synth_cursor": 4', encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="fluid.codemode.skills"):
         assert store.synth_cursor() == 0
     assert list(tmp_path.glob("meta.json.corrupt-*"))
-
-    anchors = AnchorStore(tmp_path)
-    anchors.add(title="t", prompt="do x", checks=[{"kind": "contains", "pattern": "x"}])
-    (tmp_path / "anchors.json").write_text("[1, 2", encoding="utf-8")
-    with caplog.at_level(logging.WARNING, logger="fluid.codemode.skills"):
-        assert anchors.list() == []
-    assert list(tmp_path.glob("anchors.json.corrupt-*"))
-    assert anchors.add(
-        title="t2", prompt="do y", checks=[{"kind": "contains", "pattern": "y"}]
-    ).id == "a1"
 
 
 def test_non_object_document_is_quarantined_too(tmp_path) -> None:
@@ -113,39 +102,9 @@ def test_document_saves_go_through_a_temp_file_and_rename(tmp_path, monkeypatch)
     store = SkillStore(tmp_path)
     store.save_memory("x")
     store.set_synth_cursor(1)
-    AnchorStore(tmp_path).add(
-        title="t", prompt="p", checks=[{"kind": "contains", "pattern": "p"}]
-    )
     targets = {dst for _, dst in seen}
-    assert {"memories.json", "meta.json", "anchors.json"} <= targets
+    assert {"memories.json", "meta.json"} <= targets
     assert all(src.startswith(dst + ".tmp-") for src, dst in seen)
-
-
-# ─── every log the store root holds is bounded ───────────────────────────────
-
-
-def test_reap_bounds_the_evolution_gate_files(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(skills_mod, "MAX_LOG_ENTRIES", 5)
-    store = SkillStore(tmp_path)
-    parked = tmp_path / "parked.jsonl"
-    log = tmp_path / ".evolution-log.jsonl"
-    with parked.open("w", encoding="utf-8") as fh:
-        for i in range(30):
-            fh.write(json.dumps({"i": i, "content": "x" * 4000}) + "\n")
-    with log.open("w", encoding="utf-8") as fh:
-        for i in range(12):
-            fh.write(json.dumps({"i": i}) + "\n")
-
-    dropped = store.reap()
-    assert dropped["parked"] == 25
-    assert dropped["evolution_log"] == 7
-    kept = [
-        json.loads(line)["i"]
-        for line in parked.read_text(encoding="utf-8").splitlines()
-    ]
-    assert kept == list(range(25, 30))  # newest survive
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 5
-    assert store.reap() == {}  # idempotent once under the cap
 
 
 # ─── journal reaping cannot lose an append ───────────────────────────────────

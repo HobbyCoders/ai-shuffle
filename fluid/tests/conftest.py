@@ -139,7 +139,7 @@ def _no_real_claude_on_path():
 
 @pytest.fixture(autouse=True)
 def isolate_home(tmp_path_factory, monkeypatch):
-    from fluid.cli import evolve, replay
+    from fluid.cli import workflows
     from fluid.codemode import skills
 
     home = tmp_path_factory.mktemp("home")
@@ -147,9 +147,9 @@ def isolate_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     # HOME alone is too late: collection imports skills.py, which caches this
-    # path, and evolve/replay retain their own imported aliases. Give all three
-    # the same per-test root; later imports also see the patched source value.
-    for module in (skills, evolve, replay):
+    # path, and the workflows CLI keeps its own imported alias. Give both the
+    # same per-test root; later imports also see the patched source value.
+    for module in (skills, workflows):
         monkeypatch.setattr(module, "DEFAULT_SKILLS_ROOT", home / ".fluid" / "skills")
     return home
 

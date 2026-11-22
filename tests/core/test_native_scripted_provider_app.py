@@ -68,9 +68,7 @@ def _isolated_home(monkeypatch, tmp_path):
     home.mkdir()
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    from app.core import guidance_surface
-
-    monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
+    monkeypatch.setenv("FLUID_GUIDANCE_HOME", str(home))
 
 
 @pytest.fixture

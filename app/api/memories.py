@@ -14,7 +14,7 @@ from app.api.auth import require_admin
 from app.core.fluid_memory import store_for_owner
 from app.db.async_database import run_sync
 from app.db.projects import get_projects_by_ids
-from fluid.codemode import facts
+from fluid.codemode import behavior, facts
 from fluid.codemode.skills import MAX_MEMORY_CHARS
 from fluid.codemode.transactions import file_transaction
 
@@ -58,6 +58,12 @@ def _visible(entry, store_id):
     # memory.coexist.* rows are internal pair answers, not saved memories.
     return (not str(entry.get("key") or "").startswith("memory.coexist.")
             and facts.visible_on(entry, store_id))
+
+
+def _is_memory(entry, store_id):
+    # Behaviour rules are facts too, but they have their own page and
+    # routes (app.api.learner), which keep their model-family key intact.
+    return _visible(entry, store_id) and not behavior.is_rule_key(entry.get("key"))
 
 
 def _metadata_version(entry):
@@ -120,7 +126,7 @@ def _list():
     store = store_for_owner("local", initialize=False)
     doc = store._facts.snapshot(read_only=True)
     rows = [(entry, status) for bucket, status in (("entries", "active"), ("archived", "archived"))
-            for entry in doc[bucket] if _visible(entry, doc["store_id"])]
+            for entry in doc[bucket] if _is_memory(entry, doc["store_id"])]
     names = _project_names([entry for entry, _ in rows])
     items = [_item(entry, status, names) for entry, status in rows]
     items.sort(key=lambda item: item["updated_at"] or 0, reverse=True)
@@ -130,7 +136,7 @@ def _list():
 def _find(store, memory_id):
     doc = store._facts.snapshot(read_only=True)
     for entry in doc["entries"] + doc["archived"]:
-        if entry["id"] == memory_id and _visible(entry, doc["store_id"]):
+        if entry["id"] == memory_id and _is_memory(entry, doc["store_id"]):
             return entry
     raise HTTPException(404, _NOT_FOUND)
 

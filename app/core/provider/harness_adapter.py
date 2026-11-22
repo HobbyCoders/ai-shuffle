@@ -1071,23 +1071,21 @@ class HarnessAdapter(ProviderAdapter):
                     )
                     synthesizer = None
                     if settings.fluid_continual:
-                        # Session provider; fluid_continual_model pins synthesis
-                        # to one model so skill quality doesn't drift with the
-                        # session's provider choice.
-                        synthesizer, engine_bus = self._learner_synthesizer(
-                            provider_client,
-                            settings.fluid_continual_model or cast(str, native_model),
-                            skills, memory_project, options, fluid_session_id,
-                            session_model=options.model or cast(str, native_model),
-                            # The session model's resolved window sizes the
-                            # learner's request; a pinned learner model has no
-                            # resolved window here and falls back to fluid's
-                            # table (and a local model to the small default).
-                            context_window=(
-                                None if settings.fluid_continual_model
-                                else _native_context_window(kind, options)
-                            ),
-                        )
+                        # The same target as the delegated leg: the owner's
+                        # Text Generation binding, or an API user's own row
+                        # (_learner_target). None keeps the journal for a
+                        # later pass on the same store.
+                        owner = getattr(getattr(skills, "_facts", None), "owner", "local")
+                        target = await run_sync(_learner_target, options, owner)
+                        if target is not None:
+                            learner = _LearnerProvider(target.kind, target.options)
+                            self._learner_provider = learner
+                            synthesizer, engine_bus = self._learner_synthesizer(
+                                learner, target.model, skills, memory_project, options,
+                                fluid_session_id,
+                                session_model=options.model or cast(str, native_model),
+                                context_window=target.context_window, binding=target.options,
+                            )
 
                     # Never for the chat lane. Code mode replaces the request
                     # schemas with its four-tool surface and hands the model a
@@ -1167,13 +1165,6 @@ class HarnessAdapter(ProviderAdapter):
                 "workspace_card": self._workspace_card,
                 "worker": self._worker_identity,
             }
-            if (not one_shot and options.extra.get("provider_auth_mode") == "chatgpt"
-                    and options.extra.get("app_session_id") and options.extra.get("provider_id")):
-                from app.core.behavioral_learning import wait_for_matching_review
-
-                await wait_for_matching_review(
-                    options.extra["app_session_id"], options.model, options.extra["provider_id"]
-                )
             compiled_prompt = await run_sync(
                 self._compile_prompt_sections,
                 system, append_system, options,
@@ -1878,15 +1869,6 @@ class HarnessAdapter(ProviderAdapter):
                 # Native child tasks inherit the producer's ContextVar. Even a
                 # delayed old task using the shared ctx cannot borrow this run.
                 lambda: proof if delegated or CURRENT_PLAN_RUN.get() == proof else None,
-            )
-        from app.core.behavioral_provenance import CURRENT
-
-        execution = CURRENT.get()
-        if execution is not None:
-            execution.submitted(
-                self._resolve_app_session_id(),
-                native=(isinstance(op, UserTurn) and isinstance(self._engine, NativeLoop)
-                        and self._provider_kind == "openai_responses"),
             )
         try:
             await self._engine.submit(op)
@@ -3332,16 +3314,11 @@ class HarnessAdapter(ProviderAdapter):
         project's sessions. Passes are background and best-effort, paced and
         capped by the store's shared daily budget (fluid/codemode/continual.py).
 
-        ``session_model``/``guidance_snapshot`` open fluid's
-        guidance-proposal channel. ``session_model`` is ``options.model``, NOT
-        a resolved api id, because it must be the same string the guidance
-        read path keys on (``_model_guidance_blocks`` and
-        ``prompt_guidance_blocks``): a proposal's stem has to be a substring of
-        it or the committed file would never load. The snapshot is the raw text
-        of the very files this session's prompt carries, so the learner amends
-        rather than blindly overwrites. Drafts are queued and validated, never
-        applied: the commit gate disposes of them out-of-band
-        (app/core/guidance_surface.py).
+        ``session_model`` is ``options.model``: the learner names its rule
+        family (fluid.codemode.behavior.family_for) so a behaviour rule about
+        this model's habits is tagged for that family. The owner's
+        ``learner_enabled`` switch is read at pass time; off, no pass calls
+        a model.
         """
         from fluid.events.bus import EventBus
 
@@ -3354,7 +3331,7 @@ class HarnessAdapter(ProviderAdapter):
             # announce what the pass changed.
             await self._announce_continual(list(changes))
 
-        from app.core.fluid_memory import learner_billing, learner_daily_calls
+        from app.core.fluid_memory import learner_billing, learner_daily_calls, learner_enabled
 
         bound = binding or options
         shape = (bound.extra.get("provider_type"), bound.extra.get("provider_auth_mode"))
@@ -3369,7 +3346,7 @@ class HarnessAdapter(ProviderAdapter):
             session_id=fluid_session_id or self._resolve_app_session_id(),
             on_change=_announce,
             session_model=session_model,
-            guidance_snapshot=_session_guidance_snapshot(session_model),
+            enabled=learner_enabled,
             context_window=context_window,
             daily_calls=learner_daily_calls,
             billing=learner_billing(*shape),
@@ -3386,8 +3363,8 @@ class HarnessAdapter(ProviderAdapter):
         checkout, so DelegatedLoop's user, tool (with friction) and assistant
         records land in that store's ``journal.jsonl`` exactly as native ones.
 
-        The CLI is not a provider the learner can call, so passes run on the
-        client :func:`_delegated_learner_target` picks. With none, the journal
+        The CLI is not a provider the learner can call, so passes run where
+        :func:`_learner_target` points. With none, the journal
         is kept without a learner: its entries wait for the next pass any
         session on the same store runs. Off (None, None) with continual
         learning off, on an auxiliary request, or with no app session. Never
@@ -8345,30 +8322,20 @@ def _model_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
 
 
 def _learned_guidance_blocks(model: Optional[str]) -> Tuple[str, ...]:
-    """Committed per-model guidance files for ``model``, or ``()``.
+    """Hand-written per-model guidance files (``~/.fluid/guidance/<stem>.md``)
+    for ``model``, screened and capped by fluid, or ``()``. Nothing writes
+    them automatically: learned habits are behaviour rules in the memory
+    section (fluid.codemode.behavior)."""
+    if not model:
+        return ()
+    try:
+        from fluid.cli.prompt import load_guidance_files
 
-    The evolvable counterpart to ``_model_guidance_blocks`` above: the gate
-    writes ``<home>/.fluid/guidance/<stem>.md`` when a proposal survives
-    validity, improvement and retention, and this is the only thing that reads
-    it back into a session. Screening and the size cap are fluid's
-    (``load_guidance_files``); the surface module owns where "home" is.
-    """
-    from app.core.guidance_surface import prompt_guidance_blocks
-
-    return prompt_guidance_blocks(model)
-
-
-def _session_guidance_snapshot(model: Optional[str]) -> Dict[str, str]:
-    """The raw ``{stem: content}`` behind ``_learned_guidance_blocks(model)``.
-
-    Handed to the ``Synthesizer`` so a drafted proposal is a full-file
-    amendment of what the session actually carries. Unscreened and
-    untruncated on purpose: an amendment written against a truncated view
-    would silently drop the tail of the file it replaces.
-    """
-    from app.core.guidance_surface import session_guidance_snapshot
-
-    return session_guidance_snapshot(model)
+        override = (os.environ.get("FLUID_GUIDANCE_HOME") or "").strip()
+        return tuple(load_guidance_files(model, home=Path(override) if override else None))
+    except Exception:  # noqa: BLE001 — degrade to the shipped blocks alone
+        logger.warning("[HarnessAdapter] guidance files failed for %r", model, exc_info=True)
+        return ()
 
 
 def _code_mode_skills_text(text: str) -> str:
@@ -8799,18 +8766,6 @@ def _app_guidance_blocks(
     blocks.extend(_model_guidance_blocks(options.model))
     blocks.extend(_learned_guidance_blocks(options.model))
     if native:
-        extra = options.extra or {}
-        if (
-            not extra.get("one_shot")
-            and extra.get("provider_auth_mode") == "chatgpt"
-            and extra.get("app_session_id")
-            and extra.get("provider_id")
-        ):
-            from app.core.behavioral_learning import prompt_block
-
-            scoped = prompt_block(extra["app_session_id"], options.model, extra["provider_id"])
-            if scoped:
-                blocks.append(scoped)
         mcp_block = _mcp_instructions_block(registry, permitted)
         if mcp_block:
             blocks.append(mcp_block)
@@ -9800,10 +9755,14 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 
 #: Leg kinds a memory learner can call: the native provider clients.
 _LEARNER_KINDS = frozenset({"anthropic", "openai_responses", "openrouter", "gemini"})
+# A learner target whose passes run through the app's text-generation helper
+# (app.api.generation.generate_with_claude): any binding without a native
+# client, the Claude Code CLI included.
+TEXT_GENERATION_LEARNER = "text_generation"
 
 
 class _LearnerTarget(NamedTuple):
-    """Where a delegated session's memory-learner passes run."""
+    """Where a session's memory-learner passes run (:func:`_learner_target`)."""
 
     kind: str
     #: The binding :func:`_build_provider_client` reads (provider row id and
@@ -9811,86 +9770,101 @@ class _LearnerTarget(NamedTuple):
     options: SessionOptions
     model: str
     context_window: Optional[int]
-    #: ``"session"`` (the session's own provider row) or ``"subscription"``.
+    #: ``"text_generation"`` (the owner's binding) or ``"session"`` (an API
+    #: user's own provider row).
     source: str
 
 
-def _delegated_learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTarget]:
-    """The provider and model a delegated session's learner passes use, or None.
+def _learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTarget]:
+    """Where a session's memory-learner passes run, for either leg, or None.
 
-    The Claude CLI is not a provider client, so the native rule ("the
-    session's own provider") has nothing to point at unless the session is
-    bound to an API row. In order:
-
-    1. The session's bound provider row, when it is one a native client can
-       call: the same client and model choice as a native session on that
-       row (``fluid_continual_model``, else the session's model).
-    2. For the installation owner's sessions only, a usable flat-rate
-       subscription row (ChatGPT, SuperGrok; see
-       :func:`credential_gate.subscription_provider_model`), on the row that
-       curates ``fluid_continual_model`` when one does, else its default model.
-       An API-key row is never picked here: nothing configured it for this,
-       and its calls are billed per token. An API user's session never
-       spends the owner's subscription.
+    1. The installation owner's sessions: the Text Generation binding
+       (Settings > Default models), the model that already names branches
+       and writes commit messages, so the owner picks what learning costs.
+       ``fluid_continual_model`` still pins the model when set. A row a
+       native client can call is called directly (exact token counts); any
+       other binding, the Claude Code CLI included, runs through the app's
+       text-generation helper, so learning works on every provider.
+    2. An API user's session: its own bound provider row, when a native
+       client can call it. It never spends the owner's binding.
     3. None: the journal is kept without a learner.
 
-    Blocking (provider-row reads); callers run it in a thread. Never raises.
+    Blocking (settings and provider-row reads); callers run it in a thread.
+    Never raises.
     """
     from app.core.config import settings
 
     pinned = settings.fluid_continual_model
     try:
-        provider_id = options.extra.get("provider_id")
-        if provider_id:
-            shape = (
-                options.extra.get("provider_type"),
-                options.extra.get("provider_auth_mode"),
-                options.extra.get("provider_dialect"),
-            )
-            if not shape[0]:
+        if owner == "local":
+            from app.core.generation_options import text_generation_config
+
+            config = text_generation_config()
+            model = pinned or config.get("model")
+            if not model:
+                return None
+            provider_id = config.get("provider")
+            if provider_id:
                 shape = _lookup_provider_row_shape(str(provider_id))
-            kind = _provider_row_kind(*shape)
-            if kind in _LEARNER_KINDS:
-                model = pinned or (
-                    _native_api_model(options.model, options)
-                    if kind == "anthropic" else options.model
-                )
-                if model:
+                kind = _provider_row_kind(*shape)
+                if kind in _LEARNER_KINDS:
                     return _LearnerTarget(
                         kind=cast(str, kind),
                         options=_learner_binding(model, str(provider_id), shape),
                         model=model,
-                        context_window=None if pinned else _native_context_window(cast(str, kind), options),
-                        source="session",
+                        context_window=_provider_row_window(str(provider_id), model),
+                        source="text_generation",
                     )
-        if owner != "local":
+            # The row's shape still decides billing (a Claude subscription
+            # sign-in is flat-rate); no row is native Anthropic via the CLI.
+            binding = (
+                _learner_binding(model, str(provider_id), _lookup_provider_row_shape(str(provider_id)))
+                if provider_id else SessionOptions(model=model)
+            )
+            return _LearnerTarget(
+                kind=TEXT_GENERATION_LEARNER, options=binding, model=model,
+                context_window=None, source="text_generation",
+            )
+        provider_id = options.extra.get("provider_id")
+        if not provider_id:
             return None
-        from app.core.credential_gate import subscription_provider_model
-
-        picked = subscription_provider_model(pinned)
-        if picked is None:
-            return None
-        row, model = picked
-        shape = (row.get("provider_type"), row.get("auth_mode"), row.get("api_dialect"))
+        shape = (
+            options.extra.get("provider_type"),
+            options.extra.get("provider_auth_mode"),
+            options.extra.get("provider_dialect"),
+        )
+        if not shape[0]:
+            shape = _lookup_provider_row_shape(str(provider_id))
         kind = _provider_row_kind(*shape)
-        if kind not in _LEARNER_KINDS or not row.get("id"):
+        if kind not in _LEARNER_KINDS:
             return None
-        # The row's own window for the model (models_json, preset roster,
-        # row column). Without it fluid sized every pass for a small local
-        # model and the live learner read about 37 entries a pass.
-        try:
-            window = resolve_provider_context_window(row, model)
-        except Exception:  # noqa: BLE001 — unknown window: fluid's own fallback
-            window = None
+        model = pinned or (
+            _native_api_model(options.model, options) if kind == "anthropic" else options.model
+        )
+        if not model:
+            return None
         return _LearnerTarget(
             kind=cast(str, kind),
-            options=_learner_binding(model, str(row["id"]), shape),
+            options=_learner_binding(model, str(provider_id), shape),
             model=model,
-            context_window=window,
-            source="subscription",
+            context_window=None if pinned else _native_context_window(cast(str, kind), options),
+            source="session",
         )
     except Exception:  # noqa: BLE001 — no learner is the safe answer
         logger.warning("[HarnessAdapter] learner provider lookup failed", exc_info=True)
+        return None
+
+
+def _provider_row_window(provider_id: str, model: str) -> Optional[int]:
+    """The provider row's context window for ``model``, or None (fluid's
+    table then decides). Without it a hosted model was sized like a small
+    local one."""
+    try:
+        from app.db.model_providers import get_model_provider
+
+        row = get_model_provider(provider_id)
+        return resolve_provider_context_window(row, model) if row else None
+    except Exception:  # noqa: BLE001 — unknown window: fluid's own fallback
         return None
 
 
@@ -9920,7 +9894,7 @@ def _delegated_learning_inputs(app_session_id: str, options: SessionOptions) -> 
         pass
     skills.journal_context(session_id=app_session_id, project=memory_project, cwd=options.cwd)
     owner = getattr(getattr(skills, "_facts", None), "owner", "local")
-    return skills, memory_project, _delegated_learner_target(options, owner)
+    return skills, memory_project, _learner_target(options, owner)
 
 
 class _LearnerProvider:
@@ -9947,6 +9921,10 @@ class _LearnerProvider:
             return self._client
 
     async def stream(self, request: Any) -> AsyncIterator[Any]:
+        if self._kind == TEXT_GENERATION_LEARNER:
+            async for chunk in _text_generation_stream(request):
+                yield chunk
+            return
         client = await self._ensure()
         async for chunk in client.stream(request):
             yield chunk
@@ -9955,6 +9933,40 @@ class _LearnerProvider:
         http, self._http, self._client = self._http, None, None
         if http is not None:
             await http.aclose()
+
+
+# One learner pass through the text-generation helper; a pass that has not
+# answered by then is abandoned (the learner counts it as a failed pass).
+TEXT_GENERATION_LEARNER_TIMEOUT = 300.0
+
+
+async def _text_generation_stream(request: Any) -> AsyncIterator[Any]:
+    """A learner request answered by the app's text-generation helper, as the
+    stream chunks the learner reads: the reply text and a stop, or an error
+    chunk. The helper runs on the owner's Text Generation binding whatever
+    its leg (the Claude Code CLI included) and records its own usage, so the
+    pass reports no token counts of its own; the daily call cap still holds.
+    """
+    from fluid.providers.base import StreamChunk
+
+    from app.api.generation import generate_with_claude
+
+    parts = [f"<instructions>\n{request.system}\n</instructions>"] if request.system else []
+    for message in request.messages:
+        for block in getattr(message, "content", None) or []:
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+    try:
+        text = await generate_with_claude(
+            "\n\n".join(parts), timeout_seconds=TEXT_GENERATION_LEARNER_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 — the pass fails, never the session
+        detail = getattr(exc, "detail", None) or str(exc) or type(exc).__name__
+        yield StreamChunk("error", {"message": f"text generation failed: {detail}"})
+        return
+    yield StreamChunk("text_delta", {"text": text})
+    yield StreamChunk("message_stop", {"stop_reason": "end_turn"})
 
 
 async def _build_provider_client(
@@ -10005,11 +10017,6 @@ async def _build_provider_client(
                 base_url = OPENAI_RESPONSES_URL
             kwargs = dict(api_key=creds.api_key, auth=creds.auth, base_url=base_url,
                           http_client=http_client, **timeouts)
-            app_session_id = options.extra.get("app_session_id")
-            if creds.use_codex_backend and app_session_id:
-                from app.core.behavioral_provenance import SourceResponsesClient
-
-                return SourceResponsesClient(app_session_id, str(provider_id), **kwargs), http_client
             return OpenAIResponsesClient(**kwargs), http_client
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(**timeouts), None

@@ -450,11 +450,6 @@ class HarnessConfig:
     # how the learner's provider bills a pass (continual.learner_budget);
     # values are clamped, and the consolidation reserve and pacing follow it.
     learner_daily_calls: int | None = None
-    # Retention budget for the harness-evolution commit gate (HCL's B): how
-    # many anchor regressions a proposed harness-state change may cause and
-    # still commit. 0 = strict stability; the shipped default follows HCL's
-    # finding that a moderate budget beats both extremes.
-    anchor_budget: int = 1
     instruction_files: InstructionFilesConfig = field(default_factory=InstructionFilesConfig)
     # Which filesystem scopes feed context and settings discovery (instruction
     # files, skills, agents, commands, plugins, settings.json, mcp.json,
@@ -527,7 +522,6 @@ class HarnessConfig:
             continual_model=d.get("continual_model"),
             continual_provider=d.get("continual_provider") or None,
             learner_daily_calls=_optional_int(d.get("learner_daily_calls")),
-            anchor_budget=max(0, int(d.get("anchor_budget", 1))),
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             setting_sources=_setting_sources_from(d.get("setting_sources")),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
@@ -576,7 +570,6 @@ class HarnessConfig:
             "continual_model": self.continual_model,
             "continual_provider": self.continual_provider,
             "learner_daily_calls": self.learner_daily_calls,
-            "anchor_budget": self.anchor_budget,
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "max_model_calls": self.max_model_calls,

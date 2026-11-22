@@ -183,9 +183,9 @@
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
 		},
 		{
-			"why": "Owner edits and deletes saved model guidance in Memory; subsequent chat prompts follow the saved block",
-			"journeys": ["settings-learned-guidance"],
-			"globs": ["frontend/tests/journeys/settings-learned-guidance.journey.mjs", "frontend/src/lib/components/settings/memory/MemoryCollection.svelte", "frontend/src/lib/components/settings/memory/LearnedGuidance.svelte", "frontend/src/lib/components/settings/memory/GuidanceEditor.svelte", "frontend/src/lib/settings/entries/memory.ts", "app/api/learned_guidance.py", "app/core/guidance_storage.py", "app/core/guidance_surface.py", "fluid/fluid/context/guidance.py"]
+			"why": "Owner adds and deletes a behaviour rule and switches the learner off and on; fresh chat prompts carry the saved rule and drop it after deletion",
+			"journeys": ["settings-learned-behaviour"],
+			"globs": ["frontend/tests/journeys/settings-learned-behaviour.journey.mjs", "frontend/src/lib/components/settings/learning/**", "frontend/src/lib/settings/entries/learning.ts", "app/api/learner.py", "app/core/owner_settings.py", "fluid/fluid/codemode/behavior.py", "fluid/fluid/codemode/skills.py"]
 		},
 		{
 			"why": "Desktop startup is discoverable in Settings only with a capable native shell",

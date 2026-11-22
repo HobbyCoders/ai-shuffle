@@ -41,7 +41,6 @@ from weakref import WeakValueDictionary
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set
 
-from app.core import behavioral_provenance
 from app.core.config import settings
 from app.core.permission_handler import permission_handler
 from app.core.turn_recorder import (
@@ -365,9 +364,6 @@ async def _fire_on_turn_settled(session_id: str, turn_id: str, outcome: str) -> 
     if outcome in ("completed", "aborted"):
         from app.core.lifecycle_events import enqueue
         enqueue(outcome, session_id, turn_id)
-    if outcome == "completed":
-        from app.core.behavioral_learning import enqueue as enqueue_behavioral_review
-        enqueue_behavioral_review(session_id, turn_id)
     hook = _on_turn_settled
     if hook is None:
         return
@@ -1325,7 +1321,6 @@ class SessionRuntime:
             #    settlement callback still run. The pump runs as a CHILD task so
             #    interrupt() escalation can cancel it without cancelling
             #    execute() itself.
-            execution = None
             try:
                 async with get_reader_lock(sid):
                     # Pooled engines do not reconnect. Their Swarm recovery
@@ -1342,14 +1337,10 @@ class SessionRuntime:
                         )
                     from app.core.session_plan import CURRENT_PLAN_RUN
 
-                    if settings.fluid_continual and self.turn.get("source") in ("user", "queue"):
-                        execution = behavioral_provenance.Execution(sid)
                     plan_token = CURRENT_PLAN_RUN.set((sid, run_id, fence_token))
-                    evidence_token = behavioral_provenance.CURRENT.set(execution)
                     try:
                         pump = asyncio.create_task(self._run_pump(recorder))
                     finally:
-                        behavioral_provenance.CURRENT.reset(evidence_token)
                         CURRENT_PLAN_RUN.reset(plan_token)
                     self._pump_task = pump
                     if self._unowned:
@@ -1463,10 +1454,6 @@ class SessionRuntime:
         #    and ONLY when finalize actually performed the DB transition. A racer
         #    (interrupt escalation, reap) that settled first already fired it.
         if outcome is not None and settled_here:
-            if outcome == "completed" and execution is not None:
-                binding = execution.finish()
-                if binding is not None:
-                    behavioral_provenance.record_settlement(sid, tid, binding)
             await _fire_on_turn_settled(sid, tid, outcome)
         return outcome
 

@@ -196,8 +196,6 @@ async def generate_with_claude(
     prompt: str,
     model: Optional[str] = None,
     timeout_seconds: float = 120.0,
-    *,
-    review_binding: tuple[dict, str] | None = None,
 ) -> str:
     """
     Generate a response using AI, honoring the text-generation setting.
@@ -234,20 +232,10 @@ async def generate_with_claude(
                the adapter is torn down and an HTTP 504 is raised. Latency-
                sensitive callers (branch names) pass a shorter budget so their
                non-AI fallback fires quickly.
-        review_binding: Internal, pre-checked text-generation config and exact
-               ChatGPT account; refuses any credential switch rather than retrying.
 
     Returns:
         Text response from the model.
     """
-    if review_binding is not None:
-        from app.core.provider.behavioral_review_transport import infer
-
-        if model is not None:
-            raise RuntimeError("Behavioral review cannot override its configured binding")
-        route, account = review_binding
-        return await infer(prompt, route, account, timeout_seconds)
-
     from app.core.generation_options import (
         build_generation_options,
         text_generation_config,

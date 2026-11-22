@@ -7,12 +7,12 @@ import pytest
 
 # Import during collection, before isolate_home runs: HOME alone cannot fix
 # these cached paths, including the CLI modules' imported copies.
-from fluid.cli import evolve, replay
+from fluid.cli import workflows
 from fluid.codemode import skills
 from tests.conftest import guard_skills_writes
 
 
-@pytest.mark.parametrize("module", [skills, evolve, replay])
+@pytest.mark.parametrize("module", [skills, workflows])
 def test_cached_skills_roots_follow_isolated_home(isolate_home, module):
     assert module.DEFAULT_SKILLS_ROOT == isolate_home / ".fluid" / "skills"
     assert Path.home() == isolate_home

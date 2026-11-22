@@ -43,7 +43,6 @@ def test_env_overrides_maps_every_recognized_variable() -> None:
         "FLUID_CONTINUAL": "TRUE",
         "FLUID_CONTINUAL_MODEL": "m-small",
         "FLUID_CONTINUAL_PROVIDER": "openrouter",
-        "FLUID_ANCHOR_BUDGET": "3",
         "FLUID_MAX_TOKENS": "4096",
         "FLUID_MAX_CALLS": "12",
         "FLUID_CONTEXT_WINDOW": "200000",
@@ -68,7 +67,6 @@ def test_env_overrides_maps_every_recognized_variable() -> None:
         "continual": True,
         "continual_model": "m-small",
         "continual_provider": "openrouter",
-        "anchor_budget": 3,
         "max_tokens": 4096,
         "max_model_calls": 12,
         "context_window": 200000,
@@ -92,7 +90,7 @@ def test_env_overrides_reads_the_process_environment_by_default(monkeypatch) -> 
 
 
 @pytest.mark.parametrize("var", [
-    "FLUID_ANCHOR_BUDGET", "FLUID_MAX_TOKENS", "FLUID_MAX_CALLS", "FLUID_CONTEXT_WINDOW",
+    "FLUID_MAX_TOKENS", "FLUID_MAX_CALLS", "FLUID_CONTEXT_WINDOW",
 ])
 def test_malformed_integers_are_dropped(var) -> None:
     assert env_overrides({var: "lots"}) == {}
