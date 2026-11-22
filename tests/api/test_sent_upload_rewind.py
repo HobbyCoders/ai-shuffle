@@ -274,6 +274,47 @@ async def test_unsending_while_attachments_are_written_keeps_it_from_the_model(s
     assert adapter.calls == []
 
 
+async def test_a_message_sent_while_attachments_are_written_does_not_overtake_them(staged_upload, tmp_path):
+    """A screenshot, then a quick follow-up sent while its file is still being
+    written: the follow-up's own sweep waits, and the model gets them in order."""
+    from app.core import upload_transfer
+
+    source = str(staged_upload)
+    blob_ids = upload_transfer.lift_paths_to_blobs([source], {"path": str(staged_upload.parent)}, SID)
+    turns.enqueue_turn(SID, "user", prompt="opening")
+    first = turns.enqueue_turn(SID, "user", prompt=f"look @{source}", payload={
+        "upload_paths": [source], "upload_blob_ids": blob_ids, "deferred_user_record": True,
+    })
+    adapter, pool, seen, _ = _steer_into_live_turn(first["id"], tmp_path)
+    real_materialize = upload_transfer.materialize_blobs_for_turn
+
+    def _materialize_while_another_send_arrives(ids, cwd):
+        seen["second"] = turns.enqueue_turn(SID, "user", prompt="and also this")
+        # That send asks to steer while this thread still writes the file.
+        seen["second_sweep"] = asyncio.run_coroutine_threadsafe(
+            session_runtime.try_steer_pending(SID), loop)
+        return real_materialize(ids, cwd)
+
+    async def _impl(**kwargs):
+        seen["steered"] = await session_runtime.try_steer_pending(SID)
+        seen["steered"] += await asyncio.wrap_future(seen["second_sweep"])
+        yield {"type": "steer_delivered", "steers": [{"id": first["id"]}, {"id": seen["second"]["id"]}]}
+        yield {"type": "done", "metadata": {}}
+
+    loop = asyncio.get_running_loop()
+    opening = turns.get_queued_turns(SID)[0]
+    real_create = turn_recorder.TurnRecorder.create_for_run
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), _pump_env(_impl), \
+            patch.object(upload_transfer, "materialize_blobs_for_turn", _materialize_while_another_send_arrives), \
+            patch.object(turn_recorder.TurnRecorder, "create_for_run", real_create):
+        assert await session_runtime.SessionRuntime(opening).execute() == "completed"
+    assert seen["steered"] == 2
+    assert [steer_id for _text, steer_id in adapter.calls] == [first["id"], seen["second"]["id"]]
+    users = [row["payload"]["content"] for row in session_events.get_events(SID)
+             if row["event_type"] == "message.user"]
+    assert users[-1] == "and also this"
+
+
 async def test_remote_materialization_records_the_local_paths(staged_upload, rewind_env, tmp_path, monkeypatch):
     from contextlib import ExitStack
     from app.core import query_engine, upload_transfer

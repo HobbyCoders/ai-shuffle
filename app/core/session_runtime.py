@@ -829,6 +829,11 @@ class SessionRuntime:
         # Row -> what turn setup would have made of it: the prompt naming the
         # attachments' local paths, and those paths, for the receipt to record.
         self._steer_prepared: Dict[str, Dict[str, Any]] = {}
+        # One ``steer_pending`` walk at a time. A walk awaits mid-row (files
+        # being written, a peer's scope rechecked), and a second walk skips
+        # attempted rows, so without this a message sent meanwhile would reach
+        # the model ahead of the one still being prepared.
+        self._steer_lock = asyncio.Lock()
         # Queued rows already logged as not steerable into this turn, so a
         # refusal is logged once per row rather than on every send and sweep.
         self._steer_refusals_logged: set = set()
@@ -2049,6 +2054,10 @@ class SessionRuntime:
 
         Returns how many rows were submitted.
         """
+        async with self._steer_lock:
+            return await self._steer_pending_locked()
+
+    async def _steer_pending_locked(self) -> int:
         if self._steering_closed:
             return 0
         adapter = self._live_adapter()
