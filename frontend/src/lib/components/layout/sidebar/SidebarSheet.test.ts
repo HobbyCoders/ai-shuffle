@@ -84,6 +84,27 @@ describe('SidebarSheet drag to dismiss', () => {
 		expect(node.setPointerCapture).not.toHaveBeenCalled();
 	});
 
+	it('a desktop popover opened from a low row opens just above it', () => {
+		const onClose = vi.fn();
+		render(SidebarSheet, {
+			props: { open: true, label: 'Snooze chat', phone: false, anchor: { top: 840, bottom: 880, height: 900 }, onClose, children }
+		});
+		const node = screen.getByRole('dialog', { name: 'Snooze chat' });
+		expect(node.classList.contains('above')).toBe(true);
+		expect(node.style.top).toBe('auto');
+		expect(node.style.bottom).toBe('64px');
+	});
+
+	it('the phone sheet ignores a row anchor', () => {
+		const onClose = vi.fn();
+		render(SidebarSheet, {
+			props: { open: true, label: 'Snooze chat', phone: true, anchor: { top: 840, bottom: 880, height: 900 }, onClose, children }
+		});
+		const node = screen.getByRole('dialog', { name: 'Snooze chat' });
+		expect(node.style.top).toBe('');
+		expect(node.style.bottom).toBe('');
+	});
+
 	it('the desktop popover does not drag', () => {
 		const { onClose, pointer } = sheet(false);
 		pointer('pointerdown', 100, 0);
