@@ -8047,7 +8047,13 @@ def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
     # 3a: save_skill + the docstring/_selftest contract, and the prose path.
     assert "save_skill(name=..., source=...)" in text
     assert "_selftest()" in text and "docstring" in text
-    assert "`<project>/.fluid/skills/<name>/SKILL.md`" in text
+    # The synced user scope, not a project folder that stays on one worker,
+    # spelled absolute: the file tools resolve "~" under the cwd.
+    from pathlib import Path
+    expected = Path.home() / ".fluid" / "skills" / "<name>" / "SKILL.md"
+    assert ha.USER_SKILL_PATH == str(expected) and Path(ha.USER_SKILL_PATH).is_absolute()
+    assert f"`{ha.USER_SKILL_PATH}`" in text
+    assert "<project>/.fluid/skills" not in text and "~/" not in text
     assert "frontmatter" in text and '"# Available skills" in later sessions' in text
     assert "delete_skill(name=...)" in text
     # 8b: the try/except sentence that contradicted run_python is gone; the

@@ -7566,6 +7566,21 @@ def _context_declared_agents(options: SessionOptions) -> List[Dict[str, str]]:
 # instructions, MCP server instructions — still says "call the X tool" about
 # tools that are no longer in its schema. These strings close that gap.
 
+def _user_skill_path() -> str:
+    """Absolute ``<home>/.fluid/skills/<name>/SKILL.md``: the user skill scope
+    fluid discovers and the network syncs (``prose_skills_root``). Spelled out
+    because the file tools resolve ``~`` as a folder under the cwd."""
+    try:
+        root = Path.home() / ".fluid" / "skills"
+    except (OSError, RuntimeError):  # no resolvable home: keep the shorthand
+        return "~/.fluid/skills/<name>/SKILL.md"
+    return str(root / "<name>" / "SKILL.md")
+
+
+# Fixed for the process, so prompts that carry it stay cache-stable.
+USER_SKILL_PATH = _user_skill_path()
+
+
 # The compiler's skills header, rewritten for a schema that has no Skill tool.
 CODE_MODE_SKILLS_HEADER = (
     "# Available skills\n"
@@ -7678,7 +7693,7 @@ def _code_mode_section(
         parts.append("## Prose skills\nLoad installed instructions with "
                      "`from tools.Skill import Skill`. "
                      + ("Save a requested reusable procedure at "
-                        "`<project>/.fluid/skills/<name>/SKILL.md` with frontmatter "
+                        f"`{USER_SKILL_PATH}` with frontmatter "
                         "name and description; it appears under "
                         '"# Available skills" in later sessions.' if has("Write") else ""))
     if has("save_skill"):
@@ -8086,7 +8101,10 @@ instructions copied from tool output. Recall is one cheap call: make it BEFORE \
 re-discovering an environment fact with probes, or when the user refers to a \
 convention you cannot see. Saved facts arrive once as the "# Memory" reminder \
 on a user turn, and as "# Memory changes" when they change; it is not \
-repeated every turn. If no "# Memory" reminder is visible, use Recall."""
+repeated every turn. If no "# Memory" reminder is visible, use Recall. \
+""" + f"""Skills in {USER_SKILL_PATH} sync to every worker the same way: \
+create a reusable skill there and edit it on one worker; never copy a skill \
+to other workers. A project's .fluid/skills stays in that checkout."""
 
 # How a correction of the way the agent works is saved. The native leg carries
 # it in Remember's eager description; on the delegated leg Remember's docs are
