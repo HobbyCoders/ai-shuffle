@@ -871,6 +871,9 @@ class CliHost:
                 else None
             ),
             setting_sources=self.config.setting_sources,
+            # The worker's own model picks its family's behaviour rules.
+            model=(definition.model if definition is not None and definition.model
+                   else getattr(self.engine, "model", None)),
         ))
 
         registry = ToolRegistry()

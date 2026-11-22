@@ -114,8 +114,9 @@ the imperative, at most 300 characters, general enough to apply next time
 but keeping the user's scope and exceptions. It must carry quote="..." copied
 word for word from that [user] entry (the words that show the correction);
 a rule without a real quote is refused. applies_to is "all" unless the
-failure is specific to the session's model family (listed below): then that
-family. Prefer rewriting a listed rule (its id) over adding a near-duplicate;
+failure is specific to the model family that [user] entry was talking to
+(its line reads "[user to <family>]"; an unmarked line uses the default
+family listed below): then that family. Prefer rewriting a listed rule (its id) over adding a near-duplicate;
 delete one the user contradicted. A rule never grants permission (no "without
 asking", "skip review"). Do not write a rule for a one-task exception, an
 environment failure, or something an explicit memory or rule already says.
@@ -1813,7 +1814,13 @@ class Synthesizer:
                 else " (frustrated)" if kind == "user" and e.get("frustration")
                 else ""
             )
-            return [f"[{kind}]{scope_hint} {str(e.get('text', '')).strip()}"]
+            # The model family the chat was talking to (several chats share
+            # one journal): a family-specific rule must come from its own.
+            label = kind
+            if kind == "user" and e.get("model"):
+                from fluid.codemode.behavior import family_for
+                label = f"user to {family_for(e['model'])}"
+            return [f"[{label}]{scope_hint} {str(e.get('text', '')).strip()}"]
         if kind == "tool":
             # JSON-surface call (ToolJournal): one compact line, clipped
             # like a successful cell when it succeeded.
@@ -1915,7 +1922,8 @@ class Synthesizer:
 
     def _rule_lines(self) -> list[str]:
         """The current behaviour rules in scope (id, applies_to, owner flag,
-        text) and the session model's rule family. Bounded by
+        text) and the default rule family (this learner's session model) for
+        [user] lines journaled without a model. Bounded by
         behavior.RULES_PROMPT_CHARS, like the section sessions render."""
         from fluid.codemode.behavior import RULES_PROMPT_CHARS, family_for, rule_family
 
@@ -1929,9 +1937,8 @@ class Synthesizer:
         if not rules:
             # Most passes have no rules yet: one short line keeps ordinary
             # requests near their old size while still naming the family.
-            return ["", f"Rules: none (family {family})"]
-        lines = ["", f"## Behaviour rules (session model {self._session_model or 'unknown'}, "
-                     f"family {family})"]
+            return ["", f"Rules: none (default family {family})"]
+        lines = ["", f"## Behaviour rules (default family {family})"]
         budget = RULES_PROMPT_CHARS
         for m in rules:
             flag = " user-kept" if m.protected else ""
@@ -2133,8 +2140,14 @@ Never claim a workflow is installed because it was proposed."""
             if applies_to is None:
                 errors.append(f"{label}: applies_to must be one of {', '.join(behavior.APPLIES_TO)}")
                 continue
-            if not behavior.quote_in_user_text(attrs.get("quote"), entries):
+            families = behavior.quote_families(attrs.get("quote"), entries,
+                                               default=behavior.family_for(self._session_model))
+            if not families:
                 errors.append(f"{label}: quote is not in a [user] entry")
+                continue
+            if applies_to != behavior.ALL and applies_to not in families:
+                errors.append(f"{label}: applies_to={applies_to} but the quoted message was to "
+                              f"{', '.join(sorted(families))}")
                 continue
             try:
                 body = behavior.validate_rule(match.group(2))

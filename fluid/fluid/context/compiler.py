@@ -112,6 +112,10 @@ class PromptInputs:
     # is the skills root (the continual store's home); ``None`` omits the
     # section (continual learning off).
     memories_dir: str | os.PathLike[str] | None = None
+    # The session's model: picks which family-specific behaviour rules the
+    # memory section renders (fluid.codemode.behavior). ``None`` renders
+    # only the rules for every model.
+    model: str | None = None
     # Enabled plugins (~/.fluid/plugins, gated by the settings stack's
     # enabledPlugins map) contribute their skills and agents to the indexes,
     # namespaced <plugin>:<name> and just as deferred — descriptions only.
@@ -324,7 +328,7 @@ def compile_prompt(inputs: PromptInputs) -> CompiledPrompt:
         store = SkillStore(inputs.memories_dir)
         # Project-scoped entries render only into their own project's
         # sessions; global entries render everywhere.
-        section = store.render_memory_section(project_key_for(inputs.cwd))
+        section = store.render_memory_section(project_key_for(inputs.cwd), model=inputs.model)
         if section:
             sections.append(
                 PromptSection(

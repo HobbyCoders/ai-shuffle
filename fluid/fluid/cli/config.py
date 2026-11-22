@@ -110,8 +110,17 @@ def resolved_prompt(
                 else None
             ),
             setting_sources=config.setting_sources,
+            model=_session_model(config, provider_name),
         )
     )
+
+
+def _session_model(config: HarnessConfig, provider_name: str | None) -> str:
+    """The model this run uses, as the base prompt resolves it."""
+    try:
+        return config.model_for(provider_name)
+    except KeyError:
+        return config.default_model
 
 
 def resolved_system(

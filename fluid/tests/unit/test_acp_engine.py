@@ -151,6 +151,32 @@ async def test_streaming_turn_maps_chunks_usage_and_instructions(tmp_path: Path)
         await d.close()
 
 
+class _Journal:
+    """Records what the loop hands the memory learner."""
+
+    def __init__(self) -> None:
+        self.turns = 0
+        self.events: list[tuple[str, str, Any]] = []
+
+    def begin_turn(self) -> None:
+        self.turns += 1
+
+    def record_event(self, kind: str, text: str, model: Any = None) -> None:
+        self.events.append((kind, text, model))
+
+
+async def test_each_turn_feeds_the_memory_learner_its_text_and_model(tmp_path: Path) -> None:
+    journal = _Journal()
+    d = await _driver(tmp_path, model="gemini-3.8-flash", journal=journal)
+    try:
+        assert isinstance(await d.turn("stream"), TurnComplete)
+        assert journal.turns == 1
+        assert journal.events == [("user", "stream", "gemini-3.8-flash"),
+                                  ("assistant", "Hello world", "gemini-3.8-flash")]
+    finally:
+        await d.close()
+
+
 async def test_context_usage_is_the_agents_own_usage_update(tmp_path: Path) -> None:
     # agy 1.5.13 sends usage_update {used, size} after each turn (live probe,
     # 2026-11-20); the fake's "stream" turn sends used=120, size=1000.

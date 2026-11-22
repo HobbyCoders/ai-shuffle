@@ -228,6 +228,13 @@ def fingerprint(text):
     return hashlib.sha256(" ".join(text.casefold().split()).encode()).hexdigest()
 
 
+def _is_rule_key(key):
+    """A behaviour rule's key (fluid.codemode.behavior.KEY_PREFIX)."""
+    from fluid.codemode.behavior import is_rule_key
+
+    return is_rule_key(key)
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -835,8 +842,14 @@ class FactStore:
                             and ((key and e.get("key") == key) or (
                                 not str(key or "").startswith("memory.coexist.")
                                 and not str(e.get("key") or "").startswith("memory.coexist.")
+                                # The same rule text for another model family is
+                                # a separate rule, not this one.
+                                and not (_is_rule_key(key) and _is_rule_key(e.get("key")))
                                 and fingerprint(e["text"]) == fp))), None)
             now = time.time()
+            # A behaviour rule moved to another model family keeps its text but
+            # changes its key: that is a revision, not a repeat of the same save.
+            rekey = bool(old) and _is_rule_key(key) and old.get("key") != key
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if replaces:
                 new_scope = scope or (old.get("scope", "global") if old else "global")
@@ -880,7 +893,7 @@ class FactStore:
             # worker-tagged fact, even when its text/metadata did not change.
             same_authority = not old or not protected or (
                 not old.get("worker") and (not provenance or old.get("provenance") == provenance))
-            if (old and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
+            if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
                     and not targets and self._metadata_differs(old, when, always)
                     and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
@@ -894,7 +907,7 @@ class FactStore:
                 if _document is None:
                     self._write(doc)
                 return self._entry(old)
-            if (old and not resolves and not old.get("conflicted") and old["text"] == text
+            if (old and not rekey and not resolves and not old.get("conflicted") and old["text"] == text
                     and same_authority and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
@@ -1382,7 +1395,7 @@ class FactStore:
                 self._write(doc)
             return changed
 
-    def forget(self, memory_id, *, explicit=False, expected_revision=None):
+    def forget(self, memory_id, *, explicit=False, expected_revision=None, purge=True):
         with file_transaction(self.lock):
             doc = self._prepare()
             old = next((e for e in doc["entries"] + doc["archived"] if e["id"] == memory_id), None)
@@ -1411,11 +1424,13 @@ class FactStore:
             doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
             for bucket in ("entries", "archived"):
                 doc[bucket] = [e for e in doc[bucket] if e["id"] != memory_id]
-            if explicit:
+            if explicit and purge:
                 # Journal evidence older than this is purged and never shown
                 # to the learner again. Only a user Forget earns that; a
                 # learner delete setting it would let the next maintenance
-                # sweep wipe the journal anyway.
+                # sweep wipe the journal anyway. Deleting a behaviour rule
+                # passes purge=False: the barrier stops it being learned
+                # again, and unread evidence of other lessons stays.
                 doc["forgotten_before"] = time.time()
             self._maintain(doc)
             self._write(doc)

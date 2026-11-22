@@ -296,18 +296,23 @@ class FrictionDetector:
         }
 
 
-def conversation_entry(kind: str, text: str, cap: int) -> dict[str, Any] | None:
+def conversation_entry(kind: str, text: str, cap: int,
+                       model: str | None = None) -> dict[str, Any] | None:
     """The journal line for one conversation event, or None when empty.
 
     A ``user`` message loses the app's reminders (they are echoes of saved
     facts) and is checked for frustration (behavior.frustration_signal): a
     hit is stamped ``frustration`` so the learner reads the turn as a
-    correction."""
+    correction. ``model`` (the model the chat was talking to) is stamped on
+    a ``user`` entry: a behaviour rule for one model family must come from a
+    message to that family, and several chats share one journal."""
     if kind == "user":
         text = strip_reminders(text)
     if not (text or "").strip():
         return None
     entry: dict[str, Any] = {"kind": kind, "text": text[:cap]}
+    if kind == "user" and model:
+        entry["model"] = str(model)[:80]
     if kind == "user":
         from fluid.codemode.behavior import frustration_signal
         try:
@@ -379,9 +384,10 @@ class ToolJournal:
         except Exception:
             pass
 
-    def record_event(self, kind: str, text: str) -> None:
-        """Journal a conversation event (``user`` prompt / ``assistant`` reply)."""
-        entry = conversation_entry(kind, text, _EVENT_CAP)
+    def record_event(self, kind: str, text: str, model: str | None = None) -> None:
+        """Journal a conversation event (``user`` prompt / ``assistant`` reply).
+        ``model`` is the model the chat is talking to (see conversation_entry)."""
+        entry = conversation_entry(kind, text, _EVENT_CAP, model)
         if entry is None:
             return
         try:

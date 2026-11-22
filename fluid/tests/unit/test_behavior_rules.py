@@ -105,7 +105,9 @@ async def test_a_quoted_rule_is_learned_and_shown_only_to_its_family(tmp_path):
     _correction(store)
     answer = ('<rule applies_to="gpt" quote="real PRs only">When opening a pull request: '
               'open a real PR, never a draft.</rule>')
-    await Synthesizer(Answer(answer), "gpt-test", store, min_new_entries=1).run()
+    # The journal line carries no model: it was said to the session's model.
+    await Synthesizer(Answer(answer), "gpt-test", store, min_new_entries=1,
+                      session_model="gpt-6.2-sol").run()
     [rule] = rules(store)
     assert rule.text.startswith("When opening a pull request")
     assert behavior.rule_family(rule.key) == "gpt" and rule.durable and not rule.protected
@@ -124,6 +126,84 @@ async def test_a_rule_whose_quote_the_user_never_wrote_is_refused(tmp_path):
     await synth.run()
     assert rules(store) == []
     assert "quote is not in a [user] entry" in (synth.last_error or "")
+
+
+def test_a_quote_carries_the_family_of_the_model_it_was_said_to():
+    entries = [{"kind": "user", "text": "Stop opening draft PRs.", "model": "claude-opus-5-5"},
+               {"kind": "user", "text": "Lead with the result please."},
+               {"kind": "assistant", "text": "draft PRs are fine", "model": "gpt-6.2-sol"}]
+    assert behavior.quote_families("draft PRs", entries, default="gpt") == {"claude"}
+    assert behavior.quote_families("lead with the RESULT", entries, default="gpt") == {"gpt"}
+    assert behavior.quote_families("draft PRs are fine", entries) == set()
+
+
+async def test_a_rule_for_a_family_the_user_was_not_talking_to_is_refused(tmp_path):
+    store = SkillStore(tmp_path)
+    store.journal_append({"kind": "user", "session": "s1", "model": "claude-opus-5-5",
+                          "text": "Stop opening draft PRs, I told you real PRs only."})
+    store.journal_append(edit_cell(1))
+    store.journal_append({"kind": "assistant", "session": "s1", "text": "Opened PR."})
+    answer = ('<rule applies_to="gpt" quote="real PRs only">When opening a pull request: '
+              'open a real PR, never a draft.</rule>')
+    provider = Answer(answer)
+    synth = Synthesizer(provider, "gpt-test", store, min_new_entries=1)
+    await synth.run()
+    assert rules(store) == []
+    assert "applies_to=gpt but the quoted message was to claude" in (synth.last_error or "")
+    assert "[user to claude]" in provider.prompts[0]
+
+
+async def test_a_rule_for_the_family_the_user_was_talking_to_is_learned(tmp_path):
+    store = SkillStore(tmp_path)
+    store.journal_append({"kind": "user", "session": "s1", "model": "claude-opus-5-5",
+                          "text": "Stop opening draft PRs, I told you real PRs only."})
+    store.journal_append(edit_cell(1))
+    store.journal_append({"kind": "assistant", "session": "s1", "text": "Opened PR."})
+    answer = ('<rule applies_to="claude" quote="real PRs only">When opening a pull request: '
+              'open a real PR, never a draft.</rule>')
+    await Synthesizer(Answer(answer), "gpt-test", store, min_new_entries=1).run()
+    [rule] = rules(store)
+    assert behavior.rule_family(rule.key) == "claude"
+
+
+def test_moving_a_rule_to_another_family_keeps_the_new_family(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    rule = store.save_memory(text, provenance="user", protected=True,
+                             key=behavior.rule_key("gpt", text), when="When working with the owner")
+    moved = store.save_memory(text, memory_id=rule.id, expected_revision=rule.revision,
+                              provenance="user", protected=True, key=behavior.rule_key("claude", text), when="When working with the owner")
+    [only] = rules(store)
+    assert only.id == rule.id == moved.id and behavior.rule_family(only.key) == "claude"
+
+
+def test_the_same_rule_text_for_two_families_is_two_rules(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    for family in ("gpt", "claude"):
+        store.save_memory(text, provenance="user", protected=True,
+                          key=behavior.rule_key(family, text), when="When working with the owner")
+    assert sorted(behavior.rule_family(r.key) for r in rules(store)) == ["claude", "gpt"]
+
+
+def test_the_assembled_prompt_shows_a_family_rule_only_to_that_family(tmp_path):
+    from fluid.context.compiler import PromptInputs, compile_prompt
+
+    store = SkillStore(tmp_path / "skills")
+    text = "When opening a pull request: open a real PR, never a draft."
+    store.save_memory(text, provenance="user", protected=True,
+                      key=behavior.rule_key("gpt", text), when="When working with the owner")
+
+    def compiled(model):
+        return compile_prompt(PromptInputs(
+            base="base", cwd=str(tmp_path), include_env=False,
+            include_global_instructions=False, include_project_instructions=False,
+            include_skills=False, include_agents=False, include_plugins=False,
+            memories_dir=str(tmp_path / "skills"), model=model,
+        )).text
+
+    assert text in compiled("gpt-6.2-sol")
+    assert text not in compiled("claude-opus-5-5")
 
 
 async def test_a_rewrite_cannot_touch_a_rule_the_owner_kept(tmp_path):

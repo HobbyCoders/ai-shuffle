@@ -141,16 +141,26 @@ def grants_permission(text: str) -> bool:
 def quote_in_user_text(quote: Any, entries: Iterable[dict]) -> bool:
     """True when ``quote`` (whitespace and case aside) appears in what the
     user wrote in ``entries`` (``user`` and ``remember`` journal kinds)."""
+    return bool(quote_families(quote, entries))
+
+
+def quote_families(quote: Any, entries: Iterable[dict], *, default: str = "other") -> set[str]:
+    """The model families of the user entries ``quote`` appears in
+    (whitespace and case aside); empty when it is in none. An entry is the
+    family of the model it was journaled with (``model``), ``default`` when
+    it carries none (a ``remember`` entry, or one written before entries
+    were stamped)."""
     from fluid.codemode.journal import strip_reminders
 
     wanted = _normal(quote)
     if not (MIN_QUOTE_CHARS <= len(wanted) <= MAX_QUOTE_CHARS):
-        return False
+        return set()
+    found: set[str] = set()
     for entry in entries:
         if entry.get("kind") in ("user", "remember"):
             if wanted in _normal(strip_reminders(str(entry.get("text", "")))):
-                return True
-    return False
+                found.add(family_for(entry["model"]) if entry.get("model") else default)
+    return found
 
 
 # ── frustration ─────────────────────────────────────────────────────────

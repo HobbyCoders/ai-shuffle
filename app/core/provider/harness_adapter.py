@@ -2097,9 +2097,14 @@ class HarnessAdapter(ProviderAdapter):
             else _external_mcp_servers(options.mcp_servers)
         )
 
+        # The learning journal, as on the delegated leg: the memory learner
+        # learns from Antigravity chats like any other.
+        acp_journal, acp_bus = await self._delegated_journal(options, fluid_session_id)
         self._engine = AcpLoop(
             store=store,
             spec=spec,
+            journal=acp_journal,
+            bus=acp_bus,
             model=options.model,
             effort=_valid_effort(getattr(options, "effort", None)),
             permission_mode=options.permission_mode,
@@ -2982,8 +2987,11 @@ class HarnessAdapter(ProviderAdapter):
             if not app_session_id:
                 return None
             store, project = session_memory(app_session_id, self._options.cwd)
+            # The session's model picks which family-specific behaviour
+            # rules render (fluid.codemode.behavior).
             section = store.render_memory_section(project, checkout=self._options.cwd,
-                                                  task_query=getattr(self, "_memory_initial_task", ""))
+                                                  task_query=getattr(self, "_memory_initial_task", ""),
+                                                  model=self._options.model or self._current_model or "")
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)

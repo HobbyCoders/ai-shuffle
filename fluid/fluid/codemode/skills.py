@@ -1766,14 +1766,17 @@ class SkillStore:
                                     expected_when_at=expected_when_at)
 
     def delete_memory(self, memory_id: str, *, explicit: bool = False,
-                      expected_revision: int | None = None) -> bool:
+                      expected_revision: int | None = None, purge_evidence: bool = True) -> bool:
         """Delete one fact. ``explicit`` means the user asked (the Forget
         tool); only that purges the journal evidence written before it. A
         learner or consolidation delete retires the fact and leaves the
-        journal and the synthesis cursor alone.
+        journal and the synthesis cursor alone. ``purge_evidence=False``
+        keeps an explicit delete's barrier without the purge (deleting a
+        behaviour rule is not a request to forget the chats behind it).
         """
-        deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision)
-        if deleted and explicit:
+        deleted = self._facts.forget(memory_id, explicit=explicit, expected_revision=expected_revision,
+                                     purge=purge_evidence)
+        if deleted and explicit and purge_evidence:
             self.purge_forgotten_evidence()
         return deleted
 

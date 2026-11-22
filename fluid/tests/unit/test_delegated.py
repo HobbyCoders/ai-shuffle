@@ -2170,7 +2170,7 @@ class _Journal:
     def begin_turn(self) -> None:
         self.events.append(("begin",))
 
-    def record_event(self, kind: str, text: str) -> None:
+    def record_event(self, kind: str, text: str, model: str | None = None) -> None:
         self.events.append(("event", kind, text))
 
     def record_tool(self, name: str, input: dict, output: str, is_error: bool) -> None:

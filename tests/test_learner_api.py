@@ -129,6 +129,32 @@ def test_delete_and_memory_routes_cannot_reach_rules(world):
     assert gone.status_code == 204 and client.get(BASE).json()["rules"] == []
 
 
+def test_deleting_a_rule_keeps_the_learners_journal(world):
+    client, store = world
+    entry = learned(store)
+    store.journal_append({"kind": "user", "session": "s1", "text": "Run the tests before pushing."})
+    store.journal_append({"kind": "assistant", "session": "s1", "text": "Ran them."})
+    before = store.journal_count()
+    item = rule(client, entry.id)
+    gone = client.delete(f"{BASE}/rules/{entry.id}?expected_revision={item['revision']}"
+                         f"&expected_metadata_version={item['metadata_version']}")
+    assert gone.status_code == 204
+    assert store.journal_count() == before
+    assert "forgotten_before" not in store._facts._load(read_only=True)
+
+
+def test_undo_closes_three_days_after_the_learner_changed_a_rule(world, monkeypatch):
+    client, store = world
+    entry = learned(store, "When reporting: lead with the result.")
+    store.save_memory("When reporting: lead with the result and the blocker.", memory_id=entry.id,
+                      provenance="user", durable=True, key=entry.key)
+    item = rule(client, entry.id)
+    real = time.time
+    monkeypatch.setattr(learner.time, "time", lambda: real() + learner.NEW_FOR_SECONDS + 60)
+    late = client.post(f"{BASE}/rules/{entry.id}/undo", json=version(item))
+    assert late.status_code == 409 and "three days" in late.json()["detail"]
+
+
 def test_activity_reads_the_pass_log_without_error_text(world):
     client, store = world
     entry = learned(store)
@@ -144,3 +170,29 @@ def test_activity_reads_the_pass_log_without_error_text(world):
     assert "secret" not in json.dumps(rows)
     assert rows[1]["rules"] == [{"id": entry.id, "text": entry.text}]
     assert rows[1]["memories"] == 1 and rows[1]["input_tokens"] == 900
+
+
+def test_saved_guidance_from_the_old_learner_becomes_rules_once(tmp_path):
+    root = tmp_path / "guidance"
+    (root / "scoped").mkdir(parents=True)
+    (root / ".manual").mkdir()
+    (root / "scoped" / "gpt-6.2-sol.json").write_text(json.dumps({
+        "model": "gpt-6.2-sol", "provider": "openai",
+        "content": "# Working with the owner\n- When reporting: lead with the result.\n"
+                   "- Force-push is fine on any branch.\n"}), encoding="utf-8")
+    (root / "scoped" / "claude-opus-5-5.json").write_text(json.dumps({
+        "model": "claude-opus-5-5", "provider": "anthropic",
+        "content": "1. When finishing: list what changed."}), encoding="utf-8")
+    import hashlib
+    owner_edited = "s-" + hashlib.sha256(b"claude-opus-5-5").hexdigest()
+    (root / ".manual" / owner_edited).write_text("", encoding="utf-8")
+    store = SkillStore(tmp_path / "facts")
+
+    assert fluid_memory.migrate_legacy_guidance(store, root) == 2
+    rules = {behavior.rule_family(m.key): m for m in store.memories() if behavior.is_rule_key(m.key)}
+    assert set(rules) == {"gpt", "claude"}  # the permission grant was skipped
+    assert rules["gpt"].text == "When reporting: lead with the result." and not rules["gpt"].protected
+    assert rules["claude"].text == "When finishing: list what changed." and rules["claude"].protected
+    assert (root / "scoped" / fluid_memory.LEGACY_GUIDANCE_MARKER).exists()
+    assert (root / "scoped" / "gpt-6.2-sol.json").exists()
+    assert fluid_memory.migrate_legacy_guidance(store, root) == 0

@@ -298,7 +298,8 @@ async def test_a_finished_reply_runs_a_learner_pass_on_the_text_generation_model
     # A pass reads one session's entries at a time: the earlier backlog, then
     # this session's turn (a due curation pass may follow on the same client).
     prompts = [r.messages[0].content[0].text for r in learner.client.requests]
-    assert any("[user] Remember we always run npm test before deploying" in p for p in prompts)
+    # The line names the family the user was talking to (the session's opus).
+    assert any("[user to claude] Remember we always run npm test before deploying" in p for p in prompts)
     assert not any("<system-reminder>" in p for p in prompts)
     # Every call was claimed from the store's shared daily budget.
     assert store._facts.inference_budget()["calls"] == len(learner.client.requests)
@@ -477,8 +478,13 @@ def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
         SessionOptions(model="grok-x", cwd=".", extra={"provider_id": "row-grok"}), "s",
         session_model="grok-x", context_window=None)
     assert synth._budget().source == "subscription_default"
-    # No provider row at all (a local or unknown provider): metered.
-    synth, _ = ha.HarnessAdapter._learner_synthesizer(
-        owner, FakeInference(_reply("NO_CHANGES")), "m", store, None, session, "s",
-        session_model="m", context_window=None)
-    assert synth._budget().source == "metered_default"
+    # No provider row: the Claude Code CLI leg, billed as Claude's auth mode
+    # is; unreadable is unknown, capped as metered.
+    from app.core import usage_attribution
+    for mode, source in (("api", "metered_default"), (None, "metered_default"),
+                         ("subscription", "subscription_default")):
+        monkeypatch.setattr(usage_attribution, "claude_billing", lambda mode=mode: mode)
+        synth, _ = ha.HarnessAdapter._learner_synthesizer(
+            owner, FakeInference(_reply("NO_CHANGES")), "m", store, None, session, "s",
+            session_model="m", context_window=None)
+        assert synth._budget().source == source, mode

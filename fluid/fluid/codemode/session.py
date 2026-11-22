@@ -828,7 +828,7 @@ class CodeModeSession:
             except Exception:
                 pass
 
-    def record_event(self, kind: str, text: str) -> None:
+    def record_event(self, kind: str, text: str, model: str | None = None) -> None:
         """Journal a conversation event — the episodic half of the journal.
 
         ``kind`` is ``"user"`` (the prompt that started a turn) or
@@ -842,7 +842,7 @@ class CodeModeSession:
         # not an echo of facts that are already saved.
         if self._skills is None:
             return
-        entry = conversation_entry(kind, text, _JOURNAL_EVENT_CAP)
+        entry = conversation_entry(kind, text, _JOURNAL_EVENT_CAP, model)
         if entry is None:
             return
         try:

@@ -112,6 +112,9 @@ def _setup(store) -> dict[str, Any]:
                 row = _lookup_provider_row(str(provider_id)) or {}
                 provider = row.get("name") or None
                 billing = learner_billing(*_lookup_provider_row_shape(str(provider_id))[:2])
+            else:
+                # No row: the Claude Code CLI leg, billed by Claude's auth mode.
+                billing = learner_billing(None, None)
     except Exception as exc:  # noqa: BLE001 — setup reads are best-effort
         logger.warning("Could not resolve the learner model (%s)", type(exc).__name__)
     setting = learner_daily_calls()
@@ -305,22 +308,31 @@ def _undo(rule_id, body: RuleVersion):
         _require_metadata_version(old, body.expected_metadata_version)
         if old.get("protected"):
             raise HTTPException(409, "You kept this rule, so there is no learner change to undo. Edit or delete it instead.")
+        if time.time() - float(old.get("updated_at") or 0) >= NEW_FOR_SECONDS:
+            raise HTTPException(409, "Undo is only available for three days after the learner changes a rule. Edit or delete it instead.")
         history = old.get("history") or []
         if history and history[-1].get("text"):
             store.save_memory(history[-1]["text"], memory_id=rule_id,
                               expected_revision=body.expected_revision, provenance=old.get("provenance"),
                               durable=True, key=old["key"], when=old.get("when") or _RULE_WHEN)
             return {"restored": _saved(store, rule_id)}
-        if not store.delete_memory(rule_id, explicit=True, expected_revision=body.expected_revision):
+        if not _forget_rule(store, rule_id, body.expected_revision):
             raise HTTPException(404, _NOT_FOUND)
         return {"deleted": rule_id}
+
+
+def _forget_rule(store, rule_id, expected_revision) -> bool:
+    """Delete a rule on every worker and stop it being learned again, without
+    purging the learner's unread chat evidence (a memory Forget does that)."""
+    return store.delete_memory(rule_id, explicit=True, expected_revision=expected_revision,
+                               purge_evidence=False)
 
 
 def _delete(rule_id, expected_revision, expected_metadata_version):
     store = store_for_owner("local")
     with file_transaction(store._facts.lock):
         _require_metadata_version(_find_rule(store, rule_id), expected_metadata_version)
-        if not store.delete_memory(rule_id, explicit=True, expected_revision=expected_revision):
+        if not _forget_rule(store, rule_id, expected_revision):
             raise HTTPException(404, _NOT_FOUND)
 
 

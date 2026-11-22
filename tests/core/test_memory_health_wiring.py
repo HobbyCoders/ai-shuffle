@@ -111,7 +111,30 @@ def test_learner_budget_is_a_persisted_owner_setting_read_at_pass_time():
     (("openai", "api_key"), "metered"),
     (("anthropic", "api_key"), "metered"),
     (("openrouter", None), "metered"),
-    ((None, None), None),
+    (("anthropic", "oauth"), "subscription"),
+    (("antigravity", "oauth-personal"), "subscription"),
+    (("antigravity", "gemini-api-key"), "metered"),
 ])
 def test_learner_billing_follows_the_subscription_rows(shape, billing):
     assert fluid_memory.learner_billing(*shape) == billing
+
+
+@pytest.mark.parametrize("mode,billing", [
+    ("subscription", "subscription"),
+    ("cloud", "metered"),
+])
+def test_learner_billing_without_a_row_follows_claude_auth_mode(monkeypatch, mode, billing):
+    """No provider row: the pass runs on the Claude Code CLI, billed by the
+    Claude auth mode (a Claude plan is flat-rate)."""
+    from app.core import claude_auth_mode
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: mode)
+    assert fluid_memory.learner_billing(None, None) == billing
+
+
+def test_learner_billing_without_a_row_is_unknown_when_unreadable(monkeypatch):
+    from app.core import claude_auth_mode
+
+    def boom():
+        raise OSError("unreadable")
+    monkeypatch.setattr(claude_auth_mode, "current_mode", boom)
+    assert fluid_memory.learner_billing(None, None) is None
