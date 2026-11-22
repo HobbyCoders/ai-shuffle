@@ -343,8 +343,9 @@
 	const labelSpeed = $derived(shownSpeed({
 		fastSupported, fastEnabled: fastMode, fastPending, ultrafastSupported, ultrafastEnabled: ultrafastMode
 	}));
+	/** Settles once the chat has answered, so the bolt can step from the newest pick. */
 	function selectSpeed(speed: ComposerSpeed) {
-		if (!fastPending) activeSession.setSpeed(speed);
+		return fastPending ? undefined : activeSession.setSpeed(speed);
 	}
 
 	// Live reroute detection: the backend `model_info` note tells us which model

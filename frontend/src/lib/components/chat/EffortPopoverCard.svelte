@@ -49,7 +49,8 @@
 		ultrafastEnabled?: boolean;
 		/** How the model's Ultrafast is paid for, which words its cost line. */
 		ultrafastBilling?: UltrafastBilling;
-		onSelectSpeed?: (speed: ComposerSpeed) => void;
+		/** Settles once the chat has answered the pick. */
+		onSelectSpeed?: (speed: ComposerSpeed) => void | Promise<unknown>;
 	}
 
 	let {
@@ -73,21 +74,33 @@
 	const speedPicker = $derived(fastSupported && ultrafastSupported);
 	const costNote = $derived(ultrafastCost(ultrafastBilling));
 	const speed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
-	const upcoming = $derived(nextSpeed(speed, speedPicker));
+	// The chat answers each pick after the worker saves it. Until every pick
+	// has settled, the bolt shows and steps from the newest one asked for, so
+	// a quick second click moves on from it instead of repeating it.
+	let requested = $state<ComposerSpeed | null>(null);
+	let inFlight = 0;
+	const boltSpeed = $derived(speedPicker ? (requested ?? speed) : speed);
+	const upcoming = $derived(nextSpeed(boltSpeed, speedPicker));
 	const boltLabel = $derived(fastPending ? (speedPicker ? 'Speed: loading' : 'Fast mode: loading')
-		: speedPicker ? `Speed: ${SPEED_NAMES[speed]}` : 'Fast mode');
+		: speedPicker ? `Speed: ${SPEED_NAMES[boltSpeed]}` : 'Fast mode');
 	const boltTitle = $derived.by(() => {
 		if (fastPending) return `${speedPicker ? 'Speed' : 'Fast mode'}: loading this chat's own setting`;
 		if (!speedPicker) return 'Fast mode: faster output at a higher price. Switching clears the prompt cache.';
 		const next = upcoming === 'standard' ? 'Click to go back to Standard.'
 			: `Click for ${SPEED_OPTIONS.find((option) => option.value === upcoming)?.title}`;
-		return `Speed: ${SPEED_NAMES[speed]}. ${next}`;
+		return `Speed: ${SPEED_NAMES[boltSpeed]}. ${next}`;
 	});
 
 	function clickBolt() {
 		if (fastPending) return;
-		if (speedPicker) onSelectSpeed?.(upcoming);
-		else onToggleFast?.();
+		if (!speedPicker) { onToggleFast?.(); return; }
+		const target = upcoming;
+		requested = target;
+		inFlight++;
+		// A refused pick falls back to the tier in force once nothing is pending.
+		void Promise.resolve(onSelectSpeed?.(target)).catch(() => {}).finally(() => {
+			if (--inFlight === 0) requested = null;
+		});
 	}
 
 	const pinnedIndex = $derived(options.findIndex((option) => option.value === value));
@@ -134,24 +147,24 @@
 			<button
 				type="button"
 				class="fast-toggle"
-				class:on={speed !== 'standard' && !fastPending}
+				class:on={boltSpeed !== 'standard' && !fastPending}
 				class:pending={fastPending}
 				disabled={fastPending}
 				onclick={clickBolt}
-				aria-pressed={fastPending ? 'mixed' : speed !== 'standard'}
+				aria-pressed={fastPending ? 'mixed' : boltSpeed !== 'standard'}
 				aria-busy={fastPending || undefined}
 				aria-label={boltLabel}
 				title={boltTitle}
-				data-speed={fastPending ? undefined : speed}
+				data-speed={fastPending ? undefined : boltSpeed}
 				data-testid="speed-bolt"
 			>
 				<Zap size={13} strokeWidth={2} aria-hidden="true" />
-				{#if speedPicker && speed === 'ultrafast' && !fastPending}<Zap size={13} strokeWidth={2} aria-hidden="true" />{/if}
+				{#if speedPicker && boltSpeed === 'ultrafast' && !fastPending}<Zap size={13} strokeWidth={2} aria-hidden="true" />{/if}
 			</button>
 		{/if}
 	</div>
 
-	{#if speedPicker && speed === 'ultrafast' && !fastPending && costNote}
+	{#if speedPicker && boltSpeed === 'ultrafast' && !fastPending && costNote}
 		<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
 	{/if}
 

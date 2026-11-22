@@ -283,6 +283,39 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
 	});
 
+	it('steps a quick second click from the pick still being saved', async () => {
+		const answers: Array<(value?: unknown) => void> = [];
+		const onSelectSpeed = vi.fn((_speed: string) => new Promise((resolve) => { answers.push(resolve); }));
+		const props = { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed };
+		const view = render(EffortPopoverCard, { props });
+		// On Fast, two clicks before the worker answers mean Ultrafast, then Standard.
+		await fireEvent.click(bolt());
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Ultrafast');
+		expect(bolts()).toBe(2);
+		await fireEvent.click(bolt());
+		expect(onSelectSpeed.mock.calls.map(([speed]) => speed)).toEqual(['ultrafast', 'standard']);
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+		// The first answer lands; the bolt keeps the newer pick until both have.
+		answers[0]();
+		await view.rerender({ ...props, ultrafastEnabled: true });
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+		answers[1]();
+		await view.rerender({ ...props, fastEnabled: false, ultrafastEnabled: false });
+		await Promise.resolve();
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+	});
+
+	it('falls back to the tier in force when a pick is refused', async () => {
+		let refuse: (reason: unknown) => void = () => {};
+		const onSelectSpeed = vi.fn(() => new Promise((_, reject) => { refuse = reject; }));
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed } });
+		await fireEvent.click(bolt());
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Ultrafast');
+		refuse(new Error('worker said no'));
+		await vi.waitFor(() => expect(bolt().getAttribute('aria-label')).toBe('Speed: Fast'));
+		expect(bolts()).toBe(1);
+	});
+
 	it('holds the bolt while the chat\'s own value loads', async () => {
 		const onSelectSpeed = vi.fn();
 		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastEnabled: true, fastPending: true, ultrafastSupported: true, onSelectSpeed } });
