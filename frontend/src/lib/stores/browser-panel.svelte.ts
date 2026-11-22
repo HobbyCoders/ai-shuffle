@@ -15,7 +15,6 @@ import { browser } from '$app/env';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 import { sidePanel, sessionPanelKey } from './side-panel.svelte';
-import type { SelectedElement } from '$lib/browser-panel/inspect';
 
 // ============================================
 // Types
@@ -51,11 +50,9 @@ interface BrowserPanelState {
 	 * panel the user deliberately dismissed. Cleared whenever the user reopens.
 	 */
 	userClosedForSession: string | null;
-	/** Point-and-prompt mode: clicks in the live view select elements instead
-	 *  of being forwarded to the page. Runtime-only; off on open. */
+	/** Design mode: clicks in the live view mark elements instead of being
+	 *  forwarded to the page. Runtime-only; off on open. */
 	inspectMode: boolean;
-	/** Element picked in inspect mode, feeding the panel's prompt composer. */
-	selectedElement: SelectedElement | null;
 }
 
 // ============================================
@@ -203,7 +200,6 @@ let _state = $state<BrowserPanelState>({
 	pageTracked: false,
 	userClosedForSession: null,
 	inspectMode: false,
-	selectedElement: null,
 });
 
 // ============================================
@@ -224,13 +220,13 @@ function _update(fn: (s: BrowserPanelState) => BrowserPanelState) {
 }
 
 // Runtime state never enters preferenceSync or localStorage.
-type RuntimeState = Pick<BrowserPanelState, 'open' | 'expanded' | 'status' | 'url' | 'pageLoading' | 'pageTracked' | 'userClosedForSession' | 'inspectMode' | 'selectedElement'>;
+type RuntimeState = Pick<BrowserPanelState, 'open' | 'expanded' | 'status' | 'url' | 'pageLoading' | 'pageTracked' | 'userClosedForSession' | 'inspectMode'>;
 let runtime = $state<Record<string, RuntimeState>>({});
 function updateSession(sessionId: string | null, fn: (s: BrowserPanelState) => BrowserPanelState) {
 	if (!sessionId) return;
 	const next = fn(untrack(() => browserPanel.forSession(sessionId)));
-	const { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode, selectedElement } = next;
-	runtime[sessionId] = { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode, selectedElement };
+	const { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode } = next;
+	runtime[sessionId] = { open, expanded, status, url, pageLoading, pageTracked, userClosedForSession, inspectMode };
 	notifySubscribers();
 }
 
@@ -270,7 +266,7 @@ export const browserPanel = {
 	closePanel(sessionId: string | null) {
 		sidePanel.close(sessionId ? sessionPanelKey(sessionId) : null, 'browser');
 		updateSession(sessionId, s => ({ ...s, open: false, expanded: false,
-			userClosedForSession: sessionId, inspectMode: false, selectedElement: null }));
+			userClosedForSession: sessionId, inspectMode: false }));
 	},
 	toggle(sessionId: string | null) {
 		if (this.forSession(sessionId).open) this.closePanel(sessionId);
@@ -281,10 +277,7 @@ export const browserPanel = {
 		updateSession(sessionId, s => ({ ...s, expanded }));
 	},
 	setInspectMode(on: boolean, sessionId: string) {
-		updateSession(sessionId, s => ({ ...s, inspectMode: on, selectedElement: on ? s.selectedElement : null }));
-	},
-	setSelectedElement(element: SelectedElement | null, sessionId: string) {
-		updateSession(sessionId, s => ({ ...s, selectedElement: element }));
+		updateSession(sessionId, s => ({ ...s, inspectMode: on }));
 	},
 
 	/** Set the panel width (clamped to a 320px minimum) and persist it. */
@@ -316,7 +309,7 @@ export const browserPanel = {
 	},
 
 	/** Reset per-attachment page tracking (session switch / stream teardown).
-	 *  A selection from the previous session's page is meaningless — drop it. */
+	 *  Design mode never carries over to a different attachment. */
 	resetPageTracking(sessionId: string) {
 		updateSession(sessionId, (s) => ({
 			...s,
@@ -324,7 +317,6 @@ export const browserPanel = {
 			inspectMode: false,
 			pageLoading: false,
 			pageTracked: false,
-			selectedElement: null,
 		}));
 	},
 

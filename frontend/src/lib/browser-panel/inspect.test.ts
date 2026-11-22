@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-	composeElementPrompt,
 	describeElement,
 	isDrawableRect,
 	parseElementHit,
@@ -79,34 +78,5 @@ describe('describeElement', () => {
 			describeElement(makeElement({ id: null, classes: ['a', 'b', 'c'] })),
 		).toBe('button.a.b…');
 		expect(describeElement(makeElement({ id: null, classes: [] }))).toBe('button');
-	});
-});
-
-describe('composeElementPrompt', () => {
-	it('embeds the ask plus selector/element context and the page url', () => {
-		const prompt = composeElementPrompt(
-			makeElement({ text: 'Get started' }),
-			'http://localhost:5173/',
-			'Make this button bigger and blue.',
-		);
-		expect(prompt).toContain('http://localhost:5173/');
-		expect(prompt).toContain('- selector: main > button#cta');
-		expect(prompt).toContain('- element: button#cta.btn.btn-primary');
-		expect(prompt).toContain('- text: "Get started"');
-		expect(prompt).toContain('Make this button bigger and blue.');
-		expect(prompt).toContain('source');
-	});
-
-	it('includes the HTML snippet fenced when present, omits it when absent', () => {
-		const withHtml = composeElementPrompt(
-			makeElement({ html: '<button id="cta">Go</button>' }),
-			null,
-			'Center it.',
-		);
-		expect(withHtml).toContain('```html');
-		expect(withHtml).toContain('<button id="cta">Go</button>');
-
-		const withoutHtml = composeElementPrompt(makeElement(), null, 'Center it.');
-		expect(withoutHtml).not.toContain('```html');
 	});
 });

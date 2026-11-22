@@ -83,29 +83,3 @@ export function describeElement(el: SelectedElement): string {
 	if (el.classes.length > 2) label += '…';
 	return label;
 }
-
-/**
- * Compose the chat prompt for a point-and-prompt request: the user's ask plus
- * enough element context (selector, tag/classes, text, HTML snippet, page URL)
- * for the agent to find the matching source code — code stays the single
- * source of truth; the agent makes the edit.
- */
-export function composeElementPrompt(
-	el: SelectedElement,
-	url: string | null,
-	userText: string,
-): string {
-	const lines: string[] = [
-		`Using the live browser preview${url ? ` of ${url}` : ''}, I selected this element:`,
-		'',
-		`- element: ${describeElement(el)}`,
-		`- selector: ${el.selector}`,
-	];
-	if (el.role) lines.push(`- role: ${el.role}`);
-	if (el.text) lines.push(`- text: ${JSON.stringify(el.text.slice(0, 160))}`);
-	if (el.html) {
-		lines.push('', 'HTML snippet:', '```html', el.html, '```');
-	}
-	lines.push('', userText.trim(), '', 'Find where this element is defined in the project source and make the change there.');
-	return lines.join('\n');
-}

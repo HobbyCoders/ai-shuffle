@@ -4,7 +4,7 @@
  * The owner selects a range of diff lines and writes a comment; these helpers
  * turn that into one plain-text chat message for the agent (file, old/new line
  * range, review scope, a bounded diff excerpt and the comment). Same pattern as
- * the browser panel's `composeElementPrompt`: nothing is posted anywhere else
+ * the browser panel's `composeDesignPrompt`: nothing is posted anywhere else
  * and nothing on disk changes. Kept pure so it is testable without a DOM.
  */
 import type { DiffLine } from '$lib/utils/diff-parser';

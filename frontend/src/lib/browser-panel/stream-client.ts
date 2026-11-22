@@ -13,8 +13,8 @@ import { isBrowserChoices, type BrowserChoices } from './pickers';
  *
  *   ws(s)://{host}/api/v1/ws/browser/{sessionId}?token=…
  *
- *   server→client: hello · status · page · frame · inspect-hit · error · ping
- *   client→server: input · navigate · command · inspect · viewport · pong
+ *   server→client: hello · status · page · frame · inspect-hit · design-result · error · ping
+ *   client→server: input · navigate · command · inspect · design · viewport · pong
  *
  * The caller creates ONE client per (open panel, session). `connect()` is a
  * no-op while already connected/connecting; `destroy()` tears down the socket
@@ -70,6 +70,12 @@ export interface BrowserStreamConfig {
 	 * data — parse with `parseElementHit` before use.
 	 */
 	onInspectHit?: (mode: 'hover' | 'select', element: unknown) => void;
+	/**
+	 * A `design-result` arrived: the page's answer to this client's `design`
+	 * request (a style preview, an element-position refresh, a reset or the
+	 * original/with-changes toggle). `result` is raw page-provided data.
+	 */
+	onDesignResult?: (op: string, result: unknown) => void;
 	/** An `error` frame arrived. */
 	onError?: (message: string) => void;
 	/** The socket opened. */
@@ -229,7 +235,7 @@ export function createBrowserStreamClient(
 			config.onHello?.(msg.viewer_id as string);
 			return;
 		}
-		if (['workspace', 'frame', 'inspect-hit'].includes(String(msg.type)) && !protocolReady) return;
+		if (['workspace', 'frame', 'inspect-hit', 'design-result'].includes(String(msg.type)) && !protocolReady) return;
 		switch (msg.type) {
 			case 'workspace': {
 				const next = msg.state;
@@ -303,6 +309,14 @@ export function createBrowserStreamClient(
 				if (msg.mode === 'hover' || msg.mode === 'select') {
 					config.onInspectHit?.(msg.mode, msg.element ?? null);
 				}
+				break;
+			case 'design-result':
+				if (
+					(msg.runtime_id && msg.runtime_id !== workspace?.runtime_id) ||
+					(msg.tab_id && msg.tab_id !== workspace?.active_tab_id)
+				)
+					break;
+				if (typeof msg.op === 'string') config.onDesignResult?.(msg.op, msg.result ?? null);
 				break;
 			case 'error':
 				if (typeof msg.id === 'string')
@@ -411,13 +425,13 @@ export function createBrowserStreamClient(
 			const payload = data as Record<string, unknown>;
 			if (
 				!payload ||
-				!['pong', 'workspace-command', 'input', 'inspect'].includes(
+				!['pong', 'workspace-command', 'input', 'inspect', 'design'].includes(
 					String(payload.type),
 				)
 			)
 				return false;
 			if (
-				['workspace-command', 'input', 'inspect'].includes(String(payload.type))
+				['workspace-command', 'input', 'inspect', 'design'].includes(String(payload.type))
 			) {
 				if (
 					!protocolReady ||
@@ -433,7 +447,7 @@ export function createBrowserStreamClient(
 					pending.size >= 128
 				)
 					return false;
-				if (payload.type !== 'inspect') {
+				if (payload.type !== 'inspect' && payload.type !== 'design') {
 					const id = payload.id;
 					pendingId = id;
 					pending.set(

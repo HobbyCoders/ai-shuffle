@@ -45,14 +45,6 @@ describe('session browser visibility', () => {
  });
 });
 
-const sampleElement = {
-	selector: 'main > button#cta',
-	tag: 'button',
-	id: 'cta',
-	classes: ['btn'],
-	rect: { x: 1, y: 2, width: 3, height: 4 },
-};
-
 describe('browserPanel width clamp + persistence', () => {
 	it('clamps below the minimum to 320', () => {
 		browserPanel.setWidth(100);
@@ -133,46 +125,31 @@ describe('browserPanel page tracking', () => {
 	});
 });
 
-describe('browserPanel inspect mode + selection', () => {
-	it('starts with inspect off and nothing selected', () => {
+describe('browserPanel design mode', () => {
+	it('starts off and turns on and off per session', () => {
 		expect(browserPanel.forSession(a).inspectMode).toBe(false);
-		expect(browserPanel.forSession(a).selectedElement).toBeNull();
-	});
-
-	it('setInspectMode(true) keeps a selection; setInspectMode(false) drops it', () => {
 		browserPanel.setInspectMode(true, a);
-		browserPanel.setSelectedElement(sampleElement, a);
-		expect(browserPanel.forSession(a).selectedElement).toEqual(sampleElement);
-
-		browserPanel.setInspectMode(true, a); // re-arm is a no-op for the selection
-		expect(browserPanel.forSession(a).selectedElement).toEqual(sampleElement);
-
+		expect(browserPanel.forSession(a).inspectMode).toBe(true);
+		expect(browserPanel.forSession(b).inspectMode).toBe(false);
 		browserPanel.setInspectMode(false, a);
 		expect(browserPanel.forSession(a).inspectMode).toBe(false);
-		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 	});
 
-	it('closePanel and toggle-close reset inspect state', () => {
+	it('closePanel and toggle-close turn it off', () => {
 		browserPanel.setInspectMode(true, a);
-		browserPanel.setSelectedElement(sampleElement, a);
 		browserPanel.closePanel(a);
 		expect(browserPanel.forSession(a).inspectMode).toBe(false);
-		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 
 		browserPanel.openPanel(a);
 		browserPanel.setInspectMode(true, a);
-		browserPanel.setSelectedElement(sampleElement, a);
 		browserPanel.toggle(a); // closes
 		expect(browserPanel.forSession(a).inspectMode).toBe(false);
-		expect(browserPanel.forSession(a).selectedElement).toBeNull();
 	});
 
-	it('resetPageTracking (session switch) drops the selection', () => {
+	it('resetPageTracking (session switch) turns it off', () => {
 		browserPanel.setInspectMode(true, a);
-		browserPanel.setSelectedElement(sampleElement, a);
 		browserPanel.resetPageTracking(a);
-		expect(browserPanel.forSession(a).selectedElement).toBeNull();
-		// Inspection never carries over to a different attachment.
+		// Design mode never carries over to a different attachment.
 		expect(browserPanel.forSession(a).inspectMode).toBe(false);
 	});
 });

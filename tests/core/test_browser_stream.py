@@ -394,6 +394,102 @@ class TestToolbarCommands:
 
 
 # ===========================================================================
+# Design mode (live style previews on the inspected page)
+# ===========================================================================
+class TestDesign:
+    def test_parse_style_valid(self):
+        args = browser_stream.parse_design(
+            {
+                "type": "design",
+                "op": "style",
+                "key": "k3",
+                "selector": "main > h1",
+                "scope": "all",
+                "styles": {"font-size": "40px", "color": "var(--brand)"},
+            }
+        )
+        assert args == {
+            "op": "style",
+            "key": "k3",
+            "selector": "main > h1",
+            "scope": "all",
+            "styles": {"font-size": "40px", "color": "var(--brand)"},
+        }
+
+    @pytest.mark.parametrize(
+        "patch",
+        [
+            {"op": "run"},
+            {"key": "k1); alert(1"},
+            {"key": None},
+            {"selector": "x" * 501},
+            {"scope": "page"},
+            {"styles": {"position": "fixed"}},
+            {"styles": {"color": "red; position: fixed"}},
+            {"styles": {"background-color": "url(http://x.test/a.png)"}},
+            {"styles": {"color": "x" * 65}},
+        ],
+    )
+    def test_parse_style_rejects_anything_off_the_allow_list(self, patch):
+        msg = {
+            "op": "style",
+            "key": "k1",
+            "selector": "h1",
+            "scope": "one",
+            "styles": {"color": "#000000"},
+        }
+        with pytest.raises(Exception):
+            browser_stream.parse_design({**msg, **patch})
+
+    def test_parse_rects_reset_and_peek(self):
+        assert browser_stream.parse_design(
+            {"op": "rects", "items": [{"key": "k1", "selector": "h1"}, {"key": "k2"}]}
+        ) == {
+            "op": "rects",
+            "items": [
+                {"key": "k1", "selector": "h1"},
+                {"key": "k2", "selector": None},
+            ],
+        }
+        assert browser_stream.parse_design({"op": "reset"}) == {
+            "op": "reset",
+            "key": None,
+        }
+        assert browser_stream.parse_design({"op": "reset", "key": "k9"}) == {
+            "op": "reset",
+            "key": "k9",
+        }
+        assert browser_stream.parse_design({"op": "peek", "on": True}) == {
+            "op": "peek",
+            "on": True,
+        }
+        assert browser_stream.parse_design({"op": "peek"}) == {
+            "op": "peek",
+            "on": False,
+        }
+        with pytest.raises(Exception):
+            browser_stream.parse_design({"op": "rects", "items": [{"key": "nope"}]})
+        with pytest.raises(Exception):
+            browser_stream.parse_design(
+                {"op": "rects", "items": [{"key": "k1"}] * 500}
+            )
+
+    def test_build_expression_embeds_arguments_as_json(self):
+        args = browser_stream.parse_design(
+            {
+                "op": "style",
+                "key": "k1",
+                "selector": 'a[title="x\'y"]',
+                "scope": "one",
+                "styles": {"padding": "12px"},
+            }
+        )
+        expr = browser_stream.build_design_expression(args)
+        assert "__ARGS__" not in expr
+        assert json.dumps(args) in expr
+
+
+# ===========================================================================
 # Inspect (point-and-prompt hit-test)
 # ===========================================================================
 class TestInspect:
@@ -1020,6 +1116,40 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     assert not fakes[0].closed
 
     await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_viewer_joining_a_live_hub_is_told_it_is_live(monkeypatch):
+    """A second device opening the panel on a page that sits still gets no new
+    status from the hub, so it must be given the one the first viewer has."""
+    sid = "hub-second-viewer"
+    registry.register(sid, "target-1", "tab-1", "http://a/")
+    fakes = []
+
+    async def opener(uri):
+        fake = FakeUpstream(uri)
+        fakes.append(fake)
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    first_ws, second_ws = FakeViewerWS(), FakeViewerWS()
+    hub, first = await browser_stream.attach_viewer(sid, first_ws)
+    assert hub.status is None
+    await hub.repeat_status(first)
+    assert first_ws.sent == []
+    await _wait_for(lambda: fakes and "Page.startScreencast" in fakes[0].methods())
+    fakes[0].feed_frame("A", {"deviceWidth": 10, "deviceHeight": 10})
+    await _wait_for(lambda: any(m.get("state") == "live" for m in first_ws.sent))
+
+    _, second = await browser_stream.attach_viewer(sid, second_ws)
+    try:
+        await asyncio.sleep(0.02)
+        assert not any(m.get("type") == "status" for m in second_ws.sent)
+        await hub.repeat_status(second)
+        assert {"type": "status", "state": "live", "url": "http://a/"} in second_ws.sent
+        assert len(fakes) == 1
+    finally:
+        await browser_stream.detach_viewer(sid, first)
+        await browser_stream.detach_viewer(sid, second)
 
 
 async def test_resize_refreshes_stalled_capture_for_both_viewers(monkeypatch):
