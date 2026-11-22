@@ -147,6 +147,7 @@
 			<button
 				type="button"
 				class="fast-toggle"
+				class:tiers={speedPicker}
 				class:on={boltSpeed !== 'standard' && !fastPending}
 				class:pending={fastPending}
 				disabled={fastPending}
@@ -383,6 +384,12 @@
 	/* Ultrafast: the second bolt tucks behind the first. */
 	.fast-toggle :global(svg + svg) {
 		margin-left: -5px;
+	}
+
+	/* A three-tier bolt keeps the two-bolt width (13 + 13 - 5 + 6 px padding) in
+	   every tier, so repeated clicks on one spot all reach it. */
+	.fast-toggle.tiers {
+		min-width: 27px;
 	}
 
 	@keyframes fast-bolt-charge {

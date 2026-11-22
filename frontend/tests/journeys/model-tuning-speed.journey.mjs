@@ -65,17 +65,29 @@ async function boltCycle(page) {
   await page.getByRole('button', { name: /^Effort: / }).filter({ visible: true }).click({ timeout: 8_000 });
   const bolt = page.getByTestId('speed-bolt').filter({ visible: true });
   await bolt.and(page.getByRole('button', { name: 'Speed: Standard', exact: true })).waitFor();
-  // Three clicks on one spot, as a person does: the bolt must not move mid-cycle.
-  const box = await bolt.boundingBox();
-  const spot = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const tier = (name) => bolt.and(page.getByRole('button', { name: `Speed: ${name}`, exact: true })).waitFor();
+  // Clicks on one spot, as a person does: the bolt must not move mid-cycle.
+  let box = await bolt.boundingBox();
+  let spot = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await spot();
   await spot();
-  await bolt.and(page.getByRole('button', { name: 'Speed: Ultrafast', exact: true })).waitFor();
+  await tier('Ultrafast');
   expect(await bolt.locator('svg').count() === 2, 'Ultrafast shows two bolts');
   await waitSaved(page, [true, 'ultrafast']);
+  // Then a whole cycle on one spot near the left edge of the Ultrafast bolt,
+  // its widest look: the bolt must not narrow once it shows one bolt again.
+  box = await bolt.boundingBox();
+  spot = () => page.mouse.click(box.x + 4, box.y + box.height / 2);
   await spot();
-  await bolt.and(page.getByRole('button', { name: 'Speed: Standard', exact: true })).waitFor();
+  await tier('Standard');
   expect(await page.locator('.effort-pop-card').count() === 1, 'the card stays open after leaving Ultrafast');
+  await waitSaved(page, [false, null]);
+  await spot();
+  await tier('Fast');
+  await spot();
+  await tier('Ultrafast');
+  await spot();
+  await tier('Standard');
   await waitSaved(page, [false, null]);
   await page.keyboard.press('Escape');
 }

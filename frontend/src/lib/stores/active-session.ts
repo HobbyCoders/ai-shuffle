@@ -244,6 +244,9 @@ export interface ActiveSessionState {
 		 *  `fastMode` is on, and only on a model that offers it
 		 *  (`isUltrafastCapable`); code that knows only `fastMode` runs Fast. */
 		ultrafastMode?: boolean;
+		/** The worker running this chat answered an Ultrafast pick as plain Fast
+		 *  (it predates speed tiers), so the speed control offers Fast on/off. */
+		ultrafastRefused?: boolean;
 /** Agent / access / Fast fields that still hold a placeholder until the
 	 *  session's own binding arrives from `/live` (#418). Shown as loading and
 	 *  never sent. See session/composer-binding.ts. */
@@ -463,6 +466,7 @@ function defaultState(): ActiveSessionState {
 		effortLevelOverride: getPersistedEffort(),
 		fastMode: getPersistedFastMode(),
 		ultrafastMode: getPersistedUltrafastMode(),
+		ultrafastRefused: false,
 		bindingUnhydrated: {},
 		bindingPicks: {},
 		workspaceProjectIds: [],
@@ -949,6 +953,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 	let ultrafast: boolean | undefined = field === 'speed' ? value === 'ultrafast' : undefined;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
+	let ultrafastRefused = false;
 	if (sessionId && !staged) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -968,7 +973,10 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel)
 				: speedField ? saved.fast : saved[field as 'effort'];
 			if (speedField && saved.speed) ultrafast = saved.speed === 'ultrafast';
-			else if (field === 'speed') ultrafast = false; // an older owner runs it as Fast
+			else if (field === 'speed') {
+				ultrafast = false; // an older owner runs it as Fast
+				ultrafastRefused = value === 'ultrafast';
+			}
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
@@ -1013,6 +1021,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 		...s, [stateKey]: selected,
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(speedField ? { ...(staged ? markBindingPicked(s, 'fast') : markBindingHydrated(s, 'fast')), ultrafastMode: ultrafastNow } : {}),
+		...(ultrafastRefused ? { ultrafastRefused: true } : {}),
 		// A context-window answer says nothing about Fast.
 		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})

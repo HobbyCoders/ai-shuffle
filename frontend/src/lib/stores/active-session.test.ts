@@ -898,6 +898,41 @@ describe('live effort and Fast mode selection', () => {
 		});
 	});
 
+	describe('a worker that predates speed tiers', () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+			Object.assign(activeSession.current, { sessionId: null, fastMode: false, ultrafastMode: false, ultrafastRefused: false });
+		});
+		const start = () => Object.assign(activeSession.current, {
+			sessionId: 'older', modelOverride: 'gpt-6.1-sol', fastMode: true, ultrafastMode: false, ultrafastRefused: false
+		});
+
+		it('marks the chat when it runs an Ultrafast pick as Fast', async () => {
+			start();
+			// No `speed` in the answer: the worker saved plain Fast.
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: true, context_window: 400_000 });
+			await activeSession.setSpeed('ultrafast', false);
+			expect(activeSession.current.fastMode).toBe(true);
+			expect(activeSession.current.ultrafastMode).toBe(false);
+			expect(activeSession.current.ultrafastRefused).toBe(true);
+		});
+
+		it('leaves a chat whose worker answers the tier alone', async () => {
+			start();
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: true, speed: 'ultrafast', context_window: 400_000 });
+			await activeSession.setSpeed('ultrafast', false);
+			expect(activeSession.current.ultrafastMode).toBe(true);
+			expect(activeSession.current.ultrafastRefused).toBe(false);
+		});
+
+		it('does not read a Standard answer without a tier as a refusal', async () => {
+			start();
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: false, context_window: 400_000 });
+			await activeSession.setSpeed('standard', false);
+			expect(activeSession.current.ultrafastRefused).toBe(false);
+		});
+	});
+
 	describe('context window selection', () => {
 		it('saves the pin without sending a message and waits for acknowledgement', async () => {
 			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m' });

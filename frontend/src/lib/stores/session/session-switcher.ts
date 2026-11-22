@@ -783,6 +783,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			stopRequestedTurnId: null,
 			stopTimedOutTurnId: null,
 			fastAppliesTurnId: null,
+			ultrafastRefused: false,
 			turnParked: false,
 			// Same for the live model: the leaving session's rerouted-model note
 			// must not flag a phantom reroute on the target before its feed replays.
@@ -1217,6 +1218,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			stopRequestedTurnId: null,
 			stopTimedOutTurnId: null,
 			fastAppliesTurnId: null,
+			ultrafastRefused: false,
 			turnParked: false,
 			// Reset the live model too so no stale reroute flag survives into the
 			// fresh compose screen (mirrors defaultState).

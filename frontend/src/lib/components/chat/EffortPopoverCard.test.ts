@@ -250,6 +250,7 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolt().getAttribute('aria-pressed')).toBe('false');
 		expect(bolt().getAttribute('title')).toMatch(/Click for Fast/);
 		expect(bolts()).toBe(1);
+		expect(bolt().classList.contains('tiers')).toBe(true);
 		// An API-key route states the price before Ultrafast is picked, and the
 		// line stays put through the cycle so the bolt never moves.
 		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/several times the Standard API price/);
@@ -274,6 +275,8 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolts()).toBe(2);
 		expect(card.classList.contains('ultrafast-active')).toBe(true);
 		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
+		// One hit target in every tier (the width rule rides on this class).
+		expect(bolt().classList.contains('tiers')).toBe(true);
 		await fireEvent.click(bolt());
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
 		expect(onSelectSpeed).toHaveBeenCalledTimes(3);

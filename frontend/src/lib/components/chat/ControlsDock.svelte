@@ -329,7 +329,10 @@
 	// per-model flag: a ChatGPT plan whose catalog lists it, or a documented
 	// API model). Elsewhere the plain Fast toggle stays as it is.
 	const ultrafastMode = $derived(!!$activeSession.ultrafastMode);
-	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue));
+	// Once the chat's worker has run an Ultrafast pick as Fast (it predates the
+	// tier), offer Fast on/off: a cycle would ask it for Ultrafast forever and
+	// never come round to Standard.
+	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue) && !$activeSession.ultrafastRefused);
 	const speedBilling = $derived(ultrafastBilling(modelValue));
 	// The same reset for the dearer tier: a model without it runs the chat on
 	// Fast (Standard where Fast is gone too, which the effect above handles).
