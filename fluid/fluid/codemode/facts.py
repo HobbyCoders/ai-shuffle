@@ -314,6 +314,21 @@ def _union_rule_fences(target, other):
         target["contested"] = sorted(contested)[:MAX_RULE_FENCES]
 
 
+def _carry_contested(winner, loser):
+    """A newer copy replacing one that recorded a dispute keeps the disputed
+    wordings fenced (and, while it is still conflicted, recorded), even if
+    the newer copy's writer never saw them. Its text and clock still win."""
+    lost = set(_contested(loser)) - set(_contested(winner))
+    if not (lost and _is_rule_key(winner.get("key"))):
+        return
+    contested = set(_contested(winner)) | lost
+    keep = sorted(contested | {_fence_fingerprint(winner["text"], winner.get("key"))})[-MAX_RULE_FENCES:]
+    held = [f for f in winner.get("fences") or [] if isinstance(f, str) and f not in keep]
+    winner["fences"] = _bounded_fences(held, keep)
+    if winner.get("conflicted"):
+        winner["contested"] = sorted(contested)[:MAX_RULE_FENCES]
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -1712,6 +1727,7 @@ class FactStore:
                 older = all(local_clock.get(k, 0) >= incoming_clock.get(k, 0) for k in actors)
                 if newer and not older:
                     entries[entry["id"]] = entry
+                    _carry_contested(entry, old)
                     # The newer value keeps a metadata edit only the local
                     # copy has (a backfill when-line, say).
                     self._merge_metadata(entry, old, entry, prefer=entry)
@@ -1757,6 +1773,7 @@ class FactStore:
                     # (a metadata-only edit leaves the clock as it is), so the
                     # value stays; a newer when-line/always stamp still lands.
                     self._merge_metadata(old, old, entry, prefer=None if newer else old)
+                    _carry_contested(old, entry)
             for key in tombstones:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.

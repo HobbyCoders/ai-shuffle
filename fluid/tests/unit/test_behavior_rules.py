@@ -424,6 +424,33 @@ def test_at_the_fence_cap_every_workers_competing_wording_stays_fenced(tmp_path)
         _refused(a, "gpt", text)
 
 
+def test_a_newer_copy_keeps_the_wordings_a_dispute_recorded(tmp_path):
+    import copy
+
+    first = "When reporting: lead with the result."
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    b._facts.merge(a._facts.export())
+    a.save_memory("When reporting: lead with the result and the risk.", memory_id=rule.id,
+                  provenance="user", durable=True, key=rule.key)
+    theirs = "When reporting: lead with the blocker."
+    b.save_memory(theirs, memory_id=_peer_id(b, rule), provenance="user", durable=True, key=rule.key)
+    a._facts.merge(b._facts.export())
+    # A third worker's later edit that saw neither wording: newer clock, still
+    # conflicted, no record of B's wording in its fences or history.
+    snapshot = copy.deepcopy(a._facts.export())
+    entry = next(e for e in snapshot["entries"] if e.get("key") == rule.key)
+    clock = dict(entry["clock"])
+    clock["c" * 32] = 1
+    entry.update(text="When reporting: lead with the outcome first.", clock=clock,
+                 revision=entry["revision"] + 1, history=[], alternatives=[], conflicted=True,
+                 fences=[], contested=[])
+    a._facts.merge(snapshot)
+    _resolve_and_delete(a, rule.key)
+    _refused(a, "gpt", theirs)
+
+
 def test_resolving_a_cross_family_conflict_fences_each_wording_for_its_own_family(tmp_path):
     first = "When reporting: lead with the result."
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
