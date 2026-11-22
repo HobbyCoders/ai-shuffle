@@ -124,6 +124,8 @@ describe('rules', () => {
 	it('adds a rule as the owner’s own, with the family picked', async () => {
 		http.post.mockResolvedValueOnce(rule({ id: 'r9', kept: true, new: false }));
 		await show('new-rule');
+		// The saved rule takes the draft's place: no extra Back step to an empty form.
+		const replace = vi.spyOn(settingsNav, 'replaceItem');
 		const box = (await screen.findByRole('textbox', { name: 'Rule text' })) as HTMLTextAreaElement;
 		await fireEvent.input(box, { target: { value: '  When   asked for a plan: list   steps.  ' } });
 		await fireEvent.change(screen.getByRole('combobox', { name: 'Applies to' }), { target: { value: 'gpt' } });
@@ -131,6 +133,8 @@ describe('rules', () => {
 		await waitFor(() =>
 			expect(http.post).toHaveBeenCalledWith('/learner/rules', { text: 'When asked for a plan: list steps.', applies_to: 'gpt' })
 		);
+		await waitFor(() => expect(replace).toHaveBeenCalledWith('r9', 'learning'));
+		replace.mockRestore();
 	});
 
 	it('refuses an empty rule without calling the worker', async () => {

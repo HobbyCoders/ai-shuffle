@@ -29,8 +29,10 @@ function responseTo(page, method, path) {
 
 async function chatPrompt(page, status, variant, token) {
 	if (variant.viewport === 'phone') {
+		// From a rule's page, Back twice; deleting a rule already returned to the list.
 		const bar = page.locator('.topbar');
-		await button(bar, 'Back to Learned behaviour').click();
+		const toList = button(bar, 'Back to Learned behaviour');
+		if (await toList.count()) await toList.click();
 		await button(bar, 'Back to Settings').click();
 	}
 	await showSidebar(page);
@@ -43,9 +45,12 @@ async function chatPrompt(page, status, variant, token) {
 	const request = requests.find(({ method, body }) => method === 'POST' && body?.model === status.seed.model
 		&& body.messages?.some(({ role, content }) => role === 'user' && JSON.stringify(content).includes(token)));
 	expect(request, 'the seeded fake model must receive this chat turn');
-	const instructions = request.body.messages.filter(({ role }) => ['system', 'developer'].includes(role));
-	expect(instructions.length > 0, 'the captured request must contain prompt instructions');
-	return JSON.stringify(instructions);
+	// Rules render in the # Memory section, which the native leg sends as a
+	// reminder block on the first user turn, not as a system message: search
+	// the whole request. The typed text never contains the rule's wording.
+	const memory = request.body.messages.find(({ content }) => JSON.stringify(content).includes('# Memory'));
+	expect(memory, 'the captured request must carry the memory section');
+	return JSON.stringify(request.body.messages);
 }
 
 await runJourney({
@@ -92,7 +97,10 @@ await runJourney({
 				expect(made.status() === 201, `the real POST must add the rule (HTTP ${made.status()})`);
 				created = await made.json();
 				expect(created.text === rule && created.kept === true, 'an added rule is the owner’s own');
-				await page.getByRole('button', { name: new RegExp(`copper lantern ${token}`) }).filter({ visible: true }).first().waitFor();
+				// The new rule opens in its editor: beside the list on desktop, as
+				// its own page on a phone (the list is then hidden).
+				await page.waitForFunction((text) => [...document.querySelectorAll('textarea[aria-label="Rule text"]')]
+					.some((box) => box.value === text && box.offsetParent !== null), rule);
 
 				await mark('a fresh chat carries the rule');
 				const withRule = await chatPrompt(page, status, variant, `${token}-rule`);
@@ -110,11 +118,17 @@ await runJourney({
 				expect(on.ok() && (await on.json()).learner_enabled === true, 'the switch must save learner_enabled=true');
 
 				await mark('delete the rule');
+				// A phone shows Setup as its own page: back to the list first.
+				if (variant.viewport === 'phone') await button(page.locator('.topbar'), 'Back to Learned behaviour').click();
 				await page.getByRole('button', { name: new RegExp(`copper lantern ${token}`) }).filter({ visible: true }).first().click();
 				await button(page, 'Delete').click();
 				const [removed] = await Promise.all([responseTo(page, 'DELETE', `${ROUTE}/rules`), button(page, 'Delete').last().click()]);
 				expect(removed.status() === 204, `the real DELETE must remove the rule (HTTP ${removed.status()})`);
 				created = null;
+				// A phone returns to the list; let the rule's page finish leaving.
+				if (variant.viewport === 'phone') {
+					await button(page.locator('.topbar'), 'Back to Learned behaviour').waitFor({ state: 'hidden' });
+				}
 
 				await mark('a fresh chat after deleting');
 				const after = await chatPrompt(page, status, variant, `${token}-gone`);

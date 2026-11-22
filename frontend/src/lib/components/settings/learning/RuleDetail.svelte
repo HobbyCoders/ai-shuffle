@@ -65,7 +65,9 @@
 			const made = await model.create(text, appliesTo);
 			if (made) {
 				flashSaved();
-				settingsNav.selectItem(made.id, CATEGORY);
+				// Same Back step as the draft: a phone's Back then returns to the
+				// list, not to an empty New rule form.
+				settingsNav.replaceItem(made.id, CATEGORY);
 			}
 			return;
 		}
