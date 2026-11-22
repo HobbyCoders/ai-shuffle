@@ -76,6 +76,37 @@ def test_peer_checks_file_roots_and_scope(client, monkeypatch):
     assert access.call_args.args[2].state.api_user == {"project_id": "project"}
 
 
+@pytest.mark.parametrize("admin,api_user,expected", [
+    (True, None, True),                       # the owner
+    (False, None, False),                     # a paired controller that is not the owner
+    (False, {"id": "unscoped-key"}, False),   # an API key with no project
+])
+def test_forward_says_whether_the_viewer_is_the_owner(client, monkeypatch, admin, api_user, expected):
+    def authenticate(request: Request):
+        request.state.is_admin = admin
+        request.state.api_user = api_user
+        return "viewer"
+    client.app.dependency_overrides[require_auth] = authenticate
+    forward = AsyncMock(return_value=Response(b"remote file"))
+    monkeypatch.setattr(api, "forward_file", forward)
+    client.get("/api/files/by-path", params={"path": "/shot.jpg", "session_id": "chat"})
+    assert forward.await_args.kwargs["owner_viewer"] is expected
+
+
+@pytest.mark.parametrize("query,admin", [
+    ("", False),
+    ("&owner_viewer=1", True),
+    ("&owner_viewer=1&project_id=project", False),  # a project scope always wins
+])
+def test_peer_marks_owner_viewer_only_without_scope(client, monkeypatch, query, admin):
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
+    monkeypatch.setattr(control, "_require_owned", lambda _: {"project_id": "project"})
+    access = Mock(side_effect=HTTPException(403))
+    monkeypatch.setattr(api, "require_file_access", access)
+    client.get("/api/files/peer/chat?path=/shot.jpg" + query)
+    assert access.call_args.args[2].state.is_admin is admin
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [200, 206, 403, 404, 416])
 async def test_stream_preserves_bytes_headers_and_range(monkeypatch, status):
@@ -108,6 +139,26 @@ async def test_stream_preserves_bytes_headers_and_range(monkeypatch, status):
     assert seen[0].headers["range"] == "bytes=0-9"
     assert "cookie" not in seen[0].headers
     assert seen[0].url.params["project_id"] == "project"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_id,owner_viewer,sent", [
+    (None, True, "1"), (None, False, None), ("project", True, None),
+])
+async def test_forward_sends_owner_viewer_only_when_unscoped(monkeypatch, project_id, owner_viewer, sent):
+    seen = []
+    def handle(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"x")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(files.httpx, "AsyncClient", lambda **_: client)
+    link = SimpleNamespace(base_url="https://peer", token="device-only", authenticate=AsyncMock())
+    monkeypatch.setattr(files, "peer_link", AsyncMock(return_value=(object(), link)))
+    monkeypatch.setattr(files.transport, "note_contact", Mock())
+    request = Request({"type": "http", "headers": []})
+    response = await files.forward_file(request, "remote", "chat", "/shot.jpg", project_id, owner_viewer=owner_viewer)
+    assert response.status_code == 200
+    assert seen[0].url.params.get("owner_viewer") == sent
 
 
 @pytest.mark.asyncio

@@ -122,9 +122,9 @@ def is_path_served(file_path: Path, workspace: Path) -> bool:
 # Browser screenshots in the Claude Code CLI's own cache. The CLI saves every
 # image a tool returns as ``<config>/projects/<project>/<session>/tool-results/
 # mcp-browser-blob-<n>-<id>.jpg`` and shows the agent that path, so agents link
-# it in chat. Only that exact shape is served: the same folders also hold text
-# tool output, which stays private.
-_CLI_SCREENSHOT_NAME = re.compile(r"mcp-browser-blob-[A-Za-z0-9_-]+\.(?:jpe?g|png)")
+# it in chat. Only that exact shape, as a regular file, is served and only to
+# the owner: the same folders also hold text tool output, which stays private.
+_CLI_SCREENSHOT_NAME = re.compile(r"mcp-browser-blob-[0-9]+-[a-z0-9]+\.jpg")
 
 
 def _cli_transcript_roots() -> tuple:
@@ -144,7 +144,7 @@ def is_cli_browser_screenshot(file_path: Path) -> bool:
         resolved = file_path.resolve()
     except (OSError, RuntimeError):
         return False
-    if not _CLI_SCREENSHOT_NAME.fullmatch(resolved.name):
+    if not _CLI_SCREENSHOT_NAME.fullmatch(resolved.name) or not resolved.is_file():
         return False
     for root in _cli_transcript_roots():
         try:
@@ -156,18 +156,29 @@ def is_cli_browser_screenshot(file_path: Path) -> bool:
     return False
 
 
+def is_owner_request(request: Optional[Request]) -> bool:
+    """The install owner: ``require_auth`` marked the request admin and no API user is attached."""
+    if request is None:
+        return False
+    state = request.state
+    return getattr(state, "is_admin", False) is True and getattr(state, "api_user", None) is None
+
+
 def require_file_access(file_path: Path, workspace: Path, request: Optional[Request]) -> None:
     """Authorize a served path against the caller's project, including checkouts.
 
-    Unscoped authenticated callers keep the existing served-root behavior, plus
-    the CLI's cached browser screenshots (:func:`is_cli_browser_screenshot`).
-    Scoped API users never inherit the global workspace or another project's roots.
+    Unscoped authenticated callers keep the existing served-root behavior. The
+    owner (an admin credential, not an API user) may also open the CLI's cached
+    browser screenshots (:func:`is_cli_browser_screenshot`). Scoped API users
+    never inherit the global workspace or another project's roots.
     The caller offloads this synchronous DB/path work with ``run_sync``.
     """
     api_user = get_api_user_from_request(request) if request is not None else None
     project_id = (api_user or {}).get("project_id")
     if not project_id:
-        allowed = is_path_served(file_path, workspace) or is_cli_browser_screenshot(file_path)
+        allowed = is_path_served(file_path, workspace) or (
+            is_owner_request(request) and is_cli_browser_screenshot(file_path)
+        )
     else:
         allowed = False
         try:

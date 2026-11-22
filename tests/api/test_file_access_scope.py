@@ -160,10 +160,21 @@ def cli_screenshots(scoped_files, tmp_path, monkeypatch):
     return scoped_files, config_dir, results, shot
 
 
-def test_owner_can_open_browser_screenshots_from_the_cli_cache(cli_screenshots):
+def _sign_in(app, *, is_admin, api_user=None):
+    """Replace the fixture's scoped API user with another kind of credential."""
     from app.api.auth import require_auth
+
+    def authenticate(request: Request):
+        request.state.is_admin = is_admin
+        request.state.api_user = api_user
+        return "synthetic-credential"
+
+    app.dependency_overrides[require_auth] = authenticate
+
+
+def test_owner_can_open_browser_screenshots_from_the_cli_cache(cli_screenshots):
     (client, app, *_), config_dir, results, shot = cli_screenshots
-    app.dependency_overrides[require_auth] = lambda: "synthetic-admin"
+    _sign_in(app, is_admin=True)
     response = client.get("/api/files/by-path", params={"path": str(shot)})
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
@@ -171,6 +182,8 @@ def test_owner_can_open_browser_screenshots_from_the_cli_cache(cli_screenshots):
     for refused in (
         results / "mcp-browser-browser_snapshot-1795000000000.txt",
         results / "notes.jpg",
+        results / "mcp-browser-blob-not-a-capture.jpg",
+        results / "mcp-browser-blob-1795000000000-abc123.png",
         config_dir / "projects" / "mcp-browser-blob-1795000000000-abc123.jpg",
         config_dir / "mcp-browser-blob-1795000000000-abc123.jpg",
     ):
@@ -180,9 +193,8 @@ def test_owner_can_open_browser_screenshots_from_the_cli_cache(cli_screenshots):
 
 
 def test_screenshot_name_cannot_smuggle_another_file(cli_screenshots, tmp_path):
-    from app.api.auth import require_auth
     (client, app, *_), _, results, _ = cli_screenshots
-    app.dependency_overrides[require_auth] = lambda: "synthetic-admin"
+    _sign_in(app, is_admin=True)
     secret = tmp_path / "secret.txt"
     secret.write_text("synthetic secret")
     link = results / "mcp-browser-blob-1795000000001-def456.jpg"
@@ -195,8 +207,34 @@ def test_screenshot_name_cannot_smuggle_another_file(cli_screenshots, tmp_path):
     assert client.get("/api/files/by-path", params={"path": traversal}).status_code == 403
 
 
+def test_screenshot_named_folder_is_not_listed(cli_screenshots):
+    (client, app, _, _, workspace, _), _, results, _ = cli_screenshots
+    _sign_in(app, is_admin=True)
+    folder = results / "mcp-browser-blob-1795000000003-jkl012.jpg"
+    folder.mkdir()
+    (folder / "private.txt").write_text("synthetic tool output")
+    shared = workspace / "shared-files"
+    for child in shared.iterdir():
+        child.unlink()
+    shared.rmdir()
+    try:
+        shared.symlink_to(folder, target_is_directory=True)
+    except OSError:
+        pytest.skip("This host does not allow symlink creation")
+    assert client.get("/api/files/").status_code == 403
+    assert client.get("/api/files/by-path", params={"path": str(folder)}).status_code == 403
+
+
 def test_project_scoped_users_cannot_open_cli_screenshots(cli_screenshots):
     (client, *_), _, _, shot = cli_screenshots
+    assert client.get("/api/files/by-path", params={"path": str(shot)}).status_code == 403
+
+
+@pytest.mark.parametrize("api_user", [None, {"id": "unscoped-key"}])
+def test_non_owner_credentials_cannot_open_cli_screenshots(cli_screenshots, api_user):
+    # A paired controller that is not the owner, or an API key without a project.
+    (client, app, *_), _, _, shot = cli_screenshots
+    _sign_in(app, is_admin=False, api_user=api_user)
     assert client.get("/api/files/by-path", params={"path": str(shot)}).status_code == 403
 
 
