@@ -178,6 +178,8 @@
 	const inlineOpen = $derived($runningTasksOpen);
 	const toggleInline = () => runningTasksOpen.set(!runningTasksOpen.current);
 	let ownSheetOpen = $state(false);
+	/** The last stop failure, shown inside the open sheet, which covers the banner. */
+	let sheetStopError = $state<string | null>(null);
 	let sheetOpener: HTMLElement | null = null;
 
 	// A different chat starts clean.
@@ -207,6 +209,7 @@
 		prefOpen = null;
 		prefError = null;
 		ownSheetOpen = false;
+		sheetStopError = null;
 	}
 
 	const rows = $derived(buildRows({ tasks, swarms: sessionSwarms, messages, stopping, stopped, defaultWorker }));
@@ -369,14 +372,19 @@
 		}
 	}
 
-	/** A stop failure shows on the page (a phone has no bell on screen) and stays in the bell. */
+	/**
+	 * A stop failure shows on the page (a phone has no bell on screen) and stays in
+	 * the bell. The sheet sits above the banner, so it also shows the failure itself.
+	 */
 	function stopFailed(message: string) {
 		notify.banner(message, { severity: 'error', persist: true, duration_ms: 8000 });
+		if (sheetVisible) sheetStopError = message;
 	}
 
 	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
 	async function stopRow(row: RunRow, quiet = false): Promise<boolean> {
 		if (!sessionId || row.state !== 'running' || !canAct()) return false;
+		if (!quiet) sheetStopError = null;
 		const requestedSessionId = sessionId;
 		markStopping(row.key, true);
 		let ok = false;
@@ -401,6 +409,7 @@
 	async function stopMember(swarm: SwarmRow, member: SwarmMemberRow) {
 		if (!member.taskId || member.status !== 'running' || stopping.has(member.key)) return;
 		markStopping(member.key, true);
+		sheetStopError = null;
 		const result = await stopTask(member.taskId);
 		if (!result.ok) {
 			markStopping(member.key, false);
@@ -414,6 +423,7 @@
 		const scope = stopScope;
 		confirmingAll = false;
 		if (!scope.length) return;
+		sheetStopError = null;
 		const results = await Promise.all(scope.map((row) => stopRow(row, true)));
 		const failed = results.filter((ok) => !ok).length;
 		if (failed) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`);
@@ -596,6 +606,7 @@
 		confirmingWatch = null;
 		movingWatch = null;
 		prefOpen = null;
+		sheetStopError = null;
 		if (variant === 'sheet' || variant === 'page') {
 			onClose?.();
 			return;
@@ -1228,6 +1239,12 @@
 		</div>
 	</header>
 	<div class="rt-list">
+		{#if sheetStopError}
+			<p class="rt-warn rt-error" role="alert" data-testid="sheet-stop-error">
+				{sheetStopError}
+				<button type="button" class="link" onclick={() => (sheetStopError = null)}>Dismiss</button>
+			</p>
+		{/if}
 		{#if swarmError && sessionSwarms.length}
 			<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
 		{/if}
@@ -1702,6 +1719,7 @@
 	.chip[aria-pressed='true'] .chip-count { background: color-mix(in oklch, var(--primary) 18%, transparent); color: var(--primary); }
 	.rt-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 	.rt-warn { margin: 8px 16px 0; font-size: 0.75rem; color: var(--warning); }
+	.rt-warn.rt-error { color: var(--destructive); }
 	.link { border: 0; background: transparent; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline; }
 	.finished { border-top: 1px solid var(--border-subtle, var(--border)); }
 	.finished summary {

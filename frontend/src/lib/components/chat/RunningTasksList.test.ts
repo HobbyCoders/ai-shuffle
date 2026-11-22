@@ -351,6 +351,32 @@ describe('RunningTasksList stopping', () => {
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
 	});
 
+	it('shows a stop failure inside the open sheet, which covers the banner, until a retry', async () => {
+		const message = "Couldn't stop the task. The worker running this chat did not answer in time.";
+		mocks.stopSessionTask.mockResolvedValue({ ok: false, message });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		const alert = await screen.findByTestId('sheet-stop-error');
+		expect(screen.getByRole('dialog').contains(alert)).toBe(true);
+		expect(alert.getAttribute('role')).toBe('alert');
+		expect(alert.textContent).toContain(message);
+		expect(mocks.notifyBanner).toHaveBeenCalledTimes(1);
+		mocks.stopSessionTask.mockResolvedValue({ ok: true });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => expect(screen.queryByTestId('sheet-stop-error')).toBeNull());
+	});
+
+	it('dismisses the in-sheet stop failure', async () => {
+		mocks.stopSessionTask.mockResolvedValue({ ok: false });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await screen.findByTestId('sheet-stop-error');
+		await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+	});
+
 	it("says why a paused task could not be stopped when the chat's worker explains", async () => {
 		const detail = "Couldn't reach ServerWorker from Laptop (connection refused).";
 		mocks.cancelLimitResume.mockRejectedValue({ status: 409, detail });
