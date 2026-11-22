@@ -7,7 +7,8 @@
 	 * On desktop the same content becomes a
 	 * small popover; the caller places it with `placement` (the More flyout sits
 	 * beside the rail, the filter popover under the filter button), and the
-	 * scrim turns transparent so it only catches the outside click.
+	 * scrim turns transparent so it only catches the outside click. A popover
+	 * opened from a row passes that row as `anchor` and opens right beside it.
 	 *
 	 * The sheet lives inside the sidebar plane rather than a portal, so it moves
 	 * with the mobile drawer and never covers the chat beside a docked sidebar.
@@ -15,6 +16,7 @@
 	import { tick, type Snippet } from 'svelte';
 	import { X } from 'lucide-svelte';
 	import { moveSheetDrag, sheetDragDismisses, startSheetDrag, type SheetDrag } from '$lib/components/ui/sheet-drag';
+	import { anchoredPopover, type SheetAnchor } from './sheet-anchor';
 
 	interface Props {
 		open: boolean;
@@ -25,11 +27,15 @@
 		phone: boolean;
 		/** Desktop placement class: 'flyout' (beside the rail) or 'popover'. */
 		placement?: 'flyout' | 'popover';
+		/** Desktop popover only: the row that opened it, so it opens beside that row. */
+		anchor?: SheetAnchor | null;
 		onClose: () => void;
 		children: Snippet;
 	}
 
-	let { open, label, role = 'dialog', phone, placement = 'popover', onClose, children }: Props = $props();
+	let { open, label, role = 'dialog', phone, placement = 'popover', anchor = null, onClose, children }: Props = $props();
+
+	const anchored = $derived(!phone && placement === 'popover' && anchor ? anchoredPopover(anchor) : null);
 
 	let sheetRef = $state<HTMLDivElement | null>(null);
 	let dragY = $state(0);
@@ -97,6 +103,10 @@
 	class="sheet {phone ? 'phone' : placement}"
 	class:open
 	class:dragging
+	class:above={anchored?.side === 'above'}
+	style:top={anchored ? (anchored.top === null ? 'auto' : `${anchored.top}px`) : undefined}
+	style:bottom={anchored?.bottom != null ? `${anchored.bottom}px` : undefined}
+	style:max-height={anchored ? `${anchored.maxHeight}px` : undefined}
 	{role}
 	aria-label={label}
 	aria-hidden={open ? undefined : 'true'}
@@ -230,6 +240,11 @@
 		padding: 10px 10px 4px;
 		transform-origin: 100% 0;
 		transform: translateY(-6px) scale(0.97);
+	}
+	/* Opened from a row low in the list: it grows up from that row instead. */
+	.sheet.popover.above {
+		transform-origin: 100% 100%;
+		transform: translateY(6px) scale(0.97);
 	}
 	.sheet.flyout.open,
 	.sheet.popover.open { opacity: 1; pointer-events: auto; transform: none; }
