@@ -126,6 +126,10 @@
 		sessionId: $activeSession.sessionId,
 		remote: mirrorRemote,
 		createdFromComposer: $activeSession.createdFromComposer,
+		// /live (not the row, which can lag a hand-off) said this worker runs it,
+		// and its transcript is on screen: handed off while open, it stays shown.
+		shownAsLocal: !!$activeSession.sessionId && $activeSession.confirmedLocalSession === $activeSession.sessionId
+			&& chatSurface === 'active',
 		onCaughtUp: () => activeSession.reloadSession(false, 'mirror-caught-up')
 	}));
 	// MainPanel's header title follows the hero through the first sync (#812).

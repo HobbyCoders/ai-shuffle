@@ -535,8 +535,8 @@
 			]
 		},
 		{
-			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
-			"journeys": ["mirrored-chat", "open-unloaded-chat"],
+			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it, including a chat handed to another worker while open",
+			"journeys": ["mirrored-chat", "open-unloaded-chat", "mirrored-project-upload"],
 			"globs": [
 				"frontend/src/lib/components/chat/MirrorSyncGate.svelte",
 				"frontend/src/lib/components/chat/mirror-sync.svelte.ts"
