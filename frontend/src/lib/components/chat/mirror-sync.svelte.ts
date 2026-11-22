@@ -113,8 +113,8 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		// earlier transcript to reveal or reload at the opening checkpoint.
 		let caughtUpOnce = createdFromComposer;
 		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
-		// Progress of the opening wait: the fewest updates remaining seen so
-		// far, and when that last went down (or the first answer came).
+		// Progress of the opening wait: the fewest per-chat updates remaining
+		// seen so far, and when that last went down (or the first answer came).
 		let fewestPending = Infinity;
 		let progressAt = 0;
 		const notice = createConnectionBannerGrace({
@@ -151,7 +151,12 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 				if (!['checking', 'syncing', 'current', 'offline'].includes(status.state)) throw new Error('Invalid sync status');
 				// Pin an opening checkpoint instead of chasing a continuously writing
 				// owner. The server replaces it on an epoch change or truncation.
-				if (!caughtUpOnce && status.initial_target) initialTarget = status.initial_target;
+				if (!caughtUpOnce && status.initial_target) {
+					const next = status.initial_target;
+					if (initialTarget && (next.seq !== initialTarget.seq || next.epoch !== initialTarget.epoch
+						|| next.tail_id !== initialTarget.tail_id)) fewestPending = Infinity; // a new checkpoint, a new count
+					initialTarget = next;
+				}
 				const firstCatchUp = !caughtUpOnce && (status.state === 'current' || status.initial_caught_up === true);
 				if (firstCatchUp) caughtUpOnce = true;
 				syncState = status.state;
@@ -160,7 +165,14 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 					: status.pending_updates ?? 0);
 				pending = remaining;
 				const now = Date.now();
-				if (remaining < fewestPending) { fewestPending = remaining; progressAt = now; }
+				// Only a per-chat count measures progress (an owner-wide answer
+				// reports 0 for "unknown"); the first one, or a lower one, counts.
+				// A first transcript download has nothing usable to show yet.
+				if (!progressAt || status.transcript === 'downloading'
+					|| (status.scope !== 'owner' && remaining < fewestPending)) progressAt = now;
+				if (status.scope !== 'owner' && status.transcript !== 'downloading') {
+					fewestPending = Math.min(fewestPending, remaining);
+				}
 				// Stuck (an owner that never delivers the last updates, say): show
 				// what this worker has rather than hold the chat hidden forever.
 				const stalled = now - progressAt >= MIRROR_SYNC_STALL_REVEAL_MS;

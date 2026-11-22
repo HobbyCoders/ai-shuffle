@@ -27,7 +27,7 @@ import random
 import threading
 import time
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
@@ -123,6 +123,11 @@ _session_watermarks: dict[tuple[str, str], dict] = {}
 # How long a sync check for a chat whose head is unknown waits for an exchange
 # with its owner (``fetch_session_head``) before it answers with what it has.
 SESSION_HEAD_WAIT_SECONDS = 1.5
+# The longest a head-only request may hold an owner's link (route, auth and
+# the request together). An owner that accepts connections but stops answering
+# would otherwise hold it for a full read timeout, and the sync pass, woken to
+# try the same owner, waits that out before it reaches the next worker.
+SESSION_HEAD_FETCH_SECONDS = 3.0
 # One out-of-band exchange per owner at a time, shared by every caller.
 _head_fetches: Dict[str, asyncio.Task] = {}
 # A chat whose owner sends no head (an older peer, a chat it no longer lists)
@@ -273,9 +278,10 @@ async def fetch_session_head(session_id: str, owner_device_id: str | None, *,
     freshness, which says "syncing" whenever the owner has unpublished events
     in any chat. The head otherwise arrives only when the sequential sync pass
     next reaches the owner, so opening another worker's chat showed "Checking
-    sync" for seconds even when this copy was already current. This exchanges
-    with the owner directly (one exchange per owner, shared by concurrent
-    callers) and waits up to ``timeout`` for it; the exchange carries on in the
+    sync" for seconds even when this copy was already current. This asks the
+    owner for its heads directly (``PeerLink.fetch_heads``: one request per
+    owner, shared by concurrent callers) and waits until this chat's head is
+    known, the request ends, or ``timeout``; the request carries on in the
     background past that, and the caller answers with what is known.
     """
     ctx = engine.context()
@@ -283,6 +289,8 @@ async def fetch_session_head(session_id: str, owner_device_id: str | None, *,
             or owner_device_id == ctx.device_id):
         return
     new, head = _note_session_interest(owner_device_id, session_id)
+    if new:
+        _kick_from_thread()  # the pass pulls what the head shows is missing
     if head is not None:
         return
     link, client = _links.get(owner_device_id), _sync_client
@@ -292,10 +300,7 @@ async def fetch_session_head(session_id: str, owner_device_id: str | None, *,
         running = None
     if (link is None or not link.endpoints or link.backoff_until > time.monotonic()
             or client is None or running is None or running is not _loop):
-        # Unreachable or backing off: leave it to the sync loop's own pass.
-        if new:
-            _kick_from_thread()
-        return
+        return  # unreachable or backing off: the sync loop's own pass covers it
     task = _head_fetches.get(owner_device_id)
     if task is None or task.done():
         now = time.monotonic()
@@ -306,32 +311,29 @@ async def fetch_session_head(session_id: str, owner_device_id: str | None, *,
         _head_fetch_at[(owner_device_id, session_id)] = now
         task = running.create_task(_fetch_heads(link, client), name=f"network-head-{owner_device_id[:8]}")
         _head_fetches[owner_device_id] = task
-    try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
+    # A pass holding the link may record the head before this request runs.
+    deadline = running.time() + timeout
+    while not task.done() and _session_head(owner_device_id, session_id) is None:
+        remaining = deadline - running.time()
+        if remaining <= 0:
+            break
+        await asyncio.wait({task}, timeout=min(remaining, 0.05))
+
+
+def _session_head(owner_device_id: str, session_id: str) -> Optional[dict]:
+    with _session_watermark_lock:
+        return _session_watermarks.get((owner_device_id, session_id))
 
 
 async def _fetch_heads(link: "PeerLink", client: httpx.AsyncClient) -> None:
-    """One exchange with ``link`` for the heads its viewers asked for.
-
-    A full ``sync_once``: it also pulls the chat's missing events. Skipped when
-    a pass that held the link meanwhile already brought every requested head.
-    Failures are the sync loop's to count and back off; this only logs.
-    """
+    """Background half of ``fetch_session_head``. Failures are the sync loop's
+    to count and back off (its pass was woken); this only logs."""
     try:
-        ctx = engine.require_context()
-        summary = await link.sync_once(client, ctx, unless=lambda: _heads_known(link.device_id))
-        if summary.get("skipped"):
-            return
-        await asyncio.to_thread(note_contact, link.device_id)
-        if summary.get("received") or summary.get("unsettled") or summary.get("snapshot_required"):
-            _kick_from_thread()  # let the regular pass follow up
+        await link.fetch_heads(client, engine.require_context())
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - the sync loop owns failure state
         logger.debug("Head fetch from %s failed: %s", link.device_id, exc)
-        _kick_from_thread()
 
 
 def session_sync_status(session_id: str, owner_device_id: str | None, *,
@@ -814,18 +816,47 @@ class PeerLink:
             raise PeerError("endpoint answered for another device")
         return result["token"], float(result.get("expires_at") or (time.time() + tokens.TOKEN_TTL_SECONDS))
 
-    async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False,
-                        unless: Optional[Callable[[], bool]] = None) -> dict:
-        """Exchange with this peer. ``unless`` is checked once this holds the
-        link: when it returns True the exchange is skipped (``{"skipped": True}``)."""
+    async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
         async with self._sync_lock:
-            if unless is not None and unless():
-                return {"skipped": True, "received": 0, "sent": 0}
             self.syncing = catch_up
             try:
                 return await self._sync_once(client, ctx, catch_up=catch_up)
             finally:
                 self.syncing = False
+
+    async def fetch_heads(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> bool:
+        """One exchange request for the transcript heads viewers asked for, and nothing else.
+
+        It holds the link like ``sync_once`` (one conversation per peer) but
+        asks for a single op it then ignores: no ops applied, no state copy, no
+        push, no failure or contact bookkeeping. The sync pass does all of
+        that. Returns False when every requested head was already known (a
+        pass that held the link meanwhile brought them).
+        """
+        async with self._sync_lock:
+            if _heads_known(self.device_id):
+                return False
+            session_ids = requested_session_watermarks(self.device_id)
+            async with asyncio.timeout(SESSION_HEAD_FETCH_SECONDS):  # see SESSION_HEAD_FETCH_SECONDS
+                await self.open(client, ctx)
+                marks = await asyncio.to_thread(store.local_watermarks)
+                exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange",
+                                           json_body=await self._exchange_body(ctx, session_ids, marks, limit=1,
+                                                                               flush=False))
+            note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
+            return True
+
+    async def _exchange_body(self, ctx: engine.NetworkContext, session_ids: list[str], marks: dict, *,
+                             limit: int, flush: bool) -> dict:
+        return {
+            "session_ids": session_ids,
+            "watermarks": marks, "limit": limit, "incarnation": ctx.identity.incarnation,
+            "generation": ctx.generation,
+            "flush": flush,
+            "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
+            **(await asyncio.to_thread(_description)), "version": settings.version,
+            "platform": identity_mod.platform_name(),
+        }
 
     async def _sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool) -> dict:
         """Full exchange with this peer. Returns a small summary."""
@@ -837,15 +868,9 @@ class PeerLink:
         checked_stalls: set[tuple[str, str]] = set()
         while True:
             session_ids = requested_session_watermarks(self.device_id)
-            exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange", json_body={
-                "session_ids": session_ids,
-                "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
-                "generation": ctx.generation,
-                "flush": catch_up and target is None,
-                "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
-                **(await asyncio.to_thread(_description)), "version": settings.version,
-                "platform": identity_mod.platform_name(),
-            })
+            exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange",
+                                       json_body=await self._exchange_body(ctx, session_ids, marks, limit=BATCH_LIMIT,
+                                                                           flush=catch_up and target is None))
             note_session_watermarks(self.device_id, session_ids, exchange.get("session_watermarks"))
             theirs = exchange.get("watermarks") or {}
             reported = exchange.get("generation") if exchange.get("retention_ack") == RETENTION_ACK else None
