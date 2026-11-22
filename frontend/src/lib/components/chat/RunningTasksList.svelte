@@ -351,15 +351,18 @@
 		stopped = { ...stopped, [row.key]: { row: { ...row, endedAt: Date.now() }, at: Date.now() } };
 	}
 
-	async function stopTask(id: string): Promise<boolean> {
-		if (!sessionId || !canAct()) return false;
+	const STOP_FAILED = "Couldn't stop the task. It may have already finished.";
+
+	/** Stop one task: whether it stopped, and the server's words when it says why not. */
+	async function stopTask(id: string): Promise<{ ok: boolean; message?: string }> {
+		if (!sessionId || !canAct()) return { ok: false };
 		try {
 			// A paused worker is stopped by cancelling its scheduled resume.
-			if (paused.has(id)) return (await cancelLimitResume(sessionId, id)).cancelled;
+			if (paused.has(id)) return { ok: (await cancelLimitResume(sessionId, id)).cancelled };
 			const result = await stopSessionTask(sessionId, id);
-			return result.ok;
+			return { ok: result.ok, message: result.message };
 		} catch {
-			return false;
+			return { ok: false };
 		}
 	}
 
@@ -377,8 +380,9 @@
 				if (!quiet) notify.error(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.");
 			}
 		} else {
-			ok = await stopTask(row.id);
-			if (!ok && !quiet) notify.error("Couldn't stop the task. It may have already finished.");
+			const result = await stopTask(row.id);
+			ok = result.ok;
+			if (!ok && !quiet) notify.error(result.message || STOP_FAILED);
 		}
 		if (sessionId !== requestedSessionId || !canAct()) return ok;
 		if (ok) remember(row);
@@ -389,10 +393,10 @@
 	async function stopMember(swarm: SwarmRow, member: SwarmMemberRow) {
 		if (!member.taskId || member.status !== 'running' || stopping.has(member.key)) return;
 		markStopping(member.key, true);
-		const ok = await stopTask(member.taskId);
-		if (!ok) {
+		const result = await stopTask(member.taskId);
+		if (!result.ok) {
 			markStopping(member.key, false);
-			notify.error("Couldn't stop the task. It may have already finished.");
+			notify.error(result.message || STOP_FAILED);
 		}
 		// On success the swarm's next snapshot marks it cancelled; the spinner
 		// stays until then.

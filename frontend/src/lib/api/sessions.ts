@@ -495,6 +495,11 @@ export interface StopTaskResult {
 	ok: boolean;
 	kind?: 'agent' | 'shell';
 	detail?: string;
+	/**
+	 * Why the stop failed, in words for the person (the worker that runs the
+	 * chat could not be reached, or needs an update). Show it as is.
+	 */
+	message?: string;
 }
 
 /**

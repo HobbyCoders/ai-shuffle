@@ -1741,13 +1741,19 @@ async def stop_session_background_task(
     Returns ``{"ok": bool, ...}`` — a failed stop is a 200 with ok=False
     (a shell whose processes survived) rather than an error; a task that
     already finished is ok=True with ``detail: "already finished"``.
-    """
-    await require_session(request, session_id)
 
+    A chat that runs on another worker is a mirror here, with none of its
+    tasks: the stop is forwarded to that worker, as the chat's Stop is.
+    """
+    session = await require_session(request, session_id)
+
+    from app.api.task_stop_owner import forward_task_stop
     from app.core.query_engine import stop_session_task
 
     async with api_error_handler("stop background task"):
-        result = await stop_session_task(session_id, task_id)
+        result = await forward_task_stop(session, task_id)
+        if result is None:
+            result = await stop_session_task(session_id, task_id)
         return {"session_id": session_id, "task_id": task_id, **result}
 
 

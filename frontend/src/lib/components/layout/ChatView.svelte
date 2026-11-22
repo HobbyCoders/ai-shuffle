@@ -198,7 +198,7 @@
 				const owner = $activeSession.sessionId;
 				if (!owner) return false;
 				const result = await stopSessionTask(owner, job.stop.taskId);
-				if (!result.ok) notify.error('Could not stop that job. It may have finished.');
+				if (!result.ok) notify.error(result.message || 'Could not stop that job. It may have finished.');
 				return result.ok;
 			}
 			await interruptSession(job.stop.sessionId);

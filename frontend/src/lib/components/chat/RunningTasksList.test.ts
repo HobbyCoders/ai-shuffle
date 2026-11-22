@@ -330,6 +330,17 @@ describe('RunningTasksList stopping', () => {
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
 		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalled());
+		expect(mocks.notifyError).toHaveBeenCalledWith("Couldn't stop the task. It may have already finished.");
+		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
+	});
+
+	it("says why, in the server's words, when the chat's worker could not stop it", async () => {
+		const message = "Couldn't stop the task. Couldn't reach ServerWorker from Laptop (connection refused).";
+		mocks.stopSessionTask.mockResolvedValue({ ok: false, message });
+		setTasks([task('a')]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(message));
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
 	});
 
