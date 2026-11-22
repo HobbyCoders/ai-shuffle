@@ -198,6 +198,68 @@ describe('the opening wait', () => {
 		expect(sync.pending).toBeLessThan(400);
 		destroy();
 	});
+
+	it('does not count an owner-wide answer (no per-chat count yet) as the lowest count', async () => {
+		vi.useFakeTimers();
+		let polls = 0;
+		const fetch = vi.fn().mockImplementation(() => {
+			polls += 1;
+			// The first check ran before the owner's head arrived.
+			return Promise.resolve(reply(polls === 1
+				? { state: 'syncing', scope: 'owner', pending_updates: 0 }
+				: { state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: 400 - polls * 10 }));
+		});
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-late-head', remote: true });
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS * 2);
+		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
+	it('restarts the stall clock when the opening checkpoint is replaced', async () => {
+		vi.useFakeTimers();
+		let polls = 0;
+		const fetch = vi.fn().mockImplementation(() => {
+			polls += 1;
+			// The owner's log was replaced: a new checkpoint with a larger count, then progress on it.
+			const replaced = polls > 4;
+			return Promise.resolve(reply({
+				state: 'syncing', scope: 'session', initial_caught_up: false,
+				initial_target: replaced ? { seq: 90, epoch: 'second', tail_id: 't90' } : { seq: 10, epoch: 'first', tail_id: 't10' },
+				initial_pending_updates: replaced ? 100 - polls : 5,
+			}));
+		});
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-replaced', remote: true });
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS * 2);
+		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
+	it('keeps a first transcript download hidden: there is no usable copy to show yet', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply(
+			{ state: 'syncing', pending_updates: 0, transcript: 'downloading', scope: 'owner' })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-new-worker', remote: true });
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS * 3);
+		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
+	it('shows a chat whose owner never sends a per-chat head (an older worker) after the stall time', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply(
+			{ state: 'syncing', pending_updates: 4, scope: 'owner' })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-old-owner', remote: true });
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS - MIRROR_SYNC_WAITING_POLL_MS);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
+		expect(sync.waiting).toBe(false);
+		destroy();
+	});
 });
 
 describe('a sync check that keeps failing (#814)', () => {
