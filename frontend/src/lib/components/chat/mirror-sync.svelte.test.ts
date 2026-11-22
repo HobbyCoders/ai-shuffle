@@ -85,6 +85,41 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		destroy();
 	});
 
+	it('keeps a chat handed to another worker while open on screen, but checks it when opened again later', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply({
+			state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: 3, pending_updates: 3,
+		})));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'mine', remote: false });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetch).not.toHaveBeenCalled();
+		// The hand-off: the open chat now runs elsewhere. Its transcript is this
+		// worker's own, so it is never hidden, not even for one frame.
+		props.remote = true;
+		expect(sync.waiting).toBe(false);
+		flushSync();
+		expect(sync.waiting).toBe(false);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(String(fetch.mock.calls[0][0])).toContain('/sessions/mine/sync-status');
+		expect(sync.syncState).toBe('syncing');
+		expect(sync.waiting).toBe(false);
+		// Followed at the normal pace, with no opening reload.
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS - MIRROR_SYNC_WAITING_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(onCaughtUp).not.toHaveBeenCalled();
+
+		// Opened again after another chat, it is a mirror like any other.
+		props.sessionId = 'other';
+		flushSync();
+		props.sessionId = 'mine';
+		flushSync();
+		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
 	it('never polls a local chat or an unbound one', async () => {
 		vi.useFakeTimers();
 		const fetch = vi.fn();

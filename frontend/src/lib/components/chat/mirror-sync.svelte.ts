@@ -97,21 +97,31 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	const sessionId = $derived(input().sessionId);
 	const remote = $derived(input().remote);
 	const createdFromComposer = $derived(input().createdFromComposer === true);
+	// The open chat while this worker ran it. Handed to another worker while
+	// open, it is this worker's own transcript and already on screen: like a
+	// composed one, it is not hidden for an opening catch-up nor reloaded.
+	let ranHere = $state<string | null>(null);
 	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
 	// catch-up, then keep the conversation mounted during incremental sync.
-	const waiting = $derived(!!sessionId && remote && !createdFromComposer && revealedSession !== sessionId);
+	const waiting = $derived(!!sessionId && remote && !createdFromComposer
+		&& revealedSession !== sessionId && ranHere !== sessionId);
 	const behind = $derived(syncState === 'syncing' || syncState === 'checking');
 
 	$effect(() => {
 		const id = sessionId;
-		if (!id || !remote) return;
+		if (!id || !remote) {
+			ranHere = id;
+			return;
+		}
+		const handedOff = untrack(() => ranHere) === id;
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
 		let failures = 0;
 		let inFlight = false;
-		// A fresh compose already shows the outgoing message; there is no
-		// earlier transcript to reveal or reload at the opening checkpoint.
-		let caughtUpOnce = createdFromComposer;
+		// A fresh compose already shows the outgoing message, and a hand-off
+		// keeps this worker's own; there is no earlier transcript to reveal or
+		// reload at the opening checkpoint.
+		let caughtUpOnce = createdFromComposer || handedOff;
 		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
 		// Progress of the opening wait: the fewest per-chat updates remaining
 		// seen so far, and when that last went down (or the first answer came).
@@ -122,7 +132,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 			onHide: () => { noticeVisible = false; },
 			graceMs: untrack(() => input().graceMs ?? MIRROR_SYNC_NOTICE_GRACE_MS),
 		});
-		revealedSession = null;
+		// Only the open chat's own hand-off counts: going back to it later (after
+		// another chat) opens it like any other mirrored chat.
+		ranHere = null;
+		revealedSession = handedOff ? id : null;
 		noticeVisible = false;
 		syncState = 'checking';
 		pending = 0;

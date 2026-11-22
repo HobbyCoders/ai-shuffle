@@ -16,9 +16,10 @@ describe('mirrored session freshness', () => {
 	it('withholds stale content without unmounting it at an opening freshness barrier', async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(status('syncing', 4)).mockImplementation(() => Promise.resolve(status('current'))));
-		const view = render(MirrorSyncGate, { sessionId: 'chat', remote: false, children });
+		// Opened as a mirror. (A chat this worker ran, handed off while open, is
+		// its own transcript and stays shown: see mirror-sync.svelte.test.ts.)
+		render(MirrorSyncGate, { sessionId: 'chat', remote: true, children });
 		const transcript = screen.getByText('2 running tasks, 2 agents');
-		await view.rerender({ sessionId: 'chat', remote: true, children });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(transcript.isConnected).toBe(true);
 		const withheld = transcript.closest('[aria-hidden="true"]') as HTMLElement;
