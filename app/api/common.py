@@ -7,6 +7,7 @@ projects, github, git, project_agents, mcp, project_plugins, hooks).
 """
 
 import logging
+import re
 from contextlib import asynccontextmanager, contextmanager
 from functools import wraps
 from pathlib import Path
@@ -118,17 +119,55 @@ def is_path_served(file_path: Path, workspace: Path) -> bool:
     return any(is_path_safe(file_path, root) for root in _registered_serve_roots())
 
 
+# Browser screenshots in the Claude Code CLI's own cache. The CLI saves every
+# image a tool returns as ``<config>/projects/<project>/<session>/tool-results/
+# mcp-browser-blob-<n>-<id>.jpg`` and shows the agent that path, so agents link
+# it in chat. Only that exact shape is served: the same folders also hold text
+# tool output, which stays private.
+_CLI_SCREENSHOT_NAME = re.compile(r"mcp-browser-blob-[A-Za-z0-9_-]+\.(?:jpe?g|png)")
+
+
+def _cli_transcript_roots() -> tuple:
+    """Where the CLI keeps transcripts: its config folder's ``projects``, plus a configured override."""
+    from app.core import claude_cli_home
+
+    roots = [claude_cli_home.default_dir() / "projects"]
+    configured = getattr(settings, "claude_projects_dir", None)
+    if configured:
+        roots.append(Path(configured))
+    return tuple(roots)
+
+
+def is_cli_browser_screenshot(file_path: Path) -> bool:
+    """A browser screenshot the CLI cached for one of its sessions (symlinks resolved)."""
+    try:
+        resolved = file_path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not _CLI_SCREENSHOT_NAME.fullmatch(resolved.name):
+        return False
+    for root in _cli_transcript_roots():
+        try:
+            parts = resolved.relative_to(root.resolve()).parts
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if len(parts) == 4 and parts[2] == "tool-results":
+            return True
+    return False
+
+
 def require_file_access(file_path: Path, workspace: Path, request: Optional[Request]) -> None:
     """Authorize a served path against the caller's project, including checkouts.
 
-    Unscoped authenticated callers keep the existing served-root behavior.
+    Unscoped authenticated callers keep the existing served-root behavior, plus
+    the CLI's cached browser screenshots (:func:`is_cli_browser_screenshot`).
     Scoped API users never inherit the global workspace or another project's roots.
     The caller offloads this synchronous DB/path work with ``run_sync``.
     """
     api_user = get_api_user_from_request(request) if request is not None else None
     project_id = (api_user or {}).get("project_id")
     if not project_id:
-        allowed = is_path_served(file_path, workspace)
+        allowed = is_path_served(file_path, workspace) or is_cli_browser_screenshot(file_path)
     else:
         allowed = False
         try:
