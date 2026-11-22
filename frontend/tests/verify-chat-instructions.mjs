@@ -1,4 +1,5 @@
-// Real-browser check of Settings > Security > Chat instructions: the row uses
+// Real-browser check of Settings > Agent behavior > Chat instructions (on
+// Security until Settings was reorganized): the row uses
 // the new name, a saved customization says it differs from the current
 // default, the default opens read-only for comparison without saving anything,
 // and Revert to default (after its confirm) restores the default. Desktop width;
@@ -58,8 +59,8 @@ async function harness(viewport) {
 	page.on('pageerror', (e) => errors.push(e.message));
 	const noOverflow = () => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 
-	// 1. Security lists the setting under its new name, customized.
-	await page.goto(`${base}?tab=security`);
+	// 1. Agent behavior lists the setting under its new name, customized.
+	await page.goto(`${base}?tab=agents`);
 	const row = page.getByRole('button', { name: /^Chat instructions/ });
 	await row.waitFor();
 	check((await row.textContent()).includes('Customized'), 'row says Customized', await row.textContent());

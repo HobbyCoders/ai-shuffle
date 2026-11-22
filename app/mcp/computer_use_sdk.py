@@ -290,7 +290,7 @@ def _halt_payload(session_id: Optional[str], outcome: str = "rejected") -> dict:
     cause = abort.describe(reason)
     who = abort.kind(reason)
     if who == "disabled":
-        code, then = "PERMISSION_REQUIRED", "The user must turn it on in Settings > Security > Computer use."
+        code, then = "PERMISSION_REQUIRED", "The user must turn it on in Settings > Agent behavior > Computer use."
     elif who == "completed":
         code, then = "CONTROL_ENDED", "Start a new turn to continue."
     elif who == "app":
@@ -402,7 +402,7 @@ def create_computer_use_server(
             return _fail(_halt_payload(session_id))
         from app.api.computer_use import get_computer_use_enabled
         if not get_computer_use_enabled():
-            return _fail({"error": "Computer use is disabled in Settings > Security > Computer use.",
+            return _fail({"error": "Computer use is disabled in Settings > Agent behavior > Computer use.",
                           "code": "PERMISSION_REQUIRED", "outcome": "rejected"})
         return _access_error()
 
@@ -1454,7 +1454,7 @@ def create_computer_use_server(
         return bool(allowed) and access.consume_first_use_confirmation(session_id)
 
     async def _dedicated_desktop() -> bool:
-        """True when only agents use this worker's desktop (Settings > Security).
+        """True when only agents use this worker's desktop (Settings > Agent behavior).
 
         Then the first grant needs no person's allow: the session's permission
         mode decides, as for later grants. A read error keeps the prompt.

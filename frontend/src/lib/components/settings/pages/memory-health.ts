@@ -1,5 +1,5 @@
 /**
- * System > Memory > Memory health: the worker's own check of long-term memory
+ * Settings > Memory > Memory health: the worker's own check of long-term memory
  * (GET /memory/health, app/core/fluid_memory.py owner_health). Read-only: the
  * worker repairs what it safely can by itself; this only reports.
  */

@@ -255,7 +255,7 @@ Repairs only retire unprotected facts into the archive: exact duplicates (every
 worker keeps the same copy, chosen from replicated fields) and harvested facts
 that nobody recalled or saw in a snapshot for 30 days and that have not changed
 for 14. Near-duplicates are reported, not merged. A user-saved fact is never
-repaired away. The owner sees the result under Settings, System, Memory health
+repaired away. The owner sees the result under Settings, Memory, Memory health
 (`GET /api/v1/memory/health`), and gets one notification per stretch of
 attention, at most once a day per worker. The row's hint says when the check
 last ran (`checked_at`; "Not checked yet" when it has not), the opened list

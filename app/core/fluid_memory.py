@@ -330,7 +330,7 @@ def _health_notification(state: dict) -> str:
     text = " ".join(reasons[:2])
     if len(reasons) > 2:
         text += f" ({len(reasons) - 2} more.)"
-    return text + " Details are in Settings, System."
+    return text + " Details are in Settings, Memory."
 
 
 async def _announce_health(owner: str, store, state: dict) -> None:

@@ -11,11 +11,12 @@ import * as providers from './entries/providers';
 import * as models from './entries/models';
 import * as tuning from './entries/tuning';
 import * as usage from './entries/usage';
+import * as agents from './entries/agents';
 import * as memory from './entries/memory';
-import * as integrations from './entries/integrations';
 import * as plugins from './entries/plugins';
 import * as mcp from './entries/mcp';
 import * as hooks from './entries/hooks';
+import * as integrations from './entries/integrations';
 import * as devices from './entries/devices';
 import * as cloud from './entries/cloud';
 import * as security from './entries/security';
@@ -31,11 +32,12 @@ export const MODULES: Record<CategoryId, CategoryModule> = {
 	models,
 	tuning,
 	usage,
+	agents,
 	memory,
-	integrations,
 	plugins,
 	mcp,
 	hooks,
+	integrations,
 	devices,
 	cloud,
 	security,

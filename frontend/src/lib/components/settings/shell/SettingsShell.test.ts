@@ -80,10 +80,10 @@ describe('SettingsShell index', () => {
 		await fireEvent.keyDown(general, { key: '/' });
 		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
 	});
-	it('lists categories in three groups and opens General', async () => {
+	it('lists categories in five groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
-		for (const group of ['Personal', 'AI', 'This worker']) expect(within(index).getByText(group)).toBeTruthy();
+		for (const group of ['Personal', 'Models', 'Agents and tools', 'Devices and access', 'Maintenance']) expect(within(index).getByText(group)).toBeTruthy();
 		const names = within(index)
 			.getAllByRole('button')
 			.map((b) => b.textContent?.trim());
@@ -94,11 +94,12 @@ describe('SettingsShell index', () => {
 			'Default models',
 			'Model tuning',
 			'Usage',
+			'Agent behavior',
 			'Memory',
-			'Integrations',
 			'Plugins',
 			'MCP servers',
 			'Hooks',
+			'Integrations',
 			'Devices',
 			'Cloud',
 			'Security',

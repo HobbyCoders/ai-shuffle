@@ -91,7 +91,7 @@ Claude Code compaction's computed size target (for example, 30,000 tokens) is a 
 
 ## Computer use is unavailable
 
-**Settings → Security → Computer use** is greyed out with the reason next to it. With Docker it is never available, because a container has no screen to control. It needs the desktop app. On Linux, it needs an X11 session rather than Wayland.
+**Settings → Agent behavior → Computer use** is greyed out with the reason next to it. With Docker it is never available, because a container has no screen to control. It needs the desktop app. On Linux, it needs an X11 session rather than Wayland.
 
 ## The built-in browser crashes
 

@@ -5,10 +5,11 @@ import { runJourney } from './runner.mjs';
 import { expect, gotoApp, settleServiceWorker, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Memory', 'Integrations', 'Plugins', 'MCP servers', 'Hooks', 'Devices', 'Cloud', 'Security', 'Vault', 'System', 'Logs'];
+const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Agent behavior', 'Memory', 'Plugins', 'MCP servers', 'Hooks', 'Integrations', 'Devices', 'Cloud', 'Security', 'Vault', 'System', 'Logs'];
 // Security and Usage shifted for #1301 (a loading placeholder smaller than the
-// loaded control); the rest are measured with --all-pages.
-const pages = process.argv.includes('--all-pages') ? ALL : ['Security', 'Usage'];
+// loaded control). Agent behavior holds the rows that left Security for it
+// (chat instructions, computer use). The rest are measured with --all-pages.
+const pages = process.argv.includes('--all-pages') ? ALL : ['Security', 'Agent behavior', 'Usage'];
 const slug = (label) => label.toLowerCase().replace(/[^a-z]+/g, '-');
 
 const reloadCase = (label) => ({
@@ -41,10 +42,10 @@ const reloadCase = (label) => ({
 	}
 });
 
-// Security when its data cannot be read (#1403): the two requests answer 500
-// after the first paint, as a worker that errors would. The rows say so in
-// their own hints; no notice is inserted between the groups to push them down.
-const FAILING = /\/api\/v1\/(owner\/status|settings\/security-instructions)(\?|$)/;
+// Security when its data cannot be read (#1403): the owner status answers 500
+// after the first paint, as a worker that errors would. The row says so in
+// its own hint; no notice is inserted between the groups to push them down.
+const FAILING = /\/api\/v1\/owner\/status(\?|$)/;
 const INSTRUCTIONS = /\/api\/v1\/settings\/security-instructions(\?|$)/;
 const rowIn = (page) => (id) => page.locator(`[data-setting-anchor="${id}"]`).filter({ visible: true }).first();
 /** Answers matching GETs with 500 about 1.5 s late, as an erroring worker would. */
@@ -62,7 +63,7 @@ const failedLoadCase = {
 	name: 'reload-on-security-when-loading-fails',
 	allow: [
 		...reloadCase('Security').allow,
-		{ kind: 'failed_requests', status: 500, url: FAILING, reason: 'this case answers these two requests with 500 on purpose' }
+		{ kind: 'failed_requests', status: 500, url: FAILING, reason: 'this case answers this request with 500 on purpose' }
 	],
 	async setup(ctx) {
 		await reloadCase('Security').setup(ctx);
@@ -74,9 +75,7 @@ const failedLoadCase = {
 		const { page } = ctx;
 		const row = rowIn(page);
 		expect((await row('security.ownerPassword').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Owner password says why in its hint');
-		expect((await row('security.secInstr').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Chat instructions says why in its hint');
 		expect(await row('security.ownerPassword').getByRole('button', { name: 'Try again' }).isEnabled(), 'Try again is offered in the row');
-		expect(await row('security.secInstr').getByRole('button', { name: 'Try again' }).isEnabled(), 'Try again is offered in the instructions row too');
 		expect((await page.locator('.settings-shell p.st-msg.err').filter({ visible: true }).count()) === 0, 'no notice is inserted between the groups');
 
 		// From the keyboard: the retry fails, then works. Focus never drops to the page.
@@ -90,11 +89,10 @@ const failedLoadCase = {
 		expect((await focusedText(page)) === 'Try again', 'focus is still on Try again after a failed retry');
 		await page.waitForTimeout(500);
 
-		await ctx.mark('Try again, from the keyboard, works for both rows');
+		await ctx.mark('Try again, from the keyboard, works');
 		await page.context().unroute(FAILING);
 		await page.keyboard.press(' ');
 		await row('security.ownerPassword').locator('.st-rh').filter({ hasNotText: 'Could not load' }).waitFor({ timeout: 10_000 });
-		await row('security.secInstr').locator('.st-rh').filter({ hasNotText: 'Could not load' }).waitFor({ timeout: 10_000 });
 		expect((await page.getByRole('button', { name: 'Try again' }).count()) === 0, 'no Try again is left');
 		expect(await focusIn(row('security.ownerPassword')), 'focus lands in the Owner password row');
 		await page.waitForTimeout(1000);
@@ -119,28 +117,29 @@ const failUnlessRetrying = (page, url) =>
 		await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Synthetic failure' }) }).catch(() => {});
 	});
 
-// Only the instructions fail: their row offers the retry itself.
+// Agent behavior when only the chat instructions fail: their row offers the
+// retry itself. (This row was on Security until Settings was reorganized.)
 const instructionsFailCase = {
-	...failedLoadCase,
-	name: 'reload-on-security-when-instructions-fail',
+	...reloadCase('Agent behavior'),
+	name: 'reload-on-agent-behavior-when-instructions-fail',
 	allow: [
-		...reloadCase('Security').allow,
+		...reloadCase('Agent behavior').allow,
 		{ kind: 'failed_requests', status: 500, url: INSTRUCTIONS, reason: 'this case answers this request with 500 on purpose' }
 	],
 	async setup(ctx) {
-		await reloadCase('Security').setup(ctx);
+		await reloadCase('Agent behavior').setup(ctx);
 		await failUnlessRetrying(ctx.page, INSTRUCTIONS);
 	},
 	async act(ctx) {
-		await reloadCase('Security').act(ctx);
+		await reloadCase('Agent behavior').act(ctx);
 		const { page } = ctx;
 		const row = rowIn(page);
-		expect((await row('security.secInstr').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Chat instructions says why in its hint');
+		expect((await row('agents.instructions').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Chat instructions says why in its hint');
 		expect((await page.getByRole('button', { name: 'Try again' }).count()) === 1, 'one Try again, in the instructions row');
 		expect((await page.locator('.settings-shell p.st-msg.err').filter({ visible: true }).count()) === 0, 'no notice is inserted between the groups');
 		await ctx.mark('Try again with the mouse');
-		await row('security.secInstr').getByRole('button', { name: 'Try again' }).click();
-		await row('security.secInstr').locator('.st-rh').filter({ hasNotText: 'Could not load' }).waitFor({ timeout: 10_000 });
+		await row('agents.instructions').getByRole('button', { name: 'Try again' }).click();
+		await row('agents.instructions').locator('.st-rh').filter({ hasNotText: 'Could not load' }).waitFor({ timeout: 10_000 });
 		expect((await page.getByRole('button', { name: 'Try again' }).count()) === 0, 'the retry recovered the row');
 		await page.waitForTimeout(1000);
 	}

@@ -133,11 +133,11 @@ describe('settings navigation state', () => {
 	});
 
 	it('go() lands on the item, tab, anchor and expansion', () => {
-		settingsNav.go({ category: 'security', anchor: 'security.secInstr', open: 'security.secInstr' });
-		expect(settingsNav.category).toBe('security');
-		expect(settingsNav.pendingAnchor).toBe('security.secInstr');
+		settingsNav.go({ category: 'agents', anchor: 'agents.instructions', open: 'agents.instructions' });
+		expect(settingsNav.category).toBe('agents');
+		expect(settingsNav.pendingAnchor).toBe('agents.instructions');
 		expect(settingsNav.consumeOpen('other')).toBe(false);
-		expect(settingsNav.consumeOpen('security.secInstr')).toBe(true);
+		expect(settingsNav.consumeOpen('agents.instructions')).toBe(true);
 		expect(settingsNav.pendingOpen).toBeNull();
 
 		settingsNav.go({ category: 'providers', item: 'c-sub', tab: 'Policy' });

@@ -80,6 +80,16 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+it('lists Memory health beside Learned guidance and opens its check', async () => {
+	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
+		: path === '/memory/health' ? { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] }
+		: {});
+	await show('health');
+	expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Memory health');
+	await waitFor(() => expect(screen.getByTestId('memory-health').textContent).toContain('Healthy'));
+	expect(http.get).toHaveBeenCalledWith('/memory/health');
+});
+
 it('shows the same-account Text Generation requirement with no saved guidance', async () => {
 	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
 		: { blocks: [], max_chars: 4000 });
@@ -301,7 +311,8 @@ describe('Settings > Memory page', () => {
 
 	it('keeps memory text out of the Settings search index', () => {
 		const entry = MODULES.memory;
-		expect(entry.entries.map((e) => e.id)).toEqual(['memory.list']);
+		// Only the fixed rows: the page and its health check, never a memory.
+		expect(entry.entries.map((e) => e.id)).toEqual(['memory.list', 'memory.health']);
 		expect('searchSource' in entry).toBe(false);
 	});
 });

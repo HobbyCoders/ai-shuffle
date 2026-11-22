@@ -101,7 +101,7 @@ Subagents, Swarm tasks and chats an agent starts begin in the starting chat's cu
 
 Computer use (screen control) always asks the first time in each chat, in every mode, including Bypass. After you allow it, later requests in that chat follow the mode. Stopping the chat or restarting the worker resets it.
 
-On a computer nobody works at, such as a virtual machine set aside for agents, you can turn on **Settings → Security → Only agents use this computer**. Screen control then follows the mode from the first request. Leave it off on a computer you use yourself.
+On a computer nobody works at, such as a virtual machine set aside for agents, you can turn on **Settings → Agent behavior → Only agents use this computer**. Screen control then follows the mode from the first request. Leave it off on a computer you use yourself.
 
 ## Reasoning effort
 

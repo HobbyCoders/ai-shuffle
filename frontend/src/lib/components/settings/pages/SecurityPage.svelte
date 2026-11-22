@@ -1,20 +1,14 @@
 <script lang="ts">
 	/**
-	 * Security: Sign-in (owner password, trusted LAN) and Agent safety (agents
-	 * run as you, computer use, chat instructions).
-	 *
-	 * Owner access and the chat instructions are worker settings; the
-	 * instructions keep an explicit Save and survive a change made elsewhere
-	 * (banner + Load latest). Computer use follows the shared computerUse
-	 * store, polled only while this page is mounted.
+	 * Security: who can reach this worker. Sign-in (owner password, trusted
+	 * LAN) and terminals opened from other workers. The agent rows (chat
+	 * instructions, computer use, agents run as you) are on AgentsPage.svelte.
 	 */
-	import { onMount, tick } from 'svelte';
-	import { api, getErrorMessage, isApiError } from '$lib/api/client';
+	import { onMount } from 'svelte';
+	import { api, getErrorMessage } from '$lib/api/client';
 	import { terminalsApi } from '$lib/api/terminals';
 	import { fetchOwnerStatus, setTrustedLan, type OwnerStatus, type OwnerStatusFailure } from '$lib/api/owner';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
-	import { computerUse } from '$lib/stores/computerUse.svelte';
-	import { desktop } from '$lib/services/desktop';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { FORBIDDEN_TEXT, isForbidden } from '$lib/settings/access.svelte';
@@ -22,23 +16,12 @@
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import Switch from '../rows/Switch.svelte';
-	import ValueText from '../rows/ValueText.svelte';
 	import PeerDeviceLinks from '$lib/components/terminal/PeerDeviceLinks.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import OwnerPasswordForm from './editors/OwnerPasswordForm.svelte';
-	import SecurityInstructionsEditor from './editors/SecurityInstructionsEditor.svelte';
+	import { couldNotLoad, couldNotLoadSentence, handOffRetryFocus } from './load-failure';
 	import './editors/editors.css';
-
-	/** A failed load's one-line hint: the HTTP status, or that the worker did not answer. */
-	function couldNotLoad(code: number | null | undefined): string {
-		return code ? `Could not load (error ${code})` : 'Could not load (no answer)';
-	}
-
-	/** The same failure in full, for a screen reader's alert. */
-	function couldNotLoadSentence(what: string, code: number | null | undefined): string {
-		return `Could not load ${what}. ${code ? `The worker answered with an error (status ${code}).` : 'The worker did not answer.'}`;
-	}
 
 	/* ---------- owner access ---------- */
 
@@ -118,198 +101,6 @@
 		}
 	}
 
-	/* ---------- agents run as you (desktop app only) ---------- */
-
-	const agentAccess = desktop?.agentAccess ?? null;
-
-	/* ---------- computer use ---------- */
-
-	const UNAVAILABLE: Record<string, { hint: string; help: string }> = {
-		docker: {
-			hint: 'Unavailable in Docker',
-			help: 'AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.'
-		},
-		'no-display': {
-			hint: 'No desktop on this host',
-			help: 'No desktop display detected on this host. On Linux, start AI Shuffle from an X11 desktop session.'
-		},
-		wayland: {
-			hint: 'Wayland is not supported',
-			help: 'Computer use needs an X11 session on Linux. Log in with an X11 session (for example GNOME on Xorg) and restart AI Shuffle.'
-		},
-		'no-monitors': { hint: 'No monitors detected', help: 'No monitors detected on this host.' },
-		'missing-deps': {
-			hint: 'Python packages missing',
-			help: 'The computer-use Python packages are not installed. Run pip install -r requirements-native.txt.'
-		},
-		'missing-system-packages': {
-			hint: 'System libraries missing',
-			help: 'Screen-capture libraries are missing on this host.'
-		},
-		'x11-unreachable': {
-			hint: 'Cannot reach the X display',
-			help: 'AI Shuffle could not connect to the X display. Check DISPLAY and XAUTHORITY.'
-		},
-		'x11-no-xtest': {
-			hint: 'X server lacks XTEST',
-			help: 'The X server has no XTEST extension, which mouse and keyboard control needs.'
-		},
-		'env-disabled': {
-			hint: 'Turned off by environment',
-			help: 'Disabled by the COMPUTER_USE_DISABLED environment variable.'
-		},
-		'screenshot-probe-failed': {
-			hint: 'Screen capture check failed',
-			help: 'The screen-capture probe failed on this host.'
-		}
-	};
-
-	let computerBusy = $state(false);
-	const computerOff = $derived(UNAVAILABLE[computerUse.reason] ?? {
-		hint: 'Unavailable on this host',
-		help: `Unavailable (${computerUse.reason}).`
-	});
-	const computerHint = $derived(
-		!computerUse.available
-			? computerOff.hint
-			: computerUse.active
-				? `Controlling ${computerUse.displayLabel ?? 'your screen'}`
-				: computerUse.enabled
-					? 'On for every chat'
-					: undefined
-	);
-
-	async function setComputerUse(on: boolean) {
-		if (computerBusy || !computerUse.available) return;
-		computerBusy = true;
-		try {
-			await computerUse.setEnabled(on);
-			if (computerUse.enabled === on) flashSaved();
-		} finally {
-			computerBusy = false;
-		}
-	}
-
-	async function setDedicatedDesktop(on: boolean) {
-		if (computerBusy || !computerUse.available) return;
-		const mode = on ? 'dedicated_desktop' : 'shared_desktop';
-		computerBusy = true;
-		try {
-			await computerUse.setInputMode(mode);
-			if (computerUse.inputMode === mode) flashSaved();
-		} finally {
-			computerBusy = false;
-		}
-	}
-
-	$effect(() => {
-		computerUse.start();
-		return () => computerUse.stop();
-	});
-
-	/* ---------- chat instructions ---------- */
-
-	// Formerly "security instructions". The worker also answers
-	// /settings/chat-instructions, but this UI keeps the old path so it still
-	// works against workers that predate the rename.
-
-	interface Instructions {
-		current: string;
-		default: string;
-		is_customized: boolean;
-	}
-
-	let instrText = $state('');
-	let instrSaved = $state('');
-	let instrDefault = $state('');
-	let instrCustomized = $state(false);
-	let instrLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
-	/** The failed first load's HTTP status (null: no answer), for the row's hint. */
-	let instrLoadCode = $state<number | null>(null);
-	let instrBusy = $state(false);
-	/** A failed save or revert (a failed load is `instrLoad`, so a later read or a 403 ends it). */
-	let instrError = $state('');
-	const instrErrorId = `${uid}-instr-error`;
-	let instrOpen = $state(false);
-	/** Newest saved text from the worker while local edits were unsaved. */
-	let instrRemote = $state<Instructions | null>(null);
-
-	function applyInstructions(value: Instructions) {
-		instrText = value.current;
-		instrSaved = value.current;
-		instrDefault = value.default;
-		instrCustomized = value.is_customized;
-		instrRemote = null;
-	}
-
-	async function loadInstructions(quiet = false) {
-		const clean = !instrBusy && instrText === instrSaved;
-		try {
-			const value = await api.get<Instructions>('/settings/security-instructions');
-			instrLoad = 'ok';
-			if (quiet && (!clean || instrBusy || instrText !== instrSaved)) {
-				if (value.current !== instrSaved) instrRemote = value;
-				return;
-			}
-			applyInstructions(value);
-		} catch (e: unknown) {
-			if (isForbidden(e)) instrLoad = 'forbidden';
-			else if (!quiet) {
-				instrLoad = 'error';
-				instrLoadCode = isApiError(e) ? e.status : null;
-			}
-		}
-	}
-
-	async function saveInstructions() {
-		if (!instrText.trim()) {
-			instrError = 'Instructions cannot be empty. Use Revert to restore defaults.';
-			return;
-		}
-		instrBusy = true;
-		instrError = '';
-		try {
-			await api.put('/settings/security-instructions', { instructions: instrText });
-			instrSaved = instrText;
-			instrCustomized = true;
-			instrRemote = null;
-			flashSaved();
-		} catch (e: unknown) {
-			instrError = getErrorMessage(e, 'Could not save the chat instructions.');
-		} finally {
-			instrBusy = false;
-		}
-	}
-
-	async function revertInstructions() {
-		instrBusy = true;
-		instrError = '';
-		try {
-			await api.delete('/settings/security-instructions');
-			instrText = instrDefault;
-			instrSaved = instrDefault;
-			instrCustomized = false;
-			instrRemote = null;
-			flashSaved();
-		} catch (e: unknown) {
-			instrError = getErrorMessage(e, 'Could not revert the chat instructions.');
-		} finally {
-			instrBusy = false;
-		}
-	}
-
-	const instrValue = $derived(
-		instrLoad === 'ok'
-			? instrCustomized
-				? 'Customized'
-				: 'Default'
-			: instrLoad === 'forbidden'
-				? FORBIDDEN_TEXT
-				: instrLoad === 'error'
-					? 'Unavailable'
-					: 'Loading…'
-	);
-
 	/* ---------- terminals on other workers ---------- */
 
 	let peerTerminalsOn = $state<boolean | null>(null);
@@ -352,56 +143,31 @@
 
 	let retrying = $state(false);
 
-	/** Try again, in either failed row, reloads every load that failed. */
-	async function retryFailed() {
+	async function retryOwner() {
 		if (retrying) return;
 		retrying = true;
 		try {
-			await Promise.all([ownerRetryable ? loadOwner() : null, instrLoad === 'error' ? loadInstructions() : null]);
+			if (ownerRetryable) await loadOwner();
 		} finally {
 			retrying = false;
 		}
 	}
 
-	// A Try again goes away when its row loads or is refused. If it has focus
-	// then, focus would fall to the page body: move it to that row's value,
-	// else another button in the row, else a Try again still on the page.
-	// Runs before the rows update; focus anywhere else is never moved.
 	$effect.pre(() => {
 		void ownerRetryable;
-		void instrLoad;
-		const button = document.activeElement;
-		if (!(button instanceof HTMLElement) || !button.matches('[data-retry-load]')) return;
-		const row = button.closest('.st-row');
-		const page = button.closest('.st-page');
-		void tick().then(() => {
-			if (button.isConnected || (document.activeElement && document.activeElement !== document.body)) return;
-			(
-				row?.querySelector<HTMLElement>('.st-vbtn:not(:disabled)') ??
-				row?.querySelector<HTMLElement>('button:not(:disabled)') ??
-				page?.querySelector<HTMLElement>('[data-retry-load]')
-			)?.focus();
-		});
+		handOffRetryFocus();
 	});
 
 	/* ---------- lifecycle ---------- */
 
 	onMount(() => {
 		void loadOwner();
-		void loadInstructions();
 		void loadPeerTerminals();
 	});
-	watchResources(['settings'], () => { void loadInstructions(true); void loadPeerTerminals(); });
+	watchResources(['settings'], () => void loadPeerTerminals());
 </script>
 
 {#snippet peerDevices()}<PeerDeviceLinks workerName={workerName} full />{/snippet}
-
-<!-- Beside a failed row's value; it retries every failed load on the page. -->
-{#snippet retryButton(errorId: string)}
-	<button type="button" class="st-btn sm" data-retry-load aria-disabled={retrying || undefined} aria-describedby={retrying ? undefined : errorId} onclick={retryFailed}>
-		{retrying ? 'Retrying…' : 'Try again'}
-	</button>
-{/snippet}
 
 <PreferencePage category="security">
 	<RowGroup title="Sign-in">
@@ -414,7 +180,9 @@
 				<ExpandToggle value={FORBIDDEN_TEXT} open={false} disabled />
 			{:else if ownerFailure}
 				<ExpandToggle value="Unavailable" open={false} disabled />
-				{@render retryButton(ownerErrorId)}
+				<button type="button" class="st-btn sm" data-retry-load aria-disabled={retrying || undefined} aria-describedby={retrying ? undefined : ownerErrorId} onclick={retryOwner}>
+					{retrying ? 'Retrying…' : 'Try again'}
+				</button>
 			{:else}
 				<ExpandToggle value="" open={false} pending />
 			{/if}
@@ -461,63 +229,6 @@
 		</p>
 	{/if}
 
-	<RowGroup title="Agent safety">
-		{#if agentAccess}
-			<SettingRow id="security.runsAs">
-				<ValueText value="Your user account" />
-			</SettingRow>
-		{/if}
-		<SettingRow
-			id="security.computerUse"
-			hint={computerHint}
-			help={computerUse.available ? undefined : (computerUse.detail ?? computerOff.help)}
-			dim={!computerUse.available}
-			value={computerUse.available ? computerUse.enabled : undefined}
-			onReset={() => void setComputerUse(false)}
-		>
-			<!-- A saved "on" cannot run on a host without computer use: show it off. -->
-			<Switch
-				checked={computerUse.available && computerUse.enabled}
-				disabled={!computerUse.available || computerBusy}
-				onchange={(on) => void setComputerUse(on)}
-			/>
-		</SettingRow>
-		<SettingRow
-			id="security.computerUseDedicated"
-			dim={!computerUse.available}
-			value={computerUse.available ? computerUse.inputMode === 'dedicated_desktop' : undefined}
-			onReset={() => void setDedicatedDesktop(false)}
-		>
-			<Switch
-				checked={computerUse.inputMode === 'dedicated_desktop'}
-				disabled={!computerUse.available || computerBusy}
-				onchange={(on) => void setDedicatedDesktop(on)}
-			/>
-		</SettingRow>
-		<SettingRow
-			id="security.secInstr"
-			hint={instrLoad === 'error' ? couldNotLoad(instrLoadCode) : undefined}
-			expanded={instrOpen && instrLoad === 'ok' ? instrEditor : undefined}
-		>
-			{#if instrLoad === 'ok'}
-				<ExpandToggle value={instrValue} bind:open={instrOpen} />
-			{:else}
-				<!-- Holds the loaded row's shape (#1301). -->
-				<ExpandToggle value={instrValue} open={false} pending={instrLoad === 'loading'} disabled={instrLoad !== 'loading'} />
-				{#if instrLoad === 'error'}{@render retryButton(instrErrorId)}{/if}
-			{/if}
-		</SettingRow>
-	</RowGroup>
-	<!-- A failed load is the row's hint (#1403); a failed save or revert, after
-	     the reader acted, keeps its visible line. -->
-	{#if instrLoad === 'error'}
-		{#if !retrying}
-			<p class="st-vh" role="alert" id={instrErrorId}>{couldNotLoadSentence('the chat instructions', instrLoadCode)}</p>
-		{/if}
-	{:else if instrError && !(instrOpen && instrLoad === 'ok')}
-		<p class="st-msg err" role="alert">{instrError}</p>
-	{/if}
-
 	<RowGroup title="Terminals on other workers">
 		<SettingRow id="security.peerTerminals" dim={peerTerminalsOn === null} value={peerTerminalsOn ?? undefined} onReset={() => void setPeerTerminals(false)}
 			expanded={peerTerminalsOn ? peerDevices : undefined}>
@@ -531,19 +242,4 @@
 	{#if owner}
 		<OwnerPasswordForm status={owner} onSaved={passwordSaved} onCancel={() => (ownerOpen = false)} />
 	{/if}
-{/snippet}
-
-{#snippet instrEditor()}
-	<SecurityInstructionsEditor
-		bind:value={instrText}
-		saved={instrSaved}
-		defaultText={instrDefault}
-		customized={instrCustomized}
-		busy={instrBusy}
-		changedElsewhere={!!instrRemote}
-		error={instrError}
-		onSave={saveInstructions}
-		onRevert={revertInstructions}
-		onLoadLatest={() => instrRemote && applyInstructions(instrRemote)}
-	/>
 {/snippet}
