@@ -829,6 +829,9 @@ class SessionRuntime:
         # Row -> what turn setup would have made of it: the prompt naming the
         # attachments' local paths, and those paths, for the receipt to record.
         self._steer_prepared: Dict[str, Dict[str, Any]] = {}
+        # Delivered rows whose transferred upload bytes go once the turn has
+        # settled without re-queuing them (``_release_steered_uploads``).
+        self._steer_release: Dict[str, Dict[str, str]] = {}
         # One ``steer_pending`` walk at a time. A walk awaits mid-row (files
         # being written, a peer's scope rechecked), and a second walk skips
         # attempted rows, so without this a message sent meanwhile would reach
@@ -2143,7 +2146,7 @@ class SessionRuntime:
                     )
                 else:
                     if _needs_upload_setup(row.get("payload")):
-                        prepared = await self._prepare_steer_uploads(row)
+                        prepared = await self._prepare_steer_uploads(row, adapter)
                         if prepared is None:
                             self._steer_attempted.discard(row_id)
                             break
@@ -2204,7 +2207,7 @@ class SessionRuntime:
             submitted += 1
         return submitted
 
-    async def _prepare_steer_uploads(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _prepare_steer_uploads(self, row: Dict[str, Any], adapter: Any) -> Optional[Dict[str, Any]]:
         """Give a queued row's attachments the turn setup it will not get.
 
         A file sent through another worker arrives as a blob, and a chip a
@@ -2223,6 +2226,12 @@ class SessionRuntime:
             from app.db import database
 
             state = get_session_pool().peek(self.session_id)
+            if (state is None or getattr(state, "adapter", None) is not adapter
+                    or not getattr(state, "is_streaming", False)):
+                # While a turn is still connecting, the pooled client can be
+                # the idle one from before (another folder): nothing is
+                # written until it is the client running this turn.
+                raise upload_transfer.UploadLiftError("no client is running the turn yet")
             cwd = str(getattr(getattr(state, "connect_options", None), "cwd", "") or "")
 
             def _prepare() -> Dict[str, Any]:
@@ -2754,15 +2763,6 @@ class SessionRuntime:
             # Attachments written into this turn's folder are named by the
             # paths the model was given (``_prepare_steer_uploads``).
             prepared = self._steer_prepared.get(row_id) or {}
-            if prepared.get("written"):
-                # Delivered, so the files the model was pointed at are the
-                # message's copy now and the transferred bytes can go.
-                try:
-                    from app.core.upload_transfer import clear_materialized
-                    await asyncio.to_thread(clear_materialized, prepared["written"])
-                except Exception:  # noqa: BLE001 - the bytes only linger
-                    logger.warning("SessionRuntime: could not release steered upload bytes for %s",
-                                   row_id, exc_info=True)
             content = prepared.get("prompt") or row.get("prompt") or steer.get("text") or ""
             upload_paths = prepared.get("upload_paths", (row.get("payload") or {}).get("upload_paths"))
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
@@ -2793,6 +2793,12 @@ class SessionRuntime:
                 )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
+                if prepared.get("written"):
+                    # The files the model was pointed at are the message's copy
+                    # now, but a turn that dies before answering re-queues the
+                    # row, and its own run writes them again: the transferred
+                    # bytes go only once this turn has settled without that.
+                    self._steer_release[row_id] = prepared["written"]
                 # Remember WHEN this turn swallowed the row, and the row
                 # itself: if the turn then dies from an interrupt the user
                 # asked for BEFORE this moment, ``_finalize`` puts the
@@ -3077,6 +3083,27 @@ class SessionRuntime:
         self, sid: str, tid: str, *, recorder: Optional[TurnRecorder] = None,
     ) -> "tuple[str, bool]":
         """Only the originating chat generation may finalize session-wide state."""
+        try:
+            return await self._finalize_replaceable(sid, tid, recorder=recorder)
+        finally:
+            # After any re-queue of a stranded steer has run.
+            await self._release_steered_uploads()
+
+    async def _release_steered_uploads(self) -> None:
+        """Drop the transferred bytes of attachments this turn delivered for good."""
+        release, self._steer_release = self._steer_release, {}
+        for row_id, written in release.items():
+            try:
+                from app.core.upload_transfer import clear_materialized
+
+                await asyncio.to_thread(clear_materialized, written)
+            except Exception:  # noqa: BLE001 - the bytes only linger until purge
+                logger.warning("SessionRuntime: could not release steered upload bytes for %s",
+                               row_id, exc_info=True)
+
+    async def _finalize_replaceable(
+        self, sid: str, tid: str, *, recorder: Optional[TurnRecorder] = None,
+    ) -> "tuple[str, bool]":
         try:
             self._check_finalization()
             return await self._finalize_owned(sid, tid, recorder=recorder)
@@ -3530,6 +3557,8 @@ class SessionRuntime:
                 )
                 continue
             requeued += 1
+            # Its own run writes the attachments again, from the same bytes.
+            self._steer_release.pop(row_id, None)
             logger.info(
                 "SessionRuntime: steer %s was absorbed into %s but the turn "
                 "aborted before answering — re-queued as %s",

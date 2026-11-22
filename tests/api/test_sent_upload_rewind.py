@@ -141,7 +141,7 @@ def _steer_into_live_turn(queued_id, cwd):
     adapter = _Adapter()
     pool = MagicMock(name="session_pool")
     pool.peek.return_value = SimpleNamespace(
-        adapter=adapter, connect_options=SimpleNamespace(cwd=str(cwd)))
+        adapter=adapter, is_streaming=True, connect_options=SimpleNamespace(cwd=str(cwd)))
     seen = {}
 
     async def _impl(**kwargs):
@@ -225,6 +225,78 @@ async def test_a_refused_attachment_steer_leaves_its_own_turn_able_to_write_the_
     assert mapping == {source: str(current / "uploads" / staged_upload.name)}
 
 
+async def test_an_idle_pooled_client_gets_no_attachment_files(staged_upload, tmp_path):
+    """While the next turn connects, the pooled client can still be the idle
+    one from before, in another folder. Nothing is written for it, and the
+    message keeps its bytes for its own turn."""
+    from app.core import upload_transfer
+    from app.db import upload_blobs
+
+    source = str(staged_upload)
+    blob_ids = upload_transfer.lift_paths_to_blobs([source], {"path": str(staged_upload.parent)}, SID)
+    stale = tmp_path / "old-checkout"
+    stale.mkdir()
+    turns.enqueue_turn(SID, "user", prompt="opening")
+    queued = turns.enqueue_turn(SID, "user", prompt=f"look @{source}", payload={
+        "upload_paths": [source], "upload_blob_ids": blob_ids, "deferred_user_record": True,
+    })
+    adapter, pool, seen, _ = _steer_into_live_turn(queued["id"], stale)
+    pool.peek.return_value.is_streaming = False
+
+    async def _impl(**kwargs):
+        seen["steered"] = await session_runtime.try_steer_pending(SID)
+        yield {"type": "done", "metadata": {}}
+
+    opening = turns.get_queued_turns(SID)[0]
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), _pump_env(_impl):
+        assert await session_runtime.SessionRuntime(opening).execute() == "completed"
+
+    assert seen["steered"] == 0
+    assert adapter.calls == []
+    assert not (stale / "uploads").exists()
+    assert [r["id"] for r in turns.get_queued_turns(SID)] == [queued["id"]]
+    assert upload_blobs.get_blob_data(blob_ids[0]) == b"image"
+
+
+async def test_a_delivered_attachment_that_is_requeued_keeps_its_bytes(staged_upload, tmp_path):
+    """The turn receipts the attachment, then dies before the model answers:
+    the message is re-queued, and its own run, in whatever folder it then
+    runs, can still write the file."""
+    from app.core import upload_transfer
+    from app.db import upload_blobs
+
+    source = str(staged_upload)
+    blob_ids = upload_transfer.lift_paths_to_blobs([source], {"path": str(staged_upload.parent)}, SID)
+    old = tmp_path / "old-checkout"
+    old.mkdir()
+    turns.enqueue_turn(SID, "user", prompt="opening")
+    queued = turns.enqueue_turn(SID, "user", prompt=f"look @{source}", payload={
+        "upload_paths": [source], "upload_blob_ids": blob_ids, "deferred_user_record": True,
+    })
+    adapter, pool, seen, _ = _steer_into_live_turn(queued["id"], old)
+
+    async def _impl(**kwargs):
+        seen["steered"] = await session_runtime.try_steer_pending(SID)
+        yield {"type": "steer_delivered", "steers": [{"id": queued["id"]}]}
+        yield {"type": "error", "message": "boom"}
+
+    opening = turns.get_queued_turns(SID)[0]
+    real_create = turn_recorder.TurnRecorder.create_for_run
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), _pump_env(_impl):
+        with patch.object(turn_recorder.TurnRecorder, "create_for_run", real_create):
+            await session_runtime.SessionRuntime(opening).execute()
+
+    assert seen["steered"] == 1
+    assert (old / "uploads" / staged_upload.name).read_bytes() == b"image"
+    requeued = turns.get_queued_turns(SID)
+    assert [r["payload"].get("requeued_from_turn_id") for r in requeued] == [queued["id"]]
+    assert upload_blobs.get_blob_data(blob_ids[0]) == b"image"
+    current = tmp_path / "new-checkout"
+    current.mkdir()
+    upload_transfer.materialize_blobs_for_turn(requeued[0]["payload"]["upload_blob_ids"], str(current))
+    assert (current / "uploads" / staged_upload.name).read_bytes() == b"image"
+
+
 async def test_a_turn_that_ends_while_attachments_are_written_does_not_get_them(staged_upload, tmp_path):
     """The turn's client goes away while the files are written: the row runs
     as its own turn, so nothing is handed to whatever client is pooled now."""
@@ -245,7 +317,7 @@ async def test_a_turn_that_ends_while_attachments_are_written_does_not_get_them(
     def _materialize_as_the_client_changes(ids, cwd, **kwargs):
         mapping = real_materialize(ids, cwd, **kwargs)
         pool.peek.return_value = SimpleNamespace(
-            adapter=replacement, connect_options=SimpleNamespace(cwd=str(cwd)))
+            adapter=replacement, is_streaming=True, connect_options=SimpleNamespace(cwd=str(cwd)))
         return mapping
 
     async def _impl(**kwargs):
