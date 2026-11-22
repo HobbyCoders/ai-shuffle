@@ -53,6 +53,10 @@ export interface MirrorSyncInput {
 	/** A conversation composed in this view has no pre-existing history to
 	 *  open. Keep its local echo visible and follow the live feed, not a reset. */
 	createdFromComposer?: boolean;
+	/** This visit confirmed this worker runs the chat (its own /live answer,
+	 *  not a sidebar row that may lag a hand-off) and shows its transcript.
+	 *  Handed to another worker while open, the chat then stays shown. */
+	shownAsLocal?: boolean;
 	/** Fires ONCE per opened session: its opening checkpoint is materialized.
 	 *  Freshness is not invalidation: neither this first catch-up nor later
 	 *  backlog drains should discard the reducer or cursor. The live feed
@@ -97,9 +101,11 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	const sessionId = $derived(input().sessionId);
 	const remote = $derived(input().remote);
 	const createdFromComposer = $derived(input().createdFromComposer === true);
-	// The open chat while this worker ran it. Handed to another worker while
-	// open, it is this worker's own transcript and already on screen: like a
-	// composed one, it is not hidden for an opening catch-up nor reloaded.
+	const shownAsLocal = $derived(input().shownAsLocal === true);
+	// The open chat once this visit showed it as run here (shownAsLocal).
+	// Handed to another worker while open, it is this worker's own transcript
+	// and already on screen: like a composed one, it is not hidden for an
+	// opening catch-up nor reloaded. A local-looking row alone never arms it.
 	let ranHere = $state<string | null>(null);
 	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
 	// catch-up, then keep the conversation mounted during incremental sync.
@@ -110,7 +116,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 	$effect(() => {
 		const id = sessionId;
 		if (!id || !remote) {
-			ranHere = id;
+			// Armed once confirmed, kept through a later reload of the same
+			// chat, dropped for any other chat.
+			if (id && shownAsLocal) ranHere = id;
+			else if (untrack(() => ranHere) !== id) ranHere = null;
 			return;
 		}
 		const handedOff = untrack(() => ranHere) === id;

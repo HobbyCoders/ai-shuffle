@@ -755,6 +755,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			createdFromComposer: false,
 			isRemote,
 			ownerDeviceName,
+			confirmedLocalSession: null,
 			title: resolvedTitle,
 			project: targetProject,
 			projectV2Id: targetV2,
@@ -1037,7 +1038,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// so a late answer neither restores the old owner nor its project.
 			const ownerCurrent = (deps.ownerObservation?.() ?? 0) === ownerAsked;
 			const metaOwner = ownerCurrent ? meta.is_remote : undefined;
-			if (metaOwner !== undefined) patch.isRemote = metaOwner;
+			if (metaOwner !== undefined) {
+				patch.isRemote = metaOwner;
+				patch.confirmedLocalSession = metaOwner ? null : sessionId;
+			}
 			if (ownerCurrent && meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
 			// Reloads and deep links have no row to tell an archived chat apart.
 			if (meta.status !== undefined) archivedChats.mark(sessionId, meta.status === 'archived');
@@ -1197,6 +1201,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			createdFromComposer: false,
 			isRemote: undefined,
 			ownerDeviceName: undefined,
+			confirmedLocalSession: null,
 			mode,
 			// A fresh chat has no session to restore — cancel any pending boot
 			// restore (and any in-flight openChat load) so neither window can

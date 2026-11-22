@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 /** A controller in its own effect root, the way ChatView's init creates it. */
-function startSync(input: { sessionId: string | null; remote: boolean; createdFromComposer?: boolean }, onCaughtUp = vi.fn()) {
+function startSync(input: { sessionId: string | null; remote: boolean; createdFromComposer?: boolean; shownAsLocal?: boolean }, onCaughtUp = vi.fn()) {
 	const props = $state({ ...input });
 	let sync!: MirrorSync;
 	const destroy = $effect.root(() => {
@@ -91,7 +91,8 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 			state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: 3, pending_updates: 3,
 		})));
 		vi.stubGlobal('fetch', fetch);
-		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'mine', remote: false });
+		// /live said this worker runs it, and its transcript is shown.
+		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'mine', remote: false, shownAsLocal: true });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(fetch).not.toHaveBeenCalled();
 		// The hand-off: the open chat now runs elsewhere. Its transcript is this
@@ -113,10 +114,47 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 
 		// Opened again after another chat, it is a mirror like any other.
 		props.sessionId = 'other';
+		props.shownAsLocal = false;
 		flushSync();
 		props.sessionId = 'mine';
 		flushSync();
 		expect(sync.waiting).toBe(true);
+		destroy();
+	});
+
+	it('gates a chat handed off while away even when a stale row reopens it as local', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply({
+			state: 'syncing', scope: 'session', initial_target: { seq: 9, epoch: 'e', tail_id: 't' },
+			initial_caught_up: false, initial_pending_updates: 3, pending_updates: 3,
+		})));
+		vi.stubGlobal('fetch', fetch);
+		// Shown and confirmed local, then left for another chat.
+		const { sync, props, onCaughtUp, destroy } = startSync({ sessionId: 'moved', remote: false, shownAsLocal: true });
+		flushSync();
+		props.sessionId = 'other';
+		props.shownAsLocal = false;
+		flushSync();
+		// Handed off from another tab meanwhile. Reopened while the sidebar row
+		// still says local (its refresh is pending) and /live names the new
+		// owner, so this visit never confirms it runs here, though its old
+		// transcript loads.
+		props.sessionId = 'moved';
+		flushSync();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fetch).not.toHaveBeenCalled();
+		// The row refresh says remote while the mirror is still behind.
+		props.remote = true;
+		flushSync();
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(String(fetch.mock.calls[0][0])).toContain('/sessions/moved/sync-status');
+		expect(sync.waiting).toBe(true);
+		// The opening checkpoint is pinned and asked for on the next check.
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
+		expect(String(fetch.mock.calls[1][0])).toContain('initial_seq=9');
+		expect(sync.waiting).toBe(true);
+		expect(onCaughtUp).not.toHaveBeenCalled();
 		destroy();
 	});
 

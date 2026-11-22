@@ -410,11 +410,14 @@ describe('session-switcher · authoritative lane hydration', () => {
 		await switcher.switchSession('unlisted-child');
 		await vi.waitFor(() => expect(getState().isRemote).toBe(is_remote));
 		expect(getState().ownerDeviceName).toBe('Owner');
+		// Only this answer confirms the chat runs here (a row can lag a hand-off).
+		expect(getState().confirmedLocalSession).toBe(is_remote ? null : 'unlisted-child');
 		expect(_mockSessions.current).toEqual([]);
 		expect(api.get).toHaveBeenCalledWith('/sessions/unlisted-child/live?since_update_id=0&include_messages=false&owner_fields=true');
 		await switcher.switchSession('unknown-owner');
 		expect(getState().isRemote).toBeUndefined();
 		expect(getState().ownerDeviceName).toBeUndefined();
+		expect(getState().confirmedLocalSession).toBeNull();
 		switcher.destroy();
 	});
 

@@ -107,6 +107,10 @@ export interface ActiveSessionState {
 	/** Ownership from /live, including sessions absent from the sidebar. */
 	isRemote?: boolean;
 	ownerDeviceName?: string | null;
+	/** The open chat's id once this visit's own /live answer said this worker
+	 *  runs it. Unlike `isRemote` (seeded from a sidebar row, which can lag a
+	 *  hand-off), only that answer sets it; every switch clears it. */
+	confirmedLocalSession?: string | null;
 	/** Whether this surface has a project ('code') or not ('chat'); 'voice'
 	 *  only on historical call sessions. For an OPEN session it is the row's
 	 *  own mode; on a new-session screen it follows the project pick (#371
