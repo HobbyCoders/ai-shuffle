@@ -375,11 +375,18 @@
 	/**
 	 * A stop failure shows on the page (a phone has no bell on screen) and stays in
 	 * the bell. The full-screen sheet sits above the banner, so it also shows the
-	 * failure itself. The phone's controls page sits below it and does not.
+	 * failure itself, unless the user has since moved to another chat. The phone's
+	 * controls page sits below the banner and does not.
 	 */
-	function stopFailed(message: string) {
+	function stopFailed(message: string, requestedSessionId: string | null | undefined) {
 		notify.banner(message, { severity: 'error', persist: true, duration_ms: 8000 });
-		if (variant === 'sheet' || ownSheetOpen) sheetStopError = message;
+		if ((variant === 'sheet' || ownSheetOpen) && sessionId === requestedSessionId) sheetStopError = message;
+	}
+
+	/** Dismiss removes the focused button, so keep focus inside the open dialog. */
+	function dismissSheetError() {
+		sheetStopError = null;
+		(closeRef ?? sheetRef)?.focus();
 	}
 
 	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
@@ -394,12 +401,12 @@
 				await swarms.cancel(sessionId, row.id);
 				ok = true;
 			} catch (error) {
-				if (!quiet) stopFailed(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.");
+				if (!quiet) stopFailed(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.", requestedSessionId);
 			}
 		} else {
 			const result = await stopTask(row.id);
 			ok = result.ok;
-			if (!ok && !quiet) stopFailed(result.message || STOP_FAILED);
+			if (!ok && !quiet) stopFailed(result.message || STOP_FAILED, requestedSessionId);
 		}
 		if (sessionId !== requestedSessionId || !canAct()) return ok;
 		if (ok) remember(row);
@@ -411,10 +418,11 @@
 		if (!member.taskId || member.status !== 'running' || stopping.has(member.key)) return;
 		markStopping(member.key, true);
 		sheetStopError = null;
+		const requestedSessionId = sessionId;
 		const result = await stopTask(member.taskId);
 		if (!result.ok) {
 			markStopping(member.key, false);
-			stopFailed(result.message || STOP_FAILED);
+			stopFailed(result.message || STOP_FAILED, requestedSessionId);
 		}
 		// On success the swarm's next snapshot marks it cancelled; the spinner
 		// stays until then.
@@ -425,9 +433,10 @@
 		confirmingAll = false;
 		if (!scope.length) return;
 		sheetStopError = null;
+		const requestedSessionId = sessionId;
 		const results = await Promise.all(scope.map((row) => stopRow(row, true)));
 		const failed = results.filter((ok) => !ok).length;
-		if (failed) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`);
+		if (failed) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`, requestedSessionId);
 	}
 
 	async function confirmSwarmStop(row: SwarmRow) {
@@ -1193,7 +1202,7 @@
 				<!-- Over the list's foot, so the rows under a finger do not move. -->
 				<p class="rt-stop-error" role="alert" data-testid="sheet-stop-error">
 					<span>{sheetStopError}</span>
-					<button type="button" class="link" onclick={() => (sheetStopError = null)}>Dismiss</button>
+					<button type="button" class="link" onclick={dismissSheetError}>Dismiss</button>
 				</p>
 			{/if}
 		</div>

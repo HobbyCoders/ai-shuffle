@@ -384,6 +384,20 @@ describe('RunningTasksList stopping', () => {
 		await screen.findByTestId('sheet-stop-error');
 		await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
 		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
+		expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
+	});
+
+	it("keeps a late stop failure out of another chat's sheet", async () => {
+		let finish!: (value: { ok: boolean }) => void;
+		mocks.stopSessionTask.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+		setTasks([task('a')]);
+		const view = render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
+		mocks.active.set({ sessionId: 's2', activeTasks: [task('b')], messages: [] });
+		await view.rerender({ sessionId: 's2', variant: 'sheet' });
+		finish({ ok: false });
+		await waitFor(() => expect(mocks.notifyBanner).toHaveBeenCalledTimes(1));
+		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
 	});
 
 	it("says why a paused task could not be stopped when the chat's worker explains", async () => {
