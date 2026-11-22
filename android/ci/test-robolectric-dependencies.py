@@ -20,9 +20,12 @@ class RobolectricDependenciesTests(unittest.TestCase):
         self.assertIn('systemProperty("robolectric.dependency.dir", robolectricDependencyDir', script)
         self.assertIn('isTransitive = false', script)
         self.assertIn('configurations.detachedConfiguration', script)
-        self.assertIn('robolectricJars.flatMap { it.resolve() }', script)
+        self.assertIn('robolectricJars.filterKeys { it !in reused }.values.flatMap { it.resolve() }', script)
         self.assertIn('java.security.MessageDigest.getInstance("SHA-256")', script)
         self.assertIn('check(actual == expected)', script)
+        # A restored CI copy is reused only when its bytes match the pin.
+        self.assertIn('if (sha256(jar) == expected) {\n                reused[coordinate] = jar', script)
+        self.assertLess(script.index('reused[coordinate] = jar'), script.index('copy {'))
         self.assertIn('TestExceptionFormat.FULL', script)
         self.assertIn('showExceptions = true', script)
         self.assertIn('showCauses = true', script)
@@ -72,6 +75,39 @@ class RobolectricDependenciesTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", step)
             self.assertNotIn("||", step["run"])
             self.assertNotIn("retry", step.get("uses", ""))
+
+    def test_pinned_jars_have_their_own_cache_saved_after_they_verify(self):
+        # setup-java's shared Gradle key can be saved by a job that never
+        # resolves these jars, so every run downloaded them (HTTP 429).
+        script = (ROOT / "android/ci/robolectric.gradle.kts").read_text()
+        self.assertIn('providers.environmentVariable("ROBOLECTRIC_JAR_CACHE")', script)
+        workflow = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
+        job = workflow["jobs"]["build"]
+        path = "${{ github.workspace }}/.robolectric-jars"
+        key = "robolectric-jars-${{ runner.os }}-${{ hashFiles('android/ci/robolectric.gradle.kts') }}"
+        # Job-wide: every test task re-runs the preparation.
+        self.assertEqual(job["env"]["ROBOLECTRIC_JAR_CACHE"], path)
+        steps = job["steps"]
+        restore = next(s for s in steps if s.get("uses") == "actions/cache/restore@v4")
+        prepare = next(s for s in steps if s.get("name") == "Resolve pinned Robolectric dependencies")
+        save = next(s for s in steps if s.get("uses") == "actions/cache/save@v4")
+        self.assertEqual(steps.index(restore) + 1, steps.index(prepare))
+        self.assertEqual(steps.index(prepare) + 1, steps.index(save))
+        self.assertEqual(restore["with"], {"path": "${{ env.ROBOLECTRIC_JAR_CACHE }}", "key": key})
+        self.assertEqual(save["with"], {"path": "${{ env.ROBOLECTRIC_JAR_CACHE }}",
+                                        "key": "${{ steps.robolectric-jars.outputs.cache-primary-key }}"})
+        self.assertEqual(restore["id"], "robolectric-jars")
+        self.assertEqual(save["if"], "steps.robolectric-jars.outputs.cache-hit != 'true'")
+        self.assertEqual(save["continue-on-error"], "true")
+        # The signing workflow reads the same entry and never saves one.
+        play = yaml.load((ROOT / ".github/workflows/android-play.yml").read_text(), Loader=yaml.BaseLoader)
+        bundle = play["jobs"]["bundle"]["steps"]
+        self.assertFalse([s for s in bundle if s.get("uses", "").startswith(("actions/cache@", "actions/cache/save@"))])
+        play_restore = next(s for s in bundle if s.get("uses") == "actions/cache/restore@v4")
+        build = next(s for s in bundle if s.get("name") == "Test and build signed bundle")
+        self.assertEqual(play_restore["with"], {"path": path, "key": key})
+        self.assertEqual(build["env"]["ROBOLECTRIC_JAR_CACHE"], path)
+        self.assertLess(bundle.index(play_restore), bundle.index(build))
 
     def test_pr_checks_also_run_unit_tests_with_push_on(self):
         # Release builds carry Firebase config (push on); PR builds do not.

@@ -50,6 +50,10 @@ jobs:
     defaults:
       run:
         working-directory: android
+    # Every Gradle run with unit tests re-runs prepareRobolectricDependencies,
+    # so the whole job (not only that step) must see the verified jar cache.
+    env:
+      ROBOLECTRIC_JAR_CACHE: ${{ github.workspace }}/.robolectric-jars
 
     steps:
       - name: Checkout
@@ -99,13 +103,35 @@ jobs:
           npm ci
           bash ../android/scripts/sync-offline-demo.sh
 
-      # Gradle caches these jars under ~/.gradle (covered by setup-java), not
-      # Robolectric's uncached ~/.m2 runtime fetcher. Cold caches work too.
+      # setup-java's Gradle cache cannot be relied on for these jars: its key is
+      # shared with jobs that never resolve them, and an existing key is never
+      # saved again, so every run downloaded them until Maven Central answered
+      # 429 (run 44984315975). This cache holds only the pinned jars, keyed on
+      # the pins; the task re-checks every SHA-256 on a hit and resolves any
+      # missing or mismatched jar. Pull requests read main's entry; main saves
+      # its own the first time it resolves them.
+      - name: Restore pinned Robolectric jars
+        id: robolectric-jars
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.ROBOLECTRIC_JAR_CACHE }}
+          key: robolectric-jars-${{ runner.os }}-${{ hashFiles('android/ci/robolectric.gradle.kts') }}
+
       # android/gradle.properties supplies the transient-transfer retry budget
       # for preparation AND all subsequent Gradle invocations (including Play).
       # No test, compiler or lint task is retried.
       - name: Resolve pinned Robolectric dependencies
         run: ./gradlew :app:prepareRobolectricDependencies --stacktrace
+
+      # Saved right after the jars verified, so a later test or lint failure
+      # does not throw the download away. A failed save never fails the job.
+      - name: Save pinned Robolectric jars
+        if: steps.robolectric-jars.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.ROBOLECTRIC_JAR_CACHE }}
+          key: ${{ steps.robolectric-jars.outputs.cache-primary-key }}
 
       - name: Unit tests and Android lint
         run: |

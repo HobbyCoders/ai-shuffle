@@ -152,9 +152,19 @@ jobs:
         run: |
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/play-release.jks"
+      # The unit tests resolve the pinned Robolectric jars. Reuse the entry
+      # android.yml saves (same path and key) instead of downloading them from
+      # Maven Central; the task re-checks every SHA-256. This signing job only
+      # reads the cache, it never saves one.
+      - name: Restore pinned Robolectric jars
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/.robolectric-jars
+          key: robolectric-jars-${{ runner.os }}-${{ hashFiles('android/ci/robolectric.gradle.kts') }}
       - name: Test and build signed bundle
         working-directory: android
         env:
+          ROBOLECTRIC_JAR_CACHE: ${{ github.workspace }}/.robolectric-jars
           KEYSTORE_PATH: ${{ runner.temp }}/play-release.jks
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
