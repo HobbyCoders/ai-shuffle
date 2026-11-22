@@ -219,6 +219,57 @@ describe('design changes delivery', () => {
   await tick();
   expect(pageRequests()).toEqual([expect.objectContaining({ op: 'reset' })]);
  });
+ it('starts from a clean page when a row was removed while the page could not be reached', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  await mark('other');
+  await openControls(view);
+  await fireEvent.input(view.getByLabelText('Corners'), { target: { value: '20' } });
+  await waitFor(() => expect(pageRequests().at(-1)).toMatchObject({ op: 'style', key: 'k2' }));
+  // The page changes size: nothing reaches it until a frame of that size arrives.
+  mocks.config!.onWorkspace?.({ ...state('human'), viewport: { mode: 'fixed', width: 900, height: 700 } });
+  await tick();
+  mocks.send.mockClear();
+  await fireEvent.click(view.getByRole('button', { name: 'Remove change 1' }));
+  expect(pageRequests()).toEqual([]);
+  mocks.config!.onFrame('AA==', { deviceWidth: 900, deviceHeight: 700, runtime_id: 'runtime', tab_id: 'tab' });
+  await tick();
+  // Everything comes off first, so the removed row's preview goes with it.
+  expect(pageRequests().map((r) => [r.op, r.key])).toEqual([['reset', undefined], ['style', 'k2']]);
+ });
+ it('shows the latest values once another device returns control', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  const held = state('human');
+  held.control.viewer_id = 'someone-else';
+  mocks.config!.onWorkspace?.(held);
+  await tick();
+  // The worker refuses previews while the other device has control.
+  await fireEvent.input(view.getByLabelText('Corners'), { target: { value: '30' } });
+  await waitFor(() => expect(pageRequests().at(-1)).toMatchObject({ styles: { 'border-radius': '30px' } }));
+  mocks.send.mockClear();
+  mocks.config!.onWorkspace?.(state('agent'));
+  await tick();
+  expect(pageRequests()).toEqual([
+   expect.objectContaining({ op: 'reset' }),
+   expect.objectContaining({ op: 'style', key: 'k1', styles: { 'border-radius': '30px' } }),
+  ]);
+ });
+ it('drops the list when the browser shows another tab, even at the same address', async () => {
+  const view = await setupDesign();
+  await previewCorners(view);
+  mocks.send.mockClear();
+  const other = state('human');
+  other.active_tab_id = 'tab-2';
+  other.tabs = [{ id: 'tab-2', title: 'Example', url: 'https://example.test', current: true }];
+  mocks.config!.onWorkspace?.(other);
+  await tick();
+  expect(view.queryByRole('textbox', { name: 'What should change?' })).toBeNull();
+  mocks.config!.onFrame('AA==', { deviceWidth: 1280, deviceHeight: 800, runtime_id: 'runtime', tab_id: 'tab-2' });
+  await tick();
+  // Nothing of the old tab's list is put on this one.
+  expect(pageRequests().filter((r) => r.op === 'style')).toEqual([]);
+ });
  it('offers space between children only on an element that lays children out', async () => {
   const view = await setupDesign();
   await openControls(view);

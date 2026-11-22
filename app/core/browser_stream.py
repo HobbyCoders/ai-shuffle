@@ -516,25 +516,57 @@ _DESIGN_JS_TEMPLATE = """
       return all;
     } catch (e) { return [el]; }
   };
-  // The inline value the page had, kept per longhand so a shorthand preview
-  // cannot swallow an inline longhand the page set itself.
+  const read = (el, p) => [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)];
+  // What the page's own inline style was before a preview touched the
+  // element: the attribute's text (a shorthand written with var() has no
+  // longhand values, and the browser cannot always write one back out), and
+  // each longhand, so one the page set itself is not swallowed.
   const remember = (el, prop) => {
     let saved = reg.base.get(el);
     if (!saved) {
-      saved = new Map();
-      saved.hadStyle = el.hasAttribute('style');
+      saved = {
+        hadStyle: el.hasAttribute('style'), text: el.getAttribute('style') || '',
+        props: new Map(), shorthands: new Map(), written: null,
+      };
       reg.base.set(el, saved);
     }
-    for (const p of LONGHANDS[prop] || [prop]) {
-      if (!saved.has(p)) saved.set(p, [el.style.getPropertyValue(p), el.style.getPropertyPriority(p)]);
+    const longhands = LONGHANDS[prop];
+    for (const p of longhands || [prop]) {
+      if (!saved.props.has(p)) saved.props.set(p, { had: read(el, p), wrote: null });
     }
+    // A shorthand the page wrote with var() has no longhand values to keep.
+    if (longhands && !saved.shorthands.has(prop)) saved.shorthands.set(prop, read(el, prop));
+  };
+  // Note what the preview left on the element, to tell it from a later
+  // change by the page itself.
+  const seal = (el) => {
+    const saved = reg.base.get(el);
+    if (!saved) return;
+    for (const [p, entry] of saved.props) entry.wrote = read(el, p);
+    saved.written = el.style.cssText;
   };
   const restore = (el) => {
     const saved = reg.base.get(el);
     if (!saved) return;
-    for (const [p, [value, priority]] of saved) {
-      if (value) el.style.setProperty(p, value, priority);
-      else el.style.removeProperty(p);
+    reg.base.delete(el);
+    if (el.style.cssText === saved.written) {
+      // Only the preview changed it: the page's own text goes back as it was.
+      el.style.cssText = saved.text;
+    } else {
+      // The page changed its inline style meanwhile. Take off only what the
+      // preview wrote and the page has not replaced since.
+      const kept = new Set();
+      for (const [p, { had, wrote }] of saved.props) {
+        const now = read(el, p);
+        if (!wrote || now[0] !== wrote[0] || now[1] !== wrote[1]) kept.add(p);
+        else if (had[0]) el.style.setProperty(p, had[0], had[1]);
+        else el.style.removeProperty(p);
+      }
+      for (const [prop, [value, priority]] of saved.shorthands) {
+        const longhands = LONGHANDS[prop];
+        if (!value || longhands.some((p) => kept.has(p) || saved.props.get(p).had[0])) continue;
+        el.style.setProperty(prop, value, priority);
+      }
     }
     // An element that had no style attribute gets none left behind. Chromium
     // writes the attribute lazily, so it is read first: removing it before
@@ -542,7 +574,6 @@ _DESIGN_JS_TEMPLATE = """
     if (!saved.hadStyle && !el.style.length && el.hasAttribute('style')) {
       el.removeAttribute('style');
     }
-    reg.base.delete(el);
   };
   const targetsOf = (owner, into) => {
     for (const c of reg.changes.values()) {
@@ -554,6 +585,7 @@ _DESIGN_JS_TEMPLATE = """
   // over them again in the order the changes were made.
   const render = (els) => {
     for (const el of els) restore(el);
+    const styled = new Set();
     for (const c of reg.changes.values()) {
       if (reg.hidden.has(c.owner)) continue;
       for (const t of c.targets) {
@@ -562,8 +594,10 @@ _DESIGN_JS_TEMPLATE = """
           remember(t, prop);
           t.style.setProperty(prop, value, 'important');
         }
+        styled.add(t);
       }
     }
+    for (const el of styled) seal(el);
   };
   if (a.op === 'rects') {
     const rects = {};

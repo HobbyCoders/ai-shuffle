@@ -69,6 +69,17 @@ describe('the page-side design preview script', () => {
 				return real(...args);
 			}) as never;
 		}
+		const text = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target.style), 'cssText');
+		if (text?.set) {
+			Object.defineProperty(target.style, 'cssText', {
+				configurable: true,
+				get: () => text.get?.call(target.style),
+				set: (value: string) => {
+					unread = true;
+					text.set?.call(target.style, value);
+				},
+			});
+		}
 		const has = target.hasAttribute.bind(target);
 		target.hasAttribute = (name) => {
 			unread = false;
@@ -161,6 +172,47 @@ describe('the page-side design preview script', () => {
 		// The shorthand preview did not swallow the page's own longhand.
 		expect(el('#one').style.getPropertyValue('padding-left')).toBe('4px');
 		expect(el('#one').style.getPropertyValue('padding-top')).toBe('');
+	});
+
+	it('puts back a shorthand the page wrote with a variable', () => {
+		// The longhands of `padding: var(--pad)` read as empty, so they cannot
+		// be what is kept: the page's own text is.
+		el('#one').setAttribute('style', '--pad: 16px; padding: var(--pad)');
+		const before = el('#one').style.cssText;
+		style('k1', '#one', { padding: '24px' });
+		expect(el('#one').style.getPropertyValue('padding-top')).toBe('24px');
+		run({ op: 'reset', key: 'k1' });
+		expect(el('#one').style.cssText).toBe(before);
+		expect(el('#one').style.getPropertyValue('padding')).toBe('var(--pad)');
+	});
+
+	it('keeps an inline value the page set itself while the preview was on', () => {
+		el('#one').setAttribute('style', 'font-size: 16px');
+		style('k1', '#one', { 'font-size': '24px', color: 'rgb(0, 0, 255)' });
+		// The page's own code runs, as a resize handler would.
+		el('#one').style.setProperty('font-size', '20px');
+		run({ op: 'reset', key: 'k1' });
+		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
+		expect(el('#one').style.getPropertyValue('color')).toBe('');
+	});
+
+	it('previews again over a value the page set while the preview was on', () => {
+		el('#one').setAttribute('style', 'font-size: 16px');
+		style('k1', '#one', { 'font-size': '24px' });
+		el('#one').style.setProperty('font-size', '20px');
+		style('k1', '#one', { 'font-size': '28px' });
+		expect(el('#one').style.getPropertyValue('font-size')).toBe('28px');
+		run({ op: 'reset', key: 'k1' });
+		expect(el('#one').style.getPropertyValue('font-size')).toBe('20px');
+	});
+
+	it('puts a variable shorthand back even when the page changed something else', () => {
+		el('#one').setAttribute('style', '--pad: 16px; padding: var(--pad)');
+		style('k1', '#one', { padding: '24px' });
+		el('#one').style.setProperty('color', 'rgb(255, 0, 0)');
+		run({ op: 'reset', key: 'k1' });
+		expect(el('#one').style.getPropertyValue('padding')).toBe('var(--pad)');
+		expect(el('#one').style.getPropertyValue('color')).toBe('rgb(255, 0, 0)');
 	});
 
 	it('always includes the picked element when a change applies to every match', () => {

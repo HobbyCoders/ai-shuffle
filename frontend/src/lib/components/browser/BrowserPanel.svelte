@@ -442,6 +442,9 @@
 					if (frameIdentity !== identity) {
 						// Keep the last image until this target paints; input stays gated.
 						hoverRect = null;
+						// Another tab or browser is another page, even at the same
+						// address: the marked elements are not on it.
+						if (frameIdentity !== null) clearDesign();
 						browserPanel.resetPageTracking(sid);
 						frameIdentity = identity;
 						trackedPage = false;
@@ -972,22 +975,34 @@
 	// should show (the mode closed, the list was sent or emptied) they come off,
 	// as soon as the page can be reached. A panel that closes or loses its
 	// connection cannot ask, so the worker puts the page back for it.
+	//
+	// Anything asked for while the page could not be reached (a removed row, a
+	// new slider value) was not delivered, so going back on starts from a clean
+	// page: what shows is then exactly the list. While another device controls
+	// the browser the worker refuses new previews but still takes them off.
 	const designReachable = $derived(isLive && frameMatchesWorkspace && !pageLoading);
+	const designHeld = $derived(
+		!!workspace && workspace.control.owner === 'human' && workspace.control.viewer_id !== viewerId,
+	);
 	const designWanted = $derived(inspectMode && designHasPreviews);
 	let designShown = false;
 	$effect(() => {
 		const reachable = designReachable;
+		const held = designHeld;
 		const wanted = designWanted;
 		untrack(() => {
 			if (!reachable) {
 				designShown = false;
-			} else if (wanted && !designShown) {
-				designShown = true;
-				designOriginal = false;
-				for (const change of designRows) if (Object.keys(change.tweaks).length > 0) previewChange(change);
 			} else if (!wanted) {
 				designShown = false;
 				if (designOnPage && sendDesign({ op: 'reset' })) designOnPage = false;
+			} else if (held) {
+				designShown = false;
+			} else if (!designShown) {
+				designShown = true;
+				designOriginal = false;
+				if (designOnPage) sendDesign({ op: 'reset' });
+				for (const change of designRows) if (Object.keys(change.tweaks).length > 0) previewChange(change);
 			}
 		});
 	});
