@@ -360,8 +360,10 @@ def find_pull_for_checkout_fallback(
     trailers, say) and pushes them under a NEW branch name leaves no shared
     commit. A same-repository PR from a local or remote-tracking branch whose
     head has exactly the tree of one of this branch's own commits is this work.
-    Own commits exclude the creation point's tree and anything reachable from
-    a base ref (main merged in brings other PRs' squash commits).
+    Own commits exclude anything reachable from a base ref (main merged in
+    brings other PRs' squash commits), and a matching commit must differ from
+    its merge base with the base refs: base content restored by a revert, or
+    main merged in after one, is not this session's work.
 
     Local git gates precede gh calls. A five-minute negative cache is keyed by
     checkout, HEAD, upstream and the content-matching branch names (plus
@@ -434,25 +436,32 @@ def find_pull_for_checkout_fallback(
         # Commits merged in from a base (main merged into this branch) are
         # someone else's work, e.g. another PR's squash commit.
         base_shas = sorted({sha for name, sha, _ in refs if name in bases and sha})
-        commits = [line.split() for line in git(
-            "log", "--format=%T %P", f"--max-count={_MAX_OWN_TREES}", head_sha,
+        commit_for_tree: dict[str, str] = {}
+        for line in git(
+            "log", "--format=%T %H", f"--max-count={_MAX_OWN_TREES}", head_sha,
             "--not", creation_sha, *base_shas, check=True,
-        ).stdout.splitlines() if line.strip()]
-        parents = sorted({p for _, *ps in commits for p in ps})
-        parent_tree = dict(zip(parents, git(
-            "rev-parse", *(f"{p}^{{tree}}" for p in parents), check=True,
-        ).stdout.split())) if parents else {}
-        # A commit with a parent's exact content (an empty commit, or a merge
-        # of main after reverting everything) adds no work of this session.
-        own_trees = {
-            tree for tree, *ps in commits if all(parent_tree.get(p) != tree for p in ps)
-        }
-        own_trees.discard(git("rev-parse", f"{creation_sha}^{{tree}}", check=True).stdout.strip())
+        ).stdout.splitlines():
+            tree, _, commit = line.partition(" ")
+            commit_for_tree.setdefault(tree, commit)
+
+        def carries_own_change(commit: str) -> bool:
+            # Content equal to where the commit meets the base (a revert, or
+            # main merged in after one) holds nothing of this session's own.
+            meet = git("merge-base", commit, *(base_shas or [creation_sha]), check=True).stdout.strip()
+            diff = git("diff", "--quiet", meet, commit)
+            if diff.returncode not in (0, 1):
+                diff.check_returncode()
+            return diff.returncode == 1
+
         skip_names = bases | {branch, upstream_branch, "HEAD"}
-        republished = sorted({
-            name for name, _, tree in refs
-            if name and name not in skip_names and tree in own_trees
-        })[:_MAX_REPUBLISHED_REFS]
+        matches = {
+            name: tree for name, _, tree in refs
+            if name and name not in skip_names and tree in commit_for_tree
+        }
+        own_trees = {
+            tree for tree in set(matches.values()) if carries_own_change(commit_for_tree[tree])
+        }
+        republished = sorted(n for n, t in matches.items() if t in own_trees)[:_MAX_REPUBLISHED_REFS]
 
     cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha,
                  tuple(sorted(bases)), match_content, tuple(republished))
