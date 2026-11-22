@@ -174,6 +174,16 @@ _STEER_INHERITED_WHEN_ABSENT = frozenset({"workspace_project_ids"})
 _UNREAD = object()
 
 
+def _needs_upload_setup(payload: Optional[Dict[str, Any]]) -> bool:
+    """Attachments this worker must admit or write before the prompt is usable.
+
+    Blobs sent through another worker and chips restored by a rewind; a fresh
+    local file (``upload_paths`` alone) is already on this disk.
+    """
+    payload = payload or {}
+    return bool(payload.get("upload_blob_ids") or payload.get("upload_references"))
+
+
 async def try_steer_pending(session_id: str) -> int:
     """Try to hand this session's queued user messages to its RUNNING turn.
 
@@ -813,6 +823,12 @@ class SessionRuntime:
         # no-longer-attempted row and hand it to the engine again — delivering
         # the very message the user cancelled. Never steered again this turn.
         self._steer_withdrawn: set = set()
+        # Rows whose attachments are being written into the live turn's folder:
+        # attempted, but not yet handed to the engine (``cancel_steer``).
+        self._steer_preparing: set = set()
+        # Row -> what turn setup would have made of it: the prompt naming the
+        # attachments' local paths, and those paths, for the receipt to record.
+        self._steer_prepared: Dict[str, Dict[str, Any]] = {}
         # Queued rows already logged as not steerable into this turn, so a
         # refusal is logged once per row rather than on every send and sweep.
         self._steer_refusals_logged: set = set()
@@ -2025,8 +2041,8 @@ class SessionRuntime:
 
         Walks the queue IN ORDER and stops at the first row that cannot be
         steered: a later message must never overtake an earlier one, so an
-        ineligible row (an attachment, a different model, a different agent)
-        pins everything behind it to the ordinary drain. The rows stay
+        ineligible row (a different model, a different agent, attachments that
+        could not be prepared) pins everything behind it to the ordinary drain. The rows stay
         ``queued`` throughout — only fluid's delivery receipt retires one (see
         ``_on_steer_delivered``), so a steer the engine drops at turn end simply
         runs as the turn it always was.
@@ -2076,7 +2092,7 @@ class SessionRuntime:
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
             refusal = self._steer_refusal(row, stored_workspace_ids=stored_folders,
-                                          guarded_now=guarded_now)
+                                          guarded_now=guarded_now, prepares_uploads=True)
             if refusal is not None:
                 if row.get("id") not in self._steer_refusals_logged:
                     self._steer_refusals_logged.add(row.get("id"))
@@ -2117,6 +2133,16 @@ class SessionRuntime:
                         provenance=provenance,
                     )
                 else:
+                    if _needs_upload_setup(row.get("payload")):
+                        prepared = await self._prepare_steer_uploads(row)
+                        if prepared is None:
+                            self._steer_attempted.discard(row_id)
+                            break
+                        if row_id in self._steer_withdrawn:
+                            # The user took it back while its files were written.
+                            self._steer_attempted.discard(row_id)
+                            continue
+                        prompt = prepared["prompt"]
                     command_id = row.get("command_id")
                     steer_id = (command_id if isinstance(command_id, str)
                                 and command_id.startswith("client-") else row_id)
@@ -2161,6 +2187,52 @@ class SessionRuntime:
                 break
             submitted += 1
         return submitted
+
+    async def _prepare_steer_uploads(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Give a queued row's attachments the turn setup it will not get.
+
+        A file sent through another worker arrives as a blob, and a chip a
+        rewind brought back names its file by the recorded message. A turn of
+        their own admits them and writes the blobs into its working folder
+        (``query_engine``); steered, the same is done here, into the folder the
+        live engine runs in. Returns the prompt naming the local paths and
+        those paths, or None when they cannot be prepared: the row then waits
+        for its own turn, which reports why.
+        """
+        row_id = row["id"]
+        self._steer_preparing.add(row_id)
+        try:
+            from app.core.session_pool import get_session_pool
+            from app.core import upload_transfer
+            from app.db import database
+
+            state = get_session_pool().peek(self.session_id)
+            cwd = str(getattr(getattr(state, "connect_options", None), "cwd", "") or "")
+
+            def _prepare() -> Dict[str, Any]:
+                session = database.get_session(self.session_id)
+                payload = upload_transfer.admit_turn_uploads(row.get("payload") or {}, session)
+                blob_ids = list(payload.get("upload_blob_ids") or [])
+                if blob_ids and not cwd:
+                    raise upload_transfer.UploadLiftError("the live turn has no working folder")
+                mapping = upload_transfer.materialize_blobs_for_turn(blob_ids, cwd) if blob_ids else {}
+                return {
+                    "prompt": upload_transfer.rewrite_prompt(row.get("prompt") or "", mapping),
+                    "upload_paths": [mapping.get(p, p) for p in payload.get("upload_paths") or []],
+                }
+
+            prepared = await asyncio.to_thread(_prepare)
+        except Exception as exc:  # noqa: BLE001 - its own turn surfaces the failure
+            logger.info(
+                "SessionRuntime: attachments of queued turn %s could not join %s "
+                "turn %s (%s) — it waits for the drain",
+                row_id, self.session_id, self.turn_id, type(exc).__name__,
+            )
+            return None
+        finally:
+            self._steer_preparing.discard(row_id)
+        self._steer_prepared[row_id] = prepared
+        return prepared
 
     async def steer_task_notification(
         self,
@@ -2303,6 +2375,11 @@ class SessionRuntime:
         if turn_id not in self._steer_attempted:
             if withdraw:
                 self._steer_withdrawn.add(turn_id)
+            return "not_submitted"
+        if turn_id in self._steer_preparing:
+            # Its attachments are still being written; the engine has nothing
+            # yet. Both callers remove the row, so bar the pending submit.
+            self._steer_withdrawn.add(turn_id)
             return "not_submitted"
         adapter = self._live_adapter()
         if adapter is None:
@@ -2453,7 +2530,7 @@ class SessionRuntime:
 
     def _steer_refusal(
         self, row: Dict[str, Any], *, stored_workspace_ids: Any = _UNREAD,
-        guarded_now: Any = _UNREAD,
+        guarded_now: Any = _UNREAD, prepares_uploads: bool = False,
     ) -> Optional[str]:
         """Why ``row``'s prompt cannot join the LIVE turn, or None when it can.
 
@@ -2465,10 +2542,12 @@ class SessionRuntime:
         already running under settings this row would change, and folding the
         text in would silently ignore what the user picked:
 
-        * attachments (``upload_blob_ids``): the files have to be materialized
-          into the working dir before the prompt makes sense, which is turn
-          setup, not something a tool result can carry; the same for a
-          ``@Notes/<id>`` reference, which turn setup expands;
+        * attachments that need turn setup (``upload_blob_ids`` from another
+          worker, ``upload_references`` from a restored chip): the files have
+          to be admitted and written into the working dir first. The live
+          steer sweep does that itself (``prepares_uploads``,
+          :meth:`_prepare_steer_uploads`); every other caller keeps the rule.
+          A ``@Notes/<id>`` reference is always refused: turn setup expands it;
         * a different model / effort / permission mode, or a different set of
           workspace folders (a row that names none means the chat's stored
           folders, and joins only while the live turn has that set);
@@ -2504,7 +2583,7 @@ class SessionRuntime:
                 guarded_now = self._steering_guarded_now()
             if guarded_now:
                 return "text no person entered runs as its own turn here"
-        if payload.get("upload_blob_ids") or payload.get("upload_references"):
+        if not prepares_uploads and _needs_upload_setup(payload):
             return "attachments need turn setup"
         if row.get("source") != "agent_message":
             from app.core.query_engine import NOTE_REFERENCE
@@ -2649,7 +2728,11 @@ class SessionRuntime:
                     row_id, row.get("state"), self.session_id,
                 )
                 continue
-            content = row.get("prompt") or steer.get("text") or ""
+            # Attachments written into this turn's folder are named by the
+            # paths the model was given (``_prepare_steer_uploads``).
+            prepared = self._steer_prepared.get(row_id) or {}
+            content = prepared.get("prompt") or row.get("prompt") or steer.get("text") or ""
+            upload_paths = prepared.get("upload_paths", (row.get("payload") or {}).get("upload_paths"))
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
             # A row whose words are already in the transcript (a voice handoff,
             # whose caption was stored before submit, or a re-queued steer) adds
@@ -2659,7 +2742,7 @@ class SessionRuntime:
                     content,
                     profile_id=profile_id,
                     command_id=row.get("command_id"),
-                    upload_paths=(row.get("payload") or {}).get("upload_paths") or None,
+                    upload_paths=upload_paths or None,
                     owner_receipt=owner_message_receipt(row),
                     **({"queued_turn_id": row_id, "checkpoint_backed": False,
                         "source": "agent_message"}
@@ -2674,7 +2757,7 @@ class SessionRuntime:
                 await owner_confirm.after_owner_message(self.session_id, row.get("payload"))
                 await self._persist_user_message(
                     content, profile_id=profile_id, source=row.get("source") or "user",
-                    upload_paths=(row.get("payload") or {}).get("upload_paths"),
+                    upload_paths=upload_paths,
                 )
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
@@ -3005,6 +3088,7 @@ class SessionRuntime:
         self._steering_closed = True
         self._steer_attempted.clear()
         self._steer_ids.clear()
+        self._steer_prepared.clear()
         # A task notification is the exception: it has no queue row behind it,
         # so an undelivered one has to be handed back to the scheduler or the
         # completion is lost. Before the park gate, so a wake enqueued here is
