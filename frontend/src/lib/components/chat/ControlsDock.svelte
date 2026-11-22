@@ -31,7 +31,7 @@
 	 * session is the Stop button's job.
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, ultrafastRefusedHere } from '$lib/stores/active-session';
 	import { fastChangeWaits } from '$lib/utils/fast-outcome';
 	import { standardContextCap } from '$lib/stores/session/context-window';
 	import { contextCapRevision } from '$lib/stores/composer-preferences';
@@ -329,10 +329,10 @@
 	// per-model flag: a ChatGPT plan whose catalog lists it, or a documented
 	// API model). Elsewhere the plain Fast toggle stays as it is.
 	const ultrafastMode = $derived(!!$activeSession.ultrafastMode);
-	// Once the chat's worker has run an Ultrafast pick as Fast (it predates the
-	// tier), offer Fast on/off: a cycle would ask it for Ultrafast forever and
-	// never come round to Standard.
-	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue) && !$activeSession.ultrafastRefused);
+	// While the worker that ran an Ultrafast pick as Fast (it predates the tier)
+	// still runs the chat, offer Fast on/off: a cycle would ask it for Ultrafast
+	// forever and never come round to Standard. A handoff lifts it.
+	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue) && !ultrafastRefusedHere($activeSession));
 	const speedBilling = $derived(ultrafastBilling(modelValue));
 	// The same reset for the dearer tier: a model without it runs the chat on
 	// Fast (Standard where Fast is gone too, which the effect above handles).

@@ -58,7 +58,7 @@ vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from './header-dropdowns';
 import { fastChangeWaits } from '$lib/utils/fast-outcome';
-import { activeSession } from './active-session';
+import { activeSession, ultrafastRefusedHere } from './active-session';
 import { api, recheckAuthOn401 } from '$lib/api/client';
 import { appData } from './app-data.svelte';
 import { auth } from '$lib/stores/auth.svelte';
@@ -901,20 +901,39 @@ describe('live effort and Fast mode selection', () => {
 	describe('a worker that predates speed tiers', () => {
 		afterEach(() => {
 			vi.restoreAllMocks();
-			Object.assign(activeSession.current, { sessionId: null, fastMode: false, ultrafastMode: false, ultrafastRefused: false });
+			Object.assign(activeSession.current, {
+				sessionId: null, fastMode: false, ultrafastMode: false, ultrafastRefusedBy: null, isRemote: undefined, ownerDeviceName: undefined
+			});
 		});
 		const start = () => Object.assign(activeSession.current, {
-			sessionId: 'older', modelOverride: 'gpt-6.1-sol', fastMode: true, ultrafastMode: false, ultrafastRefused: false
+			sessionId: 'older', modelOverride: 'gpt-6.1-sol', fastMode: true, ultrafastMode: false, ultrafastRefusedBy: null,
+			isRemote: true, ownerDeviceName: 'OldBox'
 		});
+		const refused = () => ultrafastRefusedHere(activeSession.current);
 
-		it('marks the chat when it runs an Ultrafast pick as Fast', async () => {
+		it('marks the worker that runs an Ultrafast pick as Fast', async () => {
 			start();
 			// No `speed` in the answer: the worker saved plain Fast.
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: true, context_window: 400_000 });
 			await activeSession.setSpeed('ultrafast', false);
 			expect(activeSession.current.fastMode).toBe(true);
 			expect(activeSession.current.ultrafastMode).toBe(false);
-			expect(activeSession.current.ultrafastRefused).toBe(true);
+			expect(refused()).toBe(true);
+		});
+
+		it('lifts the mark once another worker runs the chat', async () => {
+			start();
+			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: true, context_window: 400_000 });
+			await activeSession.setSpeed('ultrafast', false);
+			expect(refused()).toBe(true);
+			// Handed to a current worker, then to this one: neither refused it.
+			Object.assign(activeSession.current, { ownerDeviceName: 'NewBox' });
+			expect(refused()).toBe(false);
+			Object.assign(activeSession.current, { isRemote: false, ownerDeviceName: null });
+			expect(refused()).toBe(false);
+			// Back on the older worker, it still runs Ultrafast as Fast.
+			Object.assign(activeSession.current, { isRemote: true, ownerDeviceName: 'OldBox' });
+			expect(refused()).toBe(true);
 		});
 
 		it('leaves a chat whose worker answers the tier alone', async () => {
@@ -922,14 +941,14 @@ describe('live effort and Fast mode selection', () => {
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: true, speed: 'ultrafast', context_window: 400_000 });
 			await activeSession.setSpeed('ultrafast', false);
 			expect(activeSession.current.ultrafastMode).toBe(true);
-			expect(activeSession.current.ultrafastRefused).toBe(false);
+			expect(refused()).toBe(false);
 		});
 
 		it('does not read a Standard answer without a tier as a refusal', async () => {
 			start();
 			vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: null, fast: false, context_window: 400_000 });
 			await activeSession.setSpeed('standard', false);
-			expect(activeSession.current.ultrafastRefused).toBe(false);
+			expect(refused()).toBe(false);
 		});
 	});
 

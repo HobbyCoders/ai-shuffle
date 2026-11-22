@@ -310,6 +310,29 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
 	});
 
+	it('keeps its layout when Ultrafast goes away while it is open', async () => {
+		const onSelectSpeed = vi.fn();
+		const onToggleFast = vi.fn();
+		const props = { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed, onToggleFast };
+		const view = render(EffortPopoverCard, { props });
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		// An older worker ran the Ultrafast pick as Fast: the bolt turns into the
+		// Fast toggle but keeps its size, and the cost line keeps its room unseen.
+		await view.rerender({ ...props, ultrafastSupported: false });
+		expect(bolt().getAttribute('aria-label')).toBe('Fast mode');
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		const note = screen.getByTestId('ultrafast-cost');
+		expect(note.classList.contains('held')).toBe(true);
+		expect(note.getAttribute('aria-hidden')).toBe('true');
+		await fireEvent.click(bolt());
+		expect(onToggleFast).toHaveBeenCalledOnce();
+		view.unmount();
+		// Opened afresh on that chat, the card has the plain Fast layout.
+		render(EffortPopoverCard, { props: { ...props, ultrafastSupported: false } });
+		expect(bolt().classList.contains('tiers')).toBe(false);
+		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+	});
+
 	it('falls back to the tier in force when a pick is refused', async () => {
 		let refuse: (reason: unknown) => void = () => {};
 		const onSelectSpeed = vi.fn(() => new Promise((_, reject) => { refuse = reject; }));

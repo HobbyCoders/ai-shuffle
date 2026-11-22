@@ -244,9 +244,10 @@ export interface ActiveSessionState {
 		 *  `fastMode` is on, and only on a model that offers it
 		 *  (`isUltrafastCapable`); code that knows only `fastMode` runs Fast. */
 		ultrafastMode?: boolean;
-		/** The worker running this chat answered an Ultrafast pick as plain Fast
-		 *  (it predates speed tiers), so the speed control offers Fast on/off. */
-		ultrafastRefused?: boolean;
+		/** The owner (`speedOwnerKey`) that answered an Ultrafast pick as plain
+		 *  Fast because it predates speed tiers. While that owner still runs the
+		 *  chat, the speed control offers Fast on/off (`ultrafastRefusedHere`). */
+		ultrafastRefusedBy?: string | null;
 /** Agent / access / Fast fields that still hold a placeholder until the
 	 *  session's own binding arrives from `/live` (#418). Shown as loading and
 	 *  never sent. See session/composer-binding.ts. */
@@ -466,7 +467,7 @@ function defaultState(): ActiveSessionState {
 		effortLevelOverride: getPersistedEffort(),
 		fastMode: getPersistedFastMode(),
 		ultrafastMode: getPersistedUltrafastMode(),
-		ultrafastRefused: false,
+		ultrafastRefusedBy: null,
 		bindingUnhydrated: {},
 		bindingPicks: {},
 		workspaceProjectIds: [],
@@ -931,6 +932,17 @@ const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
 type RunSettingField = 'effort' | 'fast' | 'speed' | 'context_window';
+/** Which worker runs the open chat, as far as speed answers go: this one, or
+ *  a remote by name. A handoff changes it. */
+export function speedOwnerKey(state: Pick<ActiveSessionState, 'isRemote' | 'ownerDeviceName'>): string {
+	return state.isRemote ? `remote:${state.ownerDeviceName ?? ''}` : 'local';
+}
+
+/** The worker running the chat now is the one that ran an Ultrafast pick as Fast. */
+export function ultrafastRefusedHere(state: Pick<ActiveSessionState, 'isRemote' | 'ownerDeviceName' | 'ultrafastRefusedBy'>): boolean {
+	return state.ultrafastRefusedBy != null && state.ultrafastRefusedBy === speedOwnerKey(state);
+}
+
 type RunSettingsAnswer = { effort: string | null; fast: boolean; speed?: ComposerSpeed; context_window: number; fast_applies_turn?: string | null };
 
 async function setLiveRunSetting(field: RunSettingField, value: string | null | boolean | number, remember = true) {
@@ -953,7 +965,9 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 	let ultrafast: boolean | undefined = field === 'speed' ? value === 'ultrafast' : undefined;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
-	let ultrafastRefused = false;
+	let ultrafastRefusedBy: string | null = null;
+	// The worker the pick was sent to, should the chat move while it is answered.
+	const speedOwner = speedOwnerKey(_state);
 	if (sessionId && !staged) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -975,7 +989,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 			if (speedField && saved.speed) ultrafast = saved.speed === 'ultrafast';
 			else if (field === 'speed') {
 				ultrafast = false; // an older owner runs it as Fast
-				ultrafastRefused = value === 'ultrafast';
+				if (value === 'ultrafast') ultrafastRefusedBy = speedOwner;
 			}
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
 			if (field === 'context_window' && selected) {
@@ -1021,7 +1035,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 		...s, [stateKey]: selected,
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(speedField ? { ...(staged ? markBindingPicked(s, 'fast') : markBindingHydrated(s, 'fast')), ultrafastMode: ultrafastNow } : {}),
-		...(ultrafastRefused ? { ultrafastRefused: true } : {}),
+		...(ultrafastRefusedBy != null ? { ultrafastRefusedBy } : {}),
 		// A context-window answer says nothing about Fast.
 		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})

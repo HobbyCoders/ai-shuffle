@@ -72,6 +72,12 @@
 	}: Props = $props();
 
 	const speedPicker = $derived(fastSupported && ultrafastSupported);
+	// Once this card has shown the three-tier bolt it keeps that layout until it
+	// closes, even if Ultrafast goes away meanwhile (an older worker ran the
+	// pick as Fast): the bolt stays where the next click expects it.
+	let tierShown = $state(false);
+	$effect.pre(() => { if (speedPicker) tierShown = true; });
+	const tierLayout = $derived(speedPicker || tierShown);
 	const costNote = $derived(ultrafastCost(ultrafastBilling));
 	const speed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
 	// The chat answers each pick after the worker saves it. Until every pick
@@ -147,7 +153,7 @@
 			<button
 				type="button"
 				class="fast-toggle"
-				class:tiers={speedPicker}
+				class:tiers={tierLayout}
 				class:on={boltSpeed !== 'standard' && !fastPending}
 				class:pending={fastPending}
 				disabled={fastPending}
@@ -167,9 +173,11 @@
 
 	<!-- Shown in every tier, as the phone sheet does: the card opens upward from
 	     its bottom edge, so a line that came and went mid-cycle would move the
-	     bolt out from under the next click. -->
-	{#if speedPicker && costNote}
-		<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
+	     bolt out from under the next click. If Ultrafast goes away while the card
+	     is open, the line keeps its room, unseen. -->
+	{#if tierLayout && costNote}
+		<p class="speed-cost" class:held={!speedPicker} aria-hidden={!speedPicker || undefined}
+			data-testid="ultrafast-cost">{costNote}</p>
 	{/if}
 
 	<div aria-live="polite">
@@ -390,6 +398,10 @@
 	   every tier, so repeated clicks on one spot all reach it. */
 	.fast-toggle.tiers {
 		min-width: 27px;
+	}
+
+	.speed-cost.held {
+		visibility: hidden;
 	}
 
 	@keyframes fast-bolt-charge {
