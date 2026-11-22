@@ -69,10 +69,21 @@
 
 	/* The health row shows the last answer the worker gave, if any; the detail
 	   pane asks again when it opens. */
+	const healthLoad = $derived(memoryHealth.result?.status);
 	const healthData = $derived(memoryHealth.result?.status === 'ok' ? memoryHealth.result.data : null);
-	const healthSummary = $derived(healthData ? memorySummary(healthData) : 'Checks itself every hour');
+	/* A failed check says so on the row, as the System row did, without
+	   opening the detail. */
+	const healthSummary = $derived(
+		healthData
+			? memorySummary(healthData)
+			: healthLoad === 'error'
+				? 'Unavailable'
+				: healthLoad === 'forbidden'
+					? FORBIDDEN_TEXT
+					: 'Checks itself every hour'
+	);
 	const healthTone = $derived<StatusTone | undefined>(
-		healthData ? (healthData.state === 'healthy' ? 'ok' : 'warn') : undefined
+		healthData ? (healthData.state === 'healthy' ? 'ok' : 'warn') : healthLoad === 'error' ? 'off' : undefined
 	);
 
 	const summary = (m: MemoryItem) => (model.dirty(m.id) ? 'Unsaved changes' : memoryMeta(m));

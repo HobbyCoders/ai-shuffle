@@ -5,11 +5,11 @@ import { runJourney } from './runner.mjs';
 import { expect, gotoApp, settleServiceWorker, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Agent behavior', 'Memory', 'Plugins', 'MCP servers', 'Hooks', 'Integrations', 'Devices', 'Cloud', 'Security', 'Vault', 'System', 'Logs'];
+const ALL = ['General', 'Voice', 'Providers', 'Default models', 'Model tuning', 'Usage', 'Agent instructions', 'Memory', 'Plugins', 'MCP servers', 'Hooks', 'Devices', 'Cloud', 'Integrations', 'Security', 'Vault', 'System', 'Logs'];
 // Security and Usage shifted for #1301 (a loading placeholder smaller than the
-// loaded control). Agent behavior holds the rows that left Security for it
-// (chat instructions, computer use). The rest are measured with --all-pages.
-const pages = process.argv.includes('--all-pages') ? ALL : ['Security', 'Agent behavior', 'Usage'];
+// loaded control). Agent instructions holds the chat instructions row that left
+// Security. The rest are measured with --all-pages.
+const pages = process.argv.includes('--all-pages') ? ALL : ['Security', 'Agent instructions', 'Usage'];
 const slug = (label) => label.toLowerCase().replace(/[^a-z]+/g, '-');
 
 const reloadCase = (label) => ({
@@ -117,21 +117,21 @@ const failUnlessRetrying = (page, url) =>
 		await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Synthetic failure' }) }).catch(() => {});
 	});
 
-// Agent behavior when only the chat instructions fail: their row offers the
+// Agent instructions when the chat instructions fail: their row offers the
 // retry itself. (This row was on Security until Settings was reorganized.)
 const instructionsFailCase = {
-	...reloadCase('Agent behavior'),
-	name: 'reload-on-agent-behavior-when-instructions-fail',
+	...reloadCase('Agent instructions'),
+	name: 'reload-on-agent-instructions-when-instructions-fail',
 	allow: [
-		...reloadCase('Agent behavior').allow,
+		...reloadCase('Agent instructions').allow,
 		{ kind: 'failed_requests', status: 500, url: INSTRUCTIONS, reason: 'this case answers this request with 500 on purpose' }
 	],
 	async setup(ctx) {
-		await reloadCase('Agent behavior').setup(ctx);
+		await reloadCase('Agent instructions').setup(ctx);
 		await failUnlessRetrying(ctx.page, INSTRUCTIONS);
 	},
 	async act(ctx) {
-		await reloadCase('Agent behavior').act(ctx);
+		await reloadCase('Agent instructions').act(ctx);
 		const { page } = ctx;
 		const row = rowIn(page);
 		expect((await row('agents.instructions').locator('.st-rh').textContent()) === 'Could not load (error 500)', 'Chat instructions says why in its hint');

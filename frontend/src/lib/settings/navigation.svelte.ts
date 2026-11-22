@@ -54,12 +54,9 @@ export const MOVED_ANCHORS: Readonly<Record<string, SettingsTarget>> = {
 	'cloud.key': { category: 'cloud', anchor: 'cloud.account' },
 	'cloud.deactivate': { category: 'cloud', anchor: 'cloud.account' },
 	'cloud.plan': { category: 'cloud', anchor: 'cloud.account' },
-	// The agent rows left Security for Agents, and Memory health left System
-	// for Memory, in the Settings reorganization.
+	// Chat instructions left Security for Agent instructions, and Memory
+	// health left System for Memory, in the Settings reorganization.
 	'security.secInstr': { category: 'agents', anchor: 'agents.instructions' },
-	'security.runsAs': { category: 'agents', anchor: 'agents.runsAs' },
-	'security.computerUse': { category: 'agents', anchor: 'agents.computerUse' },
-	'security.computerUseDedicated': { category: 'agents', anchor: 'agents.computerUseDedicated' },
 	'system.memoryHealth': { category: 'memory', item: 'health', anchor: 'memory.health' },
 	// Default models media options became remembered generation choices (#379).
 	'models.imageAspect': { category: 'models', item: 'gen-image' },

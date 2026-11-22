@@ -83,7 +83,7 @@ describe('SettingsShell index', () => {
 	it('lists categories in five groups and opens General', async () => {
 		render(SettingsShell);
 		const index = nav();
-		for (const group of ['Personal', 'Models', 'Agents and tools', 'Devices and access', 'Maintenance']) expect(within(index).getByText(group)).toBeTruthy();
+		for (const group of ['Personal', 'Models', 'Agents and tools', 'Connections and security', 'System and data']) expect(within(index).getByText(group)).toBeTruthy();
 		const names = within(index)
 			.getAllByRole('button')
 			.map((b) => b.textContent?.trim());
@@ -94,14 +94,14 @@ describe('SettingsShell index', () => {
 			'Default models',
 			'Model tuning',
 			'Usage',
-			'Agent behavior',
+			'Agent instructions',
 			'Memory',
 			'Plugins',
 			'MCP servers',
 			'Hooks',
-			'Integrations',
 			'Devices',
 			'Cloud',
+			'Integrations',
 			'Security',
 			'Vault',
 			'System',

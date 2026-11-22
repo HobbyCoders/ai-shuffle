@@ -11,6 +11,11 @@ const owner = vi.hoisted(() => ({
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
 const refresh = vi.hoisted(() => vi.fn());
 const layout = vi.hoisted(() => ({ openFeaturePage: vi.fn() }));
+const host = vi.hoisted(() => ({
+	desktop: null as unknown,
+	status: { available: true, reason: 'ok', enabled: false } as Record<string, unknown>
+}));
+const computer = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), setMode: vi.fn(), stop: vi.fn() }));
 
 vi.mock('$lib/api/owner', () => owner);
 vi.mock('$lib/stores/owner-access.svelte', () => ({ ownerAccess: { refresh } }));
@@ -20,6 +25,17 @@ vi.mock('$lib/api/client', () => ({
 	isApiError: (e: unknown) => typeof e === 'object' && e !== null && 'status' in e && 'detail' in e
 }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout }));
+vi.mock('$lib/services/desktop', () => ({
+	get desktop() {
+		return host.desktop;
+	}
+}));
+vi.mock('$lib/api/computerUse', () => ({
+	getComputerUseStatus: computer.get,
+	setComputerUseEnabled: computer.set,
+	setComputerUseInputMode: computer.setMode,
+	stopComputerUse: computer.stop
+}));
 
 import SecurityPage from './SecurityPage.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
@@ -58,6 +74,8 @@ async function fill(values: Record<string, string>) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	host.desktop = null;
+	host.status = { available: true, reason: 'ok', enabled: false };
 	owner.fetchOwnerStatus.mockResolvedValue(loaded());
 	owner.changeOwnerPassword.mockResolvedValue({ status: 'ok' });
 	owner.createOwnerPassword.mockResolvedValue({ status: 'ok' });
@@ -66,6 +84,9 @@ beforeEach(() => {
 	transport.get.mockResolvedValue({});
 	transport.put.mockResolvedValue({});
 	transport.delete.mockResolvedValue({});
+	computer.get.mockImplementation(async () => ({ display: null, display_label: null, active: false, ...host.status }));
+	computer.set.mockImplementation(async (on: boolean) => ({ enabled: on }));
+	computer.setMode.mockImplementation(async (mode: string) => ({ input_mode: mode }));
 });
 afterEach(() => {
 	cleanup();
@@ -73,15 +94,20 @@ afterEach(() => {
 });
 
 describe('coverage', () => {
-	it('renders a row for every Security entry', async () => {
+	it('renders a row for every Security entry in the desktop app', async () => {
+		host.desktop = { agentAccess: { title: 'Agents run as you', message: 'm', points: [], footer: 'f' } };
 		await assertCategoryCoverage('security', () => render(SecurityPage).container);
 	});
 
-	it('no longer has the agent rows; they moved to Agent behavior', () => {
+	it('leaves "Agents run as you" out of the web app', () => {
 		render(SecurityPage);
-		for (const label of ['Chat instructions', 'Computer use', 'Only agents use this computer', 'Agents run as you']) {
-			expect(screen.queryByText(label)).toBeNull();
-		}
+		expect(screen.queryByText('Agents run as you')).toBeNull();
+	});
+
+	it('no longer has Chat instructions; they moved to Agent instructions', () => {
+		render(SecurityPage);
+		expect(screen.queryByText('Chat instructions')).toBeNull();
+		expect(transport.get).not.toHaveBeenCalledWith('/settings/security-instructions');
 	});
 });
 
@@ -343,4 +369,77 @@ describe('trusted LAN', () => {
 		expect(owner.setTrustedLan).toHaveBeenCalledWith(false);
 		expect(screen.queryByText('Any device becomes owner?')).toBeNull();
 	});
+});
+
+describe('computer use', () => {
+	it('is off with the reason as hint when the host cannot do it', async () => {
+		host.status = { available: false, reason: 'docker', enabled: false };
+		render(SecurityPage);
+		expect(await screen.findByText('Unavailable in Docker')).toBeTruthy();
+		expect((screen.getByRole('switch', { name: 'Computer use' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('shows the switch off on a host that cannot run it, even when the saved setting is on', async () => {
+		host.status = { available: false, reason: 'docker', enabled: true };
+		render(SecurityPage);
+		await screen.findByText('Unavailable in Docker');
+		const toggle = screen.getByRole('switch', { name: 'Computer use' });
+		expect(toggle.getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('explains a Linux host it cannot use, with the server detail behind the help button', async () => {
+		host.status = {
+			available: false,
+			reason: 'wayland',
+			enabled: false,
+			detail: 'This is a Wayland session. Log out and pick an X11 session.'
+		};
+		render(SecurityPage);
+		expect(await screen.findByText('Wayland is not supported')).toBeTruthy();
+		expect((screen.getByRole('switch', { name: 'Computer use' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.focus(screen.getByRole('button', { name: 'About Computer use' }));
+		expect((await screen.findByRole('tooltip')).textContent).toContain('pick an X11 session');
+	});
+
+	it('names missing Linux packages when the server sends no detail', async () => {
+		host.status = { available: false, reason: 'missing-system-packages', enabled: false };
+		render(SecurityPage);
+		expect(await screen.findByText('System libraries missing')).toBeTruthy();
+		await fireEvent.focus(screen.getByRole('button', { name: 'About Computer use' }));
+		expect((await screen.findByRole('tooltip')).textContent).toContain('Screen-capture libraries are missing');
+	});
+
+	it('turns on through the shared store', async () => {
+		render(SecurityPage);
+		const toggle = screen.getByRole('switch', { name: 'Computer use' });
+		await waitFor(() => expect(computer.get).toHaveBeenCalled());
+		await fireEvent.click(toggle);
+		await waitFor(() => expect(computer.set).toHaveBeenCalledWith(true));
+	});
+
+	it('marks this computer as agents-only, which skips the first-use prompt', async () => {
+		render(SecurityPage);
+		const toggle = screen.getByRole('switch', { name: 'Only agents use this computer' });
+		expect(screen.getByText('Skips the first-use prompt')).toBeTruthy();
+		await waitFor(() => expect(computer.get).toHaveBeenCalled());
+		await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
+		expect(toggle.getAttribute('aria-checked')).toBe('false');
+		await fireEvent.click(toggle);
+		await waitFor(() => expect(computer.setMode).toHaveBeenCalledWith('dedicated_desktop'));
+	});
+
+	it('cannot mark an agents-only computer when the host has no computer use', async () => {
+		host.status = { available: false, reason: 'docker', enabled: false };
+		render(SecurityPage);
+		await screen.findByText('Unavailable in Docker');
+		const toggle = screen.getByRole('switch', { name: 'Only agents use this computer' }) as HTMLButtonElement;
+		expect(toggle.disabled).toBe(true);
+	});
+});
+
+it('does not offer an OS sandbox setting or fetch its retired status', async () => {
+	render(SecurityPage);
+	await waitFor(() => expect(computer.get).toHaveBeenCalled());
+	expect(screen.queryByText('Code sandbox')).toBeNull();
+	expect(transport.get).not.toHaveBeenCalledWith('/deployment');
 });

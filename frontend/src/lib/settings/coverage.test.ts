@@ -120,13 +120,13 @@ describe('assertCategoryCoverage', () => {
  */
 const CONDITIONAL_ROWS: Partial<Record<CategoryId, Record<string, string>>> = {
 	voice: { 'voice.hotkey': 'only while global voice input is on' },
-	agents: { 'agents.runsAs': 'desktop app only' },
 	cloud: {
 		'cloud.link': 'only once the status says the account is not linked',
 		'cloud.remoteWorkers': 'only once the Cloud status loaded',
 		'cloud.renewal': 'only on a paid plan with a renewal date',
 		'cloud.upgrade': 'only when not on a paid plan'
-	}
+	},
+	security: { 'security.runsAs': 'desktop app only' }
 };
 
 /**

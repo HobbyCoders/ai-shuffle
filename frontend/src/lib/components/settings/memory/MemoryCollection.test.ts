@@ -15,6 +15,7 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { MODULES } from '$lib/settings/registry';
+import { memoryHealth } from '$lib/stores/memory-health.svelte';
 import MemoryCollection from './MemoryCollection.svelte';
 import {
 	MemoryModel,
@@ -88,6 +89,19 @@ it('lists Memory health beside Learned guidance and opens its check', async () =
 	expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Memory health');
 	await waitFor(() => expect(screen.getByTestId('memory-health').textContent).toContain('Healthy'));
 	expect(http.get).toHaveBeenCalledWith('/memory/health');
+});
+
+it('says Unavailable on the Memory health row when the check fails, without opening it', async () => {
+	memoryHealth.reset();
+	http.get.mockImplementation(async (path) => {
+		if (path === '/memory/health') throw Object.assign(new Error('Server error'), { status: 500 });
+		return path === '/memories' ? { items: rows, limits } : {};
+	});
+	await show();
+	await waitFor(() =>
+		expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Unavailable')
+	);
+	memoryHealth.reset();
 });
 
 it('shows the same-account Text Generation requirement with no saved guidance', async () => {

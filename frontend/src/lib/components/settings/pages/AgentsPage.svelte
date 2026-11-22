@@ -1,27 +1,20 @@
 <script lang="ts">
 	/**
-	 * Agent behavior: how every agent on this worker behaves and what it can
-	 * reach. Instructions (the chat instructions sent to every agent) and
-	 * Computer access (agents run as you in the desktop app, computer use). These rows were on
+	 * Agent instructions: the chat instructions sent to every agent on this
+	 * worker (the default block of every system prompt). This row was on
 	 * Security until the Settings reorganization.
 	 *
 	 * The chat instructions are a worker setting; they keep an explicit Save
-	 * and survive a change made elsewhere (banner + Load latest). Computer use
-	 * follows the shared computerUse store, polled only while this page is
-	 * mounted.
+	 * and survive a change made elsewhere (banner + Load latest).
 	 */
 	import { onMount } from 'svelte';
 	import { api, getErrorMessage, isApiError } from '$lib/api/client';
-	import { computerUse } from '$lib/stores/computerUse.svelte';
-	import { desktop } from '$lib/services/desktop';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { FORBIDDEN_TEXT, isForbidden } from '$lib/settings/access.svelte';
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
-	import Switch from '../rows/Switch.svelte';
-	import ValueText from '../rows/ValueText.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import SecurityInstructionsEditor from './editors/SecurityInstructionsEditor.svelte';
 	import { couldNotLoad, couldNotLoadSentence, handOffRetryFocus } from './load-failure';
@@ -151,95 +144,6 @@
 		handOffRetryFocus();
 	});
 
-	/* ---------- agents run as you (desktop app only) ---------- */
-
-	const agentAccess = desktop?.agentAccess ?? null;
-
-	/* ---------- computer use ---------- */
-
-	const UNAVAILABLE: Record<string, { hint: string; help: string }> = {
-		docker: {
-			hint: 'Unavailable in Docker',
-			help: 'AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.'
-		},
-		'no-display': {
-			hint: 'No desktop on this host',
-			help: 'No desktop display detected on this host. On Linux, start AI Shuffle from an X11 desktop session.'
-		},
-		wayland: {
-			hint: 'Wayland is not supported',
-			help: 'Computer use needs an X11 session on Linux. Log in with an X11 session (for example GNOME on Xorg) and restart AI Shuffle.'
-		},
-		'no-monitors': { hint: 'No monitors detected', help: 'No monitors detected on this host.' },
-		'missing-deps': {
-			hint: 'Python packages missing',
-			help: 'The computer-use Python packages are not installed. Run pip install -r requirements-native.txt.'
-		},
-		'missing-system-packages': {
-			hint: 'System libraries missing',
-			help: 'Screen-capture libraries are missing on this host.'
-		},
-		'x11-unreachable': {
-			hint: 'Cannot reach the X display',
-			help: 'AI Shuffle could not connect to the X display. Check DISPLAY and XAUTHORITY.'
-		},
-		'x11-no-xtest': {
-			hint: 'X server lacks XTEST',
-			help: 'The X server has no XTEST extension, which mouse and keyboard control needs.'
-		},
-		'env-disabled': {
-			hint: 'Turned off by environment',
-			help: 'Disabled by the COMPUTER_USE_DISABLED environment variable.'
-		},
-		'screenshot-probe-failed': {
-			hint: 'Screen capture check failed',
-			help: 'The screen-capture probe failed on this host.'
-		}
-	};
-
-	let computerBusy = $state(false);
-	const computerOff = $derived(UNAVAILABLE[computerUse.reason] ?? {
-		hint: 'Unavailable on this host',
-		help: `Unavailable (${computerUse.reason}).`
-	});
-	const computerHint = $derived(
-		!computerUse.available
-			? computerOff.hint
-			: computerUse.active
-				? `Controlling ${computerUse.displayLabel ?? 'your screen'}`
-				: computerUse.enabled
-					? 'On for every chat'
-					: undefined
-	);
-
-	async function setComputerUse(on: boolean) {
-		if (computerBusy || !computerUse.available) return;
-		computerBusy = true;
-		try {
-			await computerUse.setEnabled(on);
-			if (computerUse.enabled === on) flashSaved();
-		} finally {
-			computerBusy = false;
-		}
-	}
-
-	async function setDedicatedDesktop(on: boolean) {
-		if (computerBusy || !computerUse.available) return;
-		const mode = on ? 'dedicated_desktop' : 'shared_desktop';
-		computerBusy = true;
-		try {
-			await computerUse.setInputMode(mode);
-			if (computerUse.inputMode === mode) flashSaved();
-		} finally {
-			computerBusy = false;
-		}
-	}
-
-	$effect(() => {
-		computerUse.start();
-		return () => computerUse.stop();
-	});
-
 	/* ---------- lifecycle ---------- */
 
 	onMount(() => {
@@ -249,7 +153,7 @@
 </script>
 
 <PreferencePage category="agents">
-	<RowGroup title="Instructions">
+	<RowGroup title="Every chat">
 		<SettingRow
 			id="agents.instructions"
 			hint={instrLoad === 'error' ? couldNotLoad(instrLoadCode) : undefined}
@@ -277,41 +181,6 @@
 	{:else if instrError && !(instrOpen && instrLoad === 'ok')}
 		<p class="st-msg err" role="alert">{instrError}</p>
 	{/if}
-
-	<RowGroup title="Computer access">
-		{#if agentAccess}
-			<SettingRow id="agents.runsAs">
-				<ValueText value="Your user account" />
-			</SettingRow>
-		{/if}
-		<SettingRow
-			id="agents.computerUse"
-			hint={computerHint}
-			help={computerUse.available ? undefined : (computerUse.detail ?? computerOff.help)}
-			dim={!computerUse.available}
-			value={computerUse.available ? computerUse.enabled : undefined}
-			onReset={() => void setComputerUse(false)}
-		>
-			<!-- A saved "on" cannot run on a host without computer use: show it off. -->
-			<Switch
-				checked={computerUse.available && computerUse.enabled}
-				disabled={!computerUse.available || computerBusy}
-				onchange={(on) => void setComputerUse(on)}
-			/>
-		</SettingRow>
-		<SettingRow
-			id="agents.computerUseDedicated"
-			dim={!computerUse.available}
-			value={computerUse.available ? computerUse.inputMode === 'dedicated_desktop' : undefined}
-			onReset={() => void setDedicatedDesktop(false)}
-		>
-			<Switch
-				checked={computerUse.inputMode === 'dedicated_desktop'}
-				disabled={!computerUse.available || computerBusy}
-				onchange={(on) => void setDedicatedDesktop(on)}
-			/>
-		</SettingRow>
-	</RowGroup>
 </PreferencePage>
 
 {#snippet instrEditor()}

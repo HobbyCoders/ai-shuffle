@@ -1006,7 +1006,7 @@ Returns `{"success": true, "params": {"guidance_scale": 3.5}}` with the options 
 
 ### GET /api/v1/settings/chat-instructions
 
-The chat instructions: the text added to the system prompt of every chat. The built-in default tells agents what the chat renders and how to link files so they open. Settings shows it under **Agent behavior > Chat instructions**.
+The chat instructions: the text added to the system prompt of every chat. The built-in default tells agents what the chat renders and how to link files so they open. Settings shows it under **Agent instructions > Chat instructions**.
 
 These routes were named `security-instructions` before; `/api/v1/settings/security-instructions` still answers `GET`, `PUT` and `DELETE` the same way.
 

@@ -38,16 +38,18 @@ type CategoryRow = Omit<CategoryDef, 'type'>;
 
 /**
  * Personal: how the app looks and listens to you. Models: which models run
- * and what they may spend. Agents and tools: how agents behave and what they
- * can reach. Devices and access: who and what can reach this worker.
- * Maintenance: keeping the worker itself running.
+ * and what they may spend. Agents and tools: what every agent is told and the
+ * tools it can use. Connections and security: what this worker is linked to
+ * (other devices, the cloud account, GitHub and API keys) and what may reach
+ * or control it (sign-in, agent computer access, saved sign-ins). System and
+ * data: the worker itself, its data, updates and logs.
  */
 export const CATEGORY_GROUPS: { id: CategoryGroup; label: string }[] = [
 	{ id: 'personal', label: 'Personal' },
 	{ id: 'models', label: 'Models' },
 	{ id: 'agents', label: 'Agents and tools' },
-	{ id: 'access', label: 'Devices and access' },
-	{ id: 'maintenance', label: 'Maintenance' }
+	{ id: 'connections', label: 'Connections and security' },
+	{ id: 'system', label: 'System and data' }
 ];
 
 const ROWS: CategoryRow[] = [
@@ -58,19 +60,20 @@ const ROWS: CategoryRow[] = [
 	{ id: 'tuning', label: 'Model tuning', icon: SlidersVertical, group: 'models' },
 	{ id: 'usage', label: 'Usage', icon: Gauge, group: 'models' },
 	// Not "Agents": that name and the Bot icon belong to the sidebar's Agents
-	// area (profiles). This page is the behavior every agent shares.
-	{ id: 'agents', label: 'Agent behavior', icon: BotMessageSquare, group: 'agents' },
+	// area (profiles). This page is the instructions every agent shares.
+	{ id: 'agents', label: 'Agent instructions', icon: BotMessageSquare, group: 'agents' },
 	{ id: 'memory', label: 'Memory', icon: Brain, group: 'agents' },
 	{ id: 'plugins', label: 'Plugins', icon: Puzzle, group: 'agents' },
 	{ id: 'mcp', label: 'MCP servers', icon: Cable, group: 'agents' },
 	{ id: 'hooks', label: 'Hooks', icon: Webhook, group: 'agents' },
-	{ id: 'integrations', label: 'Integrations', icon: Plug, group: 'agents' },
-	{ id: 'devices', label: 'Devices', icon: MonitorSmartphone, group: 'access' },
-	{ id: 'cloud', label: 'Cloud', icon: Cloud, group: 'access' },
-	{ id: 'security', label: 'Security', icon: Shield, group: 'access' },
-	{ id: 'vault', label: 'Vault', icon: Vault, group: 'access' },
-	{ id: 'system', label: 'System', icon: Server, group: 'maintenance' },
-	{ id: 'logs', label: 'Logs', icon: ScrollText, group: 'maintenance' }
+	{ id: 'devices', label: 'Devices', icon: MonitorSmartphone, group: 'connections' },
+	{ id: 'cloud', label: 'Cloud', icon: Cloud, group: 'connections' },
+	// GitHub sign-in and API users (outside apps calling this worker with a key).
+	{ id: 'integrations', label: 'Integrations', icon: Plug, group: 'connections' },
+	{ id: 'security', label: 'Security', icon: Shield, group: 'connections' },
+	{ id: 'vault', label: 'Vault', icon: Vault, group: 'connections' },
+	{ id: 'system', label: 'System', icon: Server, group: 'system' },
+	{ id: 'logs', label: 'Logs', icon: ScrollText, group: 'system' }
 ];
 
 export const CATEGORIES: CategoryDef[] = ROWS.map((c) => ({ ...c, type: PAGE_TYPES[c.id] }));

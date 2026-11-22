@@ -20,9 +20,9 @@ export const CATEGORY_IDS = [
 	'plugins',
 	'mcp',
 	'hooks',
-	'integrations',
 	'devices',
 	'cloud',
+	'integrations',
 	'security',
 	'vault',
 	'system',
@@ -30,7 +30,7 @@ export const CATEGORY_IDS = [
 ] as const;
 
 export type CategoryId = (typeof CATEGORY_IDS)[number];
-export type CategoryGroup = 'personal' | 'models' | 'agents' | 'access' | 'maintenance';
+export type CategoryGroup = 'personal' | 'models' | 'agents' | 'connections' | 'system';
 export type PageType = 'preference' | 'collection';
 
 /** Page type per category. Collections are list + detail; the rest are one column of rows. */

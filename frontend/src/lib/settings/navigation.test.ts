@@ -76,6 +76,31 @@ describe('settings targets', () => {
 		expect(nav.category).toBe('cloud');
 		expect(nav.pendingAnchor).toBe('cloud.account');
 	});
+
+	it('sends the reorganized rows to their new pages', () => {
+		// Chat instructions left Security; its opened editor still opens.
+		expect(decodeTarget('category=security&anchor=security.secInstr&open=security.secInstr')).toEqual({
+			category: 'agents',
+			anchor: 'agents.instructions',
+			open: 'agents.instructions'
+		});
+		// Memory health left a System row for an item in the Memory list.
+		expect(decodeTarget('category=system&anchor=system.memoryHealth')).toEqual({
+			category: 'memory',
+			item: 'health',
+			anchor: 'memory.health'
+		});
+		// The computer-use rows never moved.
+		expect(redirectTarget({ category: 'security', anchor: 'security.computerUse' })).toEqual({
+			category: 'security',
+			anchor: 'security.computerUse'
+		});
+		const nav = new SettingsNavigation(false);
+		nav.go({ category: 'system', anchor: 'system.memoryHealth' });
+		expect(nav.category).toBe('memory');
+		expect(nav.selectedItem('memory')).toBe('health');
+		expect(nav.pendingAnchor).toBe('memory.health');
+	});
 });
 
 describe('openSettings', () => {

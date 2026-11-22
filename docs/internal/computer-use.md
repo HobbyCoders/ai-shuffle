@@ -307,7 +307,7 @@ Computer use works on Linux in an **X11** session: a normal desktop login, or
 any X server that `DISPLAY` points at (Xvfb, Xephyr, a VNC desktop). Capture
 uses mss over XCB and input uses pynput's X11 backend (XTEST). It is off by
 default and uses the same toggle, access prompt and permission behaviour as on
-Windows. Settings > Agent behavior > Computer use shows why it is unavailable:
+Windows. Settings > Security > Computer use shows why it is unavailable:
 
 | Reason | What it means | What to do |
 | --- | --- | --- |

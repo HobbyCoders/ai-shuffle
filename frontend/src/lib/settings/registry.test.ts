@@ -29,7 +29,7 @@ describe('settings registry', () => {
 
 	it('lists categories in five groups with icons', () => {
 		expect(CATEGORIES.map((c) => c.id)).toEqual([...CATEGORY_IDS]);
-		expect(CATEGORY_GROUPS.map((g) => g.label)).toEqual(['Personal', 'Models', 'Agents and tools', 'Devices and access', 'Maintenance']);
+		expect(CATEGORY_GROUPS.map((g) => g.label)).toEqual(['Personal', 'Models', 'Agents and tools', 'Connections and security', 'System and data']);
 		for (const c of CATEGORIES) {
 			expect(c.icon).toBeTruthy();
 			expect(c.type).toBe(PAGE_TYPES[c.id]);
