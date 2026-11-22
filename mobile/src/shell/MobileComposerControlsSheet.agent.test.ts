@@ -13,7 +13,7 @@ const { session, setProfile } = vi.hoisted(() => ({ session: { store: null as an
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	session.store = writable({});
-	return { activeSession: { subscribe: session.store.subscribe, setProfile } };
+	return { activeSession: { subscribe: session.store.subscribe, setProfile }, streamingSessions: writable(new Set<string>()) };
 });
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	projects: writable([]),
