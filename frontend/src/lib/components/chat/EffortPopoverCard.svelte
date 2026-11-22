@@ -164,7 +164,10 @@
 		{/if}
 	</div>
 
-	{#if speedPicker && boltSpeed === 'ultrafast' && !fastPending && costNote}
+	<!-- Shown in every tier, as the phone sheet does: the card opens upward from
+	     its bottom edge, so a line that came and went mid-cycle would move the
+	     bolt out from under the next click. -->
+	{#if speedPicker && costNote}
 		<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
 	{/if}
 

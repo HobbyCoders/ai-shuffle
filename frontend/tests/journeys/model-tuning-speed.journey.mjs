@@ -65,12 +65,15 @@ async function boltCycle(page) {
   await page.getByRole('button', { name: /^Effort: / }).filter({ visible: true }).click({ timeout: 8_000 });
   const bolt = page.getByTestId('speed-bolt').filter({ visible: true });
   await bolt.and(page.getByRole('button', { name: 'Speed: Standard', exact: true })).waitFor();
-  await bolt.click();
-  await bolt.click();
+  // Three clicks on one spot, as a person does: the bolt must not move mid-cycle.
+  const box = await bolt.boundingBox();
+  const spot = () => page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await spot();
+  await spot();
   await bolt.and(page.getByRole('button', { name: 'Speed: Ultrafast', exact: true })).waitFor();
   expect(await bolt.locator('svg').count() === 2, 'Ultrafast shows two bolts');
   await waitSaved(page, [true, 'ultrafast']);
-  await bolt.click();
+  await spot();
   await bolt.and(page.getByRole('button', { name: 'Speed: Standard', exact: true })).waitFor();
   expect(await page.locator('.effort-pop-card').count() === 1, 'the card stays open after leaving Ultrafast');
   await waitSaved(page, [false, null]);

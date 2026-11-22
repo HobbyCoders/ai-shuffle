@@ -250,6 +250,9 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolt().getAttribute('aria-pressed')).toBe('false');
 		expect(bolt().getAttribute('title')).toMatch(/Click for Fast/);
 		expect(bolts()).toBe(1);
+		// An API-key route states the price before Ultrafast is picked, and the
+		// line stays put through the cycle so the bolt never moves.
+		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/several times the Standard API price/);
 		await fireEvent.click(bolt());
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('fast');
 
@@ -260,7 +263,7 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolts()).toBe(1);
 		expect(card.classList.contains('fast-active')).toBe(true);
 		expect(card.classList.contains('ultrafast-active')).toBe(false);
-		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
 		await fireEvent.click(bolt());
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('ultrafast');
 
@@ -270,8 +273,7 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolt().getAttribute('title')).toMatch(/back to Standard/);
 		expect(bolts()).toBe(2);
 		expect(card.classList.contains('ultrafast-active')).toBe(true);
-		// An API-key route says the price while Ultrafast is picked.
-		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/several times the Standard API price/);
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
 		await fireEvent.click(bolt());
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
 		expect(onSelectSpeed).toHaveBeenCalledTimes(3);
@@ -324,7 +326,7 @@ describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 		expect(bolt().getAttribute('aria-label')).toBe('Speed: loading');
 		expect((bolt() as HTMLButtonElement).disabled).toBe(true);
 		expect(bolts()).toBe(1);
-		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
 		await fireEvent.click(bolt());
 		expect(onSelectSpeed).not.toHaveBeenCalled();
 	});
