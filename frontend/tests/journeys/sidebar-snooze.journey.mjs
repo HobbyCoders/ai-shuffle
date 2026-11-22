@@ -416,12 +416,34 @@ await runJourney({
 					await route.continue();
 				});
 				try {
-					await rowAction(page, first, 'Settle session');
-					await waitLane(page, first, 'settled');
-					await open(second);
-					await waitSaved(page, first, (row) => !row.is_active, 'the settle never reached the server');
-					// The settle also reloads the list after it lands.
-					await page.waitForTimeout(1500);
+					// The settle ends with a list reload (several GETs); the old code
+					// navigated right after it. Wait for the PATCH, then until no list
+					// request has been in flight for 500ms.
+					const listRequest = (r) => r.method() === 'GET' && /\/api\/v1\/sessions(\?|\/count|$)/.test(r.url());
+					let inFlight = 0;
+					let quietSince = Date.now();
+					const started = (r) => { if (listRequest(r)) inFlight++; };
+					const ended = (r) => { if (listRequest(r) && --inFlight === 0) quietSince = Date.now(); };
+					page.on('request', started);
+					page.on('requestfinished', ended);
+					page.on('requestfailed', ended);
+					try {
+						const patched = page.waitForResponse((r) => r.request().method() === 'PATCH' && r.url().endsWith(`/sessions/${first}/active`), { timeout: 30_000 });
+						await rowAction(page, first, 'Settle session');
+						await waitLane(page, first, 'settled');
+						await open(second);
+						await patched;
+						const until = Date.now() + 30_000;
+						await page.waitForTimeout(100);
+						while (inFlight > 0 || Date.now() - quietSince < 500) {
+							if (Date.now() > until) throw new Error('the list reload after the settle never finished');
+							await page.waitForTimeout(100);
+						}
+					} finally {
+						page.off('request', started);
+						page.off('requestfinished', ended);
+						page.off('requestfailed', ended);
+					}
 					const now = await openTag();
 					expect(now === sessionTag(second), `the chat picked during the settle stays open: want ${sessionTag(second)}, got ${JSON.stringify(await chatState(page))}`);
 				} finally {
