@@ -47,4 +47,6 @@ def test_both_legs_say_once_that_user_skills_sync_on_their_own():
         system = compiled.text if not native else "\n\n".join(
             s.text for s in compiled.sections if s.kind != "tools")
         assert system.count(SKILL_SYNC) == 1, native
-        assert "~/.fluid/skills/<name>/SKILL.md sync to every worker" in system
+        # Absolute: Write and Edit resolve "~" as a folder under the cwd.
+        assert f"Skills in {ha.USER_SKILL_PATH} sync to every worker" in system
+        assert "~/.fluid" not in system

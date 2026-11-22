@@ -12,8 +12,9 @@ session.
 
 ## 1. Plugin or plain skill?
 
-Write a plain skill instead (`save_skill`, or `~/.fluid/skills/<name>/SKILL.md`,
-which AI Shuffle syncs to the owner's other workers) when one written
+Write a plain skill instead (`save_skill`, or `<home>/.fluid/skills/<name>/SKILL.md`
+with your home folder spelled out, since file tools do not expand `~`; AI
+Shuffle syncs that folder to the owner's other workers) when one written
 procedure is enough. Build a plugin when the
 owner wants one of these:
 
