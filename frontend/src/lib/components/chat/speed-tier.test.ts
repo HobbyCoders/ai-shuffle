@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effortSpeedLabel, pickedSpeed, shownSpeed, SPEED_OPTIONS, ultrafastCost } from './speed-tier';
+import { effortSpeedLabel, nextSpeed, pickedSpeed, shownSpeed, SPEED_OPTIONS, ultrafastCost } from './speed-tier';
 
 describe('speed tier', () => {
 	const on = { fastSupported: true, fastEnabled: true, ultrafastSupported: true, ultrafastEnabled: true };
@@ -19,6 +19,16 @@ describe('speed tier', () => {
 		expect(pickedSpeed(on)).toBe('ultrafast');
 		expect(pickedSpeed({ ...on, ultrafastEnabled: false })).toBe('fast');
 		expect(pickedSpeed({ ...on, fastEnabled: false })).toBe('standard');
+	});
+
+	it('moves the corner bolt one tier on and wraps to Standard', () => {
+		expect(nextSpeed('standard', true)).toBe('fast');
+		expect(nextSpeed('fast', true)).toBe('ultrafast');
+		expect(nextSpeed('ultrafast', true)).toBe('standard');
+		// Without Ultrafast the bolt is a plain toggle.
+		expect(nextSpeed('standard', false)).toBe('fast');
+		expect(nextSpeed('fast', false)).toBe('standard');
+		expect(nextSpeed('ultrafast', false)).toBe('standard');
 	});
 
 	it('names the tier in the accessible label', () => {

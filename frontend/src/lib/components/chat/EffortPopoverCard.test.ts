@@ -218,53 +218,142 @@ describe('EffortPopoverCard', () => {
 	});
 });
 
-describe('EffortPopoverCard — Ultrafast speed picker', () => {
+describe('EffortPopoverCard — Ultrafast through the corner bolt', () => {
 	const base = { options, value: 'high', onSelect: vi.fn(), fastSupported: true };
+	const bolt = () => screen.getByTestId('speed-bolt');
+	const bolts = () => bolt().querySelectorAll('svg').length;
 
-	it('keeps the plain Fast toggle where the route has no Ultrafast', () => {
-		render(EffortPopoverCard, { props: { ...base, fastEnabled: true } });
-		expect(screen.getByRole('button', { name: 'Fast mode' })).toBeTruthy();
-		expect(screen.queryByRole('radiogroup', { name: 'Speed' })).toBeNull();
+	it('keeps the plain Fast toggle where the route has no Ultrafast', async () => {
+		const onToggleFast = vi.fn();
+		const onSelectSpeed = vi.fn();
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, onToggleFast, onSelectSpeed } });
+		expect(screen.getByRole('button', { name: 'Fast mode' })).toBe(bolt());
+		expect(bolts()).toBe(1);
+		expect(screen.queryByRole('radiogroup')).toBeNull();
 		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+		await fireEvent.click(bolt());
+		expect(onToggleFast).toHaveBeenCalledOnce();
+		expect(onSelectSpeed).not.toHaveBeenCalled();
 	});
 
-	it('offers Standard, Fast and Ultrafast as one pick', async () => {
+	it('cycles Standard → Fast → Ultrafast → Standard from the same bolt', async () => {
 		const onSelectSpeed = vi.fn();
-		const view = render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed } });
-		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
-		const radios = screen.getAllByRole('radio');
-		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Standard', 'Fast', 'Ultrafast']);
-		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
-		expect(radios[2].getAttribute('title')).toMatch(/fastest tier/);
-		// The cost is said before any pick (an API-key row by default: a price).
+		const onToggleFast = vi.fn();
+		const props = { ...base, ultrafastSupported: true, onSelectSpeed, onToggleFast };
+		const view = render(EffortPopoverCard, { props: { ...props, fastEnabled: false } });
+		const card = view.container.querySelector('.effort-pop-card')!;
+		// No segmented picker: the bolt is the only speed control.
+		expect(screen.queryByRole('radiogroup')).toBeNull();
+		expect(screen.queryAllByRole('radio')).toHaveLength(0);
+
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+		expect(bolt().getAttribute('aria-pressed')).toBe('false');
+		expect(bolt().getAttribute('title')).toMatch(/Click for Fast/);
+		expect(bolts()).toBe(1);
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		// An API-key route states the price before Ultrafast is picked, and the
+		// line stays put through the cycle so the bolt never moves.
 		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/several times the Standard API price/);
-		await fireEvent.click(radios[2]);
-		expect(onSelectSpeed).toHaveBeenLastCalledWith('ultrafast');
-		// The current pick is not sent again.
-		await fireEvent.click(radios[1]);
-		expect(onSelectSpeed).toHaveBeenCalledOnce();
-		await view.rerender({ ...base, fastEnabled: true, ultrafastSupported: true, ultrafastEnabled: true, onSelectSpeed });
-		expect(screen.getByRole('radio', { name: /Ultrafast/ }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(bolt());
+		expect(onSelectSpeed).toHaveBeenLastCalledWith('fast');
+
+		await view.rerender({ ...props, fastEnabled: true });
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Fast');
+		expect(bolt().getAttribute('aria-pressed')).toBe('true');
+		expect(bolt().getAttribute('title')).toMatch(/Click for Ultrafast/);
+		expect(bolts()).toBe(1);
+		expect(card.classList.contains('fast-active')).toBe(true);
+		expect(card.classList.contains('ultrafast-active')).toBe(false);
 		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
-		expect(document.querySelector('.effort-pop-card')!.classList.contains('ultrafast-active')).toBe(true);
-		await fireEvent.click(screen.getByRole('radio', { name: /Standard/ }));
+		await fireEvent.click(bolt());
+		expect(onSelectSpeed).toHaveBeenLastCalledWith('ultrafast');
+
+		await view.rerender({ ...props, fastEnabled: true, ultrafastEnabled: true });
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Ultrafast');
+		expect(bolt().dataset.speed).toBe('ultrafast');
+		expect(bolt().getAttribute('title')).toMatch(/back to Standard/);
+		expect(bolts()).toBe(2);
+		expect(card.classList.contains('ultrafast-active')).toBe(true);
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
+		// One hit target in every tier (the width rule rides on this class).
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		await fireEvent.click(bolt());
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
-		// A ChatGPT sign-in keeps the picker without a cost paragraph.
-		await view.rerender({ ...base, fastEnabled: false, ultrafastSupported: true, ultrafastBilling: 'plan', onSelectSpeed });
-		expect(screen.getByRole('radio', { name: /Ultrafast/ })).toBeTruthy();
+		expect(onSelectSpeed).toHaveBeenCalledTimes(3);
+		expect(onToggleFast).not.toHaveBeenCalled();
+
+		// A ChatGPT sign-in keeps the two bolts without a cost paragraph.
+		await view.rerender({ ...props, fastEnabled: true, ultrafastEnabled: true, ultrafastBilling: 'plan' });
+		expect(bolts()).toBe(2);
 		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
 	});
 
-	it('holds every tier while the chat\'s own value loads', async () => {
+	it('steps a quick second click from the pick still being saved', async () => {
+		const answers: Array<(value?: unknown) => void> = [];
+		const onSelectSpeed = vi.fn((_speed: string) => new Promise((resolve) => { answers.push(resolve); }));
+		const props = { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed };
+		const view = render(EffortPopoverCard, { props });
+		// On Fast, two clicks before the worker answers mean Ultrafast, then Standard.
+		await fireEvent.click(bolt());
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Ultrafast');
+		expect(bolts()).toBe(2);
+		await fireEvent.click(bolt());
+		expect(onSelectSpeed.mock.calls.map(([speed]) => speed)).toEqual(['ultrafast', 'standard']);
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+		// The first answer lands; the bolt keeps the newer pick until both have.
+		answers[0]();
+		await view.rerender({ ...props, ultrafastEnabled: true });
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+		answers[1]();
+		await view.rerender({ ...props, fastEnabled: false, ultrafastEnabled: false });
+		await Promise.resolve();
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Standard');
+	});
+
+	it('keeps its layout when Ultrafast goes away while it is open', async () => {
 		const onSelectSpeed = vi.fn();
-		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, fastPending: true, ultrafastSupported: true, onSelectSpeed } });
-		const group = screen.getByRole('radiogroup', { name: 'Speed' });
-		expect(group.getAttribute('aria-busy')).toBe('true');
-		for (const radio of screen.getAllByRole('radio')) {
-			expect(radio.getAttribute('aria-checked')).toBe('false');
-			expect((radio as HTMLButtonElement).disabled).toBe(true);
-		}
-		await fireEvent.click(screen.getAllByRole('radio')[2]);
+		const onToggleFast = vi.fn();
+		const props = { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed, onToggleFast };
+		const view = render(EffortPopoverCard, { props });
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		// An older worker ran the Ultrafast pick as Fast: the bolt turns into the
+		// Fast toggle but keeps its size, and the cost line keeps its room unseen.
+		await view.rerender({ ...props, ultrafastSupported: false });
+		expect(bolt().getAttribute('aria-label')).toBe('Fast mode');
+		expect(bolt().classList.contains('tiers')).toBe(true);
+		const note = screen.getByTestId('ultrafast-cost');
+		expect(note.classList.contains('held')).toBe(true);
+		expect(note.getAttribute('aria-hidden')).toBe('true');
+		await fireEvent.click(bolt());
+		expect(onToggleFast).toHaveBeenCalledOnce();
+		view.unmount();
+		// Opened afresh on that chat, the card has the plain Fast layout.
+		render(EffortPopoverCard, { props: { ...props, ultrafastSupported: false } });
+		expect(bolt().classList.contains('tiers')).toBe(false);
+		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+	});
+
+	it('falls back to the tier in force when a pick is refused', async () => {
+		let refuse: (reason: unknown) => void = () => {};
+		const onSelectSpeed = vi.fn(() => new Promise((_, reject) => { refuse = reject; }));
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed } });
+		await fireEvent.click(bolt());
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: Ultrafast');
+		refuse(new Error('worker said no'));
+		await vi.waitFor(() => expect(bolt().getAttribute('aria-label')).toBe('Speed: Fast'));
+		expect(bolts()).toBe(1);
+	});
+
+	it('holds the bolt while the chat\'s own value loads', async () => {
+		const onSelectSpeed = vi.fn();
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastEnabled: true, fastPending: true, ultrafastSupported: true, onSelectSpeed } });
+		expect(bolt().getAttribute('aria-busy')).toBe('true');
+		expect(bolt().getAttribute('aria-pressed')).toBe('mixed');
+		expect(bolt().getAttribute('aria-label')).toBe('Speed: loading');
+		expect((bolt() as HTMLButtonElement).disabled).toBe(true);
+		expect(bolts()).toBe(1);
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
+		await fireEvent.click(bolt());
 		expect(onSelectSpeed).not.toHaveBeenCalled();
 	});
 
