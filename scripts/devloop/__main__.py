@@ -491,6 +491,26 @@ def application_environment(args: argparse.Namespace, directory: Path, port: int
     )
     if args.transcript_producer:
         env["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] = "1"
+    if getattr(args, "browser_cdp_port", None):
+        env.update(browser_environment(args.browser_cdp_port))
+    return env
+
+
+def browser_environment(port: int) -> dict:
+    """Opt the copy into the Browser panel against a separately launched Chromium.
+
+    The copy never starts or shares the worker's own browser: the caller runs a
+    throwaway Chromium (docker/start-chrome.sh, its own HOME and port) and names
+    its loopback DevTools port here.
+    """
+    own = int(os.environ.get("CHROME_CDP_PORT") or 9221)
+    if port == own or not 1024 <= port <= 65535:
+        raise SystemExit(f"--browser-cdp-port must be a free port other than the worker's own ({own})")
+    built = ROOT / "browser-mcp" / "dist" / "index.js"
+    entry = str(built) if built.exists() else os.environ.get("BROWSER_MCP_ENTRY", "")
+    env = {"START_CHROME": "1", "CHROME_CDP_PORT": str(port)}
+    if entry:
+        env["BROWSER_MCP_ENTRY"] = entry
     return env
 
 
@@ -870,6 +890,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="Keep app, Vite and PostgreSQL running while idle (CI and --workers 2 always do)")
     start.add_argument("--transcript-producer", action="store_true",
                        help="Opt into dark transcript production in this disposable instance only")
+    start.add_argument("--browser-cdp-port", type=int,
+                       help="Turn the Browser panel on against a throwaway Chromium you started "
+                            "on this loopback DevTools port (never the worker's own browser)")
     start.add_argument("--seed", default="default", help="Seed name: default, long (performance), or none")
     start.add_argument("--latency-ms", type=float, default=0.0,
                        help="Fake AI delay before each reply")

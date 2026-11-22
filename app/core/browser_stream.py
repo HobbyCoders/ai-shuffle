@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import suppress
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import websockets
@@ -340,10 +341,297 @@ _INSPECT_JS_TEMPLATE = """
       attrs[cap(a.name, 60)] = cap(a.value, 160);
     }
     out.attrs = attrs;
+    // Design mode detail. Every block is best-effort: a hostile or odd page
+    // must never turn a selection into a miss.
+    try {
+      const S = Symbol.for('ais.design');
+      const reg = window[S] || (window[S] = {
+        n: 0, els: new Map(), saved: new Map(), groups: new Map(), held: null,
+      });
+      let key = null;
+      for (const [k, v] of reg.els) if (v === el) { key = k; break; }
+      if (!key) {
+        if (reg.els.size >= 200) reg.els.delete(reg.els.keys().next().value);
+        key = 'k' + (++reg.n);
+        reg.els.set(key, el);
+      }
+      out.key = key;
+    } catch (e) {}
+    try {
+      out.label = cap(
+        (el.getAttribute('aria-label') || el.getAttribute('alt') ||
+          el.getAttribute('placeholder') || el.getAttribute('title') || '') + '',
+        120,
+      );
+    } catch (e) {}
+    try {
+      const cs = getComputedStyle(el);
+      const styles = {};
+      for (const p of [
+        'font-size', 'font-weight', 'line-height', 'font-family', 'color',
+        'background-color', 'padding-top', 'padding-right', 'padding-bottom',
+        'padding-left', 'margin-bottom', 'border-top-left-radius', 'display', 'gap',
+      ]) styles[p] = cap(cs.getPropertyValue(p), 80);
+      out.styles = styles;
+    } catch (e) {}
+    try {
+      let similar = 1;
+      if (el.classList.length) {
+        similar = document.querySelectorAll(
+          el.tagName.toLowerCase() +
+            Array.from(el.classList).slice(0, 6).map((c) => '.' + CSS.escape(c)).join(''),
+        ).length;
+      }
+      out.similar = Math.min(similar, 999);
+    } catch (e) {}
+    try {
+      // Where the element comes from, when the page is a framework dev build.
+      let node = el;
+      for (let i = 0; node && i < 6 && !out.source; i++, node = node.parentElement) {
+        const sm = node.__svelte_meta;
+        if (sm && sm.loc && sm.loc.file) {
+          out.source = { file: cap(sm.loc.file + '', 200), line: sm.loc.line | 0 };
+          break;
+        }
+        const fiberKey = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+        if (fiberKey) {
+          let f = node[fiberKey];
+          for (let j = 0; f && j < 12; j++, f = f.return) {
+            if (f._debugSource && f._debugSource.fileName) {
+              out.source = {
+                file: cap(f._debugSource.fileName + '', 200),
+                line: f._debugSource.lineNumber | 0,
+              };
+              break;
+            }
+          }
+        }
+        const vue = node.__vueParentComponent;
+        if (!out.source && vue && vue.type && vue.type.__file) {
+          out.source = { file: cap(vue.type.__file + '', 200), line: 0 };
+        }
+      }
+    } catch (e) {}
+    try {
+      // The page's own colour variables, so a tweak can stay on its palette.
+      const tokens = [];
+      const seen = new Set();
+      const rootCs = getComputedStyle(document.documentElement);
+      let budget = 3000;
+      const walk = (rules) => {
+        for (const rule of Array.from(rules)) {
+          if (budget-- <= 0 || tokens.length >= 24) return;
+          if (rule.cssRules && !rule.selectorText) { walk(rule.cssRules); continue; }
+          if (!rule.style || !/(^|,)\\s*(:root|html|body)(\\s*(,|$)|[.:\\[])/.test(rule.selectorText || '')) continue;
+          for (const name of Array.from(rule.style)) {
+            if (!name.startsWith('--') || seen.has(name)) continue;
+            const v = rootCs.getPropertyValue(name).trim();
+            if (!v || v.length > 60 || !CSS.supports('color', v)) continue;
+            seen.add(name);
+            tokens.push({ name: cap(name, 60), value: v });
+            if (tokens.length >= 24) return;
+          }
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets).slice(0, 40)) {
+        let rules = null;
+        try { rules = sheet.cssRules; } catch (e) { continue; }
+        if (rules) walk(rules);
+      }
+      out.tokens = tokens;
+    } catch (e) {}
   }
   return out;
 })()
 """
+
+# ---------------------------------------------------------------------------
+# Design mode (live style preview on the inspected page)
+# ---------------------------------------------------------------------------
+# A design request previews a change on the page without touching source: it
+# sets inline styles on an element picked through inspect, reports where the
+# picked elements are now, or puts the page back. The agent makes the real
+# edit in code; this is only the "try it first" step.
+_VALID_DESIGN_OPS = {"style", "rects", "reset", "peek"}
+_DESIGN_PROPS = frozenset({
+    "font-size", "font-weight", "color", "background-color", "padding",
+    "border-radius", "margin-bottom", "gap", "line-height", "opacity",
+})
+_DESIGN_KEY_RE = re.compile(r"^k\d{1,7}$")
+# Plain CSS values only: no url(), no declaration or rule breakouts, no quotes.
+_DESIGN_VALUE_RE = re.compile(r"^[#%(),./\w\s-]{1,64}$")
+_MAX_DESIGN_ITEMS = 40
+
+_DESIGN_JS_TEMPLATE = """
+(() => {
+  const a = __ARGS__;
+  const S = Symbol.for('ais.design');
+  const reg = window[S] || (window[S] = {
+    n: 0, els: new Map(), saved: new Map(), groups: new Map(), held: null,
+  });
+  const find = (key, selector) => {
+    let el = key ? reg.els.get(key) : null;
+    if (el && !el.isConnected) el = null;
+    if (!el && selector) {
+      try { el = document.querySelector(selector); } catch (e) { el = null; }
+      if (el && key) reg.els.set(key, el);
+    }
+    return el || null;
+  };
+  const rectOf = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  };
+  const peers = (el) => {
+    if (!el.classList.length) return [el];
+    try {
+      return Array.from(document.querySelectorAll(
+        el.tagName.toLowerCase() +
+          Array.from(el.classList).slice(0, 6).map((c) => '.' + CSS.escape(c)).join(''),
+      )).slice(0, 200);
+    } catch (e) { return [el]; }
+  };
+  const restoreProp = (el, prop) => {
+    const saved = reg.saved.get(el);
+    if (!saved || !(prop in saved)) return;
+    const [value, priority] = saved[prop];
+    if (value) el.style.setProperty(prop, value, priority);
+    else el.style.removeProperty(prop);
+    delete saved[prop];
+    if (!Object.keys(saved).length) reg.saved.delete(el);
+  };
+  const restoreAll = (el) => {
+    const saved = reg.saved.get(el);
+    if (saved) for (const prop of Object.keys(saved)) restoreProp(el, prop);
+  };
+  const setProp = (el, prop, value) => {
+    let saved = reg.saved.get(el);
+    if (!saved) { saved = {}; reg.saved.set(el, saved); }
+    if (!(prop in saved)) {
+      saved[prop] = [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
+    }
+    el.style.setProperty(prop, value, 'important');
+  };
+  if (a.op === 'rects') {
+    const rects = {};
+    for (const item of a.items) {
+      const el = find(item.key, item.selector);
+      rects[item.key] = el ? rectOf(el) : null;
+    }
+    return { rects };
+  }
+  if (a.op === 'peek') {
+    // Show the page as it really is, without dropping the previewed styles.
+    if (a.on && !reg.held) {
+      reg.held = [];
+      for (const [el, saved] of Array.from(reg.saved)) {
+        const now = {};
+        for (const prop of Object.keys(saved)) now[prop] = el.style.getPropertyValue(prop);
+        reg.held.push([el, now]);
+        restoreAll(el);
+      }
+    } else if (!a.on && reg.held) {
+      for (const [el, now] of reg.held) {
+        if (!el.isConnected) continue;
+        for (const [prop, value] of Object.entries(now)) setProp(el, prop, value);
+      }
+      reg.held = null;
+    }
+    return { peek: !!reg.held };
+  }
+  if (a.op === 'reset') {
+    reg.held = null;
+    if (a.key) {
+      for (const el of reg.groups.get(a.key) || []) restoreAll(el);
+      reg.groups.delete(a.key);
+    } else {
+      for (const el of Array.from(reg.saved.keys())) restoreAll(el);
+      reg.groups.clear();
+    }
+    return { reset: true };
+  }
+  // op === 'style': `styles` is the whole preview for this element, so a
+  // property that is no longer listed goes back to what the page had.
+  const el = find(a.key, a.selector);
+  if (!el) return { key: a.key, missing: true };
+  reg.held = null;
+  const targets = a.scope === 'all' ? peers(el) : [el];
+  const before = reg.groups.get(a.key) || [];
+  for (const old of before) if (!targets.includes(old)) restoreAll(old);
+  for (const t of targets) {
+    const saved = reg.saved.get(t);
+    if (saved) for (const prop of Object.keys(saved)) if (!(prop in a.styles)) restoreProp(t, prop);
+    for (const [prop, value] of Object.entries(a.styles)) setProp(t, prop, value);
+  }
+  if (Object.keys(a.styles).length) reg.groups.set(a.key, targets);
+  else reg.groups.delete(a.key);
+  return { key: a.key, rect: rectOf(el), count: targets.length };
+})()
+"""
+
+
+class DesignInput(BaseModel):
+    """One design-mode request. Unknown keys (``type``, identity) are ignored."""
+
+    op: str
+    key: Optional[str] = None
+    selector: Optional[str] = None
+    scope: Optional[str] = None
+    styles: Optional[Dict[str, str]] = None
+    items: Optional[List[Dict[str, Optional[str]]]] = None
+    on: Optional[bool] = None
+
+
+def _design_target(key: object, selector: object) -> Tuple[str, Optional[str]]:
+    if not isinstance(key, str) or not _DESIGN_KEY_RE.match(key):
+        raise ValueError("invalid design element key")
+    if selector is not None and (not isinstance(selector, str) or len(selector) > 500):
+        raise ValueError("invalid design selector")
+    return key, selector
+
+
+def parse_design(msg: dict) -> dict:
+    """Validate one client ``design`` message into the page script's arguments."""
+    design = DesignInput(**msg)
+    if design.op not in _VALID_DESIGN_OPS:
+        raise ValueError(f"invalid design op: {design.op!r}")
+    if design.op == "rects":
+        items = design.items or []
+        if len(items) > _MAX_DESIGN_ITEMS:
+            raise ValueError("too many design elements")
+        out = []
+        for item in items:
+            key, selector = _design_target(item.get("key"), item.get("selector"))
+            out.append({"key": key, "selector": selector})
+        return {"op": "rects", "items": out}
+    if design.op == "peek":
+        return {"op": "peek", "on": bool(design.on)}
+    if design.op == "reset":
+        if design.key is None:
+            return {"op": "reset", "key": None}
+        key, _ = _design_target(design.key, None)
+        return {"op": "reset", "key": key}
+    key, selector = _design_target(design.key, design.selector)
+    if design.scope not in ("one", "all"):
+        raise ValueError(f"invalid design scope: {design.scope!r}")
+    styles = design.styles or {}
+    for prop, value in styles.items():
+        if prop not in _DESIGN_PROPS:
+            raise ValueError(f"design property not allowed: {prop!r}")
+        if not _DESIGN_VALUE_RE.match(value) or "url(" in value.lower():
+            raise ValueError(f"invalid design value for {prop}")
+    return {
+        "op": "style",
+        "key": key,
+        "selector": selector,
+        "scope": design.scope,
+        "styles": styles,
+    }
+
+
+def build_design_expression(args: dict) -> str:
+    """Build the page-side expression for one validated design request."""
+    return _DESIGN_JS_TEMPLATE.replace("__ARGS__", json.dumps(args))
 
 
 def parse_inspect(msg: dict) -> InspectInput:
@@ -458,6 +746,8 @@ class BrowserStreamHub:
         self._last_metadata: Optional[dict] = None
         self._last_frame: Optional[dict] = None
         self._last_frame_key = None
+        # Last status broadcast to viewers (None until the hub reports one).
+        self.status: Optional[dict] = None
         self._attached_target_id = None
         self._frame_identity = {}
         # Toolbar state tracked from CDP page events, mirrored to viewers as
@@ -546,8 +836,26 @@ class BrowserStreamHub:
 
     async def _broadcast_status(self, state: str, url: Optional[str]) -> None:
         msg = {"type": "status", "state": state, "url": url}
+        # Kept for a viewer that joins later: nothing repeats "live" on a page
+        # that sits still, so without it a second viewer waits on "connecting".
+        self.status = msg
         for viewer in list(self.viewers):
             await self.send_to_viewer(viewer, msg)
+
+    async def repeat_status(self, viewer: _Viewer) -> None:
+        """Tell one viewer the state the others already have.
+
+        The status is read under the viewer's send lock, so a broadcast that
+        is waiting for the lock cannot be followed by an older state.
+        """
+        async with viewer.send_lock:
+            msg = self.status
+            if msg is None:
+                return
+            if viewer.redact_urls:
+                msg = {**msg, "url": None}
+            with suppress(Exception):
+                await safe_ws_send(viewer.websocket, msg)
 
     def _broadcast_page(self) -> None:
         """Fan out toolbar page state (url + loading), latest-wins, never blocks."""
@@ -711,9 +1019,49 @@ class BrowserStreamHub:
         if viewer not in self.viewers:
             return
         value = reply.get("result", {}).get("value")
+        if mode.startswith("design:"):
+            await self.send_to_viewer(
+                viewer,
+                {
+                    "type": "design-result",
+                    "op": mode[len("design:"):],
+                    "result": sanitize_inspect_result(value),
+                },
+            )
+            return
         element = sanitize_inspect_result(value)
         await self.send_to_viewer(
             viewer, {"type": "inspect-hit", "mode": mode, "element": element}
+        )
+
+    async def dispatch_design(self, viewer: "_Viewer", args: dict) -> None:
+        """Run one design-mode preview request for ``viewer``.
+
+        Same request and reply pairing as a hit-test: the page script runs
+        through ``Runtime.evaluate`` and the pump loop answers the requesting
+        viewer with a ``design-result`` frame. It only ever sets or restores
+        inline styles on elements already picked through inspect.
+        """
+        ws = self._upstream
+        op = args["op"]
+        if ws is None:
+            await self.send_to_viewer(
+                viewer, {"type": "design-result", "op": op, "result": None}
+            )
+            return
+        if not await self._send_upstream(
+            ws,
+            "Runtime.evaluate",
+            {"expression": build_design_expression(args), "returnByValue": True},
+            response=True,
+        ):
+            return
+        if len(self._pending_inspects) >= 128:
+            self._pending_inspects.pop(next(iter(self._pending_inspects)))
+        self._pending_inspects[self._upstream_msg_id] = (
+            viewer,
+            f"design:{op}",
+            dict(self._frame_identity),
         )
 
     async def _complete_history_jump(self, msg_id: int, reply: dict) -> None:

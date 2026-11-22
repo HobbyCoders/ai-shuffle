@@ -354,6 +354,12 @@ async def serve_browser_panel(
         )
     else:
         hub, viewer = await browser_stream.attach_viewer(session_id, websocket)
+    # A hub that already existed (another device is watching, or a reconnect)
+    # has reported its state to the earlier viewers only. Repeat it here, or
+    # this viewer keeps the "connecting" it was just sent until the page next
+    # changes, which a still page never does.
+    if isinstance(hub, browser_stream.BrowserStreamHub):
+        await hub.repeat_status(viewer)
     # Toolbar state for a hub that already existed (mid-navigation reconnect):
     # a brand-new hub broadcasts its first page frame soon after anyway.
     if isinstance(hub, browser_stream.BrowserStreamHub) and (
@@ -422,10 +428,11 @@ async def serve_browser_panel(
                 "command",
                 "viewport",
                 "inspect",
+                "design",
             ):
                 try:
                     broker.identity(data)
-                    if mtype == "inspect":
+                    if mtype in ("inspect", "design"):
                         target = registry.get_target(session_id)
                         if (
                             target is None
@@ -436,8 +443,13 @@ async def serve_browser_panel(
                             raise browser_control.ControlError(
                                 "Stale inspection target"
                             )
-                        inspect = browser_stream.parse_inspect(data)
-                        await hub.dispatch_inspect(viewer, inspect)
+                        if mtype == "design":
+                            await hub.dispatch_design(
+                                viewer, browser_stream.parse_design(data)
+                            )
+                        else:
+                            inspect = browser_stream.parse_inspect(data)
+                            await hub.dispatch_inspect(viewer, inspect)
                     else:
                         command = dict(data)
                         internal = mtype == "input"

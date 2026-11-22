@@ -7,12 +7,15 @@
 	 * close / session switch, and folds `status` / `frame` frames into the
 	 * browser-panel store + the BrowserLiveView canvas.
 	 *
-	 * Point-and-prompt: the header's inspect toggle switches the live view into
-	 * element selection — clicks hit-test the page (backend `inspect` message)
-	 * instead of being forwarded, and the selected element feeds a small prompt
-	 * composer that routes "change this" requests to the agent with the
-	 * element's selector/context attached. Code stays the single source of
-	 * truth; the agent makes the edit and the screencast shows the reload.
+	 * Design mode: the header's Design button switches the live view into
+	 * element selection. Clicks hit-test the page (backend `inspect` message)
+	 * instead of being forwarded, and each picked element becomes a numbered
+	 * change in the list beside the page (BrowserDesignRail). The user says
+	 * what should change or tries a size or colour, which the page previews
+	 * through backend `design` messages, then sends the whole list to the
+	 * agent with each element's selector and context attached. Code stays the
+	 * single source of truth: the agent makes the edit and the screencast
+	 * shows the reload.
 	 *
 	 * Layout: a right-aligned, left-edge-resizable overlay on the desktop shell
 	 * at every width; a fullscreen overlay on the mobile shell. The live-view
@@ -31,11 +34,9 @@
 		ArrowRight,
 		RotateCw,
 		X as StopIcon,
-		Crosshair,
+		PencilRuler,
 		ExternalLink,
-		Send,
 		Check,
-		MessageSquare,
 		Maximize2,
 		Minimize2,
 		Copy,
@@ -51,13 +52,20 @@
 		type BrowserStreamClient,
 		type FrameMessageMetadata,
 	} from '$lib/browser-panel/stream-client';
+	import { isDrawableRect, parseElementHit, type SelectedElement } from '$lib/browser-panel/inspect';
 	import {
-		composeElementPrompt,
-		describeElement,
-		parseElementHit,
-	} from '$lib/browser-panel/inspect';
+		composeDesignPrompt,
+		isEmptyChange,
+		parseDesignDetail,
+		safeValue,
+		type DesignChange,
+		type DesignDetail,
+		type DesignProp,
+		type DesignScope,
+	} from '$lib/browser-panel/design';
 	import type { PageRect } from '$lib/browser-panel/coords';
 	import BrowserLiveView from './BrowserLiveView.svelte';
+	import BrowserDesignRail from './BrowserDesignRail.svelte';
 	import BrowserWorkspaceToolbar from './BrowserWorkspaceToolbar.svelte';
 	import BrowserWorkspaceNotice from './BrowserWorkspaceNotice.svelte';
 	import {
@@ -85,8 +93,8 @@
 	const url = $derived(panel.url);
 	const width = $derived(panel.width);
 	const pageLoading = $derived(panel.pageLoading);
+	/** Design mode: clicks on the page mark elements instead of reaching it. */
 	const inspectMode = $derived(panel.inspectMode);
-	const selectedElement = $derived(panel.selectedElement);
 
 	let latestFrame = $state<{
 		data: string;
@@ -103,9 +111,195 @@
 		return null;
 	}
 
-	// ── Inspect state (hover highlight is view-local, selection is stored) ─
+	// ── Design mode ───────────────────────────────────────────────────────
+	// The user marks elements on the live page, says what each should become
+	// (in words, or by trying a size or colour that is previewed on the page),
+	// then sends the list to the agent in one message. The list is view-local:
+	// it belongs to the page it was marked on.
 	let hoverRect = $state<PageRect | null>(null);
-	const selectionRect = $derived(selectedElement?.rect ?? null);
+	let designChanges = $state<DesignChange[]>([]);
+	/** The change open in the editor: a new one, or a working copy of a listed one. */
+	let designDraft = $state<DesignChange | null>(null);
+	/** Where each marked element is now, in page CSS pixels, by preview key. */
+	let designRects = $state<Record<string, PageRect>>({});
+	let designOriginal = $state(false);
+	let designSending = $state(false);
+	let designSent = $state<number | null>(null);
+	let designFocus = $state(0);
+	let designSeq = 0;
+	let expandedForDesign = false;
+
+	const draftIsNew = $derived(!!designDraft && !designChanges.some((c) => c.id === designDraft?.id));
+	const designRows = $derived.by(() => {
+		const draft = designDraft;
+		if (!draft) return designChanges;
+		return draftIsNew ? [...designChanges, draft] : designChanges.map((c) => (c.id === draft.id ? draft : c));
+	});
+	const designHasPreviews = $derived(designRows.some((c) => Object.keys(c.tweaks).length > 0));
+	const designPins = $derived(
+		inspectMode
+			? designRows.flatMap((c, i) => {
+					const rect = (c.detail.key && designRects[c.detail.key]) || (c.detail.key ? null : c.element.rect);
+					return rect ? [{ rect, label: String(i + 1), active: c.id === designDraft?.id }] : [];
+				})
+			: [],
+	);
+
+	function sameTarget(change: DesignChange, el: SelectedElement, detail: DesignDetail) {
+		return detail.key ? change.detail.key === detail.key : change.element.selector === el.selector;
+	}
+
+	function sendDesign(payload: Record<string, unknown>) {
+		if (streamOpen && frameMatchesWorkspace) sendIdentified({ type: 'design', ...payload });
+	}
+
+	/** Put a change's previewed styles on the page (an empty set puts it back). */
+	function previewChange(change: DesignChange) {
+		if (!change.detail.key) return;
+		const styles: Record<string, string> = {};
+		for (const [prop, value] of Object.entries(change.tweaks)) {
+			const safe = safeValue(value);
+			if (safe) styles[prop] = safe;
+		}
+		designOriginal = false;
+		sendDesign({ op: 'style', key: change.detail.key, selector: change.element.selector, scope: change.scope, styles });
+	}
+
+	// Sliders and colour pickers fire on every step; the page gets the latest.
+	let previewTimer: ReturnType<typeof setTimeout> | null = null;
+	function schedulePreview() {
+		if (previewTimer !== null) return;
+		previewTimer = setTimeout(() => {
+			previewTimer = null;
+			if (designDraft) previewChange(designDraft);
+		}, 40);
+	}
+
+	/** Keep or drop the open change, then close the editor. */
+	function settleDraft() {
+		const draft = designDraft;
+		if (!draft) return;
+		designDraft = null;
+		if (isEmptyChange(draft)) {
+			// Emptied on purpose: an existing change with nothing left is removed.
+			designChanges = designChanges.filter((c) => c.id !== draft.id);
+			return;
+		}
+		designChanges = designChanges.some((c) => c.id === draft.id)
+			? designChanges.map((c) => (c.id === draft.id ? draft : c))
+			: [...designChanges, draft];
+	}
+
+	function pickDesignElement(el: SelectedElement, detail: DesignDetail) {
+		designSent = null;
+		if (detail.key && el.rect) designRects = { ...designRects, [detail.key]: el.rect };
+		if (!(designDraft && sameTarget(designDraft, el, detail))) {
+			settleDraft();
+			const listed = designChanges.find((c) => sameTarget(c, el, detail));
+			designDraft = listed
+				? { ...listed, tweaks: { ...listed.tweaks } }
+				: { id: ++designSeq, element: el, detail, note: '', tweaks: {}, scope: 'one' };
+		}
+		// A touch keyboard would cover the page the user is still marking up.
+		if (!platform.isMobile) designFocus++;
+	}
+
+	function setDesignNote(note: string) {
+		if (designDraft) designDraft = { ...designDraft, note };
+	}
+
+	function setDesignTweak(prop: DesignProp, value: string | null) {
+		if (!designDraft) return;
+		const tweaks = { ...designDraft.tweaks };
+		const safe = value === null ? null : safeValue(value);
+		if (safe === null) delete tweaks[prop];
+		else tweaks[prop] = safe;
+		designDraft = { ...designDraft, tweaks };
+		designOriginal = false;
+		schedulePreview();
+	}
+
+	function setDesignScope(scope: DesignScope) {
+		if (!designDraft || designDraft.scope === scope) return;
+		designDraft = { ...designDraft, scope };
+		previewChange(designDraft);
+	}
+
+	function cancelDesignDraft() {
+		const draft = designDraft;
+		if (!draft) return;
+		designDraft = null;
+		const listed = designChanges.find((c) => c.id === draft.id);
+		// Back to what was saved; a new change leaves the page as it found it.
+		if (listed) previewChange(listed);
+		else if (draft.detail.key) sendDesign({ op: 'reset', key: draft.detail.key });
+	}
+
+	function editDesignChange(id: number) {
+		if (designDraft?.id === id) return;
+		settleDraft();
+		const listed = designChanges.find((c) => c.id === id);
+		if (!listed) return;
+		designDraft = { ...listed, tweaks: { ...listed.tweaks } };
+		if (!platform.isMobile) designFocus++;
+	}
+
+	function removeDesignChange(id: number) {
+		const listed = designRows.find((c) => c.id === id);
+		if (designDraft?.id === id) designDraft = null;
+		designChanges = designChanges.filter((c) => c.id !== id);
+		if (listed?.detail.key) sendDesign({ op: 'reset', key: listed.detail.key });
+	}
+
+	function compareDesign(original: boolean) {
+		designOriginal = original;
+		sendDesign({ op: 'peek', on: original });
+	}
+
+	function clearDesign(resetPage: boolean) {
+		if (resetPage && designHasPreviews) sendDesign({ op: 'reset' });
+		designChanges = [];
+		designDraft = null;
+		designRects = {};
+		designOriginal = false;
+	}
+
+	function handleDesignResult(op: string, raw: unknown) {
+		const result = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
+		if (op === 'rects' && typeof result.rects === 'object' && result.rects !== null) {
+			const next: Record<string, PageRect> = {};
+			for (const [key, rect] of Object.entries(result.rects as Record<string, unknown>)) {
+				if (isDrawableRect(rect)) next[key] = rect;
+			}
+			designRects = next;
+		} else if (op === 'style' && typeof result.key === 'string' && isDrawableRect(result.rect)) {
+			designRects = { ...designRects, [result.key]: result.rect };
+		} else if (op === 'peek') {
+			designOriginal = result.peek === true;
+		}
+	}
+
+	async function sendDesignChanges() {
+		if (designSending || !operation) return;
+		settleDraft();
+		const list = designChanges;
+		if (list.length === 0) return;
+		const scope = operation;
+		designSending = true;
+		commandError = '';
+		try {
+			const sent = await activeSession.sendMessage(composeDesignPrompt(list, url));
+			if (operation !== scope) return;
+			if (!sent) throw new Error('Could not send your changes. They are still in the list; try again.');
+			// The page goes back to the real code so the agent's edit is what shows next.
+			clearDesign(true);
+			designSent = list.length;
+		} catch (error) {
+			if (operation === scope) commandError = error instanceof Error ? error.message : 'Could not send your changes. Try again.';
+		} finally {
+			if (operation === scope) designSending = false;
+		}
+	}
 
 	function handleInspectHit(mode: 'hover' | 'select', raw: unknown) {
 		const el = parseElementHit(raw);
@@ -114,13 +308,21 @@
 			return;
 		}
 		hoverRect = null;
-		browserPanel.setSelectedElement(el, sessionId);
-		if (el) {
-			// Land the cursor in the composer so "click, type, send" flows.
-			const selectedSession = sessionId;
-			queueMicrotask(() => { if (sessionId === selectedSession) promptEl?.focus(); });
-		}
+		if (el) pickDesignElement(el, parseDesignDetail(raw));
 	}
+
+	// Pins follow the page: ask where the marked elements are while the mode is on.
+	const designTracked = $derived(
+		designRows.flatMap((c) => (c.detail.key ? [{ key: c.detail.key, selector: c.element.selector }] : [])),
+	);
+	$effect(() => {
+		if (!inspectMode || designTracked.length === 0) return;
+		const items = designTracked.slice(0, 40);
+		const ask = () => sendDesign({ op: 'rects', items });
+		ask();
+		const timer = setInterval(ask, 350);
+		return () => clearInterval(timer);
+	});
 
 	// ── Stream client lifecycle: connect only while open && session set ────
 	// $state so toolbar enable/disable reacts to connect/disconnect cycles.
@@ -165,7 +367,11 @@
 			frameIdentity = null;
 			workspace = null;
 			keyboardOpen = false;
-			promptText = '';
+			designChanges = [];
+			designDraft = null;
+			designRects = {};
+			designOriginal = false;
+			designSent = null;
 			addressDraft = null;
 			if (framedSessionId) browserPanel.resetPageTracking(framedSessionId);
 		}
@@ -200,6 +406,7 @@
 				latestFrame = { data, metadata };
 			},
 			onInspectHit: (mode, raw) => { if (active && frameMatchesWorkspace) handleInspectHit(mode, raw); },
+			onDesignResult: (op, result) => { if (active) handleDesignResult(op, result); },
 			onError: (message) => {
 				if (!active) return;
 				commandError = message;
@@ -261,10 +468,9 @@
 			releasingControl = false;
 			scope.close();
 			if (operation === scope) operation = null;
-			promptSending = false;
-			sentFlash = false;
-			if (sentFlashTimer !== null) clearTimeout(sentFlashTimer);
-			sentFlashTimer = null;
+			designSending = false;
+			if (previewTimer !== null) clearTimeout(previewTimer);
+			previewTimer = null;
 			submitting = false;
 			navigationPending = false;
 			c.destroy();
@@ -274,22 +480,28 @@
 		});
 	});
 
-	// Cross-page navigation invalidates the selection: the element (and its
-	// rect) belong to the page it was picked on. Same-URL reloads keep it —
-	// that's the hot-reload-after-edit case the composer exists for.
-	let selectionUrl: string | null = null;
+	// Cross-page navigation ends the list: the marked elements belong to the
+	// page they were picked on. A reload of the same address keeps it, and the
+	// previews are put back once the page has loaded again.
+	let designUrl: string | null = null;
+	let designWasLoading = false;
 	$effect(() => {
 		const u = url;
-		if (selectedElement === null) {
-			selectionUrl = u;
-			return;
-		}
-		if (selectionUrl === null) selectionUrl = u;
-		else if (u !== selectionUrl) {
-			selectionUrl = u;
-			hoverRect = null;
-			browserPanel.setSelectedElement(null, sessionId);
-		}
+		const busy = pageLoading;
+		untrack(() => {
+			if (designRows.length === 0) {
+				designUrl = u;
+			} else if (designUrl === null) {
+				designUrl = u;
+			} else if (u !== designUrl) {
+				designUrl = u;
+				hoverRect = null;
+				clearDesign(false);
+			} else if (designWasLoading && !busy) {
+				for (const change of designRows) if (Object.keys(change.tweaks).length > 0) previewChange(change);
+			}
+			designWasLoading = busy;
+		});
 	});
 
 	function sendIdentified(payload: Record<string, unknown>) {
@@ -467,74 +679,44 @@
 		};
 	});
 
-	function toggleInspect() {
+	function enterDesign() {
 		hoverRect = null;
-		browserPanel.setInspectMode(!inspectMode, sessionId);
+		designSent = null;
+		browserPanel.setInspectMode(true, sessionId);
+		// The page and the list sit side by side, so give the panel the room.
+		if (embedded && !platform.isMobile && !panel.expanded) {
+			expandedForDesign = true;
+			browserPanel.setExpanded(sessionId, true);
+		}
 	}
 
 	function exitInspect() {
 		hoverRect = null;
+		settleDraft();
+		if (designOriginal) compareDesign(false);
 		browserPanel.setInspectMode(false, sessionId);
+		if (expandedForDesign) browserPanel.setExpanded(sessionId, false);
+		expandedForDesign = false;
 	}
 
-	function clearSelection() {
-		browserPanel.setSelectedElement(null, sessionId);
+	function toggleInspect() {
+		if (inspectMode) exitInspect();
+		else enterDesign();
 	}
 
 	function close() {
 		browserPanel.closePanel(sessionId);
 	}
 
-	// ── Point-and-prompt composer ──────────────────────────────────────────
-	let promptText = $state('');
-	let promptEl: HTMLTextAreaElement | undefined = $state();
-	let promptSending = $state(false);
-	let sentFlash = $state(false);
-	let sentFlashTimer: ReturnType<typeof setTimeout> | null = null;
-
-	async function sendElementPrompt() {
-		const el = selectedElement;
-		const draft = promptText;
-		const text = draft.trim();
-		if (!el || !text || promptSending || !operation) return;
-		const scope = operation;
-		promptSending = true;
-		commandError = '';
-		sentFlash = false;
-		if (sentFlashTimer !== null) clearTimeout(sentFlashTimer);
-		sentFlashTimer = null;
-		try {
-			const sent = await activeSession.sendMessage(composeElementPrompt(el, url, text));
-			if (operation !== scope) return;
-			if (!sent) throw new Error('Could not send your request. Your text is still here; try again.');
-			// Do not erase a replacement draft entered while the send was pending.
-			if (promptText === draft && selectedElement === el) promptText = '';
-			sentFlash = true;
-			sentFlashTimer = setTimeout(() => {
-				sentFlash = false;
-				sentFlashTimer = null;
-			}, 3000);
-		} catch (error) {
-			if (operation === scope) commandError = error instanceof Error ? error.message : 'Could not send your request. Try again.';
-		} finally {
-			if (operation === scope) promptSending = false;
-		}
-	}
-
-	function onPromptKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			sendElementPrompt();
-		} else if (e.key === 'Escape') {
-			e.preventDefault();
-			clearSelection();
-		}
-	}
-
-	/** Fullscreen (mobile shell) mode: jump back to the chat to watch the reply. */
+	/** Go and watch the reply: the chat sits beside the panel, or behind it on a phone. */
 	function viewChat() {
-		browserPanel.closePanel(sessionId);
+		if (platform.isMobile || !embedded) browserPanel.closePanel(sessionId);
+		else exitInspect();
 	}
+
+	// Beside the page when the panel is wide enough for both, under it otherwise.
+	let stageWidth = $state(0);
+	const designLayout = $derived(stageWidth >= 760 ? 'side' : 'sheet');
 
 	// ── Fullscreen is the mobile shell, not a width ────────────────────────
 	const isFullscreen = $derived(platform.isMobile);
@@ -809,9 +991,6 @@
 		return () => clearTimeout(t);
 	});
 
-	const chipLabel = $derived(
-		selectedElement ? describeElement(selectedElement) : '',
-	);
 </script>
 
 {#if open}
@@ -933,15 +1112,17 @@
 					{#if copyNotice}<Check size={15} strokeWidth={1.75} />{:else}<Copy size={15} strokeWidth={1.75} />{/if}
 				</button>
 				<button
-					class="tool-btn inspect-toggle"
+					class="tool-btn design-toggle"
 					class:active={inspectMode}
 					onclick={toggleInspect}
-					disabled={!isLive || !frameMatchesWorkspace}
-					aria-label="Select an element to edit with AI"
+					disabled={!inspectMode && (!isLive || !frameMatchesWorkspace)}
+					aria-label={inspectMode ? 'Leave design mode' : 'Design: mark changes on the page for the AI'}
 					aria-pressed={inspectMode}
-					title="Point & prompt — click an element, then tell the AI what to change"
+					title="Design: click elements on the page, say what should change, then send the list to the AI"
 				>
-					<Crosshair size={15} strokeWidth={1.75} />
+					<PencilRuler size={15} strokeWidth={1.75} />
+					<span class="design-toggle-label">Design</span>
+					{#if !inspectMode && designChanges.length > 0}<span class="design-toggle-count">{designChanges.length}</span>{/if}
 				</button>
 				{#if externalHref}
 					<a
@@ -959,6 +1140,7 @@
 			</div>
 		</header>
 
+		<div class="stage" class:split={inspectMode && designLayout === 'side'} bind:clientWidth={stageWidth}>
 		<div class="panel-body" bind:this={panelBodyEl}>
 			<BrowserWorkspaceNotice notice={workspace?.notice} />
 			{#if commandError}<div class="command-error" role="alert">{commandError}<button onclick={() => commandError = ''} aria-label="Dismiss browser error">×</button></div>{/if}
@@ -981,7 +1163,7 @@
 							viewport={workspace?.viewport}
 							inspecting={inspectMode && isLive && frameMatchesWorkspace}
 							{hoverRect}
-							{selectionRect}
+							pins={designPins}
 							onInput={sendInput}
 							onInspect={sendInspect}
 							onHoverLeave={() => (hoverRect = null)}
@@ -1033,79 +1215,33 @@
 			{/if}
 		</div>
 
-		{#if selectedElement}
-			<div
-				class="composer"
-				aria-label="Ask the AI to change the selected element"
-			>
-				<div class="composer-chip-row">
-					<span class="element-chip" title={selectedElement.selector}>
-						<Crosshair size={12} strokeWidth={2} />
-						<span class="element-chip-label">{chipLabel}</span>
-					</span>
-					{#if selectedElement.text}
-						<span class="element-text" title={selectedElement.text}>
-							“{selectedElement.text}”
-						</span>
-					{/if}
-					<button
-						class="chip-clear"
-						onclick={clearSelection}
-						aria-label="Clear selected element"
-						title="Clear selection"
-					>
-						<X size={13} strokeWidth={1.75} />
-					</button>
-				</div>
-				<form
-					class="composer-form"
-					onsubmit={(e) => {
-						e.preventDefault();
-						sendElementPrompt();
-					}}
-				>
-					<textarea
-						bind:this={promptEl}
-						bind:value={promptText}
-						class="composer-input"
-						rows="2"
-						placeholder="Describe the change — “make this button bigger and blue”"
-						aria-label="Describe the change for the selected element"
-						onkeydown={onPromptKeydown}></textarea>
-					<button
-						type="submit"
-						class="composer-send"
-						disabled={!promptText.trim() || promptSending}
-						aria-busy={promptSending}
-						aria-label="Send to the AI"
-						title="Send to the AI (Enter)"
-					>
-						{#if promptSending}<Loader2 size={15} strokeWidth={1.75} class="animate-spin" />
-						{:else}<Send size={15} strokeWidth={1.75} />{/if}
-					</button>
-				</form>
-				{#if sentFlash}
-					<div class="composer-sent" role="status">
-						<Check size={13} strokeWidth={2} />
-						<span>Sent — the preview reloads when the agent applies it.</span>
-						{#if isFullscreen}
-							<button class="composer-viewchat" onclick={viewChat}>
-								<MessageSquare size={12} strokeWidth={1.75} />
-								View chat
-							</button>
-						{/if}
-					</div>
-				{/if}
-			</div>
-		{:else if inspectMode}
-			<footer class="panel-note inspect-note">
-				<Crosshair size={12} strokeWidth={1.75} />
-				<span
-					>Point &amp; prompt — click any element in the preview to select it.</span
-				>
-				<button class="note-exit" onclick={exitInspect}>Done</button>
-			</footer>
-		{:else}
+		{#if inspectMode}
+			<BrowserDesignRail
+				layout={designLayout}
+				rows={designRows}
+				editingId={designDraft?.id ?? null}
+				editingNew={draftIsNew}
+				showingOriginal={designOriginal}
+				hasPreviews={designHasPreviews}
+				sending={designSending}
+				sentCount={designSent}
+				focusToken={designFocus}
+				onNote={setDesignNote}
+				onTweak={setDesignTweak}
+				onScope={setDesignScope}
+				onCommit={settleDraft}
+				onCancel={cancelDesignDraft}
+				onEdit={editDesignChange}
+				onRemove={removeDesignChange}
+				onCompare={compareDesign}
+				onSend={sendDesignChanges}
+				onDone={exitInspect}
+				onViewChat={viewChat}
+			/>
+		{/if}
+		</div>
+
+		{#if !inspectMode}
 			<footer class="panel-note">
 				<MousePointer2 size={12} strokeWidth={1.5} />
 				<span
@@ -1202,6 +1338,7 @@
 	.panel-header {
 		/* Anchors the settings popover (BrowserWorkspaceToolbar) to this row. */
 		position: relative;
+		container-type: inline-size;
 		display: flex;
 		align-items: center;
 		gap: 3px;
@@ -1257,15 +1394,43 @@
 	}
 
 	/* Header toggles report their active state without covering the page. */
-	.inspect-toggle.active,
-	.keyboard-toggle.active {
-		background: var(--row-selected);
-		color: var(--foreground);
-	}
-	.inspect-toggle.active:hover:not(:disabled),
+	.keyboard-toggle.active,
 	.keyboard-toggle.active:hover:not(:disabled) {
 		background: var(--row-selected);
 		color: var(--foreground);
+	}
+
+	/* Design mode is the panel's one named tool, so it carries its name. */
+	.design-toggle {
+		width: auto;
+		gap: 6px;
+		padding: 0 9px 0 7px;
+		font-size: 0.75rem;
+		font-weight: 550;
+	}
+	.design-toggle.active,
+	.design-toggle.active:hover:not(:disabled) {
+		background: var(--primary);
+		color: var(--primary-foreground);
+	}
+	.design-toggle-count {
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 5px;
+		background: var(--primary);
+		color: var(--primary-foreground);
+		font-size: 0.6875rem;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	@container (max-width: 420px) {
+		.design-toggle-label {
+			display: none;
+		}
 	}
 
 	.address-bar {
@@ -1363,9 +1528,22 @@
 	}
 
 	/* ── Body ───────────────────────────────────────────────────────────── */
+	/* The page, plus the design list beside or under it. */
+	.stage {
+		flex: 1;
+		min-height: 0;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.stage.split {
+		flex-direction: row;
+	}
+
 	.panel-body {
 		position: relative;
 		flex: 1;
+		min-width: 0;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
@@ -1440,167 +1618,6 @@
 		}
 	}
 
-	/* ── Point-and-prompt composer ──────────────────────────────────────── */
-	.composer {
-		flex-shrink: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 6px;
-		padding: 8px 10px 10px;
-		border-top: 1px solid var(--border);
-		background: var(--background);
-	}
-
-	.composer-chip-row {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-	}
-
-	.element-chip {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		height: 24px;
-		padding: 0 9px;
-		max-width: 60%;
-		min-width: 0;
-		background: var(--row-selected);
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		color: var(--foreground);
-		font-size: 0.6875rem;
-		font-family: var(--font-mono, monospace);
-	}
-	.element-chip :global(svg) {
-		flex-shrink: 0;
-	}
-	.element-chip-label {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.element-text {
-		flex: 1;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 0.6875rem;
-		color: var(--muted-foreground);
-	}
-
-	.chip-clear {
-		margin-left: auto;
-		width: 24px;
-		height: 24px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		background: transparent;
-		border: none;
-		border-radius: 50%;
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition:
-			background 150ms ease,
-			color 150ms ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-	.chip-clear:hover {
-		background: var(--hover-overlay);
-		color: var(--foreground);
-	}
-
-	.composer-form {
-		display: flex;
-		align-items: flex-end;
-		gap: 6px;
-	}
-
-	.composer-input {
-		flex: 1;
-		min-width: 0;
-		resize: none;
-		padding: 7px 10px;
-		background: color-mix(in oklch, var(--muted) 45%, transparent);
-		border: 1px solid var(--border);
-		border-radius: calc(var(--radius) - 2px);
-		color: var(--foreground);
-		font-size: 0.8125rem;
-		font-family: inherit;
-		line-height: 1.4;
-		outline: none;
-		transition: border-color 150ms ease;
-	}
-	.composer-input:focus {
-		border-color: var(--ring);
-	}
-	.composer-input::placeholder {
-		color: var(--muted-foreground);
-	}
-
-	.composer-send {
-		width: 34px;
-		height: 34px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		flex-shrink: 0;
-		background: var(--action);
-		border: none;
-		border-radius: calc(var(--radius) - 2px);
-		color: var(--action-foreground);
-		cursor: pointer;
-		transition: opacity 150ms ease;
-		-webkit-tap-highlight-color: transparent;
-	}
-	.composer-send:hover:not(:disabled) {
-		opacity: 0.9;
-	}
-	.composer-send:disabled {
-		opacity: 0.35;
-		cursor: default;
-	}
-	.composer-send:focus-visible {
-		outline: 2px solid var(--ring);
-		outline-offset: 2px;
-	}
-
-	.composer-sent {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		font-size: 0.6875rem;
-		color: var(--success, var(--primary));
-	}
-
-	.composer-viewchat {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		margin-left: auto;
-		padding: 2px 8px;
-		background: transparent;
-		border: 1px solid var(--border);
-		border-radius: var(--radius);
-		color: var(--foreground);
-		font-size: 0.6875rem;
-		cursor: pointer;
-	}
-	.composer-viewchat:hover {
-		background: var(--hover-overlay);
-	}
-
-	@media (max-width: 639px) {
-		.composer-input {
-			font-size: 16px;
-		}
-	}
-
 	/* ── Persistent shared-control note ─────────────────────────────────── */
 	.panel-note {
 		display: flex;
@@ -1614,27 +1631,6 @@
 	}
 	.panel-note :global(svg) {
 		flex-shrink: 0;
-	}
-
-	.inspect-note {
-		color: var(--foreground);
-		border-top-color: color-mix(in oklch, var(--primary) 30%, transparent);
-	}
-
-	.note-exit {
-		margin-left: auto;
-		padding: 2px 10px;
-		background: transparent;
-		border: 1px solid color-mix(in oklch, var(--primary) 40%, transparent);
-		border-radius: var(--radius);
-		color: var(--foreground);
-		font-size: 0.6875rem;
-		font-weight: 500;
-		cursor: pointer;
-		-webkit-tap-highlight-color: transparent;
-	}
-	.note-exit:hover {
-		background: var(--row-selected);
 	}
 
 	@media (prefers-reduced-motion: reduce) {
