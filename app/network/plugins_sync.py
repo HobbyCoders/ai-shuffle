@@ -333,7 +333,7 @@ def _ensure_marketplace(service, plugin_id: str, row) -> None:
         return
     if marketplace_id in known:
         location = getattr(known[marketplace_id], "install_location", None)
-        if location is not None and not Path(location).is_dir():
+        if location is not None and (not location or not Path(location).is_dir()):
             # Registered but never downloaded (the shipped default source
             # is fetched only when plugins are browsed).
             logger.info("Fetching plugin marketplace %s to install %s", marketplace_id, plugin_id)
