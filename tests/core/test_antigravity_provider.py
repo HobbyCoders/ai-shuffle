@@ -2697,6 +2697,27 @@ async def test_a_cancelled_usage_read_ends_its_process(mock_db, fake_agy, monkey
     assert procs[0].returncode is not None
 
 
+@pytest.mark.parametrize("windows", [True, False])
+async def test_short_runs_of_the_binary_open_no_console_window_on_windows(mock_db, fake_agy, monkeypatch, windows):
+    # The usage panel's refresh runs `agy -p /usage`; on Windows a run without
+    # CREATE_NO_WINDOW flashed a terminal open and shut.
+    seen = []
+
+    async def spawn(*args, **kw):
+        seen.append((args, kw))
+        raise OSError("not started")
+    monkeypatch.setattr(ag, "_WINDOWS", windows)
+    monkeypatch.setattr(ag.asyncio, "create_subprocess_exec", spawn)
+    row = {"id": "row-1", "provider_type": "antigravity", "auth_mode": "oauth-personal",
+           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1"}}
+    assert await ag.read_usage(row) is None
+    assert await ag.list_models(row) is None
+    assert await ag.binary_version(ag.find_binary()) is None
+    assert [args[1:3] for args, _ in seen] == [("-p", "/usage"), ("models",), ("--version",)]
+    for _, kw in seen:
+        assert kw.get("creationflags") == (0x08000000 if windows else None)
+
+
 # --- public API routes -------------------------------------------------------
 
 @pytest.mark.parametrize("endpoint,model", [
