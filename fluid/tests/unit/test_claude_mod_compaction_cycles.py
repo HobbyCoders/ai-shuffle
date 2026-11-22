@@ -553,6 +553,49 @@ def test_only_the_newest_earlier_skill_stays_pinned():
     assert entry['text'] == first['text']
 
 
+@pytest.mark.parametrize('parallel', [False, True])
+@pytest.mark.parametrize('attachment', [False, True])
+def test_a_mid_turn_compaction_keeps_the_newest_tool_group_whole(parallel, attachment):
+    """Claude Code compacts mid-turn, before the store has the newest result:
+    that call and its result are Claude Code's own rows of the newest request.
+    Fitting the answer to its target archives such rows, but a tool group
+    leaves whole or stays whole; a call kept without its result was an answer
+    the mod refused, and Claude Code's summarizer ran instead."""
+    chat = Chat()
+    chat.grow(12)
+    chat.cli.append(chat._add(Message('user', [Text('Request now: finish the migration.')])))
+    if attachment:  # the request opens with a row only Claude Code holds
+        chat.cli.append({'role': 'user', 'toolUses': [], 'handle': 'att-newest',
+                         'text': '<system•reminder>newest attachment</system•reminder>'})
+        chat.cli.append(chat._add(Message('assistant', [Text('On it.')])))
+    for step in range(15):
+        tid = f'step-{step}'
+        chat.cli.append(chat._add(Message('assistant', [ToolUseBlock(tid, 'Read', {'file_path': f'{tid}.py'})])))
+        chat.cli.append(chat._add(Message('user', [ToolResultBlock(tid, [Text('r' * 3_000)])])))
+    ids = ['newest-a', 'newest-b'] if parallel else ['newest-a']
+    for tid in ids:
+        chat.cli.append(chat._add(Message('assistant', [ToolUseBlock(tid, 'Read', {'file_path': f'{tid}.py'})])))
+    for n, tid in enumerate(ids):
+        message = Message('user', [ToolResultBlock(tid, [Text(f'RESULT-{tid} ' + 'r' * 3_000)])])
+        if n == len(ids) - 1:  # not stored yet: only Claude Code has it
+            chat.cli.append({**project(message), 'handle': f'cc-{tid}'})
+        else:
+            chat.cli.append(chat._add(message))
+    for trigger in ('auto', 'manual'):
+        posted = [dict(r) for r in chat.cli]
+        archive: list[dict] = []
+        out = compact_messages(posted, chat.stored, context_window=60_000, trigger=trigger,
+                               archive=archive)
+        assert_mod_accepts(out, posted)
+        kept = {u['tool_use_id'] for r in out for u in r['toolUses']}
+        answered = {t['tool_use_id'] for r in out for t in r.get('toolResults', [])}
+        archived = '\n'.join(e['text'] for e in archive)
+        for tid in ids:
+            assert (tid in kept and tid in answered) or (
+                tid not in kept and tid not in answered
+                and f'[tool call Read {tid}:' in archived and f'RESULT-{tid}' in archived)
+
+
 @pytest.mark.parametrize('resume', [RESUME, CONTINUE])
 def test_a_host_started_turn_is_not_a_request_of_its_own(resume):
     """Two skill requests, then the host resumes the second: the resume
