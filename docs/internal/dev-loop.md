@@ -637,6 +637,27 @@ the flag, nothing named `agy` is on the app's PATH, so Settings shows "Not
 installed". Do not press Install on a dev instance: it downloads Google's real
 release.
 
+## The Browser panel (`--browser-cdp-port`)
+
+A branch copy has no browser, so its Browser panel shows "Browser isn't
+running". To work on the panel (the live view, Design mode), start a throwaway
+Chromium with its own profile and DevTools port, then name that port:
+
+```sh
+HOME=<scratch dir> CHROME_CDP_PORT=9331 bash docker/start-chrome.sh
+python -m scripts.devloop up --browser-cdp-port 9331
+```
+
+`start-chrome.sh` assumes the container image's paths. Where they differ, also
+set `CHROME_EXECUTABLE` (the Chromium binary), `BROWSER_EGRESS_ENTRY` (a built
+`browser-mcp/dist/egress-launch.js`) and `AIS_APP_ROOT` (this checkout).
+
+The copy attaches to whatever listens on that port. The worker's default port
+is refused, and so is `CHROME_CDP_PORT` when it is set in your shell, but the
+loop cannot tell whose browser a port belongs to. Name only the port of the
+Chromium you just started, never one a real chat is using. Stop that Chromium
+yourself when you tear the copy down.
+
 ## Ports and teardown
 
 Every port is picked free at random (or `--port` / `--vite-port`); 8000 and

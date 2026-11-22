@@ -90,8 +90,8 @@
 		inspecting?: boolean;
 		/** Hover-highlight rect in page CSS pixels (inspect mode). */
 		hoverRect?: PageRect | null;
-		/** Selection-highlight rect in page CSS pixels (inspect mode). */
-		selectionRect?: PageRect | null;
+		/** Numbered markers for the changes queued in design mode (page CSS pixels). */
+		pins?: { rect: PageRect; label: string; active?: boolean }[];
 		/** Send a client→server input payload over the socket. */
 		onInput: (payload: Record<string, unknown>) => void;
 		/** Request an element hit-test at a page CSS-pixel point (inspect mode). */
@@ -118,7 +118,7 @@
 		viewport,
 		inspecting = false,
 		hoverRect = null,
-		selectionRect = null,
+		pins = [],
 		onInput,
 		onInspect,
 		onHoverLeave,
@@ -349,7 +349,6 @@
 		r: PageRect,
 		scale: number,
 		off: { x: number; y: number },
-		kind: 'hover' | 'selection',
 	) {
 		const x = off.x + r.x * scale;
 		const y = off.y + r.y * scale;
@@ -358,23 +357,62 @@
 		if (!(Number.isFinite(x) && Number.isFinite(y) && w >= 0 && h >= 0)) return;
 		const color = cssColor('--primary', '#6366f1');
 		ctx.save();
-		if (kind === 'hover') {
-			ctx.globalAlpha = 0.14;
-			ctx.fillStyle = color;
-			ctx.fillRect(x, y, w, h);
-			ctx.globalAlpha = 0.9;
-			ctx.lineWidth = 1.5;
-			ctx.strokeStyle = color;
-			ctx.strokeRect(x, y, w, h);
-		} else {
-			ctx.globalAlpha = 0.08;
-			ctx.fillStyle = color;
-			ctx.fillRect(x, y, w, h);
-			ctx.globalAlpha = 1;
-			ctx.lineWidth = 2;
-			ctx.strokeStyle = color;
-			ctx.strokeRect(x, y, w, h);
-		}
+		ctx.globalAlpha = 0.14;
+		ctx.fillStyle = color;
+		ctx.fillRect(x, y, w, h);
+		ctx.globalAlpha = 0.9;
+		ctx.lineWidth = 1.5;
+		ctx.strokeStyle = color;
+		ctx.strokeRect(x, y, w, h);
+		ctx.restore();
+	}
+
+	/** A queued change: outline plus a numbered tag sitting on its top-left corner. */
+	function drawPin(
+		ctx: CanvasRenderingContext2D,
+		pin: { rect: PageRect; label: string; active?: boolean },
+		scale: number,
+		off: { x: number; y: number },
+		bounds: { width: number; height: number },
+	) {
+		const x = off.x + pin.rect.x * scale;
+		const y = off.y + pin.rect.y * scale;
+		const w = pin.rect.width * scale;
+		const h = pin.rect.height * scale;
+		if (!(Number.isFinite(x) && Number.isFinite(y) && w >= 0 && h >= 0)) return;
+		if (x > bounds.width || y > bounds.height || x + w < 0 || y + h < 0) return;
+		const color = cssColor('--primary', '#6366f1');
+		const ink = cssColor('--primary-foreground', '#ffffff');
+		ctx.save();
+		ctx.strokeStyle = color;
+		ctx.globalAlpha = pin.active ? 1 : 0.75;
+		ctx.lineWidth = pin.active ? 2 : 1.5;
+		if (!pin.active) ctx.setLineDash([5, 4]);
+		ctx.strokeRect(x, y, w, h);
+		ctx.setLineDash([]);
+		ctx.globalAlpha = 1;
+		// Tag: beside the element so it never covers what it marks (above it when
+		// there is no room on the left), and kept inside the picture at the edges.
+		const size = 22;
+		const gap = 5;
+		let tx = x - size - gap;
+		let ty = h < size ? y + h / 2 - size / 2 : y;
+		if (tx < 2 && y - size - gap >= 2) { tx = x; ty = y - size - gap; }
+		tx = Math.max(2, Math.min(bounds.width - size - 2, tx));
+		ty = Math.max(2, Math.min(bounds.height - size - 2, ty));
+		ctx.fillStyle = color;
+		ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+		ctx.shadowBlur = 6;
+		ctx.shadowOffsetY = 1;
+		ctx.beginPath();
+		ctx.roundRect(tx, ty, size, size, 7);
+		ctx.fill();
+		ctx.shadowColor = 'transparent';
+		ctx.fillStyle = ink;
+		ctx.font = '600 12px "Inter Variable", ui-sans-serif, system-ui, sans-serif';
+		ctx.textAlign = 'center';
+		ctx.textBaseline = 'middle';
+		ctx.fillText(pin.label.slice(0, 2), tx + size / 2, ty + size / 2 + 0.5);
 		ctx.restore();
 	}
 
@@ -415,15 +453,8 @@
 		canvasEl.dataset.viewportWidth = String(meta.deviceWidth);
 		canvasEl.dataset.viewportHeight = String(meta.deviceHeight);
 
-		if (inspecting) {
-			if (selectionRect)
-				drawHighlight(ctx, selectionRect, scale, off, 'selection');
-			if (hoverRect) drawHighlight(ctx, hoverRect, scale, off, 'hover');
-		} else if (selectionRect) {
-			// Selection stays visible outside inspect mode so the composer's
-			// context is still anchored to something on screen.
-			drawHighlight(ctx, selectionRect, scale, off, 'selection');
-		}
+		if (inspecting && hoverRect) drawHighlight(ctx, hoverRect, scale, off);
+		for (const pin of pins) drawPin(ctx, pin, scale, off, box);
 	}
 
 	// Repaint on container resize so the letterbox re-fits. Observe the WRAPPER,
@@ -453,8 +484,8 @@
 	// Highlight rect / mode changes repaint the last frame (no new bitmap).
 	$effect(() => {
 		void hoverRect;
-		void selectionRect;
 		void inspecting;
+		void pins;
 		paint();
 	});
 

@@ -22,9 +22,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import secrets
 import time
 from contextlib import suppress
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import websockets
@@ -334,16 +336,382 @@ _INSPECT_JS_TEMPLATE = """
       ((el.innerText || el.textContent || '') + '').trim().replace(/\\s+/g, ' '),
       200,
     );
-    out.html = cap(el.outerHTML, 800);
+    // Without the marker a design preview puts on the elements it styles.
+    const mark = (window[Symbol.for('ais.design')] || {}).mark || '';
+    out.html = cap(
+      mark ? el.outerHTML.replace(new RegExp(' ' + mark + '="[c0-9 ]*"', 'g'), '') : el.outerHTML,
+      800,
+    );
     const attrs = {};
-    for (const a of Array.from(el.attributes).slice(0, 12)) {
+    for (const a of Array.from(el.attributes).filter((a) => a.name !== mark).slice(0, 12)) {
       attrs[cap(a.name, 60)] = cap(a.value, 160);
     }
     out.attrs = attrs;
+    // Design mode detail. Every block is best-effort: a hostile or odd page
+    // must never turn a selection into a miss.
+    try {
+      __REGISTRY__
+      let key = null;
+      for (const [k, v] of reg.els) if (v === el) { key = k; break; }
+      if (!key) {
+        if (reg.els.size >= 200) reg.els.delete(reg.els.keys().next().value);
+        // A key a queued change rebound after a reload is never handed out again.
+        do { key = 'k' + (++reg.n); } while (reg.els.has(key));
+        reg.els.set(key, el);
+      }
+      out.key = key;
+    } catch (e) {}
+    try {
+      out.label = cap(
+        (el.getAttribute('aria-label') || el.getAttribute('alt') ||
+          el.getAttribute('placeholder') || el.getAttribute('title') || '') + '',
+        120,
+      );
+    } catch (e) {}
+    try {
+      const cs = getComputedStyle(el);
+      const styles = {};
+      for (const p of [
+        'font-size', 'font-weight', 'line-height', 'font-family', 'color',
+        'background-color', 'padding-top', 'padding-right', 'padding-bottom',
+        'padding-left', 'margin-bottom', 'border-top-left-radius', 'display', 'gap',
+      ]) styles[p] = cap(cs.getPropertyValue(p), 80);
+      out.styles = styles;
+    } catch (e) {}
+    try {
+      let similar = 1;
+      if (el.classList.length) {
+        similar = document.querySelectorAll(
+          el.tagName.toLowerCase() +
+            Array.from(el.classList).slice(0, 6).map((c) => '.' + CSS.escape(c)).join(''),
+        ).length;
+      }
+      out.similar = Math.min(similar, 999);
+    } catch (e) {}
+    try {
+      // Where the element comes from, when the page is a framework dev build.
+      let node = el;
+      for (let i = 0; node && i < 6 && !out.source; i++, node = node.parentElement) {
+        const sm = node.__svelte_meta;
+        if (sm && sm.loc && sm.loc.file) {
+          out.source = { file: cap(sm.loc.file + '', 200), line: sm.loc.line | 0 };
+          break;
+        }
+        const fiberKey = Object.keys(node).find((k) => k.startsWith('__reactFiber$'));
+        if (fiberKey) {
+          let f = node[fiberKey];
+          for (let j = 0; f && j < 12; j++, f = f.return) {
+            if (f._debugSource && f._debugSource.fileName) {
+              out.source = {
+                file: cap(f._debugSource.fileName + '', 200),
+                line: f._debugSource.lineNumber | 0,
+              };
+              break;
+            }
+          }
+        }
+        const vue = node.__vueParentComponent;
+        if (!out.source && vue && vue.type && vue.type.__file) {
+          out.source = { file: cap(vue.type.__file + '', 200), line: 0 };
+        }
+      }
+    } catch (e) {}
+    try {
+      // The page's own colour variables, so a tweak can stay on its palette.
+      const tokens = [];
+      const seen = new Set();
+      const rootCs = getComputedStyle(document.documentElement);
+      let budget = 3000;
+      const walk = (rules) => {
+        for (const rule of Array.from(rules)) {
+          if (budget-- <= 0 || tokens.length >= 24) return;
+          if (rule.cssRules && !rule.selectorText) { walk(rule.cssRules); continue; }
+          if (!rule.style || !/(^|,)\\s*(:root|html|body)(\\s*(,|$)|[.:\\[])/.test(rule.selectorText || '')) continue;
+          for (const name of Array.from(rule.style)) {
+            if (!name.startsWith('--') || seen.has(name)) continue;
+            const v = rootCs.getPropertyValue(name).trim();
+            if (!v || v.length > 60 || !CSS.supports('color', v)) continue;
+            seen.add(name);
+            tokens.push({ name: cap(name, 60), value: v });
+            if (tokens.length >= 24) return;
+          }
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets).slice(0, 40)) {
+        let rules = null;
+        try { rules = sheet.cssRules; } catch (e) { continue; }
+        if (rules) walk(rules);
+      }
+      out.tokens = tokens;
+    } catch (e) {}
   }
   return out;
 })()
 """
+
+# ---------------------------------------------------------------------------
+# Design mode (live style preview on the inspected page)
+# ---------------------------------------------------------------------------
+# A design request previews a change on the page without touching source: it
+# styles an element picked through inspect, reports where the picked elements
+# are now, or puts the page back. The agent makes the real edit in code; this
+# is only the "try it first" step.
+#
+# The page keeps one record per queued change (per viewer and element key).
+# A preview never writes to an element's own style: each change is a rule in
+# one stylesheet the script adds to the page, and its elements carry a marker
+# attribute. So changes that overlap on an element never erase one another,
+# removing one leaves the rest, and putting the page back is deleting the
+# rules and the markers. The scripts are exercised against a DOM in
+# frontend/src/lib/browser-panel/design-page-script.test.ts.
+_VALID_DESIGN_OPS = {"style", "rects", "reset", "peek"}
+_DESIGN_PROPS = frozenset({
+    "font-size", "font-weight", "color", "background-color", "padding",
+    "border-radius", "margin-bottom", "gap", "line-height", "opacity",
+})
+_DESIGN_KEY_RE = re.compile(r"^k[0-9]{1,7}$")
+# Plain CSS values only: no url(), no declaration or rule breakouts, no quotes.
+_DESIGN_VALUE_RE = re.compile(r"^[#%(),./\w\s-]{1,64}$")
+_MAX_DESIGN_ITEMS = 40
+
+# Shared by the inspect and design scripts. Keys start at a random number per
+# document so a key from before a reload does not name a different element.
+# `mark` is the attribute a preview puts on the elements it styles: a name made
+# up for this document that the page is not using, so an attribute of the
+# page's own is never mistaken for one.
+_DESIGN_REGISTRY_JS = """const S = Symbol.for('ais.design');
+      const reg = window[S] || (window[S] = {
+        n: Math.floor(Math.random() * 9000000), els: new Map(),
+        changes: new Map(), hidden: new Set(), seq: 0, sheet: null, roots: new Set(),
+        mark: (() => {
+          for (;;) {
+            const name = 'data-ais-d' + Math.random().toString(36).slice(2, 10);
+            if (!document.querySelector('[' + name + ']')) return name;
+          }
+        })(),
+      });"""
+
+_DESIGN_JS_TEMPLATE = """
+(() => {
+  const a = __ARGS__;
+  __REGISTRY__
+  const MARK = reg.mark;
+  const find = (key, selector) => {
+    let el = key ? reg.els.get(key) : null;
+    if (el && !el.isConnected) el = null;
+    if (!el && selector) {
+      try { el = document.querySelector(selector); } catch (e) { el = null; }
+      if (el && key) reg.els.set(key, el);
+    }
+    return el || null;
+  };
+  const rectOf = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  };
+  // Every element sharing the picked one's tag and classes, the picked one included.
+  const peers = (el) => {
+    if (!el.classList.length) return [el];
+    try {
+      const all = Array.from(document.querySelectorAll(
+        el.tagName.toLowerCase() +
+          Array.from(el.classList).slice(0, 6).map((c) => '.' + CSS.escape(c)).join(''),
+      )).slice(0, 999);
+      if (!all.includes(el)) {
+        if (all.length >= 999) all.pop();
+        all.push(el);
+      }
+      return all;
+    } catch (e) { return [el]; }
+  };
+  const targetsOf = (owner, into) => {
+    for (const c of reg.changes.values()) {
+      if (owner === null || c.owner === owner) for (const t of c.targets) into.add(t);
+    }
+    return into;
+  };
+  // A preview never touches an element's own style. Each change is one rule
+  // in a stylesheet this script owns, and the elements it applies to carry
+  // the change's token in MARK. Taking a preview off is deleting the rule and
+  // the token, so there is nothing of the page's to save or put back.
+  // The rule outweighs the page's own rules and its normal inline styles. It
+  // does not outweigh an inline !important declaration or an !important one
+  // in a cascade layer: there the preview does not show, and the page is
+  // still left as it was.
+  const render = (els) => {
+    const tokens = new Map();
+    const roots = new Set();
+    for (const c of reg.changes.values()) {
+      for (const t of c.targets) {
+        if (!t.isConnected) continue;
+        const root = t.getRootNode();
+        if (root && root.adoptedStyleSheets) roots.add(root);
+        if (!tokens.has(t)) tokens.set(t, []);
+        tokens.get(t).push(c.token);
+      }
+    }
+    // An element carries the tokens of the changes it is a target of, and no
+    // others.
+    const mark = (el) => {
+      const want = (tokens.get(el) || []).join(' ');
+      if (!want) {
+        if (el.hasAttribute(MARK)) el.removeAttribute(MARK);
+      } else if (el.getAttribute(MARK) !== want) el.setAttribute(MARK, want);
+    };
+    for (const el of els) mark(el);
+    for (const el of tokens.keys()) mark(el);
+    if (reg.changes.size && !reg.sheet) reg.sheet = new CSSStyleSheet();
+    if (reg.sheet) {
+      reg.sheet.replaceSync('');
+      for (const c of reg.changes.values()) {
+        if (reg.hidden.has(c.owner)) continue;
+        // :is() lends the rule the weight of four ids without matching on
+        // them. Each value is set on its own, so one the browser does not
+        // accept is dropped and cannot spill into another change's rule.
+        const at = reg.sheet.insertRule(
+          '[' + MARK + '~="' + c.token + '"]:is(*, #a#a#a#a) {}', reg.sheet.cssRules.length);
+        const rule = reg.sheet.cssRules[at];
+        for (const [prop, value] of Object.entries(c.styles)) {
+          rule.style.setProperty(prop, value, 'important');
+        }
+      }
+    }
+    // The sheet sits last in each tree that has a marked element, and leaves
+    // with the last change.
+    for (const root of new Set([...reg.roots, ...roots])) {
+      const others = Array.from(root.adoptedStyleSheets).filter((sheet) => sheet !== reg.sheet);
+      const want = reg.changes.size && roots.has(root);
+      const has = others.length !== root.adoptedStyleSheets.length;
+      const last = root.adoptedStyleSheets[root.adoptedStyleSheets.length - 1] === reg.sheet;
+      if (want ? !last : has) root.adoptedStyleSheets = want ? [...others, reg.sheet] : others;
+      // A copy the page made of a marked element is not a target of any
+      // change, so it keeps no token.
+      for (const el of root.querySelectorAll('[' + MARK + ']')) mark(el);
+    }
+    reg.roots = reg.changes.size ? roots : new Set();
+    if (!reg.changes.size) reg.sheet = null;
+  };
+  if (a.op === 'rects') {
+    const rects = {};
+    for (const item of a.items) {
+      const el = find(item.key, item.selector);
+      rects[item.key] = el ? rectOf(el) : null;
+    }
+    return { rects };
+  }
+  if (a.op === 'peek') {
+    // Show the page as it really is, without dropping the queued styles.
+    if (a.on) reg.hidden.add(a.owner);
+    else reg.hidden.delete(a.owner);
+    render(targetsOf(a.owner, new Set()));
+    return { peek: reg.hidden.has(a.owner) };
+  }
+  if (a.op === 'reset') {
+    // One change (owner and key), one viewer's changes (owner), or all of them.
+    const els = new Set();
+    const id = a.key ? a.owner + ':' + a.key : null;
+    for (const [cid, c] of Array.from(reg.changes)) {
+      if (id ? cid !== id : a.owner !== null && c.owner !== a.owner) continue;
+      for (const t of c.targets) els.add(t);
+      reg.changes.delete(cid);
+    }
+    if (!id) {
+      if (a.owner === null) reg.hidden.clear();
+      else reg.hidden.delete(a.owner);
+    }
+    render(els);
+    return { reset: true };
+  }
+  // op === 'style': `styles` is the whole preview for this change, so a
+  // property that is no longer listed goes back to what the page had.
+  const el = find(a.key, a.selector);
+  if (!el) return { key: a.key, missing: true };
+  const id = a.owner + ':' + a.key;
+  const before = reg.changes.get(id);
+  if (!before && reg.changes.size >= 200) return { key: a.key, missing: true };
+  const els = new Set(before ? before.targets : []);
+  // Trying a value shows this viewer's changes again if they were hidden.
+  if (reg.hidden.delete(a.owner)) targetsOf(a.owner, els);
+  const targets = a.scope === 'all' ? peers(el) : [el];
+  for (const t of targets) els.add(t);
+  if (!Object.keys(a.styles).length) reg.changes.delete(id);
+  else if (before) { before.targets = targets; before.styles = a.styles; }
+  else reg.changes.set(id, { owner: a.owner, targets, styles: a.styles, token: 'c' + (++reg.seq) });
+  render(els);
+  return { key: a.key, rect: rectOf(el), count: targets.length };
+})()
+"""
+
+
+class DesignInput(BaseModel):
+    """One design-mode request. Unknown keys (``type``, identity) are ignored."""
+
+    op: str
+    key: Optional[str] = None
+    selector: Optional[str] = None
+    scope: Optional[str] = None
+    styles: Optional[Dict[str, str]] = None
+    items: Optional[List[Dict[str, Optional[str]]]] = None
+    on: Optional[bool] = None
+
+
+def _design_target(key: object, selector: object) -> Tuple[str, Optional[str]]:
+    if not isinstance(key, str) or not _DESIGN_KEY_RE.match(key):
+        raise ValueError("invalid design element key")
+    if selector is not None and (not isinstance(selector, str) or len(selector) > 500):
+        raise ValueError("invalid design selector")
+    return key, selector
+
+
+def parse_design(msg: dict) -> dict:
+    """Validate one client ``design`` message into the page script's arguments."""
+    design = DesignInput(**msg)
+    if design.op not in _VALID_DESIGN_OPS:
+        raise ValueError(f"invalid design op: {design.op!r}")
+    if design.op == "rects":
+        items = design.items or []
+        if len(items) > _MAX_DESIGN_ITEMS:
+            raise ValueError("too many design elements")
+        out = []
+        for item in items:
+            key, selector = _design_target(item.get("key"), item.get("selector"))
+            out.append({"key": key, "selector": selector})
+        return {"op": "rects", "items": out}
+    if design.op == "peek":
+        return {"op": "peek", "on": bool(design.on)}
+    if design.op == "reset":
+        if design.key is None:
+            return {"op": "reset", "key": None}
+        key, _ = _design_target(design.key, None)
+        return {"op": "reset", "key": key}
+    key, selector = _design_target(design.key, design.selector)
+    if design.scope not in ("one", "all"):
+        raise ValueError(f"invalid design scope: {design.scope!r}")
+    styles = design.styles or {}
+    for prop, value in styles.items():
+        if prop not in _DESIGN_PROPS:
+            raise ValueError(f"design property not allowed: {prop!r}")
+        if not _DESIGN_VALUE_RE.match(value) or "url(" in value.lower():
+            raise ValueError(f"invalid design value for {prop}")
+    return {
+        "op": "style",
+        "key": key,
+        "selector": selector,
+        "scope": design.scope,
+        "styles": styles,
+    }
+
+
+def build_design_expression(args: dict, owner: Optional[str] = None) -> str:
+    """Build the page-side expression for one validated design request.
+
+    ``owner`` names the viewer whose changes the request touches. It is chosen
+    by the server, never read from the client. ``None`` is the server's own
+    "every viewer" reset.
+    """
+    return _DESIGN_JS_TEMPLATE.replace("__REGISTRY__", _DESIGN_REGISTRY_JS).replace(
+        "__ARGS__", json.dumps({**args, "owner": owner})
+    )
 
 
 def parse_inspect(msg: dict) -> InspectInput:
@@ -372,6 +740,7 @@ def build_inspect_expression(
         _INSPECT_JS_TEMPLATE.replace("__X__", json.dumps(float(x)))
         .replace("__Y__", json.dumps(float(y)))
         .replace("__DETAIL__", "true" if detail else "false")
+        .replace("__REGISTRY__", _DESIGN_REGISTRY_JS)
     )
 
 
@@ -415,11 +784,18 @@ class _Viewer:
     the frame sender, status broadcasts and pings never interleave.
     """
 
-    __slots__ = ("websocket", "queue", "sender_task", "send_lock", "redact_urls")
+    __slots__ = (
+        "websocket", "queue", "sender_task", "send_lock", "redact_urls",
+        "design_owner", "design_active",
+    )
 
     def __init__(self, websocket: WebSocket, *, redact_urls: bool = False) -> None:
         self.websocket = websocket
         self.redact_urls = redact_urls
+        # Names this viewer's design previews on the page, so they can be put
+        # back when it leaves. ``design_active``: it has previews on the page.
+        self.design_owner = secrets.token_hex(6)
+        self.design_active = False
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=2)
         self.sender_task: Optional[asyncio.Task] = None
         self.send_lock = asyncio.Lock()
@@ -458,6 +834,8 @@ class BrowserStreamHub:
         self._last_metadata: Optional[dict] = None
         self._last_frame: Optional[dict] = None
         self._last_frame_key = None
+        # Last status broadcast to viewers (None until the hub reports one).
+        self.status: Optional[dict] = None
         self._attached_target_id = None
         self._frame_identity = {}
         # Toolbar state tracked from CDP page events, mirrored to viewers as
@@ -508,6 +886,26 @@ class BrowserStreamHub:
     async def remove_viewer(self, viewer: _Viewer) -> None:
         self.viewers.discard(viewer)
         await self._cancel_sender(viewer)
+        # A panel that closed or lost its connection cannot put the page back
+        # itself, so its previews end here.
+        if viewer.design_active:
+            viewer.design_active = False
+            await self._reset_design(self._upstream, viewer.design_owner)
+
+    async def _reset_design(self, ws, owner: Optional[str]) -> None:
+        """Take design previews off the page: one viewer's, or all (``None``)."""
+        if ws is None:
+            return
+        await self._send_upstream(
+            ws,
+            "Runtime.evaluate",
+            {
+                "expression": build_design_expression(
+                    {"op": "reset", "key": None}, owner
+                ),
+                "returnByValue": True,
+            },
+        )
 
     async def _cancel_sender(self, viewer: _Viewer) -> None:
         if viewer.sender_task is not None:
@@ -546,8 +944,26 @@ class BrowserStreamHub:
 
     async def _broadcast_status(self, state: str, url: Optional[str]) -> None:
         msg = {"type": "status", "state": state, "url": url}
+        # Kept for a viewer that joins later: nothing repeats "live" on a page
+        # that sits still, so without it a second viewer waits on "connecting".
+        self.status = msg
         for viewer in list(self.viewers):
             await self.send_to_viewer(viewer, msg)
+
+    async def repeat_status(self, viewer: _Viewer) -> None:
+        """Tell one viewer the state the others already have.
+
+        The status is read under the viewer's send lock, so a broadcast that
+        is waiting for the lock cannot be followed by an older state.
+        """
+        async with viewer.send_lock:
+            msg = self.status
+            if msg is None:
+                return
+            if viewer.redact_urls:
+                msg = {**msg, "url": None}
+            with suppress(Exception):
+                await safe_ws_send(viewer.websocket, msg)
 
     def _broadcast_page(self) -> None:
         """Fan out toolbar page state (url + loading), latest-wins, never blocks."""
@@ -711,9 +1127,56 @@ class BrowserStreamHub:
         if viewer not in self.viewers:
             return
         value = reply.get("result", {}).get("value")
+        if mode.startswith("design:"):
+            await self.send_to_viewer(
+                viewer,
+                {
+                    "type": "design-result",
+                    "op": mode[len("design:"):],
+                    "result": sanitize_inspect_result(value),
+                },
+            )
+            return
         element = sanitize_inspect_result(value)
         await self.send_to_viewer(
             viewer, {"type": "inspect-hit", "mode": mode, "element": element}
+        )
+
+    async def dispatch_design(self, viewer: "_Viewer", args: dict) -> None:
+        """Run one design-mode preview request for ``viewer``.
+
+        Same request and reply pairing as a hit-test: the page script runs
+        through ``Runtime.evaluate`` and the pump loop answers the requesting
+        viewer with a ``design-result`` frame. It only ever adds or removes
+        preview rules for elements already picked through inspect.
+        """
+        ws = self._upstream
+        op = args["op"]
+        if ws is None:
+            await self.send_to_viewer(
+                viewer, {"type": "design-result", "op": op, "result": None}
+            )
+            return
+        if not await self._send_upstream(
+            ws,
+            "Runtime.evaluate",
+            {
+                "expression": build_design_expression(args, viewer.design_owner),
+                "returnByValue": True,
+            },
+            response=True,
+        ):
+            return
+        if op == "style":
+            viewer.design_active = True
+        elif op == "reset" and args.get("key") is None:
+            viewer.design_active = False
+        if len(self._pending_inspects) >= 128:
+            self._pending_inspects.pop(next(iter(self._pending_inspects)))
+        self._pending_inspects[self._upstream_msg_id] = (
+            viewer,
+            f"design:{op}",
+            dict(self._frame_identity),
         )
 
     async def _complete_history_jump(self, msg_id: int, reply: dict) -> None:
@@ -842,6 +1305,12 @@ class BrowserStreamHub:
         change_task: Optional[asyncio.Task] = None
         recv_task: Optional[asyncio.Task] = None
         try:
+            # Previews belong to connected viewers in Design mode, and each
+            # puts its own back once the page is live. Anything already on the
+            # page was left by a connection or an app run that has ended.
+            await self._reset_design(ws, None)
+            for viewer in self.viewers:
+                viewer.design_active = False
             await self._send_upstream(ws, "Page.enable")
             # Chrome paints — and therefore screencasts — only the foreground
             # tab of a window. A panel attached to a backgrounded target reaches
@@ -969,6 +1438,13 @@ class BrowserStreamHub:
                 # _run can reattach while stop() waits for it forever.
                 await asyncio.gather(*children, return_exceptions=True)
             finally:
+                # Leaving this page (another tab, the last viewer gone): it
+                # goes back to its own styles first.
+                if any(viewer.design_active for viewer in self.viewers):
+                    for viewer in self.viewers:
+                        viewer.design_active = False
+                    with suppress(Exception):
+                        await self._reset_design(ws, None)
                 with suppress(Exception):
                     await self._send_upstream(ws, "Page.stopScreencast")
                 with suppress(Exception):

@@ -32,3 +32,27 @@ def test_producer_cli_defaults_off_even_if_the_host_is_opted_in(monkeypatch, opt
 
     assert devloop.main(["up", *(["--transcript-producer"] if opt_in else [])]) == 0
     assert seen[0].transcript_producer is opt_in
+
+
+def test_browser_panel_is_off_unless_a_throwaway_chromium_port_is_named(tmp_path, monkeypatch):
+    monkeypatch.setenv("START_CHROME", "1")
+    monkeypatch.setenv("CHROME_CDP_PORT", "9221")
+    base = dict(host=ipaddress.ip_address("127.0.0.1"), browser_host=None,
+                ttl_seconds=60, transcript_producer=False)
+
+    for name in ("off", "on"):
+        (tmp_path / name).mkdir()
+    off = devloop.application_environment(
+        SimpleNamespace(**base), tmp_path / "off", 18880, 18881, extra={})
+    assert off["START_CHROME"] == "0"
+
+    on = devloop.application_environment(
+        SimpleNamespace(**base, browser_cdp_port=9331), tmp_path / "on", 18880, 18881, extra={})
+    assert (on["START_CHROME"], on["CHROME_CDP_PORT"]) == ("1", "9331")
+
+
+@pytest.mark.parametrize("port", [9221, 80])
+def test_browser_port_refuses_the_workers_own_browser_and_reserved_ports(monkeypatch, port):
+    monkeypatch.setenv("CHROME_CDP_PORT", "9221")
+    with pytest.raises(SystemExit):
+        devloop.browser_environment(port)

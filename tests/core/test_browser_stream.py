@@ -394,6 +394,183 @@ class TestToolbarCommands:
 
 
 # ===========================================================================
+# Design mode (live style previews on the inspected page)
+# ===========================================================================
+class TestDesign:
+    def test_parse_style_valid(self):
+        args = browser_stream.parse_design(
+            {
+                "type": "design",
+                "op": "style",
+                "key": "k3",
+                "selector": "main > h1",
+                "scope": "all",
+                "styles": {"font-size": "40px", "color": "var(--brand)"},
+            }
+        )
+        assert args == {
+            "op": "style",
+            "key": "k3",
+            "selector": "main > h1",
+            "scope": "all",
+            "styles": {"font-size": "40px", "color": "var(--brand)"},
+        }
+
+    @pytest.mark.parametrize(
+        "patch",
+        [
+            {"op": "run"},
+            {"key": "k1); alert(1"},
+            {"key": None},
+            {"selector": "x" * 501},
+            {"scope": "page"},
+            {"styles": {"position": "fixed"}},
+            {"styles": {"color": "red; position: fixed"}},
+            {"styles": {"background-color": "url(http://x.test/a.png)"}},
+            {"styles": {"color": "x" * 65}},
+        ],
+    )
+    def test_parse_style_rejects_anything_off_the_allow_list(self, patch):
+        msg = {
+            "op": "style",
+            "key": "k1",
+            "selector": "h1",
+            "scope": "one",
+            "styles": {"color": "#000000"},
+        }
+        with pytest.raises(Exception):
+            browser_stream.parse_design({**msg, **patch})
+
+    def test_parse_rects_reset_and_peek(self):
+        assert browser_stream.parse_design(
+            {"op": "rects", "items": [{"key": "k1", "selector": "h1"}, {"key": "k2"}]}
+        ) == {
+            "op": "rects",
+            "items": [
+                {"key": "k1", "selector": "h1"},
+                {"key": "k2", "selector": None},
+            ],
+        }
+        assert browser_stream.parse_design({"op": "reset"}) == {
+            "op": "reset",
+            "key": None,
+        }
+        assert browser_stream.parse_design({"op": "reset", "key": "k9"}) == {
+            "op": "reset",
+            "key": "k9",
+        }
+        assert browser_stream.parse_design({"op": "peek", "on": True}) == {
+            "op": "peek",
+            "on": True,
+        }
+        assert browser_stream.parse_design({"op": "peek"}) == {
+            "op": "peek",
+            "on": False,
+        }
+        with pytest.raises(Exception):
+            browser_stream.parse_design({"op": "rects", "items": [{"key": "nope"}]})
+        with pytest.raises(Exception):
+            browser_stream.parse_design(
+                {"op": "rects", "items": [{"key": "k1"}] * 500}
+            )
+
+    def test_build_expression_embeds_arguments_as_json(self):
+        args = browser_stream.parse_design(
+            {
+                "op": "style",
+                "key": "k1",
+                "selector": 'a[title="x\'y"]',
+                "scope": "one",
+                "styles": {"padding": "12px"},
+            }
+        )
+        expr = browser_stream.build_design_expression(args, "viewer-a")
+        assert "__ARGS__" not in expr and "__REGISTRY__" not in expr
+        assert json.dumps({**args, "owner": "viewer-a"}) in expr
+
+    def test_owner_is_chosen_by_the_server_not_the_client(self):
+        args = browser_stream.parse_design({"op": "reset", "owner": "someone-else"})
+        assert "owner" not in args
+
+    @staticmethod
+    def _design_calls(fake):
+        """(op, owner) of every design script sent to the page, in order."""
+        calls = []
+        for message in fake.sent:
+            expression = message.get("params", {}).get("expression", "")
+            marker = "const a = "
+            if message["method"] != "Runtime.evaluate" or marker not in expression:
+                continue
+            start = expression.index(marker) + len(marker)
+            args = json.loads(expression[start : expression.index(";\n", start)])
+            if "op" in args:
+                calls.append((args["op"], args["owner"]))
+        return calls
+
+    async def test_a_page_is_cleared_of_stale_previews_before_anything_else(
+        self, monkeypatch
+    ):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        try:
+            assert fake.methods()[:2] == ["Runtime.evaluate", "Page.enable"]
+            assert self._design_calls(fake) == [("reset", None)]
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", viewer)
+
+    async def test_previews_leave_the_page_with_the_viewer_that_made_them(
+        self, monkeypatch
+    ):
+        hub, first, fake = await _hub_with_fake_upstream(monkeypatch)
+        second = await hub.add_viewer(FakeViewerWS())
+        style = browser_stream.parse_design(
+            {
+                "op": "style",
+                "key": "k1",
+                "selector": "h1",
+                "scope": "one",
+                "styles": {"color": "#000000"},
+            }
+        )
+        try:
+            await hub.dispatch_design(first, style)
+            await hub.dispatch_design(second, {"op": "rects", "items": []})
+            # A viewer that only looked leaves nothing to put back.
+            await hub.remove_viewer(second)
+            assert self._design_calls(fake)[1:] == [
+                ("style", first.design_owner),
+                ("rects", second.design_owner),
+            ]
+            # Closing the panel restores the page: only this viewer's changes.
+            await browser_stream.detach_viewer("hub-cmd", first)
+            assert self._design_calls(fake)[-1] == ("reset", first.design_owner)
+            assert first.design_owner != second.design_owner
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", first)
+
+    async def test_switching_page_puts_the_old_page_back(self, monkeypatch):
+        hub, viewer, fake = await _hub_with_fake_upstream(monkeypatch)
+        try:
+            await hub.dispatch_design(
+                viewer,
+                browser_stream.parse_design(
+                    {
+                        "op": "style",
+                        "key": "k1",
+                        "selector": "h1",
+                        "scope": "one",
+                        "styles": {"padding": "12px"},
+                    }
+                ),
+            )
+            fake.feed_close()
+            await _wait_for(lambda: fake.closed)
+            assert self._design_calls(fake)[-1] == ("reset", None)
+            assert viewer.design_active is False
+        finally:
+            await browser_stream.detach_viewer("hub-cmd", viewer)
+
+
+# ===========================================================================
 # Inspect (point-and-prompt hit-test)
 # ===========================================================================
 class TestInspect:
@@ -447,7 +624,7 @@ class TestInspect:
         )
         await hub.dispatch_inspect(viewer, inspect)
 
-        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        ev = [m for m in fake.sent if m["method"] == "Runtime.evaluate"][-1]
         assert ev["params"]["returnByValue"] is True
         assert "document.elementFromPoint(10.0, 20.0)" in ev["params"]["expression"]
 
@@ -474,7 +651,7 @@ class TestInspect:
             {"type": "inspect", "x": 1, "y": 1, "mode": "hover"}
         )
         await hub.dispatch_inspect(viewer, inspect)
-        ev = next(m for m in fake.sent if m["method"] == "Runtime.evaluate")
+        ev = [m for m in fake.sent if m["method"] == "Runtime.evaluate"][-1]
         fake._incoming.put_nowait(
             json.dumps(
                 {
@@ -1020,6 +1197,40 @@ async def test_same_target_updates_do_not_restart_live_screencast(monkeypatch):
     assert not fakes[0].closed
 
     await browser_stream.detach_viewer(sid, viewer)
+
+
+async def test_viewer_joining_a_live_hub_is_told_it_is_live(monkeypatch):
+    """A second device opening the panel on a page that sits still gets no new
+    status from the hub, so it must be given the one the first viewer has."""
+    sid = "hub-second-viewer"
+    registry.register(sid, "target-1", "tab-1", "http://a/")
+    fakes = []
+
+    async def opener(uri):
+        fake = FakeUpstream(uri)
+        fakes.append(fake)
+        return fake
+
+    monkeypatch.setattr(browser_stream, "_open_upstream", opener)
+    first_ws, second_ws = FakeViewerWS(), FakeViewerWS()
+    hub, first = await browser_stream.attach_viewer(sid, first_ws)
+    assert hub.status is None
+    await hub.repeat_status(first)
+    assert first_ws.sent == []
+    await _wait_for(lambda: fakes and "Page.startScreencast" in fakes[0].methods())
+    fakes[0].feed_frame("A", {"deviceWidth": 10, "deviceHeight": 10})
+    await _wait_for(lambda: any(m.get("state") == "live" for m in first_ws.sent))
+
+    _, second = await browser_stream.attach_viewer(sid, second_ws)
+    try:
+        await asyncio.sleep(0.02)
+        assert not any(m.get("type") == "status" for m in second_ws.sent)
+        await hub.repeat_status(second)
+        assert {"type": "status", "state": "live", "url": "http://a/"} in second_ws.sent
+        assert len(fakes) == 1
+    finally:
+        await browser_stream.detach_viewer(sid, first)
+        await browser_stream.detach_viewer(sid, second)
 
 
 async def test_resize_refreshes_stalled_capture_for_both_viewers(monkeypatch):

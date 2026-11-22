@@ -264,6 +264,89 @@ class TestBrowserPanelWebSocket:
             assert exc.value.code == 4400
 
 
+    def test_design_previews_wait_while_another_viewer_has_control(
+        self, client, monkeypatch
+    ):
+        """A preview restyles the shared page, so it is refused while another
+        viewer is clicking on it. Putting previews back is always allowed."""
+        sent = []
+
+        class Hub(_DummyHub):
+            _attached_target_id = "t-design"
+
+            async def dispatch_design(self, viewer, args):
+                sent.append(args["op"])
+
+        class Broker:
+            state = {
+                "target_id": "t-design",
+                "control": {
+                    "owner": "human",
+                    "viewer_id": "someone-else",
+                    "pending_viewer_id": None,
+                },
+            }
+
+            def attach(self, viewer_id, callback):
+                pass
+
+            async def send(self, viewer_id, message):
+                pass
+
+            async def detach(self, viewer_id):
+                pass
+
+            def identity(self, data):
+                pass
+
+        async def _attach(session_id, websocket):
+            return Hub(), websocket
+
+        async def _detach(session_id, viewer):
+            return None
+
+        registry.register("s1", "t-design", None, "http://page/")
+        monkeypatch.setattr(
+            bp, "authenticate_websocket", AsyncMock(return_value=(True, None))
+        )
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        monkeypatch.setattr(bp, "_browser_running", AsyncMock(return_value=True))
+        monkeypatch.setattr(bp.browser_stream, "attach_viewer", _attach)
+        monkeypatch.setattr(bp.browser_stream, "detach_viewer", _detach)
+        broker = Broker()
+        monkeypatch.setattr(bp.browser_control, "get", lambda sid: broker)
+        style = {
+            "type": "design",
+            "op": "style",
+            "key": "k1",
+            "selector": "h1",
+            "scope": "one",
+            "styles": {"color": "#000000"},
+        }
+        try:
+            with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+                ws.receive_json()
+                ws.receive_json()
+                ws.send_json(style)
+                refused = ws.receive_json()
+                assert refused["type"] == "error"
+                assert "Another device" in refused["message"]
+                ws.send_json({"type": "design", "op": "peek", "on": False})
+                assert ws.receive_json()["type"] == "error"
+                ws.send_json({"type": "design", "op": "reset"})
+                ws.send_json({"type": "design", "op": "rects", "items": []})
+                Broker.state["control"] = {
+                    "owner": "agent",
+                    "viewer_id": None,
+                    "pending_viewer_id": None,
+                }
+                ws.send_json(style)
+                ws.send_json({"type": "pong"})
+        finally:
+            registry.clear("s1")
+        assert sent == ["reset", "rects", "style"]
+
+
 class TestWorkspaceEndpoints:
     @pytest.mark.parametrize("operation", ["register", "poll", "report"])
     def test_requires_panel_token(self, client, operation):
