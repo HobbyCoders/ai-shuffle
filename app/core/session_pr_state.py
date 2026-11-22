@@ -344,7 +344,7 @@ _MAX_REPUBLISHED_REFS = 5
 def find_pull_for_checkout_fallback(
     github_service: Any, repo: str, branch: str, working_dir: str, *,
     session_id: Optional[str] = None, project_id: Optional[str] = None,
-    bypass_negative_cache: bool = False,
+    bypass_negative_cache: bool = False, match_content: bool = False,
 ) -> Any:
     """Discover only a PR containing work made AFTER this branch was created.
 
@@ -354,11 +354,14 @@ def find_pull_for_checkout_fallback(
     Inherited main/parent commits are not this session's work. A PR head may
     precede HEAD because the agent made more local commits after its last push.
 
-    Last, republished work: an agent that rewrites its commits (to fix sign-off
+    Last, with ``match_content`` (sidebar reconcile only; Ship It still acts on
+    the exact branch, so the Git header must not offer a PR it cannot merge),
+    republished work: an agent that rewrites its commits (to fix sign-off
     trailers, say) and pushes them under a NEW branch name leaves no shared
     commit. A same-repository PR from a local or remote-tracking branch whose
-    head has exactly the tree of one of this branch's own commits (never the
-    creation point's tree, never content already on the base) is this work.
+    head has exactly the tree of one of this branch's own commits is this work.
+    Own commits exclude the creation point's tree and anything reachable from
+    a base ref (main merged in brings other PRs' squash commits).
 
     Local git gates precede gh calls. A five-minute negative cache is keyed by
     checkout, HEAD, upstream and the content-matching branch names (plus
@@ -413,28 +416,37 @@ def find_pull_for_checkout_fallback(
     # Republished work: the same content pushed again under another name with
     # rewritten commits (fixed sign-offs, squashed history). No PR commit is
     # then on this branch, so only content identity can prove ownership.
-    own_trees = set(git(
-        "log", "--format=%T", f"--max-count={_MAX_OWN_TREES}", f"{creation_sha}..{head_sha}", check=True,
-    ).stdout.split())
-    own_trees.discard(git("rev-parse", f"{creation_sha}^{{tree}}", check=True).stdout.strip())
-    skip_names = bases | {branch, upstream_branch, "HEAD"}
-    republished_names: set[str] = set()
-    for line in git(
-        "for-each-ref", "--format=%(refname)%00%(tree)", "refs/heads", "refs/remotes", check=True,
-    ).stdout.splitlines():
-        ref, _, tree = line.partition("\0")
-        if tree not in own_trees:
-            continue
-        if ref.startswith("refs/heads/"):
-            name = ref.removeprefix("refs/heads/")
-        else:
-            name = ref.removeprefix("refs/remotes/").partition("/")[2]
-        if name and name not in skip_names:
-            republished_names.add(name)
-    republished = sorted(republished_names)[:_MAX_REPUBLISHED_REFS]
+    own_trees: set[str] = set()
+    republished: list[str] = []
+    if match_content:
+        refs = []
+        for line in git(
+            "for-each-ref", "--format=%(refname)%00%(objectname)%00%(tree)",
+            "refs/heads", "refs/remotes", check=True,
+        ).stdout.splitlines():
+            ref, _, rest = line.partition("\0")
+            sha, _, tree = rest.partition("\0")
+            if ref.startswith("refs/heads/"):
+                name = ref.removeprefix("refs/heads/")
+            else:
+                name = ref.removeprefix("refs/remotes/").partition("/")[2]
+            refs.append((name, sha, tree))
+        # Commits merged in from a base (main merged into this branch) are
+        # someone else's work, e.g. another PR's squash commit.
+        base_shas = sorted({sha for name, sha, _ in refs if name in bases and sha})
+        own_trees = set(git(
+            "log", "--format=%T", f"--max-count={_MAX_OWN_TREES}", head_sha,
+            "--not", creation_sha, *base_shas, check=True,
+        ).stdout.split())
+        own_trees.discard(git("rev-parse", f"{creation_sha}^{{tree}}", check=True).stdout.strip())
+        skip_names = bases | {branch, upstream_branch, "HEAD"}
+        republished = sorted({
+            name for name, _, tree in refs
+            if name and name not in skip_names and tree in own_trees
+        })[:_MAX_REPUBLISHED_REFS]
 
     cache_key = (working_dir, head_sha, upstream_name, repo, branch, creation_sha,
-                 tuple(sorted(bases)), tuple(republished))
+                 tuple(sorted(bases)), match_content, tuple(republished))
     if not bypass_negative_cache and _fallback_misses.get(cache_key):
         return None
 
@@ -479,13 +491,13 @@ def find_pull_for_checkout_fallback(
         # Content already on the base before this branch existed is not ours.
         return tree.returncode == 0 and tree.stdout.strip() in own_trees and not ancestor(sha, creation_sha)
 
-    for name in republished:
-        if discovered:
-            break
-        discovered = [
-            pr for pr in github_service.list_pulls(repo, state="all", limit=100, head=name)
-            if getattr(pr, "head_branch", None) == name and same_content(pr)
-        ]
+    if not discovered:
+        # Every matching name: a closed republish must not hide its replacement.
+        for name in republished:
+            discovered += [
+                pr for pr in github_service.list_pulls(repo, state="all", limit=100, head=name)
+                if getattr(pr, "head_branch", None) == name and same_content(pr)
+            ]
     if not discovered:
         _fallback_misses.set(cache_key, True)
         return None
@@ -634,7 +646,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                     pr = await asyncio.to_thread(
                         find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
-                        bypass_negative_cache=force,
+                        bypass_negative_cache=force, match_content=True,
                     )
             if (pr is None and pr_number and (not branch or not checkout_available)
                     and _repo_owns_url(repo, session.get("pr_url"))):

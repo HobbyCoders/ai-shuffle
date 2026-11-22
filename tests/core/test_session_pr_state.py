@@ -825,14 +825,56 @@ async def test_republished_branch_invalidates_cached_miss(pr_checkout):
     gh.list_pulls.return_value = []
     gh.list_commit_pulls.return_value = []
 
-    async def lookup():
-        return await asyncio.to_thread(find_pull_for_checkout_fallback, gh, 'o/r', 'feat/local', str(pr_checkout))
+    async def lookup(**kwargs):
+        return await asyncio.to_thread(
+            find_pull_for_checkout_fallback, gh, 'o/r', 'feat/local', str(pr_checkout), **kwargs)
 
-    assert await lookup() is None
+    assert await lookup(match_content=True) is None
     rewritten = _republish(pr_checkout, 'feat/republished')  # same HEAD and upstream
     gh.list_pulls.return_value = [_checkout_pull(23, 'MERGED', rewritten, head='feat/republished')]
-    found = await lookup()
+    # The Git header (Ship It acts on the exact branch) never matches by content.
+    assert await lookup() is None
+    gh.list_pulls.assert_not_called()
+    found = await lookup(match_content=True)
     assert found is not None and found.number == 23
+
+
+@pytest.mark.asyncio
+async def test_republished_fallback_ignores_squash_merged_in_from_main(mock_db, pr_checkout):
+    """Merging main brings another PR's squash commit, whose tree matches that PR's branch."""
+    from tests.git_repo_helpers import commit_file, git
+
+    creation = git(pr_checkout, 'rev-parse', 'HEAD')
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    git(pr_checkout, 'checkout', '-q', '-b', 'feat/other', creation)
+    other = commit_file(pr_checkout, 'other.txt', 'other work', 'other session commit')
+    squash = git(pr_checkout, 'commit-tree', f'{other}^{{tree}}', '-p', 'origin/main', '-m', 'squash')
+    git(pr_checkout, 'push', '-q', 'origin', f'{squash}:refs/heads/main')
+    git(pr_checkout, 'fetch', '-q', 'origin')
+    git(pr_checkout, 'checkout', '-q', 'feat/local')
+    git(pr_checkout, 'merge', '-q', '--no-edit', 'origin/main')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, gh = await _reconcile_checkout(
+        sid, pr_checkout, pulls=[_checkout_pull(31, 'MERGED', other, head='feat/other')])
+    assert ok
+    assert database.get_session(sid)['pr_number'] is None
+    assert all(c.kwargs['head'] != 'feat/other' for c in gh.list_pulls.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_republished_fallback_prefers_open_replacement(mock_db, pr_checkout):
+    from tests.git_repo_helpers import commit_file
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    first = _republish(pr_checkout, 'feat/a-republished', message='first try')
+    second = _republish(pr_checkout, 'feat/b-republished', message='second try')
+    pulls = [_checkout_pull(23, 'CLOSED', first, head='feat/a-republished'),
+             _checkout_pull(24, 'OPEN', second, head='feat/b-republished')]
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, _ = await _reconcile_checkout(sid, pr_checkout, pulls=pulls)
+    assert ok
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (24, 'open')
 
 
 @pytest.mark.asyncio
