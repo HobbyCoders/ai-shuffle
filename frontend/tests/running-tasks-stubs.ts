@@ -3,6 +3,9 @@
 // the production imports here; RunningTasksFixture.svelte drives them.
 import { writable, get } from 'svelte/store';
 export * from '../src/lib/utils/platform';
+// The real modules behind the rest of their names; the fakes below win.
+export * from '../src/lib/api/sessions';
+export * from '../src/lib/services/session-navigation';
 import type { UiPlatform } from '../src/lib/utils/platform';
 import type { Task } from '../src/lib/stores/types';
 import type { SwarmSnapshot } from '../src/lib/utils/swarm';
@@ -62,6 +65,15 @@ export async function stopSessionTask(_sessionId: string, taskId: string) {
 	return { ok: exists };
 }
 
+/** Chats streaming on any device: none in the fixture. */
+export const streamingSessions = writable<Map<string, unknown>>(new Map());
+
+export const interrupted: string[] = [];
+export async function interruptSession(sessionId: string) {
+	interrupted.push(sessionId);
+	return { status: 'interrupted', session_id: sessionId };
+}
+
 export const opened: string[] = [];
 export function openSession(sessionId: string) {
 	opened.push(sessionId);
@@ -70,3 +82,4 @@ export function openSessionLink(event: MouseEvent, sessionId: string) {
 	event.preventDefault();
 	openSession(sessionId);
 }
+export const openSubagentLink = openSessionLink;

@@ -5,11 +5,12 @@
  * (the session store's `activeTasks`), its swarm workflows (the swarms store)
  * and its subagent cards (for each agent's transcript). A swarm is ONE row in
  * the Agents group: its own registry task (id = swarm id) and its members'
- * tasks fold into it instead of showing as separate rows.
+ * tasks fold into it instead of showing as separate rows. Chats it started
+ * with StartSession that still work are rows in the Agents group too.
  */
 import type { ChatMessage, Task } from '$lib/stores/types';
 import { isSwarmActive, type SwarmSnapshot, type SwarmTask } from '$lib/utils/swarm';
-import { linkedTranscripts, transcriptForTask } from '$lib/utils/background-work';
+import { linkedTranscripts, transcriptForTask, type StartedChat } from '$lib/utils/background-work';
 import { taskModel, type TaskModel } from '$lib/utils/task-model';
 import { isQueuedSummary } from '$lib/utils/subagent-status';
 import { transferTarget } from './watch-placement';
@@ -61,7 +62,15 @@ export interface SwarmRow extends RowBase {
 	runningMembers: number;
 }
 
-export type RunRow = TaskRow | SwarmRow;
+/** A full chat this one started (StartSession); Stop interrupts it. */
+export interface ChatRow extends RowBase {
+	type: 'chat';
+	kind: 'agent';
+	/** The chat itself (same as `id`). */
+	transcriptSessionId: string;
+}
+
+export type RunRow = TaskRow | SwarmRow | ChatRow;
 
 /** A row the user stopped from the list, kept so it can read "Stopped". */
 export interface StoppedRecord {
@@ -74,6 +83,8 @@ export interface BuildRowsInput {
 	tasks: readonly Task[];
 	swarms: readonly SwarmSnapshot[];
 	messages: readonly ChatMessage[];
+	/** Chats this one started that are still working. */
+	chats?: readonly StartedChat[];
 	/** Row keys whose stop is in flight or confirmed but not yet off the list. */
 	stopping?: ReadonlySet<string>;
 	/** Rows the user stopped, by key. */
@@ -104,8 +115,9 @@ export function taskWorker(task: Pick<Task, 'worker' | 'summary'>, defaultWorker
 
 export const taskKey = (id: string) => `task:${id}`;
 export const swarmKey = (id: string) => `swarm:${id}`;
+export const chatKey = (id: string) => `chat:${id}`;
 
-export function buildRows({ tasks, swarms, messages, stopping, stopped, defaultWorker }: BuildRowsInput): RunRow[] {
+export function buildRows({ tasks, swarms, messages, chats, stopping, stopped, defaultWorker }: BuildRowsInput): RunRow[] {
 	const linked = linkedTranscripts(messages);
 	const running = tasks.filter((t) => t.status === 'running');
 	const byId = new Map(running.map((t) => [t.id, t]));
@@ -174,6 +186,32 @@ export function buildRows({ tasks, swarms, messages, stopping, stopped, defaultW
 		});
 	}
 
+	// A started chat a task row already opens is not listed twice.
+	const covered = new Set<string>();
+	for (const row of rows) {
+		if (row.type === 'task' && row.transcriptSessionId) covered.add(row.transcriptSessionId);
+		if (row.type === 'swarm') for (const m of row.members) if (m.transcriptSessionId) covered.add(m.transcriptSessionId);
+	}
+	for (const chat of chats ?? []) {
+		if (covered.has(chat.id)) continue;
+		const key = chatKey(chat.id);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		rows.push({
+			type: 'chat',
+			key,
+			id: chat.id,
+			kind: 'agent',
+			name: chat.title,
+			// A child chat may run elsewhere: name its worker only when known.
+			worker: chat.worker ?? '',
+			startedAt: chat.startedAt,
+			endedAt: null,
+			state: stopping?.has(key) ? 'stopping' : 'running',
+			transcriptSessionId: chat.id
+		});
+	}
+
 	// Stopped rows the user stopped here, once they left the running list.
 	for (const [key, record] of Object.entries(stopped ?? {})) {
 		if (seen.has(key)) continue;
@@ -218,13 +256,18 @@ export function groupRows(rows: readonly RunRow[]): { agents: RunRow[]; shell: R
 	};
 }
 
-/** Running counts (stopped rows excluded). A swarm counts once, as an agent. */
-export function countRows(rows: readonly RunRow[]): { running: number; agents: number; shell: number } {
+/**
+ * Running counts (stopped rows excluded). A swarm counts once, as an agent.
+ * `agents` includes started chats (the Agents filter shows them); `chats`
+ * counts those alone so the summary can name them.
+ */
+export function countRows(rows: readonly RunRow[]): { running: number; agents: number; shell: number; chats: number } {
 	const live = rows.filter((r) => r.state !== 'stopped');
 	return {
 		running: live.length,
 		agents: live.filter((r) => r.kind === 'agent').length,
-		shell: live.filter((r) => r.kind === 'shell').length
+		shell: live.filter((r) => r.kind === 'shell').length,
+		chats: live.filter((r) => r.type === 'chat').length
 	};
 }
 
@@ -233,10 +276,13 @@ export function plural(n: number, noun: string): string {
 	return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }
 
-/** "2 agents · 1 shell task", omitting a zero side unless both are zero. */
-export function countSummary(counts: { agents: number; shell: number }): string {
+/** "2 agents · 1 chat · 1 shell task", omitting zero parts unless all are zero. */
+export function countSummary(counts: { agents: number; shell: number; chats?: number }): string {
+	const chats = counts.chats ?? 0;
+	const agents = counts.agents - chats;
 	const parts: string[] = [];
-	if (counts.agents) parts.push(plural(counts.agents, 'agent'));
+	if (agents > 0) parts.push(plural(agents, 'agent'));
+	if (chats) parts.push(plural(chats, 'chat'));
 	if (counts.shell) parts.push(plural(counts.shell, 'shell task'));
 	return parts.join(' · ') || 'Nothing running';
 }
@@ -246,11 +292,15 @@ export function stoppableRows(rows: readonly RunRow[]): RunRow[] {
 	return rows.filter((r) => r.state === 'running');
 }
 
-/** The confirm question, naming how many it stops and what. */
-export function stopAllQuestion(n: number, filter: RunFilter): string {
-	if (filter === 'agents') return `Stop ${plural(n, 'agent')}?`;
-	if (filter === 'shell') return `Stop ${plural(n, 'shell task')}?`;
-	return `Stop ${plural(n, 'task')}?`;
+/**
+ * The confirm question, naming how many it stops and what. `chats` of the `n`
+ * are started chats, named apart: stopping one interrupts that whole chat.
+ */
+export function stopAllQuestion(n: number, filter: RunFilter, chats = 0): string {
+	const rest = n - chats;
+	const noun = filter === 'agents' ? 'agent' : filter === 'shell' ? 'shell task' : 'task';
+	const parts = [rest > 0 ? plural(rest, noun) : '', chats > 0 ? plural(chats, 'chat') : ''].filter(Boolean);
+	return `Stop ${parts.join(' and ') || plural(0, noun)}?`;
 }
 
 /** "45s", "1m 20s", "1h 5m". */

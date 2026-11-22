@@ -1,27 +1,11 @@
 /**
- * A chat's background work, as plain lines.
+ * A chat's background work beyond its own tasks.
  *
- * Built from what the chat's view already receives: its running background
- * tasks (with the worker chat a Task card links to) and the chats it started
- * with StartSession that are still working. No task ids, agent names or model
- * names reach the line; only what the job is about and how long it has run.
+ * Built from what the chat's view already receives: the worker chat each Task
+ * card links to, and the chats it started with StartSession that are still
+ * working. The running-tasks list shows both beside its subagents and swarms.
  */
 import type { ChatMessage, Task } from '$lib/stores/types';
-
-export type BackgroundJobStop =
-	| { kind: 'task'; taskId: string }
-	| { kind: 'session'; sessionId: string };
-
-export interface BackgroundJob {
-	key: string;
-	/** What the job is about, in the words it was started with. */
-	label: string;
-	/** Epoch ms the job started, when known. */
-	startedAt: number | null;
-	/** The job's own chat, when it has one. */
-	sessionId: string | null;
-	stop: BackgroundJobStop;
-}
 
 /** The session fields this reads; a subset of the API's Session row. */
 export interface BackgroundWorkSession {
@@ -32,14 +16,25 @@ export interface BackgroundWorkSession {
 	has_running_tasks?: boolean;
 	parked_task_kind?: string | null;
 	created_at?: string;
+	device_name?: string | null;
 }
 
-export interface BackgroundWorkInput {
-	tasks: readonly Task[];
+export interface StartedChatsInput {
 	messages: readonly ChatMessage[];
 	sessions: readonly BackgroundWorkSession[];
 	/** Sessions streaming on any device (ids). */
 	streaming: ReadonlySet<string> | ReadonlyMap<string, unknown>;
+}
+
+/** A chat this one started (StartSession) that is still working. */
+export interface StartedChat {
+	id: string;
+	/** Its title, or the title it was started with. */
+	title: string;
+	/** Epoch ms its current work started, when known. */
+	startedAt: number | null;
+	/** The worker it runs on, when the session list names one. */
+	worker: string | null;
 }
 
 const START_SESSION = /(^|__)StartSession$/;
@@ -62,7 +57,7 @@ function startedSessionId(message: ChatMessage): string | null {
 	return typeof result === 'string' ? (result.match(SESSION_ID)?.[1] ?? null) : null;
 }
 
-function isWorking(session: BackgroundWorkSession, streaming: BackgroundWorkInput['streaming']): boolean {
+function isWorking(session: BackgroundWorkSession, streaming: StartedChatsInput['streaming']): boolean {
 	return streaming.has(session.id)
 		|| session.remote_runtime_state === 'working'
 		|| session.remote_runtime_state === 'parked'
@@ -94,60 +89,26 @@ export function transcriptForTask(task: Pick<Task, 'id' | 'toolUseId'>, linked: 
 	return (task.toolUseId && linked.get(task.toolUseId)) || linked.get(task.id) || null;
 }
 
-export function buildBackgroundJobs({ tasks, messages, sessions, streaming }: BackgroundWorkInput): BackgroundJob[] {
-	const linked = linkedTranscripts(messages);
-	const started: { id: string; title: string; at: number | null }[] = [];
+/** The chats this one started that are still working, once each, in start order. */
+export function startedChats({ messages, sessions, streaming }: StartedChatsInput): StartedChat[] {
+	const byId = new Map(sessions.map((session) => [session.id, session]));
+	const chats: StartedChat[] = [];
+	const seen = new Set<string>();
 	for (const message of messages) {
 		if (message.type === 'subagent') continue;
 		const id = startedSessionId(message);
-		if (id) {
-			const input = (message.toolInput ?? {}) as { title?: unknown };
-			started.push({ id, title: typeof input.title === 'string' ? input.title : '', at: parseTime(message.timestamp) });
-		}
-	}
-
-	const jobs: BackgroundJob[] = [];
-	const seen = new Set<string>();
-	for (const task of tasks) {
-		if (task.status !== 'running') continue;
-		const sessionId = transcriptForTask(task, linked);
-		if (sessionId) seen.add(sessionId);
-		jobs.push({
-			key: `task:${task.id}`,
-			label: plain(task.subject) || plain(task.summary) || 'Background job',
-			startedAt: parseTime(task.startedAt),
-			sessionId,
-			stop: { kind: 'task', taskId: task.id }
-		});
-	}
-
-	const byId = new Map(sessions.map((session) => [session.id, session]));
-	for (const chat of started) {
-		if (seen.has(chat.id)) continue;
-		seen.add(chat.id);
+		if (!id || seen.has(id)) continue;
+		seen.add(id);
 		// A chat missing from the loaded list still counts while it streams.
-		const session = byId.get(chat.id);
-		if (!(session ? isWorking(session, streaming) : streaming.has(chat.id))) continue;
-		jobs.push({
-			key: `chat:${chat.id}`,
-			label: plain(session?.title) || plain(chat.title) || 'Background job',
-			startedAt: parseTime(session?.work_started_at) ?? chat.at ?? parseTime(session?.created_at),
-			sessionId: chat.id,
-			stop: { kind: 'session', sessionId: chat.id }
+		const session = byId.get(id);
+		if (!(session ? isWorking(session, streaming) : streaming.has(id))) continue;
+		const input = (message.toolInput ?? {}) as { title?: unknown };
+		chats.push({
+			id,
+			title: plain(session?.title) || plain(typeof input.title === 'string' ? input.title : '') || 'Chat',
+			startedAt: parseTime(session?.work_started_at) ?? parseTime(message.timestamp) ?? parseTime(session?.created_at),
+			worker: plain(session?.device_name) || null
 		});
 	}
-
-	// Longest-running first, so lines keep their place as new work starts.
-	return jobs.sort((a, b) => (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity));
-}
-
-/** "just started", "6 min", "1 h 5 min". */
-export function formatJobAge(startedAt: number | null, now: number): string | null {
-	if (startedAt === null) return null;
-	const minutes = Math.floor(Math.max(0, now - startedAt) / 60_000);
-	if (minutes < 1) return 'just started';
-	if (minutes < 60) return `${minutes} min`;
-	const hours = Math.floor(minutes / 60);
-	const rest = minutes % 60;
-	return rest ? `${hours} h ${rest} min` : `${hours} h`;
+	return chats;
 }

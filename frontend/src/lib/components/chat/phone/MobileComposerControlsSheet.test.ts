@@ -6,11 +6,18 @@ import type { ComposerSheetProps } from '../composer-shell';
 import { EFFORT_OPTIONS, NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT } from '$lib/constants/model-effort';
 import MobileComposerControlsSheet from './MobileComposerControlsSheet.svelte';
 import '$lib/test-stubs/composer-dom';
+import { activeSession, streamingSessions } from '$lib/stores/active-session';
+import { swarms } from '$lib/stores/swarms';
 
 // Exercise the actual portaled sheet; unrelated pages/menus do not produce
 // model capabilities. Preference reconciliation is exercised by the phone
 // journey, not these mocks; the original CI transition's producer is unproven.
-vi.mock('$lib/stores/active-session', () => ({ activeSession: writable({ sessionId: null, messages: [], activeTasks: [] }) }));
+vi.mock('$lib/stores/active-session', () => ({
+ activeSession: writable({ sessionId: null, messages: [] as unknown[], activeTasks: [] as unknown[] }),
+ streamingSessions: writable(new Set<string>())
+}));
+vi.mock('$lib/stores/app-data.svelte', () => ({ sessions: writable<unknown[]>([]) }));
+vi.mock('$lib/stores/swarms', () => ({ swarms: writable({ bySession: {}, errors: {} }) }));
 vi.mock('$lib/stores/watches', () => ({ watches: { ...writable({ list: [], preferredWorkerId: null }), track: () => () => {} } }));
 vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No router in this component test'); } }));
 vi.mock('$lib/components/chat/ContextPillBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -141,5 +148,40 @@ describe('phone controls panel keeps keyboard focus while open (#1407)', () => {
   const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
   close.dispatchEvent(event);
   expect(event.defaultPrevented).toBe(false);
+ });
+});
+
+describe('phone Controls running count', () => {
+ it('counts a chat this one started as running work, beside its tasks', () => {
+  const started = {
+   id: 'm1', role: 'assistant', content: '', type: 'tool_use', toolName: 'mcp__fluid_bundled__mcp__builtins__StartSession',
+   toolInput: { title: 'Clean worktrees' }, toolStatus: 'complete', toolResult: JSON.stringify({ session_id: 'chat-a' })
+  };
+  (activeSession as unknown as { set: (v: unknown) => void }).set({ sessionId: 's1', messages: [started], activeTasks: [] });
+  (streamingSessions as unknown as { set: (v: unknown) => void }).set(new Set(['chat-a']));
+  render(MobileComposerControlsSheet, props());
+  const chip = document.querySelector<HTMLElement>('.mcp-chip.run');
+  expect(chip?.textContent).toContain('1 task running');
+  expect(chip?.getAttribute('aria-label')).toBe('1 running: 1 chat. Open the list');
+  expect(chip?.classList.contains('quiet')).toBe(false);
+ });
+
+ it('counts a swarm once, as the list shows it, beside a started chat', () => {
+  const started = {
+   id: 'm1', role: 'assistant', content: '', type: 'tool_use', toolName: 'mcp__fluid_bundled__mcp__builtins__StartSession',
+   toolInput: { title: 'Clean worktrees' }, toolStatus: 'complete', toolResult: JSON.stringify({ session_id: 'chat-a' })
+  };
+  const running = (id: string) => ({ id, subject: id, status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: null, updatedAt: null });
+  (activeSession as unknown as { set: (v: unknown) => void }).set({ sessionId: 's1', messages: [started], activeTasks: [running('swarm_1'), running('m1')] });
+  (streamingSessions as unknown as { set: (v: unknown) => void }).set(new Set(['chat-a']));
+  (swarms as unknown as { set: (v: unknown) => void }).set({
+   bySession: { s1: { swarm_1: { id: 'swarm_1', session_id: 's1', title: 'Review', status: 'running', created_at: '', updated_at: '',
+    tasks: [{ id: 'code', title: 'Code', agent: 'general-purpose', depends_on: [], status: 'running', task_id: 'm1' }] } } },
+   errors: {}
+  });
+  render(MobileComposerControlsSheet, props());
+  const chip = document.querySelector<HTMLElement>('.mcp-chip.run');
+  expect(chip?.textContent).toContain('2 tasks running');
+  expect(chip?.getAttribute('aria-label')).toBe('2 running: 1 agent · 1 chat. Open the list');
  });
 });

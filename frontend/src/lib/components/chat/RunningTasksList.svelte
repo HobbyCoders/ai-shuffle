@@ -2,9 +2,11 @@
 	/**
 	 * RunningTasksList — the chat's running background work in one list (#1816).
 	 *
-	 * Agents (subagents and swarms), Shell tasks and Watches, grouped. A swarm is ONE row
-	 * that expands to its member tasks, each with its own state, transcript and
-	 * stop, plus a stop for the whole swarm. Agent rows open the subagent's chat.
+	 * Agents (subagents, swarms and chats this one started), Shell tasks and
+	 * Watches, grouped. A swarm is ONE row that expands to its member tasks, each
+	 * with its own state, transcript and stop, plus a stop for the whole swarm.
+	 * Agent rows open the subagent's chat; a started chat's row opens that chat
+	 * and its Stop interrupts it.
 	 *
 	 * variant="inline" sits under the last reply: a collapsible grouped list
 	 * (capped height past a handful of rows, with "Show all" for search and
@@ -53,6 +55,7 @@
 		Eye,
 		LoaderCircle,
 		MessageSquareText,
+		MessagesSquare,
 		Pause,
 		Play,
 		Search,
@@ -61,13 +64,15 @@
 		Workflow,
 		X
 	} from 'lucide-svelte';
-	import { activeSession, type ActiveSessionState } from '$lib/stores/active-session';
+	import { activeSession, streamingSessions, type ActiveSessionState } from '$lib/stores/active-session';
+	import { sessions } from '$lib/stores/app-data.svelte';
+	import { startedChats } from '$lib/utils/background-work';
 	import { runningTasksOpen } from '$lib/stores/expansion-preferences';
 	import { swarms } from '$lib/stores/swarms';
 	import { watches } from '$lib/stores/watches';
 	import { refreshWorkerPresence, watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
-	import { stopSessionTask } from '$lib/api/sessions';
+	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
 	import { cancelLimitResume } from '$lib/api/limit-resume';
 	import { pausedLabel, pausedWorkers } from './limit-resume';
 	import { notify } from '$lib/stores/notifications';
@@ -199,6 +204,7 @@
 		confirmingSwarm = null;
 		expanded = {};
 		stopping = new Set();
+		confirmedStops.clear();
 		stopped = {};
 		confirmingWatch = null;
 		stoppedWatches = new Set();
@@ -209,7 +215,9 @@
 		ownSheetOpen = false;
 	}
 
-	const rows = $derived(buildRows({ tasks, swarms: sessionSwarms, messages, stopping, stopped, defaultWorker }));
+	// Chats this one started (StartSession) that still work, beside its agents.
+	const chats = $derived(startedChats({ messages, sessions: $sessions ?? [], streaming: $streamingSessions ?? new Set<string>() }));
+	const rows = $derived(buildRows({ tasks, swarms: sessionSwarms, messages, chats, stopping, stopped, defaultWorker }));
 	// Workers a usage limit paused, by task id: their resume time (#1831).
 	const paused = $derived(pausedWorkers(messages));
 	const counts = $derived(countRows(rows));
@@ -280,15 +288,19 @@
 		}
 	});
 
-	// A stop in flight whose row has left the running list is settled.
+	// A confirmed stop whose row has left the running list is settled. Kept
+	// apart from `stopped` (which the empty list forgets) so a started chat that
+	// runs again under the same id offers Stop, not a stale spinner.
+	const confirmedStops = new Set<string>();
 	$effect(() => {
 		const runningKeys = new Set(rows.filter((r) => r.state !== 'stopped').map((r) => r.key));
 		untrack(() => {
 			let changed = false;
 			const next = new Set(stopping);
 			for (const key of stopping) {
-				if (!runningKeys.has(key) && stopped[key]) {
+				if (!runningKeys.has(key) && (stopped[key] || confirmedStops.has(key))) {
 					next.delete(key);
+					confirmedStops.delete(key);
 					changed = true;
 				}
 			}
@@ -376,13 +388,22 @@
 			} catch (error) {
 				if (!quiet) notify.error(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.");
 			}
+		} else if (row.type === 'chat') {
+			try {
+				await interruptSession(row.id);
+				ok = true;
+			} catch {
+				if (!quiet) notify.error("Couldn't stop the chat. It may have already finished.");
+			}
 		} else {
 			ok = await stopTask(row.id);
 			if (!ok && !quiet) notify.error("Couldn't stop the task. It may have already finished.");
 		}
 		if (sessionId !== requestedSessionId || !canAct()) return ok;
-		if (ok) remember(row);
-		else markStopping(row.key, false);
+		if (ok) {
+			confirmedStops.add(row.key);
+			remember(row);
+		} else markStopping(row.key, false);
 		return ok;
 	}
 
@@ -774,6 +795,7 @@
 		>
 			<span class="row-icon kind-{row.kind}" class:swarm={isSwarm} aria-hidden="true">
 				{#if isSwarm}<Workflow size={size === 'roomy' ? 16 : 13} strokeWidth={1.8} />
+				{:else if row.type === 'chat'}<MessagesSquare size={size === 'roomy' ? 16 : 13} strokeWidth={1.8} />
 				{:else if row.kind === 'shell'}<Terminal size={size === 'roomy' ? 16 : 13} strokeWidth={1.8} />
 				{:else}<Bot size={size === 'roomy' ? 16 : 13} strokeWidth={1.8} />{/if}
 			</span>
@@ -790,14 +812,22 @@
 					<ChevronDown size={14} class={open ? 'swarm-chev open' : 'swarm-chev'} aria-hidden="true" />
 				</button>
 			{:else}
-				<span class="row-name" class:mono={row.kind === 'shell'} title={row.name}><span class="name-text">{row.name}</span>{#if row.model}<span class="model-chip" title="Model: {row.model.raw}">{row.model.label}</span>{/if}</span>
+				<span class="row-name" class:mono={row.kind === 'shell'} title={row.type === 'chat' ? `Chat: ${row.name}` : row.name}><span class="name-text">{row.name}</span>{#if row.type === 'task' && row.model}<span class="model-chip" title="Model: {row.model.raw}">{row.model.label}</span>{/if}</span>
 			{/if}
 			<span class="row-meta">
 				<b class="meta-time">{row.state === 'stopped' ? 'Stopped' : row.type === 'task' && row.queued ? 'Queued' : elapsedOf(row)}</b>
-				<span class="meta-worker" title="Runs on {row.worker}">{row.worker}</span>
+				{#if row.worker}<span class="meta-worker" title="Runs on {row.worker}">{row.worker}</span>{/if}
 			</span>
 			<span class="row-actions">
-				{#if row.type === 'task' && row.kind === 'agent' && row.transcriptSessionId}
+				{#if row.type === 'chat'}
+					<button
+						type="button"
+						class="icon-btn"
+						title="Open chat"
+						aria-label="Open chat: {row.name}"
+						onclick={(e) => guardClick(e, () => openTranscript(row.transcriptSessionId))}
+					><MessageSquareText size={size === 'roomy' ? 18 : 14} strokeWidth={1.7} /></button>
+				{:else if row.type === 'task' && row.kind === 'agent' && row.transcriptSessionId}
 					<button
 						type="button"
 						class="icon-btn"
@@ -1191,7 +1221,7 @@
 		</div>
 		{#if confirmingAll}
 			<div class="confirm" role="alertdialog" aria-labelledby="{titleId}-confirm">
-				<span id="{titleId}-confirm">{stopAllQuestion(stopScope.length, filter)}</span>
+				<span id="{titleId}-confirm">{stopAllQuestion(stopScope.length, filter, stopScope.filter((r) => r.type === 'chat').length)}</span>
 				<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
 				<button type="button" class="btn danger" onclick={stopAll}>Stop {stopScope.length}</button>
 			</div>
@@ -1290,7 +1320,7 @@
 		{#if inlineOpen}
 			{#if confirmingAll && !ownSheetOpen}
 				<div class="confirm compact" role="alertdialog" aria-labelledby="{titleId}-inline-confirm">
-					<span id="{titleId}-inline-confirm">{stopAllQuestion(stoppableRows(rows).length, 'all')}</span>
+					<span id="{titleId}-inline-confirm">{stopAllQuestion(stoppableRows(rows).length, 'all', stoppableRows(rows).filter((r) => r.type === 'chat').length)}</span>
 					<button type="button" class="btn ghost" onclick={() => (confirmingAll = false)}>Cancel</button>
 					<button type="button" class="btn danger" onclick={() => { filter = 'all'; query = ''; void stopAll(); }}>Stop {stoppableRows(rows).length}</button>
 				</div>

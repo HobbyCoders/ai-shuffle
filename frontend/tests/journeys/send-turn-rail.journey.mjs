@@ -114,8 +114,8 @@ function composerAtRest(page) {
 	}, undefined, { polling: 'raf', timeout: 15_000 });
 }
 
-/** A chat with two turns and one child chat still running, so the line naming
- * that child sits in the composer's slot above the draft. */
+/** A chat with two turns and one child chat still running. The child is a row
+ * in the transcript's running-tasks list, never a line in the composer's slot. */
 async function openChatWithARunningChild(ctx) {
 	const { page } = ctx;
 	await openStopChat(ctx);
@@ -123,9 +123,10 @@ async function openChatWithARunningChild(ctx) {
 	await pickAccess(page, 'Bypass');
 	await typeAndSend(page, 'start the helper [script:tool-start-running-child]');
 	await waitTurnSettled(page, { text: 'Started the child.', messagesAtLeast: 2 });
-	await page.locator('.input-slot').getByText('Running child job').waitFor({ timeout: 30_000 });
+	await page.locator('[data-transcript-task-row]').getByText('Running child job').waitFor({ timeout: 30_000 });
 	await typeAndSend(page, 'one more turn [script:default]');
 	await waitTurnSettled(page, { messagesAtLeast: 4 });
+	expect(await page.locator('.input-slot').getByText('Running child job').count() === 0, 'the running child is not repeated in the composer slot');
 }
 
 /** What a phone keyboard does: only the visual viewport shrinks, and the app's

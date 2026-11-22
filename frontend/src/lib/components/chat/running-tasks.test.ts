@@ -55,7 +55,33 @@ describe('buildRows', () => {
 		const groups = groupRows(rows);
 		expect(groups.agents.map((r) => r.id)).toEqual(['a', 'c']);
 		expect(groups.shell.map((r) => r.id)).toEqual(['b']);
-		expect(countRows(rows)).toEqual({ running: 3, agents: 2, shell: 1 });
+		expect(countRows(rows)).toEqual({ running: 3, agents: 2, shell: 1, chats: 0 });
+	});
+
+	it('lists a started chat in Agents, after the agents started before it, and names it in the summary', () => {
+		const rows = buildRows({
+			...base,
+			tasks: [task('a')],
+			chats: [{ id: 'chat-a', title: 'Clean worktrees', startedAt: Date.parse('2026-10-04T10:05:00Z'), worker: null }]
+		});
+		// A child chat may run on another worker: unknown stays blank, not the parent's.
+		expect(rows.map((r) => [r.type, r.id, r.worker])).toEqual([['task', 'a', 'DesktopWorker'], ['chat', 'chat-a', '']]);
+		expect(groupRows(rows).agents).toHaveLength(2);
+		expect(visibleRows(rows, 'agents', 'clean').map((r) => r.id)).toEqual(['chat-a']);
+		const counts = countRows(rows);
+		expect(counts).toEqual({ running: 2, agents: 2, shell: 0, chats: 1 });
+		expect(countSummary(counts)).toBe('1 agent · 1 chat');
+		expect(countSummary({ agents: 2, shell: 0, chats: 2 })).toBe('2 chats');
+	});
+
+	it('skips a started chat that a swarm member already opens', () => {
+		const rows = buildRows({
+			...base,
+			swarms: [swarm()],
+			tasks: [task('swarm_1'), task('m1')],
+			chats: [{ id: 'w-code', title: 'Review code chat', startedAt: null, worker: null }]
+		});
+		expect(rows.map((r) => r.type)).toEqual(['swarm']);
 	});
 
 	it('names the model each subagent runs on and finds rows by it (#1827)', () => {
@@ -111,7 +137,7 @@ describe('buildRows', () => {
 		]);
 		expect(row?.type === 'swarm' && row.runningMembers).toBe(1);
 		// The swarm counts once, as an agent.
-		expect(countRows(rows)).toEqual({ running: 2, agents: 1, shell: 1 });
+		expect(countRows(rows)).toEqual({ running: 2, agents: 1, shell: 1, chats: 0 });
 	});
 
 	it('drops a finished swarm whose own task has stopped', () => {
@@ -171,6 +197,12 @@ describe('copy', () => {
 		expect(stopAllQuestion(17, 'all')).toBe('Stop 17 tasks?');
 		expect(stopAllQuestion(1, 'agents')).toBe('Stop 1 agent?');
 		expect(stopAllQuestion(3, 'shell')).toBe('Stop 3 shell tasks?');
+	});
+
+	it('names started chats apart, since stopping one interrupts the whole chat', () => {
+		expect(stopAllQuestion(2, 'agents', 1)).toBe('Stop 1 agent and 1 chat?');
+		expect(stopAllQuestion(4, 'all', 2)).toBe('Stop 2 tasks and 2 chats?');
+		expect(stopAllQuestion(1, 'all', 1)).toBe('Stop 1 chat?');
 	});
 
 	it('formats elapsed time compactly', () => {

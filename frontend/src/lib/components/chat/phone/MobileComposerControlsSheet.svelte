@@ -54,9 +54,12 @@
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
 		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, X, Zap
 	} from 'lucide-svelte';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, streamingSessions } from '$lib/stores/active-session';
+	import { sessions } from '$lib/stores/app-data.svelte';
+	import { startedChats } from '$lib/utils/background-work';
 	import { watches } from '$lib/stores/watches';
-	import { watchCount } from '$lib/components/chat/running-tasks';
+	import { swarms } from '$lib/stores/swarms';
+	import { buildRows, plural, watchCount } from '$lib/components/chat/running-tasks';
 	import { closeDropdown } from '$lib/stores/header-dropdowns';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
@@ -175,16 +178,29 @@
 	/** The tier the next turn asks for, which the quick bar and effort value show. */
 	const labelSpeed = $derived(fastShown ? shownSpeed({ fastSupported, fastEnabled, fastPending, ultrafastSupported, ultrafastEnabled }) : 'standard');
 
-	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
+	// Count the rows the running-tasks list shows: a swarm is one row, and
+	// chats this one started are rows of their own.
+	const runRows = $derived(
+		buildRows({
+			tasks: $activeSession.activeTasks ?? [],
+			swarms: Object.values($swarms.bySession[$activeSession.sessionId ?? ''] ?? {}),
+			messages: $activeSession.messages,
+			chats: startedChats({ messages: $activeSession.messages, sessions: $sessions ?? [], streaming: $streamingSessions ?? new Set<string>() }),
+			defaultWorker: ''
+		})
+	);
+	const runningTasks = $derived(runRows.filter((r) => r.type !== 'chat'));
+	const runningChats = $derived(runRows.length - runningTasks.length);
+	const runningCount = $derived(runRows.length);
 	// The owner's watches (#371) open the same list. They are long-lived, so
 	// they get the chip but not the Controls badge, which means work running now.
 	const liveWatches = $derived($watches.list.filter((w) => w.status !== 'stopped').length);
 	const pausedWatches = $derived($watches.list.filter((w) => w.status === 'paused').length);
 	// A worker chosen for new watches stays changeable with no watch live (#565).
-	const preferenceOnly = $derived(!runningTasks.length && !liveWatches && !!$watches.preferredWorkerId);
+	const preferenceOnly = $derived(!runningCount && !liveWatches && !!$watches.preferredWorkerId);
 	const runSummary = $derived(
-		runningTasks.length
-			? [taskSummary(runningTasks), liveWatches ? watchCount(liveWatches) : ''].filter(Boolean).join(' · ')
+		runningCount
+			? [taskSummary(runningTasks), runningChats ? plural(runningChats, 'chat') : '', liveWatches ? watchCount(liveWatches) : ''].filter(Boolean).join(' · ')
 			: preferenceOnly
 				? 'Where new watches run'
 				: pausedWatches
@@ -192,12 +208,12 @@
 				: 'Watching for changes'
 	);
 	const runHead = $derived(
-		runningTasks.length ? `${runningTasks.length} running` : preferenceOnly ? 'Watches' : watchCount(liveWatches)
+		runningCount ? `${runningCount} running` : preferenceOnly ? 'Watches' : watchCount(liveWatches)
 	);
 	const runChipLabel = $derived(
-		runningTasks.length ? `${runningTasks.length} ${runningTasks.length === 1 ? 'task' : 'tasks'} running` : runHead
+		runningCount ? `${runningCount} ${runningCount === 1 ? 'task' : 'tasks'} running` : runHead
 	);
-	const showRunChip = $derived(runningTasks.length > 0 || liveWatches > 0 || preferenceOnly);
+	const showRunChip = $derived(runningCount > 0 || liveWatches > 0 || preferenceOnly);
 	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
 
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
@@ -928,11 +944,11 @@
 			aria-haspopup="dialog"
 			aria-controls={panelId}
 			aria-expanded={open}
-			aria-label={`All chat controls${runningTasks.length ? `, ${runningTasks.length} running` : ''}`}
+			aria-label={`All chat controls${runningCount ? `, ${runningCount} running` : ''}`}
 			onclick={() => (open ? closePanel() : openPanel('main'))}
 		>
 			<span class="ql">Controls</span>
-			{#if runningTasks.length}<span class="qcount" aria-hidden="true">{runningTasks.length}</span>{/if}
+			{#if runningCount}<span class="qcount" aria-hidden="true">{runningCount}</span>{/if}
 			<ChevronDown size={14} class="qchev" aria-hidden="true" />
 		</button>
 	</div>
@@ -1011,7 +1027,7 @@
 					{#if rendered || panelVisible}
 						{#if showRunChip}
 							<div class="mcp-status">
-									<button type="button" class="mcp-chip run" class:quiet={!runningTasks.length}
+									<button type="button" class="mcp-chip run" class:quiet={!runningCount}
 										aria-label={`${runHead}: ${runSummary}. Open the list`}
 										onclick={(e) => goTo('tasks', e.currentTarget)}>
 										<i aria-hidden="true"></i>{runChipLabel}
