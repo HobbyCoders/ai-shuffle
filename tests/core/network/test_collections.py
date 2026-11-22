@@ -202,7 +202,7 @@ def test_plugin_desired_state_is_published_and_applied(workers, monkeypatch):
         def get_enabled_plugins(self):
             return dict(self.enabled)
 
-        def install_plugin(self, plugin_id, scope="user"):
+        def install_plugin(self, plugin_id, scope="user", enable=True):
             self.calls.append(("install", plugin_id, scope))
             self.installed[plugin_id] = FakePlugin(plugin_id, "1.2.0", True)
             return self.installed[plugin_id]

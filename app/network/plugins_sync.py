@@ -2,9 +2,13 @@
 
 The network carries what a plugin *should* be on every worker (id and
 enabled state) in ``network_plugins_desired``; binaries are never a payload.
-The table's ``config`` column is written as ``{}`` for a new row, never
-updated, and not applied to any worker. A worker
-publishes only a plugin new to the table or a change to its enabled state;
+The table's ``config`` column carries one thing: ``marketplace``, the git
+source (``{"id", "url"}``) of the plugin's marketplace, so a worker that has
+never added that marketplace can add it before installing. Only a plain
+http(s) or ``git@`` URL with no credentials in it is shared; a local or
+credentialed source stays on its worker. A worker
+publishes only a plugin new to the table, a change to its enabled state, or
+a marketplace source the row lacks;
 explicit removals produce tombstones that inventory scans cannot resurrect. An
 explicit install can replace a tombstone. The
 stored version is informational (the last publisher's) and is never enforced.
@@ -12,6 +16,16 @@ Each worker reconciles its user-scope installation against that table:
 install what is desired and missing, enable or disable to match, uninstall
 what a tombstone removed. Project-scope plugins live with the checkout and
 stay local.
+
+A received change is applied once (``apply_desired``). Because that one try
+can fail (marketplace not added yet, offline, a worker that joined later),
+``publish`` also schedules ``reconcile_missing``: every desired plugin that
+is not installed here is installed, retried with a growing delay while it
+keeps failing. It never uninstalls and never changes an installed plugin's
+enabled state; those follow received changes only, so a local toggle that
+has not been published yet is never reverted. Removing a marketplace records
+an uninstall for each of its plugins, otherwise the next reconcile would add
+the marketplace back and reinstall them.
 
 Agent-authored plugins (``<name>@authored``) are not part of this table:
 their drafts and the owner's content-pinned approvals travel as memory
@@ -21,8 +35,12 @@ marketplace.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+import threading
+import time
 from typing import Dict, Iterable, Optional
 
 from app.db.base import get_db
@@ -31,6 +49,15 @@ from app.network import engine
 
 logger = logging.getLogger(__name__)
 _REMOVAL_PREFIX = "network_plugin_uninstall:"
+# The same URL shapes ``add_marketplace`` accepts, minus the GitHub shorthand.
+# The host part admits no ``user:secret@``, so a credentialed URL never matches.
+_SHAREABLE_URL = re.compile(r"^(https?://[\w\-.]+(:\d+)?(/[\w\-./%+@]*)*|git@[\w\-.]+:[\w\-./]+)$")
+_RETRY_FIRST_SECONDS = 300.0
+_RETRY_MAX_SECONDS = 6 * 3600.0
+_retry_lock = threading.Lock()
+_retry: Dict[str, tuple] = {}  # plugin id -> (failures, next attempt on time.monotonic())
+_reconcile_lock = threading.Lock()
+_reconcile_scheduled = False
 
 
 def _pending_removals(cursor):
@@ -75,6 +102,27 @@ def install_plugin(service, plugin_id: str, scope: str, enable: bool):
     return plugin
 
 
+def remove_marketplace(service, marketplace_id: str) -> bool:
+    """Remove a marketplace here and uninstall its plugins on every worker.
+
+    Its plugins are removed with it; without a tombstone for each, the shared
+    rows would still list them and the next reconcile would add the
+    marketplace back from the row's source and reinstall them. Desired rows
+    for plugins that never installed here are covered too, for the same reason.
+    """
+    suffix = "@" + marketplace_id
+    ids = {pid for pid in _user_scope_ids(service) if pid.endswith(suffix)}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM network_plugins_desired")
+        ids |= {r["id"] for r in cursor.fetchall() if r["id"].endswith(suffix)}
+    removed = service.remove_marketplace(marketplace_id)
+    if removed:
+        for plugin_id in sorted(ids):
+            request_uninstall(plugin_id)
+    return removed
+
+
 def _service():
     from app.core.plugin_service import get_plugin_service
     return get_plugin_service()
@@ -108,10 +156,51 @@ def _installed(service=None) -> Dict[str, dict]:
         return {}
 
 
+def _user_scope_ids(service) -> set:
+    """Every user-scope install here, an agent's install awaiting review included."""
+    try:
+        return {p.id for p in service.get_installed_plugins()
+                if getattr(p, "scope", "user") in ("user", "global", None)}
+    except Exception:  # noqa: BLE001
+        logger.debug("Plugin inventory unavailable", exc_info=True)
+        return set()
+
+
+def _config(row) -> dict:
+    value = (row or {}).get("config") or {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _marketplace_sources(service) -> Dict[str, dict]:
+    """``{marketplace id: {"id", "url"}}`` for this worker's shareable git sources."""
+    try:
+        marketplaces = service.get_marketplaces()
+    except Exception:  # noqa: BLE001 — a test double or an unreadable registry shares nothing
+        return {}
+    out = {}
+    for mp in marketplaces:
+        url = getattr(mp, "url", "") or ""
+        if getattr(mp, "source", "git") == "git" and _SHAREABLE_URL.match(url):
+            out[mp.id] = {"id": mp.id, "url": url}
+    return out
+
+
 def refresh_desired_from_installed() -> int:
     """Publish this worker's installed plugins that are new to the desired state
-    or whose enabled state changed; a differing version alone is not published."""
-    installed = _installed()
+    or whose enabled state changed, and a marketplace source a row lacks; a
+    differing version alone is not published."""
+    service = None
+    try:
+        service = _service()
+    except Exception:  # noqa: BLE001
+        pass
+    installed = _installed(service)
+    sources = _marketplace_sources(service) if service is not None else {}
     changed = 0
     with get_db() as conn:
         cursor = conn.cursor()
@@ -123,17 +212,24 @@ def refresh_desired_from_installed() -> int:
             if plugin_id in removed:
                 continue  # it may still be installed while reconciliation is queued or failing
             current = desired.get(plugin_id)
+            config = _config(current)
+            source = sources.get(plugin_id.rpartition("@")[2])
+            # Only fill in a missing source: two workers with different URLs
+            # for one marketplace must not overwrite each other on every scan.
+            add_source = source is not None and not config.get("marketplace")
             # ``apply_desired`` never reinstalls to match a version, so workers
             # holding different versions would overwrite each other's row on
             # every scan. Only a new plugin or an enabled change is published.
-            if current and bool(current.get("enabled")) == info["enabled"]:
+            if current and bool(current.get("enabled")) == info["enabled"] and not add_source:
                 continue
+            if add_source:
+                config = {**config, "marketplace": source}
             cursor.execute(
                 """INSERT INTO network_plugins_desired (id, version, enabled, config, updated_at)
                    VALUES (%s, %s, %s, %s, NOW())
                    ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, enabled = EXCLUDED.enabled,
-                       updated_at = NOW()""",
-                (plugin_id, info["version"], info["enabled"], json.dumps({})))
+                       config = EXCLUDED.config, updated_at = NOW()""",
+                (plugin_id, info["version"], info["enabled"], json.dumps(config)))
             changed += 1
     return changed
 
@@ -143,6 +239,8 @@ def publish(*, ctx: Optional[engine.NetworkContext] = None) -> int:
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
     refresh_desired_from_installed()
+    # After the refresh, so a change made here is in the table first.
+    schedule_reconcile()
     removed = 0
     with get_db() as conn:
         cursor = conn.cursor()
@@ -172,8 +270,8 @@ def apply_desired(record_ids: Iterable[str]) -> int:
     applied = 0
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, version, enabled FROM network_plugins_desired WHERE id IN (%s)" % ",".join(["%s"] * len(ids)),
-                       tuple(ids))
+        cursor.execute("SELECT id, version, enabled, config FROM network_plugins_desired WHERE id IN (%s)"
+                       % ",".join(["%s"] * len(ids)), tuple(ids))
         rows = {r["id"]: dict(r) for r in cursor.fetchall()}
         pending = _pending_removals(cursor)
     for plugin_id in ids:
@@ -187,7 +285,7 @@ def apply_desired(record_ids: Iterable[str]) -> int:
                     applied += 1
                 continue
             if plugin_id not in installed:
-                service.install_plugin(plugin_id, "user")
+                _install_desired(service, plugin_id, row)
                 applied += 1
             if bool(row.get("enabled")):
                 service.enable_plugin(plugin_id)
@@ -195,9 +293,130 @@ def apply_desired(record_ids: Iterable[str]) -> int:
                 service.disable_plugin(plugin_id)
         except Exception:  # noqa: BLE001 — a failed install shows in the plugin UI; sync goes on
             logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
+            _note_failure(plugin_id)
     return applied
+
+
+def _connector(plugin_id: str) -> bool:
+    try:
+        from app.core import connector_packages
+        return connector_packages.kind_for(plugin_id) is not None
+    except Exception:  # noqa: BLE001 — an unknown connector kind is still a connector id
+        return True
+
+
+def _ensure_marketplace(service, plugin_id: str, row) -> None:
+    """Add the plugin's marketplace from the row's shared source if it is missing here."""
+    marketplace_id = plugin_id.rpartition("@")[2]
+    if _connector(plugin_id):
+        return  # connector packages install from the app's own catalog
+    try:
+        known = {mp.id for mp in service.get_marketplaces()}
+    except Exception:  # noqa: BLE001 — let the install report what is wrong
+        return
+    if marketplace_id in known:
+        return
+    source = _config(row).get("marketplace")
+    if not isinstance(source, dict) or source.get("id") != marketplace_id:
+        return  # the install fails with "Marketplace not found" and is retried later
+    url = source.get("url")
+    if not isinstance(url, str) or not _SHAREABLE_URL.match(url):
+        return
+    logger.info("Adding plugin marketplace %s to install %s from another worker", marketplace_id, plugin_id)
+    service.add_marketplace(url, marketplace_id)
+
+
+def _install_desired(service, plugin_id: str, row) -> None:
+    """Install a desired plugin the way the row says (not an explicit install: no publish)."""
+    _ensure_marketplace(service, plugin_id, row)
+    service.install_plugin(plugin_id, "user", enable=bool(row.get("enabled", True)))
+    with _retry_lock:
+        _retry.pop(plugin_id, None)
+
+
+def _note_failure(plugin_id: str) -> None:
+    with _retry_lock:
+        failures = _retry.get(plugin_id, (0, 0.0))[0] + 1
+        delay = min(_RETRY_FIRST_SECONDS * 2 ** (failures - 1), _RETRY_MAX_SECONDS)
+        _retry[plugin_id] = (failures, time.monotonic() + delay)
+
+
+def _due(plugin_id: str) -> bool:
+    with _retry_lock:
+        entry = _retry.get(plugin_id)
+    return entry is None or time.monotonic() >= entry[1]
+
+
+def reconcile_missing() -> int:
+    """Install every desired plugin that is not installed here; return how many.
+
+    Catches up what a single ``apply_desired`` try missed. A plugin that keeps
+    failing waits longer between tries (5 minutes, doubling to 6 hours; a
+    restart tries again at once). Never uninstalls and never changes the
+    enabled state of an installed plugin.
+    """
+    try:
+        service = _service()
+    except Exception:  # noqa: BLE001
+        return 0
+    present = _user_scope_ids(service)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, version, enabled, config FROM network_plugins_desired")
+        rows = [dict(r) for r in cursor.fetchall()]
+        pending = _pending_removals(cursor)
+    installed = 0
+    for row in sorted(rows, key=lambda r: r["id"]):
+        plugin_id = row["id"]
+        if plugin_id in present or plugin_id in pending or _authored(plugin_id) or not _due(plugin_id):
+            continue
+        try:
+            _install_desired(service, plugin_id, row)
+            installed += 1
+            logger.info("Installed %s to match the plugins on the owner's other workers", plugin_id)
+        except Exception as exc:  # noqa: BLE001 — one failure must not stop the others
+            first = plugin_id not in _retry
+            _note_failure(plugin_id)
+            # One warning per plugin per process; retries log at debug.
+            (logger.warning if first else logger.debug)(
+                "Could not install %s to match the owner's other workers (retrying later): %s", plugin_id, exc)
+    return installed
+
+
+def schedule_reconcile() -> None:
+    """Run ``reconcile_missing`` on the plugin I/O thread, once at a time.
+
+    Installs can clone from git, so they never run on the sync thread. With
+    no app loop (tests, scripts) nothing is scheduled.
+    """
+    global _reconcile_scheduled
+    from app.core.global_events import global_events
+    loop = getattr(global_events, "_loop", None)
+    if not loop or loop.is_closed():
+        return
+    with _reconcile_lock:
+        if _reconcile_scheduled:
+            return
+        _reconcile_scheduled = True
+
+    async def run():
+        global _reconcile_scheduled
+        from app.db.async_database import run_plugin_io
+        try:
+            await run_plugin_io(reconcile_missing)
+        except Exception:  # noqa: BLE001
+            logger.warning("Plugin reconcile failed", exc_info=True)
+        finally:
+            with _reconcile_lock:
+                _reconcile_scheduled = False
+
+    try:
+        asyncio.run_coroutine_threadsafe(run(), loop)
+    except RuntimeError:  # the loop closed in between
+        with _reconcile_lock:
+            _reconcile_scheduled = False
 
 
 from app.core.resource_sync import install_database_mutations as _install_resource_sync
 
-_install_resource_sync(globals(), 'plugins', 'request_uninstall install_plugin', scope='shared')
+_install_resource_sync(globals(), 'plugins', 'request_uninstall install_plugin remove_marketplace', scope='shared')
