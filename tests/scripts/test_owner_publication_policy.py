@@ -297,7 +297,11 @@ def test_android_prs_cannot_sign_or_publish_even_as_owner_with_publish_requested
         assert "if" not in config["jobs"][name]
         assert config["jobs"][name].get("permissions", config["permissions"]) == {"contents": "read"}
     build = config["jobs"]["build"]
-    release_steps = [step for step in build["steps"] if "if" in step]
+    # The Robolectric jar cache save is unsigned CI on every event; only a cache hit skips it.
+    cache_save = next(step for step in build["steps"] if step.get("name") == "Save pinned Robolectric jars")
+    assert cache_save["if"] == "steps.robolectric-jars.outputs.cache-hit != 'true'"
+    assert "secrets." not in str(cache_save)
+    release_steps = [step for step in build["steps"] if "if" in step and step is not cache_save]
     assert {step["name"] for step in release_steps} == {
         "Configure Firebase client (optional)", "Decode release keystore", "Build release APK",
         "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files",

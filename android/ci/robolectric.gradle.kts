@@ -13,11 +13,18 @@ val robolectricPins = mapOf(
 )
 // Separate configurations prevent Gradle's version conflict resolution from
 // collapsing all four android-all-instrumented versions to the highest SDK.
-val robolectricJars = robolectricPins.keys.map { coordinate ->
+val robolectricJars = robolectricPins.keys.associateWith { coordinate ->
     configurations.detachedConfiguration(dependencies.create("org.robolectric:$coordinate@jar")).apply {
         isTransitive = false
     }
 }
+// CI restores a dedicated actions/cache here (android.yml). A plain directory of
+// jars, because Gradle ignores files-2.1 copies without its metadata index and
+// asks Maven Central again. Unset (local builds): Gradle's own cache only.
+// Only the android-all runtimes (~670 MB) live here: no Gradle classpath uses
+// them. nativeruntime-dist-compat is also on the test runtime classpath, so it
+// stays in Gradle's cache, which the job's setup-java cache entry carries.
+val robolectricJarCache = providers.environmentVariable("ROBOLECTRIC_JAR_CACHE").orNull?.let(::File)
 // This executes inside the Gradle daemon, after systemProp.* installation.
 // Keep proof of the effective shared policy in debug and Play build logs.
 val downloadAttempts = System.getProperty("org.gradle.internal.repository.max.tentatives")
@@ -30,16 +37,9 @@ val prepareRobolectricDependencies = tasks.register("prepareRobolectricDependenc
     // Deliberately no up-to-date shortcut: recheck bytes even on cache hits.
     doLast {
         val cache = gradle.gradleUserHomeDir.resolve("caches/modules-2/files-2.1/org.robolectric")
-        val present = robolectricPins.keys.count { coordinate ->
-            val (artifact, version) = coordinate.split(":")
-            cache.resolve("$artifact/$version").walkTopDown().any { it.name == "$artifact-$version.jar" }
-        }
-        logger.lifecycle("Robolectric cache before resolve: $present/${robolectricPins.size} pinned jars present")
-        val files = robolectricJars.flatMap { it.resolve() }.toSet()
-        val expectedNames = robolectricPins.mapKeys { (coordinate, _) -> coordinate.replace(":", "-") + ".jar" }
-        check(files.map { it.name }.toSet() == expectedNames.keys) { "Unexpected Robolectric artifacts: $files" }
-        files.forEach { jar ->
-            val expected = expectedNames.getValue(jar.name)
+        val jarCache = robolectricJarCache
+        fun jarName(coordinate: String) = coordinate.replace(":", "-") + ".jar"
+        fun sha256(jar: File): String {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
             jar.inputStream().use { stream ->
                 val buffer = ByteArray(1024 * 1024)
@@ -49,9 +49,51 @@ val prepareRobolectricDependencies = tasks.register("prepareRobolectricDependenc
                     count = stream.read(buffer)
                 }
             }
-            val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }
+        fun inJarCache(coordinate: String) = jarCache != null && coordinate.startsWith("android-all-instrumented:")
+        val cachedCopies = robolectricPins.keys.filter(::inJarCache)
+            .associateWith { jarCache?.resolve(jarName(it))?.takeIf(File::isFile) }
+        val present = robolectricPins.keys.count { coordinate ->
+            val (artifact, version) = coordinate.split(":")
+            cachedCopies[coordinate] != null ||
+                cache.resolve("$artifact/$version").walkTopDown().any { it.name == "$artifact-$version.jar" }
+        }
+        val jarCacheHits = cachedCopies.values.count { it != null }
+        logger.lifecycle("Robolectric cache before resolve: $present/${robolectricPins.size} pinned jars present " +
+            "($jarCacheHits in the CI jar cache${jarCache?.let { " at $it" } ?: ", which is unset"})")
+        // A restored copy is used only when its bytes match the pin; anything
+        // else is discarded and resolved again, then checked like a download.
+        val reused = mutableMapOf<String, File>()
+        cachedCopies.forEach { (coordinate, jar) ->
+            if (jar == null) return@forEach
+            val expected = robolectricPins.getValue(coordinate)
+            if (sha256(jar) == expected) {
+                reused[coordinate] = jar
+                logger.lifecycle("Verified Robolectric dependency: ${jar.name} SHA-256=$expected (CI jar cache)")
+            } else {
+                logger.warn("Discarded $jar: its SHA-256 does not match the pin; resolving it again")
+                jar.delete()
+            }
+        }
+        val resolved = robolectricJars.filterKeys { it !in reused }.values.flatMap { it.resolve() }.toSet()
+        val expectedNames = robolectricPins.mapKeys { (coordinate, _) -> jarName(coordinate) }
+        check((reused.values + resolved).map { it.name }.toSet() == expectedNames.keys) {
+            "Unexpected Robolectric artifacts: ${reused.values + resolved}"
+        }
+        val files = reused.values + resolved.map { jar ->
+            val expected = expectedNames.getValue(jar.name)
+            val actual = sha256(jar)
             check(actual == expected) { "SHA-256 mismatch for $jar: expected $expected, got $actual" }
             logger.lifecycle("Verified Robolectric dependency: ${jar.name} SHA-256=$actual")
+            val coordinate = robolectricPins.keys.single { jarName(it) == jar.name }
+            if (!inJarCache(coordinate)) return@map jar
+            // CI saves this directory right after the step succeeds (android.yml).
+            val kept = jar.copyTo(jarCache!!.resolve(jar.name), overwrite = true)
+            // Drop Gradle's copy so setup-java's Gradle entry does not store the
+            // same ~670 MB again; Gradle refetches a deleted artifact if asked.
+            if (jar.startsWith(cache)) jar.delete()
+            kept
         }
         copy {
             from(files.filter { it.name.startsWith("android-all-instrumented-") })

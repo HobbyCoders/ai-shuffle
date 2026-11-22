@@ -50,6 +50,10 @@ jobs:
     defaults:
       run:
         working-directory: android
+    # Every Gradle run with unit tests re-runs prepareRobolectricDependencies,
+    # so the whole job (not only that step) must see the verified jar cache.
+    env:
+      ROBOLECTRIC_JAR_CACHE: ${{ github.workspace }}/.robolectric-jars
 
     steps:
       - name: Checkout
@@ -72,6 +76,16 @@ jobs:
           # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
           java-version: '21'
           cache: gradle
+          # Its own key: setup-java never re-saves an existing key, and with the
+          # default file list the minified build (no unit tests or lint) saved
+          # it first (run 44961909135), so every run here downloaded the test
+          # and lint classpath. Listing gradle.properties, which the default
+          # patterns miss, makes this hash differ; it is a Gradle input anyway.
+          # setup-java saves only after the whole job succeeds.
+          cache-dependency-path: |
+            android/**/*.gradle*
+            android/**/gradle-wrapper.properties
+            android/gradle.properties
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -99,13 +113,35 @@ jobs:
           npm ci
           bash ../android/scripts/sync-offline-demo.sh
 
-      # Gradle caches these jars under ~/.gradle (covered by setup-java), not
-      # Robolectric's uncached ~/.m2 runtime fetcher. Cold caches work too.
+      # The ~670 MB android-all runtimes live in their own cache, not in Gradle's
+      # (the task drops Gradle's copy): saved right after they verify, it
+      # survives a later test failure, which setup-java's save does not. Before
+      # this, every run downloaded them until Maven Central answered 429 (run
+      # 44984315975). Keyed on the pins; the task re-checks every SHA-256 on a
+      # hit and resolves any missing or mismatched jar. Pull requests read
+      # main's entry; main saves its own the first time it resolves them.
+      - name: Restore pinned Robolectric jars
+        id: robolectric-jars
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.ROBOLECTRIC_JAR_CACHE }}
+          key: robolectric-jars-${{ runner.os }}-${{ hashFiles('android/ci/robolectric.gradle.kts') }}
+
       # android/gradle.properties supplies the transient-transfer retry budget
       # for preparation AND all subsequent Gradle invocations (including Play).
       # No test, compiler or lint task is retried.
       - name: Resolve pinned Robolectric dependencies
         run: ./gradlew :app:prepareRobolectricDependencies --stacktrace
+
+      # Saved right after the jars verified, so a later test or lint failure
+      # does not throw the download away. A failed save never fails the job.
+      - name: Save pinned Robolectric jars
+        if: steps.robolectric-jars.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.ROBOLECTRIC_JAR_CACHE }}
+          key: ${{ steps.robolectric-jars.outputs.cache-primary-key }}
 
       - name: Unit tests and Android lint
         run: |
