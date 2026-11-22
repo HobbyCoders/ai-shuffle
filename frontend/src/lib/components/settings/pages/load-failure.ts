@@ -1,5 +1,5 @@
 /**
- * A failed first load on a preference page (Security, Agents): the row's
+ * A failed first load on a preference page (Security, Agent instructions): the row's
  * one-line hint, the full sentence for a screen reader, and where focus goes
  * when the row's Try again button disappears.
  */
