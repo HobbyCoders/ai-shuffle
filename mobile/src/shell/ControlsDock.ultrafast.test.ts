@@ -1,7 +1,7 @@
 /**
  * OpenAI's Ultrafast tier in the composer: the effort label names and animates
- * the tier in force, the Fast toggle becomes a three-way pick only where the
- * route carries Ultrafast, and a model without it falls back to Fast.
+ * the tier in force, the corner bolt cycles three tiers only where the route
+ * carries Ultrafast, and a model without it falls back to Fast.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
@@ -87,7 +87,10 @@ describe('the effort label shows the speed tier', () => {
 		render(ControlsDock, { props: {} });
 		await tick();
 		await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
-		await fireEvent.click(screen.getByRole('radio', { name: /Ultrafast/ }));
+		// The corner bolt cycles Standard -> Fast -> Ultrafast.
+		await fireEvent.click(screen.getByRole('button', { name: 'Speed: Standard' }));
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Speed: Fast' }));
 		await tick();
 		expect(get(activeSession)).toMatchObject({ fastMode: true, ultrafastMode: true });
 		expect(composerPreferences.speedForModel(ASTRA)).toBe('ultrafast');
