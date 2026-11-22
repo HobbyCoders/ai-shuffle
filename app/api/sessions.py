@@ -2243,8 +2243,18 @@ async def cancel_session_limit_resume(
     """Cancel the resume this chat (or one of its paused Task workers) has
     scheduled. A cancelled worker settles as stopped. ``cancelled`` is false
     when nothing was scheduled."""
-    await require_session(request, session_id)
+    session = await require_session(request, session_id)
     from app.core import limit_resume
+
+    if task_id:
+        # A paused worker's resume is armed on the worker that runs the chat.
+        from app.api.task_stop_owner import forward_paused_task_cancel
+        forwarded = await forward_paused_task_cancel(session, task_id)
+        if forwarded is not None:
+            if "error" in forwarded:
+                raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
+                                    detail=forwarded["detail"])
+            return {"session_id": session_id, "task_id": task_id, "cancelled": forwarded["cancelled"]}
 
     target = session_id
     if task_id:

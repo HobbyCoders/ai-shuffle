@@ -622,7 +622,7 @@ The event log emits `system` frames with subtype `limit_resume` (`system.note` i
 
 **Auth:** Required, with normal session access. Cancelling a per-chat one-shot arm additionally requires the owner. Stopping a paused worker with `task_id`, or cancelling a globally scheduled automatic resume, keeps normal authenticated access.
 
-Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat.
+Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat. When the chat runs on another worker in your network, a `task_id` cancel is sent to that worker, where the resume is scheduled; `409` with a `detail` means that worker could not be reached or needs an update.
 
 ### POST /api/v1/sessions/batch-delete
 
@@ -778,7 +778,7 @@ A swarm left running when the app stopped is settled when the app starts again, 
 
 ### POST /api/sessions/{session_id}/swarms/{swarm_id}/cancel
 
-Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when it cannot be cancelled right now. For a chat that runs on another worker in your network, the cancel is sent to that worker; `409` then also means that worker could not be reached or needs an update, and `detail` says which. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
+Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when it cannot be cancelled right now. For a chat that runs on another worker in your network, the cancel is sent to that worker; `409` then also means that worker could not be reached or needs an update, and `detail` says which. A caller whose access does not include the chat's transcript gets only `id`, `session_id` and `status` in `swarm`, without task briefs or reports. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
 
 ## Vault
 

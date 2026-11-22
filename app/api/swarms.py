@@ -29,13 +29,29 @@ async def cancel_swarm(session_id: str, swarm_id: str, request: Request, token: 
     from app.api.task_stop_owner import forward_swarm_cancel
     forwarded = await forward_swarm_cancel(session, swarm_id)
     if forwarded is not None:
-        if "swarm" in forwarded:
-            return {"swarm": forwarded["swarm"]}
-        raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
-                            detail=forwarded["detail"])
+        if "swarm" not in forwarded:
+            raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
+                                detail=forwarded["detail"])
+        snapshot = forwarded["swarm"]
+    else:
+        try:
+            snapshot = await swarm.cancel(session_id, swarm_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except swarm.SwarmUnavailableError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"swarm": await _readable(request, session, snapshot)}
+
+
+async def _readable(request: Request, session: dict, snapshot):
+    """The snapshot carries task briefs and reports: the transcript rule, as
+    for GET (#1877). A caller allowed to cancel but not to read gets a receipt."""
     try:
-        return {"swarm": await swarm.cancel(session_id, swarm_id)}
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except swarm.SwarmUnavailableError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await check_transcript_access(request, session)
+    except HTTPException as exc:
+        if exc.status_code != 403:
+            raise
+        if not isinstance(snapshot, dict):
+            return None
+        return {key: snapshot.get(key) for key in ("id", "session_id", "status")}
+    return snapshot

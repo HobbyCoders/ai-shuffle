@@ -361,8 +361,11 @@
 			if (paused.has(id)) return { ok: (await cancelLimitResume(sessionId, id)).cancelled };
 			const result = await stopSessionTask(sessionId, id);
 			return { ok: result.ok, message: result.message };
-		} catch {
-			return { ok: false };
+		} catch (error) {
+			// A 409 says why the chat's worker could not cancel a paused task.
+			const { status, detail } = (error ?? {}) as { status?: unknown; detail?: unknown };
+			const why = status === 409 && typeof detail === 'string' && detail ? detail : '';
+			return { ok: false, message: why ? `Couldn't stop the task. ${why}` : undefined };
 		}
 	}
 

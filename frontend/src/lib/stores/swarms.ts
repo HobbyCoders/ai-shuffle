@@ -11,7 +11,11 @@ const base = (id: string) => apiUrl(`/api/sessions/${encodeURIComponent(id)}/swa
 async function request(url: string, method = 'GET'): Promise<unknown> {
  const response = await fetch(url, withAuth({ method, headers: { Accept: 'application/json' } }));
  if (response.status === 401) recheckAuthOn401();
- if (!response.ok) throw new Error(`Swarm request failed (${response.status}). Try again.`);
+ if (!response.ok) {
+  // A 409 says why (the chat's worker could not be reached, or needs an update).
+  const detail = response.status === 409 ? await response.json().then((b) => b?.detail, () => null) : null;
+  throw new Error(typeof detail === 'string' && detail ? detail : `Swarm request failed (${response.status}). Try again.`);
+ }
  return response.json();
 }
 function receive(value: unknown, sessionId?: string) {

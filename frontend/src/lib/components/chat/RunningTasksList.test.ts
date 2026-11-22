@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => {
 		deviceName: store<string | null>('DesktopWorker'),
 		mobile: false,
 		stopSessionTask: vi.fn(),
+		cancelLimitResume: vi.fn(),
 		cancel: vi.fn(),
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
@@ -62,6 +63,7 @@ vi.mock('$lib/stores/swarms', () => ({
 }));
 vi.mock('$lib/stores/usage-target', () => ({ usageTargetDeviceName: mocks.deviceName }));
 vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask }));
+vi.mock('$lib/api/limit-resume', () => ({ cancelLimitResume: mocks.cancelLimitResume }));
 // No watches here (RunningTasksList.watches.test.ts covers them).
 vi.mock('$lib/api/watches', () => ({
 	listWatches: vi.fn(async () => ({ watches: [], preferredWorkerId: null })),
@@ -342,6 +344,19 @@ describe('RunningTasksList stopping', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
 		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(message));
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
+	});
+
+	it("says why a paused task could not be stopped when the chat's worker explains", async () => {
+		const detail = "Couldn't reach ServerWorker from Laptop (connection refused).";
+		mocks.cancelLimitResume.mockRejectedValue({ status: 409, detail });
+		const pause = { id: 'p1', role: 'system', type: 'system', content: '', systemSubtype: 'limit_resume',
+			systemData: { status: 'scheduled', resume_at: 2_000_000_000, task_id: 'a' } };
+		setTasks([task('a')], [pause]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel: Task a' }));
+		expect(mocks.cancelLimitResume).toHaveBeenCalledWith('s1', 'a');
+		expect(mocks.stopSessionTask).not.toHaveBeenCalled();
+		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(`Couldn't stop the task. ${detail}`));
 	});
 
 	it('Stop all confirms with the count and stops only the filtered rows', async () => {

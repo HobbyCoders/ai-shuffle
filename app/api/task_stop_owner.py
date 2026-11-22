@@ -114,3 +114,47 @@ async def handle_swarm_cancel(body: dict, from_device: str) -> dict:
         return {"error": "unknown", "detail": str(exc)}
     except swarm.SwarmUnavailableError as exc:
         return {"error": "unavailable", "detail": str(exc)}
+
+
+# A row paused by a usage limit is stopped by cancelling its scheduled resume,
+# and that wakeup is armed on the worker that runs the chat.
+RESUME_ACTION = "session-paused-task-cancel"
+
+
+async def forward_paused_task_cancel(session: dict, task_id: str) -> Optional[dict]:
+    """The owner's ``{"cancelled": bool}``, ``{"error": "unknown" | "unavailable",
+    "detail": ...}``, or None when the chat is ours."""
+    owner = await run_sync(control.owner_of, session)
+    if owner is None:
+        return None
+    try:
+        result = await control.call(owner, RESUME_ACTION, {"session_id": session["id"], "task_id": task_id})
+    except control.ControlRefused as exc:
+        if "Unknown control action" in str(exc):
+            name, _ = await run_sync(control._names, engine.require_context(), owner)
+            return {"error": "unavailable", "detail": f"{name} needs an update to stop a paused task from here. "
+                    "Update it, or use Stop to stop everything in this chat."}
+        return {"error": "unavailable", "detail": str(exc) or "The worker that runs this chat refused."}
+    except control.RunnerUnreachable as exc:
+        logger.info("Paused task cancel for %s/%s did not reach %s: %s", session.get("id"), task_id, owner, exc)
+        return {"error": "unavailable", "detail": str(exc)}
+    if not isinstance(result, dict) or not (isinstance(result.get("cancelled"), bool)
+                                            or result.get("error") == "unknown"):
+        return {"error": "unavailable", "detail": "The worker that runs this chat sent an answer that could not be read."}
+    return result
+
+
+async def handle_paused_task_cancel(body: dict, from_device: str) -> dict:
+    """Owner side: cancel the scheduled resume of one paused worker of a chat
+    this worker runs. Only a worker of that chat: never another chat's."""
+    from app.core import limit_resume
+
+    session_id = str(body.get("session_id") or "")
+    task_id = body.get("task_id")
+    if not isinstance(task_id, str) or not task_id or len(task_id) > 200:
+        raise ValueError("Invalid task id")
+    await run_sync(control._require_owned, session_id)
+    if task_id not in await run_sync(limit_resume.paused_workers_of, session_id):
+        return {"error": "unknown", "detail": "No paused worker with that id"}
+    logger.info("Worker %s cancelled the paused task %s of %s", from_device, task_id, session_id)
+    return {"cancelled": await limit_resume.cancel(task_id)}

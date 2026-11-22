@@ -392,7 +392,8 @@ async def test_auth_identities_use_existing_session_access(agents, monkeypatch, 
         request.state.is_admin = identity in {"admin", "owner"}
         request.state.api_user = {"id": "owner" if identity == "api-owner" else "other"} if identity.startswith("api-") else None
     monkeypatch.setattr(swarm, "snapshots", AsyncMock(return_value=[]))
-    monkeypatch.setattr(swarm, "cancel", AsyncMock(return_value={"status": "cancelled"}))
+    full = {"id": "swarm", "session_id": "auth-parent", "status": "cancelled", "tasks": [{"report": "private"}]}
+    monkeypatch.setattr(swarm, "cancel", AsyncMock(return_value=full))
     if identity == "api-other":
         with pytest.raises(HTTPException) as exc:
             await swarms.list_swarms("auth-parent", request)
@@ -402,14 +403,16 @@ async def test_auth_identities_use_existing_session_access(agents, monkeypatch, 
     elif identity in {"paired", "owner-paired"}:
         # Snapshots carry task briefs and reports: a paired device gets the
         # transcript rule (#1877), which refuses it an API key's chat.
-        # Cancelling is a control route and keeps the session access.
+        # Cancelling is a control route and keeps the session access, but its
+        # answer is only a receipt: no briefs or reports.
         with pytest.raises(HTTPException) as exc:
             await swarms.list_swarms("auth-parent", request)
         assert exc.value.status_code == 403
-        assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {"swarm": {"status": "cancelled"}}
+        assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {
+            "swarm": {"id": "swarm", "session_id": "auth-parent", "status": "cancelled"}}
     else:
         assert await swarms.list_swarms("auth-parent", request) == {"swarms": []}
-        assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {"swarm": {"status": "cancelled"}}
+        assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {"swarm": full}
 
 @pytest.mark.asyncio
 async def test_recovery_preserves_live_local_job_even_with_stale_terminal_mirror(agents, monkeypatch):
@@ -756,6 +759,7 @@ async def test_cancel_orphan_returns_cancelled_snapshot_not_conflict(
         stopped.append((worker_id, reason))
     monkeypatch.setattr(swarm, "_stop_item", stop)
     monkeypatch.setattr(swarms, "owned_session", AsyncMock())
+    monkeypatch.setattr(swarms, "check_transcript_access", AsyncMock())
     result = await swarms.cancel_swarm(sid, key, SimpleNamespace())
     snapshot = result["swarm"]
     assert snapshot["status"] == "cancelled"

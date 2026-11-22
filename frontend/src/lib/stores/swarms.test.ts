@@ -50,4 +50,13 @@ describe('swarm live store', () => {
   expect(get(swarms).bySession[snapshot.session_id][snapshot.id].status).toBe('cancelled');
   expect(fetch).toHaveBeenCalledWith('/api/sessions/session-swarm/swarms/sw-1/cancel', expect.objectContaining({ method: 'POST' }));
  });
+ it("says why a cancel was refused when the chat's worker explains", async () => {
+  const detail = 'ServerWorker needs an update to cancel a swarm from here. Update it, or use Stop to stop everything in this chat.';
+  vi.stubGlobal('fetch', vi.fn()
+   .mockResolvedValueOnce(new Response(JSON.stringify({ detail }), { status: 409 }))
+   .mockResolvedValueOnce(new Response('', { status: 404 })));
+  const { swarms } = await import('./swarms');
+  await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow(detail);
+  await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow('Swarm request failed (404). Try again.');
+ });
 });
