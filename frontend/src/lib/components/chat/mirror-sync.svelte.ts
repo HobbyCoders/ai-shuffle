@@ -22,6 +22,13 @@ import { createConnectionBannerGrace } from '$lib/stores/session/connection-bann
 export const MIRROR_SYNC_NOTICE_GRACE_MS = 3000;
 /** Poll interval of the sync status. */
 export const MIRROR_SYNC_POLL_MS = 2000;
+/** Poll interval while a chat is still hidden behind its first sync check:
+ *  the user is looking at "Checking sync…", so a catch-up shows at once. */
+export const MIRROR_SYNC_WAITING_POLL_MS = 500;
+/** A waiting chat whose remaining updates have not gone down for this long is
+ *  shown anyway, with the "Syncing updates" pill, instead of blocking the view
+ *  indefinitely; the check keeps running and the first catch-up still reloads. */
+export const MIRROR_SYNC_STALL_REVEAL_MS = 8000;
 /** Failed sync checks in a row before a waiting chat stops waiting and says
  *  it cannot reach its owner (#814). */
 export const MIRROR_SYNC_FAILURE_LIMIT = 3;
@@ -61,7 +68,8 @@ export interface MirrorSync {
 	/** Updates still to replicate for this chat (0 when only owner-wide counts are known). */
 	readonly pending: number;
 	/** The open remote chat has not been revealed yet: its first catch-up (or
-	 *  an offline/current answer) is still owed. */
+	 *  an offline/current answer, or MIRROR_SYNC_STALL_REVEAL_MS without
+	 *  progress) is still owed. */
 	readonly waiting: boolean;
 	/** Behind the owner right now (checking or syncing). */
 	readonly behind: boolean;
@@ -105,6 +113,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 		// earlier transcript to reveal or reload at the opening checkpoint.
 		let caughtUpOnce = createdFromComposer;
 		let initialTarget: { seq: number; epoch: string; tail_id: string } | null = null;
+		// Progress of the opening wait: the fewest per-chat updates remaining
+		// seen so far, and when that last went down (or the first answer came).
+		let fewestPending = Infinity;
+		let progressAt = 0;
 		const notice = createConnectionBannerGrace({
 			onShow: () => { noticeVisible = true; },
 			onHide: () => { noticeVisible = false; },
@@ -139,14 +151,32 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 				if (!['checking', 'syncing', 'current', 'offline'].includes(status.state)) throw new Error('Invalid sync status');
 				// Pin an opening checkpoint instead of chasing a continuously writing
 				// owner. The server replaces it on an epoch change or truncation.
-				if (!caughtUpOnce && status.initial_target) initialTarget = status.initial_target;
+				if (!caughtUpOnce && status.initial_target) {
+					const next = status.initial_target;
+					if (initialTarget && (next.seq !== initialTarget.seq || next.epoch !== initialTarget.epoch
+						|| next.tail_id !== initialTarget.tail_id)) fewestPending = Infinity; // a new checkpoint, a new count
+					initialTarget = next;
+				}
 				const firstCatchUp = !caughtUpOnce && (status.state === 'current' || status.initial_caught_up === true);
 				if (firstCatchUp) caughtUpOnce = true;
 				syncState = status.state;
-				pending = status.scope === 'owner' ? 0 : (!caughtUpOnce
+				const remaining = status.scope === 'owner' ? 0 : (!caughtUpOnce
 					? status.initial_pending_updates ?? status.pending_updates ?? 0
 					: status.pending_updates ?? 0);
-				if (firstCatchUp || status.state === 'current' || status.state === 'offline') revealedSession = id;
+				pending = remaining;
+				const now = Date.now();
+				// Only a per-chat count measures progress (an owner-wide answer
+				// reports 0 for "unknown"); the first one, or a lower one, counts.
+				// A first transcript download has nothing usable to show yet.
+				if (!progressAt || status.transcript === 'downloading'
+					|| (status.scope !== 'owner' && remaining < fewestPending)) progressAt = now;
+				if (status.scope !== 'owner' && status.transcript !== 'downloading') {
+					fewestPending = Math.min(fewestPending, remaining);
+				}
+				// Stuck (an owner that never delivers the last updates, say): show
+				// what this worker has rather than hold the chat hidden forever.
+				const stalled = now - progressAt >= MIRROR_SYNC_STALL_REVEAL_MS;
+				if (firstCatchUp || status.state === 'current' || status.state === 'offline' || stalled) revealedSession = id;
 				notice.setConnected(status.state !== 'syncing' && status.state !== 'checking');
 				failures = 0;
 				unreachable = false;
@@ -168,7 +198,10 @@ export function createMirrorSync(input: () => MirrorSyncInput): MirrorSync {
 				controller.signal.removeEventListener('abort', abortRequest);
 				inFlight = false;
 				retrying = false;
-				if (!controller.signal.aborted) timer = setTimeout(poll, mirrorSyncRetryDelay(failures));
+				if (!controller.signal.aborted) {
+					const hidden = !failures && untrack(() => revealedSession) !== id;
+					timer = setTimeout(poll, hidden ? MIRROR_SYNC_WAITING_POLL_MS : mirrorSyncRetryDelay(failures));
+				}
 			}
 		}
 		retryNow = () => {
