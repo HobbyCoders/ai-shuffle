@@ -36,7 +36,7 @@
 // checked by hand: waiting a minute per variant is too slow for the suite.
 // `--mobile-shell` runs the swipe cases in the built `/mobile/` app.
 import { runJourney } from './runner.mjs';
-import { api, chatState, expect, gotoApp, showSidebar, waitChat } from './lib/app.mjs';
+import { api, chatIdByToken, chatState, expect, gotoApp, openNewChat, showSidebar, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobileShell = process.argv.includes('--mobile-shell');
@@ -215,6 +215,16 @@ async function expectRowInPlace(page, id) {
 
 const snoozePicker = (page) => page.getByRole('dialog', { name: 'Snooze chat' });
 
+/** The chat signature's `session` field for a chat id (uiSessionTag in ui-signature.ts). */
+function sessionTag(id) {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < id.length; i += 1) {
+		hash ^= id.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return `s:${hash.toString(36).padStart(6, '0').slice(-6)}`;
+}
+
 /** Where the chat list's groups and rows sit, in page pixels. */
 async function listLayout(page) {
 	const sessions = await showChats(page);
@@ -360,6 +370,66 @@ await runJourney({
 					await waitLane(page, id, 'settled');
 					await waitSaved(page, id, row => !row.is_active && !row.snoozed_until, `bulk Settle did not save ${id}`);
 				}
+			}
+		},
+		{
+			// Settle the open chat, then pick another before the settle finishes:
+			// the picked chat stays open. The settle's request is slowed so the
+			// pick lands inside it every run. Guards: the finished settle sent the
+			// user to a new chat anyway, deciding from the row's stale "open"
+			// state (its row had already moved to Settled). Desktop only: a phone
+			// never leaves the chat on a settle.
+			name: 'settle-then-pick-another',
+			viewports: ['desktop'],
+			async setup({ page, status, log }) {
+				// Two chats with a turn each, so switching between them is an
+				// ordinary chat switch, not two never-used chats.
+				page.__pair = [];
+				await openNewChat({ page, status });
+				for (const name of ['A', 'B']) {
+					if (name === 'B') {
+						// A reload would reopen chat A: start the second from New chat.
+						await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'New chat', exact: true }).click();
+						await waitChat(page, { surface: 'new' }, { timeout: 30_000 });
+					}
+					const token = `settle-race-${name}-${uniq()}`;
+					await typeAndSend(page, `[script:default] ${token}`);
+					await waitTurnSettled(page);
+					page.__pair.push(await chatIdByToken(page, token));
+				}
+				for (const id of page.__pair) await waitLane(page, id, 'active');
+				log(`chats ${page.__pair.join(', ')}`);
+			},
+			async act({ page, mark }) {
+				const [first, second] = page.__pair;
+				const openTag = async () => (await chatState(page))?.session ?? null;
+				const open = async (id) => {
+					await (await showSidebar(page)).locator(`${CARD(id)} .scard`).click();
+					await waitChat(page, { session: sessionTag(id) }, { timeout: 15_000 });
+					await waitChatOpen(page, { hold: 0 });
+				};
+				await open(first);
+
+				await mark('settle the open chat, pick another while the settle is in flight');
+				await page.route('**/api/v1/sessions/*/active', async (route) => {
+					await new Promise((resolve) => setTimeout(resolve, 1500));
+					await route.continue();
+				});
+				try {
+					await rowAction(page, first, 'Settle session');
+					await waitLane(page, first, 'settled');
+					await open(second);
+					await waitSaved(page, first, (row) => !row.is_active, 'the settle never reached the server');
+					// The settle also reloads the list after it lands.
+					await page.waitForTimeout(1500);
+					const now = await openTag();
+					expect(now === sessionTag(second), `the chat picked during the settle stays open: want ${sessionTag(second)}, got ${JSON.stringify(await chatState(page))}`);
+				} finally {
+					await page.unroute('**/api/v1/sessions/*/active');
+				}
+				// Settling the open chat with nothing else picked still moves to a new
+				// chat; Sidebar.test.ts covers it (the hero's composer move would read
+				// here as a layout shift).
 			}
 		},
 		{

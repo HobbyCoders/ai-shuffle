@@ -1240,6 +1240,55 @@ describe('Sidebar rows keep their place', () => {
 	});
 });
 
+describe('Settling the open chat, then picking another before the settle finishes', () => {
+	/** Like the real store: the row moves to Settled at once, the call resolves later. */
+	function deferredSettle() {
+		let finish!: () => void;
+		mocks.setSessionActive.mockImplementation((id: string, isActive: boolean) => {
+			mocks.sessions.set(mocks.sessions.current.map((row: any) => (row.id === id ? { ...row, is_active: isActive } : row)));
+			return new Promise<void>((resolve) => { finish = resolve; });
+		});
+		return () => finish();
+	}
+	const open = (sessionId: string) => mocks.activeSession.set({ sessionId, isStreaming: false, activeTasks: [] });
+
+	beforeEach(() => {
+		mocks.sessions.set([
+			session('a', 'Chat A', 'visible-project', true),
+			session('b', 'Chat B', 'visible-project', true),
+		]);
+	});
+
+	it("stays on the chat picked during a row's settle", async () => {
+		const onSettledOpenSession = vi.fn();
+		open('a');
+		render(Sidebar, { props: { ...sidebarProps, onOpenSession: open, onSettledOpenSession } });
+		const finish = deferredSettle();
+
+		await fireEvent.click(within(cardFrame('Chat A')).getByTitle('Settle session'));
+		await tick();
+		await fireEvent.click(screen.getByText('Chat B'));
+		finish();
+		await vi.waitFor(() => expect(mocks.setSessionActive).toHaveBeenCalledWith('a', false));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(mocks.activeSession.current.sessionId).toBe('b');
+		expect(onSettledOpenSession).not.toHaveBeenCalled();
+	});
+
+	it('still moves to a fresh chat when the open chat is settled and nothing else was picked', async () => {
+		const onSettledOpenSession = vi.fn();
+		open('a');
+		render(Sidebar, { props: { ...sidebarProps, onOpenSession: open, onSettledOpenSession } });
+		const finish = deferredSettle();
+
+		await fireEvent.click(within(cardFrame('Chat A')).getByTitle('Settle session'));
+		finish();
+
+		await vi.waitFor(() => expect(onSettledOpenSession).toHaveBeenCalledOnce());
+	});
+});
+
 describe('Sidebar background work', () => {
 	it('keeps a Monitor row with no parked marker Parked (not Working) through selection, switching away, and list reload', async () => {
 		const monitor = session('monitor', 'Monitor chat', 'visible-project', true, false, {

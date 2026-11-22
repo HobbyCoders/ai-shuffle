@@ -824,6 +824,12 @@
 		}
 	}
 
+	/** A row's settle finished. Move on only if that chat is still the open one:
+	 *  the user may have picked another chat while the settle was in flight. */
+	function leaveSettledRow(id: string) {
+		if (id === activeId) onSettledOpenSession();
+	}
+
 	// --- snooze --------------------------------------------------------------
 	// One picker for a row's Snooze button and the selection bar's.
 	let snoozeTargets = $state<string[]>([]);
@@ -925,7 +931,7 @@
 		onSelectToggle={toggleSelected}
 		onLongPress={startSelecting}
 		onOpen={onOpenSession}
-		onSettled={onSettledOpenSession}
+		onSettled={leaveSettledRow}
 		onSnooze={(id) => openSnooze([id])}
 	/>
 {/snippet}
