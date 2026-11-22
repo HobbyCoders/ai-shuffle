@@ -483,6 +483,21 @@ def test_replaying_old_disputes_leaves_a_resolved_rule_the_same_on_every_worker(
     assert copy_on(b)["fences"] == copy_on(c)["fences"] == resolved["fences"]
 
 
+def test_at_the_fence_cap_a_partly_fenced_dispute_keeps_all_its_wordings(tmp_path):
+    from fluid.codemode import facts
+
+    store = SkillStore(tmp_path)
+    rule, _, held = _rule_at_the_fence_cap(store)
+    winner = next(e for e in store._facts._load(read_only=True)["entries"] if e["id"] == rule.id)
+    current = facts._fence_fingerprint(winner["text"], rule.key)
+    # A late dispute record: one wording this copy still fences, one it never saw.
+    fenced = winner["fences"][0]  # the oldest: the first a rebuild would evict
+    missing = facts._fence_fingerprint(_sorts_after(held), rule.key)
+    facts._carry_contested(winner, {"key": rule.key, "contested": [fenced, missing]})
+    assert {fenced, missing, current} <= set(winner["fences"])
+    assert len(winner["fences"]) == facts.MAX_RULE_FENCES
+
+
 def test_resolving_a_cross_family_conflict_fences_each_wording_for_its_own_family(tmp_path):
     first = "When reporting: lead with the result."
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")

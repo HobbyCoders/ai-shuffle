@@ -327,7 +327,9 @@ def _carry_contested(winner, loser):
     unfenced = disputed - set(winner.get("fences") or [])
     unrecorded = disputed - recorded if winner.get("conflicted") else set()
     if unfenced:
-        keep = sorted(recorded | unfenced | {_fence_fingerprint(winner["text"], winner.get("key"))})
+        # Every wording of the dispute, not just the missing ones: fencing
+        # one must not evict another the same dispute already fenced.
+        keep = sorted(recorded | disputed | {_fence_fingerprint(winner["text"], winner.get("key"))})
         held = [f for f in winner.get("fences") or [] if isinstance(f, str) and f not in keep]
         winner["fences"] = _bounded_fences(held, keep[-MAX_RULE_FENCES:])
     if unrecorded:
