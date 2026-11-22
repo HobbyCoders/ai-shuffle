@@ -318,15 +318,20 @@ def _carry_contested(winner, loser):
     """A newer copy replacing one that recorded a dispute keeps the disputed
     wordings fenced (and, while it is still conflicted, recorded), even if
     the newer copy's writer never saw them. Its text and clock still win."""
-    lost = set(_contested(loser)) - set(_contested(winner))
-    if not (lost and _is_rule_key(winner.get("key"))):
+    if not _is_rule_key(winner.get("key")):
         return
-    contested = set(_contested(winner)) | lost
-    keep = sorted(contested | {_fence_fingerprint(winner["text"], winner.get("key"))})[-MAX_RULE_FENCES:]
-    held = [f for f in winner.get("fences") or [] if isinstance(f, str) and f not in keep]
-    winner["fences"] = _bounded_fences(held, keep)
-    if winner.get("conflicted"):
-        winner["contested"] = sorted(contested)[:MAX_RULE_FENCES]
+    disputed, recorded = set(_contested(loser)), set(_contested(winner))
+    # A resolution already fenced every disputed wording, then cleared
+    # `contested`: replaying the dispute changes nothing, so every replica
+    # keeps the resolved copy exactly as written.
+    unfenced = disputed - set(winner.get("fences") or [])
+    unrecorded = disputed - recorded if winner.get("conflicted") else set()
+    if unfenced:
+        keep = sorted(recorded | unfenced | {_fence_fingerprint(winner["text"], winner.get("key"))})
+        held = [f for f in winner.get("fences") or [] if isinstance(f, str) and f not in keep]
+        winner["fences"] = _bounded_fences(held, keep[-MAX_RULE_FENCES:])
+    if unrecorded:
+        winner["contested"] = sorted(recorded | unrecorded)[:MAX_RULE_FENCES]
 
 
 def canonical_key(text):

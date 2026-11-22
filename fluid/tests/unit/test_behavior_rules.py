@@ -451,6 +451,38 @@ def test_a_newer_copy_keeps_the_wordings_a_dispute_recorded(tmp_path):
     _refused(a, "gpt", theirs)
 
 
+def test_replaying_old_disputes_leaves_a_resolved_rule_the_same_on_every_worker(tmp_path):
+    first = "When reporting: lead with the result."
+    a, b, c = (SkillStore(tmp_path / name) for name in "abc")
+    rule = a.save_memory(first, provenance="user", durable=True,
+                         key=behavior.rule_key("gpt", first), when=OWNER_WHEN)
+    for peer in (b, c):
+        peer._facts.merge(a._facts.export())
+    a.save_memory("When reporting: lead with the result and the risk.", memory_id=rule.id,
+                  provenance="user", durable=True, key=rule.key)
+    for name, peer in (("blocker", b), ("outcome", c)):
+        peer.save_memory(f"When reporting: lead with the {name}.", memory_id=_peer_id(peer, rule),
+                         provenance="user", durable=True, key=rule.key)
+        peer._facts.merge(a._facts.export())  # each records its own A/peer dispute
+    stale = [b._facts.export(), c._facts.export()]
+    for snapshot in stale:
+        a._facts.merge(snapshot)
+    current = next(m for m in a.memories() if m.key == rule.key)
+    a.save_memory("When reporting: lead with the summary.", memory_id=current.id,
+                  expected_revision=current.revision, provenance="user", protected=True, key=rule.key)
+
+    def copy_on(store):
+        return next(e for e in store._facts._load(read_only=True)["entries"] if e.get("key") == rule.key)
+
+    resolved = copy_on(a)
+    for snapshot in stale * 2:
+        a._facts.merge(snapshot)
+        assert copy_on(a) == resolved
+    for peer in (b, c):
+        peer._facts.merge(a._facts.export())
+    assert copy_on(b)["fences"] == copy_on(c)["fences"] == resolved["fences"]
+
+
 def test_resolving_a_cross_family_conflict_fences_each_wording_for_its_own_family(tmp_path):
     first = "When reporting: lead with the result."
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
