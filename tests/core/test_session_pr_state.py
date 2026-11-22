@@ -840,12 +840,18 @@ async def test_republished_branch_invalidates_cached_miss(pr_checkout):
 
 
 @pytest.mark.asyncio
-async def test_republished_fallback_ignores_squash_merged_in_from_main(mock_db, pr_checkout):
-    """Merging main brings another PR's squash commit, whose tree matches that PR's branch."""
+@pytest.mark.parametrize('reverted', [False, True])
+async def test_republished_fallback_ignores_squash_merged_in_from_main(mock_db, pr_checkout, reverted):
+    """Merging main brings another PR's squash commit, whose tree matches that PR's branch.
+
+    After a revert the merge commit itself has main's exact tree.
+    """
     from tests.git_repo_helpers import commit_file, git
 
     creation = git(pr_checkout, 'rev-parse', 'HEAD')
     commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    if reverted:
+        git(pr_checkout, 'revert', '--no-edit', 'HEAD')
     git(pr_checkout, 'checkout', '-q', '-b', 'feat/other', creation)
     other = commit_file(pr_checkout, 'other.txt', 'other work', 'other session commit')
     squash = git(pr_checkout, 'commit-tree', f'{other}^{{tree}}', '-p', 'origin/main', '-m', 'squash')

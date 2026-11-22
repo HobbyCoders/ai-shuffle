@@ -434,10 +434,19 @@ def find_pull_for_checkout_fallback(
         # Commits merged in from a base (main merged into this branch) are
         # someone else's work, e.g. another PR's squash commit.
         base_shas = sorted({sha for name, sha, _ in refs if name in bases and sha})
-        own_trees = set(git(
-            "log", "--format=%T", f"--max-count={_MAX_OWN_TREES}", head_sha,
+        commits = [line.split() for line in git(
+            "log", "--format=%T %P", f"--max-count={_MAX_OWN_TREES}", head_sha,
             "--not", creation_sha, *base_shas, check=True,
-        ).stdout.split())
+        ).stdout.splitlines() if line.strip()]
+        parents = sorted({p for _, *ps in commits for p in ps})
+        parent_tree = dict(zip(parents, git(
+            "rev-parse", *(f"{p}^{{tree}}" for p in parents), check=True,
+        ).stdout.split())) if parents else {}
+        # A commit with a parent's exact content (an empty commit, or a merge
+        # of main after reverting everything) adds no work of this session.
+        own_trees = {
+            tree for tree, *ps in commits if all(parent_tree.get(p) != tree for p in ps)
+        }
         own_trees.discard(git("rev-parse", f"{creation_sha}^{{tree}}", check=True).stdout.strip())
         skip_names = bases | {branch, upstream_branch, "HEAD"}
         republished = sorted({
