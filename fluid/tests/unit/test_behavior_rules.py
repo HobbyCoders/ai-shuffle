@@ -225,6 +225,50 @@ def test_a_deleted_rule_fences_each_old_wording_for_the_family_it_was_held_under
                               key=behavior.rule_key(family, text), when="When working with the owner")
 
 
+def test_a_deleted_rule_fences_wordings_its_undo_history_has_dropped(tmp_path):
+    store = SkillStore(tmp_path)
+    wordings = [f"When reporting: lead with the result, take {n}." for n in range(4)]
+    rule = store.save_memory(wordings[0], provenance="user", durable=True,
+                             key=behavior.rule_key("claude", wordings[0]), when="When working with the owner")
+    for text in wordings[1:]:
+        store.save_memory(text, memory_id=rule.id, provenance="user", durable=True, key=rule.key)
+    entry = next(e for e in store._facts._load(read_only=True)["entries"] if e["id"] == rule.id)
+    assert wordings[0] not in [h["text"] for h in entry["history"]]
+    assert store.delete_memory(rule.id, explicit=True, purge_evidence=False)
+    for text in wordings:
+        with pytest.raises(ValueError):
+            store.save_memory(text, provenance="user", durable=True,
+                              key=behavior.rule_key("claude", text), when="When working with the owner")
+
+
+def test_no_one_can_move_a_rule_onto_a_slot_another_rule_holds(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    learned = store.save_memory(text, provenance="user", durable=True,
+                                key=behavior.rule_key("all", text), when="When working with the owner")
+    kept = store.save_memory("When reporting: lead with the blocker.", provenance="user", protected=True,
+                             key=behavior.rule_key("gpt", text), when="When working with the owner")
+    # The learner narrows its All-models rule to GPT, onto the owner's slot.
+    with pytest.raises(ValueError, match="another rule already holds"):
+        store.save_memory("When reporting to the owner: lead with the result.", memory_id=learned.id,
+                          provenance="user", durable=True, key=kept.key)
+    by_id = {m.id: m for m in store.memories()}
+    assert by_id[learned.id].key == learned.key and not by_id[kept.id].conflicted
+
+
+def test_health_repair_keeps_a_rule_that_shares_text_with_a_fact_or_another_family(tmp_path):
+    from fluid.codemode import memory_health
+
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    fact = store.save_memory(text, provenance="user", protected=True)
+    rules = [store.save_memory(text, provenance="user", durable=True, key=behavior.rule_key(f, text),
+                               when="When working with the owner") for f in ("gpt", "claude")]
+    memory_health.repair(store)
+    live = {m.id for m in store.memories()}
+    assert {fact.id, *(r.id for r in rules)} <= live
+
+
 def test_a_rule_and_an_ordinary_fact_with_the_same_text_stay_separate(tmp_path):
     store = SkillStore(tmp_path)
     text = "When reporting: lead with the result."

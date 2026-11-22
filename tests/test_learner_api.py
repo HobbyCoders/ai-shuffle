@@ -173,6 +173,25 @@ def test_undo_refuses_to_move_a_rule_onto_a_family_slot_another_rule_holds(world
     assert rule(client, kept.id)["text"] == "When reporting: lead with the blocker."
 
 
+def test_editing_a_rule_that_conflicted_on_sync_resolves_it(world, tmp_path):
+    client, store = world
+    text = "When reporting: lead with the result."
+    key = behavior.rule_key("all", text)
+    store.save_memory("When reporting: lead with the result, then the blocker.", provenance="user",
+                      durable=True, key=key, when="When working with the owner")
+    peer = SkillStore(tmp_path / "peer")
+    peer.save_memory("When reporting: lead with the blocker.", provenance="user", durable=True,
+                     key=key, when="When working with the owner")
+    store._facts.merge(peer._facts.export())
+    copies = [r for r in client.get(BASE).json()["rules"] if r["applies_to"] == "all"]
+    assert len(copies) == 2
+    item = copies[0]
+    response = client.put(f"{BASE}/rules/{item['id']}",
+                          json={"text": text, "applies_to": "all", **version(item)})
+    assert response.status_code == 200, response.text
+    assert [r["text"] for r in client.get(BASE).json()["rules"]] == [text]
+
+
 def test_undo_closes_three_days_after_the_learner_changed_a_rule(world, monkeypatch):
     client, store = world
     entry = learned(store, "When reporting: lead with the result.")

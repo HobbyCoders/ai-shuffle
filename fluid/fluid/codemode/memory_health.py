@@ -24,7 +24,7 @@ import re
 import time
 from pathlib import Path
 
-from fluid.codemode import facts
+from fluid.codemode import behavior, facts
 from fluid.codemode.continual import MIN_NEW_ENTRIES
 from fluid.codemode.skills import (
     JOURNAL_HIGH_VALUE_KINDS,
@@ -212,7 +212,11 @@ def _exact_duplicate_groups(entries: list[dict]) -> list[list[dict]]:
     groups: dict[tuple[str, str], list[dict]] = {}
     for e in entries:
         if not e.get("conflicted"):
-            groups.setdefault((e.get("scope", "global"), facts.fingerprint(e["text"])), []).append(e)
+            # A behaviour rule is its own slot: the same text as an ordinary
+            # fact, or as the rule for another model family, is no duplicate.
+            rule_key = e.get("key") if behavior.is_rule_key(e.get("key")) else None
+            groups.setdefault((e.get("scope", "global"), facts.fingerprint(e["text"]), rule_key),
+                              []).append(e)
     return [g for g in groups.values() if len(g) > 1]
 
 

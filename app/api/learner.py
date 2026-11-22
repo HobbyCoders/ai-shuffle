@@ -265,10 +265,15 @@ def _find_rule(store, rule_id):
     raise HTTPException(404, _NOT_FOUND)
 
 
-def _require_free_key(store, key, scope, rule_id) -> None:
-    """Refuse to give a rule a key another rule already holds in its scope:
-    two rows sharing one key would replicate as a conflict and drop both from
-    prompts."""
+def _require_free_key(store, old, key) -> None:
+    """Refuse to move a rule onto a key another rule already holds in its
+    scope: two rows sharing one key would replicate as a conflict and drop
+    both from prompts. (The fact store refuses it too; this gives the owner
+    a clear message.) Keeping the key is always allowed, so an edit can
+    still resolve copies of one rule that conflicted on sync."""
+    if old.get("key") == key:
+        return
+    rule_id, scope = old["id"], old.get("scope", "global")
     doc = store._facts.snapshot(read_only=True)
     for entry in doc["entries"]:
         if (entry["id"] != rule_id and entry.get("key") == key
@@ -313,7 +318,7 @@ def _update(rule_id, body: RuleUpdate):
         _require_metadata_version(old, body.expected_metadata_version)
         digest = str(old["key"]).rsplit(".", 1)[-1]
         key = f"{behavior.KEY_PREFIX}{applies}.{digest}"
-        _require_free_key(store, key, old.get("scope", "global"), rule_id)
+        _require_free_key(store, old, key)
         # Saved by the owner, the rule is kept: the learner reads it but
         # never rewrites it, and it no longer fades.
         saved = store.save_memory(text, memory_id=rule_id, expected_revision=body.expected_revision,
@@ -337,7 +342,7 @@ def _undo(rule_id, body: RuleVersion):
         if history and history[-1].get("text"):
             # A family move recorded the rule's previous key: restore both.
             key = history[-1].get("key") or old["key"]
-            _require_free_key(store, key, old.get("scope", "global"), rule_id)
+            _require_free_key(store, old, key)
             store.save_memory(history[-1]["text"], memory_id=rule_id,
                               expected_revision=body.expected_revision, provenance=old.get("provenance"),
                               durable=True, key=key, when=old.get("when") or _RULE_WHEN)

@@ -246,6 +246,25 @@ def _fence_fingerprint(text, key=None):
     return fingerprint(text)
 
 
+# Wordings a rule remembers for its deletion fence (67 bytes each in the
+# synced document, which has a 2 MiB budget).
+MAX_RULE_FENCES = 12
+_FENCE = re.compile(r"[0-9a-f]{64}")
+
+
+def _rule_fences(entry, key, text, history):
+    """``{"fences": [...]}`` for a behaviour rule: the per-family fingerprint
+    of every wording it has held, kept apart from the bounded undo history so
+    a deletion still fences a wording that history has dropped. ``{}`` for an
+    ordinary fact."""
+    if not _is_rule_key(key):
+        return {}
+    held = list(entry.get("fences") or [])
+    held += [_fence_fingerprint(h["text"], h.get("key") or key) for h in history if h.get("text")]
+    held.append(_fence_fingerprint(text, key))
+    return {"fences": list(dict.fromkeys(held))[-MAX_RULE_FENCES:]}
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -870,6 +889,15 @@ class FactStore:
             # A behaviour rule moved to another model family keeps its text but
             # changes its key: that is a revision, not a repeat of the same save.
             rekey = bool(old) and _is_rule_key(key) and old.get("key") != key
+            if rekey:
+                # Two rows on one rule key replicate as a conflict and drop out
+                # of prompts: a move onto a slot another rule holds is refused,
+                # whoever makes it (the learner, the owner, an undo).
+                target_scope = scope or old.get("scope", "global")
+                if any(e["id"] != old["id"] and e.get("key") == key
+                       and e.get("scope", "global") == target_scope and visible_on(e, local)
+                       for e in doc["entries"]):
+                    raise ValueError(f"another rule already holds {key}; edit or delete that one instead")
             archived_old = bool(old) and any(e is old for e in doc["archived"])
             if replaces:
                 new_scope = scope or (old.get("scope", "global") if old else "global")
@@ -1025,6 +1053,7 @@ class FactStore:
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
+                         **_rule_fences(entry, key or entry.get("key"), text, history),
                          expires_at=0 if protected else (now + DURABLE_TTL if is_durable
                                                          else entry.get("expires_at", now + INFERRED_TTL)))
             # A rewrite of a fact that already expired into the archive is a
@@ -1434,9 +1463,12 @@ class FactStore:
                          "revision": old.get("revision", 1) + 1, "key": old.get("key"),
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
                          "fingerprints": ([] if str(old.get("key") or "").startswith("memory.coexist.") else
-                                          [_fence_fingerprint(h["text"], h.get("key") or old.get("key"))
-                                           for h in old.get("history", [])]
-                                          + [_fence_fingerprint(old["text"], old.get("key"))]),
+                                          list(dict.fromkeys(
+                                              # A rule's fences outlive its undo history.
+                                              [f for f in old.get("fences") or [] if isinstance(f, str)]
+                                              + [_fence_fingerprint(h["text"], h.get("key") or old.get("key"))
+                                                 for h in old.get("history", [])]
+                                              + [_fence_fingerprint(old["text"], old.get("key"))]))),
                          "source_session": old.get("source_session")}
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.
@@ -1580,6 +1612,12 @@ class FactStore:
                         # An unusable when-line is not worth refusing the
                         # replica for: the fact is listed by its text instead.
                         entry.pop("when", None)
+                fences = entry.get("fences")
+                if fences is not None and not (
+                        isinstance(fences, list) and len(fences) <= MAX_RULE_FENCES
+                        and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in fences)):
+                    # Unreadable fences: the rule's history still fences it.
+                    entry.pop("fences")
                 if type(entry.get("always", False)) is not bool:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):
