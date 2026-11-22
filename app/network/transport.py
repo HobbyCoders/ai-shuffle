@@ -125,6 +125,11 @@ _session_watermarks: dict[tuple[str, str], dict] = {}
 SESSION_HEAD_WAIT_SECONDS = 1.5
 # One out-of-band exchange per owner at a time, shared by every caller.
 _head_fetches: Dict[str, asyncio.Task] = {}
+# A chat whose owner sends no head (an older peer, a chat it no longer lists)
+# starts at most one such exchange per this window; the sync pass covers it
+# meanwhile, so a polling viewer cannot turn into an exchange every poll.
+SESSION_HEAD_RETRY_SECONDS = 10.0
+_head_fetch_at: Dict[tuple[str, str], float] = {}
 # The sync loop's HTTP client, while it runs (bound to ``_loop``).
 _sync_client: Optional[httpx.AsyncClient] = None
 # Progress of the latest full state copy this worker received (a new worker's
@@ -293,6 +298,12 @@ async def fetch_session_head(session_id: str, owner_device_id: str | None, *,
         return
     task = _head_fetches.get(owner_device_id)
     if task is None or task.done():
+        now = time.monotonic()
+        for stale in [k for k, at in _head_fetch_at.items() if now - at >= SESSION_HEAD_RETRY_SECONDS]:
+            del _head_fetch_at[stale]
+        if (owner_device_id, session_id) in _head_fetch_at:
+            return
+        _head_fetch_at[(owner_device_id, session_id)] = now
         task = running.create_task(_fetch_heads(link, client), name=f"network-head-{owner_device_id[:8]}")
         _head_fetches[owner_device_id] = task
     try:
@@ -1976,6 +1987,7 @@ def forget_peers() -> None:
         _session_interests.clear()
         _session_watermarks.clear()
     _head_fetches.clear()  # a running fetch finishes on its own; its link is gone
+    _head_fetch_at.clear()
     _tried_since_hold.clear()
 
 

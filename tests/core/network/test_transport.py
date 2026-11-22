@@ -717,6 +717,32 @@ async def test_head_fetch_leaves_unreachable_owners_to_the_sync_loop(workers, mo
             assert link.failures == 0
 
 
+async def test_head_fetch_without_an_owner_head_is_retried_once_per_window(workers, monkeypatch):
+    """An owner that sends no head (an older peer) must not get an exchange per poll."""
+    worker = workers("head-retry")
+    with worker.active():
+        engine.create_network("Home")
+        link = transport.PeerLink("owner", ["https://owner.example.com"])
+        async with httpx.AsyncClient() as client:
+            _serve_links(monkeypatch, client, link)
+            calls = []
+
+            async def headless_exchange(_client, _ctx, *, unless=None, catch_up=False):
+                calls.append(1)
+                transport.note_session_watermarks("owner", ["old"], {})
+                return {"received": 0, "sent": 0}
+
+            monkeypatch.setattr(link, "sync_once", headless_exchange)
+            for _poll in range(4):
+                await transport.fetch_session_head("old", "owner")
+            assert len(calls) == 1
+            assert transport.session_sync_status("old", "owner")["scope"] == "owner"
+            # Past the window the next poll asks again.
+            transport._head_fetch_at[("owner", "old")] -= transport.SESSION_HEAD_RETRY_SECONDS
+            await transport.fetch_session_head("old", "owner")
+            assert len(calls) == 2
+
+
 def test_session_freshness_checks_witness_at_owner_seq_not_newer_local_tail(workers):
     from app.db import session_events
 
