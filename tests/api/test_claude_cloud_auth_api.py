@@ -99,7 +99,7 @@ def test_turning_on_needs_acknowledgement_and_a_saved_method(authenticated_clien
     assert body["mode"] == "cloud" and body["mode_label"] == "Cloud provider or gateway"
     assert body["cloud"] == {"method": "gateway", "method_label": "LLM gateway", "configured": True,
                              "ready": True, "missing": [], "storage_locked": False}
-    assert [m["value"] for m in body["modes"]] == ["subscription", "api_key", "cloud", "off"]
+    assert [m["value"] for m in body["modes"]] == ["subscription", "cloud", "off"]
     assert TOKEN not in r.text
     # Switching back is the ordinary mode switch.
     assert authenticated_client.put(MODE, json={"mode": "subscription"}).json()["mode"] == "subscription"

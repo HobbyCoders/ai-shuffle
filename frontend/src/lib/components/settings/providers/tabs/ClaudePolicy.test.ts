@@ -1,6 +1,6 @@
 /**
  * Claude subscription > Policy: the loop guard and its held turns. Ported
- * from LoopGuardPanel.test.ts: usage and defaults hints, the API key / off
+ * from LoopGuardPanel.test.ts: usage and defaults hints, the cloud / off
  * text, confirming a held turn, and saving a changed budget.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -54,11 +54,11 @@ it('names the default once a budget differs from it', async () => {
 	expect(screen.getByText('Default 60')).toBeTruthy();
 });
 
-it('says it does nothing in API key mode', async () => {
+it('says it does nothing on a cloud provider or gateway', async () => {
 	worker.state.loopGuard = loopGuardStatus({ applies: false });
-	await show('api_key');
-	expect(screen.getByText('Off in API key mode')).toBeTruthy();
-	expect(screen.getByText('Console spend limit applies')).toBeTruthy();
+	await show('cloud');
+	expect(screen.getByText('Off with a cloud provider or gateway')).toBeTruthy();
+	expect(screen.getByText("Your cloud provider's billing applies")).toBeTruthy();
 	expect(screen.queryByRole('switch')).toBeNull();
 	expect(screen.queryByLabelText('Per session')).toBeNull();
 });

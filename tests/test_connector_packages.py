@@ -189,6 +189,16 @@ def test_catalog_installs_verified_sources(local_package):
     with pytest.raises(ValueError, match="Unknown connector plugin"):
         packages.require_installed("unknown")
 
+def test_a_connector_installed_switched_off_stays_off(local_package):
+    # Plugin sync installs a connector disabled when it is off on the owner's
+    # other workers; installing it enabled would publish an enable back.
+    from app.core.plugin_service import get_plugin_service
+    get_plugin_service().install_plugin("webhook@shuffle-connectors", "user", enable=False)
+    assert packages.record("webhook")["enabled"] is False
+    packages.install("webhook")  # an update keeps the owner's state
+    assert packages.record("webhook")["enabled"] is False
+
+
 def test_teams_experimental_opt_in(local_package, monkeypatch):
     from app.core.connector_service import get_connector_type_info
 

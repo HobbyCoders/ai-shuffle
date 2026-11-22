@@ -113,11 +113,11 @@ export function claudeSummary(partial: Partial<ClaudeAuthSummary> = {}): ClaudeA
 	const mode = partial.mode ?? 'subscription';
 	return {
 		mode,
-		mode_label: mode === 'off' ? 'Off' : mode === 'api_key' ? 'Anthropic API key' : 'Claude subscription',
+		mode_label: mode === 'off' ? 'Off' : mode === 'cloud' ? 'Cloud provider or gateway' : 'Claude subscription',
 		explicit: true,
 		modes: [
 			{ value: 'subscription', label: 'Claude subscription' },
-			{ value: 'api_key', label: 'Anthropic API key' },
+			{ value: 'cloud', label: 'Cloud provider or gateway' },
 			{ value: 'off', label: 'Off' }
 		],
 		cli: {

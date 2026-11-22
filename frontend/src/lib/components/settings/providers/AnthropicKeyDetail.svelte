@@ -1,5 +1,8 @@
 <script lang="ts">
-	/** One saved Anthropic key. Account selection never changes the Claude Code mode. */
+	/**
+	 * One saved Anthropic key. The selected key is the "Claude API" provider
+	 * beside the subscription; selecting a key never changes the Claude Code mode.
+	 */
 	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -16,12 +19,11 @@
 	import ClaudeApiModels from './tabs/ClaudeApiModels.svelte';
 	import type { CredentialView, ProviderView } from './providers-model';
 	import { detailLine, safeKeyHint } from './credential-display';
-	import { changeClaudeMode, startSetup } from './provider-actions';
+	import { startSetup } from './provider-actions';
 
 	let { credential, provider }: { credential: CredentialView; provider: ProviderView } = $props();
 	const access = getSettingsAccess();
 	const account = $derived(credential.account);
-	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 	const masked = $derived(safeKeyHint(account?.masked_key) || safeKeyHint(providers.current.anthropicKeyMasked) || (account || providers.current.anthropicKeySet ? 'Saved' : 'No key selected'));
 	let saving = $state(false);
 	let error = $state('');
@@ -48,7 +50,7 @@
 
 	const danger = $derived<DangerAction[]>(account || providers.current.anthropicKeySet ? [{
 		label: 'Remove this credential',
-		hint: account?.active ? 'Leaves API key mode with no selected key; other saved keys are kept' : 'Deletes only this saved key',
+		hint: account?.active ? 'Claude API models stop working until another key is selected; other saved keys are kept' : 'Deletes only this saved key',
 		button: 'Remove',
 		question: `Remove ${credential.name}?`,
 		onConfirm: remove
@@ -57,14 +59,11 @@
 
 <DetailPane name={credential.name}
 	status={credential.attention ? credential.status : undefined} statusText={credential.attention ? credential.statusText : undefined}
-	subtitle={detailLine(!credential.attention && credential.statusText, credential.on ? 'New chats default to Claude · API' : account?.active ? 'Listed as Claude · API in model pickers' : 'Saved Anthropic account', 'Billed per use')}
+	subtitle={detailLine(!credential.attention && credential.statusText, account?.active || !account ? 'Listed as Claude · API in model pickers' : 'Saved Anthropic account', 'Billed per use')}
 	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		{#if account}<CredentialControl {credential} showState />{/if}
-		{#if (account?.active || !account && providers.current.anthropicKeySet) && mode !== 'api_key'}
-			<button type="button" class="st-btn" onclick={() => changeClaudeMode('api_key')}>Use API key mode</button>
-		{/if}
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
@@ -79,7 +78,7 @@
 					<SettingRow label="Name"><TextField value={account.label} width={260} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
 				{/if}
 				<SettingRow id="providers.anthropicKey" label="Key"><ValueText mono tone="fg" value={masked} /></SettingRow>
-				<SettingRow label="Account selection" hint="Changing the selected key keeps the Claude Code mode unchanged">
+				<SettingRow label="Account selection" hint="The selected key runs Claude · API models; changing it keeps the Claude Code mode unchanged">
 					<ValueText value={credential.statusText} status={credential.status} />
 				</SettingRow>
 				<SettingRow label="Another API key" hint="The new key becomes selected">

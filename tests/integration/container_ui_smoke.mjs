@@ -51,8 +51,9 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   await license.getByRole('heading', { name: 'Local use is free', exact: true }).waitFor();
   await license.getByRole('button', { name: 'Continue', exact: true }).click();
   // One provider step: every agent provider is a choice, none is connected
-  // here, so Continue stays disabled. Claude's own pay choice (subscription or
-  // API key) lives inside the Claude choice and still stores the real mode.
+  // here, so Continue stays disabled. Claude's own pay choice lives inside the
+  // Claude choice: Subscription stores the Claude mode, while API key only
+  // opens the key form (the key runs as the Claude API provider, not a mode).
   const step = page.getByTestId('setup-provider');
   await step.waitFor();
   await step.getByTestId('setup-provider-missing').waitFor();
@@ -61,23 +62,37 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   }
   assert.equal(await step.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
   await step.getByTestId('setup-provider-claude').click();
-  // Startup records a default mode (subscription on a fresh worker), and picking
-  // the way that is already stored saves nothing. Pick the other way first so
-  // each click is a real change through the mode producer.
-  const picks = [['subscription', /^Subscription/], ['api_key', /^API key/]];
+  const modeWrites = [];
+  const countModeWrite = request => {
+    if (request.url().endsWith('/settings/claude-auth') && request.method() === 'PUT') modeWrites.push(request);
+  };
+  page.on('request', countModeWrite);
+  // Startup records a default mode (subscription on a fresh worker). Picking
+  // the way that is already stored saves nothing, so a PUT is expected only
+  // when the stored mode differs.
   const stored = (await workerJson(page, '/api/v1/settings/claude-auth')).mode;
-  if (picks[0][0] === stored) picks.reverse();
-  for (const [mode, label] of picks) {
+  const picks = [['api_key', /^API key/], ['subscription', /^Subscription/]];
+  for (const [way, label] of picks) {
     const ways = step.getByRole('radiogroup', { name: 'How to pay for Claude' });
     await ways.waitFor();
-    const [response] = await Promise.all([
-      page.waitForResponse(response => response.url().endsWith('/settings/claude-auth') && response.request().method() === 'PUT'),
-      ways.getByText(mode === 'subscription' ? 'Subscription' : 'API key', { exact: true }).click(),
-    ]);
+    const writesBefore = modeWrites.length;
+    const pick = ways.getByText(way === 'subscription' ? 'Subscription' : 'API key', { exact: true });
+    if (way === 'subscription' && stored !== 'subscription') {
+      const [response] = await Promise.all([
+        page.waitForResponse(response => response.url().endsWith('/settings/claude-auth') && response.request().method() === 'PUT'),
+        pick.click(),
+      ]);
+      assert.equal(response.status(), 200, 'The real mode producer rejected setup');
+    } else {
+      await pick.click();
+    }
     assert.equal(await ways.getByRole('radio', { name: label }).isChecked(), true);
-    assert.equal(response.status(), 200, 'The real mode producer rejected setup');
-    const summary = await response.json();
-    assert.equal(summary.mode, mode);
+    if (way === 'api_key') {
+      await step.getByLabel('Anthropic API key', { exact: true }).waitFor();
+      assert.equal(modeWrites.length, writesBefore, 'Picking the API key must not change the Claude mode');
+    }
+    const summary = await workerJson(page, '/api/v1/settings/claude-auth');
+    assert.equal(summary.mode, way === 'subscription' ? 'subscription' : stored);
     assert.equal(summary.cli.signed_in, false, 'Acceptance must not inherit a CLI login');
     assert.equal(summary.api_key.set, false, 'Acceptance must not inherit an API key');
     assert.equal(summary.gate.claude_credential_ready, false);
@@ -95,13 +110,14 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
     assert.equal(await page.getByTestId('setup-first-run').count(), 0, 'Do not run a model in offline acceptance');
     assert.equal(await page.getByRole('button', { name: 'Finish', exact: true }).count(), 0);
   }
+  page.off('request', countModeWrite);
   const auth = await workerJson(page, '/api/v1/auth/status');
   assert.equal(auth.onboarding_complete, false, 'A credential-blocked wizard must stay unfinished');
   assert.equal(auth.agent_gate.ready, false);
   assert.equal(auth.owner_linked, false);
-  // The last pick is the stored mode. On a fresh worker that is the mode the
-  // worker did not record at startup, so callers must not hard-code it.
-  return picks.at(-1)[0];
+  // Subscription was picked last, so it is the stored mode callers compare
+  // against after a restart.
+  return 'subscription';
 }
 
 export async function configurePersistenceFixture(page, workspace) {
@@ -209,7 +225,7 @@ async function main() {
     assert.equal((await workerJson(page, '/api/v1/auth/status')).onboarding_complete, false);
     assert.deepEqual(completed, [], 'The smoke test must never bypass onboarding completion');
     assert.deepEqual(pageErrors, [], 'Bundled UI raised JavaScript errors');
-    console.log('Bundled wizard persisted both Claude modes from the provider step, refused to continue with no provider ready and stayed unfinished after reload. Workspace/network persistence and update policy APIs passed. No model, account linking, first-run completion or post-setup Settings UI was exercised.');
+    console.log('Bundled wizard stored the subscription mode, kept the mode when the API key was picked, refused to continue with no provider ready and stayed unfinished after reload. Workspace/network persistence and update policy APIs passed. No model, account linking, first-run completion or post-setup Settings UI was exercised.');
   } finally {
     await page.screenshot({ path: '/tmp/container-ui.png', mask: [page.locator('code, input[type="password"]')] });
     await context.close();

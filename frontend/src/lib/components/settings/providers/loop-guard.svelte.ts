@@ -3,7 +3,8 @@
  * tabs show it: a budget for unattended Claude turns (automations, wake-ups,
  * background workers, connectors) while Claude runs on the subscription, a
  * time limit for background workers, and the turns it holds for the owner.
- * It does nothing in API key mode or while Claude is off.
+ * It does nothing on a cloud provider or gateway, while Claude is off, or for
+ * runs on a Claude · API model.
  */
 import { getErrorMessage } from '$lib/api/client';
 import {

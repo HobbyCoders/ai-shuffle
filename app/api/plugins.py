@@ -288,10 +288,14 @@ def remove_marketplace(
     marketplace_id: str,
     token: str = Depends(require_admin)
 ):
-    """Remove a plugin marketplace and all its installed plugins - Admin only"""
+    """Remove a plugin marketplace and all its installed plugins - Admin only
+
+    Its plugins are uninstalled on the owner's other workers too, as an
+    uninstall of each would be (see ``plugins_sync.remove_marketplace``).
+    """
     service = get_plugin_service()
     try:
-        service.remove_marketplace(marketplace_id)
+        plugins_sync.remove_marketplace(service, marketplace_id)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

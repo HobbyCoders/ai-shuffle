@@ -1011,7 +1011,7 @@ class PluginService:
         from app.core import connector_packages
         kind = connector_packages.kind_for(plugin_id)
         if kind:
-            return connector_packages.install(kind, scope)
+            return connector_packages.install(kind, scope, enabled=enable)
         return _inst_mod.install_plugin(self, plugin_id, scope, enable, requested_by)
 
     def install_plugins_batch(

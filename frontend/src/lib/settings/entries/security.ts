@@ -1,6 +1,7 @@
 /**
  * Security: owner password, trusted LAN, agents run as you (desktop app),
- * computer use, code sandbox, chat instructions.
+ * computer use, terminals on other workers. The chat instructions moved to
+ * Agent instructions (entries/agents.ts).
  * SecurityPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -61,13 +62,5 @@ export const entries: SettingEntry[] = [
 		help: 'Lets a chat on another worker of yours open its shell from the app you are using. Turn it on for both workers. Each device links once per worker with a code, then signs every shell it opens. Agents, API keys and preview links cannot use it.',
 		keywords: ['terminal', 'shell', 'peer', 'remote', 'device link', 'other worker'],
 		default: false
-	},
-	{
-		id: 'security.secInstr',
-		category: 'security',
-		section: 'Agent safety',
-		label: 'Chat instructions',
-		hint: 'Sent to every agent',
-		keywords: ['system prompt', 'custom instructions', 'security instructions', 'markdown', 'file links', 'revert']
 	}
 ];

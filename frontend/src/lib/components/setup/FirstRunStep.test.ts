@@ -73,4 +73,19 @@ describe('first run with no model picked', () => {
 		expect((await screen.findByText(/GPT-5\.5 on OpenAI/)).textContent).toContain('billed to your own account');
 		expect(screen.queryByTestId('setup-first-run-needs-model')).toBeNull();
 	});
+
+	it('never runs on the Anthropic API key, and lets the owner continue', async () => {
+		const models = [{ id: 'claude-sonnet', label: 'Sonnet' }];
+		mocks.status = { agent_gate: gate(['gw:claude-api']) };
+		mocks.rows = [{ ...openaiRow(models), id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', base_url: '' }];
+		mocks.registry = [{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', models, default_model: 'claude-sonnet', auth_kind: 'api', plan_type: null }];
+		const onContinue = vi.fn();
+		render(FirstRunStep, { onContinue });
+		expect((await screen.findByTestId('setup-first-run-key-only')).textContent).toContain('Claude · API');
+		expect(screen.queryByTestId('setup-first-run-needs-model')).toBeNull();
+		expect((screen.getByRole('button', { name: /Run it/ }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect(onContinue).toHaveBeenCalledOnce();
+		expect(mocks.start).not.toHaveBeenCalled();
+	});
 });

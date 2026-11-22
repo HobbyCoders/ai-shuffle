@@ -2,7 +2,7 @@
 	/**
 	 * SecurityInstructionsEditor: the chat instructions sent to every agent
 	 * (`/settings/security-instructions`, the setting's former name), opened
-	 * under Security > Chat instructions. Explicit Save; Revert to default goes
+	 * under Agent instructions > Chat instructions. Explicit Save; Revert to default goes
 	 * through InlineConfirm and deletes the customization on the worker.
 	 *
 	 * A saved customization is never replaced by a newer built-in default, so

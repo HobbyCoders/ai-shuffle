@@ -567,7 +567,7 @@
 	// when this tab left a questioning session means the user answered from
 	// elsewhere (the WS frame path is in ws-message-handlers).
 	$effect(() => observeSessionRows($sessions));
-	// Settings > System's memory health answer is the owner's only: signing out
+	// Settings > Memory's memory health answer is the owner's only: signing out
 	// (also the way to another account) or losing owner rights forgets it. The
 	// reset is the cleanup, not a branch for the signed-out state: signing out
 	// unmounts this page before an effect could see that state.

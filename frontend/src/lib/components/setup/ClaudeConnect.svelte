@@ -8,12 +8,14 @@
 	 * - Subscription: the stock Claude Code CLI, signed in by the owner on
 	 *   Anthropic's page. `ClaudeCliPanel variant="setup"` keeps the Docker
 	 *   (in-app terminal) and desktop (own terminal) differences.
-	 * - API key: an Anthropic Console key. The worker checks it first and the
-	 *   save also sets Claude to API key mode (`use_for_claude_code`).
+	 * - API key: an Anthropic Console key. The worker checks it first; the key
+	 *   becomes the "Claude API" provider beside any subscription and never
+	 *   changes the Claude mode.
 	 *
-	 * Picking one stores the Claude mode (`PUT /settings/claude-auth`), the same
-	 * setting as Settings > Providers > Claude. Readiness comes from the worker's
-	 * `claude-auth` summary; `onReady` fires once the chosen way has its credential.
+	 * Picking Subscription stores the Claude mode (`PUT /settings/claude-auth`),
+	 * the same setting as Settings > Providers > Claude. Readiness comes from the
+	 * worker's `claude-auth` summary; `onReady` fires once the chosen way has its
+	 * credential.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { Check, ExternalLink, KeyRound, Loader2, SquareTerminal } from 'lucide-svelte';
@@ -21,11 +23,12 @@
 	import { claudePlanLabel } from '$lib/api/claude-cli';
 	import {
 		getAgentCredentials, keyLabel, saveAnthropicApiKey, setClaudeAuthMode,
-		type AgentCredentials, type ClaudeAuthMode
+		type AgentCredentials
 	} from '$lib/api/agent-credentials';
 	import ClaudeCliPanel from '$lib/components/settings/ClaudeCliPanel.svelte';
 
-	type Way = Exclude<ClaudeAuthMode, 'off'>;
+	/** How setup connects Claude. Only `subscription` and `cloud` are modes. */
+	type Way = 'subscription' | 'api_key' | 'cloud';
 
 	interface Props {
 		isAdmin: boolean;
@@ -49,7 +52,7 @@
 	let disposed = false;
 	let announced = false;
 
-	const ready = $derived(!!way && creds?.mode === way && creds.credentialReady);
+	const ready = $derived(!!way && !!creds && (way === 'api_key' ? creds.apiKeyReady : creds.mode === way && creds.credentialReady));
 	const keySet = $derived(creds?.apiKey.set === true);
 	const account = $derived.by(() => {
 		if (!creds?.cli.signed_in) return '';
@@ -81,6 +84,7 @@
 			creds = next; error = '';
 			// A returning owner whose Claude already works starts on that way.
 			if (!way && next.credentialReady && next.mode !== 'off') way = next.mode;
+			else if (!way && next.apiKeyReady) way = 'api_key';
 		} catch (e) {
 			if (!disposed) error = getErrorMessage(e, 'Could not ask the worker about Claude.');
 		} finally {
@@ -91,7 +95,8 @@
 	async function choose(next: Way) {
 		if (switching) return;
 		way = next; error = '';
-		if (creds?.mode === next) return;
+		// The API key is not a mode: choosing it only shows the key form.
+		if (next === 'api_key' || creds?.mode === next) return;
 		switching = true;
 		try {
 			creds = await setClaudeAuthMode(next);
@@ -108,7 +113,7 @@
 		if (!value || saving) return;
 		saving = true; saveError = '';
 		try {
-			await saveAnthropicApiKey(value, { useForClaudeCode: true });
+			await saveAnthropicApiKey(value);
 			keyInput = ''; replacing = false;
 			await check();
 		} catch (e) {

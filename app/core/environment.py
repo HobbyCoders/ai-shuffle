@@ -65,7 +65,8 @@ Never guess URLs; never paste base64.
 ### Files on disk
 Use `/api/files/by-path?path=URL_ENCODED_FULL_PATH`: `![alt](URL)` for images, `[label](URL)` for links and inline video/audio.
 - Share only existing files in a served root the viewer can access: the worker's workspace or a registered project/worktree.
-- Never share scratch/temp paths. For scratch/temp or unserved files, copy only the intended deliverable to a served root. Verify the copy exists and is accessible; link or embed it, not the original. If access is unverified, say it's unavailable.
+- Never share scratch/temp/cache paths. For scratch/temp or unserved files, copy only the intended deliverable to a served root. Verify the copy exists and is accessible; link or embed it, not the original. If access is unverified, say it's unavailable.
+- Exception: browser screenshots at `…/tool-results/mcp-browser-blob-*.jpg` are served; embed that path.
 - Never copy or share secrets or credentials (`.env`, keys). Don't commit copies.
 - Percent-encode the full absolute path: `urllib.parse.quote(path, safe="/")`.
   `C:\\a b.png` becomes `/api/files/by-path?path=C%3A%5Ca%20b.png`
@@ -414,12 +415,9 @@ def inject_claude_code_auth(
 
     from app.core import claude_auth_mode, claude_cli_home, claude_cloud_auth, claude_subscriptions, credential_gate
 
-    selected, choice = claude_auth_mode.runtime_choice()
-    # API key mode runs the CLI on the subscription: the saved key is the
-    # separate "Claude API" provider (app.core.claude_api_provider) and never
-    # reaches the CLI.
-    mode = (claude_auth_mode.MODE_SUBSCRIPTION if selected == claude_auth_mode.MODE_API_KEY
-            else selected)
+    # The saved key is the separate "Claude API" provider
+    # (app.core.claude_api_provider) and never reaches the CLI.
+    mode, choice = claude_auth_mode.runtime_choice()
     target = (claude_subscriptions.shared_target(choice, read_choice=False)
               if mode == claude_auth_mode.MODE_SUBSCRIPTION else None)
     enforced = choice is not None or target is not None

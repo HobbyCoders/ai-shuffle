@@ -4,7 +4,7 @@
  * The setup wizard reads all of it from one call, `GET /api/v1/settings/claude-auth`
  * (the same summary Settings > Providers > Claude shows):
  *
- * - `mode`: `'subscription'`, `'api_key'` or `'off'`, with `explicit` false only before
+ * - `mode`: `'subscription'`, `'cloud'` or `'off'`, with `explicit` false only before
  *   startup has recorded the worker's default.
  * - `cli`: what `claude auth status` reports, with the account only when signed in.
  * - `api_key`: whether a key is stored, and its last four characters.
@@ -15,8 +15,8 @@
  *
  * `PUT /api/v1/settings/claude-auth` with `{ mode }` stores the choice (owner
  * only) and answers with the same summary. `POST /api/v1/settings/integrations/anthropic`
- * saves a key; with `use_for_claude_code: true` it also switches Claude Code
- * to API key mode in the same call. The worker never switches modes itself.
+ * saves a key, which becomes the "Claude API" provider beside the subscription
+ * and never changes the mode. The worker never switches modes itself.
  */
 import { api } from './client';
 import {
@@ -35,8 +35,10 @@ export interface AgentCredentials {
 	explicit: boolean;
 	/** The server gate's `ready`: some agent provider is ready. */
 	ready: boolean;
-	/** The active mode's credential exists (CLI signed in, or a key stored). */
+	/** The mode's Claude Code credential exists (CLI signed in, or the cloud method set up). */
 	credentialReady: boolean;
+	/** The saved Anthropic key's "Claude API" provider can run. */
+	apiKeyReady: boolean;
 	/** Why Claude cannot run, fit to show the user; null when it can. */
 	reason: string | null;
 	cli: ClaudeAuthSummary['cli'];
@@ -47,7 +49,7 @@ export interface AgentCredentials {
 export const CLAUDE_API_READY_ID = 'gw:claude-api';
 
 export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
-	return value === 'subscription' || value === 'api_key' || value === 'cloud' || value === 'off';
+	return value === 'subscription' || value === 'cloud' || value === 'off';
 }
 
 /** The wizard's view of the worker's `claude-auth` summary. */
@@ -55,25 +57,25 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 	const mode: ClaudeAuthMode = isClaudeAuthMode(summary.mode) ? summary.mode : 'subscription';
 	const gate = summary.gate;
 	// Off: Claude is turned off on this worker, so no credential is in use.
-	// API key mode: the key runs on the separate "Claude API" provider, so its
-	// readiness is that provider's, not the Claude Code CLI's sign-in.
 	const credentialReady = gate
-		? mode === 'api_key' && gate.ready_providers
-			? gate.ready_providers.includes(CLAUDE_API_READY_ID)
-			: gate.claude_credential_ready === true
+		? gate.claude_credential_ready === true
 		: mode === 'subscription'
 			? summary.cli.signed_in
-			: mode === 'api_key'
-				? summary.api_key.set
-				: mode === 'cloud'
-					? !!summary.cloud?.ready
-					: false;
+			: mode === 'cloud'
+				? !!summary.cloud?.ready
+				: false;
+	// The key runs on the separate "Claude API" provider, so its readiness is
+	// that provider's, never the Claude Code CLI's. Off turns it off too.
+	const apiKeyReady = mode !== 'off' && (gate?.ready_providers
+		? gate.ready_providers.includes(CLAUDE_API_READY_ID)
+		: summary.api_key.set);
 	return {
 		mode,
 		modeLabel: summary.mode_label,
 		explicit: summary.explicit,
-		ready: gate ? gate.ready === true : credentialReady,
+		ready: gate ? gate.ready === true : credentialReady || apiKeyReady,
 		credentialReady,
+		apiKeyReady,
 		reason: claudeReason(summary, credentialReady),
 		cli: summary.cli,
 		apiKey: summary.api_key,
@@ -106,14 +108,12 @@ export async function setClaudeAuthMode(mode: ClaudeAuthMode): Promise<AgentCred
 /**
  * Save the Anthropic API key on this worker (it stays on this worker). The
  * worker checks the key with Anthropic first and refuses a key Anthropic
- * rejects. `useForClaudeCode` also switches Claude Code to API key mode;
- * without it, saving a key never changes the mode.
+ * rejects. The key becomes the "Claude API" provider; saving it never
+ * changes the Claude mode.
  */
-export async function saveAnthropicApiKey(
-	apiKey: string, options: { useForClaudeCode?: boolean } = {}
-): Promise<{ masked: string }> {
+export async function saveAnthropicApiKey(apiKey: string): Promise<{ masked: string }> {
 	const body = await api.post<{ success?: boolean; masked_key?: string }>(
-		'/settings/integrations/anthropic', { api_key: apiKey, use_for_claude_code: options.useForClaudeCode === true });
+		'/settings/integrations/anthropic', { api_key: apiKey });
 	return { masked: body?.masked_key || '' };
 }
 

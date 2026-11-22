@@ -22,7 +22,7 @@ class FakeService:
     def get_enabled_plugins(self):
         return dict(self.enabled)
 
-    def install_plugin(self, plugin_id, scope="user"):
+    def install_plugin(self, plugin_id, scope="user", enable=True):
         self.calls.append(("install", plugin_id))
         if "install" in self.fail:
             raise RuntimeError("marketplace offline")

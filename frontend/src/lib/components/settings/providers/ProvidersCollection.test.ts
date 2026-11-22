@@ -398,7 +398,7 @@ describe('the list', () => {
 		expect(screen.getByText('5 connected')).toBeTruthy();
 		expect(credentialNames('Claude')).toEqual([
 			'Claude Max subscription, Active for Claude',
-			'Anthropic API key, Standby'
+			'Anthropic API key, Active for Claude API'
 		]);
 		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, Active', 'OpenAI API key, Active']);
 		expect(within(group('OpenAI')).getByText('owner@example.com, Plus plan')).toBeTruthy();
@@ -516,7 +516,7 @@ describe('Claude', () => {
 		await waitFor(() =>
 			expect(within(screen.getByRole('group', { name: 'Runs on' })).getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('true')
 		);
-		expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']);
+		await waitFor(() => expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']));
 	});
 
 	it('does not save when the current mode is picked again', async () => {
@@ -630,7 +630,7 @@ describe('Claude Code on the Not connected page', () => {
 	}
 
 	it('keeps the mode control reachable with no Claude account row, in every mode', async () => {
-		for (const mode of ['subscription', 'off', 'api_key'] as const) {
+		for (const mode of ['subscription', 'off'] as const) {
 			cleanup();
 			providers.clear();
 			settingsNav.reset();

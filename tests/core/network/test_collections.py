@@ -202,8 +202,8 @@ def test_plugin_desired_state_is_published_and_applied(workers, monkeypatch):
         def get_enabled_plugins(self):
             return dict(self.enabled)
 
-        def install_plugin(self, plugin_id, scope="user"):
-            self.calls.append(("install", plugin_id, scope))
+        def install_plugin(self, plugin_id, scope="user", enable=True):
+            self.calls.append(("install", plugin_id, scope, enable))
             self.installed[plugin_id] = FakePlugin(plugin_id, "1.2.0", True)
             return self.installed[plugin_id]
 
@@ -237,8 +237,8 @@ def test_plugin_desired_state_is_published_and_applied(workers, monkeypatch):
         rows = b.sql("SELECT id, enabled FROM network_plugins_desired")
         assert rows[0]["id"] == "tools@official"
         assert plugins_sync.apply_desired(["tools@official"]) == 1
-        assert ("install", "tools@official", "user") in services["b"].calls
-        assert ("enable", "tools@official") in services["b"].calls
+        # Installed enabled, as the row says (the install applies ``enable``).
+        assert ("install", "tools@official", "user", True) in services["b"].calls
     # A disables the plugin; B follows.
     current["name"] = "a"
     with a.active():

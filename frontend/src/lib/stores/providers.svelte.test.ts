@@ -178,7 +178,8 @@ describe('providers store — Anthropic API key integration', () => {
 		expect(providers.current.anthropicKeySet).toBe(true);
 		expect(providers.current.falKeySet).toBe(true);
 		expect(providers.current.anthropicKeyMasked).toBe('sk-ant-…zzz');
-		expect(providers.current.claudeCodeAuthMethod).toBe('api_key');
+		// An older worker's legacy API key mode reads as the subscription.
+		expect(providers.current.claudeCodeAuthMethod).toBe('account');
 		expect(providers.current.integrationsError).toBe(null);
 
 		vi.unstubAllGlobals();
@@ -195,7 +196,7 @@ describe('providers store — Anthropic API key integration', () => {
 				json: async () => ({
 					anthropic_api_key_set: true,
 					anthropic_api_key_masked: 'sk-ant-…new',
-					claude_code_auth_method: 'api_key'
+					claude_code_auth_method: 'account'
 				})
 			});
 		vi.stubGlobal('fetch', fetchMock);
@@ -208,7 +209,8 @@ describe('providers store — Anthropic API key integration', () => {
 		// State reflects the reload, not a local write.
 		expect(providers.current.anthropicKeySet).toBe(true);
 		expect(providers.current.anthropicKeyMasked).toBe('sk-ant-…new');
-		expect(providers.current.claudeCodeAuthMethod).toBe('api_key');
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ api_key: 'sk-ant-secret' });
+		expect(providers.current.claudeCodeAuthMethod).toBe('account');
 
 		vi.unstubAllGlobals();
 	});

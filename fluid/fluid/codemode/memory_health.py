@@ -14,7 +14,7 @@ only reported.
 
 Every signal is ``healthy`` or ``attention`` with one plain sentence. The
 thresholds below are first estimates, not tuned values, so attention alone
-is shown in Settings, System; only an ``alert`` (memory lost or refused)
+is shown in Settings, Memory; only an ``alert`` (memory lost or refused)
 raises a notification.
 """
 from __future__ import annotations
@@ -117,7 +117,7 @@ def _signal(sid: str, attention: bool, reason: str, *, alert: bool = False, note
     """``alert`` marks an attention the owner is notified about: memory was
     lost or refused (user-saved facts gone, saves failing, the store full,
     conversation dropped unread). Every other attention is shown in
-    Settings, System only. Raising the bell for each heuristic signal kept
+    Settings, Memory only. Raising the bell for each heuristic signal kept
     notifying about things nobody could act on, one signal after another.
 
     ``note`` marks a healthy signal whose reason the owner should still be
@@ -886,7 +886,7 @@ def run(store, *, now: float | None = None, learning_enabled: bool = True) -> di
     else:
         attention_since = None
     # Only an alert (see :func:`_signal`) starts a stretch the owner is told
-    # about; other attention is shown in Settings, System without a bell.
+    # about; other attention is shown in Settings, Memory without a bell.
     alerting = alert_signals(result)
     alert_since = previous.get("alert_since") if alerting else None
     if alerting and "alert_since" not in previous and previous.get("state") == "attention":

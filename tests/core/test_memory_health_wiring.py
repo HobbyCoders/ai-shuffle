@@ -23,7 +23,7 @@ def test_owner_health_without_a_store_is_healthy_and_creates_nothing():
 
 
 def test_sweep_does_not_announce_attention_without_a_loss(monkeypatch):
-    # The learner has not run: shown in Settings, System, but nothing was
+    # The learner has not run: shown in Settings, Memory, but nothing was
     # lost or refused, so no notification.
     monkeypatch.setattr(settings, "fluid_continual", True)
     _owner_store_needing_attention()
@@ -50,7 +50,7 @@ async def test_sweep_checks_health_and_announces_once(monkeypatch):
     emit.assert_awaited_once()
     args, kwargs = emit.await_args
     assert args == ("admin",) and kwargs["category"] == "memory_health"
-    assert kwargs["message"].startswith("Memory is full") and "Settings, System" in kwargs["message"]
+    assert kwargs["message"].startswith("Memory is full") and "Settings, Memory" in kwargs["message"]
     assert "Learning has not run" not in kwargs["message"], "only alerts are named"
     # Not due again within the hour; when due, the same stretch stays quiet.
     assert fluid_memory.sweep_memories(now=now + 60) == []

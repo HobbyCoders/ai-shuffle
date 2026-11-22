@@ -6,7 +6,7 @@
 	import Checkbox from '$lib/components/ui/Checkbox.svelte';
 	/**
 	 * ImportWizard: copy instructions, skills, agents, MCP inventory and
-	 * projects from Claude Code and Codex, inline under System > Workspace.
+	 * projects from Claude Code and Codex, inline under System > Your data.
 	 * Source, then Preview (choose items and confirm), then Result.
 	 *
 	 * Ported from SettingsImportDialog. The rules stay: preview is read-only,

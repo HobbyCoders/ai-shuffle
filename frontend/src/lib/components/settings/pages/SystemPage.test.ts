@@ -16,29 +16,21 @@ import { CHANNEL_LATE_POLL_MS, CHANNEL_POLL_MS, CHANNEL_READ_MS, CHANNEL_WAIT_MS
 import { resourceSync } from '$lib/services/resource-sync';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import { aiContentPrefill, supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
-import { memoryHealth as memoryHealthStore } from '$lib/stores/memory-health.svelte';
 
 let policy: { allow_updates: boolean; update_all_workers: boolean };
 let workspace: string;
 let workers: Record<string, unknown>[];
-let memoryHealth: unknown;
 let channelStatus: { channel: string; available: string[]; source: string; editable: boolean; restart_required: boolean };
 
 beforeEach(() => {
 	vi.resetAllMocks();
-	memoryHealthStore.reset();
 	policy = { allow_updates: true, update_all_workers: false };
 	workspace = '/data/workspace';
 	workers = [{ device_id: 'self', device_name: 'Current worker', online: true, supported: true, phase: 'idle' }];
-	memoryHealth = { state: 'healthy', checked_at: 1, signals: [], repairs: [] };
 	channelStatus = { channel: 'stable', available: ['stable', 'nightly'], source: 'default', editable: true, restart_required: false };
 	transport.get.mockImplementation(async (path: string) => {
 		if (path === '/support/capabilities') return { basic_report: true, can_report_ai_content: true };
 		if (path === '/updates/channel') return { ...channelStatus };
-		if (path === '/memory/health') {
-			if (memoryHealth instanceof Error) throw memoryHealth;
-			return memoryHealth;
-		}
 		if (path === '/settings/application-updates') return { ...policy };
 		if (path === '/settings/application-updates/workers') return { ...policy, workers };
 		if (path === '/workspace/config') return { workspace_path: workspace, is_configured: true, is_local_mode: false, default_path: '', exists: true };
@@ -62,7 +54,6 @@ afterEach(() => {
 	resourceSync.clear();
 	supportCaps.reset();
 	supportReportDialog.close();
-	memoryHealthStore.reset();
 	vi.useRealTimers();
 });
 
@@ -169,16 +160,22 @@ describe('held main in check results', () => {
 
 describe('coverage', () => {
 	it('renders a row for every System entry', async () => {
-		await assertCategoryCoverage('system', () => render(SystemPage).container, {
-			settle: () => waitFor(() => expect(screen.getByTestId('memory-health').textContent).toContain('Healthy'))
-		});
+		await assertCategoryCoverage('system', () => render(SystemPage).container);
 	});
 
 	it('no longer has License rows; they moved to Cloud', async () => {
 		render(SystemPage);
-		await waitFor(() => expect(screen.getByTestId('memory-health').textContent).not.toBe(''));
+		await screen.findByText('Report a problem');
 		expect(screen.queryByRole('heading', { name: 'License' })).toBeNull();
 		expect(transport.get).not.toHaveBeenCalledWith('/license');
+	});
+
+	it('no longer has Memory health; it moved to Memory', async () => {
+		render(SystemPage);
+		await screen.findByText('Report a problem');
+		expect(screen.queryByText('Memory health')).toBeNull();
+		expect(screen.queryByTestId('memory-health')).toBeNull();
+		expect(transport.get).not.toHaveBeenCalledWith('/memory/health');
 	});
 });
 
@@ -607,133 +604,6 @@ describe('update channel', () => {
 		[{ status: 409, detail: 'Something new' }, 'This worker cannot change its update channel right now.']
 	])('maps refusal %o to one sentence', (cause, sentence) => {
 		expect(channelError(cause)).toBe(sentence);
-	});
-});
-
-describe('memory health', () => {
-	it('shows a healthy store with one line when opened', async () => {
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Healthy'));
-		await fireEvent.click(within(row).getByRole('button'));
-		expect(await screen.findByText('Nothing needs attention')).toBeTruthy();
-	});
-
-	it('names what needs attention and what was repaired', async () => {
-		const at = Date.now() / 1000;
-		memoryHealth = {
-			state: 'attention',
-			checked_at: at,
-			signals: [
-				{ id: 'learner', label: 'Learning', state: 'attention', reason: 'Learning has not run despite recent sessions.' },
-				{ id: 'saves', label: 'Saving', state: 'healthy', reason: 'Saves are writing normally.' }
-			],
-			repairs: [{ kind: 'duplicates', count: 1, at, summary: 'Archived 1 exact duplicate.' }]
-		};
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Needs attention'));
-		await fireEvent.click(within(row).getByRole('button'));
-		expect(await screen.findByText('Learning has not run despite recent sessions.')).toBeTruthy();
-		expect(screen.getByText(/Archived 1 exact duplicate\./)).toBeTruthy();
-		expect(screen.queryByText('Saves are writing normally.')).toBeNull();
-	});
-
-	it('says when it last checked, with no warning notice in the page flow (#1042)', async () => {
-		memoryHealth = {
-			state: 'attention',
-			checked_at: Date.now() / 1000 - 12 * 60,
-			signals: [
-				{ id: 'capacity', label: 'Capacity', state: 'attention', reason: 'Automatic cleanup has recorded 3 permanent deletions of older facts. Recall cannot recover a deleted copy.' }
-			],
-			repairs: []
-		};
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Needs attention'));
-		const setting = row.closest('.st-row') as HTMLElement;
-		expect(setting.querySelector('.st-rh')?.textContent).toBe('Checked 12m ago');
-		// No notice under the card: a late answer cannot push the page down.
-		expect(document.querySelector('.st-banner.warn')).toBeNull();
-		expect(screen.queryByText(/^Capacity: Automatic cleanup/)).toBeNull();
-		await fireEvent.click(within(row).getByRole('button', { name: /Needs attention/ }));
-		expect(await screen.findByText(/Recall cannot recover a deleted copy\./)).toBeTruthy();
-		expect(screen.getByText(/^Last checked /)).toBeTruthy();
-	});
-
-	it('shows the last answer at once on reopening, then asks again', async () => {
-		memoryHealth = {
-			state: 'attention',
-			checked_at: Date.now() / 1000 - 60,
-			signals: [{ id: 'capacity', label: 'Capacity', state: 'attention', reason: 'Automatic cleanup has recorded 3 permanent deletions of older facts.' }],
-			repairs: []
-		};
-		await memoryHealthStore.refresh();
-		const asked = () => transport.get.mock.calls.filter(([path]) => path === '/memory/health').length;
-		expect(asked()).toBe(1);
-		memoryHealth = { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] };
-		render(SystemPage);
-		const row = screen.getByTestId('memory-health');
-		// The last answer is on the row at once, with no Loading in between.
-		expect(row.textContent).toContain('Needs attention');
-		await waitFor(() => expect(row.textContent).toContain('Healthy'));
-		expect(asked()).toBe(2);
-	});
-
-	it('asks again when the store forgets its answer while the page stays open', async () => {
-		memoryHealth = { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] };
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Healthy'));
-		const asked = () => transport.get.mock.calls.filter(([path]) => path === '/memory/health').length;
-		const before = asked();
-		memoryHealthStore.reset();
-		await waitFor(() => expect(asked()).toBe(before + 1));
-		await waitFor(() => expect(row.textContent).toContain('Healthy'));
-	});
-
-	it('stays quiet when healthy, and says when it has not checked yet', async () => {
-		memoryHealth = { state: 'healthy', checked_at: null, signals: [], repairs: [] };
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Healthy'));
-		expect((row.closest('.st-row') as HTMLElement).querySelector('.st-rh')?.textContent).toBe('Not checked yet');
-		expect(document.querySelector('.st-banner.warn')).toBeNull();
-	});
-
-	it('is owner only', async () => {
-		memoryHealth = Object.assign(new Error('Owner access required'), { status: 403 });
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
-		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
-		expect(document.querySelector('.st-banner.warn')).toBeNull();
-	});
-
-	it('keeps one value button from Loading to the answer, so a late answer does not move the row', async () => {
-		let answer!: (health: unknown) => void;
-		memoryHealth = new Promise((done) => (answer = done));
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		const button = within(row).getByRole('button');
-		expect(button.textContent).toContain('Loading');
-		expect(button.matches(':disabled')).toBe(true);
-		expect(row.querySelector('.st-dot.busy')).toBeTruthy();
-		answer({ state: 'healthy', checked_at: Date.now() / 1000 - 60, signals: [], repairs: [] });
-		await waitFor(() => expect(button.textContent).toContain('Healthy'));
-		expect(within(row).getByRole('button')).toBe(button);
-		expect(button.matches(':disabled')).toBe(false);
-		expect(row.querySelector('.st-dot.ok')).toBeTruthy();
-	});
-
-	it('leaves the value button shut when the check cannot be read', async () => {
-		memoryHealth = Object.assign(new Error('Server error'), { status: 500 });
-		render(SystemPage);
-		const row = await screen.findByTestId('memory-health');
-		await waitFor(() => expect(row.textContent).toContain('Unavailable'));
-		expect(within(row).getByRole('button').matches(':disabled')).toBe(true);
-		expect(row.querySelector('.st-dot.off')).toBeTruthy();
-		expect(document.querySelector('.st-banner.warn')).toBeNull();
 	});
 });
 

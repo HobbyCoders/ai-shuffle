@@ -442,11 +442,11 @@ def test_an_unrunnable_default_reads_as_none(lane):
 def test_write_normalizes_and_validates(lane, monkeypatch):
     from app.core import claude_auth_mode
 
-    # A subscription keeps a full Claude id; API-key and cloud fold it.
+    # A subscription keeps a full Claude id; cloud folds it.
     saved = subagent_default.write("claude-opus-4-6")
     assert saved == subagent_default.SubagentDefault("claude-opus-4-6")
     assert subagent_default.read() == saved
-    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_CLOUD)
     saved = subagent_default.write("claude-opus-4-6")
     assert saved == subagent_default.SubagentDefault("opus")
     assert subagent_default.read() == saved
@@ -456,7 +456,7 @@ def test_write_normalizes_and_validates(lane, monkeypatch):
 
 def test_an_aliasless_version_stays_on_subscription_workers(lane, monkeypatch):
     """Mythos has no alias: the shared setting holds it only in ``version``,
-    so an API-key worker (or an older release) sees no default and asks."""
+    so a cloud worker (or an older release) sees no default and asks."""
     import json
 
     from app.core import claude_auth_mode
@@ -467,7 +467,7 @@ def test_an_aliasless_version_stays_on_subscription_workers(lane, monkeypatch):
     stored = json.loads(database.get_system_setting(subagent_default.SETTING_KEY))
     assert stored == {"model": None, "version": "claude-mythos-5-1"}
     assert subagent_default.read() == saved
-    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_CLOUD)
     assert subagent_default.read().model is None
     by_id = {t.id: t for t in apm.available_subagents("caller", None)}
     assert by_id["plain"].model_source == "unset"
@@ -493,7 +493,7 @@ def test_a_versioned_default_falls_back_to_its_family_alias(lane, monkeypatch, v
     assert subagent_default.write(version).model == version
     stored = json.loads(database.get_system_setting(subagent_default.SETTING_KEY))
     assert stored == {"model": fallback, "version": version}
-    for mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_CLOUD):
+    for mode in (claude_auth_mode.MODE_CLOUD,):
         monkeypatch.setattr(claude_auth_mode, "current_mode", lambda m=mode: m)
         assert subagent_default.read().model == fallback
         # The same id saved by an older release in both fields reads the same.

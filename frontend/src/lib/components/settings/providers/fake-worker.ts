@@ -228,14 +228,10 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 		},
 		'GET /settings/claude-auth': () => state.claude,
 		'PUT /settings/claude-auth': (body) => {
-			const { mode, api_key_confirmation } = body as { mode: ClaudeAuthMode; api_key_confirmation?: string };
-			if (api_key_confirmation && api_key_confirmation !== state.claude.api_key_confirmation) {
-				throw { status: 409, detail: 'The Claude API key or mode changed. Review the current selection before confirming again.' };
-			}
+			const { mode } = body as { mode: ClaudeAuthMode };
 			state.claude = claudeSummary({
 				...state.claude,
 				mode,
-				api_key_confirmation_required: mode === 'api_key' ? false : state.claude.api_key_confirmation_required,
 				gate: claudeSummary({ mode }).gate
 			});
 			return state.claude;

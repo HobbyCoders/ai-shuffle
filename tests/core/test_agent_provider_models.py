@@ -794,14 +794,14 @@ def test_a_stored_version_runs_only_on_a_subscription_for_db_and_file_agents(moc
         file_agent = _task_baseline_model(None, None, None, {}, "caller")
         return target.model, db_agent, file_agent, subagent_default.payload()["model"]
 
-    # Subscription -> API key -> cloud -> subscription on one worker.
+    # Subscription -> cloud -> subscription on one worker.
     for now, want in ((claude_auth_mode.MODE_SUBSCRIPTION, "claude-opus-4-6"),
-                      (claude_auth_mode.MODE_API_KEY, "opus"), (claude_auth_mode.MODE_CLOUD, "opus"),
+                      (claude_auth_mode.MODE_CLOUD, "opus"),
                       (claude_auth_mode.MODE_SUBSCRIPTION, "claude-opus-4-6")):
         mode["now"] = now
         assert runs() == (want,) * 4, now
-    # The owner picks sonnet on an API-key worker: the version is gone everywhere.
-    mode["now"] = claude_auth_mode.MODE_API_KEY
+    # The owner picks sonnet on a cloud worker: the version is gone everywhere.
+    mode["now"] = claude_auth_mode.MODE_CLOUD
     subagent_default.write("sonnet")
     assert json.loads(stored[subagent_default.SETTING_KEY]) == {"model": "sonnet"}
     mode["now"] = claude_auth_mode.MODE_SUBSCRIPTION

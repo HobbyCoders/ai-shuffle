@@ -125,8 +125,9 @@ def test_a_local_cloud_override_keeps_the_owners_key_pin():
     the native Claude API provider, never a stale scalar from a peer."""
     from app.core import claude_api_provider
 
+    claude_auth_mode.set_mode("subscription")
     accounts.add_api_key("example-anthropic-secret-key-1111")
-    accounts.add_api_key("example-anthropic-secret-key-2222", for_claude_code=True)
+    accounts.add_api_key("example-anthropic-secret-key-2222")
     assert claude_auth_mode.shared_selection()["key_id"]
     # A peer's older save lands its scalar after the owner's pin.
     db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("example-anthropic-secret-key-1111"))
@@ -135,7 +136,7 @@ def test_a_local_cloud_override_keeps_the_owners_key_pin():
     assert claude_api_provider._active_key().endswith("2222")
     active = [row["last4"] for row in accounts.accounts_payload()["api_key"] if row["active"]]
     assert active == ["2222"]
-    # Settings names the same key outside API key mode too.
+    # Settings names the same key under a Cloud override too.
     assert claude_auth_mode.summary(cli={})["api_key"]["last4"] == "2222"
 
 

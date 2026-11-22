@@ -85,7 +85,7 @@ describe('a failed action says so where it was taken (#1523)', () => {
 			'DELETE /settings/claude-auth/accounts/api_key/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
 		});
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Selected for API key mode' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Active for Claude API' }));
 		expect((await failedRemove('Work')).textContent).toContain('Database is busy');
 		expect(providers.current.claude?.accounts?.api_key.map((a) => a.id)).toContain('work');
 	});
@@ -180,7 +180,7 @@ describe('saved account controls', () => {
 
 	it('renames and deletes only the selected Anthropic account, without selecting a sibling', async () => {
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Selected for API key mode' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Active for Claude API' }));
 		const name = await screen.findByRole('textbox', { name: 'Name' });
 		await fireEvent.focus(name); await fireEvent.input(name, { target: { value: 'Team' } }); await fireEvent.blur(name);
 		await waitFor(() => expect(worker.sent('PATCH', '/settings/claude-auth/accounts/api_key/work')[0]?.body).toEqual({ label: 'Team' }));

@@ -69,7 +69,7 @@ The message in the app says which of these it is.
 
 ### Claude
 
-- **API key mode, but no key is stored.** Add your Anthropic key in **Settings → Providers → Claude**, or switch to subscription mode.
+- **A "Claude · API" model cannot run.** No Anthropic API key is selected. Add or select one in **Settings → Providers → Claude**, or pick a subscription model.
 - **The Claude Code CLI is not signed in.** Sign in again from **Settings → Providers → Claude subscription → Sign in**, or run `docker exec -it -u appuser ai-shuffle claude auth login`. `claude auth status` shows which account is signed in.
 - **The Claude Code CLI is missing.** Install it in **Settings → Providers → Claude**.
 - **An automation or background agent waits for confirmation.** The loop guard held it. Confirm it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or use an API key for unattended work.

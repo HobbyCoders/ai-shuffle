@@ -158,15 +158,23 @@ function forBrand(brand: string, input: FirstRunModelInput): FirstRunModel | nul
 }
 
 /**
+ * The Anthropic API key's provider. It runs only when a Claude · API model is
+ * picked (owner decision, 2026-11-22), so the wizard never chooses it: only a
+ * worker default the owner set to it explicitly runs on it.
+ */
+export const CLAUDE_API_BRAND = 'gw:claude-api';
+
+/**
  * The provider and model for the first run: the provider connected in this
  * wizard when it is ready, then the worker's default when its provider is
- * ready, then the first ready provider with a model. Null when nothing ready
- * has a model to name; the run then goes out with the worker's default.
+ * ready, then the first ready provider with a model. Never the Claude API key
+ * unless the worker's default names it. Null when nothing ready has a model
+ * to name; the run then goes out with the worker's default.
  */
 export function pickFirstRunModel(input: FirstRunModelInput): FirstRunModel | null {
 	const ready = new Set(input.ready);
 	const order: string[] = [];
-	if (input.preferred && ready.has(input.preferred)) order.push(input.preferred);
+	if (input.preferred && input.preferred !== CLAUDE_API_BRAND && ready.has(input.preferred)) order.push(input.preferred);
 	const decoded = decodeProviderModel(input.defaultModel);
 	if (decoded) {
 		const row = input.rows.find((r) => r.id === decoded.providerId);
@@ -175,7 +183,7 @@ export function pickFirstRunModel(input: FirstRunModelInput): FirstRunModel | nu
 	} else if (ready.has('claude')) {
 		order.push('claude');
 	}
-	order.push(...input.ready);
+	order.push(...input.ready.filter((brand) => brand !== CLAUDE_API_BRAND));
 	for (const brand of new Set(order)) {
 		const pick = forBrand(brand, input);
 		if (pick) return pick;

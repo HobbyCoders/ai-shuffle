@@ -18,7 +18,7 @@ from app.api.sessions_helpers import require_session
 from app.network import control, tokens
 from app.network.files import forward_file
 from app.db.async_database import run_sync
-from app.api.common import require_file_access
+from app.api.common import is_owner_request, require_file_access
 
 from app.core.config import settings
 from app.api.common import is_path_safe, is_path_served, format_file_size  # noqa: F401 (is_path_safe re-exported for tests)
@@ -139,7 +139,8 @@ async def get_file_by_path(
         owner = control.owner_of(session)
         if owner:
             project_id = (get_api_user_from_request(request) or {}).get("project_id")
-            return await forward_file(request, owner, session_id, path, project_id)
+            return await forward_file(request, owner, session_id, path, project_id,
+                                      owner_viewer=is_owner_request(request))
     return await _serve_file(path, request)
 
 
@@ -147,6 +148,7 @@ async def get_file_by_path(
 async def peer_file(
     session_id: str, path: str, request: Request,
     project_id: str | None = None,
+    owner_viewer: bool = False,
     _device: str = Depends(tokens.require_worker_device),
 ):
     try:
@@ -157,8 +159,10 @@ async def peer_file(
         raise HTTPException(409, "This worker does not own the session") from None
     if project_id and session.get("project_id") != project_id:
         raise HTTPException(403, "Session is outside the requested project")
-    # The authenticated viewer forwards scope, never its cookie or API key.
+    # The authenticated viewer forwards scope and whether it is the owner,
+    # never its cookie or API key. A project scope always wins.
     request.state.api_user = {"project_id": project_id} if project_id else None
+    request.state.is_admin = owner_viewer and not project_id
     return await _serve_file(path, request)
 
 

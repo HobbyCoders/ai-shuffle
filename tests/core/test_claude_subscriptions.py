@@ -149,7 +149,7 @@ def test_delayed_login_does_not_override_same_account_reselect(world):
 
 def test_verified_default_recovers_first_sign_in_even_without_saved_folder_support(world, monkeypatch):
     world.signed.clear()
-    claude_auth_mode.set_mode("api_key")
+    claude_auth_mode.set_mode("off")
     claude_auth_mode.set_mode("subscription")
     assert subs.shared_target() == subs.UNRESOLVED
     monkeypatch.setattr(home, "platform_support", lambda: (False, "macOS"))

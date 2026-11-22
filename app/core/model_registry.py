@@ -288,8 +288,7 @@ def model_values() -> List[str]:
 def _disabled_subscription_models(claude: Optional[Dict[str, object]] = None) -> set[str]:
     """Claude subscription model ids the owner unchecked for pickers.
 
-    Applies when serving subscription models (subscription mode, or api_key mode
-    where native Claude is the subscription CLI). Cloud and off modes keep the
+    Applies when serving subscription models (subscription mode). Cloud and off modes keep the
     built-in list untouched.
     """
     from app.core import claude_auth_mode, claude_cli_models

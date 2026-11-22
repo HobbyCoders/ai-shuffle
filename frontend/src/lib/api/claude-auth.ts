@@ -1,9 +1,12 @@
 /**
  * Which credential Claude Code runs on: the user's Claude subscription (the
- * stock CLI's own sign-in), the Anthropic API key stored on this worker, a
- * cloud provider or gateway the owner set up here (Amazon Bedrock, Google
- * Vertex AI, Microsoft Foundry or an LLM gateway), or off (Claude models
- * leave the picker and Claude turns are refused).
+ * stock CLI's own sign-in), a cloud provider or gateway the owner set up here
+ * (Amazon Bedrock, Google Vertex AI, Microsoft Foundry or an LLM gateway), or
+ * off (Claude models leave the picker and Claude turns are refused).
+ *
+ * The Anthropic API key is not a mode. The saved key is its own provider,
+ * "Claude API", beside the subscription (like ChatGPT and the OpenAI API), and
+ * runs only when a "Claude · API" model is picked.
  *
  * The mode is an explicit choice. AI Shuffle never switches it on its own,
  * whichever credentials exist.
@@ -11,9 +14,28 @@
 
 import { api, isApiError, type AgentGateStatus } from './client';
 
-export type ClaudeAuthMode = 'subscription' | 'api_key' | 'cloud' | 'off';
+export type ClaudeAuthMode = 'subscription' | 'cloud' | 'off';
 
-export const CLAUDE_AUTH_MODES: readonly ClaudeAuthMode[] = ['subscription', 'api_key', 'cloud', 'off'];
+export const CLAUDE_AUTH_MODES: readonly ClaudeAuthMode[] = ['subscription', 'cloud', 'off'];
+
+/** The removed API key mode, still reported by workers not yet updated. */
+const LEGACY_API_KEY_MODE = 'api_key';
+
+/**
+ * A worker not yet updated may still report the removed `api_key` mode. It
+ * ran the CLI on the subscription, so it reads as `subscription` here and is
+ * dropped from the choices.
+ */
+export function normalizeClaudeAuth(summary: ClaudeAuthSummary): ClaudeAuthSummary {
+	const legacy = (summary.mode as string) === LEGACY_API_KEY_MODE;
+	const modes = (summary.modes ?? []).filter((m) => (m.value as string) !== LEGACY_API_KEY_MODE);
+	if (!legacy && modes.length === (summary.modes ?? []).length) return summary;
+	return {
+		...summary,
+		modes,
+		...(legacy ? { mode: 'subscription' as const, mode_label: 'Claude subscription' } : {})
+	};
+}
 
 export type ClaudeCloudMethodId = 'bedrock' | 'vertex' | 'foundry' | 'gateway';
 
@@ -203,10 +225,6 @@ export interface ClaudeAuthSummary {
 	};
 	/** Whether a key is stored, and its last four characters. Never the key. */
 	api_key: { set: boolean; last4: string | null };
-	/** Legacy API mode uses a saved key that the owner has not yet pinned. */
-	api_key_confirmation_required?: boolean;
-	/** Opaque revision for the exact legacy selection shown above. */
-	api_key_confirmation?: string | null;
 	/** The cloud provider or gateway method. Absent on older workers. */
 	cloud?: ClaudeCloudStatus;
 	/** Whether new Claude agent runs can start on this worker, and why not. */
@@ -215,20 +233,18 @@ export interface ClaudeAuthSummary {
 	claude_reason?: string | null;
 }
 
-export function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {
-	return api.get(`/settings/claude-auth${refresh ? '?refresh=true' : ''}`, { cache: 'no-store' });
+export async function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {
+	return normalizeClaudeAuth(await api.get<ClaudeAuthSummary>(
+		`/settings/claude-auth${refresh ? '?refresh=true' : ''}`, { cache: 'no-store' }));
 }
 
 /**
  * Store the mode (owner only). Turning on `cloud` needs the warning
  * acknowledged: the server refuses it otherwise.
  */
-export function setClaudeAuthMode(mode: ClaudeAuthMode, acknowledgeWarning = false): Promise<ClaudeAuthSummary> {
-	return api.put('/settings/claude-auth', acknowledgeWarning ? { mode, acknowledge_warning: true } : { mode });
-}
-
-export function confirmClaudeApiKey(revision: string): Promise<ClaudeAuthSummary> {
-	return api.put('/settings/claude-auth', { mode: 'api_key', api_key_confirmation: revision });
+export async function setClaudeAuthMode(mode: ClaudeAuthMode, acknowledgeWarning = false): Promise<ClaudeAuthSummary> {
+	return normalizeClaudeAuth(await api.put<ClaudeAuthSummary>(
+		'/settings/claude-auth', acknowledgeWarning ? { mode, acknowledge_warning: true } : { mode }));
 }
 
 // ============================================================================

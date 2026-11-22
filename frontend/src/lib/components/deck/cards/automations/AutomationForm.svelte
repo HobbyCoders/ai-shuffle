@@ -194,7 +194,7 @@ import AutomationModelError from './AutomationModelError.svelte';
 		// is connected, so only an explicit other-provider choice clears this.
 		const model = formModel || profile?.config?.model || '';
 		if (model && decodeProviderModel(model)) return '';
-		return 'Claude runs on your subscription, so this automation uses your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
+		return "Claude runs on your subscription, so this automation uses your Claude plan while you are away. To bill it per use instead, pick a Claude · API model or another provider's API key model. The loop guard holds unattended turns past its budget until you confirm them.";
 	});
 
 	// What runs use with no model of their own: the worker's default for
@@ -334,7 +334,7 @@ import AutomationModelError from './AutomationModelError.svelte';
 {/if}
 {#if scheduledRunNotice}
  <div data-testid="automation-api-key-notice"><InlineBanner tone="warn" compact>Claude runs on your subscription.
-  {#snippet actions()}<span class="notice-actions"><button class="notice-link" aria-label="Open Claude settings" onclick={() => openSettings({category:'providers',item:'provider:claude',anchor:'providers.claudeMode'})}>Use an API key</button><HelpTip about="scheduled Claude runs" text={scheduledRunNotice} /></span>{/snippet}
+  {#snippet actions()}<span class="notice-actions"><button class="notice-link" aria-label="Open Claude settings" onclick={() => openSettings({category:'providers',item:'provider:claude'})}>Claude settings</button><HelpTip about="scheduled Claude runs" text={scheduledRunNotice} /></span>{/snippet}
  </InlineBanner></div>
 {/if}
 <DetailTabs {tabs} current={tab} onselect={(id) => tab = id} label="Automation configuration" idPrefix="automation-form" />

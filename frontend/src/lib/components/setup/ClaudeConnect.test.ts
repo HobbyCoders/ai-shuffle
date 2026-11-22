@@ -15,7 +15,7 @@ import ClaudeConnect from './ClaudeConnect.svelte';
 function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
 	return {
 		mode: 'subscription', modeLabel: 'Claude subscription', explicit: true,
-		ready: false, credentialReady: false, reason: 'Not signed in.',
+		ready: false, credentialReady: false, apiKeyReady: false, reason: 'Not signed in.',
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		apiKey: { set: false, last4: null },
 		...over,
@@ -34,7 +34,7 @@ afterEach(() => cleanup());
 
 describe('setup Claude connect flow', () => {
 	it('asks how to pay with nothing picked, and stores the pick as the Claude mode', async () => {
-		mocks.creds.mockResolvedValue(creds({ mode: 'api_key' }));
+		mocks.creds.mockResolvedValue(creds({ mode: 'off' }));
 		render(ClaudeConnect, { isAdmin: true, pollMs: 60_000 });
 		const group = await screen.findByRole('radiogroup', { name: 'How to pay for Claude' });
 		await waitFor(() => expect(mocks.creds).toHaveBeenCalled());
@@ -47,16 +47,17 @@ describe('setup Claude connect flow', () => {
 	it('saves an Anthropic key without the CLI and reports ready', async () => {
 		const missingCli = { installed: false, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null };
 		mocks.creds.mockResolvedValueOnce(creds({ cli: missingCli }))
-			.mockResolvedValue(creds({ mode: 'api_key', ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' }, cli: missingCli }));
+			.mockResolvedValue(creds({ ready: true, apiKeyReady: true, apiKey: { set: true, last4: 'abcd' }, cli: missingCli }));
 		mocks.save.mockResolvedValue({ masked: 'sk-ant-...abcd' });
 		const onReady = vi.fn();
 		render(ClaudeConnect, { isAdmin: true, onReady, pollMs: 60_000 });
 		await waitFor(() => expect(mocks.creds).toHaveBeenCalled());
 		await fireEvent.click(screen.getByLabelText(/API key/));
-		expect(mocks.setMode).toHaveBeenCalledWith('api_key');
+		// The key is not a Claude mode: picking it never changes the mode.
+		expect(mocks.setMode).not.toHaveBeenCalled();
 		await fireEvent.input(await screen.findByLabelText('Anthropic API key'), { target: { value: ' sk-ant-secret ' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
-		expect(mocks.save).toHaveBeenCalledWith('sk-ant-secret', { useForClaudeCode: true });
+		expect(mocks.save).toHaveBeenCalledWith('sk-ant-secret');
 		expect((await screen.findByTestId('setup-claude-ready')).textContent).toContain('(ending in abcd)');
 		expect(onReady).toHaveBeenCalledOnce();
 	});

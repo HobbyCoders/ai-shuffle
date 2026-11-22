@@ -229,6 +229,17 @@ describe('first run model', () => {
 		expect(pickFirstRunModel(input({ ready: ['claude'], defaultModel: 'prov:xai:grok-4' }))).toMatchObject({ providerId: 'claude', model: 'sonnet' });
 	});
 
+	it('never picks the Claude API key unless the worker default names it', () => {
+		const rows = [...ROWS, row({ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic' })];
+		const registry = [...REGISTRY, entry({ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', models: [{ id: 'claude-sonnet', label: 'Sonnet' }] })];
+		expect(pickFirstRunModel(input({ rows, registry, ready: ['gw:claude-api'] }))).toBeNull();
+		expect(pickFirstRunModel(input({ rows, registry, ready: ['gw:claude-api'], preferred: 'gw:claude-api' }))).toBeNull();
+		expect(pickFirstRunModel(input({ rows, registry, ready: ['gw:claude-api', 'grok'] }))).toMatchObject({ providerId: 'grok' });
+		// The owner set the worker default to it: that is their pick.
+		expect(pickFirstRunModel(input({ rows, registry, ready: ['gw:claude-api'], defaultModel: 'prov:claude-api:claude-sonnet' })))
+			.toMatchObject({ providerId: 'gw:claude-api', model: 'prov:claude-api:claude-sonnet' });
+	});
+
 	it('returns null when nothing ready has a model', () => {
 		expect(pickFirstRunModel(input({ ready: [] }))).toBeNull();
 		expect(pickFirstRunModel(input({ ready: ['openrouter'] }))).toBeNull();
