@@ -50,6 +50,22 @@ describe('swarm live store', () => {
   expect(get(swarms).bySession[snapshot.session_id][snapshot.id].status).toBe('cancelled');
   expect(fetch).toHaveBeenCalledWith('/api/sessions/session-swarm/swarms/sw-1/cancel', expect.objectContaining({ method: 'POST' }));
  });
+ it('treats a matching receipt as confirmed and refreshes the workflow', async () => {
+  const receipt = { id: snapshot.id, session_id: snapshot.session_id, status: 'cancelled' };
+  vi.stubGlobal('fetch', vi.fn()
+   .mockResolvedValueOnce(new Response(JSON.stringify({ swarm: receipt }), { status: 200 }))
+   .mockResolvedValueOnce(new Response(JSON.stringify({ swarms: [{ ...snapshot, status: 'cancelled' }] }), { status: 200 })));
+  const { swarms } = await import('./swarms');
+  await swarms.cancel(snapshot.session_id, snapshot.id);
+  await vi.waitFor(() => expect(get(swarms).bySession[snapshot.session_id]?.[snapshot.id]?.status).toBe('cancelled'));
+  expect(fetch).toHaveBeenLastCalledWith('/api/sessions/session-swarm/swarms', expect.anything());
+ });
+ it('rejects a receipt for another workflow', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(
+   { swarm: { id: 'other', session_id: snapshot.session_id, status: 'cancelled' } }), { status: 200 })));
+  const { swarms } = await import('./swarms');
+  await expect(swarms.cancel(snapshot.session_id, snapshot.id)).rejects.toThrow('Cancellation was not confirmed');
+ });
  it("says why a cancel was refused when the chat's worker explains", async () => {
   const detail = 'ServerWorker needs an update to cancel a swarm from here. Update it, or use Stop to stop everything in this chat.';
   vi.stubGlobal('fetch', vi.fn()

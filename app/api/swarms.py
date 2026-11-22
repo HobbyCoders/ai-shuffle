@@ -33,6 +33,11 @@ async def cancel_swarm(session_id: str, swarm_id: str, request: Request, token: 
             raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
                                 detail=forwarded["detail"])
         snapshot = forwarded["swarm"]
+        if isinstance(snapshot, dict) and "tasks" not in snapshot:
+            # A receipt (the link was not HTTPS): the tasks come from our
+            # synced copy, which catches up with the cancel as events arrive.
+            synced = [s for s in await swarm.snapshots(session_id) if s.get("id") == swarm_id]
+            snapshot = synced[0] if synced else snapshot
     else:
         try:
             snapshot = await swarm.cancel(session_id, swarm_id)
@@ -51,7 +56,6 @@ async def _readable(request: Request, session: dict, snapshot):
     except HTTPException as exc:
         if exc.status_code != 403:
             raise
-        if not isinstance(snapshot, dict):
-            return None
-        return {key: snapshot.get(key) for key in ("id", "session_id", "status")}
+        from app.api.task_stop_owner import swarm_receipt
+        return swarm_receipt(snapshot)
     return snapshot

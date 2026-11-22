@@ -157,21 +157,66 @@ def swarm_pair(pair, monkeypatch):
             raise swarm.SwarmUnavailableError("Couldn't read this swarm's workers right now; nothing was stopped.")
         return {"id": key, "session_id": session_id, "status": "cancelled", "tasks": [{"report": "private"}]}
     monkeypatch.setattr(swarm, "cancel", cancel)
-    return (*pair, cancelled_on, swarms_api)
+
+    # The mirror's synced copy (what the encrypted transcript sync delivered).
+    async def snapshots(session_id):
+        if _ACTIVE.get().name != "mirror":
+            return []
+        return [{"id": "wf-1", "session_id": session_id, "status": "cancelled", "tasks": [{"report": "synced"}]}]
+    monkeypatch.setattr(swarm, "snapshots", snapshots)
+
+    # What the owner actually put on the (plain HTTP) control link.
+    served = pair[2]
+    peer_bodies = []
+    real_handler = served.handler
+
+    def recording(request):
+        response = real_handler(request)
+        if str(request.url).endswith(SWARM_PATH):
+            peer_bodies.append(response.content)
+        return response
+    monkeypatch.setattr(served, "handler", recording)
+    return (*pair, cancelled_on, swarms_api, peer_bodies)
 
 
 def test_the_swarm_x_on_a_mirrored_chat_cancels_where_it_runs(swarm_pair):
-    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
     with mirror.active():
         result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-1", None, token="t"))
-    assert result["swarm"]["status"] == "cancelled" and result["swarm"]["tasks"]
+    assert result["swarm"] == {"id": "wf-1", "session_id": SESSION, "status": "cancelled",
+                               "tasks": [{"report": "synced"}]}
     assert cancelled_on == ["owner"]
     assert ("POST", SWARM_PATH) in served.requests
+    # Briefs and reports never crossed the plain-HTTP link.
+    assert peer_bodies and all(b"private" not in body and b"tasks" not in body for body in peer_bodies)
+
+
+def test_a_mirror_without_a_synced_copy_answers_with_the_receipt(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
+    with mirror.active():
+        result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-new", None, token="t"))
+    assert result == {"swarm": {"id": "wf-new", "session_id": SESSION, "status": "cancelled"}}
+    assert cancelled_on == ["owner"]
+
+
+@pytest.mark.parametrize(("https", "has_tasks"), [(False, False), (True, True)])
+def test_the_owner_sends_task_reports_only_over_https(swarm_pair, https, has_tasks):
+    owner, mirror, served, _, cancelled_on, swarms_api, peer_bodies = swarm_pair
+    with owner.active():
+        token = control.inbound_https.set(https)
+        try:
+            answer = asyncio.run(control.handle(task_stop_owner.SWARM_ACTION,
+                                                {"session_id": SESSION, "swarm_id": "wf-5"},
+                                                from_device=mirror.device_id))
+        finally:
+            control.inbound_https.reset(token)
+    assert ("tasks" in answer["swarm"]) is has_tasks
+    assert answer["swarm"]["status"] == "cancelled"
 
 
 @pytest.mark.parametrize("viewer", ["mirror", "owner"])
 def test_a_caller_who_may_not_read_the_chat_gets_only_a_receipt(swarm_pair, viewer):
-    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
     with {"owner": owner, "mirror": mirror}[viewer].active():
         result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-9", "no-transcript", token="t"))
     assert result == {"swarm": {"id": "wf-9", "session_id": SESSION, "status": "cancelled"}}
@@ -180,7 +225,7 @@ def test_a_caller_who_may_not_read_the_chat_gets_only_a_receipt(swarm_pair, view
 @pytest.mark.parametrize(("key", "code"), [("gone", 404), ("stuck", 409)])
 def test_the_owners_swarm_refusal_keeps_its_status(swarm_pair, key, code):
     from fastapi import HTTPException
-    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
     with mirror.active():
         with pytest.raises(HTTPException) as caught:
             asyncio.run(swarms_api.cancel_swarm(SESSION, key, None, token="t"))
@@ -189,7 +234,7 @@ def test_the_owners_swarm_refusal_keeps_its_status(swarm_pair, key, code):
 
 
 def test_a_swarm_on_this_worker_is_cancelled_here(swarm_pair):
-    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
     with owner.active():
         asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-2", None, token="t"))
     assert cancelled_on == ["owner"]
@@ -198,7 +243,7 @@ def test_a_swarm_on_this_worker_is_cancelled_here(swarm_pair):
 
 def test_an_older_owner_is_asked_to_update_for_a_swarm(swarm_pair):
     from fastapi import HTTPException
-    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    owner, mirror, served, _, cancelled_on, swarms_api, _bodies = swarm_pair
     original = control._LAZY_HANDLERS.pop(task_stop_owner.SWARM_ACTION)
     try:
         with mirror.active():

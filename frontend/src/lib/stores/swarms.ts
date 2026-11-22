@@ -51,9 +51,15 @@ function hydrate(sessionId: string): Promise<void> {
 export const swarms = {
  subscribe: state.subscribe, receive, hydrate,
  async cancel(sessionId: string, swarmId: string) {
-  const result = parseSwarm(await request(`${base(sessionId)}/${encodeURIComponent(swarmId)}/cancel`, 'POST'));
-  if (!result || result.id !== swarmId || result.session_id !== sessionId) throw new Error('Cancellation was not confirmed. Refresh the workflow and try again.');
-  receive(result, sessionId);
+  const body = await request(`${base(sessionId)}/${encodeURIComponent(swarmId)}/cancel`, 'POST');
+  const result = parseSwarm(body);
+  if (result && result.id === swarmId && result.session_id === sessionId) { receive(result, sessionId); return; }
+  // A receipt without tasks (from a worker whose copy has not synced yet):
+  // the cancel landed, and the full workflow arrives with the next refresh.
+  const receipt = body && typeof body === 'object' && 'swarm' in body ? (body as { swarm: unknown }).swarm : null;
+  if (receipt && typeof receipt === 'object' && (receipt as { id?: unknown }).id === swarmId &&
+   (receipt as { session_id?: unknown }).session_id === sessionId) { void hydrate(sessionId); return; }
+  throw new Error('Cancellation was not confirmed. Refresh the workflow and try again.');
  },
  /** Reconnect refresh is scoped to sessions with workflows, not every chat. */
  refreshKnown(sessionId: string) {

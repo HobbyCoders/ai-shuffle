@@ -109,11 +109,22 @@ async def handle_swarm_cancel(body: dict, from_device: str) -> dict:
     await run_sync(control._require_owned, session_id)
     logger.info("Worker %s cancelled swarm %s of %s", from_device, swarm_id, session_id)
     try:
-        return {"swarm": await swarm.cancel(session_id, swarm_id)}
+        snapshot = await swarm.cancel(session_id, swarm_id)
     except ValueError as exc:
         return {"error": "unknown", "detail": str(exc)}
     except swarm.SwarmUnavailableError as exc:
         return {"error": "unavailable", "detail": str(exc)}
+    # The snapshot carries task briefs and reports. Control may travel as
+    # plain HTTP on a LAN, so send them only over HTTPS; otherwise the viewing
+    # worker reads them from its copy, which arrives by the encrypted sync.
+    return {"swarm": snapshot if control.inbound_https.get() else swarm_receipt(snapshot)}
+
+
+def swarm_receipt(snapshot) -> Optional[dict]:
+    """A swarm snapshot without its task briefs and reports."""
+    if not isinstance(snapshot, dict):
+        return None
+    return {key: snapshot.get(key) for key in ("id", "session_id", "status")}
 
 
 # A row paused by a usage limit is stopped by cancelling its scheduled resume,
