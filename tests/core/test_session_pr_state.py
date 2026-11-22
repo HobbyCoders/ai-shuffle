@@ -752,6 +752,160 @@ async def test_fallback_rejects_unowned_candidates(mock_db, pr_checkout, invalid
     assert database.get_session(sid)['pr_number'] is None
 
 
+def _republish(checkout, name, tree='HEAD^{tree}', message='rewritten with sign-off'):
+    """Rewrite the work as a fresh commit on main and push it under ``name``."""
+    from tests.git_repo_helpers import git
+
+    sha = git(checkout, 'commit-tree', tree, '-p', 'origin/main', '-m', message)
+    git(checkout, 'branch', name, sha)
+    git(checkout, 'push', '-q', 'origin', name)
+    return sha
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['OPEN', 'MERGED'])
+async def test_reconcile_finds_pr_republished_under_new_branch(mock_db, pr_checkout, state):
+    """The agent rewrote its commits and opened the PR from a new branch (#1923)."""
+    from tests.git_repo_helpers import commit_file, git
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    git(pr_checkout, 'push', '-q', '-u', 'origin', 'HEAD:feat/local')
+    rewritten = _republish(pr_checkout, 'feat/republished')
+    assert git(pr_checkout, 'rev-parse', f'{rewritten}^{{tree}}') == git(pr_checkout, 'rev-parse', 'HEAD^{tree}')
+    assert git(pr_checkout, 'merge-base', 'HEAD', rewritten) == git(pr_checkout, 'rev-parse', 'origin/main')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    pr = _checkout_pull(23, state, rewritten, head='feat/republished')
+    ok, gh = await _reconcile_checkout(sid, pr_checkout, pulls=[pr])
+    assert ok
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (23, state.lower())
+    assert row['worktree_branch'] == 'feat/local'
+    assert database.decode_pull_requests(row['pull_requests'])[0]['branch'] == 'feat/republished'
+    gh.list_commit_pulls.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid', ['fork', 'base-content', 'other-content', 'targets-local'])
+async def test_republished_fallback_needs_same_own_content(mock_db, pr_checkout, invalid):
+    from tests.git_repo_helpers import commit_file, git
+
+    creation = git(pr_checkout, 'rev-parse', 'HEAD')
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    if invalid == 'base-content':
+        # An empty republish carries main's content, not this session's work.
+        sha = _republish(pr_checkout, 'feat/republished', tree=f'{creation}^{{tree}}')
+    elif invalid == 'other-content':
+        git(pr_checkout, 'checkout', '-q', '-b', 'feat/republished', creation)
+        sha = commit_file(pr_checkout, 'other.txt', 'other work', 'other commit')
+        git(pr_checkout, 'checkout', '-q', 'feat/local')
+    else:
+        sha = _republish(pr_checkout, 'feat/republished')
+    pr = _checkout_pull(23, 'OPEN', sha, head='feat/republished')
+    if invalid == 'fork':
+        pr.head_repo = 'someone/fork'
+    elif invalid == 'targets-local':
+        pr.base_branch = 'feat/local'
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, gh = await _reconcile_checkout(sid, pr_checkout, pulls=[pr])
+    assert ok
+    assert database.get_session(sid)['pr_number'] is None
+    asked = [c.kwargs['head'] for c in gh.list_pulls.call_args_list]
+    assert ('feat/republished' in asked) == (invalid in ('fork', 'targets-local'))
+
+
+@pytest.mark.asyncio
+async def test_republished_branch_invalidates_cached_miss(pr_checkout):
+    import asyncio
+    from unittest.mock import Mock
+    from app.core.session_pr_state import find_pull_for_checkout_fallback
+    from tests.git_repo_helpers import commit_file
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    gh = Mock()
+    gh.list_pulls.return_value = []
+    gh.list_commit_pulls.return_value = []
+
+    async def lookup(**kwargs):
+        return await asyncio.to_thread(
+            find_pull_for_checkout_fallback, gh, 'o/r', 'feat/local', str(pr_checkout), **kwargs)
+
+    assert await lookup(match_content=True) is None
+    rewritten = _republish(pr_checkout, 'feat/republished')  # same HEAD and upstream
+    gh.list_pulls.return_value = [_checkout_pull(23, 'MERGED', rewritten, head='feat/republished')]
+    # The Git header (Ship It acts on the exact branch) never matches by content.
+    assert await lookup() is None
+    gh.list_pulls.assert_not_called()
+    found = await lookup(match_content=True)
+    assert found is not None and found.number == 23
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('revert', ['none', 'before-merge', 'after-merge'])
+async def test_republished_fallback_ignores_squash_merged_in_from_main(mock_db, pr_checkout, revert):
+    """Merging main brings another PR's squash commit, whose tree matches that PR's branch.
+
+    Reverting the session's own work around that merge leaves a local commit
+    with exactly main's content, which must not count as the session's.
+    """
+    from tests.git_repo_helpers import commit_file, git
+
+    creation = git(pr_checkout, 'rev-parse', 'HEAD')
+    own = commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    if revert == 'before-merge':
+        git(pr_checkout, 'revert', '--no-edit', 'HEAD')
+    git(pr_checkout, 'checkout', '-q', '-b', 'feat/other', creation)
+    other = commit_file(pr_checkout, 'other.txt', 'other work', 'other session commit')
+    squash = git(pr_checkout, 'commit-tree', f'{other}^{{tree}}', '-p', 'origin/main', '-m', 'squash')
+    git(pr_checkout, 'push', '-q', 'origin', f'{squash}:refs/heads/main')
+    git(pr_checkout, 'fetch', '-q', 'origin')
+    git(pr_checkout, 'checkout', '-q', 'feat/local')
+    git(pr_checkout, 'merge', '-q', '--no-edit', 'origin/main')
+    if revert == 'after-merge':
+        git(pr_checkout, 'revert', '--no-edit', own)
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, gh = await _reconcile_checkout(
+        sid, pr_checkout, pulls=[_checkout_pull(31, 'MERGED', other, head='feat/other')])
+    assert ok
+    assert database.get_session(sid)['pr_number'] is None
+    assert all(c.kwargs['head'] != 'feat/other' for c in gh.list_pulls.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_republished_pr_found_after_its_squash_is_merged_back(mock_db, pr_checkout):
+    """Republish, squash-merge, then merge main back: the merge shares the tree."""
+    from tests.git_repo_helpers import commit_file, git
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    rewritten = _republish(pr_checkout, 'feat/republished')
+    squash = git(pr_checkout, 'commit-tree', 'HEAD^{tree}', '-p', 'origin/main', '-m', 'squash (#23)')
+    git(pr_checkout, 'push', '-q', 'origin', f'{squash}:refs/heads/main')
+    git(pr_checkout, 'fetch', '-q', 'origin')
+    git(pr_checkout, 'merge', '-q', '--no-edit', 'origin/main')
+    assert git(pr_checkout, 'rev-parse', 'HEAD^{tree}') == git(pr_checkout, 'rev-parse', f'{rewritten}^{{tree}}')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, _ = await _reconcile_checkout(
+        sid, pr_checkout, pulls=[_checkout_pull(23, 'MERGED', rewritten, head='feat/republished')])
+    assert ok
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (23, 'merged')
+
+
+@pytest.mark.asyncio
+async def test_republished_fallback_prefers_open_replacement(mock_db, pr_checkout):
+    from tests.git_repo_helpers import commit_file
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    first = _republish(pr_checkout, 'feat/a-republished', message='first try')
+    second = _republish(pr_checkout, 'feat/b-republished', message='second try')
+    pulls = [_checkout_pull(23, 'CLOSED', first, head='feat/a-republished'),
+             _checkout_pull(24, 'OPEN', second, head='feat/b-republished')]
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, _ = await _reconcile_checkout(sid, pr_checkout, pulls=pulls)
+    assert ok
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (24, 'open')
+
+
 @pytest.mark.asyncio
 async def test_fallback_without_creation_reflog_skips_github(mock_db, pr_checkout):
     from tests.git_repo_helpers import commit_file, git
