@@ -1189,6 +1189,13 @@
 			onkeydown={onSheetKeydown}
 		>
 			{@render sheetContent(false)}
+			{#if sheetStopError}
+				<!-- Over the list's foot, so the rows under a finger do not move. -->
+				<p class="rt-stop-error" role="alert" data-testid="sheet-stop-error">
+					<span>{sheetStopError}</span>
+					<button type="button" class="link" onclick={() => (sheetStopError = null)}>Dismiss</button>
+				</p>
+			{/if}
 		</div>
 	</div>
 {/snippet}
@@ -1239,13 +1246,7 @@
 			{/each}
 		</div>
 	</header>
-	<div class="rt-list">
-		{#if sheetStopError}
-			<p class="rt-warn rt-error" role="alert" data-testid="sheet-stop-error">
-				{sheetStopError}
-				<button type="button" class="link" onclick={() => (sheetStopError = null)}>Dismiss</button>
-			</p>
-		{/if}
+	<div class="rt-list" class:has-error={!!sheetStopError}>
 		{#if swarmError && sessionSwarms.length}
 			<p class="rt-warn" role="status">Swarm status could not be refreshed. <button type="button" class="link" onclick={() => sessionId && swarms.hydrate(sessionId)}>Retry</button></p>
 		{/if}
@@ -1720,7 +1721,28 @@
 	.chip[aria-pressed='true'] .chip-count { background: color-mix(in oklch, var(--primary) 18%, transparent); color: var(--primary); }
 	.rt-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 	.rt-warn { margin: 8px 16px 0; font-size: 0.75rem; color: var(--warning); }
-	.rt-warn.rt-error { color: var(--destructive); }
+	/* Room to scroll the last row out from under the error card. */
+	.rt-list.has-error { padding-bottom: calc(112px + env(safe-area-inset-bottom, 0px)); }
+	.rt-stop-error {
+		position: absolute;
+		left: 12px;
+		right: 12px;
+		bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+		margin: 0;
+		padding: 10px 12px;
+		border-radius: var(--radius, 0.75rem);
+		background: color-mix(in oklab, var(--destructive) 10%, var(--background));
+		border: 1px solid color-mix(in oklab, var(--destructive) 40%, var(--border));
+		box-shadow: var(--shadow-l);
+		color: var(--destructive);
+		font-size: 0.8125rem;
+		line-height: 1.4;
+	}
+	.rt-stop-error span { flex: 1; min-width: 0; }
+	.rt-stop-error .link { flex: none; color: var(--foreground); }
 	.link { border: 0; background: transparent; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline; }
 	.finished { border-top: 1px solid var(--border-subtle, var(--border)); }
 	.finished summary {
