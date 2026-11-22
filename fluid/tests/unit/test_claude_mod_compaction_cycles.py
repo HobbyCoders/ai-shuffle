@@ -592,7 +592,8 @@ def test_a_mid_turn_compaction_keeps_the_newest_tool_group_whole(parallel, attac
         archived = '\n'.join(e['text'] for e in archive)
         for tid in ids:
             assert (tid in kept and tid in answered) or (
-                tid not in kept and tid not in answered and tid in archived)
+                tid not in kept and tid not in answered
+                and f'[tool call Read {tid}:' in archived and f'RESULT-{tid}' in archived)
 
 
 @pytest.mark.parametrize('resume', [RESUME, CONTINUE])
