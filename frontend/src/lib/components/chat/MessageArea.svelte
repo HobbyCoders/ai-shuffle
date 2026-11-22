@@ -3042,7 +3042,7 @@
 			     as one expandable row) and shell tasks, grouped, each with stop and,
 			     for agents, its transcript. The phone shows the same collapsible row.
 			     Renders nothing when nothing runs. Chats this one started
-			     show beside the composer (BackgroundWorkStrip). -->
+			     (StartSession) are rows in the Agents group with a chat icon. -->
 			<RunningTasksList sessionId={$activeSession.sessionId} presentation={$activeSession} variant="inline" />
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->

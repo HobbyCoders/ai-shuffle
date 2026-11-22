@@ -683,7 +683,7 @@
 		{
 			"why": "stopping a turn",
 			"journeys": ["stop-midstream", "chat-send-stream", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
-			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
+			"globs": ["frontend/src/lib/components/chat/StopButton*"]
 		},
 		{
 			"why": "the composer's action row holds no empty seat for Send or Stop, a double tap on Send never lands on the Stop that takes its place, a late tap never lands on a button that slid into a freed seat, and the phone slot keeps its height on the first send",
@@ -908,6 +908,16 @@
 			"globs": [
 				"frontend/src/lib/components/chat/TurnNavigator.svelte",
 				"frontend/tests/journeys/send-turn-rail.journey.mjs"
+			]
+		},
+		{
+			"why": "a chat the parent started shows as a row in the running-tasks list, not beside the composer",
+			"journeys": ["send-turn-rail"],
+			"globs": [
+				"frontend/src/lib/components/chat/RunningTasksList.svelte",
+				"frontend/src/lib/components/chat/running-tasks.ts",
+				"frontend/src/lib/utils/background-work.ts",
+				"scripts/devloop/scenarios/tool-start-running-child.json"
 			]
 		},
 		{

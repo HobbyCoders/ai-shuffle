@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
 		active: store<Record<string, unknown>>({ sessionId: 's1', activeTasks: [], messages: [] }),
 		swarmState: store({ bySession: {}, errors: {} }),
 		deviceName: store<string | null>('DesktopWorker'),
+		streaming: store<Set<string>>(new Set()),
 		mobile: false,
 		list: [] as unknown[],
 		preferred: null as string | null,
@@ -48,7 +49,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('$lib/services/preferences', () => ({
 	preferenceSync: { register: vi.fn(), registerPrefix: vi.fn(), save: vi.fn() }
 }));
-vi.mock('$lib/stores/active-session', () => ({ activeSession: mocks.active }));
+vi.mock('$lib/stores/active-session', () => ({ activeSession: mocks.active, streamingSessions: mocks.streaming }));
 vi.mock('$lib/stores/swarms', () => ({
 	swarms: { subscribe: mocks.swarmState.subscribe, hydrate: vi.fn(async () => {}), cancel: vi.fn(), receive: vi.fn(), refreshKnown: vi.fn() }
 }));

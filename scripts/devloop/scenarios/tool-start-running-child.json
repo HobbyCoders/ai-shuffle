@@ -1,5 +1,5 @@
 {
-  "description": "Starts one child chat that keeps replying for a few minutes, then answers. The parent's composer shows the running child above the message box.",
+  "description": "Starts one child chat that keeps replying for a few minutes, then answers. The parent's running-tasks list shows the child as a chat row.",
   "steps": [
     {
       "tool_calls": [

@@ -34,8 +34,11 @@ const mocks = vi.hoisted(() => {
 		active: store<Record<string, unknown>>({ sessionId: 's1', activeTasks: [], messages: [] }),
 		swarmState: store<{ bySession: Record<string, Record<string, unknown>>; errors: Record<string, string> }>({ bySession: {}, errors: {} }),
 		deviceName: store<string | null>('DesktopWorker'),
+		sessions: store<Record<string, unknown>[]>([]),
+		streaming: store<Set<string>>(new Set()),
 		mobile: false,
 		stopSessionTask: vi.fn(),
+		interruptSession: vi.fn(),
 		cancel: vi.fn(),
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
@@ -50,7 +53,8 @@ vi.mock('$lib/services/preferences', () => ({
 	preferenceSync: { register: vi.fn(), registerPrefix: vi.fn(), save: mocks.savePreference }
 }));
 
-vi.mock('$lib/stores/active-session', () => ({ activeSession: mocks.active }));
+vi.mock('$lib/stores/active-session', () => ({ activeSession: mocks.active, streamingSessions: mocks.streaming }));
+vi.mock('$lib/stores/app-data.svelte', () => ({ sessions: mocks.sessions }));
 vi.mock('$lib/stores/swarms', () => ({
 	swarms: {
 		subscribe: mocks.swarmState.subscribe,
@@ -61,7 +65,7 @@ vi.mock('$lib/stores/swarms', () => ({
 	}
 }));
 vi.mock('$lib/stores/usage-target', () => ({ usageTargetDeviceName: mocks.deviceName }));
-vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask }));
+vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask, interruptSession: mocks.interruptSession }));
 // No watches here (RunningTasksList.watches.test.ts covers them).
 vi.mock('$lib/api/watches', () => ({
 	listWatches: vi.fn(async () => ({ watches: [], preferredWorkerId: null })),
@@ -120,6 +124,9 @@ beforeEach(() => {
 	mocks.savePreference.mockReset();
 	setTasks([]);
 	setSwarms([]);
+	mocks.sessions.set([]);
+	mocks.streaming.set(new Set());
+	mocks.interruptSession.mockReset().mockResolvedValue({ status: 'interrupted' });
 	mocks.stopSessionTask.mockReset().mockResolvedValue({ ok: true });
 	mocks.cancel.mockReset().mockResolvedValue(undefined);
 	mocks.openSession.mockReset();
@@ -127,6 +134,78 @@ beforeEach(() => {
 });
 
 afterEach(() => cleanup());
+
+function startSession(id: string, sessionId: string, title: string) {
+	return {
+		id, role: 'assistant', content: '', type: 'tool_use', toolName: 'mcp__fluid_bundled__mcp__builtins__StartSession',
+		toolInput: { title, prompt: 'go' }, toolStatus: 'complete',
+		toolResult: JSON.stringify({ session_id: sessionId, status: 'queued' }), timestamp: new Date(Date.now() - 90_000).toISOString()
+	};
+}
+
+describe('RunningTasksList chats this one started', () => {
+	it('lists a working started chat in Agents with its own icon, opens it, and stops it', async () => {
+		setTasks([task('a', { subject: 'Fix login' })], [startSession('m1', 'chat-a', 'Clean worktrees'), startSession('m2', 'chat-idle', 'Done already')]);
+		mocks.sessions.set([
+			{ id: 'chat-a', title: 'Clean up old worktrees', remote_runtime_state: 'working', device_name: 'OfficeWorker' },
+			{ id: 'chat-idle', title: 'Done already', remote_runtime_state: 'idle' }
+		]);
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		expect(screen.getByTestId('tasks-toggle').textContent).toContain('1 agent · 1 chat');
+		const row = rowOf('Clean up old worktrees');
+		expect(row.closest('section')?.querySelector('h3')?.textContent).toContain('Agents');
+		expect(within(row).getByText('OfficeWorker')).toBeTruthy();
+		expect(screen.queryByText('Done already')).toBeNull();
+		// A chat glyph, not the subagent's bot.
+		const icon = row.querySelector('.row-icon svg');
+		expect(icon?.getAttribute('class')).toContain('messages-square');
+		expect(rowOf('Fix login').querySelector('.row-icon svg')?.getAttribute('class')).not.toContain('messages-square');
+		expect(container.querySelectorAll('li.row')).toHaveLength(2);
+
+		await fireEvent.click(within(row).getByRole('button', { name: 'Open chat: Clean up old worktrees' }));
+		expect(mocks.openSession).toHaveBeenCalledWith('chat-a');
+
+		await fireEvent.click(within(row).getByRole('button', { name: 'Stop: Clean up old worktrees' }));
+		await waitFor(() => expect(mocks.interruptSession).toHaveBeenCalledWith('chat-a'));
+		expect(mocks.stopSessionTask).not.toHaveBeenCalled();
+	});
+
+	it('shows a streaming started chat missing from the session list, by its StartSession title', () => {
+		setTasks([], [startSession('m1', 'chat-x', 'Watch the release checks')]);
+		mocks.streaming.set(new Set(['chat-x']));
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		expect(screen.getByTestId('tasks-toggle').textContent).toContain('1 running task');
+		expect(rowOf('Watch the release checks')).toBeTruthy();
+		// Its worker is unknown: no "Runs on" guess with the parent's worker.
+		expect(rowOf('Watch the release checks').querySelector('.meta-worker')).toBeNull();
+	});
+
+	it('offers Stop again when a stopped started chat runs another turn', async () => {
+		setTasks([], [startSession('m1', 'chat-a', 'Clean worktrees')]);
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		await fireEvent.click(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' }));
+		await waitFor(() => expect(mocks.interruptSession).toHaveBeenCalledWith('chat-a'));
+		// The stop lands before the idle update; then it is the only row and leaves.
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'idle' }]);
+		await tick();
+		expect(screen.queryByText('Clean worktrees')).toBeNull();
+		// Another tab sends it a new turn.
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
+		await tick();
+		expect(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' })).toBeTruthy();
+		expect(screen.queryByRole('status', { name: 'Stopping Clean worktrees' })).toBeNull();
+	});
+
+	it('does not list a started chat twice when a subagent row already opens it', () => {
+		const card = { id: 'card', role: 'assistant', content: '', type: 'subagent', agentId: 'a', agentSessionId: 'chat-a' };
+		setTasks([task('a', { subject: 'Fix login' })], [card, startSession('m1', 'chat-a', 'Fix login chat')]);
+		mocks.streaming.set(new Set(['chat-a']));
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		expect(container.querySelectorAll('li.row')).toHaveLength(1);
+		expect(screen.queryByText('Fix login chat')).toBeNull();
+	});
+});
 
 describe('RunningTasksList grouping and counts', () => {
 	it('renders the list as a page for a host that draws its own title and Back', () => {

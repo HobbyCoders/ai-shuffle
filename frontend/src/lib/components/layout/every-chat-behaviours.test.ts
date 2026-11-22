@@ -1,12 +1,12 @@
 /**
  * The behaviours that only the retired assistant home had now run in every
- * chat (#371 step 5): the background-work strip beside the composer, approvals
+ * chat (#371 step 5): the chats it started listed with its running tasks, approvals
  * asked in words, and a call at any time (VoiceCallButton.test.ts mounts that
  * gate). No `assistantMode` flag remains to switch any of them off.
  *
  * MainPanel, ChatView, ChatInput and MessageArea pull in the whole session
  * graph when mounted (see chatview-mode-lanes.test.ts), so these are pinned at
- * the source level; ControlsDock and the strip are mounted in their own tests,
+ * the source level; ControlsDock and the task list are mounted in their own tests,
  * and the integrated view is checked in a browser.
  */
 import { describe, expect, it } from 'vitest';
@@ -65,13 +65,10 @@ describe('no assistant mode anywhere', () => {
 	});
 });
 
-describe('background work beside the composer, in every chat', () => {
-	it('renders the strip unconditionally from the chats this one started', () => {
-		expect(chatView).toMatch(/<BackgroundWorkStrip jobs=\{backgroundJobs\} onOpen=\{openJob\} onStop=\{stopJob\} \/>/);
-		expect(chatView).not.toMatch(/\{#if [^}]*\}\s*<BackgroundWorkStrip/);
-		// Its own tasks stay in the transcript's running-tasks list, never twice.
-		const build = chatView.slice(chatView.indexOf('const backgroundJobs'), chatView.indexOf('function openJob'));
-		expect(build).toContain('tasks: []');
+describe('background work in the running-tasks list, in every chat', () => {
+	it('lists started chats with the agents, not in a strip beside the composer', () => {
+		expect(chatView).not.toContain('BackgroundWorkStrip');
+		expect(lib('components/chat/RunningTasksList.svelte')).toContain('startedChats(');
 		expect(messageArea).toMatch(/<RunningTasksList sessionId=\{\$activeSession\.sessionId\} presentation=\{\$activeSession\} variant="inline" \/>/);
 		expect(messageArea).not.toMatch(/\{#if [^}]*\}\s*<RunningTasksList/);
 	});
