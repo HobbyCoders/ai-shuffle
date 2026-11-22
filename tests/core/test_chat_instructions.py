@@ -71,8 +71,10 @@ async def test_settings_save_and_revert_control_the_model_instructions():
 
 def test_default_stays_within_its_size_budget():
     assert len(DEFAULT_SECURITY_INSTRUCTIONS) <= PRE_REWRITE_CHARS
-    # Measured at 819 chars after tightening; leave 13 chars of headroom.
-    assert len(_files_on_disk(DEFAULT_SECURITY_INSTRUCTIONS)) <= 832
+    # Measured at 819 chars after tightening, then 930 after naming the served
+    # browser-screenshot exception (agents kept linking that cache path and the
+    # file API refused it); leave 12 chars of headroom.
+    assert len(_files_on_disk(DEFAULT_SECURITY_INSTRUCTIONS)) <= 942
 
 
 def _files_on_disk(text):
@@ -87,7 +89,8 @@ def _assert_disk_sharing_rules(text):
         "`![alt](URL)` for images, `[label](URL)` for links and inline video/audio",
         "Share only existing files in a served root the viewer can access",
         "the worker's workspace or a registered project/worktree",
-        "Never share scratch/temp paths",
+        "Never share scratch/temp/cache paths",
+        "browser screenshots at `…/tool-results/mcp-browser-blob-*.jpg` are served",
         "For scratch/temp or unserved files, copy only the intended deliverable to a served root",
         "Verify the copy exists and is accessible; link or embed it, not the original",
         "If access is unverified, say it's unavailable",

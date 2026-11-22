@@ -10,10 +10,15 @@ from app.network import transport
 from app.network.browser_panel import UNAVAILABLE, peer_link
 
 
-async def forward_file(request: Request, owner: str, session_id: str, path: str, project_id: str | None):
+async def forward_file(request: Request, owner: str, session_id: str, path: str, project_id: str | None,
+                       *, owner_viewer: bool = False):
+    """``owner_viewer``: the viewer is the install owner, which the worker needs to
+    serve owner-only files such as the CLI's cached browser screenshots."""
     params = {"path": path}
     if project_id:
         params["project_id"] = project_id
+    elif owner_viewer:
+        params["owner_viewer"] = "1"
     return await forward_download(
         request, owner, "/api/files/peer/" + quote(session_id, safe=""), params,
     )

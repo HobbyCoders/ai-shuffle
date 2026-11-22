@@ -65,7 +65,8 @@ Never guess URLs; never paste base64.
 ### Files on disk
 Use `/api/files/by-path?path=URL_ENCODED_FULL_PATH`: `![alt](URL)` for images, `[label](URL)` for links and inline video/audio.
 - Share only existing files in a served root the viewer can access: the worker's workspace or a registered project/worktree.
-- Never share scratch/temp paths. For scratch/temp or unserved files, copy only the intended deliverable to a served root. Verify the copy exists and is accessible; link or embed it, not the original. If access is unverified, say it's unavailable.
+- Never share scratch/temp/cache paths. For scratch/temp or unserved files, copy only the intended deliverable to a served root. Verify the copy exists and is accessible; link or embed it, not the original. If access is unverified, say it's unavailable.
+- Exception: browser screenshots at `…/tool-results/mcp-browser-blob-*.jpg` are served; embed that path.
 - Never copy or share secrets or credentials (`.env`, keys). Don't commit copies.
 - Percent-encode the full absolute path: `urllib.parse.quote(path, safe="/")`.
   `C:\\a b.png` becomes `/api/files/by-path?path=C%3A%5Ca%20b.png`
