@@ -42,6 +42,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -61,6 +62,35 @@ _retry: Dict[str, tuple] = {}  # plugin id -> (failures, next attempt on time.mo
 _reconcile_lock = threading.Lock()
 _reconcile_running = False
 _reconcile_again = False
+# A received change not yet applied here (local only, like every network_*
+# setting). The value is a token: a job clears only the marker it read.
+_RECEIVED_PREFIX = "network_plugin_received:"
+_received_resumed = False
+
+
+def _received(cursor) -> Dict[str, str]:
+    cursor.execute("SELECT key, value FROM system_settings WHERE key LIKE %s", (_RECEIVED_PREFIX + "%",))
+    return {row["key"][len(_RECEIVED_PREFIX):]: row["value"] for row in cursor.fetchall()}
+
+
+def _mark_received(ids) -> Dict[str, str]:
+    tokens = {plugin_id: uuid.uuid4().hex for plugin_id in ids if not _authored(plugin_id)}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for plugin_id, token in tokens.items():
+            cursor.execute("""INSERT INTO system_settings (key, value, updated_at) VALUES (%s, %s, NOW())
+                              ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
+                           (_RECEIVED_PREFIX + plugin_id, token))
+    return tokens
+
+
+def note_local_change(plugin_id: str) -> None:
+    """The owner changed this plugin here: that outranks a received change not yet applied."""
+    try:
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM system_settings WHERE key = %s", (_RECEIVED_PREFIX + plugin_id,))
+    except Exception:  # noqa: BLE001 — the owner's change itself goes ahead
+        logger.warning("Clearing the received plugin change for %s failed", plugin_id, exc_info=True)
 
 
 def _pending_removals(cursor):
@@ -74,6 +104,7 @@ def request_uninstall(plugin_id: str) -> None:
     """Persist an explicit removal, even before this plugin's first publish."""
     if _authored(plugin_id):
         return
+    note_local_change(plugin_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM network_plugins_desired WHERE id = %s", (plugin_id,))
@@ -86,6 +117,7 @@ def request_install(plugin_id: str, *, version: str, enabled: bool) -> None:
     """An explicit install or owner approval may replace a tombstone."""
     if _authored(plugin_id):
         return
+    note_local_change(plugin_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM system_settings WHERE key = %s", (_REMOVAL_PREFIX + plugin_id,))
@@ -211,8 +243,11 @@ def refresh_desired_from_installed() -> int:
         desired = {r["id"]: dict(r) for r in cursor.fetchall()}
         removed = _pending_removals(cursor) | {
             pid for pid, row in store.records_for_collection(cursor, "plugins_desired").items() if row["deleted"]}
+        # A received change waiting for the plugin thread: the state here is
+        # older than the row, not an edit to publish over it.
+        waiting = set(_received(cursor))
         for plugin_id, info in installed.items():
-            if plugin_id in removed:
+            if plugin_id in removed or plugin_id in waiting:
                 continue  # it may still be installed while reconciliation is queued or failing
             current = desired.get(plugin_id)
             config = _config(current)
@@ -241,6 +276,7 @@ def publish(*, ctx: Optional[engine.NetworkContext] = None) -> int:
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return 0
+    _resume_received()
     refresh_desired_from_installed()
     # After the refresh, so a change made here is in the table first.
     schedule_reconcile()
@@ -271,9 +307,27 @@ def apply_desired(record_ids: Iterable[str]) -> int:
     ids = list(record_ids)
     if not ids:
         return 0
-    if _on_plugin_thread(_apply_now, ids):
+    tokens: Dict[str, str] = {}
+    try:
+        tokens = _mark_received(ids)  # until applied, the inventory scan leaves these alone
+    except Exception:  # noqa: BLE001
+        logger.warning("Recording received plugin changes failed", exc_info=True)
+    if _on_plugin_thread(_apply_now, ids, tokens):
         return 0
-    return _apply_now(ids)
+    return _apply_now(ids, tokens)
+
+
+def _resume_received() -> None:
+    """Once per process: apply received changes a restart cut off."""
+    global _received_resumed
+    if _received_resumed:
+        return
+    _received_resumed = True
+    with get_db() as conn:
+        waiting = sorted(_received(conn.cursor()))
+    if waiting:
+        logger.info("Applying %d plugin change(s) received before the restart", len(waiting))
+        apply_desired(waiting)
 
 
 def _on_plugin_thread(fn, *args) -> bool:
@@ -297,7 +351,8 @@ def _on_plugin_thread(fn, *args) -> bool:
     return True
 
 
-def _apply_now(ids) -> int:
+def _apply_now(ids, tokens=None) -> int:
+    tokens = tokens or {}
     try:
         service = _service()
     except Exception:  # noqa: BLE001
@@ -311,28 +366,53 @@ def _apply_now(ids) -> int:
                        % ",".join(["%s"] * len(ids)), tuple(ids))
         rows = {r["id"]: dict(r) for r in cursor.fetchall()}
         pending = _pending_removals(cursor)
+        waiting = _received(cursor)
     to_install = []
-    for plugin_id in ids:
-        if _authored(plugin_id):
-            continue  # never installed or enabled from this table
-        row = None if plugin_id in pending else rows.get(plugin_id)
-        try:
-            if row is None:
-                if plugin_id in installed:
-                    service.uninstall_plugin(plugin_id)
-                    applied += 1
-                continue
-            if plugin_id not in present:
-                # Installing can clone from git: never on the sync thread.
-                to_install.append(plugin_id)
-                continue
-            if bool(row.get("enabled")):
-                service.enable_plugin(plugin_id)
-            else:
-                service.disable_plugin(plugin_id)
-        except Exception:  # noqa: BLE001 — a failed change shows in the plugin UI; sync goes on
-            logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
+    try:
+        for plugin_id in ids:
+            if _authored(plugin_id):
+                continue  # never installed or enabled from this table
+            if plugin_id in tokens and plugin_id not in waiting:
+                continue  # the owner changed it here since it arrived; theirs stands
+            row = None if plugin_id in pending else rows.get(plugin_id)
+            applied += _apply_one(service, plugin_id, row, installed, present, to_install)
+    finally:
+        _clear_received(tokens)
     return applied + _request_installs(to_install)
+
+
+def _clear_received(tokens: Dict[str, str]) -> None:
+    """Clear the markers this job wrote; a newer change for the same plugin keeps its own."""
+    if not tokens:
+        return
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for plugin_id, token in tokens.items():
+                cursor.execute("DELETE FROM system_settings WHERE key = %s AND value = %s",
+                               (_RECEIVED_PREFIX + plugin_id, token))
+    except Exception:  # noqa: BLE001 — a leftover marker is applied again after a restart
+        logger.warning("Clearing received plugin changes failed", exc_info=True)
+
+
+def _apply_one(service, plugin_id, row, installed, present, to_install) -> int:
+    """Uninstall, toggle, or queue the install of one plugin; 1 if it uninstalled."""
+    try:
+        if row is None:
+            if plugin_id in installed:
+                service.uninstall_plugin(plugin_id)
+                return 1
+            return 0
+        if plugin_id not in present:
+            to_install.append(plugin_id)  # cloning goes to the reconcile pass
+            return 0
+        if bool(row.get("enabled")):
+            service.enable_plugin(plugin_id)
+        else:
+            service.disable_plugin(plugin_id)
+    except Exception:  # noqa: BLE001 — a failed change shows in the plugin UI; sync goes on
+        logger.warning("Applying desired plugin state for %s failed", plugin_id, exc_info=True)
+    return 0
 
 
 def _request_installs(plugin_ids) -> int:

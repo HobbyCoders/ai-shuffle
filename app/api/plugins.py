@@ -803,6 +803,8 @@ async def enable_plugin(
     """
     service = await run_sync(get_plugin_service)
     extra = {"content_hash": request.content_hash} if request and request.content_hash else {}
+    # The owner's toggle here outranks a change from another worker still queued.
+    await run_sync(plugins_sync.note_local_change, plugin_id)
     try:
         success = await run_sync(service.enable_plugin, plugin_id, **extra)
     except ValueError as exc:
@@ -822,6 +824,7 @@ async def disable_plugin(
 ):
     """Disable a plugin globally - Admin only"""
     service = await run_sync(get_plugin_service)
+    await run_sync(plugins_sync.note_local_change, plugin_id)
     try:
         success = await run_sync(service.disable_plugin, plugin_id)
     except ValueError as exc:
