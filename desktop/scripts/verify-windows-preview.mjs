@@ -232,7 +232,7 @@ try {
     if (request.url().endsWith('/auth/onboarding/complete')) completed.push(request.method());
   });
   const setupMode = await verifyOfflineSetup(page);
-  passed('Actual welcome/license/mode steps persist both modes; missing subscription/API credentials block Continue and first run');
+  passed('Actual welcome/license/mode steps persist the subscription mode, the API key choice changes no mode; missing subscription/API credentials block Continue and first run');
   // The workspace is a separate persistence fixture written through the real
   // owner API. Never fake a credential or complete onboarding to reach it.
   const workspaceURL = await configurePersistenceFixture(page, workspace);
