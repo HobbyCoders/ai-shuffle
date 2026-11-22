@@ -441,10 +441,10 @@ await runJourney({
 					// navigated right after it. Wait for the PATCH, then until no list
 					// request has been in flight for 500ms.
 					const listRequest = (r) => r.method() === 'GET' && /\/api\/v1\/sessions(\?|\/count|$)/.test(r.url());
-					let inFlight = 0;
+					const pending = new Set();
 					let quietSince = Date.now();
-					const started = (r) => { if (listRequest(r)) inFlight++; };
-					const ended = (r) => { if (listRequest(r) && --inFlight === 0) quietSince = Date.now(); };
+					const started = (r) => { if (listRequest(r)) pending.add(r); };
+					const ended = (r) => { if (pending.delete(r)) quietSince = Date.now(); };
 					page.on('request', started);
 					page.on('requestfinished', ended);
 					page.on('requestfailed', ended);
@@ -456,7 +456,7 @@ await runJourney({
 						await patched;
 						const until = Date.now() + 30_000;
 						await page.waitForTimeout(100);
-						while (inFlight > 0 || Date.now() - quietSince < 500) {
+						while (pending.size > 0 || Date.now() - quietSince < 500) {
 							if (Date.now() > until) throw new Error('the list reload after the settle never finished');
 							await page.waitForTimeout(100);
 						}
