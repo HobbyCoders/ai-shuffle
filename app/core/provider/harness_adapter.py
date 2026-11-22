@@ -2873,13 +2873,16 @@ class HarnessAdapter(ProviderAdapter):
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
         # A compaction may fold the record away: put the current one back.
+        # The session plan is not a section here: the delegated loop's
+        # SessionStart answer, which carries these sections, already opens
+        # with the current plan (``_cli_session_start``), so a section of it
+        # put the same block into context twice after every compaction.
         parts = [
             ("environment", env, 0, _RESTORE_SMALL_SECTION_CHARS, False),
             ("memory", memory, 3, None, True),
             ("working_record", self._working_record_block(), 4, None, True),
             ("away", self._away_note(), 1, _RESTORE_SMALL_SECTION_CHARS, False),
             ("scratch", self._scratch_note(), 2, _RESTORE_SMALL_SECTION_CHARS, False),
-            ("plan", self._plan_note(), 2, 2600, False),
         ]
         return [
             RestorationSection(name=name, text=text, priority=priority,

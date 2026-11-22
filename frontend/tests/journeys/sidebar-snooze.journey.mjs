@@ -3,8 +3,9 @@
 // A snoozed chat leaves Active for its own Snoozed group, sorted by wake time,
 // with the wake time where the row's age was ("until Fri 9:00 AM"). Unsnooze
 // moves it straight back to Active. Guards: the row lands in the wrong group
-// (Settled, or stays in Active), the group or its label is missing, or the row
-// jumps between groups while the change is in flight.
+// (Settled, or stays in Active), the group or its label is missing, the row
+// jumps between groups while the change is in flight, or Snooze on a snoozed
+// row opens its picker at the top of the panel, far from the row.
 //
 // On a phone a finger swipes a row right to snooze it. A snooze needs a time,
 // so the swipe only opens the same picker: the row springs back, and moves to
@@ -223,6 +224,26 @@ function sessionTag(id) {
 		hash = Math.imul(hash, 0x01000193) >>> 0;
 	}
 	return `s:${hash.toString(36).padStart(6, '0').slice(-6)}`;
+}
+
+/**
+ * The desktop picker opens right beside the row that opened it, not pinned
+ * under the search bar (a snoozed row rests at the bottom of the panel, so
+ * the picker used to open the whole panel's height away from it). The phone
+ * shell's bottom sheet is left alone.
+ */
+async function expectPickerBesideRow(page, id) {
+	const placed = await page.evaluate((selector) => {
+		const sheet = document.querySelector('[role="dialog"][aria-label="Snooze chat"]');
+		const row = document.querySelector(selector);
+		if (!sheet || !row) return null;
+		const s = sheet.getBoundingClientRect();
+		const r = row.getBoundingClientRect();
+		return { popover: sheet.classList.contains('popover'), gap: s.top >= r.bottom ? s.top - r.bottom : r.top - s.bottom, sheet: [s.top, s.bottom], row: [r.top, r.bottom] };
+	}, CARD(id));
+	expect(placed, 'the picker and its row are on the page');
+	if (!placed.popover) return;
+	expect(placed.gap >= 0 && placed.gap <= 12, `the picker opens beside its row, got ${JSON.stringify(placed)}`);
 }
 
 /** Where the chat list's groups and rows sit, in page pixels. */
@@ -484,6 +505,19 @@ await runJourney({
 				expect(/^until /.test(label), `the row shows its wake time, got ${JSON.stringify(label)} (picked ${picked})`);
 				expect((await page.locator(`[data-group="settled"] ${CARD(id)}`).count()) === 0, 'a snoozed chat is not listed under Settled');
 				await waitSaved(page, id, (row) => !row.is_active && !!row.snoozed_until, 'the snooze never reached the server');
+
+				await mark('snooze the snoozed row again: the picker opens beside it, then dismiss');
+				await rowAction(page, id, 'Snooze session');
+				await picker.waitFor({ timeout: 10_000 });
+				// Its scale-in transition ends before the box is measured.
+				await page.waitForFunction(() => {
+					const sheet = document.querySelector('[role="dialog"][aria-label="Snooze chat"]');
+					return !!sheet && sheet.getAnimations().length === 0;
+				}, null, { timeout: 5_000 });
+				await expectPickerBesideRow(page, id);
+				await page.keyboard.press('Escape');
+				await picker.waitFor({ state: 'hidden', timeout: 10_000 });
+				await waitLane(page, id, 'snoozed');
 
 				await mark('unsnooze');
 				await rowAction(page, id, 'Unsnooze session and move it to Active');

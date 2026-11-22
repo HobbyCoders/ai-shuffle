@@ -524,6 +524,26 @@ async def test_compact_puts_the_note_back_after_the_ledger_once(tmp_path) -> Non
     assert calls == [1, 1]
 
 
+async def test_compact_carries_the_session_plan_once_beside_the_note(tmp_path, monkeypatch) -> None:
+    """SessionStart opens with the current plan for every source, a compaction
+    included, so the host's note has no plan section of its own (it used to,
+    and the same block went back twice after every compaction)."""
+    from fluid.tools.builtins import plan
+
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=_note_provider())
+    monkeypatch.setattr(loop, "_bridged_tool_name", lambda name: "mcp__fluid_bundled__" + name)
+    loop.ctx.session_id = loop.session_id
+    plan.execute({
+        "action": "update", "request_id": "start", "expected_revision": 0,
+        "goal": "Ship the requested fix", "done_when": "Targeted checks pass",
+        "tasks": [{"id": "a", "title": "Implement", "status": "pending"}],
+    }, loop.ctx)
+    context = (await _fire_main_compact(loop, written))["hookSpecificOutput"]["additionalContext"]
+    assert context.count("# Session plan (revision 1;") == 1
+    assert "mcp__fluid_bundled__Plan get reads all tasks" in context
+    assert context.index("# Session plan") < context.index(_NOTE)
+
+
 async def test_the_note_is_only_for_a_compaction(tmp_path) -> None:
     calls: list = []
     loop, written = await _loop(

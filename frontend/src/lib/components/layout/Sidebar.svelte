@@ -80,6 +80,7 @@
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
 	import SnoozePicker from './sidebar/SnoozePicker.svelte';
+	import type { SheetAnchor } from './sidebar/sheet-anchor';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
 	import {
 		branchLabel,
@@ -834,11 +835,23 @@
 	// One picker for a row's Snooze button and the selection bar's.
 	let snoozeTargets = $state<string[]>([]);
 	let snoozeOpenedAt = $state(Date.now());
+	let snoozeAnchor = $state<SheetAnchor | null>(null);
+	let colRef = $state<HTMLDivElement | null>(null);
 
-	function openSnooze(ids: string[]) {
+	/** A row's edges in the column, so its picker opens beside it, not at the top. */
+	function rowAnchor(id: string): SheetAnchor | null {
+		const row = [...(listRef?.querySelectorAll<HTMLElement>('[data-session-card]') ?? [])].find((el) => el.dataset.sessionCard === id);
+		if (!row || !colRef) return null;
+		const col = colRef.getBoundingClientRect();
+		const r = row.getBoundingClientRect();
+		return { top: r.top - col.top, bottom: r.bottom - col.top, height: col.height };
+	}
+
+	function openSnooze(ids: string[], fromRow = false) {
 		if (ids.length === 0) return;
 		snoozeTargets = ids;
 		snoozeOpenedAt = Date.now();
+		snoozeAnchor = fromRow && ids.length === 1 ? rowAnchor(ids[0]) : null;
 		sheet = 'snooze';
 	}
 
@@ -932,7 +945,7 @@
 		onLongPress={startSelecting}
 		onOpen={onOpenSession}
 		onSettled={leaveSettledRow}
-		onSnooze={(id) => openSnooze([id])}
+		onSnooze={(id) => openSnooze([id], true)}
 	/>
 {/snippet}
 
@@ -998,7 +1011,7 @@
 			{/if}
 		</div>
 	{/if}
-	<div class="col" class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
+	<div class="col" bind:this={colRef} class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
 		<div class="selbar" class:crowded={anySelectedSettled && anySelectedSettleable} inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
@@ -1174,7 +1187,7 @@
 			</div>
 		</SidebarSheet>
 
-		<SidebarSheet open={sheet === 'snooze'} label={snoozeTargets.length > 1 ? 'Snooze chats' : 'Snooze chat'} {phone} placement="popover" onClose={() => (sheet = null)}>
+		<SidebarSheet open={sheet === 'snooze'} label={snoozeTargets.length > 1 ? 'Snooze chats' : 'Snooze chat'} {phone} placement="popover" anchor={snoozeAnchor} onClose={() => (sheet = null)}>
 			{#if sheet === 'snooze'}
 				<SnoozePicker now={snoozeOpenedAt} count={snoozeTargets.length} {phone} onPick={applySnooze} />
 			{/if}

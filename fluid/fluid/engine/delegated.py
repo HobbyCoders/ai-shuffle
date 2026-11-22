@@ -799,6 +799,19 @@ def _cli_older_than(version: str | None, minimum: str) -> bool:
     return have is not None and need is not None and have < need
 
 
+#: Claude Code's ``skillListingMaxDescChars``: the most characters of one
+#: skill's description in the skill list it attaches at every session start and
+#: again after every compaction (its default is 1536; checked against 2.1.330).
+#: Every skill stays listed and loadable; only a long description ends in "…".
+#: The CLI's total budget (``SLASH_COMMAND_TOOL_CHAR_BUDGET``) is no substitute:
+#: it never shortens the CLI's own bundled skills, which are the long ones, and
+#: drops the descriptions of the user's skills instead.
+#: This is the host's value, like its attribution: ``--settings`` outranks the
+#: CLI's user, project and local settings files, so the key in one of those
+#: does not change it. Only the host's own settings do.
+SKILL_LISTING_DESC_CHARS = 300
+
+
 def _with_forced_env(settings: dict[str, Any]) -> dict[str, Any]:
     """``settings`` with ``FORCED_CHILD_ENV`` on top of its ``env`` block."""
     env = settings.get("env")
@@ -1543,6 +1556,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """Host settings with owned attribution, or None for non-object input.
 
         The CLI accepts file paths too, but those cannot enforce this policy.
+        The skill list's description cap (``SKILL_LISTING_DESC_CHARS``) is
+        sent unless the host's settings name their own value.
         """
         raw = getattr(self, "settings", None)
         try:
@@ -1553,7 +1568,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return None
         from fluid.context.attribution import cli_attribution
 
-        return {**parsed, "attribution": cli_attribution(self.commit_attribution)}
+        return {
+            "skillListingMaxDescChars": SKILL_LISTING_DESC_CHARS,
+            **parsed,
+            "attribution": cli_attribution(self.commit_attribution),
+        }
 
     async def aclose(self) -> None:
         """End the session and give back everything the loop holds.

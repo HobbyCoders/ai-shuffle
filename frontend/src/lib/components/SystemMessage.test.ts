@@ -128,7 +128,7 @@ describe('SystemMessage — task_updated / task_notification', () => {
 					systemSubtype: 'task_updated',
 					systemData: {
 						task_id: 'abcd1234ef',
-						patch: { status: 'completed', description: 'Refactor the widget' }
+						patch: { status: 'running', description: 'Refactor the widget' }
 					}
 				})
 			}
@@ -137,7 +137,7 @@ describe('SystemMessage — task_updated / task_notification', () => {
 		// Header name label is the literal 'Task'
 		expect(screen.getByText('Task')).toBeTruthy();
 		// Status chip carries the status string
-		expect(screen.getByText('completed')).toBeTruthy();
+		expect(screen.getByTestId('task-status-chip').textContent).toBe('running');
 		// Summary is the task description, not the old "task <id> · <status> · ..." string
 		expect(screen.getByText('Refactor the widget')).toBeTruthy();
 		// The collapsed summary row must not carry the old noisy concatenation.
@@ -255,6 +255,35 @@ describe('SystemMessage — task_updated / task_notification', () => {
 
 		expect(container.querySelector('.text-green-500')).not.toBeNull();
 		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
+
+	// The tick or cross already says it; a "COMPLETED"/"FAILED" chip beside it
+	// only repeated the icon. The status stays readable to a screen reader.
+	it.each(['completed', 'failed', 'error'])('drops the visible chip for a %s task', (status) => {
+		render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_notification',
+					systemData: { task_id: 'done0002', patch: { status, description: 'Done' } }
+				})
+			}
+		});
+
+		expect(screen.queryByTestId('task-status-chip')).toBeNull();
+		expect(screen.getByText(status).className).toContain('sr-only');
+	});
+
+	it.each(['running', 'pending', 'stopped', 'cancelled', 'killed'])('keeps the chip for a %s task', (status) => {
+		render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'task_updated',
+					systemData: { task_id: 'keep0001', patch: { status, description: 'npm run dev' } }
+				})
+			}
+		});
+
+		expect(screen.getByTestId('task-status-chip').textContent).toBe(status);
 	});
 });
 
