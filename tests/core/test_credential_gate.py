@@ -653,33 +653,27 @@ def _claude_signed_in():
     claude_cli_status._cached_at = time.monotonic()
 
 
-def _claude_api_key_saved(mode="api_key"):
-    # Setup for routing tests: a pre-existing legacy install, not a new pin.
+def _claude_api_key_saved(mode="subscription"):
+    # Setup for routing tests: a pre-existing install with a saved key.
     database.set_system_setting(claude_auth_mode.setting_key(), mode)
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
 
 
-def test_api_key_mode_defaults_to_the_claude_api_binding_not_an_unbound_alias(
+def test_the_legacy_api_key_mode_never_defaults_to_the_key(
     mock_db, _api_unit_credentials,
 ):
-    """The old API key mode, migrated: Claude's place in the default order is
-    the key bound to Claude API, visible in the picker. Never an unbound alias,
-    which would run on the subscription."""
-    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL, registry_payload
+    """The removed API key mode, still stored by older workers, reads as the
+    subscription: a run that names no model never lands on the Claude API key,
+    not even with the subscription signed out (owner decision: never automatic)."""
+    from app.core.model_registry import DEFAULT_MODEL, registry_payload
 
-    _claude_api_key_saved()
-    api_default = ("claude-api", API_MODEL_IDS[DEFAULT_MODEL])
-    assert credential_gate.default_run_model(prefer_most_used=False) == api_default
-    assert credential_gate.default_run_model() == api_default
-    assert registry_payload()["default"] == f"prov:claude-api:{API_MODEL_IDS[DEFAULT_MODEL]}"
-    # Most used Claude turns keep their family on the key.
+    _claude_api_key_saved(claude_auth_mode.LEGACY_MODE_API_KEY)
+    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+    assert not registry_payload()["default"].startswith("prov:claude-api:")
     _book(_chat("s1"), "opus", turns=4)
     credential_gate.invalidate_most_used_cache()
-    assert credential_gate.default_run_model() == ("claude-api", API_MODEL_IDS["opus"])
-    # Key removed: back to the unbound alias, which the CLI gate then judges.
-    database.set_system_setting("anthropic_api_key", "")
-    credential_gate.invalidate_most_used_cache()
-    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
+    assert credential_gate.default_run_model()[0] != "claude-api"
 
 
 def test_subscription_mode_never_defaults_to_the_key_while_claude_can_run(
@@ -693,7 +687,7 @@ def test_subscription_mode_never_defaults_to_the_key_while_claude_can_run(
     assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
 
 
-def test_saving_a_key_never_makes_it_the_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+def test_saving_a_key_never_makes_it_the_default(mock_db, _api_unit_credentials):
     """S14: subscription signed out and no other provider: still not the key.
     Saving it is not choosing it; the run gets Claude's setup message."""
     from app.core.model_registry import DEFAULT_MODEL
@@ -706,9 +700,9 @@ def test_saving_a_key_never_makes_it_the_default_outside_api_key_mode(mock_db, _
     assert credential_gate.default_run_model() == ("oa", "gpt-5")
 
 
-def test_claude_api_usage_history_is_not_a_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+def test_claude_api_usage_history_is_never_a_default(mock_db, _api_unit_credentials):
     """S14: Claude API picked in some chats is not consent for runs that name
-    no model; API key mode, the owner's own choice, still is."""
+    no model, in any Claude mode."""
     from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
 
     _claude_api_key_saved("subscription")
@@ -716,9 +710,9 @@ def test_claude_api_usage_history_is_not_a_default_outside_api_key_mode(mock_db,
     _book(_chat("s1"), API_MODEL_IDS["opus"], "claude-api", turns=5)
     credential_gate.invalidate_most_used_cache()
     assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
-    claude_auth_mode.set_mode("api_key")
+    claude_auth_mode.set_mode("cloud")
     credential_gate.invalidate_most_used_cache()
-    assert credential_gate.default_run_model()[0] == "claude-api"
+    assert credential_gate.default_run_model()[0] != "claude-api"
 
 
 def test_default_run_model_follows_the_ready_providers(mock_db):
@@ -1281,7 +1275,9 @@ def test_subscription_warning_for_a_saved_setup(mock_db):
     assert api_user_scope.subscription_warning({"model": "prov:p:gpt-5"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
     assert api_user_scope.subscription_warning({"model": "sonnet"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
     assert api_user_scope.subscription_warning({"model": "prov:oa:gpt-5"}) is None
-    claude_auth_mode.set_mode("api_key")  # the CLI stays on the subscription
+    # The removed API key mode, still stored by older workers: the CLI stays
+    # on the subscription.
+    database.set_system_setting(claude_auth_mode.setting_key(), claude_auth_mode.LEGACY_MODE_API_KEY)
     assert api_user_scope.subscription_warning({"model": "sonnet"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
     claude_auth_mode.set_mode("cloud")
     assert api_user_scope.subscription_warning({"model": "sonnet"}) is None

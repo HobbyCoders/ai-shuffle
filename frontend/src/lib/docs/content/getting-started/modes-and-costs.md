@@ -73,7 +73,9 @@ Use an API key for anything that runs while you are not watching:
 
 ## Claude: choosing a mode
 
-Claude runs in one mode at a time: **Subscription**, **API key**, **Cloud** or **Off**. Change it in **Settings → Providers → Claude**, which also shows the signed-in account. AI Shuffle never switches modes on its own.
+Claude Code runs in one mode at a time: **Subscription**, **Cloud** or **Off**. Change it in **Settings → Providers → Claude**, which also shows the signed-in account. AI Shuffle never switches modes on its own.
+
+An Anthropic API key is not a mode. It runs beside the subscription as **Claude · API** models, and only when you pick one: a chat, task or automation that names no model never falls back to the key. **Off** turns the key off too.
 
 ## Claude through a cloud provider or gateway
 
@@ -97,7 +99,7 @@ With a Claude subscription, AI Shuffle protects your plan from runaway automatio
 
 - Turns that start without you (automations, wake-ups, connectors and the background agents they start) have an hourly budget: by default 12 per chat and 60 per worker. Past it, the next one waits for you under **Settings → Providers → Claude subscription → Policy**, where you choose **Confirm** or **Dismiss**.
 - Background agents started that way stop after 60 minutes by default.
-- Creating an automation on a Claude subscription reminds you to use an API key.
+- Creating an automation on a Claude subscription reminds you that it can use a **Claude · API** model or another provider's API key instead.
 
 Change the budgets and time limit, or turn the guard off, on the same **Policy** page. Work you start yourself is never held or timed.
 

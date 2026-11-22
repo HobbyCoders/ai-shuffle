@@ -289,13 +289,11 @@ export const AGENT_PROVIDER_ORDER: readonly Exclude<BuiltInProviderId, 'fal'>[] 
 
 export const MODE_LABEL: Record<ClaudeAuthMode, string> = {
 	subscription: 'Subscription',
-	api_key: 'API key',
 	cloud: 'Cloud provider or gateway',
 	off: 'Off'
 };
 export const MODE_OPTIONS: { value: ClaudeAuthMode; label: string }[] = [
 	{ value: 'subscription', label: 'Subscription' },
-	{ value: 'api_key', label: 'API key' },
 	{ value: 'cloud', label: 'Cloud' },
 	{ value: 'off', label: 'Off' }
 ];
@@ -362,18 +360,20 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	} else if (cli.signed_in || subActive) {
 		out.push(cliCredential(claude));
 	}
-	const keyActive = mode === 'api_key';
+	// The selected key is the "Claude API" provider beside the subscription,
+	// in use whenever Claude is not Off (Off stops Claude API too).
+	const claudeOff = mode === 'off';
 	for (const account of claude.accounts?.api_key ?? []) {
-		const on = keyActive && account.active;
+		const on = !claudeOff && account.active;
 		out.push({
 			item: claudeKeyItem(account.id),
 			providerId: 'claude',
 			flavor: 'anthropic',
 			name: account.label || 'Anthropic API key',
 			kind: 'API key',
-			summary: `${safeKeyHint(account.masked_key) || 'Saved'}${account.active && !keyActive ? ', selected for API key mode' : ''}`,
-			status: on ? 'ok' : 'standby',
-			statusText: account.active ? (keyActive ? 'Active for Claude' : 'Selected for API key mode') : 'Saved',
+			summary: safeKeyHint(account.masked_key) || 'Saved',
+			status: on ? 'ok' : account.active ? 'off' : 'standby',
+			statusText: account.active ? (claudeOff ? 'Off' : 'Active for Claude API') : 'Saved',
 			on,
 			active: account.active,
 			switchable: true,
@@ -382,25 +382,23 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 			account
 		});
 	}
-	// Compatibility with older workers, plus the missing-key row for the selected mode.
-	if ((!claude.accounts && claude.api_key.set) || (keyActive && !(claude.accounts?.api_key.length) && !claude.api_key.set)) {
-		const ready = claude.api_key.set;
+	// Compatibility with older workers that list no saved accounts.
+	if (!claude.accounts && claude.api_key.set) {
 		const masked = safeKeyHint(keyMasked) || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Saved');
-		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : keyActive ? 'ok' : 'standby';
-		const statusText = !ready ? 'No key stored' : mode === 'off' ? 'Off' : keyActive ? 'Active for Claude' : 'Standby';
+		const statusText = claudeOff ? 'Off' : 'Active for Claude API';
 		out.push({
 			item: CLAUDE_KEY_ITEM,
 			providerId: 'claude',
 			flavor: 'anthropic',
 			name: 'Anthropic API key',
 			kind: 'API key',
-			summary: ready ? `${masked}, ${keyActive ? 'active' : statusText.toLowerCase()}` : statusText,
-			status,
+			summary: `${masked}, ${claudeOff ? 'off' : 'active for Claude API'}`,
+			status: claudeOff ? 'off' : 'ok',
 			statusText,
-			on: keyActive && ready,
+			on: !claudeOff,
 			switchable: false,
-			enabled: keyActive,
-			attention: keyActive && !ready
+			enabled: true,
+			attention: false
 		});
 	}
 	const cloud = claude.cloud;
@@ -913,18 +911,21 @@ export const KEY_CONFIG: Record<
 export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: StatusTone; text: string } {
 	if (!claude) return { status: 'off', text: 'Loading' };
 	if (claude.mode === 'off') return { status: 'off', text: 'Off, not in the picker' };
-	// The key runs natively (Claude API), never through the CLI, so the gate's
-	// CLI credential says nothing about it.
-	const ready = claude.mode === 'api_key'
-		? claude.api_key.set
-		: claude.gate
-			? claude.gate.claude_credential_ready
-			: claude.mode === 'subscription'
-				? !!claude.cli.signed_in
-				: !!claude.cloud?.ready;
-	if (!ready) return { status: 'warn', text: 'Not ready' };
+	const ready = claude.gate
+		? claude.gate.claude_credential_ready
+		: claude.mode === 'subscription'
+			? !!claude.cli.signed_in
+			: !!claude.cloud?.ready;
+	// The key runs natively (Claude API), never through the CLI, so it still
+	// runs while the subscription is not signed in. A cloud setup is a
+	// deliberate choice, so a broken one stays a warning.
+	if (!ready) {
+		return claude.api_key.set && claude.mode === 'subscription'
+			? { status: 'ok', text: 'Runs on API key' }
+			: { status: 'warn', text: 'Not ready' };
+	}
 	if (claude.mode === 'cloud') return { status: 'ok', text: `Runs on ${claude.cloud?.method_label || 'cloud provider'}` };
-	return { status: 'ok', text: claude.mode === 'subscription' ? 'Runs on subscription' : 'Runs on API key' };
+	return { status: 'ok', text: 'Runs on subscription' };
 }
 
 /**
@@ -936,9 +937,6 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
  */
 export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | null {
 	if (!claude || claude.mode === 'off') return null;
-	if (claude.mode === 'api_key' && !claude.api_key.set) {
-		return 'Claude API cannot run: no Anthropic API key is stored on this worker.';
-	}
 	const gate = claude.gate;
 	if (!gate || gate.claude_credential_ready !== false) return null;
 	// The saved key is its own provider (Claude API) and still runs without the CLI.

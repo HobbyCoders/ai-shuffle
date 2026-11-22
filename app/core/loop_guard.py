@@ -20,9 +20,9 @@ Settings > Providers > Claude (the subscription's Policy tab):
 3. **Guidance.** Creating an automation or arming a wake-up in subscription
    mode returns "use an API key for scheduled runs".
 
-Nothing here applies in API key mode (the Console spend limit is the control)
-or to turns a person started (chat, queue, resume, API, worktree), including
-the Task workers those turns start, however deep. A worker's ORIGIN is the
+Nothing here applies to runs on an API key, such as a "Claude · API" model
+(the Console spend limit is the control), or to turns a person started (chat,
+queue, resume, API, worktree), including the Task workers those turns start, however deep. A worker's ORIGIN is the
 source that started its chain: :func:`session_origin` resolves it from the
 caller's turn when the worker is dispatched (following wakes, retries and peer
 messages back through ``parent_turn_id``, and a calling worker's own stamp),
@@ -359,13 +359,6 @@ def scheduled_run_guidance(
             from app.core.query_options import is_native_claude_model
 
             if not is_native_claude_model(model):
-                return None
-        if model is None:
-            from app.core.credential_gate import claude_api_is_default
-
-            # No model: the run takes the worker's default, which in API key
-            # mode with a usable key is that key, not the subscription.
-            if claude_api_is_default():
                 return None
         if not _subscription_mode() or not _claude_cli_signed_in():
             return None

@@ -188,20 +188,20 @@ describe('ChatGPT and SuperGrok subscriptions', () => {
 });
 
 describe('Claude', () => {
-	it('subscription mode: the subscription is active, the key on standby, no switches', () => {
+	it('subscription mode: the subscription and the key are both active, no switches', () => {
 		const claude = byId(buildProviders(input()), 'claude');
 		expect(claude.credentials.map((c) => [c.item, c.status, c.on, c.switchable])).toEqual([
 			[CLAUDE_SUB_ITEM, 'ok', true, false],
-			[CLAUDE_KEY_ITEM, 'standby', false, false]
+			[CLAUDE_KEY_ITEM, 'ok', true, false]
 		]);
 		expect(claude.credentials[0].name).toBe('Claude Max subscription');
 		expect(hasPlusMenu(claude)).toBe(true);
 	});
 
-	it('API key mode: the key is active', () => {
-		const claude = byId(buildProviders(input({ claude: claudeSummary({ mode: 'api_key' }) })), 'claude');
-		expect(claude.credentials.map((c) => c.on)).toEqual([false, true]);
-		expect(claude.credentials[1].statusText).toBe('Active for Claude');
+	it('the saved key is the Claude API provider beside the subscription, not a mode', () => {
+		const claude = byId(buildProviders(input()), 'claude');
+		expect(claude.credentials[1].statusText).toBe('Active for Claude API');
+		expect(claude.credentials[1].summary).toBe('sk-ant-…4f2a, active for Claude API');
 	});
 
 	it('off: nothing is active and both rows read Off', () => {
@@ -258,25 +258,16 @@ describe('Claude', () => {
 			expect(attentionCount(views)).toBe(1);
 		});
 
-		it('keeps the warned key row when the API key mode was used recently and the key is gone', () => {
-			const summary = claudeSummary({ mode: 'api_key', cli: signedOut, api_key: noKey });
-			const views = buildProviders(input({ claude: summary, claudeUsed: claudeUsageRecorded(lastWeek) }));
-			expect(byId(views, 'claude').credentials.map((c) => [c.item, c.attention])).toEqual([[CLAUDE_KEY_ITEM, true]]);
-			expect(attentionCount(views)).toBe(1);
-		});
-
 		it('usage observed 3 months ago with no sign-in or key is not in use', () => {
 			const old = { windows: [{ type: 'five_hour', observed_at: Date.now() - 90 * DAY }, { type: 'seven_day' }] };
-			for (const mode of ['subscription', 'api_key'] as const) {
-				const summary = claudeSummary({ mode, cli: signedOut, api_key: noKey });
-				const used = claudeUsageRecorded(old);
-				expect(used).toBe(false);
-				expect(claudeInUse(summary, used)).toBe(false);
-				const views = buildProviders(input({ claude: summary, claudeUsed: used }));
-				expect(byId(views, 'claude').credentials).toEqual([]);
-				expect(splitProviders(views).notConnected.map((p) => p.id)).toContain('claude');
-				expect(attentionCount(views)).toBe(0);
-			}
+			const summary = claudeSummary({ mode: 'subscription', cli: signedOut, api_key: noKey });
+			const used = claudeUsageRecorded(old);
+			expect(used).toBe(false);
+			expect(claudeInUse(summary, used)).toBe(false);
+			const views = buildProviders(input({ claude: summary, claudeUsed: used }));
+			expect(byId(views, 'claude').credentials).toEqual([]);
+			expect(splitProviders(views).notConnected.map((p) => p.id)).toContain('claude');
+			expect(attentionCount(views)).toBe(0);
 		});
 
 		it('an owner who never used Claude still sees it under Not connected, with no warning', () => {
@@ -319,10 +310,11 @@ describe('Claude', () => {
 		const claude = byId(views, 'claude');
 		expect(claude.credentials.map((c) => [c.item, c.status, c.statusText])).toEqual([
 			[CLAUDE_SUB_ITEM, 'warn', 'Not signed in'],
-			[CLAUDE_KEY_ITEM, 'standby', 'Standby']
+			[CLAUDE_KEY_ITEM, 'ok', 'Active for Claude API']
 		]);
 		expect(attentionCount(views)).toBe(1);
-		expect(claudeHeaderStatus(summary).status).toBe('warn');
+		// The key still runs Claude API while the subscription is signed out.
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
 	});
 
 	it('is not connected when off with nothing signed in or stored', () => {
@@ -391,18 +383,9 @@ describe('claudeGateNotice', () => {
 		expect(claudeGateNotice(summary)).toBe('Claude cannot run: the Claude Code CLI is not signed in on this worker.');
 	});
 
-	it('names the missing key in API key mode', () => {
-		const summary = claudeSummary({
-			mode: 'api_key', api_key: { set: false, last4: null },
-			gate: { ...gate, mode: 'api_key', claude_credential_ready: false }
-		});
-		expect(claudeGateNotice(summary)).toBe('Claude API cannot run: no Anthropic API key is stored on this worker.');
-		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not ready' });
-	});
-
 	it('reports a saved key and the CLI sign-in separately', () => {
 		// The gate's credential is the CLI's; the key runs Claude API without it.
-		const summary = claudeSummary({ mode: 'api_key', gate: { ...gate, mode: 'api_key', claude_credential_ready: false } });
+		const summary = claudeSummary({ mode: 'subscription', gate: { ...gate, claude_credential_ready: false } });
 		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
 		expect(claudeGateNotice(summary)).toBe(
 			'Claude subscription cannot run: the Claude Code CLI is not signed in on this worker. Claude API models run on the saved key.'
@@ -414,6 +397,8 @@ describe('claudeGateNotice', () => {
 		expect(claudeGateNotice(summary)).toBe(
 			'Claude Cloud cannot run: no cloud provider or gateway is saved on this worker. Claude API models run on the saved key.'
 		);
+		// The cloud setup was chosen on purpose, so a broken one stays a warning.
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not ready' });
 	});
 
 });
@@ -431,7 +416,7 @@ describe('saved accounts and active slots', () => {
 		expect(addableKinds(openai).map((k) => k.hint)).toEqual(['Becomes active after sign-in', 'New key becomes active']);
 	});
 
-	it.each(['subscription', 'api_key', 'off'] as const)('lists saved Anthropic keys separately from %s mode', (mode) => {
+	it.each(['subscription', 'cloud', 'off'] as const)('lists saved Anthropic keys separately from %s mode', (mode) => {
 		const accounts = {
 			api_key: [
 				{ id: 'personal', label: 'Personal', active: false, masked_key: 'sk-ant-…1111', last4: '1111' },
@@ -444,7 +429,7 @@ describe('saved accounts and active slots', () => {
 		const keys = claude.credentials.filter((c) => c.flavor === 'anthropic');
 		expect(keys.map((c) => [c.item, c.name, c.active, c.on])).toEqual([
 			['claude:api-key:personal', 'Personal', false, false],
-			['claude:api-key:work', 'Work', true, mode === 'api_key']
+			['claude:api-key:work', 'Work', true, mode !== 'off']
 		]);
 		expect(addableKinds(claude).map((k) => k.menuLabel)).toContain('Another API key');
 		expect(addableKinds(claude).map((k) => k.flavor)).not.toContain('cli');
@@ -505,8 +490,8 @@ describe('saved Claude subscriptions', () => {
 			[claudeSubItem('sub-default'), 'Personal', 'owner@example.com, Max plan', 'Saved', false, false, true],
 			[claudeSubItem('work'), 'Work', 'work@example.com, Pro plan', 'Active for Claude', true, true, true]
 		]);
-		const apiMode = withSubs(accounts, { mode: 'api_key' });
-		expect(apiMode.credentials.filter((c) => c.flavor === 'cli').map((c) => [c.statusText, c.on, c.status])).toEqual([
+		const cloudMode = withSubs(accounts, { mode: 'cloud' });
+		expect(cloudMode.credentials.filter((c) => c.flavor === 'cli').map((c) => [c.statusText, c.on, c.status])).toEqual([
 			['Saved', false, 'standby'],
 			['Selected for subscription mode', false, 'standby']
 		]);

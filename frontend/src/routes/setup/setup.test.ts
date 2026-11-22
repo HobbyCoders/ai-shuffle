@@ -75,8 +75,8 @@ const NOT_SIGNED_IN = 'Agents cannot start: Claude Code is set to subscription m
 /** The wizard's view of `GET /settings/claude-auth` (see agent-credentials.ts). */
 function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
 	return {
-		mode: workerMode, modeLabel: workerMode === 'api_key' ? 'Anthropic API key' : 'Claude subscription', explicit: true,
-		ready: false, credentialReady: false, reason: NOT_SIGNED_IN,
+		mode: workerMode, modeLabel: workerMode === 'cloud' ? 'Cloud provider or gateway' : 'Claude subscription', explicit: true,
+		ready: false, credentialReady: false, apiKeyReady: false, reason: NOT_SIGNED_IN,
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		apiKey: { set: false, last4: null },
 		...over,
@@ -231,17 +231,18 @@ describe('setup wizard v2', () => {
 		await throughLicense();
 		await fireEvent.click(screen.getByTestId('setup-provider-claude'));
 		await fireEvent.click(await screen.findByLabelText(/API key/));
-		expect(mocks.setMode).toHaveBeenCalledWith('api_key');
+		// The key is the Claude API provider, not a Claude mode.
+		expect(mocks.setMode).not.toHaveBeenCalled();
 		mocks.saveKey.mockImplementation(async () => {
-			workerMode = 'api_key';
-			mocks.creds.mockImplementation(async () => creds({ ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' } }));
-			mocks.authStatus = { ...mocks.authStatus, agent_gate: gate(['claude']) };
+			mocks.creds.mockImplementation(async () => creds({ ready: true, apiKeyReady: true, apiKey: { set: true, last4: 'abcd' } }));
+			mocks.authStatus = { ...mocks.authStatus, agent_gate: gate(['gw:claude-api']) };
 			return { masked: 'sk-ant-...abcd' };
 		});
 		await fireEvent.input(await screen.findByLabelText('Anthropic API key'), { target: { value: 'sk-ant-secret' } });
 		await click('Save key');
-		expect(mocks.saveKey).toHaveBeenCalledWith('sk-ant-secret', { useForClaudeCode: true });
-		expect((await screen.findByTestId('setup-provider-ready')).textContent).toContain('Connected: Claude.');
+		expect(mocks.saveKey).toHaveBeenCalledWith('sk-ant-secret');
+		expect((await screen.findByTestId('setup-provider-ready')).textContent).toContain('Connected: Claude API.');
+		expect(workerMode).toBe('subscription');
 		expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false);
 	});
 

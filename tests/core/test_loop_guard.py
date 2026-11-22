@@ -224,17 +224,7 @@ def test_scheduled_run_guidance_only_in_subscription_mode_for_claude_profiles(mo
     assert "use an API key for scheduled runs" in loop_guard.SCHEDULED_RUN_GUIDANCE
     assert loop_guard.scheduled_run_guidance({"config": {"provider": "prov-1"}}) is None
     assert loop_guard.scheduled_run_guidance(provider_id="claude-api", model="claude-sonnet-4-5") is None
-    # API key mode: a model-less run defaults to the usable saved key, so no
-    # subscription notice; without one it falls back to the subscription, and
-    # a bare Claude model always runs on the subscription.
-    from app.core import credential_gate
-
-    claude_auth_mode.set_mode("api_key")
-    monkeypatch.setattr(credential_gate, "_claude_api_default", lambda *a, **k: None)
-    assert loop_guard.scheduled_run_guidance({"config": {}}) == loop_guard.SCHEDULED_RUN_GUIDANCE
-    monkeypatch.setattr(credential_gate, "_claude_api_default",
-                        lambda *a, **k: ("claude-api", "claude-sonnet-5"))
-    assert loop_guard.scheduled_run_guidance({"config": {}}) is None
+    # A bare Claude model always runs on the subscription.
     assert loop_guard.scheduled_run_guidance({"config": {}}, model="sonnet") == \
         loop_guard.SCHEDULED_RUN_GUIDANCE
     claude_auth_mode.set_mode("cloud")

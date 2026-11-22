@@ -23,16 +23,16 @@ def key(mock_db, monkeypatch, _api_unit_credentials):
     return KEY
 
 
-def _api_key_mode():
-    """API key mode on a worker whose choice pins no key (the legacy local
-    setting): the active saved key is the scalar the fixture patches. A synced
-    choice pins an exact key instead (tests/core/test_claude_accounts.py)."""
-    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")
+def _unpinned_key():
+    """A worker whose choice pins no key: the active saved key is the scalar
+    the fixture patches. A synced choice pins an exact key instead
+    (tests/core/test_claude_accounts.py)."""
+    database.set_system_setting(claude_auth_mode.setting_key(), claude_auth_mode.MODE_SUBSCRIPTION)
 
 
 def test_no_active_key_means_no_row(mock_db, monkeypatch):
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: None)
-    _api_key_mode()
+    _unpinned_key()
     assert cap.virtual_row() is None
     assert database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID) is None
     assert all(r["id"] != cap.CLAUDE_API_PROVIDER_ID for r in database.get_enabled_model_providers())
@@ -70,8 +70,7 @@ def test_fallback_list_and_default_are_the_5_5_generation(key):
 
 
 @pytest.mark.parametrize("picked", ["claude-opus-5", "claude-sonnet-5"])
-def test_an_explicit_api_version_runs_itself(monkeypatch, picked):
-    from app.core import credential_gate
+def test_an_explicit_api_version_runs_itself(picked):
     from app.core.provider.harness_adapter import _native_api_model
 
     bound = SimpleNamespace(extra={"provider_id": cap.CLAUDE_API_PROVIDER_ID,
@@ -81,12 +80,6 @@ def test_an_explicit_api_version_runs_itself(monkeypatch, picked):
     # Unbound, and as the default-run gate reads a pick, it is still itself.
     assert _native_api_model(picked, None) == picked
     assert cap.api_model_id(picked) == picked
-    row = {"id": cap.CLAUDE_API_PROVIDER_ID, "default_model": "claude-sonnet-5-5",
-           "models_json": [{"id": i} for i in (picked, "claude-opus-5-5", "claude-sonnet-5-5")]}
-    monkeypatch.setattr(credential_gate, "_default_candidate_rows", lambda servable_only: [row])
-    assert credential_gate._claude_api_default(picked) == (cap.CLAUDE_API_PROVIDER_ID, picked)
-    family = picked.split("-")[1]
-    assert credential_gate._claude_api_default(family) == (cap.CLAUDE_API_PROVIDER_ID, f"{picked}-5")
 
 
 def test_claude_api_models_report_the_native_effort_table(key, authenticated_client):
@@ -138,7 +131,7 @@ def test_models_follow_the_active_keys_catalog_only(key):
 def test_management_readers_and_writers_never_see_the_virtual_row(key, authenticated_client):
     """Runtime readers resolve claude-api; the exact reader that management,
     writers and sync use is stored rows only, so they answer 404."""
-    _api_key_mode()
+    _unpinned_key()
     assert database.resolve_model_provider(cap.CLAUDE_API_PROVIDER_ID)["id"] == cap.CLAUDE_API_PROVIDER_ID
     assert database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID) is None
     base = f"/api/v1/model-providers/{cap.CLAUDE_API_PROVIDER_ID}"
@@ -147,7 +140,7 @@ def test_management_readers_and_writers_never_see_the_virtual_row(key, authentic
     assert authenticated_client.delete(base).status_code == 404
 
 
-@pytest.mark.parametrize("mode", ["api_key", "subscription", "cloud"])
+@pytest.mark.parametrize("mode", ["subscription", "cloud"])
 def test_an_unbound_claude_pick_is_never_moved_onto_the_key(key, mode, tmp_path):
     """Unbound means the subscription in every mode: a chat turn and a one-shot
     generation keep the Claude Code CLI. Only an explicit binding spends the key."""
@@ -173,7 +166,7 @@ def test_a_bound_model_missing_after_a_key_switch_reads_the_catalog_once(key, mo
     from app.core import claude_api_models
     from app.core.provider_agent import validate_provider_model
 
-    _api_key_mode()
+    _unpinned_key()
     cap.remember_models(KEY, [{"id": "claude-old-only", "label": "Old"}])
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-new-key")
     monkeypatch.setattr(cap, "_refresh_tried", {})
@@ -199,7 +192,7 @@ def test_concurrent_callers_share_one_catalog_read(key, monkeypatch):
 
     from app.core import claude_api_models
 
-    _api_key_mode()
+    _unpinned_key()
     monkeypatch.setattr(cap, "_refresh_tried", {})
     started, release, reads = threading.Event(), threading.Event(), []
 
@@ -224,7 +217,7 @@ def test_concurrent_callers_share_one_catalog_read(key, monkeypatch):
 def test_a_failed_read_refuses_without_retrying_and_keeps_the_key_out_of_logs(key, monkeypatch, caplog):
     from app.core import claude_api_models
 
-    _api_key_mode()
+    _unpinned_key()
     monkeypatch.setattr(cap, "_refresh_tried", {})
     reads = []
 
@@ -300,7 +293,7 @@ def test_bound_turns_take_the_native_anthropic_leg(key):
 async def test_credentials_are_the_saved_key(key):
     from app.core.provider.fluid_credentials import resolve_provider_credentials
 
-    _api_key_mode()
+    _unpinned_key()
     creds = await resolve_provider_credentials("anthropic", cap.CLAUDE_API_PROVIDER_ID)
     assert creds.api_key == KEY
     assert creds.base_url == "https://api.anthropic.com"
@@ -325,7 +318,7 @@ def test_a_claude_api_binding_without_its_key_fails_plainly(key, monkeypatch, st
     CLI or another key."""
     from app.core.provider_agent import validate_provider_model
 
-    claude_auth_mode.set_mode("off" if state == "off" else "api_key")
+    claude_auth_mode.set_mode("off" if state == "off" else "subscription")
     if state == "no_key":
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: None)
     elif state == "locked":
@@ -440,7 +433,7 @@ def test_a_failed_first_chat_lookup_refuses_without_asking(key, monkeypatch):
 def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):
     """A slow read for key A that passed the active-key check before the owner
     switched to B must not replace B's saved list."""
-    _api_key_mode()
+    _unpinned_key()
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
     cap.remember_models("sk-ant-b", [{"id": "claude-b-only", "label": "B"}])
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: KEY)
@@ -501,7 +494,7 @@ def test_empty_catalog_is_cached_and_replaces_stale_models(key, monkeypatch):
     """S4: a valid empty [] response caches [] (distinct from None) and hides stale models."""
     from app.core import claude_api_models
 
-    _api_key_mode()
+    _unpinned_key()
     cap.remember_models(KEY, [{"id": "claude-stale", "label": "Stale"}])
     assert cap.virtual_row()["models_json"] == [{"id": "claude-stale", "label": "Stale"}]
 
@@ -526,10 +519,10 @@ def test_empty_catalog_is_cached_and_replaces_stale_models(key, monkeypatch):
 
 def test_curated_models_use_per_key_settings_and_override_catalog(key, monkeypatch):
     """S3 + curation: independent keys write independent system_settings keys; [] disables all."""
-    from app.core import claude_api_models, credential_gate
+    from app.core import claude_api_models
     from app.network.policy import is_shared_setting_key
 
-    _api_key_mode()
+    _unpinned_key()
     cap.remember_models(KEY, [
         {"id": "claude-sonnet-5", "label": "Sonnet 5"},
         {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
@@ -561,7 +554,6 @@ def test_curated_models_use_per_key_settings_and_override_catalog(key, monkeypat
     row = cap.virtual_row()
     assert row["models_json"] == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
     assert row["default_model"] == "claude-haiku-5-5"
-    assert credential_gate._claude_api_default() == (cap.CLAUDE_API_PROVIDER_ID, "claude-haiku-5-5")
 
     # Explicit curation must not be bypassed by refresh_models_once().
     reads = []
@@ -580,4 +572,3 @@ def test_curated_models_use_per_key_settings_and_override_catalog(key, monkeypat
     empty_row = cap.virtual_row()
     assert empty_row["models_json"] == []
     assert empty_row["default_model"] is None
-    assert credential_gate._claude_api_default() is None

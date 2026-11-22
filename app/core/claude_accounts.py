@@ -158,37 +158,6 @@ def pinned_api_key(account_id: str) -> str | None:
         return None
 
 
-def _encrypted_bundle(bundle) -> str:
-    return _encrypt(json.dumps({"accounts": bundle["accounts"]}))
-
-
-def pin_legacy_key() -> str | None:
-    """Snapshot the staged key by ID, persisting any pre-list legacy key first."""
-    with _lock:
-        key = active_api_key()
-        if not key:
-            return None
-        stored = database.get_system_setting_snapshot(API_LIST_SETTING)
-        account_id, migrated_list = prepare_legacy_key_pin(key, stored)
-        if migrated_list is not None and not database.set_system_setting_if_unchanged(
-            API_LIST_SETTING, migrated_list, stored,
-        ):
-            _error("selection_changed", "The saved Claude keys changed. Review them and try again.")
-        return account_id
-
-
-def prepare_legacy_key_pin(key: str, stored: database.SystemSettingSnapshot | None) -> tuple[str, str | None]:
-    """Resolve this exact key without writing; prepare a list only if missing."""
-    _require_storage()
-    bundle = _decode_key_bundle(stored.value if stored else None)
-    account = next((entry for entry in bundle["accounts"] if entry["key"] == key), None)
-    if account is not None:
-        return _pin_id(account), None
-    account = {"id": str(uuid4()), "label": "Anthropic API key", "key": key}
-    bundle["accounts"].append(account)
-    return account["id"], _encrypted_bundle(bundle)
-
-
 def saved_api_key(account_id: str) -> str | None:
     """Read one saved key, never falling back to a different account."""
     with _lock:
@@ -220,8 +189,11 @@ def _label(value, default=""):
     return value.strip() or default
 
 
-def add_api_key(key: str, label: str = "", activate: bool = True, *, for_claude_code: bool = False) -> str:
-    """Save or relabel a key, optionally select it, and return its account ID."""
+def add_api_key(key: str, label: str = "", activate: bool = True) -> str:
+    """Save or relabel a key, optionally select it, and return its account ID.
+
+    Saving never changes the Claude mode: the active key is the Claude API
+    provider, beside the subscription."""
     if not isinstance(key, str) or not key.strip():
         _error("invalid_key", "API key cannot be empty.", 400)
     key = key.strip()
@@ -237,11 +209,7 @@ def add_api_key(key: str, label: str = "", activate: bool = True, *, for_claude_
         if activate:
             bundle["active_id"] = account["id"]
         _save_keys(bundle, update_active=activate)
-        if for_claude_code:
-            from app.core import claude_auth_mode
-
-            claude_auth_mode.set_mode(claude_auth_mode.MODE_API_KEY, key_id=_pin_id(account))
-        elif activate:
+        if activate:
             _update_shared_key(_pin_id(account))
         return account["id"]
 

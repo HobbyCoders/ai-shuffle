@@ -668,7 +668,7 @@ Remove the fal.ai API key.
 
 ### POST /api/v1/settings/integrations/anthropic
 
-Save an Anthropic API key. The active key is the **Claude API** provider (`prov:claude-api:<model>` in `GET /api/v1/models`), which runs on AI Shuffle's own Anthropic client; Claude Code never receives the key. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
+Save an Anthropic API key. The active key is the **Claude API** provider (`prov:claude-api:<model>` in `GET /api/v1/models`), which runs on AI Shuffle's own Anthropic client beside the Claude subscription; Claude Code never receives the key. Body: `api_key`. Saving a key never changes the Claude mode (see [claude-auth](#get-apiv1settingsclaude-auth)); `use_for_claude_code` from older clients is accepted and ignored.
 
 The key is checked with a one-token request to Anthropic first. A key Anthropic rejects returns `400` and is not saved; a rate-limited check returns `429`. If Anthropic cannot be reached, the key is saved anyway. Returns `{"success": true, "masked_key": "sk-ant-...wxyz"}`.
 
@@ -1130,9 +1130,9 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 ### GET /api/v1/settings/claude-auth
 
-Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
+Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI) or a cloud provider or gateway you set up. A saved Anthropic API key is not a mode: it is the separate Claude API provider, used beside the subscription the way an OpenAI API key sits beside a ChatGPT sign-in.
 
-Claude Code never receives the key. Only a model bound to the Claude API provider (`prov:claude-api:<model>`) runs on it; a Claude model chosen without a provider always runs on the subscription through the CLI, in every mode, and fails with a message naming the "Claude · API" models when the CLI is not signed in. In `api_key` mode the default model for new chats is the Claude API provider's, shown in the picker; existing chats keep their model. In other modes the key is never a default: not when the subscription is signed out, and not because Claude API models were used in other chats. An agent cannot start a chat or subagent on a Claude API model, or save one on an automation or agent, unless the owner approves it at a prompt or chose it there. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
+Claude Code never receives the key. Only a model bound to the Claude API provider (`prov:claude-api:<model>`) runs on it; a Claude model chosen without a provider always runs on the subscription through the CLI, and fails with a message naming the "Claude · API" models when the CLI is not signed in. The key is never a default: not for new chats, tasks or automations, not when the subscription is signed out, and not because Claude API models were used in other chats. A worker that stored the removed `api_key` mode reads it as `subscription` and keeps its selected key. An agent cannot start a chat or subagent on a Claude API model, or save one on an automation or agent, unless the owner approves it at a prompt or chose it there. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
 
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 
@@ -1141,7 +1141,7 @@ Claude Code never receives the key. Only a model bound to the Claude API provide
   "mode": "subscription",
   "mode_label": "Claude subscription",
   "explicit": true,
-  "modes": [{"value": "subscription", "label": "Claude subscription"}, {"value": "api_key", "label": "Anthropic API key"}],
+  "modes": [{"value": "subscription", "label": "Claude subscription"}, {"value": "cloud", "label": "Cloud provider or gateway"}, {"value": "off", "label": "Off"}],
   "cli": {"installed": true, "signed_in": true, "email": "me@example.com", "org_name": null, "plan": "max", "auth_method_label": "Claude account", "error": null},
   "api_key": {"set": false, "last4": null},
   "gate": {"ready": true, "reason": null, "mode": "subscription", "claude_credential_ready": true, "license_allows_runs": true, "startup_state": "ready"}
@@ -1192,7 +1192,7 @@ Claude Code never receives the key. Only a model bound to the Claude API provide
 
 Mutations return `{"accounts":{…}}`; add-key and save-current also return
 `account_id`. These operations do not change the Claude Code mode
-(`subscription`, `api_key`, `cloud`, `off`). Cloud stays single. One API key
+(`subscription`, `cloud`, `off`). Cloud stays single. One API key
 and one subscription can be active at the same time. Existing chats use the
 current active key or sign-in on their next turn. An in-flight CLI turn retains
 its original environment; normal credential-fingerprint reconnect logic applies
@@ -1286,14 +1286,7 @@ label, `404 not_found`, `409 not_signed_in` (save-current),
 `409 folder_unavailable` (a sign-in folder could not be prepared),
 `409 selection_changed` (another request changed the shared Claude choice),
 `501 unsupported` (macOS), and `503 storage_locked`,
-`storage_unreadable`, `storage_unavailable` or `key_selection_required`. If
-Claude Code uses an unconfirmed legacy key, open Settings → Providers →
-Claude and select **Confirm API key**. That keeps Claude Code in API key
-mode. Then choose the subscription sign-in again. The confirmation PUT sends
-`{ "mode": "api_key", "api_key_confirmation": "…" }` with the opaque revision
-from the same GET as the displayed key. If the key or mode changed, the
-server returns `409` without pinning or migrating a key. Review the refreshed
-selection and confirm it explicitly.
+`storage_unreadable` or `storage_unavailable`.
 A rejected subscription activation leaves both choices untouched by the
 request. For `selection_changed`, review the latest choice and retry.
 Key validation keeps the legacy error strings: `400` authentication/API error,
@@ -1301,13 +1294,13 @@ Key validation keeps the legacy error strings: `400` authentication/API error,
 shapes return `422`.
 
 The legacy `POST /settings/integrations/anthropic` saves and activates a key in
-the same list (mode changes only with `use_for_claude_code:true`). Its `DELETE`
+the same list and never changes the mode. Its `DELETE`
 deactivates the key without deleting saved entries; use account `DELETE` to
 forget a saved key permanently.
 
 ### PUT /api/v1/settings/claude-auth
 
-Subscription and API key choices sync to the owner's workers and take effect
+The subscription choice and the selected API key sync to the owner's workers and take effect
 on new turns as each worker receives the choice. Missing credentials never
 select another account or mode. Cloud and Off are worker-local overrides.
 Update all workers before relying on an owner-wide switch: older workers may
@@ -1319,10 +1312,10 @@ still use their previous account.
 curl -X PUT http://localhost:8000/api/v1/settings/claude-auth \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "api_key"}'
+  -d '{"mode": "subscription"}'
 ```
 
-`mode` is `subscription`, `api_key`, `cloud` or `off` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
+`mode` is `subscription`, `cloud` or `off` (other values return `400`; the removed `api_key` returns `400` with a message pointing to the "Claude · API" models). Store a key for the Claude API provider with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
 
 ### GET /api/v1/settings/claude-auth/cloud
 

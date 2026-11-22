@@ -307,7 +307,7 @@ def test_anthropic_key_validation_outcomes(c, monkeypatch, error, status, saved)
         assert r.json()["masked_key"] == f"{ANTHROPIC_KEY[:7]}...{ANTHROPIC_KEY[-4:]}"
 
 
-def test_anthropic_key_switches_mode_only_when_asked(c, monkeypatch):
+def test_saving_the_anthropic_key_never_switches_the_claude_mode(c, monkeypatch):
     from app.core import claude_auth_mode
 
     async def validate(api_key):
@@ -317,8 +317,10 @@ def test_anthropic_key_switches_mode_only_when_asked(c, monkeypatch):
     claude_auth_mode.set_mode("subscription")
     c.post(f"{BASE}/integrations/anthropic", json={"api_key": ANTHROPIC_KEY})
     assert database.get_system_setting(claude_auth_mode.setting_key()) == "subscription"
-    c.post(f"{BASE}/integrations/anthropic", json={"api_key": ANTHROPIC_KEY, "use_for_claude_code": True})
-    assert database.get_system_setting(claude_auth_mode.setting_key()) == "api_key"
+    # Older clients still send use_for_claude_code: accepted and ignored.
+    r = c.post(f"{BASE}/integrations/anthropic", json={"api_key": ANTHROPIC_KEY, "use_for_claude_code": True})
+    assert r.status_code == 200, r.text
+    assert database.get_system_setting(claude_auth_mode.setting_key()) == "subscription"
     assert c.post(f"{BASE}/integrations/anthropic", json={"api_key": " "}).status_code == 400
     assert c.delete(f"{BASE}/integrations/anthropic").json() == {"success": True}
     assert get_decrypted_api_key("anthropic_api_key") is None
@@ -326,7 +328,7 @@ def test_anthropic_key_switches_mode_only_when_asked(c, monkeypatch):
     assert len(claude_accounts.accounts_payload()["api_key"]) == 1
     assert not claude_accounts.accounts_payload()["api_key"][0]["active"]
     # Removing the key leaves the mode alone.
-    assert database.get_system_setting(claude_auth_mode.setting_key()) == "api_key"
+    assert database.get_system_setting(claude_auth_mode.setting_key()) == "subscription"
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +477,16 @@ def test_claude_auth_mode_rejects_unknown_modes(c):
     r = c.put(f"{BASE}/claude-auth", json={"mode": "oauth"})
     assert r.status_code == 400
     assert r.json()["detail"].startswith("Unknown Claude Code auth mode")
+    # The removed API key mode is refused with a pointer to the Claude API models.
     r = c.put(f"{BASE}/claude-auth", json={"mode": "api_key"})
+    assert r.status_code == 400
+    assert "Claude · API" in r.json()["detail"]
+    r = c.put(f"{BASE}/claude-auth", json={"mode": "off"})
     assert r.status_code == 200
     body = r.json()
-    assert body["mode"] == "api_key"
+    assert body["mode"] == "off"
     assert {"mode", "cli", "api_key", "gate"} <= set(body)
-    assert c.get(f"{BASE}/claude-auth").json()["mode"] == "api_key"
+    assert c.get(f"{BASE}/claude-auth").json()["mode"] == "off"
 
 
 def test_claude_auth_payload_never_carries_the_key(c):
@@ -509,7 +515,7 @@ def test_loop_guard_unknown_held_turn_is_404(c, action):
 
 
 @pytest.mark.parametrize("method,path,body", [
-    ("put", "/claude-auth", {"mode": "api_key"}),
+    ("put", "/claude-auth", {"mode": "cloud"}),
     ("put", "/loop-guard", {"enabled": False}),
     ("post", "/loop-guard/held/x/confirm", None),
     ("post", "/loop-guard/held/x/dismiss", None),

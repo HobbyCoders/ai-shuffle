@@ -473,7 +473,7 @@ export interface AuthStatus {
 
 export interface AgentGateStatus {
 	ready: boolean;
-	mode: 'subscription' | 'api_key' | 'cloud' | 'off' | null;
+	mode: 'subscription' | 'cloud' | 'off' | null;
 	claude_credential_ready: boolean;
 	reason?: string | null;
 	startup_state?: 'ready' | 'setup_required' | null;

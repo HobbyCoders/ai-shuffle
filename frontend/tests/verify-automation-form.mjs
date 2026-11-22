@@ -50,7 +50,7 @@ async function open(query) {
 	await context.route((u) => u.pathname.startsWith('/api/'), async (route) => {
 		const path = new URL(route.request().url()).pathname.replace('/api/v1', '');
 		if (path === '/models') return route.fulfill({ json: registry });
-		if (path === '/settings/claude-auth') return route.fulfill({ json: { mode: 'api_key' } });
+		if (path === '/settings/claude-auth') return route.fulfill({ json: { mode: 'off' } });
 		return route.fulfill({ status: 404, json: { detail: 'not in this fixture' } });
 	});
 	const page = await context.newPage();

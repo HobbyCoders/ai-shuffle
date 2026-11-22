@@ -18,7 +18,7 @@ function summary(over: Partial<ClaudeAuthSummary> = {}): ClaudeAuthSummary {
 		mode: 'subscription',
 		mode_label: 'Claude subscription',
 		explicit: true,
-		modes: [{ value: 'subscription', label: 'Claude subscription' }, { value: 'api_key', label: 'Anthropic API key' }],
+		modes: [{ value: 'subscription', label: 'Claude subscription' }, { value: 'cloud', label: 'Cloud provider or gateway' }],
 		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
 		api_key: { set: false, last4: null },
 		gate: {
@@ -35,7 +35,7 @@ describe('agent credentials', () => {
 		mocks.get.mockResolvedValue(summary());
 		expect(await getAgentCredentials()).toEqual({
 			mode: 'subscription', modeLabel: 'Claude subscription', explicit: true,
-			ready: false, credentialReady: false, reason: NOT_SIGNED_IN,
+			ready: false, credentialReady: false, apiKeyReady: false, reason: NOT_SIGNED_IN,
 			cli: summary().cli, apiKey: { set: false, last4: null },
 		});
 		expect(mocks.get).toHaveBeenCalledOnce();
@@ -46,6 +46,7 @@ describe('agent credentials', () => {
 		const creds = credentialsFromSummary(summary({ mode: 'off', api_key: { set: true, last4: 'abcd' }, gate: undefined }));
 		expect(creds.mode).toBe('off');
 		expect(creds.credentialReady).toBe(false);
+		expect(creds.apiKeyReady).toBe(false);
 		expect(creds.ready).toBe(false);
 	});
 
@@ -86,19 +87,16 @@ describe('agent credentials', () => {
 		expect(claudeOk.reason).toBeNull();
 	});
 
-	it('reads API key mode as ready from the Claude API provider, not the CLI sign-in', () => {
+	it('reads the key as ready from the Claude API provider, beside the subscription', () => {
 		const gate = { ready: true, reason: null, mode: 'subscription' as const, claude_credential_ready: false, startup_state: 'ready' as const };
-		// The key runs natively while this worker's CLI is signed in elsewhere.
+		// The key runs natively while this worker's CLI is not signed in.
 		expect(credentialsFromSummary(summary({
-			mode: 'api_key', gate: { ...gate, ready_providers: ['gw:claude-api'] },
-		})).credentialReady).toBe(true);
+			api_key: { set: true, last4: 'abcd' }, gate: { ...gate, ready_providers: ['gw:claude-api'] },
+		}))).toMatchObject({ apiKeyReady: true, credentialReady: false });
+		// The CLI sign-in never stands in for the key.
 		expect(credentialsFromSummary(summary({
-			mode: 'api_key', gate: { ...gate, claude_credential_ready: true, ready_providers: ['claude'] },
-		})).credentialReady).toBe(false);
-		// Subscription mode still follows the CLI.
-		expect(credentialsFromSummary(summary({
-			gate: { ...gate, ready_providers: ['gw:claude-api'] },
-		})).credentialReady).toBe(false);
+			gate: { ...gate, claude_credential_ready: true, ready_providers: ['claude'] },
+		}))).toMatchObject({ apiKeyReady: false, credentialReady: true });
 	});
 
 	it('falls back to the gate reason on an older worker only while Claude is not ready', () => {
@@ -109,24 +107,28 @@ describe('agent credentials', () => {
 	});
 
 	it('stores the mode and answers with the new summary', async () => {
-		mocks.put.mockResolvedValue(summary({ mode: 'api_key', mode_label: 'Anthropic API key' }));
-		expect(await setClaudeAuthMode('api_key')).toMatchObject({ mode: 'api_key', modeLabel: 'Anthropic API key' });
-		expect(mocks.put).toHaveBeenCalledWith('/settings/claude-auth', { mode: 'api_key' });
+		mocks.put.mockResolvedValue(summary({ mode: 'cloud', mode_label: 'Cloud provider or gateway' }));
+		expect(await setClaudeAuthMode('cloud')).toMatchObject({ mode: 'cloud', modeLabel: 'Cloud provider or gateway' });
+		expect(mocks.put).toHaveBeenCalledWith('/settings/claude-auth', { mode: 'cloud' });
 	});
 
 	it('passes errors on', async () => {
 		mocks.put.mockRejectedValue({ status: 403, detail: 'Owner access required' });
-		await expect(setClaudeAuthMode('api_key')).rejects.toMatchObject({ status: 403 });
+		await expect(setClaudeAuthMode('off')).rejects.toMatchObject({ status: 403 });
 		mocks.get.mockRejectedValue({ status: 404, detail: 'Not Found' });
 		await expect(getAgentCredentials()).rejects.toMatchObject({ status: 404 });
 	});
 
-	it('saves a key for Claude Code only when asked to', async () => {
+	it('saves a key without touching the Claude mode', async () => {
 		mocks.post.mockResolvedValue({ success: true, masked_key: 'sk-ant-...abcd' });
-		expect(await saveAnthropicApiKey('sk-ant-secret', { useForClaudeCode: true })).toEqual({ masked: 'sk-ant-...abcd' });
-		expect(mocks.post).toHaveBeenCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret', use_for_claude_code: true });
-		await saveAnthropicApiKey('sk-ant-secret');
-		expect(mocks.post).toHaveBeenLastCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret', use_for_claude_code: false });
+		expect(await saveAnthropicApiKey('sk-ant-secret')).toEqual({ masked: 'sk-ant-...abcd' });
+		expect(mocks.post).toHaveBeenCalledWith('/settings/integrations/anthropic', { api_key: 'sk-ant-secret' });
+	});
+
+	it('reads a legacy API key mode as the subscription', async () => {
+		// Older workers may still answer with the removed mode.
+		mocks.get.mockResolvedValue(summary({ mode: 'api_key' as unknown as ClaudeAuthSummary['mode'] }));
+		expect((await getAgentCredentials()).mode).toBe('subscription');
 	});
 
 	it('names a stored key by its last four, as Settings does', () => {

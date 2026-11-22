@@ -83,96 +83,66 @@ it('shows the active mode, the CLI account and the key’s last four', async () 
 	expect(within(creds).getByText('Claude Max subscription')).toBeTruthy();
 	expect(within(creds).getByText('Active for Claude')).toBeTruthy();
 	expect(within(creds).getByText('Anthropic API key')).toBeTruthy();
-	expect(within(creds).getByText('Standby')).toBeTruthy();
+	// The key is the Claude API provider beside the subscription, not a standby.
+	expect(within(creds).getByText('Active for Claude API')).toBeTruthy();
 	expect(within(creds).queryByRole('switch')).toBeNull();
 
 	// The list rows carry the account and the key's last four.
 	expect(screen.getByText('owner@example.com, Max plan')).toBeTruthy();
-	expect(screen.getByText('sk-ant-…WXYZ, standby')).toBeTruthy();
+	expect(screen.getByText('sk-ant-…WXYZ, active for Claude API')).toBeTruthy();
 	expect(screen.queryByRole('alert')).toBeNull();
 });
 
 it('warns when the active mode has no credential', async () => {
-	worker.state.claude = claudeSummary({
-		mode: 'api_key',
+	// A saved sign-in that has lapsed: Claude is in use, but cannot run.
+	const summary = claudeSummary({
 		api_key: { set: false, last4: null },
+		accounts: claudeAccounts({ subscription: [subAccount({ signed_in: false, needs_sign_in: true })] }),
 		gate: {
 			ready: false,
-			mode: 'api_key',
+			mode: 'subscription',
 			claude_credential_ready: false,
-			reason: 'No Anthropic API key is stored on this worker.'
+			reason: 'The Claude Code CLI is not signed in.'
 		}
 	});
+	summary.cli = { ...summary.cli, signed_in: false, email: null, org_name: null, plan: null };
+	worker.state.claude = summary;
 	worker.state.integrations.anthropic_api_key_set = false;
 	await show();
 	expect(screen.getByText('Not ready')).toBeTruthy();
-	expect(screen.getByText('Claude API cannot run: no Anthropic API key is stored on this worker.')).toBeTruthy();
-	expect(within(credentials()).getByText('No key stored')).toBeTruthy();
-	expect(screen.getByRole('button', { name: 'Anthropic API key, No key stored' })).toBeTruthy();
+	expect(screen.getByText('Claude cannot run: the Claude Code CLI is not signed in on this worker.')).toBeTruthy();
+	// No key is saved, so there is no key row to warn about.
+	expect(within(credentials()).queryByText('Anthropic API key')).toBeNull();
 });
 
-it('changes the mode only when the owner picks one', async () => {
+it('keeps Claude API running on the saved key while the subscription is signed out', async () => {
+	const summary = claudeSummary({
+		api_key: { set: true, last4: 'WXYZ' },
+		gate: { ready: true, mode: 'subscription', claude_credential_ready: false, reason: null }
+	});
+	summary.cli = { ...summary.cli, signed_in: false, email: null, org_name: null, plan: null };
+	worker.state.claude = summary;
+	await show();
+	expect(screen.getByText('Runs on API key')).toBeTruthy();
+	expect(screen.getByText(/Claude subscription cannot run: the Claude Code CLI is not signed in on this worker\. Claude API models run on the saved key\./)).toBeTruthy();
+});
+
+it('changes the mode only when the owner picks one, and offers no API key mode', async () => {
+	worker.state.claude = claudeSummary({ ...worker.state.claude, mode: 'off' });
 	await show();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
+	// The key runs beside the subscription, so it is not a mode to pick.
+	expect(within(modes()).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Subscription', 'Cloud', 'Off']);
+	await fireEvent.click(within(modes()).getByRole('button', { name: 'Subscription' }));
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
 	expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
-		mode: 'api_key'
+		mode: 'subscription'
 	});
 	await waitFor(() =>
-		expect(within(modes()).getByRole('button', { name: 'API key' }).getAttribute('aria-pressed')).toBe('true')
+		expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true')
 	);
-	expect(screen.getByText('Runs on API key')).toBeTruthy();
-	expect(within(credentials()).getByText('Active for Claude')).toBeTruthy();
+	await waitFor(() => expect(within(credentials()).getByText('Active for Claude API')).toBeTruthy());
 	expect(mocks.hydrate).toHaveBeenCalled();
-});
-
-it('requires a separate click to confirm a legacy key while already in API key mode', async () => {
-	worker.state.claude = claudeSummary({
-		mode: 'api_key', api_key: { set: true, last4: 'WXYZ' }, api_key_confirmation_required: true,
-		api_key_confirmation: 'rendered-revision'
-	});
-	await show();
-	const action = screen.getByRole('button', { name: 'Confirm API key' });
-	expect(screen.getByText(/Confirm the key ending in WXYZ/)).toBeTruthy();
-	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
-	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	await fireEvent.click(action);
-	await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirming…' })).toBeNull());
-	expect(worker.sent('PUT', '/settings/claude-auth').map((request) => request.body)).toEqual([
-		{ mode: 'api_key', api_key_confirmation: 'rendered-revision' }
-	]);
-	expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull();
-	expect(within(modes()).getByRole('button', { name: 'API key' }).getAttribute('aria-pressed')).toBe('true');
-});
-
-it('refreshes after a stale confirmation and requires another click for the new key', async () => {
-	const detail = 'The Claude API key or mode changed. Review the current selection before confirming again.';
-	worker.state.claude = claudeSummary({
-		mode: 'api_key', api_key: { set: true, last4: '1111' },
-		api_key_confirmation_required: true, api_key_confirmation: 'old-view'
-	});
-	await show();
-	worker.state.claude = { ...worker.state.claude, api_key: { set: true, last4: '2222' }, api_key_confirmation: 'fresh-view' };
-	await fireEvent.click(screen.getByRole('button', { name: 'Confirm API key' }));
-	await screen.findByText(detail);
-	await screen.findByText(/Confirm the key ending in 2222/);
-	expect(worker.sent('PUT', '/settings/claude-auth').map((request) => request.body)).toEqual([
-		{ mode: 'api_key', api_key_confirmation: 'old-view' }
-	]);
-	await fireEvent.click(screen.getByRole('button', { name: 'Confirm API key' }));
-	await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull());
-	expect(worker.sent('PUT', '/settings/claude-auth').at(-1)?.body).toEqual({
-		mode: 'api_key', api_key_confirmation: 'fresh-view'
-	});
-});
-
-it('does not offer legacy key confirmation on a read-only Claude settings page', async () => {
-	worker.state.claude = claudeSummary({ mode: 'api_key', api_key_confirmation_required: true });
-	await show({ readOnly: true });
-	expect(screen.queryByRole('button', { name: 'Confirm API key' })).toBeNull();
-	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 });
 
 it('turns Claude off and says it is out of the picker', async () => {
@@ -190,7 +160,7 @@ it('turns Claude off and says it is out of the picker', async () => {
 it('is read-only for other devices', async () => {
 	await show({ readOnly: true });
 	for (const b of within(modes()).getAllByRole('button')) expect((b as HTMLButtonElement).disabled).toBe(true);
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
+	await fireEvent.click(within(modes()).getByRole('button', { name: 'Off' }));
 	await flush();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 });
@@ -290,7 +260,7 @@ it('lists saved sign-ins with "Another Subscription" and keeps the mode control 
 	expect(within(add).getByText('Becomes active after sign-in')).toBeTruthy();
 	// Which sign-in is active never moves the Claude Code mode.
 	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'API key' }));
+	await fireEvent.click(within(modes()).getByRole('button', { name: 'Off' }));
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
 	expect(worker.state.claude.accounts?.subscription.map((a) => a.active)).toEqual([false, true]);
 	expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/work/activate')).toHaveLength(0);

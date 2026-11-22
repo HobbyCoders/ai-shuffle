@@ -172,23 +172,30 @@ class TestModeDefault:
             assert claude_auth_mode.ensure_mode_recorded(False) == "subscription"
             assert claude_auth_mode.current_mode() == "subscription"
 
-    def test_a_key_only_install_is_not_opted_in_to_api_key_mode(self, mock_db):
+    def test_a_key_only_install_records_subscription(self, mock_db):
         """S14: a restored or synced key with no recorded mode and no CLI
-        sign-in records subscription; only the owner picks API key mode."""
+        sign-in records subscription; the key is the Claude API provider."""
         with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
             assert claude_auth_mode.current_mode() == "subscription"
-            assert not claude_auth_mode.prefers_claude_api()
             assert claude_auth_mode.ensure_mode_recorded(False) == "subscription"
         assert claude_auth_mode.stored_mode() == "subscription"
 
-    def test_an_explicit_api_key_choice_survives_startup(self, mock_db):
-        claude_auth_mode.set_mode("api_key")
+    def test_a_legacy_api_key_choice_reads_as_subscription_at_startup(self, mock_db):
+        from app.db import database
+
+        database.set_system_setting(claude_auth_mode.setting_key(), claude_auth_mode.LEGACY_MODE_API_KEY)
         with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
-            assert claude_auth_mode.ensure_mode_recorded(False) == "api_key"
+            assert claude_auth_mode.ensure_mode_recorded(False) == "subscription"
+        assert claude_auth_mode.current_mode() == "subscription"
 
     def test_set_mode_rejects_unknown(self, mock_db):
         with pytest.raises(ValueError):
             claude_auth_mode.set_mode("both")
+
+    def test_api_key_is_no_longer_a_mode(self, mock_db):
+        with pytest.raises(ValueError, match="no longer a Claude mode"):
+            claude_auth_mode.set_mode("api_key")
+        assert "api_key" not in [m["value"] for m in claude_auth_mode.summary({})["modes"]]
 
     def test_off_is_a_mode_the_user_can_choose(self, mock_db):
         assert claude_auth_mode.set_mode("off") == "off"
@@ -210,9 +217,10 @@ class TestModeDefault:
     def test_summary_shows_last_four_only(self, mock_db, _api_unit_credentials):
         from app.core import claude_accounts
 
-        claude_accounts.add_api_key("sk-ant-api03-secret-WXYZ", for_claude_code=True)
+        claude_auth_mode.set_mode("subscription")
+        claude_accounts.add_api_key("sk-ant-api03-secret-WXYZ")
         out = claude_auth_mode.summary({"installed": True, "signed_in": True, "email": "a@b.c"})
-        assert out["mode"] == "api_key" and out["explicit"] is True
+        assert out["mode"] == "subscription" and out["explicit"] is True
         assert out["api_key"] == {"set": True, "last4": "WXYZ"}
         assert "secret" not in repr(out)
         assert out["cli"]["email"] == "a@b.c"

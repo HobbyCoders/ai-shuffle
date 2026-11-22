@@ -10,7 +10,7 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 vi.mock('$lib/api/claude-auth', () => ({
-	getClaudeAuth: vi.fn(() => Promise.resolve({ mode: 'api_key' }))
+	getClaudeAuth: vi.fn(() => Promise.resolve({ mode: 'off' }))
 }));
 
 import { hydrateModelRegistry } from '$lib/constants/models';

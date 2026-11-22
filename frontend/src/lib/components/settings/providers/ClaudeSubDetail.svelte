@@ -297,7 +297,7 @@
 		{#if inactive && !cli.terminalOpen}
 			{#if tab === 'Models'}<BuiltInModels />{/if}
 		{:else if tab === 'Models'}
-			{#if mode === 'subscription' || (mode === 'api_key' && signedIn)}
+			{#if mode === 'subscription'}
 				<ClaudeCliModels readOnly={access.readOnly} canRefresh={mode === 'subscription'} />
 			{:else}
 				<BuiltInModels />
