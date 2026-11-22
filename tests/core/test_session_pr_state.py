@@ -871,6 +871,26 @@ async def test_republished_fallback_ignores_squash_merged_in_from_main(mock_db, 
 
 
 @pytest.mark.asyncio
+async def test_republished_pr_found_after_its_squash_is_merged_back(mock_db, pr_checkout):
+    """Republish, squash-merge, then merge main back: the merge shares the tree."""
+    from tests.git_repo_helpers import commit_file, git
+
+    commit_file(pr_checkout, 'own.txt', 'own work', 'session commit')
+    rewritten = _republish(pr_checkout, 'feat/republished')
+    squash = git(pr_checkout, 'commit-tree', 'HEAD^{tree}', '-p', 'origin/main', '-m', 'squash (#23)')
+    git(pr_checkout, 'push', '-q', 'origin', f'{squash}:refs/heads/main')
+    git(pr_checkout, 'fetch', '-q', 'origin')
+    git(pr_checkout, 'merge', '-q', '--no-edit', 'origin/main')
+    assert git(pr_checkout, 'rev-parse', 'HEAD^{tree}') == git(pr_checkout, 'rev-parse', f'{rewritten}^{{tree}}')
+    sid = _mk(project_id='p1', worktree_branch='feat/local')
+    ok, _ = await _reconcile_checkout(
+        sid, pr_checkout, pulls=[_checkout_pull(23, 'MERGED', rewritten, head='feat/republished')])
+    assert ok
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (23, 'merged')
+
+
+@pytest.mark.asyncio
 async def test_republished_fallback_prefers_open_replacement(mock_db, pr_checkout):
     from tests.git_repo_helpers import commit_file
 

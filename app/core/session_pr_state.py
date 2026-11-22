@@ -436,13 +436,13 @@ def find_pull_for_checkout_fallback(
         # Commits merged in from a base (main merged into this branch) are
         # someone else's work, e.g. another PR's squash commit.
         base_shas = sorted({sha for name, sha, _ in refs if name in bases and sha})
-        commit_for_tree: dict[str, str] = {}
+        commits_for_tree: dict[str, list[str]] = {}
         for line in git(
             "log", "--format=%T %H", f"--max-count={_MAX_OWN_TREES}", head_sha,
             "--not", creation_sha, *base_shas, check=True,
         ).stdout.splitlines():
             tree, _, commit = line.partition(" ")
-            commit_for_tree.setdefault(tree, commit)
+            commits_for_tree.setdefault(tree, []).append(commit)
 
         def carries_own_change(commit: str) -> bool:
             # Content equal to where the commit meets the base (a revert, or
@@ -456,10 +456,13 @@ def find_pull_for_checkout_fallback(
         skip_names = bases | {branch, upstream_branch, "HEAD"}
         matches = {
             name: tree for name, _, tree in refs
-            if name and name not in skip_names and tree in commit_for_tree
+            if name and name not in skip_names and tree in commits_for_tree
         }
+        # Any commit with the tree may prove it: main merged back in after the
+        # session's own PR landed has the same tree but no change of its own.
         own_trees = {
-            tree for tree in set(matches.values()) if carries_own_change(commit_for_tree[tree])
+            tree for tree in set(matches.values())
+            if any(carries_own_change(c) for c in commits_for_tree[tree])
         }
         republished = sorted(n for n, t in matches.items() if t in own_trees)[:_MAX_REPUBLISHED_REFS]
 
