@@ -956,6 +956,12 @@
 			message.systemSubtype === 'task_updated' ||
 			message.systemSubtype === 'task_notification'
 	);
+	// A settled task's tick or cross already says completed / failed, so its
+	// chip would only repeat it. Running, pending, stopped and killed keep theirs.
+	const TASK_SETTLED_STATUSES = ['completed', 'failed', 'error'];
+	const taskChipRedundant = $derived(
+		isTaskSubtype && TASK_SETTLED_STATUSES.includes(formatted.taskStatus ?? '')
+	);
 
 	// Only exhausted retries show a failure row and a manual Retry button.
 	const retryExhausted = $derived(
@@ -1176,7 +1182,11 @@
 					<span class="text-sm font-medium text-foreground shrink-0">{formatted.title}</span>
 					<!-- Status chip (task subtypes only) — muted pill, matching a tool card -->
 					{#if isTaskSubtype && formatted.badge}
-						<span class="text-[10px] font-medium px-1.5 py-0.5 rounded-sm border border-border bg-muted text-muted-foreground shrink-0 uppercase tracking-wide">{formatted.badge}</span>
+						{#if taskChipRedundant}
+							<span class="sr-only">{formatted.badge}</span>
+						{:else}
+							<span data-testid="task-status-chip" class="text-[10px] font-medium px-1.5 py-0.5 rounded-sm border border-border bg-muted text-muted-foreground shrink-0 uppercase tracking-wide">{formatted.badge}</span>
+						{/if}
 					{/if}
 					<!-- Content summary -->
 					{#if formatted.content}
@@ -1284,8 +1294,10 @@
 				</svg>
 				<!-- Title -->
 				<span class="text-sm font-medium text-foreground shrink-0">{formatted.title}</span>
-				<!-- Badge chip -->
-				{#if formatted.badge}
+				<!-- Badge chip (a settled swarm's tick or cross already says it) -->
+				{#if formatted.badge && taskChipRedundant && (formatted.badgeColor === 'green' || formatted.badgeColor === 'red')}
+					<span class="sr-only">{formatted.badge}</span>
+				{:else if formatted.badge}
 					<span class="px-1.5 py-0.5 text-[10px] rounded-sm shrink-0 {getBadgeClasses(formatted.badgeColor || 'gray')}">
 						{formatted.badge}
 					</span>
