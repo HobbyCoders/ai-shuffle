@@ -382,7 +382,9 @@ describe('RunningTasksList stopping', () => {
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
 		await screen.findByTestId('sheet-stop-error');
-		await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+		const dismiss = screen.getByRole('button', { name: 'Dismiss' });
+		dismiss.focus();
+		await fireEvent.click(dismiss);
 		expect(screen.queryByTestId('sheet-stop-error')).toBeNull();
 		expect(screen.getByRole('dialog').contains(document.activeElement)).toBe(true);
 	});
