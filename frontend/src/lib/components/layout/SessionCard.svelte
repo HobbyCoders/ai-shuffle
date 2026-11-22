@@ -135,8 +135,10 @@
 		/** Press-and-hold without moving. The sidebar starts selection with it. */
 		onLongPress?: (sessionId: string) => void;
 		onOpen: (sessionId: string) => void;
-		/** Desktop only: after settling the open session, let the shell move to a fresh chat. */
-		onSettled?: () => void;
+		/** Desktop only: after settling the session that was open when the settle
+		 *  began. The caller checks it is STILL the open one: the card may already
+		 *  be gone (its row moved lanes), so its own `active` prop is stale. */
+		onSettled?: (sessionId: string) => void;
 		/** Opens the snooze picker for this row. Without it the row offers no Snooze. */
 		onSnooze?: (sessionId: string) => void;
 	}
@@ -402,12 +404,17 @@
 		const id = session.id;
 		try {
 			switch (action) {
-				case 'settle':
+				case 'settle': {
+					// Read before the wait: the row leaves Active at once and this card
+					// unmounts, so `active` read afterwards is its last value, not the
+					// chat the user may have opened in the meantime.
+					const wasOpen = active;
 					await appData.setSessionActive(id, false);
 					// Desktop moves to a fresh composer. On mobile, keep the current
 					// session and drawer open so settling does not navigate the user away.
-					if (active && !platform.isMobile) onSettled?.();
+					if (wasOpen && !platform.isMobile) onSettled?.(id);
 					break;
+				}
 				case 'activate':
 				case 'unsnooze':
 					await appData.setSessionActive(id, true);
