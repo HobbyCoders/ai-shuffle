@@ -21,6 +21,9 @@ val robolectricJars = robolectricPins.keys.associateWith { coordinate ->
 // CI restores a dedicated actions/cache here (android.yml). A plain directory of
 // jars, because Gradle ignores files-2.1 copies without its metadata index and
 // asks Maven Central again. Unset (local builds): Gradle's own cache only.
+// Only the android-all runtimes (~670 MB) live here: no Gradle classpath uses
+// them. nativeruntime-dist-compat is also on the test runtime classpath, so it
+// stays in Gradle's cache, which the job's setup-java cache entry carries.
 val robolectricJarCache = providers.environmentVariable("ROBOLECTRIC_JAR_CACHE").orNull?.let(::File)
 // This executes inside the Gradle daemon, after systemProp.* installation.
 // Keep proof of the effective shared policy in debug and Play build logs.
@@ -48,15 +51,17 @@ val prepareRobolectricDependencies = tasks.register("prepareRobolectricDependenc
             }
             return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
         }
-        val cachedCopies = robolectricPins.keys.associateWith { jarCache?.resolve(jarName(it))?.takeIf(File::isFile) }
+        fun inJarCache(coordinate: String) = jarCache != null && coordinate.startsWith("android-all-instrumented:")
+        val cachedCopies = robolectricPins.keys.filter(::inJarCache)
+            .associateWith { jarCache?.resolve(jarName(it))?.takeIf(File::isFile) }
         val present = robolectricPins.keys.count { coordinate ->
             val (artifact, version) = coordinate.split(":")
             cachedCopies[coordinate] != null ||
                 cache.resolve("$artifact/$version").walkTopDown().any { it.name == "$artifact-$version.jar" }
         }
-        val inJarCache = cachedCopies.values.count { it != null }
+        val jarCacheHits = cachedCopies.values.count { it != null }
         logger.lifecycle("Robolectric cache before resolve: $present/${robolectricPins.size} pinned jars present " +
-            "($inJarCache in the CI jar cache${jarCache?.let { " at $it" } ?: ", which is unset"})")
+            "($jarCacheHits in the CI jar cache${jarCache?.let { " at $it" } ?: ", which is unset"})")
         // A restored copy is used only when its bytes match the pin; anything
         // else is discarded and resolved again, then checked like a download.
         val reused = mutableMapOf<String, File>()
@@ -72,16 +77,23 @@ val prepareRobolectricDependencies = tasks.register("prepareRobolectricDependenc
             }
         }
         val resolved = robolectricJars.filterKeys { it !in reused }.values.flatMap { it.resolve() }.toSet()
-        val files = reused.values.toSet() + resolved
         val expectedNames = robolectricPins.mapKeys { (coordinate, _) -> jarName(coordinate) }
-        check(files.map { it.name }.toSet() == expectedNames.keys) { "Unexpected Robolectric artifacts: $files" }
-        resolved.forEach { jar ->
+        check((reused.values + resolved).map { it.name }.toSet() == expectedNames.keys) {
+            "Unexpected Robolectric artifacts: ${reused.values + resolved}"
+        }
+        val files = reused.values + resolved.map { jar ->
             val expected = expectedNames.getValue(jar.name)
             val actual = sha256(jar)
             check(actual == expected) { "SHA-256 mismatch for $jar: expected $expected, got $actual" }
             logger.lifecycle("Verified Robolectric dependency: ${jar.name} SHA-256=$actual")
-            // CI saves this directory only after the step succeeds (android.yml).
-            if (jarCache != null) jar.copyTo(jarCache.resolve(jar.name), overwrite = true)
+            val coordinate = robolectricPins.keys.single { jarName(it) == jar.name }
+            if (!inJarCache(coordinate)) return@map jar
+            // CI saves this directory right after the step succeeds (android.yml).
+            val kept = jar.copyTo(jarCache!!.resolve(jar.name), overwrite = true)
+            // Drop Gradle's copy so setup-java's Gradle entry does not store the
+            // same ~670 MB again; Gradle refetches a deleted artifact if asked.
+            if (jar.startsWith(cache)) jar.delete()
+            kept
         }
         copy {
             from(files.filter { it.name.startsWith("android-all-instrumented-") })

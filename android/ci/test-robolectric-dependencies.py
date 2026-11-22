@@ -108,6 +108,23 @@ class RobolectricDependenciesTests(unittest.TestCase):
         self.assertEqual(play_restore["with"], {"path": path, "key": key})
         self.assertEqual(build["env"]["ROBOLECTRIC_JAR_CACHE"], path)
         self.assertLess(bundle.index(play_restore), bundle.index(build))
+        # Only the android-all runtimes go there; nativeruntime stays in Gradle's cache.
+        self.assertIn('coordinate.startsWith("android-all-instrumented:")', script)
+
+    def test_android_tests_have_their_own_gradle_cache_key(self):
+        # setup-java never re-saves an existing key; sharing the default key let the
+        # minified build (no unit tests or lint) save it first.
+        def setup_java(filename, job):
+            steps = yaml.load((ROOT / ".github/workflows" / filename).read_text(),
+                              Loader=yaml.BaseLoader)["jobs"][job]["steps"]
+            return next(s for s in steps if s.get("uses", "").startswith("actions/setup-java@"))["with"]
+        android = setup_java("android.yml", "build")
+        self.assertEqual(android["cache"], "gradle")
+        self.assertEqual(android["cache-dependency-path"].split(),
+                         ["android/**/*.gradle*", "android/**/gradle-wrapper.properties", "android/gradle.properties"])
+        for filename, job in (("ci-android-minified.yml", "build"), ("android-play.yml", "bundle")):
+            other = setup_java(filename, job)
+            self.assertNotEqual(other.get("cache-dependency-path"), android["cache-dependency-path"], filename)
 
     def test_pr_checks_also_run_unit_tests_with_push_on(self):
         # Release builds carry Firebase config (push on); PR builds do not.
