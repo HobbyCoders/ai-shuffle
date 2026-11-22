@@ -36,8 +36,9 @@ async def cancel_swarm(session_id: str, swarm_id: str, request: Request, token: 
         if isinstance(snapshot, dict) and "tasks" not in snapshot:
             # A receipt (the link was not HTTPS): the tasks come from our
             # synced copy, which catches up with the cancel as events arrive.
+            # The owner's status is newer than the copy's.
             synced = [s for s in await swarm.snapshots(session_id) if s.get("id") == swarm_id]
-            snapshot = synced[0] if synced else snapshot
+            snapshot = {**synced[0], "status": snapshot.get("status")} if synced else snapshot
     else:
         try:
             snapshot = await swarm.cancel(session_id, swarm_id)

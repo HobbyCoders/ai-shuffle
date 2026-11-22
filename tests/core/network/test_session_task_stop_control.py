@@ -162,7 +162,8 @@ def swarm_pair(pair, monkeypatch):
     async def snapshots(session_id):
         if _ACTIVE.get().name != "mirror":
             return []
-        return [{"id": "wf-1", "session_id": session_id, "status": "cancelled", "tasks": [{"report": "synced"}]}]
+        # Synced before the cancel landed, so it still says running.
+        return [{"id": "wf-1", "session_id": session_id, "status": "running", "tasks": [{"report": "synced"}]}]
     monkeypatch.setattr(swarm, "snapshots", snapshots)
 
     # What the owner actually put on the (plain HTTP) control link.
