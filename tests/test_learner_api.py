@@ -143,6 +143,20 @@ def test_deleting_a_rule_keeps_the_learners_journal(world):
     assert "forgotten_before" not in store._facts._load(read_only=True)
 
 
+def test_undo_moves_a_rule_back_to_the_family_the_learner_moved_it_from(world):
+    client, store = world
+    text = "When reporting: lead with the result."
+    entry = learned(store, text)
+    digest = entry.key.rsplit(".", 1)[-1]
+    store.save_memory(text, memory_id=entry.id, provenance="user", durable=True,
+                      key=f"{behavior.KEY_PREFIX}gpt.{digest}")
+    item = rule(client, entry.id)
+    assert item["applies_to"] == "gpt"
+    assert item["previous_text"] == f"{behavior.FAMILY_LABELS['all']}: {text}"
+    restored = client.post(f"{BASE}/rules/{entry.id}/undo", json=version(item)).json()["restored"]
+    assert restored["applies_to"] == "all" and restored["text"] == text
+
+
 def test_undo_closes_three_days_after_the_learner_changed_a_rule(world, monkeypatch):
     client, store = world
     entry = learned(store, "When reporting: lead with the result.")
@@ -196,3 +210,25 @@ def test_saved_guidance_from_the_old_learner_becomes_rules_once(tmp_path):
     assert (root / "scoped" / fluid_memory.LEGACY_GUIDANCE_MARKER).exists()
     assert (root / "scoped" / "gpt-6.2-sol.json").exists()
     assert fluid_memory.migrate_legacy_guidance(store, root) == 0
+
+
+def test_long_edited_guidance_is_split_into_rules_and_the_rest_is_kept_aside(tmp_path):
+    import hashlib
+
+    root = tmp_path / "guidance"
+    (root / "scoped").mkdir(parents=True)
+    (root / ".manual").mkdir()
+    first = "When reviewing a pull request: read the whole diff before commenting on any line " + "a" * 120 + "."
+    second = "When a check fails: quote the failing line and say what you will change " + "b" * 120 + "."
+    endless = "When writing: " + "c" * (behavior.MAX_RULE_CHARS + 20)
+    (root / "scoped" / "gpt-6.2-sol.json").write_text(json.dumps({
+        "model": "gpt-6.2-sol", "provider": "openai",
+        "content": f"- {first} {second}\n- {endless}"}), encoding="utf-8")
+    (root / ".manual" / ("s-" + hashlib.sha256(b"gpt-6.2-sol").hexdigest())).write_text("")
+    store = SkillStore(tmp_path / "facts")
+
+    assert fluid_memory.migrate_legacy_guidance(store, root) == 2
+    texts = {m.text for m in store.memories() if behavior.is_rule_key(m.key)}
+    assert texts == {first, second}
+    aside = (root / "scoped" / fluid_memory.LEGACY_UNMIGRATED).read_text()
+    assert endless in aside and "longer than" in aside

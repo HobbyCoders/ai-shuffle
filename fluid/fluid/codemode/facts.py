@@ -235,6 +235,17 @@ def _is_rule_key(key):
     return is_rule_key(key)
 
 
+def _fence_fingerprint(text, key=None):
+    """The text fingerprint a deletion barrier records and checks. A behaviour
+    rule's is per model family: deleting the GPT copy of a rule leaves the
+    same text for Claude (or moved to Gemini) savable."""
+    if _is_rule_key(key):
+        from fluid.codemode.behavior import rule_family
+
+        return fingerprint(f"{rule_family(key)}\x00{text}")
+    return fingerprint(text)
+
+
 def canonical_key(text):
     # Deliberately narrow. Do not equate nicknames, legal names, or someone
     # else's name. Callers can supply a slot for other explicit corrections.
@@ -821,14 +832,15 @@ class FactStore:
             # Only an answer that stays in its control namespace may ignore a
             # text fence. Rekeying it to an ordinary rule restores that fence.
             pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
-            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fp)
+            fence = _fence_fingerprint(text, key)
+            suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fence)
             if key:
                 suppressed = suppressed or barrier_contains(doc.get("forgotten", ""), "key:" + (scope or "global") + ":" + key)
             if suppressed and not (protected and restore):
                 raise ValueError("This fact matches a deletion barrier; an explicit restore request is required")
             for t in doc["tombstones"]:
                 text_match = (not pair_answer and not str(t.get("key") or "").startswith("memory.coexist.")
-                              and fp in t.get("fingerprints", []))
+                              and fence in t.get("fingerprints", []))
                 if text_match or (key and t.get("key") == key and t.get("scope") == (scope or "global")):
                     if not (protected and restore):
                         raise ValueError("This fact was forgotten; an explicit restore request is required")
@@ -974,10 +986,13 @@ class FactStore:
             if not old:
                 doc["next_id"] += 1
             history = list(entry.get("history", []))
-            if old and old["text"] != text:
+            if old and (old["text"] != text or rekey):
                 previous = {"text": old["text"], "at": now, "revision": old.get("revision", 1)}
                 if old.get("when"):
                     previous["when"] = old["when"]
+                if rekey:
+                    # A rule moved between families: undo brings the family back.
+                    previous["key"] = old["key"]
                 history.append(previous)
             clock = dict(entry.get("clock") or {entry["origin"]: entry["revision"]})
             slot = key or entry.get("key")
@@ -1409,7 +1424,9 @@ class FactStore:
                          "revision": old.get("revision", 1) + 1, "key": old.get("key"),
                          "scope": old.get("scope", "global"), "deleted_at": time.time(),
                          "fingerprints": ([] if str(old.get("key") or "").startswith("memory.coexist.") else
-                                          [fingerprint(h["text"]) for h in old.get("history", [])] + [fingerprint(old["text"])]),
+                                          [_fence_fingerprint(h["text"], h.get("key") or old.get("key"))
+                                           for h in old.get("history", [])]
+                                          + [_fence_fingerprint(old["text"], old.get("key"))]),
                          "source_session": old.get("source_session")}
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.

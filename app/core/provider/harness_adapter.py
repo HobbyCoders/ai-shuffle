@@ -3345,6 +3345,11 @@ class HarnessAdapter(ProviderAdapter):
         shape = (bound.extra.get("provider_type"), bound.extra.get("provider_auth_mode"))
         if not any(shape) and bound.extra.get("provider_id"):
             shape = _lookup_provider_row_shape(str(bound.extra["provider_id"]))[:2]
+        billing: Any = learner_billing(*shape)
+        if getattr(provider, "name", None) == TEXT_GENERATION_LEARNER:
+            # The helper routes each pass to the CURRENT Text Generation
+            # binding, so the pass's budget and request size follow it too.
+            billing = _text_generation_billing
         synthesizer = Synthesizer(
             provider,
             model,
@@ -3357,7 +3362,7 @@ class HarnessAdapter(ProviderAdapter):
             enabled=learner_enabled,
             context_window=context_window,
             daily_calls=learner_daily_calls,
-            billing=learner_billing(*shape),
+            billing=billing,
         )
         return synthesizer, engine_bus
 
@@ -9941,6 +9946,18 @@ class _LearnerProvider:
         http, self._http, self._client = self._http, None, None
         if http is not None:
             await http.aclose()
+
+
+def _text_generation_billing() -> Optional[str]:
+    """How a pass through the text-generation helper is billed now: by the
+    owner's current Text Generation binding, which the helper re-reads every
+    call (a changed binding applies to the next pass, not the next chat)."""
+    from app.core.fluid_memory import learner_billing
+    from app.core.generation_options import text_generation_config
+
+    provider_id = text_generation_config().get("provider")
+    shape = _lookup_provider_row_shape(str(provider_id))[:2] if provider_id else (None, None)
+    return learner_billing(*shape)
 
 
 # One learner pass through the text-generation helper; a pass that has not

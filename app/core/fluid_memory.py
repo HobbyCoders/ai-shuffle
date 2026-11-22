@@ -398,6 +398,7 @@ def sweep_memories(now: float | None = None) -> list[tuple[str, object, dict]]:
 
 
 LEGACY_GUIDANCE_MARKER = ".migrated-to-rules"
+LEGACY_UNMIGRATED = "unmigrated-guidance.txt"
 _LEGACY_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
 
@@ -428,6 +429,7 @@ def migrate_legacy_guidance(store=None, root: Path | None = None) -> int:
         return 0
     store = store or store_for_owner("local")
     saved = 0
+    skipped: list[str] = []
     learned = sum(1 for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected)
     for path in sorted(scoped.glob("*.json")):
         try:
@@ -439,25 +441,55 @@ def migrate_legacy_guidance(store=None, root: Path | None = None) -> int:
         marker = "s-" + hashlib.sha256(os.fsencode(path.stem.strip().lower())).hexdigest()
         kept = (root / ".manual" / marker).exists()
         family = behavior.family_for(model)
-        for raw in content.splitlines():
-            line = _LEGACY_BULLET.sub("", raw).strip()
-            if not line or line.startswith("#"):
-                continue
+        pieces = [piece for raw in content.splitlines()
+                  for line in [_LEGACY_BULLET.sub("", raw).strip()]
+                  if line and not line.startswith("#")
+                  for piece in _rule_pieces(line, behavior.MAX_RULE_CHARS)]
+        for piece in pieces:
             if not kept and learned >= behavior.MAX_LEARNED_RULES:
                 break
             try:
-                body = behavior.validate_rule(line)
+                body = behavior.validate_rule(piece)
                 store.save_memory(
                     body, scope="global", provenance="user", key=behavior.rule_key(family, body),
                     **({"protected": True} if kept else {"durable": True}),
                     when="When working with the owner (learned behaviour rule)",
                 )
-            except ValueError:
+            except ValueError as exc:
+                if kept:
+                    skipped.append(f"[{model}] {piece}  ({exc})")
                 continue
             saved += 1
             learned += 0 if kept else 1
+    if skipped:
+        # What the owner wrote and no rule could hold stays readable beside
+        # the old files, and the log names it.
+        (scoped / LEGACY_UNMIGRATED).write_text("\n".join(skipped) + "\n", encoding="utf-8")
+        logging.getLogger(__name__).warning(
+            "%d edited guidance line(s) could not become behaviour rules; see %s",
+            len(skipped), scoped / LEGACY_UNMIGRATED)
     (scoped / LEGACY_GUIDANCE_MARKER).write_text(f"{saved}\n", encoding="utf-8")
     return saved
+
+
+def _rule_pieces(line: str, limit: int) -> list[str]:
+    """A guidance line as rule-sized pieces: whole when it fits, otherwise its
+    sentences, in order, packed up to ``limit`` characters each. A single
+    sentence longer than that stays one (too long) piece."""
+    if len(line) <= limit:
+        return [line]
+    pieces: list[str] = []
+    current = ""
+    for sentence in re.split(r"(?<=[.!?])\s+", line):
+        joined = f"{current} {sentence}".strip()
+        if current and len(joined) > limit:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = joined
+    if current:
+        pieces.append(current)
+    return pieces
 
 
 async def maintain_memories():

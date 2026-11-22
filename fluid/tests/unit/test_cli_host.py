@@ -514,3 +514,62 @@ async def test_subagent_without_a_definition_gets_the_parents_surface(tmp_path) 
     assert "generic says hi" in out.getvalue()
     child_req = provider.child_requests[0]
     assert {t["name"] for t in child_req.tools} == {"Read"}
+
+
+def _family_rules(skills_dir) -> tuple[str, str]:
+    from fluid.codemode import behavior
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(skills_dir)
+    gpt = "When opening a pull request: open a real PR, never a draft."
+    claude = "When reporting: lead with the result, then the blocker."
+    for family, text in (("gpt", gpt), ("claude", claude)):
+        store.save_memory(text, provenance="user", protected=True,
+                          key=behavior.rule_key(family, text), when="When working with the owner")
+    return gpt, claude
+
+
+async def test_a_model_switch_to_another_family_swaps_the_behaviour_rules(tmp_path) -> None:
+    from fluid.cli.repl import Repl
+
+    gpt, claude = _family_rules(tmp_path / "skills")
+    store = MemoryStore()
+    meta = await store.create_session()
+    config = _config(tmp_path, continual=True, skills_dir=str(tmp_path / "skills"),
+                     model_override="gpt-6.2-sol")
+    engine = make_engine(config, store, provider=ScriptedProvider([]), session_id=meta.session_id,
+                         background_host=False)
+    try:
+        assert gpt in engine.system and claude not in engine.system
+        repl = Repl(engine, meta.session_id, out=io.StringIO())
+        assert await repl.dispatch_slash("/model claude-opus-5-5")
+        assert engine.model == "claude-opus-5-5"
+        assert claude in engine.system and gpt not in engine.system
+        assert claude in "".join(s.text for s in engine.system_sections.sections)
+        # Same family: the prompt (and its cached prefix) is left alone.
+        before = engine.system
+        assert await repl.dispatch_slash("/model claude-sonnet-5")
+        assert engine.system is before
+    finally:
+        await engine.aclose()
+
+
+async def test_a_subagent_gets_the_rules_of_the_model_it_runs_on(tmp_path) -> None:
+    gpt, claude = _family_rules(tmp_path / "skills")
+    provider = ScriptedProvider([_text("child finished")])
+    store = MemoryStore()
+    meta = await store.create_session()
+    config = _config(tmp_path, continual=True, skills_dir=str(tmp_path / "skills"),
+                     model_override="gpt-6.2-sol")
+    engine = make_engine(config, store, provider=provider, session_id=meta.session_id)
+    engine.model = "claude-opus-5-5"  # the parent switched; a child still runs the default
+    host = host_of(engine)
+    try:
+        outcome = await host.task_dispatch({"prompt": "respond", "mode": "sync"}, engine.ctx)
+        assert not outcome.is_error
+        [request] = provider.requests
+        assert request.model == "gpt-6.2-sol"
+        assert gpt in request.system and claude not in request.system
+    finally:
+        await host.aclose()
+        await engine.aclose()

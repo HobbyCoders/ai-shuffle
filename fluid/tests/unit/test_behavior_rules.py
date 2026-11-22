@@ -186,6 +186,37 @@ def test_the_same_rule_text_for_two_families_is_two_rules(tmp_path):
     assert sorted(behavior.rule_family(r.key) for r in rules(store)) == ["claude", "gpt"]
 
 
+def test_deleting_one_familys_copy_of_a_rule_leaves_the_others_free(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    saved = {family: store.save_memory(text, provenance="user", durable=True,
+                                       key=behavior.rule_key(family, text),
+                                       when="When working with the owner")
+             for family in ("gpt", "claude")}
+    assert store.delete_memory(saved["gpt"].id, explicit=True, purge_evidence=False)
+    claude = saved["claude"]
+    digest = claude.key.rsplit(".", 1)[-1]
+    moved = store.save_memory(text, memory_id=claude.id, provenance="user", durable=True,
+                              key=f"{behavior.KEY_PREFIX}gemini.{digest}")
+    assert behavior.rule_family(moved.key) == "gemini"
+    # The deleted GPT rule itself stays fenced off.
+    with pytest.raises(ValueError):
+        store.save_memory(text, provenance="user", durable=True,
+                          key=behavior.rule_key("gpt", text) + "x")
+
+
+def test_a_family_move_is_history_undo_can_restore(tmp_path):
+    store = SkillStore(tmp_path)
+    text = "When reporting: lead with the result."
+    rule = store.save_memory(text, provenance="user", durable=True,
+                             key=behavior.rule_key("all", text), when="When working with the owner")
+    digest = rule.key.rsplit(".", 1)[-1]
+    store.save_memory(text, memory_id=rule.id, provenance="user", durable=True,
+                      key=f"{behavior.KEY_PREFIX}gpt.{digest}")
+    entry = next(e for e in store._facts._load(read_only=True)["entries"] if e["id"] == rule.id)
+    assert entry["history"][-1]["key"] == rule.key and entry["history"][-1]["text"] == text
+
+
 def test_the_assembled_prompt_shows_a_family_rule_only_to_that_family(tmp_path):
     from fluid.context.compiler import PromptInputs, compile_prompt
 

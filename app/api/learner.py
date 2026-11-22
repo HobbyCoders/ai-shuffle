@@ -140,6 +140,16 @@ def _setup(store) -> dict[str, Any]:
 
 
 # ── rules ────────────────────────────────────────────────────────────────
+def _previous_text(previous: dict, family: str) -> str | None:
+    """What Undo restores, naming the earlier family when the learner moved
+    the rule to another one."""
+    text = previous.get("text")
+    was = behavior.rule_family(previous.get("key")) if previous.get("key") else None
+    if text and was and was != family:
+        return f"{behavior.FAMILY_LABELS.get(was, was)}: {text}"
+    return text
+
+
 def _rule_item(entry, project_names, now) -> dict[str, Any]:
     family = behavior.rule_family(entry.get("key")) or behavior.ALL
     kept = bool(entry.get("protected"))
@@ -155,7 +165,7 @@ def _rule_item(entry, project_names, now) -> dict[str, Any]:
         "kept": kept,
         "new": not kept and now - float(entry.get("updated_at") or 0) < NEW_FOR_SECONDS,
         # What an undo brings back; None means undo deletes the rule.
-        "previous_text": None if kept or not history else history[-1].get("text"),
+        "previous_text": None if kept or not history else _previous_text(history[-1], family),
         "scope_label": ("All projects" if scope == "global" else
                         project_names.get(scope[8:], "Other project") if scope.startswith("project:")
                         else "Other project"),
@@ -312,9 +322,11 @@ def _undo(rule_id, body: RuleVersion):
             raise HTTPException(409, "Undo is only available for three days after the learner changes a rule. Edit or delete it instead.")
         history = old.get("history") or []
         if history and history[-1].get("text"):
+            # A family move recorded the rule's previous key: restore both.
             store.save_memory(history[-1]["text"], memory_id=rule_id,
                               expected_revision=body.expected_revision, provenance=old.get("provenance"),
-                              durable=True, key=old["key"], when=old.get("when") or _RULE_WHEN)
+                              durable=True, key=history[-1].get("key") or old["key"],
+                              when=old.get("when") or _RULE_WHEN)
             return {"restored": _saved(store, rule_id)}
         if not _forget_rule(store, rule_id, body.expected_revision):
             raise HTTPException(404, _NOT_FOUND)

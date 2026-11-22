@@ -488,3 +488,25 @@ def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
             owner, FakeInference(_reply("NO_CHANGES")), "m", store, None, session, "s",
             session_model="m", context_window=None)
         assert synth._budget().source == source, mode
+
+
+def test_a_text_generation_learner_bills_each_pass_by_the_current_binding(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core import generation_options
+
+    binding = {"model": "claude", "provider": "row-plan"}
+    monkeypatch.setattr(generation_options, "text_generation_config", lambda: dict(binding))
+    shapes = {"row-plan": ("anthropic", "oauth", None), "row-key": ("anthropic", "api_key", None)}
+    monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: shapes[pid])
+    provider = ha._LearnerProvider(ha.TEXT_GENERATION_LEARNER, SessionOptions(model="claude"))
+    owner = SimpleNamespace(_announce_continual=None)
+    synth, _ = ha.HarnessAdapter._learner_synthesizer(
+        owner, provider, "claude", _store(), None, SessionOptions(model="opus", cwd=".", extra={}),
+        "s", session_model="opus", context_window=None,
+        binding=SessionOptions(model="claude", extra={"provider_id": "row-plan"}))
+    assert synth._budget(refresh=True).source == "subscription_default"
+    # The owner moves Text Generation to an API key mid-chat: the next pass
+    # is metered, with the metered request size.
+    binding["provider"] = "row-key"
+    assert synth._budget(refresh=True).source == "metered_default"
