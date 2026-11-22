@@ -29,9 +29,9 @@
 		<SettingRow
 			id="providers.loopGuard"
 			label="Loop guard"
-			hint={mode === 'off' ? undefined : 'Console spend limit applies'}
+			hint={mode === 'off' ? undefined : "Your cloud provider's billing applies"}
 		>
-			<ValueText value={mode === 'off' ? 'Off while Claude is off' : 'Off in API key mode'} />
+			<ValueText value={mode === 'off' ? 'Off while Claude is off' : 'Off with a cloud provider or gateway'} />
 		</SettingRow>
 	</RowGroup>
 {:else}

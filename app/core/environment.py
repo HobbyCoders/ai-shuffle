@@ -415,12 +415,9 @@ def inject_claude_code_auth(
 
     from app.core import claude_auth_mode, claude_cli_home, claude_cloud_auth, claude_subscriptions, credential_gate
 
-    selected, choice = claude_auth_mode.runtime_choice()
-    # API key mode runs the CLI on the subscription: the saved key is the
-    # separate "Claude API" provider (app.core.claude_api_provider) and never
-    # reaches the CLI.
-    mode = (claude_auth_mode.MODE_SUBSCRIPTION if selected == claude_auth_mode.MODE_API_KEY
-            else selected)
+    # The saved key is the separate "Claude API" provider
+    # (app.core.claude_api_provider) and never reaches the CLI.
+    mode, choice = claude_auth_mode.runtime_choice()
     target = (claude_subscriptions.shared_target(choice, read_choice=False)
               if mode == claude_auth_mode.MODE_SUBSCRIPTION else None)
     enforced = choice is not None or target is not None

@@ -61,7 +61,7 @@ await runJourney({
 			// the descriptor so external login never overwrites a path we did not create.
 			const marker = openSync(join(folder, 'devloop-account.txt'), 'wx', 0o600);
 			try {
-				await request(page, origin, 'PUT', auth, { mode: 'api_key' });
+				await request(page, origin, 'PUT', auth, { mode: 'off' });
 				await request(page, origin, 'PUT', auth, { mode: 'subscription' });
 				const state = await request(page, origin, 'GET', statusPath);
 				if (state.cli.signed_in || !state.accounts.recovery_required) throw new Error('subscription must start unavailable');

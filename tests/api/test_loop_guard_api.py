@@ -26,8 +26,11 @@ def test_reports_defaults_and_whether_it_applies(authenticated_client):
     assert body["defaults"] == loop_guard.DEFAULTS
     assert body["enabled"] is True and body["applies"] is True
     assert body["held"] == []
-    # An unbound Claude model is the subscription in API key mode too.
-    claude_auth_mode.set_mode("api_key")
+    # The removed API key mode, still stored by older workers, is the
+    # subscription for an unbound Claude model.
+    from app.db import database
+
+    database.set_system_setting(claude_auth_mode.setting_key(), claude_auth_mode.LEGACY_MODE_API_KEY)
     assert authenticated_client.get(ENDPOINT).json()["applies"] is True
     claude_auth_mode.set_mode("cloud")
     assert authenticated_client.get(ENDPOINT).json()["applies"] is False
@@ -69,21 +72,22 @@ def test_automation_create_in_subscription_mode_recommends_an_api_key(
     assert r.json()["notices"] == [loop_guard.SCHEDULED_RUN_GUIDANCE]
 
 
-def test_automation_create_in_api_key_mode_has_no_notice(authenticated_client, monkeypatch, cli_signed_in):
-    """API key mode with a saved key: the default is the key bound to Claude
-    API, so the run does not use the subscription."""
+def test_a_saved_api_key_is_never_an_automations_default(authenticated_client, monkeypatch, cli_signed_in):
+    """A saved, selected Anthropic key is the Claude API provider beside the
+    subscription, never a default: a model-less automation still runs on the
+    subscription, so the notice stands."""
     from cryptography.fernet import Fernet
 
     from app.core import claude_accounts, encryption
 
     # Real encryption: the pinned key is read back from the encrypted list.
     monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
-    # Saved and chosen the way Settings does it: the choice pins this key.
-    claude_accounts.add_api_key("sk-ant-api03-secret-ABCD", for_claude_code=True)
+    claude_auth_mode.set_mode("subscription")
+    claude_accounts.add_api_key("sk-ant-api03-secret-ABCD")
     r = _automation(authenticated_client)
     assert r.status_code == 201, r.text
-    assert r.json()["effective_provider_id"] == "claude-api"
-    assert r.json()["notices"] == []
+    assert r.json()["effective_provider_id"] != "claude-api"
+    assert r.json()["notices"] == [loop_guard.SCHEDULED_RUN_GUIDANCE]
 
 
 def test_no_notice_when_the_claude_cli_is_not_signed_in(authenticated_client, mock_encryption, cli_signed_in):

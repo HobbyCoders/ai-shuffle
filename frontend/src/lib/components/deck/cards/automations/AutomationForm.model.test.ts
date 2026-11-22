@@ -10,7 +10,7 @@ vi.mock('$lib/api/client', () => ({
 }));
 
 vi.mock('$lib/api/claude-auth', () => ({
-	getClaudeAuth: vi.fn(() => Promise.resolve({ mode: 'api_key' }))
+	getClaudeAuth: vi.fn(() => Promise.resolve({ mode: 'off' }))
 }));
 
 import { getClaudeAuth } from '$lib/api/claude-auth';
@@ -287,7 +287,7 @@ describe('scheduled-run notice', () => {
 	it('keeps compact notice detail reachable without changing regular error banners', async () => {
 		const notice = await noticeFor(signedIn, { formError: 'Could not save' });
 		expect(notice?.querySelector('.st-banner.compact')).not.toBeNull();
-		expect(within(notice as HTMLElement).getByRole('button', { name: 'Open Claude settings' }).textContent).toBe('Use an API key');
+		expect(within(notice as HTMLElement).getByRole('button', { name: 'Open Claude settings' }).textContent).toBe('Claude settings');
 		await fireEvent.click(within(notice as HTMLElement).getByRole('button', { name: 'About scheduled Claude runs' }));
 		expect(within(document.body).getByRole('tooltip').textContent).toContain('holds unattended turns past its budget until you confirm them');
 		const error = within(document.body).getByRole('alert');

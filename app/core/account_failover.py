@@ -130,7 +130,7 @@ async def attempt_failover(
     On a usage-limit 429 we no longer rotate to another saved account. Surface a
     clear rate-limited state (OC-4) and let the turn end — the user waits for the
     window to reset or signs into a different account. A 429 on an API key
-    (OpenRouter, Groq, xAI, a custom row, Claude in API-key mode) has no usage
+    (OpenRouter, Groq, xAI, a custom row, the Claude API key) has no usage
     window: it gets the plain rate-limit notice instead.
     """
     from app.db.async_database import run_sync

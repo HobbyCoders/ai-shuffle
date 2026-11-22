@@ -75,9 +75,8 @@ class IntegrationSettingsResponse(BaseModel):
     anthropic_api_key_masked: str = ""
     # Which credential Claude Code runs on, from the explicit auth mode
     # (``claude_auth_mode``; see GET /settings/claude-auth):
-    #   "api_key"  — api_key mode: new chats default to the Claude API
-    #                provider (the key); the CLI never receives it
     #   "account"  — subscription mode: the CLI's own sign-in is used
+    #   "cloud"    — a cloud provider or gateway
     #   "off"      — Claude is turned off on this worker
     # Kept for older clients; ``claude_auth_mode`` carries the mode itself
     # ("subscription", "api_key" or "off").
@@ -208,8 +207,8 @@ async def _resume_fal_balance_polling(api_key: str) -> None:
 class AnthropicKeyRequest(BaseModel):
     """Request to set Anthropic API key"""
     api_key: str
-    # True also switches Claude Code to API-key mode in the same call. Saving a
-    # key never changes the mode by itself.
+    # Accepted from older clients and ignored: API key mode was removed, and
+    # saving a key never changes the Claude mode.
     use_for_claude_code: bool = False
 
 
@@ -271,7 +270,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
             # The explicit mode decides, never the key's mere presence.
             claude_code_auth_method=(
-                auth_mode if auth_mode in ("api_key", "cloud", "off") else "account"
+                auth_mode if auth_mode in ("cloud", "off") else "account"
             ),
             claude_auth_mode=auth_mode,
             image_model=image_model,
@@ -418,10 +417,11 @@ async def set_anthropic_api_key(
     Set the Anthropic API key (admin only).
 
     The active key is the Claude API provider (``claude-api``), run on the
-    native Anthropic client; the Claude Code CLI never receives it. Saving it
-    does not change the mode unless ``use_for_claude_code`` is true, which
-    makes the key the default for new chats (``api_key`` mode). It is stored encrypted on this worker
-    and synced encrypted with saved API-key accounts. Validated here before storage.
+    native Anthropic client beside the Claude subscription; the Claude Code CLI
+    never receives it, and it runs only when a "Claude · API" model is picked.
+    Saving it never changes the Claude mode (``use_for_claude_code`` is ignored).
+    It is stored encrypted on this worker and synced encrypted with saved
+    API-key accounts. Validated here before storage.
 
     Get your API key from: https://console.anthropic.com/settings/keys
     """
@@ -432,7 +432,7 @@ async def set_anthropic_api_key(
     # above is a real network await.
     from app.core import claude_accounts
     try:
-        await run_sync(claude_accounts.add_api_key, api_key, for_claude_code=request.use_for_claude_code)
+        await run_sync(claude_accounts.add_api_key, api_key)
     except claude_accounts.AccountError as exc:
         raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
                             detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None
@@ -461,12 +461,11 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Claude Code auth mode (subscription, API key, cloud provider or gateway, off)
+# Claude Code auth mode (subscription, cloud provider or gateway, off)
 # ============================================================================
 
 class ClaudeAuthModeRequest(BaseModel):
-    mode: str = Field(..., description="'subscription', 'api_key', 'cloud' or 'off'")
-    api_key_confirmation: str | None = None
+    mode: str = Field(..., description="'subscription', 'cloud' or 'off'")
     # Required for 'cloud': the owner saw the warning (see claude_cloud_auth).
     acknowledge_warning: StrictBool = False
 
@@ -616,12 +615,7 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
             raise HTTPException(status_code=400,
                                 detail="Save a cloud provider or gateway first.")
     try:
-        if request.api_key_confirmation is not None:
-            if request.mode != claude_auth_mode.MODE_API_KEY:
-                raise HTTPException(status_code=400, detail="An API key confirmation requires API key mode.")
-            await run_sync(claude_auth_mode.confirm_legacy_api_key, request.api_key_confirmation)
-        else:
-            await run_sync(claude_auth_mode.set_mode, request.mode, require_legacy_confirmation=True)
+        await run_sync(claude_auth_mode.set_mode, request.mode)
     except claude_accounts.AccountError as exc:
         raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
                             detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None

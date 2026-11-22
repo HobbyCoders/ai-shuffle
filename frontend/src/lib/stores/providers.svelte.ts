@@ -50,7 +50,6 @@ import {
 	getClaudeAuth,
 	saveClaudeCloud as apiSaveClaudeCloud,
 	setClaudeAuthMode,
-	confirmClaudeApiKey as apiConfirmClaudeApiKey,
 	type ClaudeAuthMode,
 	type ClaudeAuthSummary,
 	type ClaudeCloudConfig,
@@ -84,8 +83,8 @@ interface ProvidersState {
 	falEnabled: boolean;
 	/** Masked form of the stored key, or null when none is set. */
 	anthropicKeyMasked: string | null;
-	/** Which auth method Claude Code runs with: 'api_key', 'account', 'cloud' or 'off'. */
-	claudeCodeAuthMethod: 'account' | 'api_key' | 'cloud' | 'off' | null;
+	/** Which auth method Claude Code runs with: 'account', 'cloud' or 'off'. */
+	claudeCodeAuthMethod: 'account' | 'cloud' | 'off' | null;
 	/** Non-null when the integrations load failed unexpectedly. */
 	integrationsError: string | null;
 	/** True once `/settings/integrations` answered. */
@@ -300,8 +299,12 @@ export const providers = {
 				// Older workers do not report the flag: the key is then always on.
 				falEnabled: data.fal_enabled !== false,
 				anthropicKeyMasked: data.anthropic_api_key_masked ?? null,
+				// A worker not yet updated may report the removed 'api_key'
+				// mode, which ran Claude Code on the account (subscription).
 				claudeCodeAuthMethod:
-					data.claude_code_auth_method ?? (data.anthropic_api_key_set ? 'api_key' : 'account'),
+					data.claude_code_auth_method === 'cloud' || data.claude_code_auth_method === 'off'
+						? data.claude_code_auth_method
+						: 'account',
 				integrationsError: null,
 				integrationsLoaded: true
 			}));
@@ -312,10 +315,10 @@ export const providers = {
 
 	/**
 	 * Store an Anthropic API key, then reload the integration status (callers
-	 * re-read the Claude summary). Saving a key never changes the mode unless
-	 * `useForClaudeCode` asks for it. Throws with the server's message.
+	 * re-read the Claude summary). The key is the "Claude API" provider; saving
+	 * it never changes the Claude mode. Throws with the server's message.
 	 */
-	async setAnthropicKey(key: string, options: { useForClaudeCode?: boolean } = {}) {
+	async setAnthropicKey(key: string) {
 		const trimmed = key.trim();
 		if (!trimmed) return;
 		let res: Response;
@@ -323,9 +326,7 @@ export const providers = {
 			res = await fetch(`${apiBase()}/settings/integrations/anthropic`, withAuth({
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify(
-					options.useForClaudeCode ? { api_key: trimmed, use_for_claude_code: true } : { api_key: trimmed }
-				)
+				body: JSON.stringify({ api_key: trimmed })
 			}));
 		} catch (e) {
 			throw new Error(e instanceof Error ? e.message : 'Network error');
@@ -491,13 +492,6 @@ export const providers = {
 	 */
 	async setClaudeMode(mode: ClaudeAuthMode, acknowledgeWarning = false) {
 		const claude = await setClaudeAuthMode(mode, acknowledgeWarning);
-		_update((s) => ({ ...s, claude }));
-		auth.checkAuth().catch(() => {});
-		await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);
-	},
-
-	async confirmClaudeApiKey(revision: string) {
-		const claude = await apiConfirmClaudeApiKey(revision);
 		_update((s) => ({ ...s, claude }));
 		auth.checkAuth().catch(() => {});
 		await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);

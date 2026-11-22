@@ -67,10 +67,14 @@ def test_native_claude_leg_is_billed_by_the_claude_auth_mode(mock_db, claude_mod
     assert usage_attribution(None)["billing"] == "api"
 
 
-def test_an_unbound_claude_turn_in_api_key_mode_books_as_the_subscription(mock_db):
-    """The CLI runs on the subscription in API key mode too, so a turn (or a
-    killed turn's recovery) with no provider books there, never as the key."""
-    claude_auth_mode.set_mode("api_key")
+def test_an_unbound_claude_turn_under_the_legacy_api_key_mode_books_as_the_subscription(mock_db):
+    """The removed API key mode, still stored by older workers, ran the CLI on
+    the subscription, so a turn (or a killed turn's recovery) with no provider
+    books there, never as the key."""
+    from app.db import database
+
+    database.set_system_setting(claude_auth_mode.setting_key(), claude_auth_mode.LEGACY_MODE_API_KEY)
+    assert claude_auth_mode.current_mode() == claude_auth_mode.MODE_SUBSCRIPTION
     assert usage_attribution(None) == {
         "provider_id": None, "provider_type": "claude", "billing": "subscription",
     }

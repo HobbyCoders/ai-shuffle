@@ -55,7 +55,7 @@
 
 	const line = $derived(
 		provider.claude
-			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'One sign-in and one key selected' : 'One key selected for API key mode')
+			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'One sign-in and one key selected' : 'One key selected for Claude · API')
 			: provider.media
 				? detailLine(head.text, 'Used by media tools')
 				: detailLine(
