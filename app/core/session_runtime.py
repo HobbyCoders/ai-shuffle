@@ -2147,6 +2147,13 @@ class SessionRuntime:
                         if prepared is None:
                             self._steer_attempted.discard(row_id)
                             break
+                        if self._steering_closed or self._live_adapter() is not adapter:
+                            # The turn ended while the files were written; the
+                            # row now runs as its own turn, so it must not also
+                            # reach whatever is on the pooled client now.
+                            self._steer_attempted.discard(row_id)
+                            self._steer_prepared.pop(row_id, None)
+                            break
                         if row_id in self._steer_withdrawn:
                             # The user took it back while its files were written.
                             self._steer_attempted.discard(row_id)
@@ -2224,10 +2231,17 @@ class SessionRuntime:
                 blob_ids = list(payload.get("upload_blob_ids") or [])
                 if blob_ids and not cwd:
                     raise upload_transfer.UploadLiftError("the live turn has no working folder")
-                mapping = upload_transfer.materialize_blobs_for_turn(blob_ids, cwd) if blob_ids else {}
+                # The bytes stay until the delivery receipt: a steer that never
+                # lands (refused, recalled, dropped at turn end) must leave the
+                # row's own turn able to write the file, in whatever folder it
+                # runs.
+                written: Dict[str, str] = {}
+                mapping = (upload_transfer.materialize_blobs_for_turn(blob_ids, cwd, keep_bytes=written)
+                           if blob_ids else {})
                 return {
                     "prompt": upload_transfer.rewrite_prompt(row.get("prompt") or "", mapping),
                     "upload_paths": [mapping.get(p, p) for p in payload.get("upload_paths") or []],
+                    "written": written,
                 }
 
             prepared = await asyncio.to_thread(_prepare)
@@ -2740,6 +2754,15 @@ class SessionRuntime:
             # Attachments written into this turn's folder are named by the
             # paths the model was given (``_prepare_steer_uploads``).
             prepared = self._steer_prepared.get(row_id) or {}
+            if prepared.get("written"):
+                # Delivered, so the files the model was pointed at are the
+                # message's copy now and the transferred bytes can go.
+                try:
+                    from app.core.upload_transfer import clear_materialized
+                    await asyncio.to_thread(clear_materialized, prepared["written"])
+                except Exception:  # noqa: BLE001 - the bytes only linger
+                    logger.warning("SessionRuntime: could not release steered upload bytes for %s",
+                                   row_id, exc_info=True)
             content = prepared.get("prompt") or row.get("prompt") or steer.get("text") or ""
             upload_paths = prepared.get("upload_paths", (row.get("payload") or {}).get("upload_paths"))
             profile_id = row.get("profile_id") or self.turn.get("profile_id")

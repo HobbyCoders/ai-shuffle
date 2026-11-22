@@ -182,6 +182,83 @@ async def test_an_attachment_sent_through_another_worker_steers_into_the_live_tu
     assert users[-1]["payload"]["upload_paths"] == [str(local)]
     assert database.get_session_messages(SID)[-1]["metadata"]["upload_paths"] == [str(local)]
     assert turns.get_queued_turns(SID) == []
+    # Delivered, so the transferred bytes are released and the copy recorded.
+    from app.db import upload_blobs
+    assert upload_blobs.get_blob_data(blob_ids[0]) is None
+    assert upload_blobs.get_blob(blob_ids[0])["materialized_path"] == str(local)
+
+
+async def test_a_refused_attachment_steer_leaves_its_own_turn_able_to_write_the_file(staged_upload, tmp_path):
+    """The pooled client refuses the steer (an idle client still for another
+    checkout, say). The file was written for it, but the transferred bytes
+    stay, so the message's own turn can write it into the folder it runs in."""
+    from app.core import upload_transfer
+    from app.db import upload_blobs
+    from tests.core.test_steering_delivery_flows import _Adapter
+
+    source = str(staged_upload)
+    blob_ids = upload_transfer.lift_paths_to_blobs([source], {"path": str(staged_upload.parent)}, SID)
+    stale = tmp_path / "old-checkout"
+    stale.mkdir()
+    turns.enqueue_turn(SID, "user", prompt="opening")
+    queued = turns.enqueue_turn(SID, "user", prompt=f"look @{source}", payload={
+        "upload_paths": [source], "upload_blob_ids": blob_ids, "deferred_user_record": True,
+    })
+    _, pool, seen, _ = _steer_into_live_turn(queued["id"], stale)
+    pool.peek.return_value.adapter = _Adapter(refuse=RuntimeError("no running turn"))
+
+    async def _impl(**kwargs):
+        seen["steered"] = await session_runtime.try_steer_pending(SID)
+        yield {"type": "done", "metadata": {}}
+
+    opening = turns.get_queued_turns(SID)[0]
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), _pump_env(_impl):
+        assert await session_runtime.SessionRuntime(opening).execute() == "completed"
+
+    assert seen["steered"] == 0
+    assert [r["id"] for r in turns.get_queued_turns(SID)] == [queued["id"]]
+    assert upload_blobs.get_blob_data(blob_ids[0]) == b"image"
+    current = tmp_path / "new-checkout"
+    current.mkdir()
+    mapping = upload_transfer.materialize_blobs_for_turn(blob_ids, str(current))
+    assert (current / "uploads" / staged_upload.name).read_bytes() == b"image"
+    assert mapping == {source: str(current / "uploads" / staged_upload.name)}
+
+
+async def test_a_turn_that_ends_while_attachments_are_written_does_not_get_them(staged_upload, tmp_path):
+    """The turn's client goes away while the files are written: the row runs
+    as its own turn, so nothing is handed to whatever client is pooled now."""
+    from types import SimpleNamespace
+    from app.core import upload_transfer
+    from tests.core.test_steering_delivery_flows import _Adapter
+
+    source = str(staged_upload)
+    blob_ids = upload_transfer.lift_paths_to_blobs([source], {"path": str(staged_upload.parent)}, SID)
+    turns.enqueue_turn(SID, "user", prompt="opening")
+    queued = turns.enqueue_turn(SID, "user", prompt=f"look @{source}", payload={
+        "upload_paths": [source], "upload_blob_ids": blob_ids, "deferred_user_record": True,
+    })
+    adapter, pool, seen, _ = _steer_into_live_turn(queued["id"], tmp_path)
+    replacement = _Adapter()
+    real_materialize = upload_transfer.materialize_blobs_for_turn
+
+    def _materialize_as_the_client_changes(ids, cwd, **kwargs):
+        mapping = real_materialize(ids, cwd, **kwargs)
+        pool.peek.return_value = SimpleNamespace(
+            adapter=replacement, connect_options=SimpleNamespace(cwd=str(cwd)))
+        return mapping
+
+    async def _impl(**kwargs):
+        seen["steered"] = await session_runtime.try_steer_pending(SID)
+        yield {"type": "done", "metadata": {}}
+
+    opening = turns.get_queued_turns(SID)[0]
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), _pump_env(_impl), \
+            patch.object(upload_transfer, "materialize_blobs_for_turn", _materialize_as_the_client_changes):
+        assert await session_runtime.SessionRuntime(opening).execute() == "completed"
+    assert seen["steered"] == 0
+    assert adapter.calls == [] and replacement.calls == []
+    assert [r["id"] for r in turns.get_queued_turns(SID)] == [queued["id"]]
 
 
 async def test_a_restored_attachment_chip_steers_into_the_live_turn(staged_upload, tmp_path):
@@ -252,8 +329,8 @@ async def test_unsending_while_attachments_are_written_keeps_it_from_the_model(s
     adapter, pool, seen, _ = _steer_into_live_turn(queued["id"], tmp_path)
     real_materialize = upload_transfer.materialize_blobs_for_turn
 
-    def _materialize_then_unsend(ids, cwd):
-        mapping = real_materialize(ids, cwd)
+    def _materialize_then_unsend(ids, cwd, **kwargs):
+        mapping = real_materialize(ids, cwd, **kwargs)
         # The page's Unsend arrives on the loop while this thread still writes.
         verdict = asyncio.run_coroutine_threadsafe(
             session_runtime.try_cancel_steer(SID, queued["id"], withdraw=True), loop).result(5)
@@ -288,12 +365,12 @@ async def test_a_message_sent_while_attachments_are_written_does_not_overtake_th
     adapter, pool, seen, _ = _steer_into_live_turn(first["id"], tmp_path)
     real_materialize = upload_transfer.materialize_blobs_for_turn
 
-    def _materialize_while_another_send_arrives(ids, cwd):
+    def _materialize_while_another_send_arrives(ids, cwd, **kwargs):
         seen["second"] = turns.enqueue_turn(SID, "user", prompt="and also this")
         # That send asks to steer while this thread still writes the file.
         seen["second_sweep"] = asyncio.run_coroutine_threadsafe(
             session_runtime.try_steer_pending(SID), loop)
-        return real_materialize(ids, cwd)
+        return real_materialize(ids, cwd, **kwargs)
 
     async def _impl(**kwargs):
         seen["steered"] = await session_runtime.try_steer_pending(SID)
