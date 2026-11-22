@@ -778,7 +778,7 @@ A swarm left running when the app stopped is settled when the app starts again, 
 
 ### POST /api/sessions/{session_id}/swarms/{swarm_id}/cancel
 
-Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when another worker may still be running it. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
+Cancel a swarm and its unfinished tasks. Returns `{"swarm": {...}}`, `404` for an unknown swarm, or `409` when it cannot be cancelled right now. For a chat that runs on another worker in your network, the cancel is sent to that worker; `409` then also means that worker could not be reached or needs an update, and `detail` says which. A swarm left running when the app stopped is cancelled here: its workers that are still running are stopped, and it is saved as `cancelled`.
 
 ## Vault
 

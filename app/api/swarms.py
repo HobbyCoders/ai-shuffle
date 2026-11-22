@@ -24,7 +24,15 @@ async def list_swarms(session_id: str, request: Request, token: str = Depends(re
 
 @router.post("/{session_id}/swarms/{swarm_id}/cancel")
 async def cancel_swarm(session_id: str, swarm_id: str, request: Request, token: str = Depends(require_auth)):
-    await owned_session(request, session_id)
+    session = await owned_session(request, session_id)
+    # A chat that runs on another worker: its coordinator is there.
+    from app.api.task_stop_owner import forward_swarm_cancel
+    forwarded = await forward_swarm_cancel(session, swarm_id)
+    if forwarded is not None:
+        if "swarm" in forwarded:
+            return {"swarm": forwarded["swarm"]}
+        raise HTTPException(status_code=404 if forwarded["error"] == "unknown" else 409,
+                            detail=forwarded["detail"])
     try:
         return {"swarm": await swarm.cancel(session_id, swarm_id)}
     except ValueError as exc:

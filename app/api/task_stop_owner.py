@@ -1,4 +1,4 @@
-"""Stopping one background task of a chat that runs on another worker.
+"""Stopping one background task (or swarm) of a chat that runs on another worker.
 
 A chat owned by another worker is a read-only mirror here: its shells and
 subagents run there, and this worker has nothing of theirs to stop. The "x"
@@ -66,3 +66,51 @@ async def handle_task_stop(body: dict, from_device: str) -> dict:
     await run_sync(control._require_owned, session_id)
     logger.info("Worker %s stopped task %s of %s", from_device, task_id, session_id)
     return await stop_session_task(session_id, task_id)
+
+
+# A swarm row's "x" (cancel the whole workflow) has the same problem: its
+# coordinator runs on the worker that runs the chat.
+SWARM_ACTION = "session-swarm-cancel"
+
+
+async def forward_swarm_cancel(session: dict, swarm_id: str) -> Optional[dict]:
+    """The owner's answer to cancelling ``swarm_id``, or None when the chat is ours.
+
+    The answer is ``{"swarm": ...}`` on success, else ``{"error": "unknown" |
+    "unavailable", "detail": ...}`` so the caller keeps its 404/409 split.
+    """
+    owner = await run_sync(control.owner_of, session)
+    if owner is None:
+        return None
+    try:
+        result = await control.call(owner, SWARM_ACTION, {"session_id": session["id"], "swarm_id": swarm_id})
+    except control.ControlRefused as exc:
+        if "Unknown control action" in str(exc):
+            name, _ = await run_sync(control._names, engine.require_context(), owner)
+            return {"error": "unavailable", "detail": f"{name} needs an update to cancel a swarm from here. "
+                    "Update it, or use Stop to stop everything in this chat."}
+        return {"error": "unavailable", "detail": str(exc) or "The worker that runs this chat refused."}
+    except control.RunnerUnreachable as exc:
+        logger.info("Swarm cancel for %s/%s did not reach %s: %s", session.get("id"), swarm_id, owner, exc)
+        return {"error": "unavailable", "detail": f"Couldn't cancel the swarm. {exc}"}
+    if not isinstance(result, dict) or not ("swarm" in result or result.get("error") in ("unknown", "unavailable")):
+        return {"error": "unavailable", "detail": "The worker that runs this chat sent an answer that could not be read."}
+    return result
+
+
+async def handle_swarm_cancel(body: dict, from_device: str) -> dict:
+    """Owner side: cancel one swarm of a chat this worker runs."""
+    from app.core import swarm
+
+    session_id = str(body.get("session_id") or "")
+    swarm_id = body.get("swarm_id")
+    if not isinstance(swarm_id, str) or not swarm_id or len(swarm_id) > 200:
+        raise ValueError("Invalid swarm id")
+    await run_sync(control._require_owned, session_id)
+    logger.info("Worker %s cancelled swarm %s of %s", from_device, swarm_id, session_id)
+    try:
+        return {"swarm": await swarm.cancel(session_id, swarm_id)}
+    except ValueError as exc:
+        return {"error": "unknown", "detail": str(exc)}
+    except swarm.SwarmUnavailableError as exc:
+        return {"error": "unavailable", "detail": str(exc)}

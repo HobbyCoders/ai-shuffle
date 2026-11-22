@@ -446,6 +446,11 @@ def _session_task_stop_handler():
     return handle_task_stop
 
 
+def _session_swarm_cancel_handler():
+    from app.api.task_stop_owner import handle_swarm_cancel
+    return handle_swarm_cancel
+
+
 def _session_git_handler():
     from app.api.git_owner import handle_session_git
     return handle_session_git
@@ -697,6 +702,7 @@ _LAZY_HANDLERS = {
     "session-files": _session_files_handler,
     # The "x" on one running task of a chat this worker runs.
     "session-task-stop": _session_task_stop_handler,
+    "session-swarm-cancel": _session_swarm_cancel_handler,
     "project-git": _project_git_handler,
     "git-state": _git_state_handler,
     "git-catalog": _git_catalog_handler,

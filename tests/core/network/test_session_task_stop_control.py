@@ -127,3 +127,71 @@ def test_the_owner_refuses_a_stop_for_a_chat_it_does_not_run(pair):
             asyncio.run(control.handle(task_stop_owner.ACTION, {"session_id": SESSION, "task_id": ""},
                                        from_device=owner.device_id))
     assert ran_on == []
+
+
+# The swarm row's "x" cancels the workflow; its coordinator runs on the owner.
+SWARM_PATH = "/api/v1/network/peer/control/" + task_stop_owner.SWARM_ACTION
+
+
+@pytest.fixture
+def swarm_pair(pair, monkeypatch):
+    from app.api import swarms as swarms_api
+    from app.core import swarm
+
+    async def owned_session(request, session_id):
+        return database.get_session(session_id)
+    monkeypatch.setattr(swarms_api, "owned_session", owned_session)
+    cancelled_on = []
+
+    async def cancel(session_id, key):
+        cancelled_on.append(_ACTIVE.get().name)
+        if key == "gone":
+            raise ValueError("Unknown swarm")
+        if key == "stuck":
+            raise swarm.SwarmUnavailableError("Couldn't read this swarm's workers right now; nothing was stopped.")
+        return {"id": key, "status": "cancelled"}
+    monkeypatch.setattr(swarm, "cancel", cancel)
+    return (*pair, cancelled_on, swarms_api)
+
+
+def test_the_swarm_x_on_a_mirrored_chat_cancels_where_it_runs(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    with mirror.active():
+        result = asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-1", None, token="t"))
+    assert result == {"swarm": {"id": "wf-1", "status": "cancelled"}}
+    assert cancelled_on == ["owner"]
+    assert ("POST", SWARM_PATH) in served.requests
+
+
+@pytest.mark.parametrize(("key", "code"), [("gone", 404), ("stuck", 409)])
+def test_the_owners_swarm_refusal_keeps_its_status(swarm_pair, key, code):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    with mirror.active():
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(swarms_api.cancel_swarm(SESSION, key, None, token="t"))
+    assert caught.value.status_code == code
+    assert cancelled_on == ["owner"]
+
+
+def test_a_swarm_on_this_worker_is_cancelled_here(swarm_pair):
+    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    with owner.active():
+        asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-2", None, token="t"))
+    assert cancelled_on == ["owner"]
+    assert ("POST", SWARM_PATH) not in served.requests
+
+
+def test_an_older_owner_is_asked_to_update_for_a_swarm(swarm_pair):
+    from fastapi import HTTPException
+    owner, mirror, served, _, cancelled_on, swarms_api = swarm_pair
+    original = control._LAZY_HANDLERS.pop(task_stop_owner.SWARM_ACTION)
+    try:
+        with mirror.active():
+            with pytest.raises(HTTPException) as caught:
+                asyncio.run(swarms_api.cancel_swarm(SESSION, "wf-3", None, token="t"))
+    finally:
+        control._LAZY_HANDLERS[task_stop_owner.SWARM_ACTION] = original
+    assert caught.value.status_code == 409
+    assert "ServerWorker needs an update to cancel a swarm" in caught.value.detail
+    assert cancelled_on == []
