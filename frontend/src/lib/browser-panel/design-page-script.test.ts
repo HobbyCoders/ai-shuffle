@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The preview script runs inside the inspected page, so the worker keeps it as
 // text (app/core/browser_stream.py). These tests run that exact text against a
@@ -37,7 +37,9 @@ function style(key: string, selector: string, styles: Record<string, string>, ex
 
 const el = (selector: string) => document.querySelector(selector) as HTMLElement;
 
-const MARK = 'data-ais-design';
+/** The marker attribute's name: the script makes one up for each document. */
+const markName = (): string =>
+	(window as unknown as Record<symbol, { mark: string } | undefined>)[REGISTRY_KEY]?.mark ?? 'data-ais-none';
 
 type RuleModel = { token: string; style: { values: Map<string, string>; setProperty(name: string, value: string, priority: string): void } };
 
@@ -48,11 +50,11 @@ class SheetModel {
 		this.cssRules = [];
 	}
 	insertRule(text: string, index: number): number {
-		const match = /^\[data-ais-design~="(c\d+)"\]:is\(\*, #a#a#a#a\) \{\}$/.exec(text);
-		if (!match) throw new Error(`unexpected rule: ${text}`);
+		const match = /^\[(data-ais-d[a-z0-9]*)~="(c\d+)"\]:is\(\*, #a#a#a#a\) \{\}$/.exec(text);
+		if (!match || match[1] !== markName()) throw new Error(`unexpected rule: ${text}`);
 		const values = new Map<string, string>();
 		this.cssRules.splice(index, 0, {
-			token: match[1],
+			token: match[2],
 			style: {
 				values,
 				setProperty: (name, value, priority) => {
@@ -71,7 +73,7 @@ const adopted = () => (document as unknown as Adopting).adoptedStyleSheets;
 
 /** The preview value an element gets for a property: the last matching rule wins. */
 function shown(target: Element, prop: string): string {
-	const tokens = (target.getAttribute(MARK) ?? '').split(' ').filter(Boolean);
+	const tokens = (target.getAttribute(markName()) ?? '').split(' ').filter(Boolean);
 	let value = '';
 	for (const sheet of adopted()) {
 		for (const rule of sheet.cssRules) {
@@ -83,10 +85,14 @@ function shown(target: Element, prop: string): string {
 
 /** Everything a preview may have left on the page. */
 function leftovers(): string[] {
-	const found = Array.from(document.querySelectorAll(`[${MARK}]`)).map((node) => `marker on ${node.id}`);
+	const found = Array.from(document.querySelectorAll(`[${markName()}]`)).map((node) => `marker on ${node.id}`);
 	if (adopted().length) found.push('stylesheet');
 	return found;
 }
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 beforeEach(() => {
 	delete (window as unknown as Record<symbol, unknown>)[REGISTRY_KEY];
@@ -157,8 +163,8 @@ describe('the page-side design preview script', () => {
 		run({ op: 'reset', key: 'k1' });
 		expect(shown(el('#two'), 'background-color')).toBe('');
 		expect(shown(el('#two'), 'font-size')).toBe('20px !important');
-		expect(el('#one').hasAttribute(MARK)).toBe(false);
-		expect(el('#three').hasAttribute(MARK)).toBe(false);
+		expect(el('#one').hasAttribute(markName())).toBe(false);
+		expect(el('#three').hasAttribute(markName())).toBe(false);
 	});
 
 	it('lets the later change win where two set the same property, and falls back when it goes', () => {
@@ -185,7 +191,7 @@ describe('the page-side design preview script', () => {
 		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
 		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
 		expect(shown(el('#three'), 'color')).toBe('');
-		expect(el('#three').hasAttribute(MARK)).toBe(false);
+		expect(el('#three').hasAttribute(markName())).toBe(false);
 	});
 
 	it('removes one change while the original page is showing without losing the rest', () => {
@@ -198,7 +204,7 @@ describe('the page-side design preview script', () => {
 		expect(run({ op: 'peek', on: false }).peek).toBe(false);
 		expect(shown(el('#text'), 'font-size')).toBe('20px !important');
 		expect(shown(el('#one'), 'color')).toBe('');
-		expect(el('#one').hasAttribute(MARK)).toBe(false);
+		expect(el('#one').hasAttribute(markName())).toBe(false);
 	});
 
 	it('shows the changes again when a new value is tried while the original is showing', () => {
@@ -224,9 +230,38 @@ describe('the page-side design preview script', () => {
 		copy.id = 'copy';
 		document.body.appendChild(copy);
 		run({ op: 'reset', key: 'k1' });
-		expect(copy.hasAttribute(MARK)).toBe(false);
+		expect(copy.hasAttribute(markName())).toBe(false);
 		expect(shown(el('#two'), 'color')).toBe('rgb(255, 0, 0) !important');
 		run({ op: 'reset', key: null });
+		expect(leftovers()).toEqual([]);
+	});
+
+	it('takes the preview off a copy the page made when the change narrows to one element', () => {
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' }, { scope: 'all' });
+		const copy = el('#two').cloneNode(true) as HTMLElement;
+		copy.id = 'copy';
+		document.body.appendChild(copy);
+		expect(shown(copy, 'color')).toBe('rgb(0, 0, 255) !important');
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
+		expect(shown(el('#two'), 'color')).toBe('');
+		expect(shown(copy, 'color')).toBe('');
+		expect(copy.hasAttribute(markName())).toBe(false);
+	});
+
+	it("never takes a marker name the page is using, and leaves the page's attribute alone", () => {
+		// The first name the script would make up is one the page already has.
+		const taken = 'data-ais-d' + (0.5).toString(36).slice(2, 10);
+		el('#text').setAttribute(taken, 'expanded');
+		el('#text').setAttribute('data-ais-design', 'expanded');
+		vi.spyOn(Math, 'random').mockReturnValueOnce(0.1).mockReturnValueOnce(0.5).mockReturnValueOnce(0.25);
+		style('k1', '#one', { color: 'rgb(0, 0, 255)' });
+		expect(markName()).toBe('data-ais-d' + (0.25).toString(36).slice(2, 10));
+		expect(markName()).not.toBe(taken);
+		expect(shown(el('#one'), 'color')).toBe('rgb(0, 0, 255) !important');
+		run({ op: 'reset', key: null });
+		expect(el('#text').getAttribute(taken)).toBe('expanded');
+		expect(el('#text').getAttribute('data-ais-design')).toBe('expanded');
 		expect(leftovers()).toEqual([]);
 	});
 

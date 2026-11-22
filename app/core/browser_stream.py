@@ -337,9 +337,13 @@ _INSPECT_JS_TEMPLATE = """
       200,
     );
     // Without the marker a design preview puts on the elements it styles.
-    out.html = cap(el.outerHTML.replace(/ data-ais-design="[c0-9 ]*"/g, ''), 800);
+    const mark = (window[Symbol.for('ais.design')] || {}).mark || '';
+    out.html = cap(
+      mark ? el.outerHTML.replace(new RegExp(' ' + mark + '="[c0-9 ]*"', 'g'), '') : el.outerHTML,
+      800,
+    );
     const attrs = {};
-    for (const a of Array.from(el.attributes).filter((a) => a.name !== 'data-ais-design').slice(0, 12)) {
+    for (const a of Array.from(el.attributes).filter((a) => a.name !== mark).slice(0, 12)) {
       attrs[cap(a.name, 60)] = cap(a.value, 160);
     }
     out.attrs = attrs;
@@ -472,17 +476,26 @@ _MAX_DESIGN_ITEMS = 40
 
 # Shared by the inspect and design scripts. Keys start at a random number per
 # document so a key from before a reload does not name a different element.
+# `mark` is the attribute a preview puts on the elements it styles: a name made
+# up for this document that the page is not using, so an attribute of the
+# page's own is never mistaken for one.
 _DESIGN_REGISTRY_JS = """const S = Symbol.for('ais.design');
       const reg = window[S] || (window[S] = {
         n: Math.floor(Math.random() * 9000000), els: new Map(),
         changes: new Map(), hidden: new Set(), seq: 0, sheet: null, roots: new Set(),
+        mark: (() => {
+          for (;;) {
+            const name = 'data-ais-d' + Math.random().toString(36).slice(2, 10);
+            if (!document.querySelector('[' + name + ']')) return name;
+          }
+        })(),
       });"""
 
 _DESIGN_JS_TEMPLATE = """
 (() => {
   const a = __ARGS__;
   __REGISTRY__
-  const MARK = 'data-ais-design';
+  const MARK = reg.mark;
   const find = (key, selector) => {
     let el = key ? reg.els.get(key) : null;
     if (el && !el.isConnected) el = null;
@@ -528,23 +541,25 @@ _DESIGN_JS_TEMPLATE = """
   const render = (els) => {
     const tokens = new Map();
     const roots = new Set();
-    const live = new Set();
     for (const c of reg.changes.values()) {
-      live.add(c.token);
       for (const t of c.targets) {
         if (!t.isConnected) continue;
         const root = t.getRootNode();
         if (root && root.adoptedStyleSheets) roots.add(root);
-        if (!els.has(t)) continue;
         if (!tokens.has(t)) tokens.set(t, []);
         tokens.get(t).push(c.token);
       }
     }
-    for (const el of els) {
-      const mine = tokens.get(el);
-      if (mine) el.setAttribute(MARK, mine.join(' '));
-      else el.removeAttribute(MARK);
-    }
+    // An element carries the tokens of the changes it is a target of, and no
+    // others.
+    const mark = (el) => {
+      const want = (tokens.get(el) || []).join(' ');
+      if (!want) {
+        if (el.hasAttribute(MARK)) el.removeAttribute(MARK);
+      } else if (el.getAttribute(MARK) !== want) el.setAttribute(MARK, want);
+    };
+    for (const el of els) mark(el);
+    for (const el of tokens.keys()) mark(el);
     if (reg.changes.size && !reg.sheet) reg.sheet = new CSSStyleSheet();
     if (reg.sheet) {
       reg.sheet.replaceSync('');
@@ -569,13 +584,9 @@ _DESIGN_JS_TEMPLATE = """
       const has = others.length !== root.adoptedStyleSheets.length;
       const last = root.adoptedStyleSheets[root.adoptedStyleSheets.length - 1] === reg.sheet;
       if (want ? !last : has) root.adoptedStyleSheets = want ? [...others, reg.sheet] : others;
-      // A copy the page made of a marked element keeps no token of a change
-      // that is gone.
-      for (const el of root.querySelectorAll('[' + MARK + ']')) {
-        const mine = (el.getAttribute(MARK) || '').split(' ').filter((token) => live.has(token));
-        if (!mine.length) el.removeAttribute(MARK);
-        else if (mine.join(' ') !== el.getAttribute(MARK)) el.setAttribute(MARK, mine.join(' '));
-      }
+      // A copy the page made of a marked element is not a target of any
+      // change, so it keeps no token.
+      for (const el of root.querySelectorAll('[' + MARK + ']')) mark(el);
     }
     reg.roots = reg.changes.size ? roots : new Set();
     if (!reg.changes.size) reg.sheet = null;
