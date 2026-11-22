@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => {
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
 		notifyError: vi.fn(),
+		notifyBanner: vi.fn(),
 		savePreference: vi.fn()
 	};
 });
@@ -71,7 +72,10 @@ vi.mock('$lib/api/watches', () => ({
 	moveWatch: vi.fn(),
 	setWatchPreference: vi.fn()
 }));
-vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.notifyError } }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { error: mocks.notifyError, banner: mocks.notifyBanner } }));
+/** A stop failure is an on-page error banner that also stays in the bell. */
+const stopFailedWith = (message: string) =>
+	expect(mocks.notifyBanner).toHaveBeenCalledWith(message, expect.objectContaining({ severity: 'error', persist: true }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession, openSessionLink: vi.fn() }));
 vi.mock('$lib/utils/platform', () => ({ buildShell: () => (mocks.mobile ? 'mobile' : 'desktop') }));
 
@@ -126,6 +130,7 @@ beforeEach(() => {
 	mocks.cancel.mockReset().mockResolvedValue(undefined);
 	mocks.openSession.mockReset();
 	mocks.notifyError.mockReset();
+	mocks.notifyBanner.mockReset();
 });
 
 afterEach(() => cleanup());
@@ -331,8 +336,8 @@ describe('RunningTasksList stopping', () => {
 		setTasks([task('a')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
-		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalled());
-		expect(mocks.notifyError).toHaveBeenCalledWith("Couldn't stop the task. It may have already finished.");
+		await waitFor(() => stopFailedWith("Couldn't stop the task. It may have already finished."));
+		expect(mocks.notifyError).not.toHaveBeenCalled();
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
 	});
 
@@ -342,7 +347,7 @@ describe('RunningTasksList stopping', () => {
 		setTasks([task('a')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop: Task a' }));
-		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(message));
+		await waitFor(() => stopFailedWith(message));
 		expect(screen.getByRole('button', { name: 'Stop: Task a' })).toBeTruthy();
 	});
 
@@ -356,7 +361,7 @@ describe('RunningTasksList stopping', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Cancel: Task a' }));
 		expect(mocks.cancelLimitResume).toHaveBeenCalledWith('s1', 'a');
 		expect(mocks.stopSessionTask).not.toHaveBeenCalled();
-		await waitFor(() => expect(mocks.notifyError).toHaveBeenCalledWith(`Couldn't stop the task. ${detail}`));
+		await waitFor(() => stopFailedWith(`Couldn't stop the task. ${detail}`));
 	});
 
 	it('Stop all confirms with the count and stops only the filtered rows', async () => {

@@ -369,6 +369,11 @@
 		}
 	}
 
+	/** A stop failure shows on the page (a phone has no bell on screen) and stays in the bell. */
+	function stopFailed(message: string) {
+		notify.banner(message, { severity: 'error', persist: true, duration_ms: 8000 });
+	}
+
 	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
 	async function stopRow(row: RunRow, quiet = false): Promise<boolean> {
 		if (!sessionId || row.state !== 'running' || !canAct()) return false;
@@ -380,12 +385,12 @@
 				await swarms.cancel(sessionId, row.id);
 				ok = true;
 			} catch (error) {
-				if (!quiet) notify.error(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.");
+				if (!quiet) stopFailed(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.");
 			}
 		} else {
 			const result = await stopTask(row.id);
 			ok = result.ok;
-			if (!ok && !quiet) notify.error(result.message || STOP_FAILED);
+			if (!ok && !quiet) stopFailed(result.message || STOP_FAILED);
 		}
 		if (sessionId !== requestedSessionId || !canAct()) return ok;
 		if (ok) remember(row);
@@ -399,7 +404,7 @@
 		const result = await stopTask(member.taskId);
 		if (!result.ok) {
 			markStopping(member.key, false);
-			notify.error(result.message || STOP_FAILED);
+			stopFailed(result.message || STOP_FAILED);
 		}
 		// On success the swarm's next snapshot marks it cancelled; the spinner
 		// stays until then.
@@ -411,7 +416,7 @@
 		if (!scope.length) return;
 		const results = await Promise.all(scope.map((row) => stopRow(row, true)));
 		const failed = results.filter((ok) => !ok).length;
-		if (failed) notify.error(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`);
+		if (failed) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`);
 	}
 
 	async function confirmSwarmStop(row: SwarmRow) {
