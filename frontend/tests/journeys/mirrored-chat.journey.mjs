@@ -35,8 +35,10 @@ import { expectComposerPositions, expectNeverDecreases, frames, markTime } from 
 
 const PEER = 'Peer worker';
 const OPEN = 'open the mirrored chat from the sidebar';
-/** "Syncing" answers before the owner reports the opening checkpoint caught up. */
-const SYNCING_POLLS = 2;
+/** "Syncing" answers before the owner reports the opening checkpoint caught up.
+ *  A hidden chat is re-checked every 500ms, so this holds the hero ~4s: long
+ *  enough to read, short of the 8s stall reveal (MIRROR_SYNC_STALL_REVEAL_MS). */
+const SYNCING_POLLS = 8;
 
 /**
  * Make the page see seeded chat `key` as mirrored from PEER, and script its

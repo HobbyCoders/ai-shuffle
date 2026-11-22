@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, createRawSnippet } from 'svelte';
 import { cleanup, render, screen } from '@testing-library/svelte';
-import { createMirrorSync, mirrorSyncHeadline, mirrorSyncRetryDelay, MIRROR_SYNC_FAILURE_LIMIT, MIRROR_SYNC_MAX_BACKOFF_MS, MIRROR_SYNC_POLL_MS, MIRROR_SYNC_REQUEST_TIMEOUT_MS, type MirrorSync } from './mirror-sync.svelte';
+import { createMirrorSync, mirrorSyncHeadline, mirrorSyncRetryDelay, MIRROR_SYNC_FAILURE_LIMIT, MIRROR_SYNC_MAX_BACKOFF_MS, MIRROR_SYNC_POLL_MS, MIRROR_SYNC_REQUEST_TIMEOUT_MS, MIRROR_SYNC_STALL_REVEAL_MS, MIRROR_SYNC_WAITING_POLL_MS, type MirrorSync } from './mirror-sync.svelte';
 import MirrorSyncGate from './MirrorSyncGate.svelte';
 
 const reply = (body: Record<string, unknown>) => new Response(JSON.stringify(body));
@@ -128,9 +128,74 @@ describe('createMirrorSync (the check ChatView runs whatever its layout)', () =>
 		await vi.advanceTimersByTimeAsync(0);
 		expect(screen.getByText('Syncing from Unraid…')).toBeTruthy();
 		expect(screen.getByText('transcript').closest('[aria-hidden="true"]')).not.toBeNull();
-		await vi.advanceTimersByTimeAsync(2000);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
 		// One poll per interval: the controller's, not one per mounted gate.
 		expect(fetch).toHaveBeenCalledTimes(2);
+		destroy();
+	});
+});
+
+describe('the opening wait', () => {
+	it('checks again quickly while the chat is hidden, then at the normal pace', async () => {
+		vi.useFakeTimers();
+		const fetch = vi.fn()
+			.mockResolvedValueOnce(reply({ state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: 1 }))
+			.mockImplementation(() => Promise.resolve(reply({ state: 'current' })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, onCaughtUp, destroy } = startSync({ sessionId: 'remote-fast', remote: true });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(sync.waiting).toBe(false);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS - 1);
+		expect(fetch).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(fetch).toHaveBeenCalledTimes(3);
+		destroy();
+	});
+
+	it('shows a chat whose last updates never arrive, with the pill, and still reloads at its catch-up', async () => {
+		vi.useFakeTimers();
+		let delivered = false;
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply(delivered
+			? { state: 'current' }
+			: { state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: 2, pending_updates: 2 })));
+		vi.stubGlobal('fetch', fetch);
+		const { sync, onCaughtUp, destroy } = startSync({ sessionId: 'remote-stuck', remote: true });
+		render(MirrorSyncGate, { sync, deviceName: 'Office PC', children });
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS - MIRROR_SYNC_WAITING_POLL_MS);
+		expect(sync.waiting).toBe(true);
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_WAITING_POLL_MS);
+		expect(sync.waiting).toBe(false);
+		expect(onCaughtUp).not.toHaveBeenCalled();
+		expect(screen.getByText('transcript').closest('[aria-hidden="true"]')).toBeNull();
+		expect(screen.getByText(/Syncing updates from Office PC… 2 updates remaining/)).toBeTruthy();
+		// Revealed: back to the normal pace, and the catch-up still reloads once.
+		const calls = fetch.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_POLL_MS - 1);
+		expect(fetch.mock.calls.length).toBe(calls);
+		delivered = true;
+		await vi.advanceTimersByTimeAsync(1);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(screen.queryByText(/Syncing updates/)).toBeNull();
+		destroy();
+	});
+
+	it('keeps waiting while a large catch-up keeps making progress', async () => {
+		vi.useFakeTimers();
+		let remaining = 400;
+		const fetch = vi.fn().mockImplementation(() => {
+			remaining -= 10;
+			return Promise.resolve(reply({ state: 'syncing', scope: 'session', initial_caught_up: false, initial_pending_updates: remaining }));
+		});
+		vi.stubGlobal('fetch', fetch);
+		const { sync, destroy } = startSync({ sessionId: 'remote-big', remote: true });
+		await vi.advanceTimersByTimeAsync(MIRROR_SYNC_STALL_REVEAL_MS * 2);
+		expect(sync.waiting).toBe(true);
+		expect(sync.pending).toBeLessThan(400);
 		destroy();
 	});
 });

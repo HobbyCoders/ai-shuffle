@@ -596,6 +596,127 @@ async def test_session_freshness_without_local_copy_uses_owner_backlog(workers):
             assert transport.session_sync_status("not-copied", a.device_id)["state"] == "syncing"
 
 
+def _serve_links(monkeypatch, client, *links):
+    """What a running sync loop provides to ``fetch_session_head``."""
+    monkeypatch.setattr(transport, "_loop", asyncio.get_running_loop())
+    monkeypatch.setattr(transport, "_sync_client", client)
+    for link in links:
+        transport._links[link.device_id] = link
+
+
+async def test_opening_a_chat_fetches_its_head_instead_of_owner_wide_syncing(workers, monkeypatch):
+    """Reopening a copied chat while its owner is busy in another chat.
+
+    The head is unknown (its interest expired), so the check used to answer
+    with owner-wide freshness: "syncing" until the sequential pass next
+    reached the owner. One direct exchange answers for this chat alone.
+    """
+    from app.db import session_events
+    from app.network import catalog
+    from tests.core.network.harness import join
+
+    a, b = workers("head-owner"), workers("head-mirror")
+    with a.active():
+        engine.create_network("Home")
+        database.create_session("viewed", "default", title="Viewed")
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "hello"}}])
+        catalog.publish_owned()
+    join(a, b)
+    served = ServedBy(a, "https://head-owner.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())  # the chat's copy arrives
+        with a.active():
+            database.create_session("busy", "default", title="Busy")
+            session_events.append_events("busy", [{"type": "message.user", "payload": {"content": "busy"}}])
+            engine.scan_collection("sessions", owner_only=True)
+        with b.active():
+            await link.sync_once(client, engine.context())
+            assert transport.owner_sync_status(a.device_id)["state"] == "syncing"
+            assert transport.session_sync_status("viewed", a.device_id)["scope"] == "owner"
+            transport.forget_peers()  # the interest and its head expired
+            _serve_links(monkeypatch, client, link)
+            calls = []
+            real = link.sync_once
+
+            async def counted(*args, **kwargs):
+                calls.append(kwargs.get("unless"))
+                return await real(*args, **kwargs)
+
+            monkeypatch.setattr(link, "sync_once", counted)
+            await transport.fetch_session_head("viewed", a.device_id)
+            status = transport.session_sync_status("viewed", a.device_id)
+            assert status["scope"] == "session"
+            assert status["state"] == "current"
+            # A known head needs no further exchange.
+            await transport.fetch_session_head("viewed", a.device_id)
+            assert len(calls) == 1
+
+
+async def test_head_fetch_is_shared_bounded_and_skipped_when_a_pass_brought_it(workers, monkeypatch):
+    worker = workers("head-wait")
+    with worker.active():
+        engine.create_network("Home")
+        link = transport.PeerLink("owner", ["https://owner.example.com"])
+        async with httpx.AsyncClient() as client:
+            _serve_links(monkeypatch, client, link)
+            release = asyncio.Event()
+            calls = []
+
+            async def slow_exchange(_client, _ctx, *, unless=None, catch_up=False):
+                calls.append(unless)
+                await release.wait()
+                transport.note_session_watermarks("owner", ["one", "two"], {
+                    sid: {"seq": 1, "epoch": "e", "tail_id": "t"} for sid in ("one", "two")})
+                return {"received": 0, "sent": 0}
+
+            monkeypatch.setattr(link, "sync_once", slow_exchange)
+            started = asyncio.get_running_loop().time()
+            # Two viewers of the same owner wait on one exchange, and only
+            # for the bounded time; the exchange carries on past it.
+            await asyncio.gather(transport.fetch_session_head("one", "owner", timeout=0.05),
+                                 transport.fetch_session_head("two", "owner", timeout=0.05))
+            assert asyncio.get_running_loop().time() - started < 1.0
+            assert len(calls) == 1
+            assert transport.session_sync_status("one", "owner")["scope"] == "owner"
+            release.set()
+            await transport._head_fetches["owner"]
+            assert transport._session_watermarks[("owner", "one")]["seq"] == 1
+            assert transport._session_watermarks[("owner", "two")]["seq"] == 1
+            # The skip test the exchange gets: true once every viewed head is known.
+            assert calls[0]() is True
+
+
+async def test_head_fetch_leaves_unreachable_owners_to_the_sync_loop(workers, monkeypatch):
+    worker = workers("head-offline")
+    kicks = []
+    monkeypatch.setattr(transport, "_kick_from_thread", lambda: kicks.append(1))
+    with worker.active():
+        engine.create_network("Home")
+        async with httpx.AsyncClient() as client:
+            _serve_links(monkeypatch, client)
+            # No link to the owner: nothing to wait for, the pass is woken.
+            await transport.fetch_session_head("viewed", "owner")
+            assert kicks == [1]
+            link = transport.PeerLink("owner", ["https://owner.example.com"])
+            link.backoff_until = transport.time.monotonic() + 60
+            transport._links["owner"] = link
+            await transport.fetch_session_head("viewed", "owner")
+            assert kicks == [1]  # interest already registered: no second wake
+            assert not transport._head_fetches
+            # A failed exchange is logged and left to the loop's backoff.
+            link.backoff_until = 0.0
+
+            async def refused(*_args, **_kwargs):
+                raise transport.PeerError("refused")
+
+            monkeypatch.setattr(link, "sync_once", refused)
+            await transport.fetch_session_head("viewed", "owner")
+            assert kicks == [1, 1]
+            assert link.failures == 0
+
+
 def test_session_freshness_checks_witness_at_owner_seq_not_newer_local_tail(workers):
     from app.db import session_events
 
