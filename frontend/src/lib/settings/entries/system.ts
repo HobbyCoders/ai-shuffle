@@ -1,7 +1,8 @@
 /**
- * System: workspace folder, import from Claude Code and Codex, export all data,
- * updates, memory health and Help (report a problem to HobbyCoders support).
- * The former License rows moved to Cloud (entries/cloud.ts).
+ * System: workspace folder, your data (import from Claude Code and Codex,
+ * export all data), updates and Help (report a problem to HobbyCoders
+ * support). The former License rows moved to Cloud (entries/cloud.ts);
+ * Memory health moved to Memory (entries/memory.ts).
  * SystemPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -18,7 +19,7 @@ export const entries: SettingEntry[] = [
 	{
 		id: 'system.import',
 		category: 'system',
-		section: 'Workspace',
+		section: 'Your data',
 		label: 'Import from Claude Code and Codex',
 		hint: 'Copy skills, agents, MCP servers and projects into this worker',
 		keywords: ['import settings', 'instructions', 'skills', 'agents', 'mcp', 'codex', 'claude code']
@@ -83,15 +84,6 @@ export const entries: SettingEntry[] = [
 		label: 'Version',
 		hint: 'Restart from the sidebar',
 		keywords: ['about', 'release', 'build']
-	},
-	{
-		id: 'system.memoryHealth',
-		category: 'system',
-		section: 'Memory',
-		label: 'Memory health',
-		hint: 'Checks itself every hour',
-		help: 'This worker checks saved facts every hour without using a model. It can move unused or duplicate facts into an archive that Recall can search. Older facts may later be permanently deleted when that archive fills or they expire; Recall cannot find deleted facts. Facts you asked to keep are excluded from automatic archive cleanup. There is no retention setting yet.',
-		keywords: ['long-term memory', 'saved facts', 'remember', 'recall', 'learner', 'duplicates', 'prune', 'archive']
 	},
 	{
 		id: 'system.reportProblem',

@@ -10,14 +10,16 @@ import SecurityPage from './SecurityPage.svelte';
 import SystemPage from './SystemPage.svelte';
 import CloudPage from './CloudPage.svelte';
 import UsagePage from './UsagePage.svelte';
+import AgentsPage from './AgentsPage.svelte';
 
-export type PreferenceCategory = 'general' | 'voice' | 'usage' | 'cloud' | 'security' | 'system';
+export type PreferenceCategory = 'general' | 'voice' | 'usage' | 'agents' | 'cloud' | 'security' | 'system';
 export type CollectionCategory = Exclude<CategoryId, PreferenceCategory>;
 
 export const PREFERENCE_PAGES: Record<PreferenceCategory, Component> = {
 	general: GeneralPage,
 	voice: VoicePage,
 	usage: UsagePage,
+	agents: AgentsPage,
 	cloud: CloudPage,
 	security: SecurityPage,
 	system: SystemPage
@@ -30,10 +32,10 @@ export const COLLECTION_LOADERS: Record<CollectionCategory, Loader> = {
 	models: () => import('../models/ModelsCollection.svelte'),
 	tuning: () => import('../tuning/TuningCollection.svelte'),
 	memory: () => import('../memory/MemoryCollection.svelte'),
-	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
 	plugins: () => import('../plugins/PluginsCollection.svelte'),
 	mcp: () => import('../mcp/McpCollection.svelte'),
 	hooks: () => import('../hooks/HooksCollection.svelte'),
+	integrations: () => import('../integrations/IntegrationsCollection.svelte'),
 	devices: () => import('../devices/DevicesCollection.svelte'),
 	vault: () => import('../vault/VaultCollection.svelte'),
 	logs: () => import('../logs/LogsCollection.svelte')

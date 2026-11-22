@@ -1,8 +1,9 @@
 <script lang="ts">
 	/**
 	 * Settings > Memory: everything agents have saved to remember, with search
-	 * and filters. Each memory is edited with an explicit Save. Unsaved edits are
-	 * kept when another row or page opens, and a tab close asks first.
+	 * and filters, plus two fixed items: Learned guidance and Memory health.
+	 * Each memory is edited with an explicit Save. Unsaved edits are kept when
+	 * another row or page opens, and a tab close asks first.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { Brain, Pin, TriangleAlert } from 'lucide-svelte';
@@ -15,6 +16,11 @@
 	import SelectField from '../rows/SelectField.svelte';
 	import MemoryDetail from './MemoryDetail.svelte';
 	import LearnedGuidance from './LearnedGuidance.svelte';
+	import MemoryHealthDetail from './MemoryHealthDetail.svelte';
+	import { memorySummary } from '../pages/memory-health';
+	import { memoryHealth } from '$lib/stores/memory-health.svelte';
+	import { MEMORY_HEALTH_ITEM } from '$lib/settings/entries/memory';
+	import type { StatusTone } from '$lib/settings/types';
 	import {
 		FILTER_OPTIONS,
 		acquireMemoryModel,
@@ -27,9 +33,15 @@
 
 	const CATEGORY = 'memory' as const;
 	const GUIDANCE = 'learned-guidance';
+	const HEALTH = MEMORY_HEALTH_ITEM;
 	const model = acquireMemoryModel();
 
-	onMount(() => void model.load());
+	onMount(() => {
+		void model.load();
+		// The health row reads its warning without being opened (#1042); a
+		// request already on its way (the detail pane's) is shared.
+		void memoryHealth.refresh();
+	});
 	onDestroy(() => releaseMemoryModel(model));
 
 	$effect(() => {
@@ -54,6 +66,25 @@
 		review: 'Nothing needs review.',
 		all: 'No memories yet.'
 	};
+
+	/* The health row shows the last answer the worker gave, if any; the detail
+	   pane asks again when it opens. */
+	const healthLoad = $derived(memoryHealth.result?.status);
+	const healthData = $derived(memoryHealth.result?.status === 'ok' ? memoryHealth.result.data : null);
+	/* A failed check says so on the row, as the System row did, without
+	   opening the detail. */
+	const healthSummary = $derived(
+		healthData
+			? memorySummary(healthData)
+			: healthLoad === 'error'
+				? 'Unavailable'
+				: healthLoad === 'forbidden'
+					? FORBIDDEN_TEXT
+					: 'Checks itself every hour'
+	);
+	const healthTone = $derived<StatusTone | undefined>(
+		healthData ? (healthData.state === 'healthy' ? 'ok' : 'warn') : healthLoad === 'error' ? 'off' : undefined
+	);
 
 	const summary = (m: MemoryItem) => (model.dirty(m.id) ? 'Unsaved changes' : memoryMeta(m));
 </script>
@@ -83,6 +114,7 @@
 	{#snippet list()}
 		<div class="mem-list" data-setting-anchor="memory.list">
 			<ListItem id={GUIDANCE} name="Learned guidance" category={CATEGORY} summary="Saved model instructions on this worker" />
+			<ListItem id={HEALTH} name="Memory health" category={CATEGORY} summary={healthSummary} status={healthTone} />
 			{#if model.loadError}
 				<InlineBanner tone="warn">
 					<span role="alert">{model.loadError}</span>
@@ -129,6 +161,8 @@
 	{#snippet detail()}
 		{#if selected === GUIDANCE}
 			<LearnedGuidance />
+		{:else if selected === HEALTH}
+			<MemoryHealthDetail />
 		{:else if selected && known}
 			{#key selected}
 				<MemoryDetail {model} id={selected} />

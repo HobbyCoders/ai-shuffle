@@ -124,6 +124,13 @@ describe('list', () => {
   expect(screen.getByRole('button', { name: /Discord Bot/ }).closest('.st-card')).toBeTruthy();
 	});
 
+	it('points owners looking for Slack or Gmail to Plugins', async () => {
+		await open();
+		expect(screen.getByText(/Slack, Gmail and Discord are set up in Plugins/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open Plugins' }));
+		expect(settingsNav.category).toBe('plugins');
+	});
+
 	it('shows the empty state and keeps Add available after a load failure', async () => {
 		apiUsers.getApiUsers.mockRejectedValue(new Error('offline'));
 		settingsNav.go({ category: 'integrations' });

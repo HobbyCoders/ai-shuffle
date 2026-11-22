@@ -27,9 +27,9 @@ describe('settings registry', () => {
 		expect(entriesFor('general').map((e) => e.id)).toContain('general.theme');
 	});
 
-	it('lists categories in three groups with icons', () => {
+	it('lists categories in five groups with icons', () => {
 		expect(CATEGORIES.map((c) => c.id)).toEqual([...CATEGORY_IDS]);
-		expect(CATEGORY_GROUPS.map((g) => g.label)).toEqual(['Personal', 'AI', 'This worker']);
+		expect(CATEGORY_GROUPS.map((g) => g.label)).toEqual(['Personal', 'Models', 'Agents and tools', 'Connections and security', 'System and data']);
 		for (const c of CATEGORIES) {
 			expect(c.icon).toBeTruthy();
 			expect(c.type).toBe(PAGE_TYPES[c.id]);
@@ -38,7 +38,7 @@ describe('settings registry', () => {
 	});
 
 	it('explains that the archive is searchable only until automatic deletion', () => {
-		expect(getEntry('system.memoryHealth')?.help).toBe(
+		expect(getEntry('memory.health')?.help).toBe(
 			"This worker checks saved facts every hour without using a model. It can move unused or duplicate facts into an archive that Recall can search. Older facts may later be permanently deleted when that archive fills or they expire; Recall cannot find deleted facts. Facts you asked to keep are excluded from automatic archive cleanup. There is no retention setting yet."
 		);
 	});

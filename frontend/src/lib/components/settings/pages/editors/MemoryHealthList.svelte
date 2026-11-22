@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * MemoryHealthList: what needs attention and what the worker repaired,
-	 * opened under System > Memory > Memory health. Each reason is a full
+	 * opened under Memory > Memory health. Each reason is a full
 	 * sentence, so it wraps under its name instead of sitting in a one-line
 	 * value slot.
 	 */

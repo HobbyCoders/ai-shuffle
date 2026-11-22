@@ -1,16 +1,16 @@
 <script lang="ts">
 	/**
-	 * System: Workspace (folder, import from Claude Code and Codex), Your data
-	 * (export everything as one ZIP), Updates
-	 * (policy, stable or nightly channel, check for updates, version), Memory
-	 * (read-only health) and Help (report a problem to HobbyCoders support).
-	 * The former License rows live in Cloud (CloudPage.svelte).
+	 * System: Workspace (folder), Your data (import from Claude Code and
+	 * Codex, export everything as one ZIP), Updates (policy, stable or nightly
+	 * channel, check for updates, version) and Help (report a problem to
+	 * HobbyCoders support). The former License rows live in Cloud
+	 * (CloudPage.svelte); Memory health lives in Memory (MemoryHealthDetail).
 	 *
 	 * The workspace path saves when "Check path" finds it valid. A path edited
 	 * here is never replaced by a change made elsewhere; a banner offers the
 	 * newer one instead.
 	 */
-	import { onDestroy, onMount, untrack } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { getWorkspaceConfig, setWorkspaceConfig, validateWorkspacePath } from '$lib/api/auth';
 	import { exportAllData } from '$lib/api/sessions';
@@ -24,22 +24,17 @@
 	import Switch from '../rows/Switch.svelte';
 	import PathField, { type PathCheck } from '../rows/PathField.svelte';
 	import ValueText from '../rows/ValueText.svelte';
-	import StatusDot from '../rows/StatusDot.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ImportWizard, { type ImportStep } from './editors/ImportWizard.svelte';
 	import UpdateCheckResults from './editors/UpdateCheckResults.svelte';
 	import UpdateRuntimeDetails from './editors/UpdateRuntimeDetails.svelte';
-	import MemoryHealthList from './editors/MemoryHealthList.svelte';
 	import Segmented from '../rows/Segmented.svelte';
 	import NightlyConfirm from './editors/NightlyConfirm.svelte';
 	import { UpdatesState } from './updates-state.svelte';
 	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
-	import { memoryChecked, memoryCheckedAt, memoryRows, memorySummary } from './memory-health';
-	import { memoryHealth } from '$lib/stores/memory-health.svelte';
 	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
-	import type { StatusTone } from '$lib/settings/types';
 	import type { ReportKind } from '$lib/api/support';
 	import {
 		aiContentPrefill,
@@ -198,38 +193,6 @@
 		deployError = result.error;
 	}
 
-	/* ---------- memory health (read-only; the worker repairs by itself) ---------- */
-
-	/* The last answer is shown at once on reopening, then asked again as the
-	   page opens (#1042). There is no warning notice in the page's flow, so a
-	   late answer only changes this row's value and hint. */
-	const memoryResult = $derived(memoryHealth.result);
-	const memoryLoad = $derived(memoryResult?.status ?? 'loading');
-	const memory = $derived(memoryResult?.status === 'ok' ? memoryResult.data : null);
-	const memoryError = $derived(memoryResult?.status === 'error' ? memoryResult.message : '');
-	let memoryOpen = $state(false);
-	// The store forgets its answer when the owner signs out or loses owner rights
-	// while this page may stay mounted: close the list and ask again rather
-	// than sit on "Loading".
-	$effect(() => {
-		if (memoryHealth.result !== null) return;
-		memoryOpen = false;
-		untrack(() => void memoryHealth.refresh());
-	});
-
-	const memoryValue = $derived(
-		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
-	);
-	const memoryReady = $derived(memoryLoad === 'ok' && !!memory);
-	const memoryDot = $derived<StatusTone>(
-		memoryLoad === 'loading' ? 'busy' : !memoryReady ? 'off' : memory?.state === 'healthy' ? 'ok' : 'warn'
-	);
-	/* "Checked 12m ago" replaces the entry's "Checks itself every hour" once the
-	   answer lands, so a warning can be told fresh or old (#1042); a minute
-	   clock keeps it true while the page stays open. */
-	let memoryNow = $state(Date.now());
-	const memoryHint = $derived(memoryLoad === 'ok' && memory ? memoryChecked(memory, memoryNow) : undefined);
-
 	/* ---------- help: report a problem ---------- */
 
 	let reportOpen = $state(false);
@@ -287,12 +250,9 @@
 	onMount(() => {
 		void loadWorkspace();
 		void refreshDeploy();
-		void memoryHealth.refresh();
 		void supportCaps.load();
 		updates.start();
 		void channel.refresh();
-		const memoryClock = setInterval(() => (memoryNow = Date.now()), 60_000);
-		return () => clearInterval(memoryClock);
 	});
 	onDestroy(() => {
 		alive = false;
@@ -316,9 +276,6 @@
 				/>
 			{/if}
 		</SettingRow>
-		<SettingRow id="system.import" expanded={importOpen ? importWizard : undefined}>
-			<ExpandToggle value={importValue} bind:open={importOpen} />
-		</SettingRow>
 	</RowGroup>
 	{#if workspaceRemote !== null}
 		<InlineBanner tone="warn">
@@ -339,6 +296,9 @@
 	{#if workspaceLoad === 'error'}<p class="st-msg err" role="alert">Could not load the workspace folder.</p>{/if}
 
 	<RowGroup title="Your data">
+		<SettingRow id="system.import" expanded={importOpen ? importWizard : undefined}>
+			<ExpandToggle value={importValue} bind:open={importOpen} />
+		</SettingRow>
 		<SettingRow id="system.exportAll">
 			<button type="button" class="st-btn" aria-busy={exporting} disabled={exporting} onclick={runExport}>
 				{exporting ? 'Exporting…' : 'Export'}
@@ -449,19 +409,6 @@
 	{/if}
 	{#if channel.error}<p class="st-msg err" role="alert">{channel.error}</p>{/if}
 
-	<RowGroup title="Memory">
-		<SettingRow id="system.memoryHealth" hint={memoryHint} expanded={memoryOpen && memory ? memoryList : undefined}>
-			<span class="st-status" data-testid="memory-health">
-				<!-- One dot and one button from "Loading" to the answer, so a narrow page does
-				     not drop the value under the label when it lands; it opens once loaded. -->
-				<StatusDot tone={memoryDot} /><fieldset class="mh-value" role="presentation" disabled={!memoryReady}>
-					<ExpandToggle value={memoryValue} bind:open={memoryOpen} />
-				</fieldset>
-			</span>
-		</SettingRow>
-	</RowGroup>
-	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
-
 	{#if canSendSupportReport() || aiReportOpen}
 		<!-- Every user may report AI content; the rest of Settings stays read-only for non-owners. -->
 		<AccessScope writable={aiReportOpen}>
@@ -509,10 +456,6 @@
 	<UpdateCheckResults rows={deploy ? deployRows(deploy) : []} running={deployLoading} error={deployError} />
 {/snippet}
 
-{#snippet memoryList()}
-	<MemoryHealthList rows={memory ? memoryRows(memory) : []} checked={memory ? memoryCheckedAt(memory) : ''} />
-{/snippet}
-
 <style>
 	.uc {
 		display: inline-flex;
@@ -528,26 +471,5 @@
 		flex-wrap: wrap;
 		/* Only the sentence takes the error colour, not the actions. */
 		color: var(--st-fg);
-	}
-	/* No scroll anchoring on this page. After a Settings search reveal from a
-	   scrolled page, Chromium's scroll anchoring followed content inserted late
-	   under the Memory card (the old warning, still the error line) and
-	   scrolled the page by its height, so the row the reader was taken to
-	   jumped up (journey attention-late-after-search). Excluding the content
-	   under the card did not stop it; only the page's scroller does. Other
-	   pages keep anchoring. */
-	:global(.settings-viewport:has([data-setting-anchor='system.memoryHealth'])) {
-		overflow-anchor: none;
-	}
-	/* Loading or unreadable: the value button is shown but cannot open. */
-	.mh-value {
-		display: contents;
-	}
-	.mh-value:disabled :global(.st-vbtn) {
-		color: var(--st-mfg);
-		cursor: default;
-	}
-	.mh-value:disabled :global(.st-vbtn svg) {
-		opacity: 0.4;
 	}
 </style>

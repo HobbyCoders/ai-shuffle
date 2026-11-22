@@ -5,7 +5,7 @@
 	 * Create or Rotate.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { Bot, Github, Plug } from 'lucide-svelte';
+	import { Bot, Github, Plug, Puzzle } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { FORBIDDEN_TEXT } from '$lib/settings/access.svelte';
@@ -88,6 +88,14 @@
 	bind:filter
 >
 	{#snippet list()}
+		<!-- App connections (Slack, Gmail, Discord...) live under Plugins > Apps;
+		     this page is GitHub and keys for outside callers. Point there. -->
+		<InlineBanner tone="info" icon={Puzzle}>
+			Connected apps such as Slack, Gmail and Discord are set up in Plugins.
+			{#snippet actions()}<button type="button" class="st-btn sm" onclick={() => settingsNav.go({ category: 'plugins' })}
+					>Open Plugins</button
+				>{/snippet}
+		</InlineBanner>
 		{#if showGithub}
 			<RowGroup title="Accounts">
 			<ListItem

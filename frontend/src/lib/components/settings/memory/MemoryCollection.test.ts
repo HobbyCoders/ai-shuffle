@@ -15,6 +15,7 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { MODULES } from '$lib/settings/registry';
+import { memoryHealth } from '$lib/stores/memory-health.svelte';
 import MemoryCollection from './MemoryCollection.svelte';
 import {
 	MemoryModel,
@@ -79,6 +80,29 @@ beforeEach(() => {
 	http.delete.mockResolvedValue(undefined);
 });
 afterEach(() => cleanup());
+
+it('lists Memory health beside Learned guidance and opens its check', async () => {
+	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
+		: path === '/memory/health' ? { state: 'healthy', checked_at: Date.now() / 1000, signals: [], repairs: [] }
+		: {});
+	await show('health');
+	expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Memory health');
+	await waitFor(() => expect(screen.getByTestId('memory-health').textContent).toContain('Healthy'));
+	expect(http.get).toHaveBeenCalledWith('/memory/health');
+});
+
+it('says Unavailable on the Memory health row when the check fails, without opening it', async () => {
+	memoryHealth.reset();
+	http.get.mockImplementation(async (path) => {
+		if (path === '/memory/health') throw Object.assign(new Error('Server error'), { status: 500 });
+		return path === '/memories' ? { items: rows, limits } : {};
+	});
+	await show();
+	await waitFor(() =>
+		expect(document.querySelector('[data-settings-item="health"]')?.textContent).toContain('Unavailable')
+	);
+	memoryHealth.reset();
+});
 
 it('shows the same-account Text Generation requirement with no saved guidance', async () => {
 	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
@@ -301,7 +325,8 @@ describe('Settings > Memory page', () => {
 
 	it('keeps memory text out of the Settings search index', () => {
 		const entry = MODULES.memory;
-		expect(entry.entries.map((e) => e.id)).toEqual(['memory.list']);
+		// Only the fixed rows: the page and its health check, never a memory.
+		expect(entry.entries.map((e) => e.id)).toEqual(['memory.list', 'memory.health']);
 		expect('searchSource' in entry).toBe(false);
 	});
 });

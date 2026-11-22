@@ -1006,7 +1006,7 @@ Returns `{"success": true, "params": {"guidance_scale": 3.5}}` with the options 
 
 ### GET /api/v1/settings/chat-instructions
 
-The chat instructions: the text added to the system prompt of every chat. The built-in default tells agents what the chat renders and how to link files so they open. Settings shows it under **Security > Chat instructions**.
+The chat instructions: the text added to the system prompt of every chat. The built-in default tells agents what the chat renders and how to link files so they open. Settings shows it under **Agent instructions > Chat instructions**.
 
 These routes were named `security-instructions` before; `/api/v1/settings/security-instructions` still answers `GET`, `PUT` and `DELETE` the same way.
 
@@ -1438,7 +1438,7 @@ curl -X PUT http://localhost:8000/api/v1/settings/limit-resume \
 
 ### Import Claude and Codex settings
 
-Copy instructions, skills, agents, hooks, enabled Claude Code plugins, MCP server definitions and configured projects from a Claude Code or Codex home folder into AI Shuffle. This is **Import from Claude Code and Codex** in **Settings → System → Workspace**. The source folder is only read, and credentials and session history are never read. An existing destination file is never overwritten (it shows as a conflict instead), except that imported hooks are merged into an existing hooks file. Secret-looking MCP values are replaced by `${VAR}` placeholders. Anything that cannot be imported, such as a plugin name that is not a plain `name@marketplace`, is listed with a diagnostic and skipped. In the **Settings and plugins** category, hooks, enabled Claude Code plugins and Codex's model and approval settings are copied; the other settings it lists are shown for reference only.
+Copy instructions, skills, agents, hooks, enabled Claude Code plugins, MCP server definitions and configured projects from a Claude Code or Codex home folder into AI Shuffle. This is **Import from Claude Code and Codex** in **Settings → System → Your data**. The source folder is only read, and credentials and session history are never read. An existing destination file is never overwritten (it shows as a conflict instead), except that imported hooks are merged into an existing hooks file. Secret-looking MCP values are replaced by `${VAR}` placeholders. Anything that cannot be imported, such as a plugin name that is not a plain `name@marketplace`, is listed with a diagnostic and skipped. In the **Settings and plugins** category, hooks, enabled Claude Code plugins and Codex's model and approval settings are copied; the other settings it lists are shown for reference only.
 
 **Auth:** Owner only
 
@@ -1814,7 +1814,7 @@ Owner only. The state of the installation owner's long-term memory on this worke
 }
 ```
 
-`state` is `healthy` or `attention`. Signals that need attention come first. `id` is one of `learner`, `usage`, `unconfirmed`, `duplicates`, `capacity`, `snapshot`, `curation`, `protected` or `saves`; `detail` holds the counts behind `reason` and differs per signal. `capacity` needs attention from 90% of the 512 facts the user can ask to keep; at 512 new ones are refused until one is forgotten, and nothing already saved is dropped. `repairs` lists the last 30 days, newest first; `kind` is `duplicates` or `unconfirmed`. When a check turns to `attention`, the owner gets one notification (category `memory_health`) for that stretch, at most once a day. The web UI shows the result only in Settings > System > Memory health, which asks again each time it opens; the check never adds an item to the sidebar's Needs you lane, because the worker repairs memory by itself.
+`state` is `healthy` or `attention`. Signals that need attention come first. `id` is one of `learner`, `usage`, `unconfirmed`, `duplicates`, `capacity`, `snapshot`, `curation`, `protected` or `saves`; `detail` holds the counts behind `reason` and differs per signal. `capacity` needs attention from 90% of the 512 facts the user can ask to keep; at 512 new ones are refused until one is forgotten, and nothing already saved is dropped. `repairs` lists the last 30 days, newest first; `kind` is `duplicates` or `unconfirmed`. When a check turns to `attention`, the owner gets one notification (category `memory_health`) for that stretch, at most once a day. The web UI shows the result only in Settings > Memory > Memory health, which asks again each time it opens; the check never adds an item to the sidebar's Needs you lane, because the worker repairs memory by itself.
 
 ## Logs
 

@@ -1,9 +1,9 @@
 /**
  * The connected worker's memory health (GET /memory/health) for Settings >
- * System > Memory health (#1042), kept outside the page so reopening it shows
+ * Memory > Memory health (#1042), kept outside the page so reopening it shows
  * the last answer at once while it asks again.
  *
- * It is asked only as Settings > System opens: the owner cannot act on a
+ * It is asked only as Settings > Memory opens: the owner cannot act on a
  * warning (the worker repairs by itself), so nothing in the app's chrome
  * follows it. The worker announces a loss only as one bell notification per
  * stretch (`_announce_health`). AppPage forgets the answer when the owner

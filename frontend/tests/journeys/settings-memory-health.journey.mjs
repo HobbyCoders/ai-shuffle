@@ -1,8 +1,9 @@
-// Settings > System > Memory health against synthetic answers (never the
-// owner's memory): healthy stays quiet, a loss shows on the row only and never
-// in the sidebar's "Needs you" lane (the owner cannot act on it; the worker
-// repairs by itself), a late answer moves nothing on the page, and a store
-// never checked says so (#1042).
+// Settings > Memory > Memory health against synthetic answers (never the
+// owner's memory): healthy stays quiet, a loss shows on the Memory list's
+// health row without opening it and never in the sidebar's "Needs you" lane
+// (the owner cannot act on it; the worker repairs by itself), a late answer
+// moves nothing in the detail pane, and a store never checked says so (#1042).
+// It was a row on Settings > System until Settings was reorganized.
 import { runJourney } from './runner.mjs';
 import { expect, gotoApp, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
@@ -32,18 +33,21 @@ const attention = (checkedAt = now() - 12 * MINUTE) => ({
 });
 
 const HEALTH = /\/api\/v1\/memory\/health(\?|$)/;
-const row = (page) => page.locator('[data-setting-anchor="system.memoryHealth"]').filter({ visible: true }).first();
+const row = (page) => page.locator('[data-setting-anchor="memory.health"]').filter({ visible: true }).first();
 const hint = (page) => row(page).locator('.st-rh');
-const toggle = (page) => row(page).locator('button[aria-expanded]');
+// The health item in the Memory list, beside Learned guidance.
+const listRow = (page) => page.locator('[data-settings-item="health"]').filter({ visible: true }).first();
+const details = (page) => page.locator('.mh-list').filter({ visible: true });
 // The page carries no warning notice of its own: the row's value says it.
 const pageNotice = (page) => page.locator('.settings-viewport .st-banner').filter({ visible: true });
 const lane = (page) => page.locator('[data-group="needs-you"]').filter({ visible: true });
-const help = (page) => page.locator('[data-setting-anchor="system.reportProblem"]').filter({ visible: true }).first();
+// The pane's title, above the row: it must not move either.
+const title = (page) => page.getByRole('heading', { name: 'Memory health', exact: true }).filter({ visible: true }).first();
 const top = (locator) => locator.evaluate((el) => Math.round(el.getBoundingClientRect().top));
 
 /**
  * Answer the health check with `payload` (the app asks only as Settings >
- * System opens). With `held`, the answer waits until
+ * Memory opens). With `held`, the answer waits until
  * `page.memoryHealth.release()` (a worker slow to answer). `answer(next)`
  * changes what later requests get.
  */
@@ -59,14 +63,29 @@ async function answerHealth(page, payload, { held = false } = {}) {
 	});
 }
 
-async function openSystem(page, status, variant) {
+/** Settings > Memory, the list only. */
+async function openMemoryList(page, status, variant) {
 	await gotoApp(page, status);
 	if (variant.viewport === 'phone') await showSidebar(page);
 	await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
-	await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'System', exact: true }).filter({ visible: true }).first().click();
-	await page.getByRole('heading', { name: 'System', exact: true }).first().waitFor({ timeout: 15_000 });
+	await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Memory', exact: true }).filter({ visible: true }).first().click();
+	await listRow(page).waitFor({ timeout: 15_000 });
+}
+
+/** Settings > Memory > Memory health, the detail pane. */
+async function openHealth(page, status, variant) {
+	await openMemoryList(page, status, variant);
+	await listRow(page).click();
 	await row(page).waitFor({ timeout: 15_000 });
 }
+
+/** The list row's text, waited on until it has `text`. */
+const listRowSays = (page, text) =>
+	page.waitForFunction(
+		(want) => [...document.querySelectorAll('[data-settings-item="health"]')].some((el) => el.checkVisibility() && el.textContent.includes(want)),
+		text,
+		{ timeout: 15_000 }
+	);
 
 const valueIs = (page, text) =>
 	page.waitForFunction(
@@ -75,7 +94,7 @@ const valueIs = (page, text) =>
 		{ timeout: 15_000 }
 	);
 
-const positions = async (page) => ({ row: await top(row(page)), help: await top(help(page)) });
+const positions = async (page) => ({ row: await top(row(page)), title: await top(title(page)) });
 
 const LOGS = /\/api\/v1\/logs(\?|$)/;
 const LOG_LINES = 120;
@@ -103,7 +122,7 @@ async function answerLogs(page) {
 
 /**
  * Bring the row into view the way a reader scrolls to it, then let input
- * grace pass so a later move counts. Returns where the row and Help sit.
+ * grace pass so a later move counts. Returns where the row and title sit.
  */
 async function scrollToRow(page) {
 	await row(page).evaluate((el) => el.scrollIntoView({ block: 'center' }));
@@ -113,8 +132,9 @@ async function scrollToRow(page) {
 
 /**
  * An attention answer that lands four seconds late, after the reader has
- * scrolled the row into view. Only the row's value and hint change: there is
- * no warning notice, so nothing on the page moves.
+ * scrolled the row into view. The row's value and hint change and the
+ * details list appears below it: there is no warning notice, so nothing at or
+ * above the row moves.
  */
 function lateAttention(viewport) {
 	return {
@@ -123,7 +143,7 @@ function lateAttention(viewport) {
 		throttles: ['fast', 'slow'],
 		async setup({ page, status, variant }) {
 			await answerHealth(page, attention(), { held: true });
-			await openSystem(page, status, variant);
+			await openHealth(page, status, variant);
 			await valueIs(page, 'Loading');
 		},
 		async act({ page, mark }) {
@@ -135,7 +155,7 @@ function lateAttention(viewport) {
 			await valueIs(page, '2 need attention');
 			await page.waitForTimeout(1500);
 			const after = await positions(page);
-			expect(after.row === before.row && after.help === before.help, `nothing moved: row ${before.row}→${after.row}, Help ${before.help}→${after.help}`);
+			expect(after.row === before.row && after.title === before.title, `nothing moved: row ${before.row}→${after.row}, title ${before.title}→${after.title}`);
 			expect((await hint(page).textContent()) === 'Checked 12m ago', 'the hint says when it checked');
 			expect((await pageNotice(page).count()) === 0, 'no notice in the page flow');
 		}
@@ -144,10 +164,11 @@ function lateAttention(viewport) {
 
 /**
  * The same late answer after arriving by Settings search from a scrolled Logs
- * page. Chromium's scroll anchoring scrolled the page by the old notice's
- * height when it landed, moving the row the search took the reader to up by
- * 67px. System turns scroll anchoring off (an error line can still land there). Logs gets a fixed answer, so the scrolled
- * start does not depend on how much the worker has logged.
+ * page. On System, Chromium's scroll anchoring once scrolled the page by an
+ * old notice's height when it landed, moving the row the search took the
+ * reader to up by 67px; the row now sits in the Memory detail pane and must
+ * stay put there too. Logs gets a fixed answer, so the scrolled start does not
+ * depend on how much the worker has logged.
  */
 const searchArrival = {
 	name: 'attention-late-after-search',
@@ -202,9 +223,7 @@ await runJourney({
 	// The service worker would answer the health request before page.route sees it.
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: [
-		...DEV_INSTANCE_NOISE,
-		{ kind: 'failed_requests', status: 403, url: /\/terminals(\?|$)/, reason: 'the preview cookie may not use terminals (require_terminal_owner refuses preview access by design)' },
-		{ kind: 'failed_requests', status: 403, url: /\/updates\/channel(\?|$)/, reason: 'the preview cookie may not read the update channel (owner-only by design)' }
+		...DEV_INSTANCE_NOISE
 	],
 	cases: [
 		{
@@ -215,7 +234,7 @@ await runJourney({
 			throttles: ['fast'],
 			async setup({ page, status, variant }) {
 				await answerHealth(page, healthy(), { held: true });
-				await openSystem(page, status, variant);
+				await openHealth(page, status, variant);
 				await valueIs(page, 'Loading');
 			},
 			async act({ page, mark }) {
@@ -226,7 +245,7 @@ await runJourney({
 				await valueIs(page, 'Healthy, 1 note');
 				await page.waitForTimeout(1000);
 				const after = await positions(page);
-				expect(after.row === before.row && after.help === before.help, `nothing moved: row ${before.row}→${after.row}, Help ${before.help}→${after.help}`);
+				expect(after.row === before.row && after.title === before.title, `nothing moved: row ${before.row}→${after.row}, title ${before.title}→${after.title}`);
 				expect((await hint(page).textContent()) === 'Checked 12m ago', `the hint says when it checked: ${await hint(page).textContent()}`);
 				expect((await page.locator('.st-banner').filter({ visible: true }).count()) === 0, 'healthy shows no notice');
 				expect((await page.locator('[data-needs-item]').count()) === 0, 'healthy puts nothing in Needs you');
@@ -237,14 +256,20 @@ await runJourney({
 			...variants,
 			async setup({ page, status, variant }) {
 				await answerHealth(page, attention());
-				await openSystem(page, status, variant);
+				await openMemoryList(page, status, variant);
 			},
 			async act({ page, mark }) {
-				await mark('an attention answer lands with the page');
+				await mark('the Memory list shows the warning on the health row, unopened');
+				await listRowSays(page, '2 need attention');
+				expect((await listRow(page).locator('.st-dot.warn').count()) === 1, 'the health row carries a warning dot');
+				expect((await pageNotice(page).count()) === 0, 'no warning notice in the page');
+				await mark('opening the row shows the check and its details');
+				await listRow(page).click();
 				await valueIs(page, '2 need attention');
 				expect((await hint(page).textContent()) === 'Checked 12m ago', 'the hint says when it checked');
-				expect((await pageNotice(page).count()) === 0, 'no warning notice in the page');
-				expect((await toggle(page).getAttribute('aria-expanded')) === 'false', 'the row stays closed');
+				await details(page).waitFor({ timeout: 5_000 });
+				expect((await details(page).textContent()).includes('The search index is 40 facts behind.'), 'the details list each signal');
+				expect((await pageNotice(page).count()) === 0, 'no warning notice in the detail pane');
 				await page.waitForTimeout(800);
 			}
 		},
@@ -254,7 +279,7 @@ await runJourney({
 		{
 			// A loss never reaches the sidebar: the owner cannot act on it, so a
 			// Needs you item would never go. The app does not ask at start either;
-			// only Settings > System does.
+			// only Settings > Memory does.
 			name: 'attention-stays-out-of-needs-you',
 			...variants,
 			async setup({ page, status, variant }) {
@@ -270,10 +295,10 @@ await runJourney({
 				expect((await page.locator('[data-needs-item]').count()) === 0, 'no memory item in Needs you');
 				expect((await page.getByText('Memory needs attention').count()) === 0, 'no "Memory needs attention" anywhere');
 				expect((await lane(page).count()) === 0, 'no Needs you lane with nothing waiting');
-				await mark('Settings > System still shows the loss on its row');
+				await mark('Settings > Memory still shows the loss on its health row');
 				await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
-				await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'System', exact: true }).filter({ visible: true }).first().click();
-				await valueIs(page, '2 need attention');
+				await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Memory', exact: true }).filter({ visible: true }).first().click();
+				await listRowSays(page, '2 need attention');
 				await page.waitForTimeout(500);
 			}
 		},
@@ -282,17 +307,15 @@ await runJourney({
 			...variants,
 			async setup({ page, status, variant }) {
 				await answerHealth(page, attention(null));
-				await openSystem(page, status, variant);
+				await openHealth(page, status, variant);
 			},
 			async act({ page, mark }) {
 				await mark('an answer that was never checked lands');
 				await valueIs(page, '2 need attention');
 				expect((await hint(page).textContent()) === 'Not checked yet', `a null checked_at says so: ${await hint(page).textContent()}`);
-				await mark('the open list has no check time');
-				await toggle(page).click();
-				const list = page.locator('.mh-list').filter({ visible: true });
-				await list.waitFor();
-				expect(!(await list.textContent()).includes('Last checked'), 'no check time when it never ran');
+				await mark('the details list has no check time');
+				await details(page).waitFor();
+				expect(!(await details(page).textContent()).includes('Last checked'), 'no check time when it never ran');
 				await page.waitForTimeout(500);
 			}
 		}
