@@ -588,7 +588,7 @@
 					aria-expanded={openPopover === 'permission'}
 					aria-busy={permissionPending || undefined}
 					aria-label="Permission mode: {permissionPending ? 'loading' : permissionLabel}{away ? ', Away mode on' : ''}"
-				>{permissionLabel}{#if away}<span class="away-badge" title={awayGlobal ? 'Away is on for all chats: agents decide with recommended defaults and report them at the end' : 'Away: agent decides with recommended defaults and reports them at the end'}>· Away</span>{/if}</button>
+				><span class="dock-txt-label">{permissionLabel}</span>{#if away}<span class="away-badge" title={awayGlobal ? 'Away is on for all chats: agents decide with recommended defaults and report them at the end' : 'Away: agent decides with recommended defaults and reports them at the end'}>· Away</span>{/if}</button>
 
 				{#if openPopover === 'permission'}
 					<div
@@ -888,7 +888,32 @@
 	.dock-right {
 		margin-left: auto;
 	}
-	.model-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.model-btn span,
+	.dock-txt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	/* Icons keep their size on a crowded row; only the text labels give way,
+	   to an ellipsis. A label that did not clip ran under the globe beside it. */
+	.dock-ico,
+	.away-badge {
+		flex: none;
+	}
+
+	/* A narrow column (ChatInput sets `.composer-narrow` from the column's own
+	   width): model, effort and the ring move to a second line, right-aligned,
+	   and access, browser and terminal keep the first beside attach and the
+	   circles. The first line matches the 32px circles so the three sit level. */
+	:global(.composer-narrow) .controls-dock {
+		flex-wrap: wrap;
+		row-gap: 2px;
+	}
+	:global(.composer-narrow) .dock-left {
+		height: 32px;
+		max-width: 100%;
+	}
+	:global(.composer-narrow) .dock-right {
+		flex-basis: 100%;
+		justify-content: flex-end;
+	}
 
 	.dock-pop-wrap {
 		position: relative;

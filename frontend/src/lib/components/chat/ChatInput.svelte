@@ -922,6 +922,32 @@
 
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
+
+	// A narrow column (a side panel open beside the chat on a desktop window)
+	// gives the controls row a second line: see `.composer-narrow` here, in
+	// ControlsDock and in ContextPillBar. The window can be wide while the
+	// column is not, so this reads the column's own width. It never reads the
+	// contents, so chips and labels arriving after the first paint cannot flip
+	// it and move the composer.
+	const NARROW_COMPOSER_PX = 520;
+	let columnRef = $state<HTMLDivElement | null>(null);
+	let composerNarrow = $state(false);
+	$effect(() => {
+		const column = columnRef;
+		if (!column || phone) {
+			composerNarrow = false;
+			return;
+		}
+		const read = () => {
+			const width = column.clientWidth;
+			composerNarrow = width > 0 && width < NARROW_COMPOSER_PX;
+		};
+		read();
+		if (typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(read);
+		observer.observe(column);
+		return () => observer.disconnect();
+	});
 	let mobileComposerExpanded = $state(false);
 	// Mobile buttons can lose focus when disabled (voice preparation), and touch
 	// browsers need not focus them at all. Retain interaction ownership until the
@@ -2059,6 +2085,8 @@
 >
 	<div
 		class="chat-input-container"
+		class:composer-narrow={composerNarrow}
+		bind:this={columnRef}
 		role="region"
 		aria-label="File drop zone"
 		ondragenter={handleDragEnter}
@@ -2497,6 +2525,12 @@
 		position: relative;
 		z-index: 20;
 		margin: 0 8px 8px 0;
+	}
+	/* A narrow column: the controls take two lines (ControlsDock), and attach
+	   and the circles stay level with the first, beside access mode. */
+	.desktop-composer .composer-narrow .composer-attach,
+	.desktop-composer .composer-narrow .send-cluster {
+		align-self: start;
 	}
 
 	/* ===== THE CIRCLES =====

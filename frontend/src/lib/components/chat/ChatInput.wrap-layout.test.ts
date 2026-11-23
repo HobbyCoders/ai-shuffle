@@ -15,6 +15,23 @@ it('keeps the desktop text and controls on fixed rows', () => {
 	expect(rule('.desktop-composer .send-cluster')).toContain('grid-row: 2;');
 });
 
+// A narrow column on a wide window (a side panel open) is decided from the
+// column's own width, not the window's: the controls take a second line and
+// attach and the circles stay level with the first instead of squashing the
+// row until labels run under the icons.
+it('gives a narrow desktop column a second controls line', () => {
+	expect(source).toContain('class:composer-narrow={composerNarrow}');
+	expect(source).toMatch(/new ResizeObserver\(read\)/);
+	expect(rule('.desktop-composer .composer-narrow .send-cluster')).toContain('align-self: start;');
+	const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
+	const dockRule = (selector: string) => dock.split(`\t${selector} {`)[1]?.split('}')[0] ?? '';
+	expect(dockRule(':global(.composer-narrow) .controls-dock')).toContain('flex-wrap: wrap;');
+	expect(dockRule(':global(.composer-narrow) .dock-right')).toContain('flex-basis: 100%;');
+	// Icons never shrink; text labels clip to an ellipsis instead of overlapping.
+	expect(dock).toMatch(/\.dock-ico,\s*\.away-badge \{\s*flex: none;/);
+	expect(dock).toContain('<span class="dock-txt-label">{permissionLabel}</span>');
+});
+
 // Only the phone composers (phone-composer.css, mobile.css) rearrange on wrap.
 it('has no rule here that rearranges the composer when its text wraps', () => {
 	const style = source.slice(source.indexOf('<style'));
