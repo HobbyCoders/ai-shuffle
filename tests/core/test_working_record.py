@@ -140,6 +140,21 @@ async def test_omitted_live_sessions_are_counted_and_retrievable(owner, count):
     assert {f"live-{index}" for index in range(count)} - shown <= found
 
 
+def test_chat_waiting_on_a_wake_reads_running_like_on_a_peer(owner):
+    import time
+
+    from app.db import wakeups
+    chat("waiting")
+    state = lambda: {r["session"]: r["state"] for r in working_record.live_sessions(exclude=owner["id"])}["waiting"]
+    assert state() == "in_flight"
+    # The peer projection reads this as parked; the owner's own read must agree.
+    wakeups.create_wakeup(id="wake-1", session_id="waiting", prompt="check the build",
+                          fire_at=time.time() + 600)
+    assert state() == "running"
+    wakeups.delete_session_wakeups("waiting")
+    assert state() == "in_flight"
+
+
 def test_read_actions_are_safe_and_writes_are_not():
     from app.core.provider.fluid_tool_bridge import BUILTINS_RISK_CLASSIFIERS
     classify = BUILTINS_RISK_CLASSIFIERS["WorkingRecord"]
