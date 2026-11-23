@@ -55,7 +55,9 @@ def announce_soon() -> None:
 
 async def handle_changed(body: dict, from_device: str) -> dict:
     from app.core.global_events import global_events
+    from app.core.project_remote import reconcile_soon
 
     for kind in ("admin", "api_user", "account", "paired"):
         global_events.resources_changed("projects", user_type=kind)
+    reconcile_soon()  # a peer may have pointed a project at another repository
     return {"ok": True}

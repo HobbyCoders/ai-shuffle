@@ -84,6 +84,9 @@ def upsert_project(
 #: elsewhere (cross-worker setup, base-checkout self-seed).
 REMOTE_URL_KEY = "remote_url"
 DEFAULT_BRANCH_KEY = "default_branch"
+#: Set when an owner pointed the project at a repository (``pin_remote``):
+#: the stored remote is then authoritative and ``record_remote`` leaves it be.
+PINNED_KEY = "remote_pinned"
 
 
 def stored_remote(row: Optional[Dict[str, Any]]) -> tuple:
@@ -122,6 +125,11 @@ def record_remote(origin: str, remote_url: str, default_branch: Optional[str] = 
         current = _parse_json(found["settings"])
         current = dict(current) if isinstance(current, dict) else {}
         stored_url, stored_branch = stored_remote({"settings": current})
+        if current.get(PINNED_KEY) is True:
+            # The owner pointed this project at a repository: a worker that has
+            # not applied it yet still reports the old remote, and must never
+            # put it back.
+            return False
         patch: Dict[str, Any] = {}
         if stored_url is None or (origin.startswith("git:") and auto_link_group_id(stored_url) != origin):
             patch[REMOTE_URL_KEY] = remote_url
@@ -199,6 +207,60 @@ def get_projects_v2_by_origins(origins) -> Dict[str, Dict[str, Any]]:
     return {row["origin"]: row for row in _rows(rows) if row.get("origin")}
 
 
+def _patch_settings(origin: str, patch: Dict[str, Any], drop: tuple = ()) -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT settings FROM projects_v2 WHERE origin = %s", (origin,))
+        found = cursor.fetchone()
+        if found is None:
+            return False
+        current = _parse_json(found["settings"])
+        current = dict(current) if isinstance(current, dict) else {}
+        current.update(patch)
+        for key in drop:
+            current.pop(key, None)
+        cursor.execute(
+            "UPDATE projects_v2 SET settings = %s, updated_at = NOW() WHERE origin = %s",
+            (json.dumps(current), origin),
+        )
+        return bool(cursor.rowcount)
+
+
+def pin_remote(origin: str, remote_url: str, *, default_branch: Optional[str], generation: int,
+               keep_upstream: bool, previous: Optional[str]) -> bool:
+    """Point ``origin`` at ``remote_url`` for every worker (credential-free URL).
+
+    The origin itself never changes. ``generation`` tells each worker whether
+    it already applied this change (``app.core.project_remote``).
+    """
+    patch: Dict[str, Any] = {
+        REMOTE_URL_KEY: remote_url, PINNED_KEY: True,
+        "remote_generation": generation, "remote_keep_upstream": bool(keep_upstream),
+    }
+    if default_branch:
+        patch[DEFAULT_BRANCH_KEY] = default_branch
+    if previous:
+        patch["previous_remote_url"] = previous
+    return _patch_settings(origin, patch, drop=() if default_branch else (DEFAULT_BRANCH_KEY,))
+
+
+def mark_merged(origin: str, into_origin: str) -> bool:
+    """Record that ``origin`` (a duplicate) now belongs to ``into_origin``."""
+    if not origin or not into_origin or origin == into_origin:
+        return False
+    return _patch_settings(origin, {"merged_into": into_origin})
+
+
+def set_forgotten(origin: str, forgotten: bool) -> bool:
+    """Hide (or show again) a project no worker holds on the Projects page."""
+    if forgotten:
+        return _patch_settings(origin, {"forgotten": True})
+    row = get_project_v2_by_origin(origin)
+    if not row or (row.get("settings") or {}).get("forgotten") is not True:
+        return False
+    return _patch_settings(origin, {}, drop=("forgotten",))
+
+
 def list_projects_v2() -> List[Dict[str, Any]]:
     """Return every project_v2, newest first."""
     with get_db() as conn:
@@ -212,6 +274,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'upsert_project record_remote',
+    'upsert_project record_remote pin_remote mark_merged set_forgotten',
     scope='shared',
 )

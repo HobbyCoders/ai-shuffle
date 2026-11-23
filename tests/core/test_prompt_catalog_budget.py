@@ -243,12 +243,12 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
     # Project tools remain deferred; emulator schemas and ArchiveSession are gone.
-    assert len(specs) == 111
+    assert len(specs) == 112
     assert not any(s.name == "ArchiveSession" for s in specs)
     assert any(s.name == "SettleSession" for s in specs)
     for leaf in (
         "CreateWatch", "ListWatches", "PauseWatch", "StopWatch", "WorkingRecord",
-        "generationPreferences", "listProjects", "createProject", "Plan",
+        "generationPreferences", "listProjects", "createProject", "changeProjectRepository", "Plan",
     ):
         spec = next(s for s in specs if s.name.rsplit("__", 1)[-1] == leaf)
         assert spec.description not in compiled.text

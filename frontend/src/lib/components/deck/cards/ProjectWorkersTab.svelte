@@ -9,6 +9,12 @@
 	 *   failed          the plain reason, the fix for its code, Retry (folder stays editable)
 	 *   offline         "Set up when online" (queues it) / "Waiting for <worker>" with Withdraw
 	 *
+	 * A Git project gets a Repository section on top: "Change repository" points
+	 * the project at another repository (a new one or a fork) on every worker at
+	 * once (PUT /projects/catalog/repository); it stays one project. When no
+	 * worker holds a copy any more, a banner offers to take it off the list
+	 * (POST /projects/catalog/forget); nothing is deleted.
+	 *
 	 * Above the cards, a banner names the online workers that lack the project
 	 * with "Set up on all missing". While any setup is queued or running the
 	 * list is re-read every 2 s; the `projects` resources_changed signal also
@@ -18,13 +24,16 @@
 	import { Check, X, Loader2, FolderOpen, MessageSquarePlus, RotateCw, Github } from 'lucide-svelte';
 	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import Switch from '$lib/components/settings/rows/Switch.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 	import {
 		browseWorkerFolder,
 		cancelProjectSetup,
+		changeProjectRepository,
 		changeWorkerFolder,
+		forgetProject,
 		getProjectWorkers,
 		removeProjectFromWorker,
 		startProjectSetup,
@@ -43,7 +52,9 @@
 		errorAction,
 		failureReason,
 		hasProject,
+		heldByNoWorker,
 		isRunning,
+		repositoryChangeSummary,
 		seenAgo,
 		setupVerb
 	} from './project-workers-view';
@@ -57,9 +68,11 @@
 		focusInstallId?: string | null;
 		/** The project's workers changed (a setup started, finished or was removed). */
 		onChanged?: () => void;
+		/** The project was taken off the list (no worker held it). */
+		onRemoved?: () => void;
 	}
 
-	let { projectRef, projectName, localProjectId, focusInstallId = null, onChanged }: Props = $props();
+	let { projectRef, projectName, localProjectId, focusInstallId = null, onChanged, onRemoved }: Props = $props();
 
 	let data = $state<ProjectWorkersResponse | null>(null);
 	let loading = $state(true);
@@ -74,6 +87,12 @@
 	let editing = $state<{ installId: string; revision: string; folder: string; error: string | null; browsing: boolean } | null>(null);
 	let confirmingRemove = $state<string | null>(null);
 	let githubHelp = $state<string | null>(null);
+	/** The "Change repository" form while it is open. */
+	let repoDraft = $state<{ url: string; keepUpstream: boolean; error: string | null } | null>(null);
+	let repoBusy = $state(false);
+	/** What the last repository change did, worker by worker. */
+	let repoResult = $state<{ ok: boolean; lines: string[] } | null>(null);
+	let forgetBusy = $state(false);
 	let pollTimer: ReturnType<typeof setTimeout> | undefined;
 	let seq = 0;
 	let destroyed = false;
@@ -84,6 +103,7 @@
 	const workers = $derived((data?.workers ?? []).map(w => ({ ...w, device_name: workerDisplayName(w.device_name, w.is_self ? 'Local' : 'Worker') })));
 	const missingOnline = $derived(workers.filter((w) => w.online && (w.state === 'missing') && !isRunning(w)));
 	const anyRunning = $derived(workers.some((w) => isRunning(w)));
+	const orphaned = $derived(heldByNoWorker(workers));
 
 	function nameList(names: string[]): string {
 		if (names.length <= 1) return names[0] ?? '';
@@ -145,6 +165,8 @@
 			editing = null;
 			busy = {};
 			confirmingRemove = null;
+			repoDraft = null;
+			repoResult = null;
 			void load();
 		});
 	});
@@ -280,6 +302,55 @@
 		}
 	}
 
+	function openRepoEditor() {
+		repoResult = null;
+		repoDraft = { url: '', keepUpstream: false, error: null };
+		void tick().then(() => document.querySelector<HTMLInputElement>('[data-change-repo-input] input')?.focus());
+	}
+	
+	function closeRepoEditor() {
+		repoDraft = null;
+		void tick().then(() => document.getElementById('pw-change-repo')?.focus());
+	}
+	
+	async function saveRepository() {
+		const draft = repoDraft;
+		const url = draft?.url.trim();
+		if (!draft || !url || repoBusy) return;
+		repoBusy = true;
+		draft.error = null;
+		const projectKey = refKey;
+		try {
+			const res = await changeProjectRepository(projectRef, url, draft.keepUpstream);
+			if (destroyed || projectKey !== refKey) return;
+			repoResult = repositoryChangeSummary(res);
+			if (repoDraft === draft) repoDraft = null;
+			if (res.workers.some((w) => w.is_self)) void appData.loadProjectCatalog(performance.now());
+			onChanged?.();
+			void load();
+		} catch (e) {
+			if (destroyed || projectKey !== refKey || repoDraft !== draft) return;
+			draft.error = errMessage(e, "Couldn't change the repository.");
+		} finally {
+			if (!destroyed && projectKey === refKey) repoBusy = false;
+		}
+	}
+	
+	async function forget() {
+		forgetBusy = true;
+		actionError = null;
+		try {
+			await forgetProject(projectRef);
+			onChanged?.();
+			onRemoved?.();
+		} catch (e) {
+			actionError = `Couldn't remove it from the list: ${errMessage(e, 'unknown error')}`;
+			void load();
+		} finally {
+			forgetBusy = false;
+		}
+	}
+	
 	function patchWorker(id: string, patch: Partial<ProjectWorkerDetail>) {
 		if (!data) return;
 		data = { ...data, workers: data.workers.map((w) => (w.install_id === id ? { ...w, ...patch } : w)) };
@@ -331,6 +402,43 @@
 		<InlineBanner>{loadError}{#snippet actions()}<button class="st-btn" onclick={() => { loading = true; void load(); }}>Try again</button>{/snippet}</InlineBanner>
 	{:else if data}
 		{#if actionError}<InlineBanner>{actionError}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
+		{#if repoResult}
+			<InlineBanner tone={repoResult.ok ? 'info' : undefined}><span data-repo-result={repoResult.ok ? 'ok' : 'partial'}>{repoResult.lines.join(' ')}</span>
+				{#snippet actions()}<button class="st-btn" onclick={() => (repoResult = null)}>Dismiss</button>{/snippet}
+			</InlineBanner>
+		{/if}
+		{#if $isAdmin && orphaned}
+			<InlineBanner tone="info">No worker has this project any more. Remove it from the Projects list? Its chats keep it, nothing on disk is touched, and it comes back if you set it up again.
+				{#snippet actions()}<button class="st-btn" onclick={forget} disabled={forgetBusy}>{forgetBusy ? 'Removing…' : 'Remove from list'}</button>{/snippet}
+			</InlineBanner>
+		{/if}
+		{#if kind === 'git'}
+			<RowGroup title="Repository">
+				<SettingRow label="Repository" hint={data.remote || 'Not reported'} hintMono>
+					{#if $isAdmin && !repoDraft}<button id="pw-change-repo" class="st-btn" onclick={openRepoEditor} disabled={!!loadError}><Github />Change repository</button>{/if}
+				</SettingRow>
+				{#if repoDraft && $isAdmin}
+					{@const draft = repoDraft}
+					<SettingRow label="New repository" wrapHint hint="A new repository or your fork. Every worker's copy switches to it and fetches it; branches, files and uncommitted work stay as they are. Workers that are offline switch when they come back. It stays one project.">
+						{#snippet expanded()}
+							<form id="pw-repo-form" class="flex flex-col gap-2" onsubmit={(event) => { event.preventDefault(); void saveRepository(); }}>
+								<div data-change-repo-input><TextField bind:value={draft.url} width="full" mono label="New repository URL" placeholder="https://github.com/you/project.git" disabled={repoBusy} /></div>
+								{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
+							</form>
+						{/snippet}
+					</SettingRow>
+					{#if data.remote}
+						<SettingRow label="Keep the current one as upstream" hint={`For a fork: ${data.remote} stays reachable as the upstream remote, so you can still pull from it.`}>
+							<Switch bind:checked={draft.keepUpstream} disabled={repoBusy} />
+						</SettingRow>
+					{/if}
+					<SettingRow label="Actions">
+						<button type="button" class="st-btn" disabled={repoBusy} onclick={closeRepoEditor}>Cancel</button>
+						<button type="submit" form="pw-repo-form" class="st-btn primary" disabled={repoBusy || !draft.url.trim()}>{repoBusy ? 'Switching…' : 'Switch repository'}</button>
+					</SettingRow>
+				{/if}
+			</RowGroup>
+		{/if}
 		{#if $isAdmin && missingOnline.length > 0}
 			{@const names = nameList(missingOnline.map(w => w.device_name))}
 			<InlineBanner tone="info">{names} {missingOnline.length === 1 ? "doesn't" : "don't"} have this project yet. Set it up there to start chats on {names} too.

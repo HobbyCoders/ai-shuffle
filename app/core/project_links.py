@@ -80,9 +80,12 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
     has no usable remote, or already carries the derived id. Returns the
     project's effective link_group_id (possibly unchanged) or ``None``.
     """
-    group_id = auto_link_group_id(remote_url)
-    if not group_id:
+    from app.core.project_remote import identity_for_remote
+
+    found = identity_for_remote(remote_url)
+    if not found:
         return None
+    group_id, pin = found
     try:
         project = database.get_project(project_id)
     except Exception:  # noqa: BLE001 — never break the caller's main flow
@@ -96,6 +99,12 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
         return group_id
     try:
         database.set_project_link_group(project_id, group_id)
+        if pin:
+            # A project pointed at this remote (or a duplicate merged into
+            # one): keep the row there even if the folder's remote changes.
+            merged = dict(project.get("settings") or {})
+            merged[LINK_LOCKED_KEY] = True
+            database.update_project(project_id, settings_dict=merged)
     except Exception:  # noqa: BLE001
         logger.debug("maybe_auto_link_project: set failed for %s", project_id, exc_info=True)
         return project.get("link_group_id")

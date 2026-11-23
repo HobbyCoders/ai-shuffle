@@ -355,7 +355,7 @@
 				{/snippet}
 				{#key selectedRow.key}
 				{#if activeTab === 'workers' && showWorkersTab && selectedRow.projectV2Id}
-					<ProjectWorkersTab projectRef={{ project_v2_id: selectedRow.projectV2Id }} projectName={selectedRow.name} localProjectId={selectedRow.localId} {focusInstallId} onChanged={() => void loadProjectsOverview()} />
+					<ProjectWorkersTab projectRef={{ project_v2_id: selectedRow.projectV2Id }} projectName={selectedRow.name} localProjectId={selectedRow.localId} {focusInstallId} onChanged={() => void loadProjectsOverview()} onRemoved={() => { handleBack(); void loadProjectsOverview(); }} />
 				{:else if selectedProject || (selectedRow.localId && activeTab === 'general')}
 					{#if activeTab === 'general'}<ProjectGeneralTab projectId={selectedRow.localId!} />
 					{:else if activeTab === 'mcp'}<ProjectMcpTab bind:this={mcpTabRef} projectId={selectedRow.localId!} />

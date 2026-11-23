@@ -884,6 +884,23 @@ export function projectKey(s: Session): string {
 	return projectIdentity({ link_group_id: s.link_group_id, origin: s.origin, id: s.project_id }) || UNGROUPED_PROJECT;
 }
 
+/**
+ * Sidebar group key for each folded duplicate's origin and v2 id: the project
+ * it was folded into by a repository change. Chats keep their stored binding;
+ * only grouping and the project filter treat them as the kept project.
+ */
+export function foldedProjectKeys(cluster: LiveClusterProject[]): Map<string, string> {
+	const keys = new Map<string, string>();
+	for (const c of cluster) for (const alias of c.aliases ?? []) if (c.origin) keys.set(alias, c.origin);
+	return keys;
+}
+
+/** {@link projectKey}, with a folded duplicate's chats grouped under the kept project. */
+export function groupedProjectKey(s: Session, folded: Map<string, string>): string {
+	const key = projectKey(s);
+	return folded.get(key) ?? key;
+}
+
 /** Identity tokens for a still-present local project. */
 export type LiveProject = {
 	id: string;
@@ -895,11 +912,13 @@ export type LiveClusterProject = {
 	origin: string;
 	project_v2_id: string;
 	local_project_id: string | null;
+	/** Origin and v2 id of a duplicate folded into this project by a repository change. */
+	aliases?: string[];
 };
 
 /**
  * Keys a session can match against to prove its project still exists:
- * local id, link group, origin, v2 id.
+ * local id, link group, origin, v2 id, and folded duplicates' aliases.
  */
 export function liveProjectKeys(
 	projects: LiveProject[],
@@ -914,6 +933,7 @@ export function liveProjectKeys(
 		if (c.origin) keys.add(c.origin);
 		if (c.project_v2_id) keys.add(c.project_v2_id);
 		if (c.local_project_id) keys.add(c.local_project_id);
+		for (const alias of c.aliases ?? []) keys.add(alias);
 	}
 	return keys;
 }

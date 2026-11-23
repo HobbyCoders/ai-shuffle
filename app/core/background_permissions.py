@@ -588,6 +588,7 @@ TOOL_LEVELS: Dict[str, Level] = {
             "createAutomation",
             "createHook",
             "createProfile",
+            "changeProjectRepository",
             "createProject",
             "createSubagent",
             "deleteAutomation",

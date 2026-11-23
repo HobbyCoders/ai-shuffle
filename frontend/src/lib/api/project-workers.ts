@@ -9,6 +9,8 @@
  *   POST   /projects/setup                       start a setup (202)
  *   POST   /projects/setup/{op_id}/cancel        best-effort cancel (409 once finished)
  *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record (files untouched)
+ *   PUT    /projects/catalog/repository?<ref>    point the project at another repository on every worker
+ *   POST   /projects/catalog/forget?<ref>        take a project no worker holds off the list (nothing deleted)
  *
  * `<ref>` is exactly one of `project_v2_id` (preferred) or `project_id`.
  *
@@ -178,4 +180,45 @@ export function cancelProjectSetup(opId: string): Promise<{ status: string }> {
 
 export async function removeProjectFromWorker(installId: string, ref: ProjectRef): Promise<void> {
 	await api.delete(`/projects/workers/${encodeURIComponent(installId)}?${refQuery(ref)}`);
+}
+
+/** One worker's answer to a repository change. */
+export interface RepositoryChangeWorker {
+	install_id: string;
+	device_name: string | null;
+	is_self: boolean;
+	/** updated / already: done. offline / pending: it switches when it next runs.
+	 *  unsupported: that worker needs an update first. Anything else failed there. */
+	status: 'updated' | 'already' | 'offline' | 'pending' | 'unsupported' | 'fetch_failed' | 'no_git' | 'error' | (string & {});
+	ok: boolean;
+	error?: string;
+	branch?: string;
+	copies?: number;
+}
+
+export interface RepositoryChangeResponse {
+	project_v2_id: string;
+	name: string | null;
+	/** Display form of the new repository. */
+	repository: string | null;
+	remote_url: string;
+	previous_repository: string | null;
+	/** The previous repository stays reachable as the `upstream` remote. */
+	kept_as_upstream: boolean;
+	default_branch: string | null;
+	/** A separate project for the new repository was folded into this one. */
+	merged_duplicate: boolean;
+	workers: RepositoryChangeWorker[];
+	/** Workers with no copy; they clone the new repository if set up later. */
+	workers_without_copy: (string | null)[];
+}
+
+/** Point the project at another Git repository (a new repo or a fork) on every worker. */
+export function changeProjectRepository(ref: ProjectRef, remote_url: string, keep_upstream: boolean): Promise<RepositoryChangeResponse> {
+	return api.put<RepositoryChangeResponse>(`/projects/catalog/repository?${refQuery(ref)}`, { remote_url, keep_upstream });
+}
+
+/** Take a project no worker holds off the Projects list. Its chats keep it. */
+export function forgetProject(ref: ProjectRef): Promise<{ ok: boolean; project_v2_id: string }> {
+	return api.post<{ ok: boolean; project_v2_id: string }>(`/projects/catalog/forget?${refQuery(ref)}`);
 }

@@ -137,11 +137,13 @@ def _build_cluster_catalog(
     installs: list,
     local_projects: list,
     me: str,
+    scoped_origin: Optional[str] = None,
 ) -> list:
     """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
     rows with no active base checkout on an approved online install. Never
     expose foreign ``path``."""
     from app.core.project_resolver import origin_for_legacy_project
+    from app.db.checkouts import merged_into_origin
 
     by_pv2: Dict[str, list] = {}
     for row in bases:
@@ -207,8 +209,37 @@ def _build_cluster_catalog(
             "local_project_id": local_id,
             "remote_only": local_id is None,
             "eligible": eligible,
+            "_merged_into": merged_into_origin(pv2.get("settings")),
         })
-    return catalog
+    return _fold_aliases(catalog, scoped_origin)
+
+
+def _fold_aliases(catalog: list, scoped_origin: Optional[str]) -> list:
+    """Offer a duplicate folded into another listed project (a repository
+    change) only as that project's ``aliases``: chats still bound to the
+    duplicate stay live, and pickers offer one project. A caller scoped to
+    the duplicate's own origin still gets it."""
+    by_origin = {row["origin"]: row for row in catalog}
+    merged = {row["origin"]: row.pop("_merged_into") for row in catalog}
+
+    def folded_into(origin: str) -> Optional[Dict[str, Any]]:
+        seen = {origin}
+        target = merged.get(origin)
+        while target in by_origin and target not in seen:  # follow A <- B <- C
+            seen.add(target)
+            if not merged.get(target) or merged[target] not in by_origin:
+                return by_origin[target]
+            target = merged[target]
+        return None
+
+    kept = []
+    for row in catalog:
+        target = folded_into(row["origin"]) if row["origin"] != scoped_origin else None
+        if target is not None:
+            target.setdefault("aliases", []).extend([row["origin"], row["project_v2_id"]])
+        else:
+            kept.append(row)
+    return kept
 
 
 @router.get("/projects")
@@ -264,6 +295,7 @@ async def list_cluster_projects(
         installs=installs,
         local_projects=local_projects,
         me=me,
+        scoped_origin=scoped_origin,
     )
     if scoped_origin:
         catalog = [row for row in catalog if row.get("origin") == scoped_origin]

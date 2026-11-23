@@ -18,6 +18,7 @@ these rows identify logical projects and their physical runner checkouts.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import ntpath
 import os
@@ -189,14 +190,18 @@ def _canonical_of_family(cursor: Any, project_ids: List[str]) -> Optional[str]:
     now linked to that identity's origin.
     """
     cursor.execute(
-        f"SELECT id, origin FROM projects_v2 WHERE id IN ({', '.join(['%s'] * len(project_ids))})",
+        f"SELECT id, origin, settings FROM projects_v2 WHERE id IN ({', '.join(['%s'] * len(project_ids))})",
         tuple(project_ids),
     )
-    origins = {row["id"]: row["origin"] or "" for row in cursor.fetchall()}
+    fetched = cursor.fetchall()
+    origins = {row["id"]: row["origin"] or "" for row in fetched}
     if len(origins) != len(project_ids):
         return None
     placeholders = {pid: o[len("local:"):] for pid, o in origins.items() if o.startswith("local:")}
-    canonical = [pid for pid in origins if pid not in placeholders]
+    # A duplicate folded into another project of this set (a repository
+    # change, ``merged_into``) shares its folder with that project.
+    merged = {row["id"] for row in fetched if merged_into_origin(row.get("settings")) in origins.values()}
+    canonical = [pid for pid in origins if pid not in placeholders and pid not in merged]
     if len(canonical) != 1:
         return None
     for legacy_id in placeholders.values():
@@ -205,6 +210,17 @@ def _canonical_of_family(cursor: Any, project_ids: List[str]) -> Optional[str]:
         if not legacy or legacy["link_group_id"] != origins[canonical[0]]:
             return None
     return canonical[0]
+
+
+def merged_into_origin(settings: Any) -> Optional[str]:
+    """The origin a project was folded into (``settings.merged_into``), if any."""
+    if isinstance(settings, str):
+        try:
+            settings = json.loads(settings)
+        except ValueError:
+            return None
+    value = settings.get("merged_into") if isinstance(settings, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def get_checkouts_by_path(path: str, *, project_id: Optional[str] = None,

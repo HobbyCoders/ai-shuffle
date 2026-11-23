@@ -943,6 +943,22 @@ def test_preview_global_toggle_is_disposable_only():
             assert _preview_may_change_dev_data(request) == disposable
 
 
+@pytest.mark.parametrize("method,path", [
+    ("PUT", "/api/v1/projects/catalog/repository"),
+    ("POST", "/api/v1/projects/catalog/forget"),
+])
+def test_preview_project_repository_changes_are_disposable_only(method, path):
+    from starlette.requests import Request
+    from app.api.auth import _preview_may_change_dev_data
+    from app.core.preview_access import mutation_allowed
+
+    request = Request({"type": "http", "method": method, "path": path, "headers": []})
+    assert mutation_allowed(path, method)
+    for disposable in (True, False):
+        with patch("app.preview_run.disposable_preview_data", return_value=disposable):
+            assert _preview_may_change_dev_data(request) == disposable
+
+
 @pytest.mark.parametrize("on", [True, False])
 async def test_synced_setting_invalidates_cache_notifies_and_only_releases_on(on):
     from app.core.global_events import global_events

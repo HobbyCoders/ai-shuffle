@@ -72,7 +72,9 @@ def _check_repository(project: dict, old: Path, destination: Path, origin: str) 
     old_is_repo = old.is_dir() and git_service.is_git_repo(str(old))
     old_remote = git_service.get_remote_url(str(old)) if old_is_repo else None
     if origin.startswith('git:'):
-        if auto_link_group_id(remote) != origin:
+        from app.core.project_remote import remote_names_origin
+
+        if not remote_names_origin(remote, origin):
             raise HTTPException(400, 'Choose a checkout of the same Git repository.')
     elif old_remote and normalize_remote_url(remote or '') != normalize_remote_url(old_remote):
         raise HTTPException(400, 'Choose a checkout of the same Git repository.')

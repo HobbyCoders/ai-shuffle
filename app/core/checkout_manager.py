@@ -455,8 +455,12 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
         return None
     if origin.startswith("local:") or origin.startswith("manual:"):
         return None
+    from app.core.project_remote import pinned_remote
     from app.db.projects_v2 import stored_remote
 
+    pinned = pinned_remote(project_v2_row)
+    if pinned is not None and (project_v2_row or {}).get("origin") == origin:
+        return pinned  # the owner pointed this project at another repository
     stored_url, _stored_branch = stored_remote(project_v2_row)
     if stored_url is not None and (project_v2_row or {}).get("origin") == origin \
             and auto_link_group_id(stored_url) == origin:

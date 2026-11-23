@@ -589,6 +589,20 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(_periodic_db_maintenance()))
     logger.info("Database maintenance task started (every 4 hours, first run in 30s)")
 
+    async def _project_remote_reconcile():
+        """Apply repository changes made while this worker was offline: a
+        project pointed at another repository (or a duplicate merged into
+        one) reaches this worker as a synced row; this points its own copy at
+        it. Two small reads when nothing is pending."""
+        from app.core.project_remote import reconcile_soon
+
+        await asyncio.sleep(60)
+        while True:
+            reconcile_soon()
+            await asyncio.sleep(120)
+
+    tasks.append(asyncio.create_task(_project_remote_reconcile()))
+
     async def _session_recall_backfill():
         """Install and backfill SessionSearch's text projection in short
         batches off the event loop, then keep checking it every minute: rows
