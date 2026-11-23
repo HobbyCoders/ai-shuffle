@@ -77,6 +77,53 @@ def test_fork_of_a_mirror_runs_on_its_owner(fork_client, remote_parent, monkeypa
     assert row["owner_device_id"] == OWNER
     assert row["model"] == "sonnet"
     assert data["fork_point_message_index"] == 3
+    # Not a "legacy held" row: the catalog scan must not publish this copy to
+    # the owner while it is still making the real fork.
+    assert row["instance_id"] is None
+    from app.db.base import get_cursor, get_db
+    from app.network import catalog
+
+    with get_db() as conn:
+        held = catalog._owned_session_ids(get_cursor(conn), "dev-mirror-self", recent_only=False,
+                                          include_held=True)
+    assert data["session_id"] not in held
+
+
+def test_owner_does_not_acknowledge_a_fork_without_a_transcript(mock_db, monkeypatch):
+    """A row under the requested id with no transcript yet (a fork still being
+    made, or a copy that reached the owner by sync) is not a finished fork."""
+    import asyncio
+    from app.api import sessions_fork
+    from tests.api.test_sessions_fork_inheritance import PARENT_SID as OWNED_SID, _seed_parent
+
+    _seed_parent()
+    sessions_db.create_session("ses-placeholder0001", "default", title="Fork of parent",
+                               parent_session_id=OWNED_SID)
+    monkeypatch.setattr(sessions_fork, "_FORK_IN_PROGRESS_WAIT", 0.0)
+    with pytest.raises(ValueError, match="still being made"):
+        asyncio.run(sessions_fork.handle_fork(
+            {"session_id": OWNED_SID, "new_session_id": "ses-placeholder0001"}, "dev-mirror"))
+
+
+def test_owner_builds_the_history_of_a_fork_short_of_the_head(mock_db, monkeypatch):
+    """The mirror has no transcript to build a fork's history from, so the
+    owner builds the event log before it publishes the fork."""
+    import asyncio
+    from app.api import sessions_fork
+    from app.db import session_events as events_db
+    from app.network import catalog, control
+    from tests.api.test_sessions_fork_inheritance import PARENT_SID as OWNED_SID, _seed_parent
+
+    _seed_parent()
+    seq_at_publish = []
+    monkeypatch.setattr(catalog, "publish_owned",
+                        lambda **kw: seq_at_publish.append(events_db.get_max_seq(kw["session_ids"][0])) or 0)
+    monkeypatch.setattr(control, "stamp_provenance", lambda sid, label: True)
+
+    asyncio.run(sessions_fork.handle_fork(
+        {"session_id": OWNED_SID, "new_session_id": "ses-0123456789abcdef", "message_index": 0}, "dev-mirror"))
+
+    assert seq_at_publish and seq_at_publish[0] > 0
 
 
 def test_unreachable_owner_leaves_no_copy(fork_client, remote_parent, monkeypatch):

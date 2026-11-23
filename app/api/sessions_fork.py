@@ -5,6 +5,7 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+import asyncio
 import re
 import uuid
 from typing import Any, Callable, Optional
@@ -536,8 +537,12 @@ async def _fork_on_owner(
             )
             # create_session stamps the owner only for a runner it can find;
             # the copy must name it regardless, or a send would run it here.
+            # instance_id stays NULL: a foreign-owned row with an instance_id
+            # and no sync record counts as a legacy held session, which the
+            # catalog scan would publish to the owner while it is still making
+            # the real fork. The owner's published row fills it in.
             get_cursor(txn).execute(
-                "UPDATE sessions SET owner_device_id = %s WHERE id = %s",
+                "UPDATE sessions SET owner_device_id = %s, instance_id = NULL WHERE id = %s",
                 (owner, new_session_id),
             )
             # The fork is the caller's chat: a paired device keeps it (#1877).
@@ -595,6 +600,32 @@ async def _fork_on_owner(
     )
 
 
+#: How long a repeated request waits for the first one to finish the copy.
+_FORK_IN_PROGRESS_WAIT = 90.0
+_FORK_POLL_SECONDS = 0.5
+
+
+async def _completed_fork(new_session_id: str) -> dict:
+    """The fork's row once its transcript exists, for a repeated request.
+
+    Both fork paths set ``sdk_session_id`` only after the transcript is
+    copied (and delete the row if copying fails), so a row without one is a
+    fork still being made, or a row this worker never forked: acknowledging
+    it would hand back a chat with no transcript.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FORK_IN_PROGRESS_WAIT
+    while True:
+        row = await run_sync(database.get_session, new_session_id)
+        if row is None:
+            raise ValueError("Forking this chat failed on the worker that runs it")
+        if row.get("sdk_session_id"):
+            return row
+        if loop.time() >= deadline:
+            raise ValueError("The fork is still being made on the worker that runs this chat")
+        await asyncio.sleep(_FORK_POLL_SECONDS)
+
+
 async def handle_fork(body: dict, from_device: str) -> dict:
     """Peer control ``session-fork``: fork a chat this worker runs for a mirror.
 
@@ -619,6 +650,7 @@ async def handle_fork(body: dict, from_device: str) -> dict:
     if existing is not None:
         if existing.get("parent_session_id") != session_id or control.owner_of(existing) is not None:
             raise ValueError("That session id is already in use")
+        existing = await _completed_fork(new_session_id)
         fork_point = existing.get("fork_point_message_index") or 0
         return ForkSessionResponse(
             session_id=new_session_id, title=existing.get("title"), parent_session_id=session_id,
@@ -645,6 +677,12 @@ async def handle_fork(body: dict, from_device: str) -> dict:
     except HTTPException as exc:
         # The requesting worker shows the reason; never ask it to retry.
         raise ValueError(str(exc.detail)) from exc
+    # A fork short of the head copies no app events, and the mirror cannot
+    # build them (it has no transcript): build them here so it opens with its
+    # history. Never raises.
+    from app.core.history_backfill import ensure_backfilled
+
+    await ensure_backfilled(new_session_id)
     try:
         await run_sync(catalog.publish_owned, session_ids=[new_session_id])
     except Exception:  # noqa: BLE001 — the periodic scan publishes it anyway
