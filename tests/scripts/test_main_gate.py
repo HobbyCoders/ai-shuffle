@@ -414,8 +414,8 @@ def test_a_green_run_names_a_record_for_every_area_it_ran():
 
 @pytest.mark.parametrize(("name", "lost"), [
     ("backend / backend-shard 3", {"backend"}),
-    ("backend / backend-security", {"backend"}),
-    ("backend / backend-postgres", {"backend"}),
+    ("backend / backend-security (policy)", {"backend"}),
+    ("backend / backend-postgres (indexing)", {"backend"}),
     ("fluid / fluid unit tests", {"fluid"}),
     ("windows / Windows desktop shard (2/3)", {"windows"}),
     ("javascript / Frontend and mobile production build", {"javascript-checks"}),

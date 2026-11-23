@@ -2,8 +2,10 @@
 import json
 import os
 import random
+import re
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -225,10 +227,17 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     # Every run of all the tests records the map, a pull request's too: main
     # adopts it when that run's record proves main's backend (ci.yml backend-map).
     assert jobs["backend-shard"]["env"]["RECORD_MAP"] == "${{ needs.backend-select.outputs.selection == 'all' }}"
+    parts = {"backend-security": ["checks", "policy"], "backend-postgres": ["safety", "indexing"]}
     for name in ("backend-security", "backend-postgres"):
         assert jobs[name]["if"] == "always()"
         assert "needs" not in jobs[name]
-        assert all("if" not in step for step in jobs[name]["steps"][:-1])
+        # Two runners split the job; neither may stop the other.
+        assert jobs[name]["strategy"] == {"fail-fast": "false", "matrix": {"part": parts[name]}}
+        assert jobs[name]["name"] == f"{name} (${{{{ matrix.part }}}})"
+        # A step may only be left to the first part, so every check runs on one of them.
+        assert all(step.get("if", f"matrix.part == '{parts[name][0]}'") == f"matrix.part == '{parts[name][0]}'"
+                   for step in jobs[name]["steps"][:-1])
+        assert jobs[name]["steps"][-1]["with"]["name"] == f"{name}-${{{{ matrix.part }}}}"
     assert "if" not in jobs["backend-contracts"] and "needs" not in jobs["backend-contracts"]
     for job in ("backend-shard", "backend-contracts"):
         assert jobs[job]["timeout-minutes"] == "35"
@@ -268,7 +277,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert command.count("python -m pytest") == 1
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
     for job in ("backend-contracts", "backend-security", "backend-postgres"):
-        assert "backend_shard_run.py" not in json.dumps(jobs[job])
+        assert "scripts/ci/backend_shard_run.py" not in json.dumps(jobs[job])
 
 
 def select_outputs(jobs):
@@ -311,11 +320,52 @@ def test_policy_suite_runs_once_in_the_required_security_job():
     policy = next(s for s in security["steps"] if s.get("name") == "Full workflow, publication, security and docs policy regressions")
     assert "backend-security" in jobs["backend"]["needs"]
     assert "if" not in policy and "continue-on-error" not in policy
+    (checks,) = pytest_calls("backend-security", policy["name"], "checks")
     for flag, path in (("--ignore", "tests/scripts"), ("--deselect", "tests/test_buyer_docs.py"),
                        ("--ignore", "tests/core/test_docs_content.py")):
         assert f"{flag}={path}" in shard.split()
         assert path not in shard.split()
-        assert path in policy["run"].split()
+        assert path in checks
+
+
+def pytest_calls(job, step_name, part):
+    """The pytest arguments of each call ``step_name`` makes for one matrix part, pytest stubbed out."""
+    step = next(s for s in workflow()["jobs"][job]["steps"] if s.get("name") == step_name)
+    stub = 'python() { printf "%s\\n" "$@" >> "$CALLS"; printf "%s\\n" "--end--" >> "$CALLS"; }\n'
+    with tempfile.TemporaryDirectory() as scratch:
+        calls = Path(scratch) / "calls"
+        calls.touch()
+        subprocess.run(["bash", "-e", "-c", stub + step["run"]], cwd=ROOT, check=True,
+                       env={**os.environ, "PART": part, "CALLS": str(calls)})
+        text = calls.read_text()
+    return [call.split("\n") for call in text.split("\n--end--\n") if call.strip()]
+
+
+def test_the_security_parts_run_the_whole_policy_suite_once():
+    step = "Full workflow, publication, security and docs policy regressions"
+    (checks,), (policy,) = pytest_calls("backend-security", step, "checks"), pytest_calls("backend-security", step, "policy")
+    suite = ["tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"]
+    assert [arg for arg in checks if arg.startswith("tests/")] == suite
+    ignored = [arg.removeprefix("--ignore=") for arg in checks if arg.startswith("--ignore=")]
+    slow = [arg for arg in policy if arg.startswith("tests/")]
+    assert ignored == slow and slow and all((ROOT / path).is_file() for path in slow)
+    assert all(path.startswith("tests/scripts/") for path in slow)
+    for call in (checks, policy):
+        assert "--dist" in call and "loadfile" in call and "--junitxml=reports/policy.xml" in call
+
+
+def test_the_postgres_parts_run_every_file_once():
+    step = next(s for s in workflow()["jobs"]["backend-postgres"]["steps"] if "PG_SAFETY_TEST" in s.get("env", {}))
+    files = {part: [arg for call in pytest_calls("backend-postgres", step["name"], part) for arg in call
+                    if arg.startswith("tests/")] for part in ("safety", "indexing")}
+    every = files["safety"] + files["indexing"]
+    # Each test file the step names runs in exactly one part.
+    named = set(re.findall(r"tests/[\w/]+\.py", step["run"]))
+    assert sorted(every) == sorted(named) and len(named) == 34
+    assert all((ROOT / path).is_file() for path in every)
+    assert files["indexing"] == ["tests/db/test_history_indexing_postgres.py",
+                                 "tests/db/test_event_write_lock_timeout_postgres.py",
+                                 "tests/db/test_handoff_bulk_postgres.py"]
 
 
 def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():
