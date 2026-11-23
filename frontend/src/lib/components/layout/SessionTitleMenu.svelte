@@ -335,7 +335,7 @@
 							<button type="button" class="sheet-row" onclick={() => (pickingWorker = false)}><ChevronLeft size={17} aria-hidden="true" />Fork to another worker</button>
 							{#each targets as target (target.id)}
 								<button type="button" class="sheet-row" disabled={!target.online} onclick={() => handleFork(target)}>
-									<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+									<span class="worker-dot" class:online={target.online} aria-hidden="true"></span><span class="worker-name">{target.label}</span>{#if !target.online}<span class="worker-note">offline</span>{/if}
 								</button>
 							{/each}
 						</div>
@@ -397,6 +397,7 @@
 			<div
 				bind:this={menuRef}
 				class="menu"
+				class:picking={pickingWorker}
 				role="menu"
 				aria-label={pickingWorker ? 'Fork to another worker' : 'Session actions'}
 				use:floatingMenu={{ anchor: triggerRef, align: 'start', gap: 4 }}
@@ -408,7 +409,7 @@
 					<div class="dropdown-divider" role="separator"></div>
 					{#each targets as target (target.id)}
 						<button type="button" class="dropdown-item worker-item" role="menuitem" disabled={!target.online} onclick={() => handleFork(target)}>
-							<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+							<span class="worker-dot" class:online={target.online} aria-hidden="true"></span><span class="worker-name">{target.label}</span>{#if !target.online}<span class="worker-note">offline</span>{/if}
 						</button>
 					{/each}
 				{:else}
@@ -626,7 +627,22 @@
 		background: var(--success, oklch(0.7 0.15 150));
 		opacity: 1;
 	}
+	/* The worker list sizes to its names (two long ones may differ only at the
+	   end); past the cap a name wraps and the offline note stays in view. */
+	.menu.picking {
+		width: max-content;
+		min-width: 280px;
+		max-width: min(440px, calc(100vw - 16px));
+	}
+	.worker-item {
+		white-space: normal;
+	}
+	.worker-name {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
 	.worker-note {
+		flex: none;
 		margin-left: auto;
 		padding-left: 12px;
 		font-size: 12px;
