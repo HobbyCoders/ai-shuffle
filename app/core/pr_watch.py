@@ -232,7 +232,7 @@ def normalize_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
             elif ctx.get("conclusion") in FAILED_CONCLUSIONS:
                 failed.append({"id": ctx.get("databaseId"), "name": ctx.get("name") or "check",
                                "url": ctx.get("detailsUrl")})
-            else:
+            elif ctx.get("conclusion") == "SUCCESS":  # cancelled or skipped proves nothing
                 passed.append(ctx.get("name") or "check")
         else:
             state = ctx.get("state")
@@ -241,7 +241,7 @@ def normalize_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
             elif state in FAILED_STATUS_STATES:
                 failed.append({"id": None, "name": ctx.get("context") or "status",
                                "url": ctx.get("targetUrl")})
-            else:
+            elif state == "SUCCESS":
                 passed.append(ctx.get("context") or "status")
     items: List[Dict[str, Any]] = []
     for node in ((pr.get("reviews") or {}).get("nodes")) or []:
@@ -879,6 +879,9 @@ async def poll(watch: Dict[str, Any], *, fetch=None, access=None, now: Optional[
         state["last_event_at"] = now.isoformat()
     if ready_to_deliver(state, now):
         state, wakes = await deliver(watch, state, wakes, settings, now)
+        if wakes and wakes[-1].get("seq") == state.get("seq"):  # this delivery woke the chat
+            # Record a queued turn even if Stop landed meanwhile (save skips stopped rows).
+            await run_sync(pr_watches.record_wakes, watch["id"], wakes)
 
     if (now - last_activity) > timedelta(days=settings["idle_days"]) and not state.get("pending"):
         await run_sync(lambda: pr_watches.save(watch["id"], state=state, wakes=wakes))

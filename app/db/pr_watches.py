@@ -187,6 +187,20 @@ def save(wid: str, **fields: Any) -> None:
         )
 
 
+def record_wakes(wid: str, wakes: list[dict[str, Any]]) -> None:
+    """Write a watch's wake history whatever its status.
+
+    A turn queued just before Stop still runs, so it must still count
+    toward the PR's daily limits when the watch is started again.
+    """
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE pr_watches SET wakes=%s, updated_at=NOW() WHERE id=%s",
+            (json.dumps(wakes), wid),
+        )
+
+
 def set_status(wid: str, status: str, reason: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Stop or end an active watch. Stopped and ended are final."""
     if status not in STATUSES or status == "active":

@@ -79,6 +79,7 @@ def test_normalize_snapshot_flattens_checks_and_comments():
             "commits": {"nodes": [{"commit": {"oid": "h", "statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
                 {"__typename": "CheckRun", "databaseId": 1, "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "d"},
                 {"__typename": "CheckRun", "databaseId": 2, "name": "lint", "status": "COMPLETED", "conclusion": "CANCELLED"},
+                {"__typename": "CheckRun", "databaseId": 3, "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
                 {"__typename": "StatusContext", "context": "ci/legacy", "state": "PENDING"},
             ]}}}}]},
             "reviews": {"nodes": [{"databaseId": 5, "author": {"login": "bob", "__typename": "User"},
@@ -92,7 +93,7 @@ def test_normalize_snapshot_flattens_checks_and_comments():
     s = pr_watch.normalize_snapshot(data)
     assert s["viewer"] == "me" and s["head"] == "h" and s["mergeable"] == "CONFLICTING"
     assert s["checks"] == {"pending": True, "failed": [{"id": 1, "name": "unit", "url": "d"}],
-                           "passed": ["lint"], "total": 3}
+                           "passed": ["build"], "total": 4}  # cancelled is not a pass
     kinds = {i["id"]: i for i in s["items"]}
     assert kinds["review:5"]["state"] == "CHANGES_REQUESTED"
     assert kinds["comment:6"]["bot"] is True
@@ -385,6 +386,40 @@ async def test_poll_end_to_end_batches_then_ends_on_merge(mock_db):
         await pr_watch.poll(row, fetch=lambda *_: snap(state="MERGED"), access=lambda _login: True, now=NOW + timedelta(minutes=12))
     row = pr_watches.get(row["id"])
     assert row["status"] == "ended" and row["reason"] == "PR merged"
+
+
+@pytest.mark.asyncio
+async def test_a_wake_queued_as_stop_lands_still_counts(mock_db):
+    from app.db import pr_watches
+
+    row = pr_watches.create(owner="admin", worker_id="me", repo="acme/app", pr_number=9,
+                            pr_url=None, pr_title=None, session_id="s1")
+    pr_watches.save(row["id"], state={"seen": [], "head": "a" * 40, "conflict": True,
+                                      "pending": [{"type": "conflict"}],
+                                      "last_event_at": (NOW - timedelta(minutes=5)).isoformat()})
+    row = pr_watches.get(row["id"])
+
+    async def wake_then_stop(*_):
+        pr_watches.set_status(row["id"], "stopped", "Stopped by you")
+        return "turn-late", ""
+
+    with patch.object(pr_watch, "_wake", side_effect=wake_then_stop), \
+            patch.object(pr_watch, "_notify", AsyncMock()):
+        await pr_watch.poll(row, fetch=lambda *_: snap(mergeable="CONFLICTING"), now=NOW)
+    stopped = pr_watches.get(row["id"])
+    assert stopped["status"] == "stopped" and [w["turn_id"] for w in stopped["wakes"]] == ["turn-late"]
+    again = pr_watch.start_watch(repo="acme/app", pr_number=9, pr_url=None, pr_title=None, session_id=None)
+    assert again["wakes_today"] == 1
+
+
+def test_a_cancelled_run_does_not_clear_the_hold():
+    unit = [{"id": 1, "name": "unit", "url": "u"}]
+    state = {"seen": []}
+    for n in range(3):
+        state, _, _ = run_diff(state, snap(head=str(n) * 40, failed=unit), repeats=3)
+    # unit was cancelled on the next commit: not failed, not passed.
+    state, _, _ = run_diff(state, snap(head="c" * 40, passed=["lint", "build"]))
+    assert state["needs_owner"]["checks"] == ["unit"]
 
 
 @pytest.mark.asyncio
