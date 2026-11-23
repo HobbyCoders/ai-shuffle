@@ -20,7 +20,8 @@ const mocks = vi.hoisted(() => {
 	}
 
 	return {
-		activeSession: store({ sessionId: null as string | null, title: '' }),
+		activeSession: store<{ sessionId: string | null; title: string; messages?: unknown[] }>({ sessionId: null, title: '' }),
+		exportSession: vi.fn(),
 		deleteSession: vi.fn(),
 		renameSession: vi.fn(),
 		loadSessions: vi.fn(),
@@ -54,6 +55,8 @@ vi.mock('$lib/api/client', () => ({
 	getErrorMessage: (e: unknown, fallback: string) =>
 		e && typeof e === 'object' && 'detail' in e ? String((e as { detail: unknown }).detail) : fallback,
 }));
+
+vi.mock('$lib/api/sessions', () => ({ exportSession: mocks.exportSession }));
 
 vi.mock('$lib/stores/notifications', () => ({
 	notify: mocks.toastPush,
@@ -107,6 +110,24 @@ describe('SessionTitleMenu', () => {
 		expect(screen.getByRole('menuitem', { name: 'Rename session' })).toBeTruthy();
 		expect(screen.getByRole('menuitem', { name: 'Fork session' })).toBeTruthy();
 		expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy();
+		for (const name of ['Rename session', 'Fork session', 'Delete']) {
+			expect(screen.getByRole('menuitem', { name }).querySelector('svg')).toBeTruthy();
+		}
+		// No transcript loaded for this chat: nothing to export yet.
+		expect(screen.queryByRole('button', { name: 'Export for sharing (.md)' })).toBeNull();
+	});
+
+	it('carries both exports in the dropdown once the chat has messages, and closes on start', async () => {
+		mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
+		renderMenu();
+
+		await openMenu();
+		const menu = screen.getByRole('menu', { name: 'Session actions' });
+		expect(menu.contains(screen.getByRole('button', { name: 'Download private backup (.jsonl)' }))).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'Export for sharing (.md)' }));
+
+		expect(mocks.exportSession).toHaveBeenCalledExactlyOnceWith('session-a', 'markdown', { shareSafe: true });
+		expect(screen.queryByRole('menu')).toBeNull();
 	});
 
 	it('renders a non-interactive title when unbound', () => {
@@ -222,10 +243,11 @@ describe('SessionTitleMenu', () => {
 			expect(sheet.parentElement?.parentElement).toBe(document.body);
 			expect(sheet.textContent).toContain('AI Shuffle');
 			expect(sheet.textContent).toContain(longTitle);
-			expect(screen.getByRole('button', { name: 'Delete' }).querySelector('svg')).toBeNull();
 			for (const name of ['Rename session', 'Fork session', 'Delete']) {
-				expect(screen.getByRole('button', { name })).toBeTruthy();
+				expect(screen.getByRole('button', { name }).querySelector('svg')).toBeTruthy();
 			}
+			// No transcript loaded for this chat: nothing to export yet.
+			expect(screen.queryByRole('button', { name: 'Export for sharing (.md)' })).toBeNull();
 			expect(screen.getByRole('button', { name: 'Chat actions' }).getAttribute('aria-expanded')).toBe('true');
 			await fireEvent.click(screen.getByRole('button', { name: 'Close chat actions' }));
 			expect(screen.queryByRole('dialog')).toBeNull();
@@ -266,6 +288,19 @@ describe('SessionTitleMenu', () => {
 			expect(screen.getByRole('heading', { name: 'Delete session' })).toBeTruthy();
 			await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
 			expect(mocks.deleteSession).toHaveBeenCalledWith('session-a');
+		});
+
+		it('carries both exports between Fork and Delete once the chat has messages', async () => {
+			mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
+			renderMenu({ variant: 'sheet' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			const rows = Array.from(screen.getByRole('group', { name: 'Session actions' }).querySelectorAll('button'));
+			expect(rows.map((b) => b.getAttribute('aria-label') ?? b.textContent?.trim())).toEqual([
+				'Rename session', 'Fork session', 'Download private backup (.jsonl)', 'Export for sharing (.md)', 'Delete',
+			]);
+			await fireEvent.click(screen.getByRole('button', { name: 'Export for sharing (.md)' }));
+			expect(mocks.exportSession).toHaveBeenCalledExactlyOnceWith('session-a', 'markdown', { shareSafe: true });
+			expect(screen.queryByRole('dialog')).toBeNull();
 		});
 
 		it('traps keyboard focus inside the sheet and returns it to the chevron on Escape', async () => {

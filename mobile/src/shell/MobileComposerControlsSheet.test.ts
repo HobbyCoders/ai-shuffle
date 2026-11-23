@@ -393,7 +393,7 @@ describe('Chat controls panel', () => {
 	});
 
 	it('holds labels, values and controls with no description paragraphs', () => {
-		render(MobileComposerControlsSheet, { props: props({ open: true, fastSupported: true }) });
+		render(MobileComposerControlsSheet, { props: props({ open: true, fastSupported: true, onBrowserToggle: vi.fn() }) });
 		const dialog = panel();
 		expect(within(dialog).getByRole('button', { name: 'Model: Opus' })).toBeTruthy();
 		expect(within(dialog).getByRole('button', { name: /Context and usage/ })).toBeTruthy();
@@ -526,12 +526,12 @@ describe('Chat controls panel', () => {
 		expect(await within(panel()).findByRole('button', { name: 'Watches: Where new watches run. Open the list' })).toBeTruthy();
 	});
 
-	it('carries Call, Browser and Export as actions, and no stash button', async () => {
+	it('carries Browser as an action, with no Export (it lives in the chat actions sheet) and no stash button', async () => {
 		const onBrowserToggle = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle }) });
 		const actions = within(panel()).getByRole('group', { name: 'More actions' });
 		expect(within(actions).getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
-		expect(within(actions).getByRole('button', { name: 'Export chat' })).toBeTruthy();
+		expect(within(panel()).queryByRole('button', { name: 'Export chat' })).toBeNull();
 		expect(within(panel()).queryByRole('button', { name: /stash/i })).toBeNull();
 		await fireEvent.click(within(actions).getByRole('button', { name: 'Toggle live browser view' }));
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
@@ -649,18 +649,9 @@ describe('Chat controls panel', () => {
 		expect(go).toHaveBeenCalledExactlyOnceWith(-1);
 	});
 
-	it('opens Export as a page with its button pinned under the choices', async () => {
-		Object.assign(activeSession.current, { sessionId: 'chat-1', messages: [{ role: 'user', content: 'hi' }] });
-		activeSession.setDraft('');
+	it('drops the bottom action bar when it has no action to carry', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true }) });
-		await fireEvent.click(within(within(panel()).getByRole('group', { name: 'More actions' })).getByRole('button', { name: 'Export chat' }));
-		expect(panel().getAttribute('aria-label')).toBe('Export chat');
-		const page = panel().querySelector<HTMLElement>('[data-page="export"]')!;
-		const choices = within(page).getByRole('radiogroup', { name: 'Export format' });
-		expect(within(choices).getByRole('radio', { name: /Export for sharing/ }).getAttribute('aria-checked')).toBe('true');
-		await fireEvent.click(within(choices).getByRole('radio', { name: /Private backup/ }));
-		const primary = within(page).getByRole('button', { name: 'Download private backup' });
-		expect(primary.closest('.page-foot')).toBeTruthy();
+		expect(within(panel()).queryByRole('group', { name: 'More actions' })).toBeNull();
 	});
 
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {

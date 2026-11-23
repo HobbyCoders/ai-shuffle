@@ -47,7 +47,6 @@ vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No route
 // Only the usage page is under test; the other pages' hosted components are not.
 vi.mock('$lib/components/chat/ContextPillBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/RunningTasksList.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/layout/ChatExportActions.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/settings/ModelPickerPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 function props(): ComposerSheetProps {

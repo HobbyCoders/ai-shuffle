@@ -75,22 +75,18 @@ it('closes the existing menu on start without adding confirmation', async () => 
 	expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-describe('page layout (the phone Chat controls Export page)', () => {
-	it('offers the two exports as a choice with one primary button last', async () => {
-		render(ChatExportActions, { sessionId: 'synthetic-session', page: true });
-		const choices = screen.getByRole('radiogroup', { name: 'Export format' });
-		const radios = Array.from(choices.querySelectorAll('[role="radio"]'));
-		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
-		const primary = screen.getByRole('button', { name: 'Export for sharing' });
-		expect(primary.closest('.page-foot')).toBeTruthy();
-		await fireEvent.click(primary);
+describe('sheet rows (the phone chat actions sheet)', () => {
+	it('labels both rows with their notes and downloads the chosen export', async () => {
+		render(ChatExportActions, { sessionId: 'synthetic-session', sheet: true });
+		expect(screen.getByText('Export for sharing')).toBeTruthy();
+		expect(screen.getByText(/Raw history; may contain secrets/)).toBeTruthy();
+		await fireEvent.click(sharing());
 		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'markdown', { shareSafe: true });
 	});
 
-	it('downloads the raw backup only when it is the chosen export', async () => {
-		render(ChatExportActions, { sessionId: 'synthetic-session', page: true });
-		await fireEvent.click(screen.getByRole('radio', { name: /Private backup/ }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Download private backup' }));
-		expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'jsonl');
+	it('disables both rows while its host is busy', () => {
+		render(ChatExportActions, { sessionId: 'synthetic-session', sheet: true, disabled: true });
+		expect((backup() as HTMLButtonElement).disabled).toBe(true);
+		expect((sharing() as HTMLButtonElement).disabled).toBe(true);
 	});
 });

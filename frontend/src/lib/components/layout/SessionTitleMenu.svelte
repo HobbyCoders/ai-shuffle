@@ -1,6 +1,9 @@
 <script lang="ts">
 	/**
-	 * SessionTitleMenu — the bound chat's actions (Rename / Fork / Delete).
+	 * SessionTitleMenu — the bound chat's actions (Rename / Fork / Export / Delete).
+	 *
+	 * Export (private backup and sharing copy) shows once the chat has messages.
+	 * This menu is its only home, on the desktop bar and in the phone app.
 	 *
 	 * `crumb` (desktop StudioTopBar): the title itself is the trigger and opens
 	 * a compact text-row menu under it. Unbound "New Chat" and non-chat pages
@@ -15,7 +18,7 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { ChevronDown, GitFork, Pencil, X } from 'lucide-svelte';
+	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { forkSession, getErrorMessage } from '$lib/api/client';
@@ -41,6 +44,10 @@
 	const bound = $derived(!!sessionId);
 	const open = $derived($openHeaderDropdown === 'session-title');
 	const sheet = $derived(variant === 'sheet');
+	/** Exports need this chat's transcript loaded, with something in it. */
+	const canExport = $derived(
+		!!sessionId && $activeSession.sessionId === sessionId && ($activeSession.messages?.length ?? 0) > 0
+	);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
 	let chevronRef = $state<HTMLButtonElement | null>(null);
@@ -255,7 +262,10 @@
 					<div class="stm-list" role="group" aria-label="Session actions">
 						<button type="button" class="sheet-row" disabled={renaming} onclick={startRename}><Pencil size={17} aria-hidden="true" />Rename session</button>
 						<button type="button" class="sheet-row" disabled={renaming} onclick={handleFork}><GitFork size={17} aria-hidden="true" />Fork session</button>
-						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
+						{#if canExport && sessionId}
+							<ChatExportActions {sessionId} sheet disabled={renaming} onStart={closeSheet} />
+						{/if}
+						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}><Trash2 size={17} aria-hidden="true" />Delete</button>
 					</div>
 				</div>
 			</div>
@@ -299,20 +309,18 @@
 		{#if open && bound && !renaming}
 			<div class="menu" role="menu" aria-label="Session actions">
 				<button type="button" class="dropdown-item" role="menuitem" onclick={startRename}>
-					Rename session
+					<Pencil size={16} strokeWidth={1.5} aria-hidden="true" />Rename session
 				</button>
 				<button type="button" class="dropdown-item" role="menuitem" onclick={handleFork}>
-					Fork session
+					<GitFork size={16} strokeWidth={1.5} aria-hidden="true" />Fork session
 				</button>
-				{#if sessionId && activeSession.current.sessionId === sessionId && (activeSession.current.messages?.length ?? 0) > 0}
-					<div class="menu-exports">
-						<div class="dropdown-divider" role="separator"></div>
-						<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
-					</div>
+				{#if canExport && sessionId}
+					<div class="dropdown-divider" role="separator"></div>
+					<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
 				{/if}
 				<div class="dropdown-divider" role="separator"></div>
 				<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
-					Delete
+					<Trash2 size={16} strokeWidth={1.5} aria-hidden="true" />Delete
 				</button>
 			</div>
 		{/if}
@@ -428,7 +436,8 @@
 		top: calc(100% + 4px);
 		left: 0;
 		right: auto;
-		min-width: 180px;
+		/* Room for the export rows' notes to wrap once at most. */
+		width: 280px;
 		max-width: calc(100vw - 24px);
 		background: var(--card);
 		border: 1px solid var(--menu-border);
@@ -447,6 +456,7 @@
 	.dropdown-item {
 		display: flex;
 		align-items: center;
+		gap: 9px;
 		width: 100%;
 		min-height: var(--menu-row);
 		padding: 7px 10px;
@@ -467,17 +477,16 @@
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
-	.dropdown-item.danger {
+	.dropdown-item :global(svg) {
+		flex: none;
+		color: var(--muted-foreground);
+	}
+	.dropdown-item.danger,
+	.dropdown-item.danger :global(svg) {
 		color: var(--destructive);
 	}
 	.dropdown-item.danger:hover {
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
-	}
-
-	/* The header shows these as icons until a phone-width bar needs the room. */
-	.menu-exports { display: none; }
-	@media (max-width: 480px) {
-		.menu-exports { display: block; }
 	}
 
 	.dropdown-divider {

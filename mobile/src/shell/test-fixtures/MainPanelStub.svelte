@@ -10,10 +10,9 @@
 	} = $props();
 </script>
 
-{#snippet downloadAction()}<button type="button">Download chat</button>{/snippet}
 {#snippet headerActions()}<button type="button">Commit</button>{/snippet}
 
 <div data-testid="main-panel">
-	{@render header?.({ title: 'T', ...mainPanelView, downloadAction, headerActions })}
+	{@render header?.({ title: 'T', ...mainPanelView, headerActions })}
 	<button type="button" onclick={() => onOpenSession('s-9')}>Panel open session</button>
 </div>
