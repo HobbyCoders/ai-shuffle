@@ -76,6 +76,39 @@ def _restore_fork_branch(new_session_id: str, branch: str) -> None:
         )
 
 
+def _seed_cli_fork_events(new_session_id: str, new_sdk_session_id: str, working_dir: str,
+                          entries: list) -> None:
+    """Build a CLI fork's app event log from the transcript lines it was given.
+
+    A fork short of the head copies no events (see ``_copy_app_event_log``),
+    and the read-path backfill cannot fill them in yet: the store holds
+    nothing for the new transcript and heals from a JSONL file only once it
+    has sat idle for a minute. A chat opened before then is empty, and a turn
+    sent in it ends backfill eligibility for good. Parse the very lines that
+    were written, through the store parser's own transform, instead.
+    Non-fatal: on failure the fork stays usable and the old path still runs.
+    """
+    try:
+        from app.core.history_backfill import convert_messages_to_events
+        from app.core.jsonl_parser import parse_session_history_from_store
+        from app.db import session_events as session_events_db
+
+        if session_events_db.get_max_seq(new_session_id):
+            return  # The whole-session copy already seeded it.
+        messages, _usage = parse_session_history_from_store(
+            new_sdk_session_id,
+            working_dir,
+            lambda _sid, subpath=None: list(entries) if subpath is None else [],
+            use_cache=False,
+            store_version_loader=lambda _sid: (len(entries), len(entries)),
+        )
+        events = convert_messages_to_events(new_session_id, messages)
+        if events:
+            session_events_db.append_backfill_events(new_session_id, events)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not seed the event log of fork %s", new_session_id, exc_info=True)
+
+
 def _copy_app_event_log(source_session_id: str, dest_session_id: str, *, at_head: bool) -> None:
     """Copy the V2 chat event log onto the fork when the fork is the whole session.
 
@@ -446,6 +479,7 @@ async def _fork_owned(
         # Write entries up to and including fork point. Stamp sessionId to the
         # NEW sdk id — the CLI keys resume on the filename and cross-checks the
         # field, so leaving the parent's id makes --resume reject the file.
+        written_entries = []
         with open(new_jsonl_path, 'w', encoding='utf-8') as f:
             for i, entry in enumerate(original_entries):
                 if i > fork_entry_index:
@@ -453,6 +487,7 @@ async def _fork_owned(
                 payload = dict(entry)
                 payload["sessionId"] = new_sdk_session_id
                 f.write(json.dumps(payload) + '\n')
+                written_entries.append(payload)
 
         logger.debug(f"Created forked JSONL file: {new_jsonl_path} with {fork_entry_index + 1} entries")
 
@@ -471,6 +506,7 @@ async def _fork_owned(
         new_session_id,
         at_head=(fork_message_index == len(display_entries) - 1),
     )
+    await run_sync(_seed_cli_fork_events, new_session_id, new_sdk_session_id, working_dir, written_entries)
 
     logger.debug(f"Forked session {session_id} to {new_session_id} at message index {fork_message_index}")
 

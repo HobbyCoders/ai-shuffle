@@ -179,6 +179,55 @@ def test_owner_forks_its_chat_under_the_mirrors_id(mock_db, monkeypatch):
     assert len(sessions_db.get_sessions(limit=100)) == count
 
 
+def test_owner_seeds_a_cli_forks_history_before_publishing(mock_db, monkeypatch, tmp_path):
+    """A CLI-backed chat forked at an earlier message: the store holds nothing
+    for the new transcript and heals from its JSONL only once the file has sat
+    idle, so the owner seeds the fork's events from the lines it wrote."""
+    import asyncio
+    import json
+    from app.api import sessions_fork
+    from app.core import jsonl_parser
+    from app.core.config import settings
+    from app.db import session_events as events_db
+    from app.network import catalog, control
+
+    parent = "sess-cli-fork-parent"
+    sessions_db.create_session(parent, "default", title="cli parent")
+    sessions_db.update_session(parent, sdk_session_id="sdk-cli-parent")
+    rows = [
+        ("u1", None, "user", "first question"),
+        ("a1", "u1", "assistant", "first answer"),
+        ("u2", "a1", "user", "second question"),
+        ("a2", "u2", "assistant", "second answer"),
+    ]
+    source = tmp_path / "parent.jsonl"
+    source.write_text("\n".join(json.dumps({
+        "type": kind, "uuid": uid, "parentUuid": pid, "sessionId": "sdk-cli-parent",
+        "timestamp": f"2026-01-01T00:00:0{i}Z",
+        "message": {"role": kind, "content": [{"type": "text", "text": text}]},
+    }) for i, (uid, pid, kind, text) in enumerate(rows)) + "\n")
+    monkeypatch.setattr(settings, "claude_projects_dir", tmp_path / "projects", raising=False)
+    monkeypatch.setattr(jsonl_parser, "get_session_jsonl_path", lambda sdk, wd: source)
+
+    published = []
+
+    def capture(**kw):
+        sid = kw["session_ids"][0]
+        published.append([(e.get("type"), json.dumps(e.get("payload"))) for e in events_db.get_events(sid)])
+        return 0
+
+    monkeypatch.setattr(catalog, "publish_owned", capture)
+    monkeypatch.setattr(control, "stamp_provenance", lambda sid, label: True)
+
+    asyncio.run(sessions_fork.handle_fork(
+        {"session_id": parent, "new_session_id": "ses-cli0123456789ab", "message_index": 1}, "dev-mirror"))
+
+    assert len(published) == 1
+    seeded = " ".join(payload for _type, payload in published[0])
+    assert "first question" in seeded and "first answer" in seeded
+    assert "second question" not in seeded
+
+
 def test_owner_refuses_a_chat_it_only_mirrors(mock_db, remote_parent):
     import asyncio
     from app.api import sessions_fork
