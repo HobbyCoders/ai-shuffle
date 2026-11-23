@@ -132,6 +132,9 @@ describe('quick bar', () => {
 		await fireEvent.click(within(picker).getByRole('radio', { name: 'Low' }));
 		expect(onEffortSelect).toHaveBeenCalledExactlyOnceWith('low');
 		expect(screen.queryByRole('dialog', { name: 'Reasoning effort' })).toBeNull();
+		// The picked option went with the picker: focus is back on its cell, not the page.
+		await tick();
+		expect(document.activeElement).toBe(cell(/^Reasoning effort/));
 		await fireEvent.click(cell(/^Reasoning effort/));
 		await fireEvent.click(within(screen.getByRole('dialog', { name: 'Reasoning effort' })).getByRole('radio', { name: 'Auto' }));
 		expect(onEffortSelect).toHaveBeenLastCalledWith(null);
@@ -564,17 +567,12 @@ describe('Chat controls panel', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle }) });
 		const actions = within(panel()).getByRole('group', { name: 'More actions' });
 		expect(within(actions).getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
-		// Voice calls start from the composer itself; export lives in the chat title menu.
+		// Voice calls start from the composer itself; export lives in the chat actions sheet.
 		expect(within(panel()).queryByRole('button', { name: /^(Call|Start a call|Export chat)/i })).toBeNull();
 		expect(panel().querySelector('[data-page="export"]')).toBeNull();
 		expect(within(panel()).queryByRole('button', { name: /stash/i })).toBeNull();
 		await fireEvent.click(within(actions).getByRole('button', { name: 'Toggle live browser view' }));
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
-	});
-
-	it('drops the action bar when it has nothing to offer', () => {
-		render(MobileComposerControlsSheet, { props: props({ open: true, newChat: true }) });
-		expect(within(panel()).queryByRole('group', { name: 'More actions' })).toBeNull();
 	});
 
 	it('has no Phone cell: the phone opens when the agent uses it', () => {
@@ -722,6 +720,11 @@ describe('Chat controls panel', () => {
 			await view.rerender(props({ open: true, newChat: true }));
 			expect(vaultAction()).toBeNull();
 		});
+	});
+
+	it('drops the bottom action bar when it has no action to carry', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		expect(within(panel()).queryByRole('group', { name: 'More actions' })).toBeNull();
 	});
 
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {

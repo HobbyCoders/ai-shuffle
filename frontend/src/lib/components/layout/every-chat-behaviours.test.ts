@@ -49,8 +49,15 @@ describe('no assistant mode anywhere', () => {
 		expect(lib('stores/layout.svelte.ts')).not.toMatch(/\| 'assistant'/);
 	});
 
-	it('keeps the header download and Git on every chat', () => {
-		expect(mainPanel).toContain("{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}");
+	it('keeps export (in the chat actions menu) and Git on every chat', () => {
+		// Export moved from a header icon into the title menu: gated only on the
+		// open chat having messages.
+		const titleMenu = lib('components/layout/SessionTitleMenu.svelte');
+		expect(titleMenu).toMatch(
+			/const canExport = \$derived\(\s*!!sessionId && \$activeSession\.sessionId === sessionId && \(\$activeSession\.messages\?\.length \?\? 0\) > 0\s*\);/
+		);
+		expect(titleMenu.match(/\{#if canExport && sessionId\}/g)).toHaveLength(2);
+		expect(mainPanel).not.toContain('ChatExportActions');
 		expect(mainPanel).toContain('const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));');
 		expect(mainPanel).toContain('{#if activeTab && gitUiVisible}');
 	});

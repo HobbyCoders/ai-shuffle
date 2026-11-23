@@ -37,6 +37,7 @@
 	 *                   A saved chat that may move (session-move.ts) titles
 	 *                   its page "Move to another worker" (#645);
 	 *   Running tasks   RunningTasksList as a page.
+	 * Export lives in the title's chat actions sheet (SessionTitleMenu).
 	 * There is no visible close button; a visually hidden one stays for
 	 * keyboard and screen-reader users. While open the panel is modal: Tab and
 	 * Shift+Tab wrap inside it instead of reaching the page behind (#1407).
@@ -279,7 +280,8 @@
 
 	/** The bar's effort picker: a level pins it; null goes back to Auto. */
 	function pickEffort(value: string | null) {
-		picker = null;
+		// The picked option goes away with the picker: focus goes back to its cell.
+		closePicker(true);
 		if (value === null ? effortPinned : value !== effortValue || !effortPinned) onEffortSelect(value);
 	}
 
@@ -1069,7 +1071,7 @@
 
 		<div class="mcp-pages">
 			<!-- ═══ Main: the inset grouped list ═══ -->
-			<section class="mcp-page" data-page="main" class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
+			<section class="mcp-page" data-page="main" class:no-foot={!footShown} class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
 				<div class="mcp-scroll" bind:this={bodyRef}>
 					{#if rendered || panelVisible}
 						{#if showRunChip}
@@ -2057,9 +2059,8 @@
 	   height plus 16px), so its last row can always come fully into view, and
 	   anything passing under the bar's top edge fades out instead of being cut. */
 	.mcp-page[data-page='main'] { --mcp-foot-height: calc(61px + env(safe-area-inset-bottom, 0px)); }
-	.mcp-page[data-page='main']:has(> .mcp-foot) > .mcp-scroll { padding-bottom: calc(var(--mcp-foot-height) + 16px); }
-	/* No actions to show (a new chat with no browser or terminal): no bar, just the safe area. */
-	.mcp-page[data-page='main']:not(:has(> .mcp-foot)) > .mcp-scroll { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+	.mcp-page[data-page='main'] > .mcp-scroll { padding-bottom: calc(var(--mcp-foot-height) + 16px); }
+	.mcp-page[data-page='main'].no-foot > .mcp-scroll { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 	.mcp-foot {
 		position: absolute;
 		inset: auto 0 0;

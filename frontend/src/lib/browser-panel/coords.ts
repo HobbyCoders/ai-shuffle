@@ -17,6 +17,47 @@ export interface FrameMetadata {
 	offsetTop?: number;
 	scrollOffsetX?: number;
 	scrollOffsetY?: number;
+	/**
+	 * Width of the whole captured surface when it is wider than the page (see
+	 * `fitFrameToViewport`). The page occupies its top-left
+	 * `deviceWidth × deviceHeight`; the rest is empty window.
+	 */
+	surfaceWidth?: number;
+}
+
+/**
+ * The widest captured surface that can still be window padding. Chrome will not
+ * size a desktop window below about 500 px, so a page emulated narrower than
+ * that (every phone preset) is painted at the top-left of a 500 px wide
+ * screencast with an empty strip on the right. Anything wider is a different,
+ * stale frame, never padding.
+ */
+export const MAX_PADDED_SURFACE_WIDTH = 640;
+
+/**
+ * Frame metadata trimmed to the page's own viewport, or null when the frame is
+ * not of that viewport (a stale size: input must wait for the next frame).
+ *
+ * An exact match passes through unchanged. A frame of the same height whose
+ * surface is wider than the viewport, but no wider than a minimum-size window,
+ * is the padded surface described above: it is reported at the viewport's
+ * width with `surfaceWidth` set, so drawing crops the empty strip and pointer
+ * mapping stays one-to-one with the page.
+ */
+export function fitFrameToViewport<M extends FrameMetadata>(
+	meta: M,
+	viewport: { width: number; height: number },
+): M | null {
+	if (meta.deviceHeight !== viewport.height) return null;
+	if (meta.deviceWidth === viewport.width) return meta;
+	if (
+		viewport.width > 0 &&
+		meta.deviceWidth > viewport.width &&
+		meta.deviceWidth <= MAX_PADDED_SURFACE_WIDTH
+	) {
+		return { ...meta, deviceWidth: viewport.width, surfaceWidth: meta.deviceWidth };
+	}
+	return null;
 }
 
 /** Minimal rect shape (a real DOMRect satisfies this). */

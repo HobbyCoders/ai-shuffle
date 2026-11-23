@@ -48,7 +48,6 @@
 	} from '$lib/stores/derived/git-action-options';
 	import { computeOperationSideEffects, resolveCommitPlan, branchNameFromMessage } from '$lib/stores/derived/git-action-options';
 	import { isApiError } from '$lib/api/client';
-	import ChatExportMenu from './ChatExportMenu.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { pullConflicts, pullNotification, resolveConflictsPrompt, resolveWithAgentReason } from './git-pull-notification';
 	import { createResolveWithAgent, RESOLVE_AGENT_ACTION } from './git-resolve-with-agent';
@@ -1059,13 +1058,9 @@
 	Header actions are declared once and rendered by whichever bar is on screen:
 	the desktop StudioTopBar, or the shell's own `header` snippet (the mobile
 	app's AppTopBar). The git cluster is the existing GitHeaderActions
-	instance with its existing handlers.
+	instance with its existing handlers. Chat export lives in the title's
+	chat actions menu (SessionTitleMenu), not here.
 -->
-{#snippet downloadAction()}
-	{#if $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}
-		<span class="header-exports"><ChatExportMenu sessionId={activeTab.sessionId} /></span>
-	{/if}
-{/snippet}
 
 {#snippet headerActions()}
 	<!-- A running session without a project: the pill opens the one-way
@@ -1093,7 +1088,6 @@
 				onClickPull={handlePull}
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
-				showChatExports={!header}
 				compact={!!header || phoneLayout.active}
 			/>
 		</div>
@@ -1107,7 +1101,6 @@
 			title: headerTitle,
 			isSessionView: $activeView?.type === 'session',
 			embedded: $activeView ? embeddedViews.has($activeView.type) : false,
-			downloadAction,
 			headerActions,
 			subagentChat: activeIsSubagent
 		})}
@@ -1124,7 +1117,6 @@
 			rule={topBarRule}
 		>
 			{#snippet actions()}
-				{@render downloadAction()}
 				{@render headerActions()}
 			{/snippet}
 		</StudioTopBar>
@@ -1234,13 +1226,6 @@
 
 <!-- Git modals (rendered outside main-panel for proper z-index stacking) -->
 <style>
-	.header-exports { display: contents; }
-	/* A phone-width bar gives its room to the title; the chat's title menu
-	   carries these actions there (SessionTitleMenu). */
-	@media (max-width: 480px) {
-		.header-exports { display: none; }
-	}
-
 	.main-content { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 	/* Keep composer popovers below the sibling side-panel overlay. */
 	.main-surface { isolation: isolate; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }

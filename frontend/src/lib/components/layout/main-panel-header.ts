@@ -12,8 +12,6 @@ export interface MainPanelHeaderContext {
 	isSessionView: boolean;
 	/** The current view draws its own StudioPageHeader (feature panels). */
 	embedded: boolean;
-	/** "Download chat history" button (renders nothing when not applicable). */
-	downloadAction: Snippet;
 	/** The git action cluster (renders nothing when not applicable). */
 	headerActions: Snippet;
 	/**

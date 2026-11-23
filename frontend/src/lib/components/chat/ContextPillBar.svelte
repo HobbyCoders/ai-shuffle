@@ -871,6 +871,14 @@
 		}
 	}
 
+	/* A narrow composer column on a wide window (ChatInput's `.composer-narrow`)
+	   makes the same trade: the names keep their room, the leading icons go. */
+	:global(.composer-narrow) .context-pill-bar:not(.sheet-mode) :global(.ctx-chip > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+	:global(.composer-narrow) .context-pill-bar:not(.sheet-mode) :global(.ctx-chip > :where(span, div):not(.ctx-chip-cb) > svg:not(.lucide-chevron-down):not(.ctx-chip-chev)),
+	:global(.composer-narrow) .context-pill-bar:not(.sheet-mode) :global(.worker-status-dot.online) {
+		display: none;
+	}
+
 	.runner-badge-wrap {
 		position: relative;
 		min-width: 0;
