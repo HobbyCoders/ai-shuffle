@@ -588,7 +588,7 @@
 					aria-expanded={openPopover === 'permission'}
 					aria-busy={permissionPending || undefined}
 					aria-label="Permission mode: {permissionPending ? 'loading' : permissionLabel}{away ? ', Away mode on' : ''}"
-				>{permissionLabel}{#if away}<span class="away-badge" title={awayGlobal ? 'Away is on for all chats: agents decide with recommended defaults and report them at the end' : 'Away: agent decides with recommended defaults and reports them at the end'}>· Away</span>{/if}</button>
+				><span class="dock-txt-label">{permissionLabel}</span>{#if away}<span class="away-badge" title={awayGlobal ? 'Away is on for all chats: agents decide with recommended defaults and report them at the end' : 'Away: agent decides with recommended defaults and reports them at the end'}>· Away</span>{/if}</button>
 
 				{#if openPopover === 'permission'}
 					<div
@@ -888,7 +888,27 @@
 	.dock-right {
 		margin-left: auto;
 	}
-	.model-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.model-btn span,
+	.dock-txt-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	/* Icons keep their size on a crowded row; only the text labels give way,
+	   to an ellipsis. A label that did not clip ran under the globe beside it. */
+	.dock-ico,
+	.away-badge {
+		flex: none;
+	}
+
+	/* A narrow column (ChatInput sets `.composer-narrow` from the column's own
+	   width and gives this row the box's full width): when access, browser and
+	   terminal do not fit beside model and effort, the right group wraps to a
+	   line of its own and stays right-aligned. */
+	:global(.composer-narrow) .controls-dock {
+		flex-wrap: wrap;
+		row-gap: 2px;
+	}
+	:global(.composer-narrow) .dock-group {
+		max-width: 100%;
+	}
 
 	.dock-pop-wrap {
 		position: relative;

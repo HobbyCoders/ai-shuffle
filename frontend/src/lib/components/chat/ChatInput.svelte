@@ -922,6 +922,32 @@
 
 	// Island ref
 	let islandRef = $state<HTMLDivElement | null>(null);
+
+	// A narrow column (a side panel open beside the chat on a desktop window)
+	// gives the controls row a second line: see `.composer-narrow` here, in
+	// ControlsDock and in ContextPillBar. The window can be wide while the
+	// column is not, so this reads the column's own width. It never reads the
+	// contents, so chips and labels arriving after the first paint cannot flip
+	// it and move the composer.
+	const NARROW_COMPOSER_PX = 520;
+	let columnRef = $state<HTMLDivElement | null>(null);
+	let composerNarrow = $state(false);
+	$effect(() => {
+		const column = columnRef;
+		if (!column || phone) {
+			composerNarrow = false;
+			return;
+		}
+		const read = () => {
+			const width = column.clientWidth;
+			composerNarrow = width > 0 && width < NARROW_COMPOSER_PX;
+		};
+		read();
+		if (typeof ResizeObserver === 'undefined') return;
+		const observer = new ResizeObserver(read);
+		observer.observe(column);
+		return () => observer.disconnect();
+	});
 	let mobileComposerExpanded = $state(false);
 	// Mobile buttons can lose focus when disabled (voice preparation), and touch
 	// browsers need not focus them at all. Retain interaction ownership until the
@@ -2059,6 +2085,8 @@
 >
 	<div
 		class="chat-input-container"
+		class:composer-narrow={composerNarrow}
+		bind:this={columnRef}
 		role="region"
 		aria-label="File drop zone"
 		ondragenter={handleDragEnter}
@@ -2497,6 +2525,30 @@
 		position: relative;
 		z-index: 20;
 		margin: 0 8px 8px 0;
+	}
+	/* A narrow column: the controls get the box's full width on their own row
+	   (wrapping in ControlsDock if they still need more), and attach and the
+	   circles take the row under them, Send still in the bottom-right corner.
+	   The circles (Stop and the stash included) never take width from the
+	   controls this way.
+	   [ text ...................................... ]
+	   [ access · browser · terminal  model · effort ]
+	   [+]                                 [circles] */
+	.desktop-composer .composer-narrow .chat-island > :global(.controls-dock) {
+		grid-row: 2;
+		grid-column: 1 / -1;
+		padding: 0 8px 0 9px;
+	}
+	.desktop-composer .composer-narrow .composer-attach,
+	.desktop-composer .composer-narrow .send-cluster {
+		grid-row: 3;
+	}
+	/* The circles now sit under the controls row (z 30), and the stash menu
+	   opens upward over it: lift the circles above that row so the menu takes
+	   its own clicks. The two rows' boxes never overlap, so this lifts only
+	   what opens out of the circles. */
+	.desktop-composer .composer-narrow .send-cluster {
+		z-index: 31;
 	}
 
 	/* ===== THE CIRCLES =====
