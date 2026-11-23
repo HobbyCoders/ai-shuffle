@@ -754,6 +754,53 @@ async def interrupt(
         )
 
 
+@router.post("/session/{session_id}/stop")
+async def stop(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth)
+):
+    """Stop a chat as its own Stop button does, on whichever worker runs it.
+
+    Ends the running turn, the chat's background work and its queued turns. A
+    chat another worker runs is stopped there. A chat with nothing running
+    answers ``stopped`` too (a Stop is safe to repeat). 409 when the worker
+    refused, 503 when that worker cannot be reached. ``incomplete`` and
+    ``message`` say when some background work may still run.
+    """
+    session = await require_session(request, session_id)
+    from app.network import control
+    try:
+        owner = control.owner_of(session)
+    except Exception:  # noqa: BLE001 — never let the network layer block a Stop
+        logger.debug("Network owner lookup failed for %s", session_id, exc_info=True)
+        owner = None
+    try:
+        if owner:
+            result = await control.interrupt(owner, session_id, "stop", stop_background=True,
+                                             source="user_stop")
+        else:
+            from app.core.query_session_lifecycle import interrupt_owned_session
+            from app.core import turn_claim
+            result = await interrupt_owned_session(session_id, "stop", stop_background=True,
+                                                   source="user_stop")
+            # Another runner executing this chat reacts now, not on its next poll.
+            await run_sync(turn_claim.notify_turns_changed, session_id)
+    except control.MaybeApplied:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="The worker that runs this chat did not answer. It may have stopped.")
+    except control.RunnerUnreachable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"The worker that runs this chat is offline ({exc}).")
+    except control.ControlRefused as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return {
+        "status": "stopped" if result.get("interrupted") else "stopping",
+        "session_id": session_id,
+        **({"incomplete": True, "message": result.get("message")} if result.get("incomplete") else {}),
+    }
+
+
 @router.get("/streaming/active")
 async def list_active_sessions(
     request: Request,

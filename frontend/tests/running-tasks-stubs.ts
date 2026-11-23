@@ -68,10 +68,10 @@ export async function stopSessionTask(_sessionId: string, taskId: string) {
 /** Chats streaming on any device: none in the fixture. */
 export const streamingSessions = writable<Map<string, unknown>>(new Map());
 
-export const interrupted: string[] = [];
-export async function interruptSession(sessionId: string) {
-	interrupted.push(sessionId);
-	return { status: 'interrupted', session_id: sessionId };
+export const stoppedChats: string[] = [];
+export async function stopSession(sessionId: string) {
+	stoppedChats.push(sessionId);
+	return { status: 'stopped', session_id: sessionId };
 }
 
 export const opened: string[] = [];
