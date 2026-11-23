@@ -43,9 +43,10 @@ def _fork_inherited_fields(original_session: dict) -> dict:
     defaults instead of what the parent was running.
     """
     return {
-        # The lane: a chat-lane chat has no project by design; forked into the
-        # code lane it would ask for one before it could take a file.
-        "mode": original_session.get("mode"),
+        # The chat lane: a chat-lane chat has no project by design; forked into
+        # the code lane it would ask for one before it could take a file. A
+        # voice row's fork is a normal conversation, with no call bound to it.
+        "mode": "chat" if original_session.get("mode") == "chat" else None,
         "project_v2_id": original_session.get("project_v2_id"),
         "provider_id": original_session.get("provider_id"),
         "derive_provider_from_profile": False,
