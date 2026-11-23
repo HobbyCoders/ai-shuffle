@@ -3028,10 +3028,10 @@ def create_builtin_tools_server(
         "can continue there (e.g. 'wrap up and hand off to DesktopWorker'). The "
         "move waits for this turn, queued messages and every running subagent and "
         "background task (Monitors, CI watches, shells); still busy after 10 "
-        "minutes, it is cancelled. So first reach a stop point, commit and push, "
+        "minutes, it is cancelled. So first reach a stop point (in a Git checkout, commit and push), "
         "stop or wait out subagents and background tasks, then call this once and "
         "end the turn without a wrap-up summary; restart that work on the target. The "
-        "app pushes the branch, syncs the target and moves the whole session; the chat "
+        "app pushes any branch, syncs the target and moves the whole session; the chat "
         "resumes there with a short notice carrying your note, and a failed move is reported "
         "back to you unless the chat is stopped. Pass the worker's name as shown in the app (or its device "
         "id) and an optional one-line note on what was in progress; use absolute dates.",
