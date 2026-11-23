@@ -11,7 +11,7 @@
 	 * the same rule (POST /sessions/{id}/attach-project refuses a second
 	 * attach, and relays one for a session another worker runs).
 	 */
-	import { FolderClosed, GitBranch, Lock, ShieldCheck, SquareTerminal, X, Check, Loader2 } from 'lucide-svelte';
+	import { ChevronLeft, ChevronRight, FolderClosed, GitBranch, Lock, ShieldCheck, SquareTerminal, X, Check, Loader2 } from 'lucide-svelte';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { attachProject } from '$lib/api/sessions';
@@ -29,7 +29,9 @@
 	} from '$lib/components/ui/sheet-drag';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { buildWorkspacePickerItems } from './workspace-catalog';
+	import { buildWorkspacePickerItems, pickerGroupIds } from './workspace-catalog';
+	import { groups, organizeByGroups } from '$lib/stores/groups.svelte';
+	import { tick } from 'svelte';
 	import { ATTACH_GAINS, attachChoice, attachWarning, type AttachOwner } from '$lib/components/chat/session-scope';
 
 	interface Props {
@@ -60,11 +62,34 @@
 		}))
 	);
 	const pickedItem = $derived(items.find((i) => i.id === picked) ?? null);
+	// The user's project groups are folders: a group row opens its projects,
+	// Back returns. The rows listed are the radios the arrow keys move through.
+	let openGroupName = $state<string | null>(null);
+	const organized = $derived(organizeByGroups(items, 'projects', $groups, pickerGroupIds));
+	const groupRows = $derived(
+		organized.groupOrder
+			.map((g) => ({ name: g.name, items: organized.grouped.get(g.name) ?? [] }))
+			.filter((g) => g.items.length > 0)
+	);
+	const openGroup = $derived(groupRows.find((g) => g.name === openGroupName) ?? null);
+	const listed = $derived(openGroup ? openGroup.items : groupRows.length ? organized.ungrouped : items);
+	let listRef = $state<HTMLDivElement | null>(null);
+	async function enterGroup(name: string | null) {
+		const from = openGroupName;
+		openGroupName = name;
+		await tick();
+		// Keep the keyboard in the list: into the group's first stop, or back
+		// onto the group row that opened it.
+		const target = name
+			? listRef?.querySelector<HTMLElement>('[role="radio"][tabindex="0"], .group-back')
+			: listRef?.querySelector<HTMLElement>(`[data-group="${CSS.escape(from ?? '')}"]`);
+		target?.focus({ preventScroll: true });
+	}
 	const warning = $derived(attachWarning(agentName, pickedItem?.name));
 	const canAttach = $derived(!!pickedItem && pickedItem.pickable && !blockedReason && !attaching);
 
 	$effect(() => {
-		if (!open) { picked = null; error = null; attaching = false; dragY = 0; dragging = false; leaving = false; gesture = null; }
+		if (!open) { picked = null; openGroupName = null; error = null; attaching = false; dragY = 0; dragging = false; leaving = false; gesture = null; }
 	});
 
 	// ── Phone: drag the sheet down to dismiss it ──────────────────────
@@ -197,8 +222,8 @@
 	// the focus together. Rows the session's worker has no checkout of can't be
 	// picked, so the arrows skip them; they stay listed with their reason.
 	let rowRefs = $state<Record<string, HTMLButtonElement | null>>({});
-	const pickable = $derived(items.filter((i) => i.pickable));
-	const tabStop = $derived(picked ?? pickable[0]?.id ?? null);
+	const pickable = $derived(listed.filter((i) => i.pickable));
+	const tabStop = $derived(pickable.some((i) => i.id === picked) ? picked : pickable[0]?.id ?? null);
 
 	function onRadioKeydown(e: KeyboardEvent, id: string) {
 		if (!pickable.length) return;
@@ -338,8 +363,32 @@
 				</button>
 			</header>
 
-			<div class="proj-list" role="radiogroup" aria-label="Project">
-				{#each items as item (item.id)}
+			<div class="proj-list" bind:this={listRef}>
+				{#if openGroup}
+					<button type="button" class="proj-row group-back" onclick={() => enterGroup(null)}>
+						<ChevronLeft size={15} strokeWidth={1.7} aria-hidden="true" />
+						<span class="proj-name">{openGroup.name}</span>
+					</button>
+				{:else}
+					{#each groupRows as group (group.name)}
+						<button
+							type="button"
+							class="proj-row group-row"
+							data-group={group.name}
+							aria-label="{group.name}, {group.items.length} {group.items.length === 1 ? 'project' : 'projects'}{group.items.some((i) => i.id === picked) ? ', has the picked project' : ''}"
+							onclick={() => enterGroup(group.name)}
+						>
+							<FolderClosed size={15} strokeWidth={1.7} aria-hidden="true" />
+							<span class="proj-name">{group.name}</span>
+							{#if group.items.some((i) => i.id === picked)}<Check size={14} strokeWidth={2.4} class="proj-check" aria-hidden="true" />{/if}
+							<span class="group-count">{group.items.length}</span>
+							<ChevronRight size={15} strokeWidth={1.7} aria-hidden="true" />
+						</button>
+					{/each}
+					{#if groupRows.length && listed.length}<div class="group-divider" role="separator"></div>{/if}
+				{/if}
+				<div class="proj-radios" role="radiogroup" aria-label={openGroup ? `Project in ${openGroup.name}` : 'Project'}>
+				{#each listed as item (item.id)}
 					<button
 						bind:this={rowRefs[item.id]}
 						type="button"
@@ -362,8 +411,9 @@
 						{/if}
 					</button>
 				{:else}
-					<p class="empty">No projects yet. Add one from the Projects page.</p>
+					{#if !groupRows.length}<p class="empty">No projects yet. Add one from the Projects page.</p>{/if}
 				{/each}
+				</div>
 			</div>
 
 			<div class="checkout-row">
@@ -459,6 +509,11 @@
 	.proj-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 	.proj-note { font-size: 11.5px; color: var(--subtle-foreground); }
 	.proj-row :global(.proj-check) { color: var(--primary); }
+	.proj-radios { display: flex; flex-direction: column; gap: 2px; }
+	.group-row .proj-name { color: var(--foreground); }
+	.group-back { color: var(--muted-foreground); }
+	.group-count { font-size: 11.5px; color: var(--muted-foreground); background: var(--muted); border-radius: 999px; padding: 1px 7px; }
+	.group-divider { height: 1px; margin: 2px 0; background: var(--border-subtle); flex: none; }
 	.empty { padding: 10px; font-size: 13px; color: var(--muted-foreground); }
 
 	.row-lbl { font-size: 11.5px; font-weight: 500; color: var(--subtle-foreground); }

@@ -245,6 +245,27 @@ export const groups = {
 
 // ─── Pure Utility Function (re-exported as-is) ──────────────────────────────
 
+/** The ids an item's group may be saved under (its own id, then any alias). */
+export type GroupIds<T> = (item: T) => readonly (string | null | undefined)[];
+
+/**
+ * The group an item is in: the first of `ids` assigned to a group that still
+ * exists. A picker row can stand for several local clones of one repository;
+ * the group may be saved on any of them.
+ */
+export function groupOf(
+	ids: readonly (string | null | undefined)[],
+	entityType: EntityType,
+	groupsState: GroupsState
+): string | null {
+	const entity = groupsState[entityType];
+	for (const id of ids) {
+		const name = id ? entity.assignments[id] : undefined;
+		if (name && entity.groups.some((g) => g.name === name)) return name;
+	}
+	return null;
+}
+
 /**
  * Helper function to organize items into groups
  * Returns { grouped: Map<groupName, items[]>, ungrouped: items[] }
@@ -252,7 +273,8 @@ export const groups = {
 export function organizeByGroups<T extends { id: string }>(
 	items: T[],
 	entityType: EntityType,
-	groupsState: GroupsState
+	groupsState: GroupsState,
+	idsOf: GroupIds<T> = (item) => [item.id]
 ): { grouped: Map<string, T[]>; ungrouped: T[]; groupOrder: GroupDefinition[] } {
 	const entity = groupsState[entityType];
 	const grouped = new Map<string, T[]>();
@@ -265,8 +287,8 @@ export function organizeByGroups<T extends { id: string }>(
 
 	// Distribute items
 	for (const item of items) {
-		const groupName = entity.assignments[item.id];
-		if (groupName && grouped.has(groupName)) {
+		const groupName = groupOf(idsOf(item), entityType, groupsState);
+		if (groupName) {
 			grouped.get(groupName)!.push(item);
 		} else {
 			ungrouped.push(item);
@@ -274,6 +296,36 @@ export function organizeByGroups<T extends { id: string }>(
 	}
 
 	return { grouped, ungrouped, groupOrder: entity.groups };
+}
+
+/** A native select's options, in the shape SelectField's `groups` takes. */
+export interface ProjectSelectGroup {
+	label: string;
+	options: { value: string; label: string; disabled?: boolean }[];
+}
+
+/**
+ * A project select's options split by the user's project groups, for a
+ * native <select> (which cannot drill into a folder): `leading` options
+ * first ("All projects", "None"), then one labelled section per group that
+ * has projects, then "Other projects". With no groups in use, one flat list.
+ */
+export function projectSelectGroups(
+	projects: readonly { id: string; name: string }[],
+	groupsState: GroupsState,
+	leading: ProjectSelectGroup['options'] = []
+): ProjectSelectGroup[] {
+	const { grouped, ungrouped, groupOrder } = organizeByGroups([...projects], 'projects', groupsState);
+	const option = (p: { id: string; name: string }) => ({ value: p.id, label: p.name });
+	const sections = groupOrder
+		.map((g) => ({ label: g.name, options: (grouped.get(g.name) ?? []).map(option) }))
+		.filter((g) => g.options.length > 0);
+	if (sections.length === 0) return [{ label: '', options: [...leading, ...projects.map(option)] }];
+	const result: ProjectSelectGroup[] = [];
+	if (leading.length) result.push({ label: '', options: leading });
+	result.push(...sections);
+	if (ungrouped.length) result.push({ label: 'Other projects', options: ungrouped.map(option) });
+	return result;
 }
 
 preferenceSync.register(API_PREFERENCE_KEY, {

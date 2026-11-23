@@ -775,6 +775,74 @@ describe('Sidebar session groups', () => {
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
 
+	it('shows project groups as folders, keeps keyboard focus, and ignores a peer chat\'s colliding local id', async () => {
+		mocks.adapters.get('groups')!.apply({
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { 'visible-project': 'Work', demo: 'Work' } },
+		});
+		// A grouped, unlinked local project with no chats loaded.
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'demo', name: 'Demo' },
+		]);
+		mocks.sessions.set([
+			// An unrelated unlinked project on a peer that shares the slug.
+			session('peer-demo', 'Peer demo chat', 'demo', false, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop',
+				origin: 'local:demo', project_name: 'Peer demo',
+			}),
+			session('active', 'Active chat', 'visible-project', true),
+			// A peer's chat whose own project id happens to equal a local one, but
+			// whose shared identity names a different project.
+			session('peer', 'Peer chat', 'visible-project', false, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop',
+				link_group_id: 'group:elsewhere', project_name: 'Elsewhere',
+			}),
+		]);
+		try {
+			render(Sidebar, { props: sidebarProps });
+			await openFilter();
+			const folder = filterOption('Work, 1 project');
+			expect(filterLabels()).toEqual(expect.arrayContaining(['Elsewhere', 'Peer demo']));
+
+			folder.focus();
+			await fireEvent.click(folder);
+			await tick();
+			const back = filterOption('Work');
+			expect(document.activeElement).toBe(back);
+			expect(filterLabels()).toContain('Visible Project');
+			expect(filterLabels()).not.toContain('Elsewhere');
+			expect(filterLabels()).not.toContain('Peer demo');
+
+			await fireEvent.click(back);
+			await tick();
+			expect(document.activeElement).toBe(filterOption('Work, 1 project'));
+		} finally {
+			mocks.adapters.get('groups')!.apply(undefined);
+		}
+	});
+
+	it('groups a chat this worker owns that carries only its local origin', async () => {
+		mocks.adapters.get('groups')!.apply({
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { demo: 'Work' } },
+		});
+		mocks.projects.set([{ id: 'demo', name: 'Demo' }]);
+		mocks.clusterProjects.set([
+			{ project_v2_id: 'v2-demo', origin: 'local:demo', name: 'Demo', local_project_id: 'demo', remote_only: false, eligible: [] },
+		]);
+		// Started here from a peer: no legacy project id, only the catalog origin.
+		mocks.sessions.set([
+			session('owned', 'Owned chat', null, true, false, { origin: 'local:demo', project_name: 'Demo' }),
+		]);
+		try {
+			render(Sidebar, { props: sidebarProps });
+			await openFilter();
+			await fireEvent.click(filterOption('Work, 1 project'));
+			expect(filterLabels()).toContain('Demo');
+		} finally {
+			mocks.adapters.get('groups')!.apply(undefined);
+		}
+	});
+
 	it('closes the filter sheet on Escape and on the scrim', async () => {
 		render(Sidebar, { props: sidebarProps });
 

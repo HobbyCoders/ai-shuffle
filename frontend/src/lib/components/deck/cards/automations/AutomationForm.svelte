@@ -18,6 +18,7 @@
 import AutomationModelError from './AutomationModelError.svelte';
 	import type { Profile } from '$lib/api/client';
 	import type { Project } from '$lib/stores/types';
+	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
 	import type { Connector, ConnectorTypeInfo } from '$lib/api/connectors';
 	import { slide } from 'svelte/transition';
 	import {
@@ -417,7 +418,7 @@ import AutomationModelError from './AutomationModelError.svelte';
     {#if permissionValue === 'bypassPermissions'}<p class="st-note" data-testid="automation-bypass-hint">Runs every tool, including shell commands, without asking — nobody is watching an automation.</p>{/if}
    {/snippet}
   </SettingRow></div>
-  <SettingRow label="Project" hint="Scope the run to a project, or leave global."><SelectField value={formProjectId} options={[{value:'',label:'None (global)'},...(formProjectId && !projects.some(p => p.id === formProjectId) ? [{value:formProjectId,label:'Saved project (unavailable)'}] : []), ...projects.map(p => ({value:p.id,label:p.name}))]} onchange={onUpdateFormProjectId} /></SettingRow>
+  <SettingRow label="Project" hint="Scope the run to a project, or leave global."><SelectField value={formProjectId} groups={projectSelectGroups(projects, $groups, [{value:'',label:'None (global)'},...(formProjectId && !projects.some(p => p.id === formProjectId) ? [{value:formProjectId,label:'Saved project (unavailable)'}] : [])])} onchange={onUpdateFormProjectId} /></SettingRow>
   <SettingRow label="Output" hint="Where the result is delivered.">
    {#snippet expanded()}<Segmented label="Output" value={formOutputType} options={[{value:'session',label:'Chat'},{value:'connector',label:'Connector'},{value:'webhook',label:'Webhook'},{value:'none',label:'None'}]} onchange={(value) => {onUpdateFormOutputType(value);onUpdateFormOutputConfig({});}} />{/snippet}
   </SettingRow>
