@@ -2543,6 +2543,13 @@
 	.desktop-composer .composer-narrow .send-cluster {
 		grid-row: 3;
 	}
+	/* The circles now sit under the controls row (z 30), and the stash menu
+	   opens upward over it: lift the circles above that row so the menu takes
+	   its own clicks. The two rows' boxes never overlap, so this lifts only
+	   what opens out of the circles. */
+	.desktop-composer .composer-narrow .send-cluster {
+		z-index: 31;
+	}
 
 	/* ===== THE CIRCLES =====
 	   Attach and dictate are quiet icons, Talk or Send the one filled action at
