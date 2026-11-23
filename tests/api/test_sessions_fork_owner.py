@@ -198,6 +198,49 @@ def test_owner_forks_its_chat_under_the_mirrors_id(mock_db, monkeypatch):
     assert len(sessions_db.get_sessions(limit=100)) == count
 
 
+def test_owner_asked_again_mid_copy_makes_one_fork(mock_db, monkeypatch):
+    """The row appears only after the copy, so a repeat that arrives while the
+    first request is still copying (its answer was lost) waits for that fork
+    instead of copying the history a second time, and both get the fork."""
+    import asyncio
+    import threading
+    from app.api import sessions_fork
+    from app.core.provider import fluid_transcript
+    from app.network import catalog, control
+    from tests.api.test_sessions_fork_inheritance import PARENT_SID as OWNED_SID, _seed_parent
+
+    _seed_parent()
+    monkeypatch.setattr(catalog, "publish_owned", lambda **kw: 0)
+    monkeypatch.setattr(control, "stamp_provenance", lambda sid, label: True)
+    real_fork = fluid_transcript.fork_fluid_session
+    copies, release = [], threading.Event()
+
+    def slow_copy(*args, **kwargs):
+        copies.append(args)
+        release.wait(5)
+        return real_fork(*args, **kwargs)
+
+    monkeypatch.setattr(fluid_transcript, "fork_fluid_session", slow_copy)
+    body = {"session_id": OWNED_SID, "new_session_id": "ses-0123456789abcdef"}
+
+    async def scenario():
+        first = asyncio.ensure_future(sessions_fork.handle_fork(body, "dev-mirror"))
+        while not copies:
+            await asyncio.sleep(0.01)
+        # The first request's connection drops mid-copy; the mirror asks again.
+        first.cancel()
+        again = asyncio.ensure_future(sessions_fork.handle_fork(body, "dev-mirror"))
+        await asyncio.sleep(0.05)
+        release.set()
+        return await again
+
+    result = asyncio.run(scenario())
+    assert result["session_id"] == "ses-0123456789abcdef"
+    assert len(copies) == 1
+    assert sessions_db.get_session("ses-0123456789abcdef")["sdk_session_id"]
+    assert sessions_fork._INFLIGHT_FORKS == {}
+
+
 def _cli_parent(monkeypatch, tmp_path, parent):
     """A CLI-backed parent with a two-turn JSONL transcript and no app events.
     Returns the list each publish appends the fork's (type, payload) events to."""

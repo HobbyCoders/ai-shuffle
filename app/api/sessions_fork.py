@@ -719,7 +719,7 @@ async def handle_fork(body: dict, from_device: str) -> dict:
     worker only mirrors. Keyed on ``new_session_id``, so a repeated request
     after a lost answer returns the fork already made.
     """
-    from app.network import catalog, control
+    from app.network import control
 
     session_id = str(body.get("session_id") or "")
     new_session_id = body.get("new_session_id")
@@ -729,6 +729,38 @@ async def handle_fork(body: dict, from_device: str) -> dict:
     if message_index is not None and (isinstance(message_index, bool) or not isinstance(message_index, int)):
         raise ValueError("message_index must be an integer")
     original_session = await run_sync(control._require_owned, session_id)
+
+    # The fork's row appears only once its history is copied, so a repeat
+    # (the caller asks again when an answer is lost) waits on the fork still
+    # being made instead of copying a second time. No await between the check
+    # and the registration; the shield keeps a dropped request from cancelling it.
+    inflight = _INFLIGHT_FORKS.get(new_session_id)
+    if inflight is None:
+        task = asyncio.ensure_future(_fork_for_peer(
+            body, session_id, new_session_id, message_index, original_session, from_device,
+        ))
+        inflight = _INFLIGHT_FORKS[new_session_id] = (session_id, task)
+
+        def _done(finished: asyncio.Future) -> None:
+            _INFLIGHT_FORKS.pop(new_session_id, None)
+            if not finished.cancelled():
+                finished.exception()  # Retrieved: a dropped first request awaits nothing.
+
+        task.add_done_callback(_done)
+    elif inflight[0] != session_id:
+        raise ValueError("That session id is already in use")
+    return await asyncio.shield(inflight[1])
+
+
+#: Peer forks still being made, by new_session_id: (parent id, task).
+_INFLIGHT_FORKS: dict[str, tuple[str, "asyncio.Future[dict]"]] = {}
+
+
+async def _fork_for_peer(
+    body: dict, session_id: str, new_session_id: str, message_index, original_session: dict, from_device: str,
+) -> dict:
+    """The fork ``handle_fork`` makes (or the one it already made) for a peer."""
+    from app.network import catalog, control
 
     existing = await run_sync(database.get_session, new_session_id)
     if existing is not None:
