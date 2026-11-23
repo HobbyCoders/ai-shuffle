@@ -2242,6 +2242,9 @@ def create_postgres_schema(cursor: Any) -> None:
     from app.db.watches import create_schema as create_watches_schema
 
     create_watches_schema(cursor)
+    from app.db.pr_watches import create_schema as create_pr_watches_schema
+
+    create_pr_watches_schema(cursor)
 
     # ==================================================================
     # SEED DATA

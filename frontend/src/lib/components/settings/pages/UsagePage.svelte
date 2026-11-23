@@ -7,9 +7,11 @@
 	import PreferencePage from '../shell/PreferencePage.svelte';
 	import SpendingRows from './SpendingRows.svelte';
 	import LimitResumeRows from './LimitResumeRows.svelte';
+	import PrWatchRows from './PrWatchRows.svelte';
 </script>
 
 <PreferencePage category="usage">
 	<SpendingRows />
 	<LimitResumeRows />
+	<PrWatchRows />
 </PreferencePage>

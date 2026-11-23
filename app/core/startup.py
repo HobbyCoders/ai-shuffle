@@ -444,6 +444,10 @@ async def start_services() -> None:
 
     await watch_manager.start()
 
+    from app.core.pr_watch import pr_watch_manager
+
+    await pr_watch_manager.start()
+
     from app.services.fal_catalog import catalog_service
     # Reads the whole model catalog; keep it off the loop so boot does not stall
     # the first requests. (Not visible to scan_blocking_db.py — it goes through
@@ -848,6 +852,9 @@ async def shutdown_services() -> bool:
     from app.core.watch_manager import watch_manager
 
     await watch_manager.shutdown()
+    from app.core.pr_watch import pr_watch_manager
+
+    await pr_watch_manager.shutdown()
     from app.core.global_events import global_events
     await global_events.shutdown()
     from app.core import composer_suggestions
