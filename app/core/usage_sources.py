@@ -157,6 +157,18 @@ def is_openai_platform_row(row: Mapping[str, Any] | None) -> bool:
     return host in ("", OPENAI_API_HOST)
 
 
+def _is_official_xai_row(row: Mapping[str, Any] | None) -> bool:
+    """xAI API-key rows on api.x.ai (not SuperGrok sign-in or custom hosts)."""
+    r = row or {}
+    if r.get("provider_type") != "xai" or r.get("auth_mode") in {"codex", "chatgpt", "grok"}:
+        return False
+    try:
+        host = (urlsplit(r.get("base_url") or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return host in ("", "api.x.ai")
+
+
 def is_grok_subscription_row(row: Mapping[str, Any] | None) -> bool:
     """SuperGrok OAuth rows. xAI API-key rows are ``provider_type='xai'``."""
     r = row or {}
@@ -521,6 +533,10 @@ class UsageLink:
     dashboard_url: str
     subscription: bool
     applies: Callable[[Mapping[str, Any] | None], bool] = field(compare=False, repr=False)
+    #: Also listed for a row whose polled source has no reading to show (an
+    #: xAI key without a management key): the usage API lists a link only for
+    #: rows with no ``providers`` entry, so a reading still wins.
+    unread_fallback: bool = False
 
 
 _LINKS: tuple[UsageLink, ...] = (
@@ -559,6 +575,14 @@ _LINKS: tuple[UsageLink, ...] = (
         dashboard_url="https://platform.openai.com/usage", subscription=False,
         applies=lambda row: is_openai_platform_row(row),
     ),
+    # An xAI API key whose team balance is not read: no management key is
+    # saved, or its first poll has not finished. A balance reading replaces it.
+    UsageLink(
+        id="xai_api", label="xAI API (pay as you go)",
+        note="No balance reading for this key",
+        dashboard_url="https://console.x.ai/", subscription=False,
+        applies=lambda row: _is_official_xai_row(row), unread_fallback=True,
+    ),
     # Per-turn cost is recorded from responses; only a balance is missing.
     UsageLink(
         id="opencode_console", label="OpenCode Console (pay as you go)", note="No balance meter for this key",
@@ -576,9 +600,10 @@ def usage_link_for(row: Mapping[str, Any] | None) -> UsageLink | None:
     A row with a polled source never gets one, and a key on a custom endpoint
     or another vendor platform matches no kind.
     """
-    if polled_sources(row):
+    link = next((link for link in _LINKS if link.applies(row)), None)
+    if link is None or (polled_sources(row) and not link.unread_fallback):
         return None
-    return next((link for link in _LINKS if link.applies(row)), None)
+    return link
 
 
 def passive_snapshot_type(row: Mapping[str, Any] | None, codex_backend: bool) -> str | None:

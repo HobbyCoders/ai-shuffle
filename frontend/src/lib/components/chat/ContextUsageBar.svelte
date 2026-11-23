@@ -52,7 +52,7 @@
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
-	import { lastPaidApiAccount } from './session-api-usage';
+	import { FAL_USAGE_ACCOUNT, lastPaidApiAccount } from './session-api-usage';
 	import { providerStatusAt } from '$lib/stores/rate-limit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
@@ -1124,8 +1124,9 @@
 				pb: null,
 				name: claudeDisplay.name,
 				subtext: claudeSubtext,
-				// A plan login is a subscription; an API-key login is an API account.
-				subscription: claudeDisplay.subtext !== 'API',
+				// A plan login is a subscription; API auth (a cloud provider or
+				// gateway, shown as "Cloud") is an API account.
+				subscription: !claudeIsApiLogin,
 			});
 		}
 		return entries.sort(compareSections);
@@ -1171,7 +1172,14 @@
 		const ids = [`provider:${effectiveProviderId}`, `provider:openrouter-account:${effectiveProviderId}`];
 		return visibleSections.find((s) => ids.includes(s.id)) ?? null;
 	});
-	const toolApiAccount = $derived(lastPaidApiAccount($activeSession.messages ?? []));
+	// The fal row is this install's own FAL_KEY (every worker uses the id
+	// `fal-ai`), so a fal charge made on another worker may be another account:
+	// only a session this install owns names it (`isSelf` would also accept an
+	// unknown owner whose usage falls back to this install's bucket).
+	const toolApiAccount = $derived.by(() => {
+		const account = lastPaidApiAccount($activeSession.messages ?? []);
+		return account === FAL_USAGE_ACCOUNT && !isSelfTarget($rateLimit, target) ? null : account;
+	});
 	const usageGroups = $derived.by<UsageGroup[]>(() => {
 		const subscriptions = visibleSections.filter((s) => s.subscription);
 		const apis = visibleSections.filter((s) => !s.subscription);

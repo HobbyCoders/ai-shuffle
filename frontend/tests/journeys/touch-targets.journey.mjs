@@ -171,6 +171,10 @@ await runJourney({
 				} else {
 					await page.getByRole('button', { name: /^Context and usage — / }).first().click();
 				}
+				// The Subscriptions / API keys groups start collapsed: open them.
+				const groups = page.locator('.usage-popover .group-header[aria-expanded="false"]').filter({ visible: true });
+				await groups.first().waitFor({ timeout: 15_000 }).catch(() => {});
+				for (let i = 0; i < 2 && (await groups.count()); i++) await groups.first().click();
 				const hide = page.getByRole('button', { name: /^Hide .+ usage$/ }).filter({ visible: true }).first();
 				await hide.waitFor({ timeout: 15_000 });
 				// A phone's sheet slides up first.

@@ -31,6 +31,9 @@ const mocks = vi.hoisted(() => {
 	};
 	return {
 		state,
+		claudeAuth: { auth_kind: 'subscription' as 'subscription' | 'api' | null, plan_type: null as string | null },
+		/** The install owning the chat; null is this one. */
+		target: null as string | null,
 		adapters: new Map<string, PreferenceAdapter>(),
 		activeSession: {
 			get current() {
@@ -55,6 +58,22 @@ vi.mock('$lib/services/preferences', () => ({
 vi.mock('$lib/stores/active-session', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
 	return { ...actual, activeSession: mocks.activeSession };
+});
+vi.mock('$lib/constants/models', async (importOriginal) => {
+	const actual = await importOriginal<Record<string, unknown>>();
+	return { ...actual, getClaudeAuth: () => mocks.claudeAuth };
+});
+vi.mock('$lib/stores/usage-target', () => {
+	const store = (get: () => string | null) => ({
+		get current() {
+			return get();
+		},
+		subscribe(fn: (v: string | null) => void) {
+			fn(get());
+			return () => {};
+		},
+	});
+	return { usageTargetInstance: store(() => mocks.target), usageTargetDeviceName: store(() => null) };
 });
 vi.mock('$lib/api/sessions', async (importOriginal) => {
 	const actual = await importOriginal<Record<string, unknown>>();
@@ -138,6 +157,8 @@ beforeEach(() => {
 	usageSections.set({});
 	rateLimit.__resetForTests();
 	Object.assign(mocks.state, { modelOverride: null, liveProvider: null, messages: [] });
+	mocks.claudeAuth = { auth_kind: 'subscription', plan_type: null };
+	mocks.target = null;
 	mocks.getContextUsage.mockReset();
 	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });
 });
@@ -184,6 +205,48 @@ describe('usage groups', () => {
 		expect(group(container, 'group:api').summary()).toBe('fal.ai $8.40 left');
 		// The plan the chat runs on still heads the subscriptions group.
 		expect(group(container, 'group:subscriptions').summary()).toMatch(/^Claude · Weekly/);
+	});
+
+	it('a chat whose tools billed an unread xAI key names that key in the collapsed API group', async () => {
+		rateLimit.applySnapshot({
+			available: true, fetched_at: T0 / 1000, windows: [], providers: [FAL],
+			usage_links: [{
+				provider_id: 'sample-xai', provider_name: 'Sample xAI', provider_type: 'xai', kind: 'xai_api',
+				note: 'No balance reading for this key', dashboard_url: 'https://console.x.ai/', subscription: false,
+			}],
+		});
+		mocks.state.messages = [{
+			...falImage(),
+			toolResult: JSON.stringify({ status: 'completed', choice: { source: 'xai', account: 'sample-xai' } }),
+		} as ChatMessage];
+		const container = await open();
+		const apis = group(container, 'group:api');
+		// xAI keys carry the Grok brand; with no meter the figure is "—".
+		expect(apis.summary()).toBe('Grok —');
+		await fireEvent.click(apis.header);
+		expect(apis.el.querySelector('.section-in-use')).not.toBeNull();
+	});
+
+	it('a fal charge on a chat another worker runs is not pinned to this worker\'s fal balance', async () => {
+		snapshot();
+		mocks.target = 'other-worker';
+		mocks.state.messages = [falImage()];
+		const container = await open();
+		expect(group(container, 'group:api').summary()).toBe('');
+	});
+
+	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {
+		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
+		snapshot();
+		const container = await open();
+		const apis = group(container, 'group:api');
+		await fireEvent.click(apis.header);
+		expect(apis.sections()).toContain('Claude');
+		// With Claude gone, nothing is a subscription, so that group is absent.
+		expect(group(container, 'group:subscriptions').el).toBeNull();
+		// The chat runs on Claude, so the collapsed API group shows it.
+		await fireEvent.click(apis.header);
+		expect(apis.summary()).toMatch(/^Claude/);
 	});
 
 	it('a chat on an API key shows that key, not a tool account, and no plan', async () => {

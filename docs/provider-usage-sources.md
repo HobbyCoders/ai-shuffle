@@ -102,7 +102,10 @@ failed or stale readings expose no current amount. Ten-minute freshness covers
 the five-minute polling interval plus jitter. Opening status or pressing Refresh
 requests a poll (30-second forced-refresh cooldown; endpoint budgets still apply).
 Optional invoice failures do not hide prepaid credit; deferred invoices retain
-previous optional values and error states.
+previous optional values and error states. An xAI key on api.x.ai with no balance
+reading (no management key saved, or before its first poll) is listed instead as
+a link to the [xAI console](https://console.x.ai/) (link kind `xai_api`), so a chat
+whose media tools billed it can still name it. A reading replaces the link.
 
 fal.ai reads its balance with the ordinary fal.ai API key the media tools use.
 fal's documented billing API (`api.fal.ai/v1/account/billing`) needs a separate

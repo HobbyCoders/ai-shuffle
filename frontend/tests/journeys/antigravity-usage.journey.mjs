@@ -63,6 +63,10 @@ await runJourney({
 				await page.getByRole('button', { name: /^Context and usage —/ }).click();
 			}
 			const panel = page.locator('.usage-popover');
+			// The Subscriptions group starts collapsed on fresh preferences.
+			const subscriptions = panel.locator('.usage-group[data-group="group:subscriptions"] > .group-header');
+			await subscriptions.waitFor({ timeout: 8000 });
+			if (await subscriptions.getAttribute('aria-expanded') === 'false') await subscriptions.click();
 			const provider = panel.getByRole('button', { name: /^Antigravity.*usage/ });
 			await provider.waitFor({ timeout: 8000 });
 			if (await provider.getAttribute('aria-expanded') === 'false') await provider.click();
