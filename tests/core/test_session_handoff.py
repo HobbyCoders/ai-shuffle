@@ -1417,8 +1417,11 @@ def _moving(gaming, call, move=None):
 
 
 RESUME_PROMPT = ("[hand-off] Moved from ServerWorker to DesktopWorker, as you requested with HandOffSession. At 2026-11-09 12:00:00 UTC +0000 (UTC). Your hand-off note: "
-                 "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
-                 "complete, stop after a brief acknowledgement; do not invent new work.")
+                 "tests pass; next: wire the UI Your whole conversation moved with you: carry on from your "
+                 "last step. Processes, servers and browser sessions on the old worker did not move, so "
+                 "check the current state (git status and log in a checkout) before relying on it. Judge "
+                 "what is left against the owner's request, not your last message. Do not redo finished "
+                 "steps or invent new work; if nothing is left, say so in one line.")
 
 
 async def test_2012_an_agent_hand_off_resumes_the_chat_there_with_its_note():
@@ -1629,6 +1632,16 @@ def test_1416_a_queued_hand_off_names_the_background_work_holding_it():
         assert "the turn" not in result["message"].split("Held by")[1]
     assert queued["message"].startswith("Hand-off to DesktopWorker is queued.")
     assert again["message"].startswith("Hand-off to DesktopWorker is already queued.")
+
+
+def test_a_queued_hand_off_does_not_ask_for_a_wrap_up_summary():
+    """A summary written as the last message before the move reads as finished
+    work on the new worker, so the result says the conversation moves instead."""
+    _chat()
+    with patch("app.core.streaming_status.has_active_run", return_value=True):
+        result = sh.request("s1", "DesktopWorker")
+    assert "do not summarize the work, your whole conversation moves with you" in result["message"]
+    assert "short summary" not in result["message"]
 
 
 def test_1416_a_queued_hand_off_says_when_nothing_else_holds_it():

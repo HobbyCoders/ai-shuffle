@@ -3030,16 +3030,16 @@ def create_builtin_tools_server(
         "background task (Monitors, CI watches, shells); still busy after 10 "
         "minutes, it is cancelled. So first reach a stop point, commit and push, "
         "stop or wait out subagents and background tasks, then call this once and "
-        "end the turn with a short summary; restart that work on the target. The "
-        "app pushes the branch, syncs the target and moves the session; the chat "
-        "resumes there with your note as its prompt, and a failed move is reported "
+        "end the turn without a wrap-up summary; restart that work on the target. The "
+        "app pushes the branch, syncs the target and moves the whole session; the chat "
+        "resumes there with a short notice carrying your note, and a failed move is reported "
         "back to you unless the chat is stopped. Pass the worker's name as shown in the app (or its device "
-        "id) and an optional one-line note on what to continue; use absolute dates.",
+        "id) and an optional one-line note on what was in progress; use absolute dates.",
         {
             "type": "object",
             "properties": {
                 "worker": {"type": "string", "description": "Target worker name or device id."},
-                "note": {"type": "string", "description": "One line on where the work stands."},
+                "note": {"type": "string", "description": "One line on what was in progress."},
                 "cancel": {"type": "boolean", "description": "Cancel a queued hand-off instead."},
             },
             "additionalProperties": False,

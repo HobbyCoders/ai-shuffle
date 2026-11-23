@@ -235,8 +235,11 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
                              "being closed. Call HandOffSession again in a minute.")
         if current is not None and current.target_id != row["device_id"]:
             raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
-        message = ("Finish this turn now with a short summary of where the work stands; once the turn "
-                   f"and any background work end, the app {how}.{holding}")
+        # No wrap-up summary: the whole conversation moves, and a summary
+        # written as the last message reads as "done" on the new worker.
+        message = ("End this turn now with one line saying the move is queued; do not summarize the "
+                   "work, your whole conversation moves with you. Once the turn and any background "
+                   f"work end, the app {how}.{holding}")
         if current is not None:
             # The same move again: the queued one stands (with its time limit).
             return {"queued": True, "worker": current.label, "handoff_id": current.handoff_id,
@@ -645,8 +648,14 @@ def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[s
     session = database.get_session(session_id) or {}
     source = _self_label()
     prompt = _handoff_context(pending, label)
-    prompt += (" Continue the work from where you left off. If it was already complete, "
-               "stop after a brief acknowledgement; do not invent new work.")
+    # Judge "done" against the request, not the last message: an earlier
+    # wording let a pre-move summary read as finished work, and the next
+    # turn stopped early or redid steps already done.
+    prompt += (" Your whole conversation moved with you: carry on from your last step. Processes, "
+               "servers and browser sessions on the old worker did not move, so check the current "
+               "state (git status and log in a checkout) before relying on it. Judge what is left "
+               "against the owner's request, not your last message. Do not redo finished steps or "
+               "invent new work; if nothing is left, say so in one line.")
     return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
             "project_id": session.get("project_id"),
             "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note, "handoff_id": pending.handoff_id}},
