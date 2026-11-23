@@ -20,7 +20,9 @@ literal with whitespace) only mention a file; they do not read it. Tests that
 list a folder below the top level of it count as naming it; tests that list
 the whole checkout or a top-level folder run too, but cannot narrow the
 choice. A file nothing names that way, any conftest, and any file under
-tests/ that is not Python (fixtures, data, snapshots) print ``all``.
+tests/ that is not Python (fixtures, data, snapshots) print ``all``. Fluid's
+own conftests (``FLUID_CONFTESTS``) are the exception: the backend suite never
+loads them, so they count as files like any other.
 
 In CI a pull request's change starts at the map's commit, so it holds what
 main changed since. Of those files, CI plumbing and files nothing names do not
@@ -93,8 +95,15 @@ ROOT_SCRIPTS = ("run_local.py",)
 FULL_SUITE_SHARE = 0.6
 # A map covering fewer test files than this is broken, not small.
 MIN_MAPPED_TESTS = 100
+# Conftests the backend suite never loads. Pytest loads a conftest from the
+# folders of its arguments and their parents, and from test* folders beneath
+# them; every backend run collects under tests/ (pytest.ini testpaths) with the
+# root conftest and the tests package first on its path (PYTHONPATH=.:fluid),
+# so neither is reached. CI Fluid (ci-fluid.yml) runs the tests that load them.
+# Any other conftest, a new one under fluid/ too, still runs every test.
+FLUID_CONFTESTS = frozenset({"fluid/conftest.py", "fluid/tests/conftest.py"})
 # Names too common to say which file a test means.
-GENERIC_NAMES = {"__init__.py", "README.md", "package.json", "package-lock.json", "index.ts",
+GENERIC_NAMES = {"__init__.py", "conftest.py", "README.md", "package.json", "package-lock.json", "index.ts",
                  "index.js", "main.py", "config.py", "utils.py", "base.py", "models.py"}
 # Code that lists files rather than naming them, and code that lists the whole checkout.
 WALKS = re.compile(r"\.(?:rglob|glob|iterdir|walk)\(|os\.(?:walk|listdir|scandir)\(|ls-files|ls-tree")
@@ -634,8 +643,9 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 raise FullSuite(f"{path} changes the test setup or dependencies")
             if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
                 raise FullSuite(f"{path} is a package manifest or lockfile")
-            # Any conftest, the root one too: pytest loads it for every test beneath it.
-            if PurePosixPath(path).name == "conftest.py":
+            # Any conftest, the root one too: pytest loads it for every test
+            # beneath it, and those in test* folders even with no test beneath.
+            if PurePosixPath(path).name == "conftest.py" and path not in FLUID_CONFTESTS:
                 raise FullSuite(f"{path} is a conftest")
             if "\ufffd" in path:
                 raise FullSuite(f"{path!r} is not a UTF-8 file name")
@@ -654,7 +664,10 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 selector.python_change(path)
                 selector.subprocess_users(path)
             else:
-                selector.other_change(path, main_only=path in main_only and p.suffix != ".py")
+                # Python outside the mapped folders may be imported unseen;
+                # Fluid's conftests are loaded by no backend test.
+                unseen = p.suffix != ".py" or path in FLUID_CONFTESTS
+                selector.other_change(path, main_only=path in main_only and unseen)
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):
