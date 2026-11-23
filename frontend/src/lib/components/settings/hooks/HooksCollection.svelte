@@ -10,6 +10,7 @@
 	import { watchResources } from '$lib/services/watch-resources';
 	import { activeSession } from '$lib/stores/active-session';
 	import { projects } from '$lib/stores/app-data.svelte';
+	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { FORBIDDEN_TEXT } from '$lib/settings/access.svelte';
 	import { setHookSearchItems } from '$lib/settings/entries/hooks';
@@ -35,10 +36,7 @@
 	watchResources(['hooks', 'projects'], () => model.load());
 
 	const projectName = $derived($projects.find((p) => p.id === model.projectId)?.name ?? null);
-	const projectOptions = $derived([
-		{ value: '', label: 'No project' },
-		...$projects.map((p) => ({ value: p.id, label: p.name }))
-	]);
+	const projectOptions = $derived(projectSelectGroups($projects, $groups, [{ value: '', label: 'No project' }]));
 
 	$effect(() =>
 		setHookSearchItems([
@@ -106,7 +104,7 @@
 			<SelectField
 				label="Project"
 				value={model.projectId ?? ''}
-				options={projectOptions}
+				groups={projectOptions}
 				width={200}
 				onchange={(v) => model.setProject(v || null)}
 			/>

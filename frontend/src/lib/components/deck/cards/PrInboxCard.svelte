@@ -13,6 +13,7 @@
 	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, ExternalLink } from 'lucide-svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, Segmented, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import PanelField from '$lib/components/layout/view/PanelField.svelte';
+	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
 	import SidebarSheet from '$lib/components/layout/sidebar/SidebarSheet.svelte';
 	import { getPullRequestInbox, type InboxPullRequest, type PullRequestInbox } from '$lib/api/github';
 	import {
@@ -185,7 +186,7 @@
   <h3>Filter pull requests</h3>
   <PanelField label="Review"><SelectField bind:value={filters.review} label="Review" options={[{value:'any', label:'Any'}, ...Object.entries(REVIEW_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
   <PanelField label="Checks"><SelectField bind:value={filters.checks} label="Checks" options={[{value:'any', label:'Any'}, ...Object.entries(CHECKS_LABELS).map(([value, label]) => ({value, label}))]} /></PanelField>
-  <PanelField label="Project"><SelectField bind:value={filters.project} label="Project" options={[{value:'any', label:'All projects'}, ...projects.map(p => ({value:p.id, label:p.name}))]} /></PanelField>
+  <PanelField label="Project"><SelectField bind:value={filters.project} label="Project" groups={projectSelectGroups(projects, $groups, [{value:'any', label:'All projects'}])} /></PanelField>
   {#if serverState === 'open' || serverState === 'all'}<SettingRow label="Hide drafts"><Switch bind:checked={filters.hideDrafts} label="Hide drafts" /></SettingRow>{/if}
   <div class="pri-filter-actions">{#if filtered}<button type="button" class="st-btn" onclick={clearFilters}>Clear filters</button>{/if}<button type="button" class="st-btn" onclick={() => filtersOpen = false}>Done</button></div>
  </div>

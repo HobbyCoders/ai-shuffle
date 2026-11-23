@@ -142,4 +142,50 @@ describe('organizeByGroups', () => {
 		expect(ungrouped.map((i) => i.id)).toEqual(['3', '4']);
 		expect(groupOrder.map((g) => g.name)).toEqual(['B', 'A', 'Empty']);
 	});
+
+	it('finds the group saved on any of an item\'s ids', async () => {
+		const { organizeByGroups } = await load();
+		const state = {
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { clone: 'Work', stale: 'Gone' } },
+			profiles: { groups: [], assignments: {} },
+			subagents: { groups: [], assignments: {} }
+		};
+		// A picker row whose group sits on a folded clone, or behind a deleted group.
+		const items = [{ id: 'row', aliases: ['clone'] }, { id: 'other', aliases: ['stale', 'clone'] }, { id: 'loose', aliases: [] }];
+		const { grouped, ungrouped } = organizeByGroups(items, 'projects', state, (i) => [i.id, ...i.aliases]);
+		expect(grouped.get('Work')?.map((i) => i.id)).toEqual(['row', 'other']);
+		expect(ungrouped.map((i) => i.id)).toEqual(['loose']);
+	});
+});
+
+describe('projectSelectGroups', () => {
+	const state = (assignments: Record<string, string>, names: string[] = ['Work', 'Empty']) => ({
+		projects: { groups: names.map((name) => ({ name, collapsed: false })), assignments },
+		profiles: { groups: [], assignments: {} },
+		subagents: { groups: [], assignments: {} }
+	});
+	const projects = [{ id: 'p1', name: 'Website' }, { id: 'p2', name: 'API' }, { id: 'p3', name: 'Docs' }];
+	const none = { value: '', label: 'None' };
+
+	it('splits a select into the leading options, one section per used group, then the rest', async () => {
+		const { projectSelectGroups } = await load();
+		expect(projectSelectGroups(projects, state({ p1: 'Work', p3: 'Work' }), [none])).toEqual([
+			{ label: '', options: [none] },
+			{ label: 'Work', options: [{ value: 'p1', label: 'Website' }, { value: 'p3', label: 'Docs' }] },
+			{ label: 'Other projects', options: [{ value: 'p2', label: 'API' }] }
+		]);
+	});
+
+	it('stays one flat list when no group holds a listed project', async () => {
+		const { projectSelectGroups } = await load();
+		expect(projectSelectGroups(projects, state({ elsewhere: 'Work' }), [none])).toEqual([
+			{ label: '', options: [none, { value: 'p1', label: 'Website' }, { value: 'p2', label: 'API' }, { value: 'p3', label: 'Docs' }] }
+		]);
+	});
+
+	it('leaves out the trailing section when every project is grouped', async () => {
+		const { projectSelectGroups } = await load();
+		const result = projectSelectGroups(projects, state({ p1: 'Work', p2: 'Work', p3: 'Work' }));
+		expect(result.map((g) => g.label)).toEqual(['Work']);
+	});
 });

@@ -355,23 +355,42 @@ describe('WorkspaceSelector sentence picker', () => {
 			groups.deleteGroup('projects', 'Side');
 		});
 
-		it('lists them flat, most recently used first and numbered', async () => {
+		const mainRows = () => [...dialog().querySelectorAll<HTMLElement>('.main-panel .panel-scroll .menu-item')].map(row => row.querySelector('.item-name')?.textContent);
+		const groupRows = () => [...dialog().querySelectorAll<HTMLElement>('.sub-panel .panel-scroll .menu-item')].map(row => row.querySelector('.item-name')?.textContent);
+
+		it('shows the groups as numbered folders, each most recently used first', async () => {
 			await openFromEditor();
-			expect(dialog().querySelector('.group-item')).toBeNull();
-			expect(rowNames()).toEqual(['API', 'Docs site', 'Website']);
-			expect([...dialog().querySelectorAll('.panel-scroll .row-key')].map(k => k.textContent)).toEqual(['1', '2', '3']);
-			await fireEvent.input(search(), { target: { value: 'site' } });
-			expect(rowNames()).toEqual(['Docs site', 'Website']);
-			await fireEvent.input(search(), { target: { value: '' } });
+			expect(mainRows()).toEqual(['Work', 'Side']);
+			expect([...dialog().querySelectorAll('.main-panel .panel-scroll .row-key')].map(k => k.textContent)).toEqual(['1', '2']);
 			const one = new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true });
 			search().dispatchEvent(one);
 			expect(one.defaultPrevented).toBe(true);
-			expect(onSelectProject).toHaveBeenCalledWith('p2', null);
+			await tick();
+			expect(onSelectProject).not.toHaveBeenCalled();
+			expect(groupRows()).toEqual(['API', 'Website']);
+		});
+
+		it('searches every project flat, grouped or not', async () => {
+			await openFromEditor();
+			await fireEvent.input(search(), { target: { value: 'site' } });
+			expect(mainRows()).toEqual(['Docs site', 'Website']);
+			await fireEvent.keyDown(search(), { key: 'Enter' });
+			expect(onSelectProject).toHaveBeenCalledWith('p3', null);
+		});
+
+		it('returns to the search from inside a group when the picker is called again', async () => {
+			await openFromEditor();
+			search().dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+			await tick();
+			selector.openPicker({ returnFocus: editor });
+			await tick();
+			await tick();
+			expect(document.activeElement).toBe(search());
 		});
 
 		it('still offers No project (0) and Add Project when switching', async () => {
 			await openFromEditor('p2', true);
-			expect(rowNames()).toEqual(['API', 'Docs site', 'Website', 'No project']);
+			expect(mainRows()).toEqual(['Work', 'Side', 'No project']);
 			expect(within(dialog()).getByRole('button', { name: /Add Project/ })).toBeTruthy();
 			search().dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true, cancelable: true }));
 			expect(onClearProject).toHaveBeenCalledOnce();

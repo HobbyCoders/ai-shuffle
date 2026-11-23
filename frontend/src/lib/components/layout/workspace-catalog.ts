@@ -102,6 +102,14 @@ export function buildWorkspacePickerItems(
 	return items;
 }
 
+/**
+ * The local ids a picker item's project group may be saved under: the
+ * project's own id, then each clone folded into the same row.
+ */
+export function pickerGroupIds(item: { id: string; project?: string; projectAliases?: string[] }): string[] {
+	return [item.id, item.project ?? '', ...(item.projectAliases ?? [])].filter(Boolean);
+}
+
 /** Resolve a persisted local/v2 selection to its merged picker item id. */
 export function selectedPickerId(
 	project: string | null | undefined,
