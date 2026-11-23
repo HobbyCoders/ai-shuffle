@@ -88,6 +88,7 @@
 		branchLabel,
 		deriveStatus,
 		sessionStartedAt,
+		projectIdentity,
 		sessionTimestamp,
 		sessionDeviceId,
 		sessionPrState,
@@ -183,7 +184,7 @@
 	function dropStrayClick(event: MouseEvent) {
 		// Keyboard activation has no position and never follows a moving header.
 		if (event.detail === 0) return;
-		if (event.target instanceof Element && event.target.closest('.sect')) {
+		if (event.target instanceof Element && event.target.closest('.sect, .proj-head')) {
 			headerClick = { at: Date.now(), x: event.clientX, y: event.clientY };
 			return;
 		}
@@ -364,13 +365,59 @@
 	/** A project option with the local project ids its group may be saved under. */
 	interface ProjectFilterOption extends FilterOption { ids: string[] }
 
+	// One name per project, so the name (and the project's place, which goes by
+	// it) never depends on which of its chats a lane holds or which history
+	// pages have loaded: chats of one linked project can carry different names
+	// from different workers. This worker's own project list names it first (a
+	// rename there is the owner's word), then the shared catalog for projects
+	// that live only elsewhere; only a project in neither goes by its oldest
+	// chat in the list. Only a link group is shared: an unlinked `local:<id>`
+	// key names a project on whichever worker owns the chat, so a local project
+	// names it only when the group holds one of this worker's own chats (a
+	// peer's chat may merely share the slug).
+	const catalogNames = $derived.by(() => {
+		const shared = new Map<string, string>();
+		const unlinked = new Map<string, string>();
+		// An unlinked catalog row is as ambiguous as any `local:<id>` key, and
+		// this worker's own unlinked projects are named from its list below.
+		for (const c of $clusterProjects) {
+			if (c.origin && c.name && !c.origin.startsWith('local:')) shared.set(c.origin, c.name);
+		}
+		const local = new Set<string>();
+		for (const p of $projects) {
+			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });
+			if (!key || !p.name || local.has(key)) continue;
+			local.add(key);
+			// A copied folder can carry a `local:` link group: still not shared.
+			(key.startsWith('local:') ? unlinked : shared).set(key, p.name);
+		}
+		return { shared, unlinked };
+	});
+	const projectNames = $derived.by(() => {
+		const oldest = new Map<string, { at: number; id: string; name: string }>();
+		const ownHere = new Set<string>();
+		for (const s of sidebarSessions) {
+			const key = projectKey(s);
+			if (!s.is_remote) ownHere.add(key);
+			const at = sessionStartedAt(s);
+			const seen = oldest.get(key);
+			if (seen && (seen.at < at || (seen.at === at && seen.id < s.id))) continue;
+			oldest.set(key, { at, id: s.id, name: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s) });
+		}
+		const { shared, unlinked } = catalogNames;
+		return new Map([...oldest].map(([key, { name }]) => [
+			key,
+			(ownHere.has(key) ? unlinked.get(key) : undefined) ?? shared.get(key) ?? name,
+		]));
+	});
+
 	const projectOptions = $derived.by((): ProjectFilterOption[] => {
 		const map = new Map<string, ProjectFilterOption>();
 		for (const s of sidebarSessions) {
 			const key = projectKey(s);
 			let option = map.get(key);
 			if (!option) {
-				option = { id: key, label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s), ids: [] };
+				option = { id: key, label: projectNames.get(key) ?? (key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s)), ids: [] };
 				map.set(key, option);
 			}
 			// Only this worker's chats carry a local project id; a peer's id names
@@ -461,12 +508,13 @@
 	// the order of Settled, which is history paged by last activity.
 	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number; started: number }
 
-	// Needs you and Active list chats in the order they were started, newest on
-	// top, and a row keeps that place: a reply, a finished turn or a tool call
+	// Needs you and Active list chats in the order they were started, oldest on
+	// top, so a new chat joins the bottom of its project and nothing above it
+	// moves. A row keeps that place: a reply, a finished turn or a tool call
 	// never moves it. Ties fall to the id, so the store handing over the same
 	// rows in another order cannot swap two of them either.
 	const byStart = (a: CardRow, b: CardRow) =>
-		b.started - a.started || (a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0);
+		a.started - b.started || (a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0);
 
 	// Snoozes whose time has passed count as Active at once: the server's wake
 	// lands a moment later and changes nothing on screen. Keyed by a string so
@@ -687,63 +735,50 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
-	// A project's place is the newest START among its chats in Needs you, Active
-	// and Snoozed. Activity in a chat never moves its project: only a chat
-	// arriving in those lanes does (a new chat, or one brought back from Settled).
-	// None of these may move it, which is why the place is a high-water mark kept
-	// for as long as this list is mounted:
-	// - its newest chat leaving the lane (settled, or archived and not yet gone).
-	//   Ranking on what is left made a project swap places, moving a screenful of
-	//   rows, and swap back if the server then refused the change;
-	// - a snoozed chat waking: Snoozed is loaded whole, so it already counts;
-	// - a page of Settled history arriving. Settled comes in pages by last
-	//   activity, so an older page can hold a chat started after everything
-	//   loaded so far. Settled rows are never read here.
-	// It is recorded in an effect, from every listed chat, so a chat that came and
-	// went while a filter hid its project, or its lane was closed, still counted.
-	let projectStart = $state.raw(new Map<string, number>());
-	$effect.pre(() => {
-		const seen = untrack(() => projectStart);
-		let next: Map<string, number> | null = null;
-		for (const s of sidebarSessions) {
-			if (!s.is_active && snoozeUntilMs(s) === null) continue;
-			const key = projectKey(s);
-			const started = sessionStartedAt(s);
-			if (started > ((next ?? seen).get(key) ?? -Infinity)) (next ??= new Map(seen)).set(key, started);
-		}
-		if (next) projectStart = next;
-	});
 	// Inside a lane, rows sit under their project when the lane spans more than
 	// one, so no row has to repeat it. Rows keep the lane's order inside it.
-	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
+	// Projects go in alphabetical order by name, with chats that have no project
+	// last. Nothing a chat does moves its project: not a reply, a new chat, a
+	// chat settling or a page of history arriving. Only the name places it.
+	type ProjectGroup = { key: string; label: string | null; rows: CardRow[] };
+	type FoldLane = 'needs' | 'active' | 'settled';
+	const byName = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+	function byProject(lane: FoldLane, laneRows: CardRow[]): ProjectGroup[] {
 		const groups = new Map<string, CardRow[]>();
-		// A project with no chat in Needs you or Active (a Settled day can hold
-		// one) goes by the newest start among its rows here.
-		const newestHere = new Map<string, number>();
 		for (const row of laneRows) {
 			const key = projectKey(row.session);
 			const group = groups.get(key);
 			if (group) group.push(row);
 			else groups.set(key, [row]);
-			if (row.started > (newestHere.get(key) ?? -Infinity)) newestHere.set(key, row.started);
 		}
+		// Headers show whenever the list spans projects, even over a lane holding
+		// just one: a header appearing as a second project joins would push every
+		// row down. A folded project keeps its header even as the only project
+		// left, or its rows would open again with nothing to fold them.
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
-		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
-		const started = (key: string) => projectStart.get(key) ?? newestHere.get(key) ?? 0;
-		// Projects started at the same moment fall to their key, never to which
-		// row the lane happens to list first: that changes when a row leaves.
+		const only = [...groups.keys()][0];
+		const keepsFold = only !== undefined && only !== UNGROUPED_PROJECT && !!collapsedGroups[projectFold(lane, only)];
+		if (!spansProjects && groups.size < 2 && !keepsFold) return [{ key: only ?? 'all', label: null, rows: laneRows }];
 		return [...groups]
-			.sort(([a], [b]) => started(b) - started(a) || (a < b ? -1 : a > b ? 1 : 0))
 			.map(([key, rows]) => ({
 				key,
-				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+				label: projectNames.get(key) ?? (key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session)),
 				rows
-			}));
+			}))
+			// Two projects with the same name fall to their key, never to which row
+			// the lane happens to list first: that changes when a row leaves.
+			.sort((a, b) =>
+				Number(a.key === UNGROUPED_PROJECT) - Number(b.key === UNGROUPED_PROJECT) ||
+				byName.compare(a.label, b.label) ||
+				(a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+			);
 	}
-	// A project's place is its newest-started chat, so a chat starting in a project
-	// lower down lifts that whole group over the ones above it (#1307). That is a
-	// screenful of rows changing place with nothing the user touched, so they
+	// A project header folds its rows away. Each lane keeps its own choice, so
+	// folding a project in Active never hides one of its chats waiting in Needs you.
+	const projectFold = (lane: string, key: string) => `project:${lane}:${key}`;
+	// A project joining a lane, or a new chat growing one, moves the groups below
+	// it. That is rows changing place with nothing the user touched, so they
 	// glide there. Position only: a group growing by a row must not stretch.
 	/** How far through its easing a group sinking out of sight reaches the list's bottom edge. */
 	const SINK_REACHES_EDGE_AT = 0.9;
@@ -775,8 +810,8 @@
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
 	const spansProjects = $derived(new Set(rows.map((r) => projectKey(r.session))).size > 1);
-	const needsYouGroups = $derived(byProject(needsYouRows));
-	const activeGroups = $derived(byProject(activeRows));
+	const needsYouGroups = $derived(byProject('needs', needsYouRows));
+	const activeGroups = $derived(byProject('active', activeRows));
 
 	const settledDays = $derived.by(() => {
 		const out: { label: string; rows: CardRow[] }[] = [];
@@ -786,7 +821,24 @@
 			if (last?.label === label) last.rows.push(row);
 			else out.push({ label, rows: [row] });
 		}
-		return out;
+		return out.map((day) => ({ label: day.label, groups: byProject('settled', day.rows) }));
+	});
+	// Chats a folded project header hides, whichever lane folded them.
+	const foldedIds = $derived.by(() => {
+		const hidden = new Set<string>();
+		const lanes: [FoldLane, ProjectGroup[]][] = [
+			['needs', needsYouGroups],
+			['active', activeGroups],
+			...settledDays.map((day): ['settled', ProjectGroup[]] => ['settled', day.groups])
+		];
+		for (const [lane, groups] of lanes) {
+			for (const group of groups) {
+				if (group.label && collapsedGroups[projectFold(lane, group.key)]) {
+					for (const row of group.rows) hidden.add(row.session.id);
+				}
+			}
+		}
+		return hidden;
 	});
 
 	// --- multi-select --------------------------------------------------------
@@ -800,10 +852,11 @@
 	// no snooze at all); a settled row only goes back to Active.
 	const anySelectedSettleable = $derived(selectedRows.some((r) => rowActive(r.session) || rowSnoozed(r.session)));
 
-	// Rows that left the list (archived elsewhere, filtered out) leave the
-	// selection too, so the count never names rows the user cannot see.
+	// Rows that left the list (archived elsewhere, filtered out, folded away
+	// under their project) leave the selection too, so the count never names
+	// rows the user cannot see and a bulk action never reaches one.
 	$effect(() => {
-		const present = new Set(rows.map((r) => r.session.id));
+		const present = new Set(rows.filter((r) => !foldedIds.has(r.session.id)).map((r) => r.session.id));
 		const current = untrack(() => selected);
 		if ([...current].some((id) => !present.has(id))) {
 			selected = new Set([...current].filter((id) => present.has(id)));
@@ -992,15 +1045,29 @@
 	/>
 {/snippet}
 
-{#snippet laneRows(groups: { key: string; label: string | null; rows: CardRow[] }[], compact = false)}
+{#snippet laneRows(lane: FoldLane, groups: ProjectGroup[], compact = false)}
 	{#each groups as group (group.key)}
+		{@const fold = projectFold(lane, group.key)}
+		{@const folded = !!group.label && !!collapsedGroups[fold]}
 		<div class="proj-group" animate:slideGroup>
 			{#if group.label}
-				<div class="proj-head" title={group.label}>{group.label}</div>
+				<button
+					class="proj-head"
+					class:closed={folded}
+					title={group.label}
+					aria-expanded={!folded}
+					onclick={() => toggleGroup(fold)}
+				>
+					<span class="chev"><ChevronDown size={12} strokeWidth={2} /></span>
+					<span class="name">{group.label}</span>
+					{#if folded}<span class="n">{group.rows.length}</span>{/if}
+				</button>
 			{/if}
-			{#each group.rows as row (row.session.id)}
-				{@render card(row, compact, !group.label && spansProjects)}
-			{/each}
+			{#if !folded}
+				{#each group.rows as row (row.session.id)}
+					{@render card(row, compact, !group.label && spansProjects)}
+				{/each}
+			{/if}
 		</div>
 	{/each}
 {/snippet}
@@ -1137,7 +1204,7 @@
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
 					<div class="cards" data-group="needs-you">
-						{@render laneRows(needsYouGroups)}
+						{@render laneRows('needs', needsYouGroups)}
 					</div>
 				{/if}
 			{/if}
@@ -1148,7 +1215,7 @@
 					<p class="empty">{settledLaneShown ? 'Nothing active. Swipe a settled session left to bring it back.' : emptyLabel}</p>
 				{:else}
 					<div class="cards" data-group="active">
-						{@render laneRows(activeGroups)}
+						{@render laneRows('active', activeGroups)}
 					</div>
 				{/if}
 			{/if}
@@ -1176,7 +1243,7 @@
 				{#each settledDays as day (day.label)}
 					<div class="daylabel">{day.label}</div>
 					<div class="cards" data-group="settled">
-						{@render laneRows(byProject(day.rows), true)}
+						{@render laneRows('settled', day.groups, true)}
 					</div>
 				{/each}
 
@@ -1478,14 +1545,29 @@
 	.cards, .proj-group { display: flex; flex-direction: column; gap: 2px; }
 	/* Tiers: the lane label, then this quieter project label, then its rows. */
 	.proj-head {
-		padding: 4px 8px 4px 12px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		width: 100%;
+		min-width: 0;
+		padding: 4px 8px 4px 8px;
+		border: 0;
+		border-radius: var(--radius-control);
+		background: transparent;
+		font: inherit;
 		font-size: var(--fs-caption);
 		font-weight: 500;
 		color: var(--subtle-foreground);
+		text-align: left;
+		cursor: pointer;
 	}
+	.proj-head .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.proj-head .n { flex: none; font-weight: 400; font-variant-numeric: tabular-nums; }
+	.proj-head .chev { flex: none; display: inline-flex; transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+	.proj-head.closed .chev { transform: rotate(-90deg); }
+	.proj-head:hover { color: var(--muted-foreground); }
+	.proj-head:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.phone .proj-head { min-height: 44px; }
 	/* The space between groups sits outside the group, never in its heading: a
 	   group's rows must keep their place inside it when it changes position,
 	   or they would jump the moment its glide begins. */

@@ -346,8 +346,12 @@ export async function pickAccess(page, mode) {
 	if (await picker.isVisible()) await page.keyboard.press('Escape');
 }
 
+/** The project picker's item; the sidebar's project headers carry the same name. */
+export const projectPickerItem = (page, project = PROJECT) =>
+	page.locator('.picker-dropdown').getByRole('button', { name: project, exact: true });
+
 export async function pickProject(page, hero, project = PROJECT) {
-	const item = page.getByRole('button', { name: project, exact: true });
+	const item = projectPickerItem(page, project);
 	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${project}` }));
 }
 

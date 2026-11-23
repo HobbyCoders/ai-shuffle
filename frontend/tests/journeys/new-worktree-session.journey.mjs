@@ -35,7 +35,7 @@
 //                   the generated name, and a ~25-character generated name is
 //                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { api, pick, withChatSetup } from './lib/app.mjs';
+import { api, pick, projectPickerItem, withChatSetup } from './lib/app.mjs';
 import { readFile, access, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expectComposerPositions } from './lib/timeline.mjs';
@@ -81,7 +81,7 @@ async function openPopup(trigger, popup) {
 }
 
 async function pickProject(page, hero) {
-	const item = page.getByRole('button', { name: PROJECT, exact: true });
+	const item = projectPickerItem(page, PROJECT);
 	await pick(hero.getByRole('button', { name: /^No project/ }), item, item, hero.getByRole('button', { name: `Workspace folders: ${PROJECT}` }));
 }
 
