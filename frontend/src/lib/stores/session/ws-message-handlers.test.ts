@@ -243,6 +243,30 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('usage_snapshot frames', () => {
+		it('keep self_networked, including false, after a REST snapshot set it', () => {
+			rateLimit.__resetForTests();
+			const frame = (extra: Record<string, unknown>) => ({
+				type: 'usage_snapshot', windows: [], fetched_at: null, available: true,
+				snapshots: [{ instance_id: 'install-here', available: false, windows: [] }],
+				self_instance_id: 'install-here', self_device_id: 'install-here', ...extra,
+			});
+			try {
+				rateLimit.applySnapshot({ ...frame({ self_networked: false }), providers: [] });
+				expect(rateLimit.current.selfNetworked).toBe(false);
+				handlers.handleMessage(frame({ self_networked: false }));
+				expect(rateLimit.current.selfNetworked).toBe(false);
+				// A frame without the flag keeps the last known value.
+				handlers.handleMessage(frame({}));
+				expect(rateLimit.current.selfNetworked).toBe(false);
+				handlers.handleMessage(frame({ self_networked: true }));
+				expect(rateLimit.current.selfNetworked).toBe(true);
+			} finally {
+				rateLimit.__resetForTests();
+			}
+		});
+	});
+
 	describe('message dispatch', () => {
 		it('should handle ping messages by sending pong', () => {
 			handlers.handleMessage({ type: 'ping' });

@@ -1175,7 +1175,7 @@
 	// The fal row is this install's own FAL_KEY (every worker uses the id
 	// `fal-ai`), so a fal charge another worker ran may be another account. A
 	// result naming its worker counts only when that is this device. One that
-	// names none (the fal-only tools, older results, or "local") cannot be
+	// names none (results from before the fal-only tools named it, or "local") cannot be
 	// placed once a chat has moved between workers, so it counts only on a
 	// worker that is on no network, where the chat never left this one. The
 	// backend says so in `self_networked`; the ids cannot (a standalone install

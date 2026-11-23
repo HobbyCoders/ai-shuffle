@@ -1231,7 +1231,8 @@ export const rateLimit = {
 					accountBuckets: _accountBucketsFromSnapshot(snapshot.accounts, s.accountBuckets, now),
 					selfInstanceId: snapshot.self_instance_id ?? null,
 					selfDeviceId: snapshot.self_device_id ?? null,
-					selfNetworked: snapshot.self_networked ?? null,
+					// A payload without the flag (an older sender) keeps the last known one.
+					selfNetworked: snapshot.self_networked ?? s.selfNetworked ?? null,
 					staleByInstance,
 				};
 				_save(next);
@@ -1314,6 +1315,7 @@ export const rateLimit = {
 			accountBuckets: {},
 			selfInstanceId: null,
 			selfDeviceId: null,
+			selfNetworked: null,
 			staleByInstance: {},
 		});
 		_claudeSource.set({ source: null, attemptedAt: null, lastErrorKind: null });

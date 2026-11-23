@@ -282,6 +282,24 @@ describe('usage groups', () => {
 		expect(group(await open(), 'group:api').summary()).toBe('');
 	});
 
+	it('on a network of one, a fal-only tool that names this worker names its fal balance', async () => {
+		rateLimit.applySnapshot({
+			available: true, fetched_at: T0 / 1000, windows: [], providers: [FAL, KIMI_API], usage_links: [],
+			self_instance_id: 'install-here', self_device_id: 'device-here', self_networked: true,
+			snapshots: [{ instance_id: 'install-here', available: false, windows: [] }],
+		});
+		const editOn = (worker: string): ChatMessage => ({
+			...falImage(), toolName: 'mcp__ai-tools__editImage',
+			toolResult: JSON.stringify({ success: true, provider_used: 'fal-ai', worker }),
+		} as ChatMessage);
+		mocks.state.messages = [editOn('device-here')];
+		expect(group(await open(), 'group:api').summary()).toBe('fal.ai $8.40 left');
+		cleanup();
+		// Run on another worker before a handoff: not this worker's balance.
+		mocks.state.messages = [editOn('device-other')];
+		expect(group(await open(), 'group:api').summary()).toBe('');
+	});
+
 	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		snapshot();

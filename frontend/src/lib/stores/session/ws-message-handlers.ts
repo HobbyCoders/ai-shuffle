@@ -699,6 +699,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				snapshots: (data.snapshots as import('$lib/stores/rate-limit').SnapshotInstance[] | undefined) ?? undefined,
 				self_instance_id: (data.self_instance_id as string | null | undefined) ?? undefined,
 				self_device_id: (data.self_device_id as string | null | undefined) ?? undefined,
+				// `false` is meaningful (off a network): keep it, never coalesce it away.
+				self_networked: typeof data.self_networked === 'boolean' ? data.self_networked : undefined,
 			});
 			return;
 		}

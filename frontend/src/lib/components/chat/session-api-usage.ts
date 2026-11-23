@@ -39,9 +39,10 @@ function parseResult(text: string | undefined): Record<string, unknown> | null {
 
 /**
  * One paid charge: the account billed and the worker that ran the call — the
- * resolver's `choice.worker` (a device id, or "local" on an install with no
- * network identity). Null when the result does not say (the fal-only tools,
- * which run on the chat's own worker).
+ * resolver's `choice.worker`, or the fal-only tools' top-level `worker` (a
+ * device id, or "local" on an install with no network identity; see
+ * app/mcp/ai_tools_sdk.py `_FalToolWorker`). Null when the result does not say
+ * (results from before the fal-only tools named their worker).
  */
 export interface PaidApiCharge {
 	account: string;
@@ -64,7 +65,9 @@ export function paidApiChargeOf(message: ChatMessage): PaidApiCharge | null {
 	}
 	if (!FAL_ONLY_TOOLS.has(tool) || result.success !== true) return null;
 	const used = result.provider_used;
-	return typeof used !== 'string' || /fal/i.test(used) ? { account: FAL_USAGE_ACCOUNT, worker: null } : null;
+	if (typeof used === 'string' && !/fal/i.test(used)) return null;
+	const worker = typeof result.worker === 'string' && result.worker ? result.worker : null;
+	return { account: FAL_USAGE_ACCOUNT, worker };
 }
 
 /** The account one finished tool call billed, or null when it billed no paid API. */
