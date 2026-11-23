@@ -129,7 +129,9 @@ def _carry_uncommitted(parent_path: str, fork_path: str, new_session_id: str) ->
     ``git stash create`` records tracked changes as a commit without touching
     the parent's files or index; applying it in the fork (a worktree of the
     same repository) reproduces them. Untracked, non-ignored files are copied
-    as files. Best effort: the fork still works from the committed state.
+    as files, and a symlink as the same link: following it would turn a link
+    to an ignored file (``.env``) into a copy of its contents that a move
+    could commit. Best effort: the fork still works from the committed state.
     """
     import shutil
     from pathlib import Path
@@ -140,7 +142,11 @@ def _carry_uncommitted(parent_path: str, fork_path: str, new_session_id: str) ->
         stash = git_service._run_git(parent_path, ["stash", "create"], timeout=30)
         sha = stash.stdout.strip() if stash.returncode == 0 else ""
         if sha:
-            applied = git_service._run_git(fork_path, ["stash", "apply", sha], timeout=30)
+            # --index keeps staged content that the working copy has since
+            # changed back; without it the staged edit is lost.
+            applied = git_service._run_git(fork_path, ["stash", "apply", "--index", sha], timeout=30)
+            if applied.returncode:
+                applied = git_service._run_git(fork_path, ["stash", "apply", sha], timeout=30)
             if applied.returncode:
                 logger.warning("Fork %s: could not apply the parent's uncommitted changes: %s",
                                new_session_id, (applied.stderr or "").strip()[:300])
@@ -150,18 +156,24 @@ def _carry_uncommitted(parent_path: str, fork_path: str, new_session_id: str) ->
             return
         names = [name for name in listed.stdout.split("\0") if name]
         source, dest = Path(parent_path), Path(fork_path)
-        files = [source / name for name in names if (source / name).is_file()]
+        files = [source / name for name in names
+                 if (source / name).is_symlink() or (source / name).is_file()]
         max_count, max_bytes = _CARRY_UNTRACKED_LIMITS
-        if len(files) > max_count or sum(f.stat().st_size for f in files) > max_bytes:
+        if len(files) > max_count or sum(f.lstat().st_size for f in files) > max_bytes:
             logger.warning("Fork %s: %d untracked files are too many to copy; left behind",
                            new_session_id, len(files))
             return
         for file in files:
             target = dest / file.relative_to(source)
-            if target.exists():
+            if target.exists() or target.is_symlink():
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(file, target)
+            try:
+                shutil.copy2(file, target, follow_symlinks=False)
+            except OSError:
+                # Windows without symlink rights: leave the link behind
+                # rather than copy what it points at.
+                logger.warning("Fork %s: could not carry %s", new_session_id, file.name, exc_info=True)
     except Exception:
         logger.warning("Fork %s: could not carry the parent's uncommitted changes", new_session_id, exc_info=True)
 

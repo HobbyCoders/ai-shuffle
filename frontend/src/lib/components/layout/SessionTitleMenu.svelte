@@ -65,9 +65,11 @@
 		)
 	);
 
+	// Each opening reloads presence: a worker that came online since the list
+	// was loaded must be offered, and nothing else may be polling it.
 	$effect(() => {
 		if (!open) pickingWorker = false;
-		else if (!$workerInstalls) void refreshWorkerPresence().catch(() => {});
+		else void refreshWorkerPresence().catch(() => {});
 	});
 
 	function closeMenu() {

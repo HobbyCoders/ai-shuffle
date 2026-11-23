@@ -223,6 +223,16 @@ describe('SessionTitleMenu', () => {
 			window.removeEventListener('open-session', onOpen);
 		});
 
+		it('reloads worker presence each time the menu opens', async () => {
+			mocks.workerInstalls.set(INSTALLS);
+			renderMenu();
+			await openMenu();
+			expect(mocks.refreshWorkerPresence).toHaveBeenCalledTimes(1);
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			await openMenu();
+			expect(mocks.refreshWorkerPresence).toHaveBeenCalledTimes(2);
+		});
+
 		it('offers this worker for a chat another worker runs', async () => {
 			mocks.workerInstalls.set(INSTALLS);
 			mocks.sessions.set([{ id: 'session-a', owner_device_id: 'dev-workstation', is_remote: true }]);

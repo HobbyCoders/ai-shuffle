@@ -115,6 +115,57 @@ def test_fork_gets_its_own_worktree_with_the_parents_uncommitted_work(fork_clien
     assert project_resolver.resolve_existing_cwd(row) == str(fork_path)
 
 
+def test_carry_keeps_links_as_links_and_the_staged_copy(fork_client, repo):
+    parent, _base, _tip = repo
+    (parent / ".env").write_text("SECRET=1\n")
+    (parent / "dev-config").symlink_to(".env")
+    # Staged edit, then the working copy put back to the commit's text.
+    (parent / "code.txt").write_text("staged edit\n")
+    git(parent, "add", "code.txt")
+    (parent / "code.txt").write_text("parent commit\n")
+
+    resp = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert resp.status_code == 200, resp.text
+    fork_path = Path(sessions_db.get_session(resp.json()["session_id"])["worktree_path"])
+
+    link = fork_path / "dev-config"
+    assert link.is_symlink() and str(link.readlink()) == ".env"
+    assert not (fork_path / ".env").exists()
+    assert git(fork_path, "show", ":code.txt") == "staged edit"
+    assert (fork_path / "code.txt").read_text() == "parent commit\n"
+
+
+def test_fork_here_gets_its_own_worktree_from_this_workers_checkout(repo):
+    """The offline-owner copy never runs in the project's base checkout."""
+    from app.core import project_resolver
+    from app.network import control
+
+    parent, base, _tip = repo
+    result = control.fork_here(PARENT_SID)
+    row = sessions_db.get_session(result["session_id"])
+
+    assert row["worktree_branch"].startswith("chore/fork-")
+    fork_path = Path(row["worktree_path"])
+    assert fork_path.is_dir() and fork_path not in (parent, base)
+    assert git(fork_path, "branch", "--show-current") == row["worktree_branch"]
+    assert git(fork_path, "rev-parse", "HEAD") == git(base, "rev-parse", "HEAD")
+    assert project_resolver.resolve_existing_cwd(row) == str(fork_path)
+
+
+def test_a_failed_fork_here_removes_its_checkout(repo, monkeypatch):
+    from app.network import control
+
+    _parent, base, _tip = repo
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("row failed")
+
+    monkeypatch.setattr(database, "create_session", broken)
+    with pytest.raises(RuntimeError):
+        control.fork_here(PARENT_SID)
+    assert _fork_branches(base) == ""
+
+
 def test_a_failed_fork_removes_its_checkout(fork_client, repo, monkeypatch):
     parent, base, _tip = repo
     (parent / "code.txt").write_text("uncommitted edit\n")
