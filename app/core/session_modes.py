@@ -337,7 +337,11 @@ def owner_workspace_chat(
     """
     if not row or _has_project(row) or session_mode_of(row) not in ("chat", "code"):
         return False
-    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS):
+    # A chat-lane fork names its parent too, yet it is the owner's own chat:
+    # workers, the other rows naming one, are marked ``is_worker``. A legacy
+    # fork stored without a lane keeps the folder its transcript resumes in.
+    fork = row.get("mode") == "chat"
+    if any(row.get(key) for key in _NOT_TOP_LEVEL_OWNER_KEYS if not (fork and key == "parent_session_id")):
         return False
     session_id = str(row.get("id") or "")
     if session_id.startswith(WATCH_SESSION_PREFIX):
@@ -359,7 +363,9 @@ def owner_workspace_chat(
         return False
     if principal and principal.get("principal_id") == PREVIEW_PRINCIPAL_ID:
         return False
-    return is_owner_session(row, principal=principal)
+    # Only the tool surface looks past a fork's parent: orchestration authority
+    # (``is_owner_session`` on the row itself) still refuses it.
+    return is_owner_session({**row, "parent_session_id": None}, principal=principal)
 
 
 def owner_chat_cwd() -> Path:

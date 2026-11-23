@@ -80,7 +80,8 @@ await runJourney({
 			expect(!entries.some(e => e.kind === 'resume_refused'), 'CLI must find reseeded transcript in its actual cwd');
 			expect(init.length === 1 && init[0].resumed && init[0].rows === (action === 'fork' ? 4 : 2),
 				`CLI resumes retained user + assistant, not fresh rows=0: ${JSON.stringify(init)}`);
-			expect(starts.length === 1 && starts[0].cwd === `${status.workspace_dir}${action === 'fork' ? '' : '/chat-uploads'}`, 'CLI uses this row’s actual runtime cwd');
+			// A fork inherits its parent's chat lane, so it stays in chat-uploads too.
+			expect(starts.length === 1 && starts[0].cwd === `${status.workspace_dir}/chat-uploads`, 'CLI uses this row’s actual runtime cwd');
 			expect(init[0].history?.some(row => row.text.includes(retained)), 'CLI actually loaded retained prompt');
 			expect(init[0].history?.some(row => row.text.includes(removed)) === (action === 'fork'), 'fork retains the second prompt; rewind removes it');
 			expect((await chatState(page)).streaming === 'false', 'reply settled');

@@ -51,6 +51,8 @@ vi.mock('$lib/stores/active-session', () => ({
 
 vi.mock('$lib/api/client', () => ({
 	forkSession: mocks.forkSession,
+	getErrorMessage: (e: unknown, fallback: string) =>
+		e && typeof e === 'object' && 'detail' in e ? String((e as { detail: unknown }).detail) : fallback,
 }));
 
 vi.mock('$lib/stores/notifications', () => ({
@@ -147,6 +149,25 @@ describe('SessionTitleMenu', () => {
 		expect(mocks.loadSessions).toHaveBeenCalledOnce();
 		expect(mocks.toastPush).toHaveBeenCalledWith('Chat forked', { severity: 'success' });
 		window.removeEventListener('open-session', onOpen);
+	});
+
+	it("shows the server's reason when a fork fails", async () => {
+		mocks.forkSession.mockRejectedValue({
+			status: 503,
+			detail: 'Home server is offline. Forking runs on the worker that runs this chat; try again once it is reachable.',
+		});
+		renderMenu();
+
+		await openMenu();
+		await fireEvent.click(screen.getByRole('menuitem', { name: 'Fork session' }));
+
+		await vi.waitFor(() =>
+			expect(mocks.toastPush).toHaveBeenCalledWith(
+				'Home server is offline. Forking runs on the worker that runs this chat; try again once it is reachable.',
+				{ severity: 'error' },
+			),
+		);
+		expect(mocks.loadSessions).not.toHaveBeenCalled();
 	});
 
 	it('deletes after ConfirmDialog confirm and resets the open chat', async () => {

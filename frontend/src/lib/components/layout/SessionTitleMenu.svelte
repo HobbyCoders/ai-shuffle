@@ -18,7 +18,7 @@
 	import { ChevronDown, GitFork, Pencil, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
-	import { forkSession } from '$lib/api/client';
+	import { forkSession, getErrorMessage } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import ChatExportActions from './ChatExportActions.svelte';
@@ -177,8 +177,10 @@
 			await appData.loadSessions();
 			notify('Chat forked', { severity: 'success' });
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: result.session_id } }));
-		} catch {
-			notify('Failed to fork session', { severity: 'error' });
+		} catch (e) {
+			// The server says why (for a chat another worker runs: that worker
+			// is unreachable, or could not fork it), so show that.
+			notify(getErrorMessage(e, 'Failed to fork session'), { severity: 'error' });
 		}
 	}
 

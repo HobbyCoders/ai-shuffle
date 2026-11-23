@@ -137,7 +137,16 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
     monkeypatch.setattr(config.settings, "claude_projects_dir", tmp_path / "cli-projects")
     monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
     principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
-    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: principal if preview and sid == PARENT_SID else None)
+    # The parent was the preview's chat; the fork's record is the real one
+    # ``record_creator`` writes for the preview cookie the fork request carries.
+    read_principal = session_orchestration._principal
+    monkeypatch.setattr(
+        session_orchestration, "_principal",
+        lambda sid: principal if preview and sid == PARENT_SID else read_principal(sid),
+    )
+    if preview:
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: {"token": "preview-cookie"})
     with get_db() as conn:
         get_cursor(conn).execute(
             "UPDATE sessions SET profile_id='fork-cwd-agent', mode='chat', branch=NULL, worktree_id=NULL, "
@@ -155,9 +164,21 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
         database.get_profile("fork-cwd-agent"), session_id=fork_id,
     )
     # Exercise the runtime producer against the exact persisted fork fields,
-    # including the absent mode and the recorded parent session.
-    assert row["mode"] is None and row["parent_session_id"] == PARENT_SID
-    assert options.cwd != parent_options.cwd
+    # including the inherited chat lane and the recorded parent session.
+    assert row["mode"] == "chat" and row["parent_session_id"] == PARENT_SID
+    from app.core.session_modes import CHAT_MODE_TOOL_SURFACE, chat_uploads_dir, owner_chat_dir, runtime_session_mode
+    # The owner's fork runs as its parent does: the code tools, in the owner's
+    # no-project folder. A preview chat's fork keeps the chat ceiling in the
+    # chat lane's shared folder, like its parent.
+    assert options.cwd == parent_options.cwd
+    if preview:
+        assert runtime_session_mode(row) == "chat" and options.cwd == str(chat_uploads_dir())
+        # The chat ceiling names every tool it allows; the shell is not one.
+        assert "Read" in options.allowed_tools and "Bash" not in options.allowed_tools
+        assert "Bash" not in CHAT_MODE_TOOL_SURFACE and "run_python" in options.disallowed_tools
+    else:
+        assert runtime_session_mode(row) == "code" and options.cwd == str(owner_chat_dir())
+        assert "Read" not in (options.allowed_tools or []) and not options.disallowed_tools
     handle = fluid_transcript.get_cli_session_id(row["sdk_session_id"])
     assert handle
     expected = fluid_transcript._cli_project_dir(tmp_path / "cli-projects", options.cwd) / f"{handle}.jsonl"
@@ -166,6 +187,67 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
     entries = [json.loads(line) for line in expected.read_text().splitlines()]
     assert {entry["cwd"] for entry in entries} == {options.cwd}
     assert [entry["message"]["content"] for entry in entries if entry["type"] == "user"] == ["hello"]
+
+
+def test_fluid_fork_stays_hidden_until_its_history_is_copied(fork_client, monkeypatch):
+    """A fork row visible mid-copy can take a turn whose event log then blocks
+    the inherited one for good; the row appears only once the copy is done."""
+    from app.core.provider import fluid_transcript
+
+    _seed_parent()
+    real_fork = fluid_transcript.fork_fluid_session
+    rows_during_copy = []
+
+    def paused_copy(*args, **kwargs):
+        from app.db.base import get_cursor, get_db
+
+        with get_db() as conn:
+            cur = get_cursor(conn)
+            cur.execute("SELECT id FROM sessions WHERE parent_session_id=%s", (PARENT_SID,))
+            rows_during_copy.extend(r["id"] for r in cur.fetchall())
+        return real_fork(*args, **kwargs)
+
+    monkeypatch.setattr(fluid_transcript, "fork_fluid_session", paused_copy)
+    response = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert response.status_code == 200, response.text
+    assert rows_during_copy == []
+    row = sessions_db.get_session(response.json()["session_id"])
+    # Created already bound to its copied transcript.
+    assert row["sdk_session_id"] and row["sdk_session_id"] != PARENT_SDK
+    assert len(fluid_transcript.fluid_transcript_entries(row["sdk_session_id"])) == 2
+
+
+def test_voice_fork_is_a_normal_conversation(fork_client):
+    from app.db.base import get_cursor, get_db
+
+    _seed_parent()
+    with get_db() as conn:
+        get_cursor(conn).execute("UPDATE sessions SET mode='voice' WHERE id=%s", (PARENT_SID,))
+    response = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert response.status_code == 200, response.text
+    assert sessions_db.get_session(response.json()["session_id"])["mode"] is None
+
+
+def test_owner_fork_gets_the_owner_tools_but_not_orchestration(fork_client, monkeypatch):
+    from app.core import session_orchestration
+    from app.core.session_modes import owner_workspace_chat
+    from app.db.base import get_cursor, get_db
+
+    _seed_parent()
+    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: None)
+    with get_db() as conn:
+        get_cursor(conn).execute(
+            "UPDATE sessions SET mode='chat', project_id=NULL, project_v2_id=NULL WHERE id=%s", (PARENT_SID,),
+        )
+    response = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert response.status_code == 200, response.text
+    row = sessions_db.get_session(response.json()["session_id"])
+    assert owner_workspace_chat(row)
+    assert not session_orchestration.is_owner_session(row, principal=None)
+    # A worker naming the same parent stays out of the owner's tools, and so
+    # does a legacy fork stored without a lane (its folder holds its resume).
+    assert not owner_workspace_chat({**row, "is_worker": True})
+    assert not owner_workspace_chat({**row, "mode": None})
 
 
 def test_fork_copies_app_event_log_with_turn_ids(fork_client):
