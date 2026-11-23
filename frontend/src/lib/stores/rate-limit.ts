@@ -180,6 +180,9 @@ interface RateLimitState {
 	selfInstanceId: string | null;
 	/** The local install's network device id, when it has one. */
 	selfDeviceId?: string | null;
+	/** Whether this worker belongs to a network now (backend `self_networked`).
+	 *  Runtime-only; null until a snapshot reports it. */
+	selfNetworked?: boolean | null;
 	/**
 	 * Per-install "stale between an account switch and the fresh snapshot" flag.
 	 * The indicator dims the pill for the shown install so we never present the
@@ -300,6 +303,8 @@ export interface UsageSnapshot {
 	self_instance_id?: string | null;
 	/** The local install's network device id. */
 	self_device_id?: string | null;
+	/** Whether this worker belongs to a network now. */
+	self_networked?: boolean | null;
 	/** Installs on one Claude account, merged by the backend. Replaces
 	 *  `accountBuckets` with every modern (`snapshots`) payload. */
 	accounts?: SnapshotAccount[];
@@ -1226,6 +1231,7 @@ export const rateLimit = {
 					accountBuckets: _accountBucketsFromSnapshot(snapshot.accounts, s.accountBuckets, now),
 					selfInstanceId: snapshot.self_instance_id ?? null,
 					selfDeviceId: snapshot.self_device_id ?? null,
+					selfNetworked: snapshot.self_networked ?? null,
 					staleByInstance,
 				};
 				_save(next);
@@ -1285,6 +1291,7 @@ export const rateLimit = {
 				accountBuckets: s.accountBuckets,
 				selfInstanceId: s.selfInstanceId,
 				selfDeviceId: s.selfDeviceId ?? null,
+				selfNetworked: s.selfNetworked ?? null,
 				staleByInstance,
 			};
 			_save(next);

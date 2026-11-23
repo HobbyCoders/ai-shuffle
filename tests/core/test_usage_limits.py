@@ -653,7 +653,22 @@ class TestNetworkCopy:
                 patch("app.network.runners.self_device_id", return_value=None):
             snap = monitor._cluster_snapshot()
         assert snap["self_device_id"] is None
+        assert snap["self_networked"] is False
         assert snap["snapshots"][-1]["instance_id"] == settings.effective_instance_id
+
+    def test_self_networked_comes_from_membership_not_the_ids(self, monitor, mock_db):
+        """A standalone install reports its registry id as self_device_id, equal
+        to self_instance_id; a member configured with INSTANCE_ID = its device
+        id reports the same pair. Only membership tells them apart."""
+        from app.db import database as db
+        me = settings.effective_instance_id
+        installs = {me: {"id": me, "device_name": "ServerWorker", "online": True}}
+        for device, networked in ((None, False), (me, True)):
+            with patch.object(db, "get_installs_map", return_value=installs), \
+                    patch("app.network.runners.self_device_id", return_value=device):
+                snap = monitor._cluster_snapshot()
+            assert snap["self_device_id"] == snap["self_instance_id"] == me
+            assert snap["self_networked"] is networked
 
 
 # ---------------------------------------------------------------------------

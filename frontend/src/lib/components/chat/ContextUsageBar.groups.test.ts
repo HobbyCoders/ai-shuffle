@@ -262,17 +262,24 @@ describe('usage groups', () => {
 		expect(group(await open(), 'group:api').summary()).toBe('');
 	});
 
-	it('a standalone install (device id = its instance id) still names its fal balance for a fal-only tool', async () => {
-		rateLimit.applySnapshot({
+	it('a fal-only tool names this worker\'s fal balance only when the backend says it is on no network', async () => {
+		// A standalone install reports its registry id as both ids; a network
+		// member may too (INSTANCE_ID set to its device id). Only
+		// self_networked tells them apart.
+		const ids = (selfNetworked: boolean) => rateLimit.applySnapshot({
 			available: true, fetched_at: T0 / 1000, windows: [], providers: [FAL, KIMI_API], usage_links: [],
-			self_instance_id: 'install-here', self_device_id: 'install-here',
+			self_instance_id: 'install-here', self_device_id: 'install-here', self_networked: selfNetworked,
 			snapshots: [{ instance_id: 'install-here', available: false, windows: [] }],
 		});
 		mocks.state.messages = [{
 			...falImage(), toolName: 'mcp__ai-tools__editImage',
 			toolResult: JSON.stringify({ success: true, provider_used: 'fal-ai' }),
 		} as ChatMessage];
+		ids(false);
 		expect(group(await open(), 'group:api').summary()).toBe('fal.ai $8.40 left');
+		cleanup();
+		ids(true);
+		expect(group(await open(), 'group:api').summary()).toBe('');
 	});
 
 	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {
