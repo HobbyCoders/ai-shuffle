@@ -775,6 +775,41 @@ describe('Sidebar session groups', () => {
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
 
+	it('shows project groups as folders, keeps keyboard focus, and ignores a peer chat\'s colliding local id', async () => {
+		mocks.adapters.get('groups')!.apply({
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { 'visible-project': 'Work' } },
+		});
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			// A peer's chat whose own project id happens to equal a local one, but
+			// whose shared identity names a different project.
+			session('peer', 'Peer chat', 'visible-project', false, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop',
+				link_group_id: 'group:elsewhere', project_name: 'Elsewhere',
+			}),
+		]);
+		try {
+			render(Sidebar, { props: sidebarProps });
+			await openFilter();
+			const folder = filterOption('Work, 1 project');
+			expect(filterLabels()).toContain('Elsewhere');
+
+			folder.focus();
+			await fireEvent.click(folder);
+			await tick();
+			const back = filterOption('Work');
+			expect(document.activeElement).toBe(back);
+			expect(filterLabels()).toContain('Visible Project');
+			expect(filterLabels()).not.toContain('Elsewhere');
+
+			await fireEvent.click(back);
+			await tick();
+			expect(document.activeElement).toBe(filterOption('Work, 1 project'));
+		} finally {
+			mocks.adapters.get('groups')!.apply(undefined);
+		}
+	});
+
 	it('closes the filter sheet on Escape and on the scrim', async () => {
 		render(Sidebar, { props: sidebarProps });
 

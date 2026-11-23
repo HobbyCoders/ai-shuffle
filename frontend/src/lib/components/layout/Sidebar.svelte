@@ -17,7 +17,7 @@
 	 * Overlays (More, the filter, Customize) live inside the panel, so on the
 	 * phone they ride with the drawer and on desktop they never cover the chat.
 	 */
-	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
+	import { onDestroy, onMount, tick, untrack, type Snippet } from 'svelte';
 	import type { AnimationConfig } from 'svelte/animate';
 	import { cubicOut } from 'svelte/easing';
 	import {
@@ -92,6 +92,7 @@
 		sessionDeviceId,
 		sessionPrState,
 		projectKey,
+		projectIdentity,
 		isVisibleSidebarSession,
 		sidebarGroup,
 		snoozeUntilMs,
@@ -373,11 +374,13 @@
 				option = { id: key, label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s), ids: [] };
 				map.set(key, option);
 			}
-			if (s.project_id && !option.ids.includes(s.project_id)) option.ids.push(s.project_id);
+			// Only this worker's chats carry a local project id; a peer's id names
+			// a project on that worker and can collide with an unrelated one here.
+			if (!s.is_remote && s.project_id && !option.ids.includes(s.project_id)) option.ids.push(s.project_id);
 		}
-		// A chat run on another worker has no local id: its clones here share the key.
+		// A peer's chat reaches its local clones through the shared identity.
 		for (const p of $projects) {
-			const option = p.link_group_id ? map.get(p.link_group_id) : undefined;
+			const option = map.get(projectIdentity(p) ?? '') ?? (p.link_group_id ? map.get(p.link_group_id) : undefined);
 			if (option && !option.ids.includes(p.id)) option.ids.push(p.id);
 		}
 		return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
@@ -393,6 +396,18 @@
 		return { rows, ungrouped: rows.length ? organized.ungrouped : projectOptions };
 	});
 	const openFilterGroup = $derived(projectFilterGroups.rows.find((g) => g.name === filterGroup) ?? null);
+	let filterOpts = $state<HTMLElement | null>(null);
+	// The chip that held focus is removed on drill-in and on Back: move focus to
+	// its counterpart so a keyboard user is not dropped to the page.
+	async function showFilterGroup(name: string | null) {
+		const leaving = filterGroup;
+		filterGroup = name;
+		await tick();
+		const target = name
+			? filterOpts?.querySelector<HTMLElement>('[data-filter-back]')
+			: [...(filterOpts?.querySelectorAll<HTMLElement>('[data-filter-group]') ?? [])].find((el) => el.dataset.filterGroup === leaving);
+		target?.focus();
+	}
 	$effect(() => {
 		if (sheet !== 'filter') filterGroup = null;
 	});
@@ -1197,9 +1212,9 @@
 			<p class="text-xs text-muted-foreground px-2 py-1">Filters apply to loaded chats only. Search reaches all history.</p>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
-				<div class="opts">
+				<div class="opts" bind:this={filterOpts}>
 					{#if openFilterGroup}
-						<button class="opt opt-back" type="button" data-filter-back onclick={() => (filterGroup = null)}><ChevronLeft size={14} strokeWidth={2} aria-hidden="true" />{openFilterGroup.name}</button>
+						<button class="opt opt-back" type="button" data-filter-back onclick={() => showFilterGroup(null)}><ChevronLeft size={14} strokeWidth={2} aria-hidden="true" />{openFilterGroup.name}</button>
 						{#each openFilterGroup.options as opt (opt.id)}
 							<button class="opt" type="button" aria-pressed={projectFilter === opt.id} onclick={() => (projectFilter = opt.id)}>{opt.label}</button>
 						{/each}
@@ -1207,7 +1222,7 @@
 						<button class="opt" type="button" aria-pressed={!projectFilter} onclick={() => (projectFilter = null)}>All projects</button>
 						{#each projectFilterGroups.rows as group (group.name)}
 							{@const holdsFilter = group.options.some((o) => o.id === projectFilter)}
-							<button class="opt opt-group" class:holds-filter={holdsFilter} type="button" aria-label="{group.name}, {group.options.length} {group.options.length === 1 ? 'project' : 'projects'}{holdsFilter ? ', has the active filter' : ''}" onclick={() => (filterGroup = group.name)}><Folder size={13} strokeWidth={2} aria-hidden="true" />{group.name}<span class="opt-count">{group.options.length}</span><ChevronRight size={13} strokeWidth={2} aria-hidden="true" /></button>
+							<button class="opt opt-group" class:holds-filter={holdsFilter} type="button" aria-label="{group.name}, {group.options.length} {group.options.length === 1 ? 'project' : 'projects'}{holdsFilter ? ', has the active filter' : ''}" data-filter-group={group.name} onclick={() => showFilterGroup(group.name)}><Folder size={13} strokeWidth={2} aria-hidden="true" />{group.name}<span class="opt-count">{group.options.length}</span><ChevronRight size={13} strokeWidth={2} aria-hidden="true" /></button>
 						{/each}
 						{#each projectFilterGroups.ungrouped as opt (opt.id)}
 							<button class="opt" type="button" aria-pressed={projectFilter === opt.id} onclick={() => (projectFilter = opt.id)}>{opt.label}</button>
