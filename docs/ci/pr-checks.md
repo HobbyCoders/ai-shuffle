@@ -201,11 +201,16 @@ PostgreSQL safety always run in full.
   also record which repository functions each test file runs
   (`tests/_test_map.py`), and once all eight passed the `backend-map` job merges
   the records, with each file's measured time, into a test map and saves it in
-  the Actions cache. A pull request reads main's newest map and never records
-  or writes one, even when it runs every test. Losing a map only makes pull
-  requests run every test, so nothing about saving it can fail a run:
-  `backend-map` and the shards' upload of their records may fail
-  (`continue-on-error`); the test receipts may not.
+  the Actions cache. A pull request reads main's newest map and never writes
+  one. When a pull request runs every test, its shards record the same files,
+  and main adopts them: a push to main whose backend a pull request's record
+  proves runs no shards of its own, so ci.yml's `backend-map` job merges that
+  pull request's records into a map for main's commit. A record names the
+  exact backend files, so the records match main's code. Without this the map
+  stayed at main's last full backend run while merges went on. Losing a map
+  only makes pull requests run every test, so nothing about saving it can fail
+  a run: both `backend-map` jobs and the shards' upload of their records may
+  fail (`continue-on-error`); the test receipts may not.
 - A pull request diffs from the commit the map was recorded on to its own merge
   commit, so what main changed since the map is chosen too, and picks the test
   files that ran a changed function (the rules are in the script's docstring).
@@ -222,12 +227,12 @@ PostgreSQL safety always run in full.
   two kinds no longer run everything: how CI Backend runs and judges its
   shards (`ci-backend.yml`, the shard and map scripts), and a file no code or
   test names. Neither can change which tests reach the pull request's files.
-  Main's dependency, `conftest.py`, test-data and Python changes count as
-  before. Maps are a run of main behind, so without this most pull requests
+  Main's dependency, test-data and Python changes count as before, and so
+  does main's change to a `conftest.py` pytest loads for the backend tests. Maps are a run of main behind, so without this most pull requests
   ran every test after any merge that touched one of those files.
 - Any doubt runs every test: no map, a map whose commit is not on main, a
-  change to the dependencies (any package manifest or lockfile, in any folder), the pytest setup (any `conftest.py`, the root one
-  too) or how the shards run and are judged, a file under `tests/` that is not
+  change to the dependencies (any package manifest or lockfile, in any folder), the pytest setup (a `conftest.py` above
+  any backend test, the root one too) or how the shards run and are judged, a file under `tests/` that is not
   Python (fixtures, data, snapshots, read by names built at run time), a file
   that no code or test names, nor any folder of it below the top level, a file
   name with a line break, a change the map cannot place, more than 60% of the
@@ -636,6 +641,13 @@ of the rerun is not a pass. The gate refuses a receipt whose failed tests have n
 rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
 `backend-security`, `backend-postgres`, and `backend-contracts` keep a single attempt.
+
+`backend-security` and `backend-postgres` each run on two runners at once
+(`(checks)` and `(policy)`, `(safety)` and `(indexing)`), and both halves must
+pass. Each half takes its share from one list in the step, so the halves run
+every test once; `tests/scripts/test_backend_shards.py` checks that. The
+PostgreSQL halves each start their own database, as these tests share one
+database and watch the whole cluster's locks.
 
 `backend-security` always runs the blocking-DB guard, required root/real-account
 isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
