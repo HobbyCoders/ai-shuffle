@@ -92,6 +92,28 @@ async function boltCycle(page) {
   await page.keyboard.press('Escape');
 }
 
+// Picking GPT-6.1 Sol in a new chat saves composer.model (and other composer
+// records) for every later new chat on this instance, so journeys that share
+// the CI shard would run on this provider. Put back what setup found. Cleanup
+// runs after the browser context closes, so ask the owner listener directly.
+async function restoreComposer(origin, before) {
+  const prefs = `${origin}/api/v1/preferences`;
+  const read = await fetch(`${prefs}/all`);
+  if (!read.ok) throw new Error(`reading preferences returned ${read.status}`);
+  const { preferences } = await read.json();
+  for (const [key, value] of Object.entries(preferences)) {
+    if (!key.startsWith('composer.')) continue;
+    const old = before[key] ?? null;
+    if (JSON.stringify(value ?? null) === JSON.stringify(old)) continue;
+    const put = await fetch(`${prefs}/${key}`, {
+      method: 'PUT',
+      headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: old })
+    });
+    if (!put.ok) throw new Error(`restoring ${key} returned ${put.status}`);
+  }
+}
+
 async function openTuning(page) {
   await showSidebar(page);
   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
@@ -104,7 +126,7 @@ async function openTuning(page) {
 
 runJourney({ name: 'model-tuning-speed', cases: [{
   name: 'new-chat-defaults',
-  async setup({ page, status }) {
+  async setup({ page, status, deferCleanup }) {
     // Preview grants are read-only for account prefs. Use the isolated
     // devloop's loopback owner listener and stamped desktop build.
     const port = status.app.local_port;
@@ -127,6 +149,10 @@ runJourney({ name: 'model-tuning-speed', cases: [{
     }
     // A retry after a failed case starts with the same unset records.
     const { preferences } = await api(page, 'GET', '/preferences/all');
+    // The speed records go back to unset, as this case leaves them.
+    const before = Object.fromEntries(Object.entries(preferences)
+      .filter(([key]) => key.startsWith('composer.') && !keys.includes(key)));
+    deferCleanup(() => restoreComposer(`http://127.0.0.1:${port}`, before));
     for (const key of keys) if (preferences[key] != null) await api(page, 'PUT', `/preferences/${key}`, { key, value: null });
     await gotoApp(page, local);
     await openTuning(page);
