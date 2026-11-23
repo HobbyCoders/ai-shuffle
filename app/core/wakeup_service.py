@@ -130,9 +130,7 @@ _publishes: "set[asyncio.Task]" = set()
 
 async def _publish(session_id: str) -> None:
     from app.core.task_persistence import broadcast_running_task_presence
-    from app.db.session_events import notify_session_write
 
-    notify_session_write(session_id, "session_runtime")
     await broadcast_running_task_presence([session_id])
 
 
@@ -147,6 +145,11 @@ def _publish_presence(session_id: Optional[str]) -> None:
     if not session_id:
         return
     try:
+        from app.db.session_events import notify_session_write
+
+        # Peers' runtime view: queues a network scan, no database work, and is
+        # made for the writer's thread, so it runs here rather than on the loop.
+        notify_session_write(str(session_id), "session_runtime")
         try:
             running: "Optional[asyncio.AbstractEventLoop]" = asyncio.get_running_loop()
         except RuntimeError:
