@@ -378,7 +378,11 @@
 	const catalogNames = $derived.by(() => {
 		const shared = new Map<string, string>();
 		const unlinked = new Map<string, string>();
-		for (const c of $clusterProjects) if (c.origin && c.name) shared.set(c.origin, c.name);
+		// An unlinked catalog row is as ambiguous as any `local:<id>` key, and
+		// this worker's own unlinked projects are named from its list below.
+		for (const c of $clusterProjects) {
+			if (c.origin && c.name && !c.origin.startsWith('local:')) shared.set(c.origin, c.name);
+		}
 		const local = new Set<string>();
 		for (const p of $projects) {
 			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });

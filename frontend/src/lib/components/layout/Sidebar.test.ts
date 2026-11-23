@@ -940,6 +940,8 @@ describe('Sidebar session groups', () => {
 			{ id: 'visible-project', name: 'Visible Project' },
 			{ id: 'demo', name: 'Demo' },
 		]);
+		// The shared catalog lists this worker's unlinked project under the same key.
+		mocks.clusterProjects.set([{ origin: 'local:demo', name: 'Demo', local_project_id: 'demo' }]);
 		mocks.sessions.set([
 			// An unrelated unlinked project on a peer that shares the slug.
 			session('peer-demo', 'Peer demo chat', 'demo', false, false, {
