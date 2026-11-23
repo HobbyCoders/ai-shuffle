@@ -134,13 +134,25 @@
   },
   {
    "id": 8,
-   "name": "backend / backend-security",
+   "name": "backend / backend-security (checks)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 8001,
+   "name": "backend / backend-security (policy)",
    "status": "completed",
    "conclusion": "success"
   },
   {
    "id": 200,
-   "name": "backend / backend-postgres",
+   "name": "backend / backend-postgres (safety)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 8002,
+   "name": "backend / backend-postgres (indexing)",
    "status": "completed",
    "conclusion": "success"
   },

@@ -231,7 +231,13 @@ PostgreSQL safety always run in full.
   Python (fixtures, data, snapshots, read by names built at run time), a file
   that no code or test names, nor any folder of it below the top level, a file
   name with a line break, a change the map cannot place, more than 60% of the
-  test files affected, or any error.
+  test files affected, or any error. The one conftest exception is Fluid's own
+  pair, `fluid/conftest.py` and `fluid/tests/conftest.py`
+  (`EXEMPT_CONFTESTS`): the selectable backend shards never load them, so they
+  count as files like any other. CI Fluid runs the tests that do, and the
+  policy suite, which always runs in full, has one that starts pytest on a
+  Fluid test. Any other conftest, a new
+  one under `fluid/` too, still runs every test.
 - When no shard test can reach the change, no shard runs (`none`).
 - `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each
   naming the same selection and shard count; only a pull request may choose
@@ -636,6 +642,13 @@ of the rerun is not a pass. The gate refuses a receipt whose failed tests have n
 rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
 `backend-security`, `backend-postgres`, and `backend-contracts` keep a single attempt.
+
+`backend-security` and `backend-postgres` each run on two runners at once
+(`(checks)` and `(policy)`, `(safety)` and `(indexing)`), and both halves must
+pass. Each half takes its share from one list in the step, so the halves run
+every test once; `tests/scripts/test_backend_shards.py` checks that. The
+PostgreSQL halves each start their own database, as these tests share one
+database and watch the whole cluster's locks.
 
 `backend-security` always runs the blocking-DB guard, required root/real-account
 isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
