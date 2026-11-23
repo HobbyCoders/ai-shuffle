@@ -10,6 +10,8 @@ import {
 	buttonName,
 	heldButton,
 	ClickCounter,
+	fitFrameToViewport,
+	MAX_PADDED_SURFACE_WIDTH,
 	MOD_ALT,
 	MOD_CTRL,
 	MOD_META,
@@ -230,5 +232,38 @@ describe('ClickCounter', () => {
 		c.press(0, 10, 10, 0, 14);
 		expect(c.press(200, 22, 20, 0, 14)).toBe(2);
 		expect(c.press(400, 40, 20, 0, 14)).toBe(1);
+	});
+});
+
+describe('fitFrameToViewport', () => {
+	const phone = { width: 375, height: 812 };
+
+	it('passes an exact match through unchanged', () => {
+		const m = meta(1280, 800);
+		expect(fitFrameToViewport(m, { width: 1280, height: 800 })).toBe(m);
+	});
+
+	it('trims a phone page painted on a minimum-width window to the page', () => {
+		const fitted = fitFrameToViewport({ ...meta(500, 812), offsetTop: 0 }, phone);
+		expect(fitted).toEqual({ deviceWidth: 375, deviceHeight: 812, offsetTop: 0, surfaceWidth: 500 });
+	});
+
+	it('maps a click on the trimmed frame one-to-one onto the page', () => {
+		const fitted = fitFrameToViewport(meta(500, 812), phone)!;
+		// A 375×812 canvas shows the page at scale 1 with no letterbox.
+		expect(canvasToPage(375, 406, rect(0, 0, 375, 812), fitted)).toEqual({ x: 375, y: 406 });
+	});
+
+	it('rejects a frame of another height as stale', () => {
+		expect(fitFrameToViewport(meta(500, 800), phone)).toBeNull();
+	});
+
+	it('rejects a frame narrower than the page as stale', () => {
+		expect(fitFrameToViewport(meta(360, 812), phone)).toBeNull();
+	});
+
+	it('rejects a surface too wide to be window padding as stale', () => {
+		expect(fitFrameToViewport(meta(MAX_PADDED_SURFACE_WIDTH + 1, 812), phone)).toBeNull();
+		expect(fitFrameToViewport(meta(1280, 812), phone)).toBeNull();
 	});
 });

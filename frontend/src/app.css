@@ -1205,7 +1205,10 @@ html.desktop:not(.desktop-fullscreen) {
 	--desktop-overlay-top: var(--titlebar-height);
 }
 
-html.desktop :is(.sb-head, .topbar, .rail-titlebar, .panel-header, .p-head, .view-titlebar, .st-dtop, .page-terminal > .bar) {
+/* `.view-panel > .panel-header`, not every `.panel-header`: the Browser and
+   Changed files panels use that class name below the title band, and a drag
+   region there swallowed every click on their address bar and buttons. */
+html.desktop :is(.sb-head, .topbar, .rail-titlebar, .view-panel > .panel-header, .p-head, .view-titlebar, .st-dtop, .page-terminal > .bar) {
 	-webkit-app-region: drag;
 	app-region: drag;
 	user-select: none;
@@ -1224,7 +1227,7 @@ html.desktop .reopen-panel {
 	-webkit-app-region: no-drag;
 	app-region: no-drag;
 }
-html.desktop :is(.panel-header, .p-head, .page-terminal > .bar) {
+html.desktop :is(.view-panel > .panel-header, .p-head, .page-terminal > .bar) {
 	height: var(--titlebar-height);
 	min-height: var(--titlebar-height);
 }
