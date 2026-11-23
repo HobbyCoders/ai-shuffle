@@ -409,8 +409,9 @@ is always present, even when `null` or an empty string.
 
 These fields use the same session ownership, API-user scope and paired-client
 transcript access checks as session detail; `owner_fields` does not grant access
-to another user's chat. The top-level `has_running_tasks` boolean counts only
-running durable background tasks, not retained terminal task cards.
+to another user's chat. The top-level `has_running_tasks` boolean counts
+running durable background tasks and scheduled wake-ups that have not fired yet,
+not retained terminal task cards.
 `parked_task_kind` is the session's parked-work kind (string or `null`). Both are
 available without messages, so idle polling does not need session detail.
 

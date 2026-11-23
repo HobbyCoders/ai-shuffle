@@ -95,6 +95,7 @@ def record_completion(session_id: str, settled: dict[str, Any], outcome: str) ->
 
 def live_sessions(exclude: str | None = None) -> list[dict[str, Any]]:
     from app.core import session_orchestration as orch
+    from app.db.wakeups import armed_wake_sql
     # Read the catalog directly, including mirrored sessions regardless of the
     # device's sidebar-sharing preference. Only the execution owner samples
     # turns; peers use the existing replicated runtime projection.
@@ -105,8 +106,8 @@ def live_sessions(exclude: str | None = None) -> list[dict[str, Any]]:
                 AND p.state='pending' AND (p.expires_at IS NULL OR p.expires_at >= NOW())) AS waiting,
             EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.id
                 AND t.state IN ('queued','running','draining','interrupting','blocked_setup')) AS working,
-            EXISTS (SELECT 1 FROM background_tasks b WHERE b.session_id=s.id
-                AND b.status='running') AS background
+            (EXISTS (SELECT 1 FROM background_tasks b WHERE b.session_id=s.id
+                AND b.status='running') OR """ + armed_wake_sql("s.id") + """) AS background
             FROM sessions s LEFT JOIN network_session_runtime n ON n.session_id=s.id
             WHERE s.is_active=TRUE AND s.status<>'archived' AND s.api_user_id IS NULL
                 AND COALESCE(s.hidden,FALSE)=FALSE AND COALESCE(s.is_worker,FALSE)=FALSE

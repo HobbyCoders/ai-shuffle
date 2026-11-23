@@ -335,6 +335,43 @@ async def test_schedule_persists_then_arms(mock_db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# an armed wake keeps the chat from reading idle
+# ---------------------------------------------------------------------------
+
+async def test_armed_wake_counts_as_running_work_until_cancelled(mock_db, monkeypatch):
+    import asyncio
+
+    from app.core import task_persistence, wakeup_service
+    from app.db import background_tasks, database
+
+    published = []
+
+    async def _broadcast(session_ids):
+        published.append(list(session_ids))
+
+    monkeypatch.setattr(task_persistence, "broadcast_running_task_presence", _broadcast)
+
+    sid = "s-waiting"
+    database.create_session(session_id=sid, profile_id="default")
+    assert background_tasks.get_running_task_presence([sid])[sid]["has_running_tasks"] is False
+
+    await wakeup_service.schedule(
+        session_id=sid, profile_id="pr", project_id=None,
+        prompt="check the build", delay_seconds=600, source="schedule_wakeup",
+    )
+    await asyncio.sleep(0)
+    # The sidebar's running flag holds while the chat waits on its wake, and
+    # the new state is pushed instead of waiting for something else to touch it.
+    assert background_tasks.get_running_task_presence([sid])[sid]["has_running_tasks"] is True
+    assert published == [[sid]]
+
+    assert await wakeup_service.cancel_session_wakeups_async(sid) == 1
+    await asyncio.sleep(0)
+    assert background_tasks.get_running_task_presence([sid])[sid]["has_running_tasks"] is False
+    assert published == [[sid], [sid]]
+
+
+# ---------------------------------------------------------------------------
 # session deletion tidies up
 # ---------------------------------------------------------------------------
 

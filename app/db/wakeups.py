@@ -35,6 +35,32 @@ _NOT_STOPPED = (
     "WHERE s.session_id = pending_wakeups.session_id), 0))"
 )
 
+#: ``fire_at`` of a held row with no timer (``wakeup_service.NEVER_FIRE_AT``).
+_NEVER_FIRE_AT = 253402300799.0
+
+#: Rows that start no work when they come due: a removed agent's one-line
+#: notice, and the retired idle watchdog's nudges (dropped at boot).
+_NOT_WORK_SOURCES = ("profile_cancelled", "idle_watchdog")
+
+
+def armed_wake_sql(session_column: str) -> str:
+    """SQL ``EXISTS`` for: the session in ``session_column`` has a wake that
+    will start a turn on its own.
+
+    A chat that scheduled a wakeup is waiting on it, the same as one waiting on
+    a background task, so the sidebar and the state peers see read it as
+    parked rather than idle. Not counted: a held row with no timer (it rides
+    the next turn and never starts one), a row that starts no work, and a row
+    a Stop cancelled but could not delete. Takes no parameters.
+    """
+    sources = ", ".join(f"'{s}'" for s in _NOT_WORK_SOURCES)
+    return (
+        f"EXISTS (SELECT 1 FROM pending_wakeups w WHERE w.session_id = {session_column} "
+        f"AND w.fire_at < {_NEVER_FIRE_AT} AND w.source NOT IN ({sources}) "
+        "AND (w.stop_seq IS NULL OR w.stop_seq >= COALESCE((SELECT st.stop_seq "
+        "FROM session_stops st WHERE st.session_id = w.session_id), 0)))"
+    )
+
 
 def create_wakeup(
     *,

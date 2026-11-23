@@ -216,7 +216,11 @@ def get_running_task_presence(session_ids: List[str]) -> Dict[str, Dict[str, Any
 
     No instance filter: a peer's work is just as visible as this install's.
     Only running rows count; retained terminal history never pins the sidebar.
+    A wakeup the chat scheduled counts too (:func:`app.db.wakeups.armed_wake_sql`):
+    the chat is waiting on it, so it must not read as idle until it fires.
     """
+    from app.db.wakeups import armed_wake_sql
+
     ids = list(dict.fromkeys(session_ids))
     if not ids:
         return {}
@@ -225,8 +229,9 @@ def get_running_task_presence(session_ids: List[str]) -> Dict[str, Dict[str, Any
         cursor = conn.cursor()
         cursor.execute(
             f"""SELECT s.id, s.api_user_id,
-                       EXISTS (SELECT 1 FROM background_tasks b
-                               WHERE b.session_id = s.id AND b.status = 'running')
+                       (EXISTS (SELECT 1 FROM background_tasks b
+                                WHERE b.session_id = s.id AND b.status = 'running')
+                        OR {armed_wake_sql('s.id')})
                            AS has_running_tasks
                   FROM sessions s WHERE s.id IN ({', '.join([_ph] * len(ids))})""",
             ids,

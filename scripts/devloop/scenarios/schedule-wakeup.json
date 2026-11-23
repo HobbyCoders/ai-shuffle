@@ -1,0 +1,19 @@
+{
+  "description": "Schedules a wakeup 90 seconds out (ScheduleWakeup) and ends its turn, so the chat waits on a timer with no background task. The sidebar shows it parked, not idle, until the wake fires (a plain echo reply) or Stop cancels it.",
+  "steps": [
+    {
+      "text": "I'll check back on the build in a minute and a half.",
+      "tool_calls": [
+        {
+          "name": "ScheduleWakeup",
+          "input": {
+            "delaySeconds": 90,
+            "prompt": "Check whether the build finished.",
+            "reason": "Waiting for the build"
+          }
+        }
+      ]
+    },
+    {"text": "Wakeup scheduled. I'll pick this up when it fires."}
+  ]
+}

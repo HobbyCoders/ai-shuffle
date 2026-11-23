@@ -119,6 +119,53 @@ _anon_timers: "set[asyncio.Task]" = set()
 #: boot instead of firing.
 RETIRED_SOURCES = frozenset({"idle_watchdog"})
 
+# The loop the wake timers run on, so a cancel made on a worker thread
+# (``cancel_session_wakeups`` from ``turn_manager.submit``) can still publish
+# the chat's new state there. Set whenever a timer is armed.
+_loop: "Optional[asyncio.AbstractEventLoop]" = None
+
+# Strong refs for in-flight presence publishes (same GC guard as the timers).
+_publishes: "set[asyncio.Task]" = set()
+
+
+async def _publish(session_id: str) -> None:
+    from app.core.task_persistence import broadcast_running_task_presence
+
+    await broadcast_running_task_presence([session_id])
+
+
+def _publish_presence(session_id: Optional[str]) -> None:
+    """A wake was armed or retired: republish the chat's running presence.
+
+    An armed wake counts as running work (``wakeups_db.armed_wake_sql``), so
+    the sidebar shows the chat parked on it and peers see ``parked``. Without
+    this, a chat would keep its old state until something else touched it.
+    Fire-and-forget from any thread; never raises.
+    """
+    if not session_id:
+        return
+    try:
+        from app.db.session_events import notify_session_write
+
+        # Peers' runtime view: queues a network scan, no database work, and is
+        # made for the writer's thread, so it runs here rather than on the loop.
+        notify_session_write(str(session_id), "session_runtime")
+        try:
+            running: "Optional[asyncio.AbstractEventLoop]" = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None:
+            task = running.create_task(_publish(str(session_id)))
+            _publishes.add(task)
+            task.add_done_callback(_publishes.discard)
+            return
+        loop = _loop
+        if loop is None or loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(_publish(str(session_id)), loop)
+    except Exception:  # noqa: BLE001 — presence is best-effort.
+        logger.debug("wakeup presence publish failed for %s", session_id, exc_info=True)
+
 
 def _now_epoch() -> float:
     return datetime.now(timezone.utc).timestamp()
@@ -648,6 +695,7 @@ def cancel_session_wakeups(
             "wakeup cancel: dropped %d pending wake(s) for session %s (source=%s)",
             len(ids), session_id, source or "*",
         )
+        _publish_presence(session_id)
     return len(ids)
 
 
@@ -666,6 +714,7 @@ async def cancel_named_wakeups_async(
     if ids:
         logger.info("wakeup cancel: Stop dropped %d pending wake(s) for session %s",
                     len(ids), session_id)
+        _publish_presence(session_id)
     return len(ids)
 
 
@@ -686,6 +735,7 @@ async def cancel_session_wakeups_async(
             "wakeup cancel: dropped %d pending wake(s) for session %s (source=%s)",
             len(ids), session_id, source or "*",
         )
+        _publish_presence(session_id)
     return len(ids)
 
 
@@ -694,6 +744,8 @@ async def take_session_wakeups(session_id: str, source: str) -> List[Dict[str, A
     and return the rows. A row a timer already claimed is not returned."""
     rows = await asyncio.to_thread(wakeups_db.take_session_wakeups, session_id, source)
     _disarm([str(row["id"]) for row in rows if row.get("id")])
+    if rows:
+        _publish_presence(session_id)
     return rows
 
 
@@ -702,15 +754,23 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
 
     A row that never fires (held progress notes) gets no timer.
     """
+    global _loop
     if never_fires(row):
         return
     wakeup_id = row.get("id")
+    _loop = asyncio.get_running_loop()
 
     async def _run() -> None:
         try:
             if delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
-            await _fire(row)
+            try:
+                await _fire(row)
+            finally:
+                # Fired, dropped or put back for a retry: whichever, the
+                # chat's state may have changed (a queued turn now speaks
+                # for it once the row is gone).
+                _publish_presence(row.get("session_id"))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a wake failure must never leak.
@@ -762,6 +822,8 @@ def arm_persisted(row: Dict[str, Any]) -> None:
     except RuntimeError:
         return
     _arm(row, max(0.0, float(row.get("fire_at") or 0.0) - _now_epoch()))
+    if not never_fires(row):
+        _publish_presence(row.get("session_id"))
 
 
 def _held_merge_kwargs(
@@ -920,6 +982,7 @@ async def schedule(
         stop_seq=stop_seq,
     )
     _arm(row, max(0.0, float(delay_seconds)))
+    _publish_presence(session_id)
     logger.info(
         "wakeup scheduled: id=%s session=%s source=%s fire_in=%.0fs",
         row["id"], session_id, source, max(0.0, float(delay_seconds)),
