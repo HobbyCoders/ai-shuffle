@@ -360,13 +360,24 @@
 
 	interface FilterOption { id: string; label: string }
 
-	const projectOptions = $derived.by((): FilterOption[] => {
-		const map = new Map<string, string>();
+	// One name per project, taken from its oldest chat in the whole list, so the
+	// name (and the project's place, which goes by it) never depends on which of
+	// its chats a lane happens to hold: chats of one linked project can carry
+	// different names from different workers.
+	const projectNames = $derived.by(() => {
+		const oldest = new Map<string, { at: number; id: string; name: string }>();
 		for (const s of sidebarSessions) {
 			const key = projectKey(s);
-			if (!map.has(key)) map.set(key, key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s));
+			const at = sessionStartedAt(s);
+			const seen = oldest.get(key);
+			if (seen && (seen.at < at || (seen.at === at && seen.id < s.id))) continue;
+			oldest.set(key, { at, id: s.id, name: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s) });
 		}
-		return [...map.entries()]
+		return new Map([...oldest].map(([key, { name }]) => [key, name]));
+	});
+
+	const projectOptions = $derived.by((): FilterOption[] => {
+		return [...projectNames.entries()]
 			.map(([id, label]) => ({ id, label }))
 			.sort((a, b) => a.label.localeCompare(b.label));
 	});
@@ -660,13 +671,16 @@
 			if (group) group.push(row);
 			else groups.set(key, [row]);
 		}
+		// Headers show whenever the list spans projects, even over a lane holding
+		// just one: a header appearing as a second project joins would push every
+		// row down, and a folded project would open again with nothing to fold it.
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
-		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
+		if (!spansProjects && groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
 		return [...groups]
 			.map(([key, rows]) => ({
 				key,
-				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
+				label: projectNames.get(key) ?? (key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session)),
 				rows
 			}))
 			// Two projects with the same name fall to their key, never to which row
@@ -724,7 +738,24 @@
 			if (last?.label === label) last.rows.push(row);
 			else out.push({ label, rows: [row] });
 		}
-		return out;
+		return out.map((day) => ({ label: day.label, groups: byProject(day.rows) }));
+	});
+	// Chats a folded project header hides, whichever lane folded them.
+	const foldedIds = $derived.by(() => {
+		const hidden = new Set<string>();
+		const lanes: ['needs' | 'active' | 'settled', ProjectGroup[]][] = [
+			['needs', needsYouGroups],
+			['active', activeGroups],
+			...settledDays.map((day): ['settled', ProjectGroup[]] => ['settled', day.groups])
+		];
+		for (const [lane, groups] of lanes) {
+			for (const group of groups) {
+				if (group.label && collapsedGroups[projectFold(lane, group.key)]) {
+					for (const row of group.rows) hidden.add(row.session.id);
+				}
+			}
+		}
+		return hidden;
 	});
 
 	// --- multi-select --------------------------------------------------------
@@ -738,10 +769,11 @@
 	// no snooze at all); a settled row only goes back to Active.
 	const anySelectedSettleable = $derived(selectedRows.some((r) => rowActive(r.session) || rowSnoozed(r.session)));
 
-	// Rows that left the list (archived elsewhere, filtered out) leave the
-	// selection too, so the count never names rows the user cannot see.
+	// Rows that left the list (archived elsewhere, filtered out, folded away
+	// under their project) leave the selection too, so the count never names
+	// rows the user cannot see and a bulk action never reaches one.
 	$effect(() => {
-		const present = new Set(rows.map((r) => r.session.id));
+		const present = new Set(rows.filter((r) => !foldedIds.has(r.session.id)).map((r) => r.session.id));
 		const current = untrack(() => selected);
 		if ([...current].some((id) => !present.has(id))) {
 			selected = new Set([...current].filter((id) => present.has(id)));
@@ -1128,7 +1160,7 @@
 				{#each settledDays as day (day.label)}
 					<div class="daylabel">{day.label}</div>
 					<div class="cards" data-group="settled">
-						{@render laneRows('settled', byProject(day.rows), true)}
+						{@render laneRows('settled', day.groups, true)}
 					</div>
 				{/each}
 

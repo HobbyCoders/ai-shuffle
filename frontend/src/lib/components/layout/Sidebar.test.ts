@@ -404,6 +404,42 @@ describe('Project groups in alphabetical order, foldable', () => {
 		await fireEvent.click(head());
 		expect(activeIds()).toEqual(['a1', 'b1']);
 	});
+
+	it('keeps a folded project folded when it is left alone in its lane', async () => {
+		const rows = [chat('a1', 'alpha', 1, 'alpha'), chat('b1', 'beta', 2, 'Beta')];
+		mocks.sessions.set(rows);
+		render(Sidebar, sidebarProps);
+		await tick();
+		const head = () => [...document.querySelectorAll<HTMLButtonElement>('[data-group="active"] .proj-head')]
+			.find((el) => el.textContent?.includes('alpha'));
+		await fireEvent.click(head()!);
+		expect(activeIds()).toEqual(['b1']);
+
+		// Beta's only chat goes to Needs you: alpha keeps its header and its fold.
+		mocks.backgroundPermissions.set(new Map([['b1', { count: 1, kind: 'permission' as const }]]));
+		await tick();
+		expect(head()?.getAttribute('aria-expanded')).toBe('false');
+		expect(activeIds()).toEqual([]);
+
+		mocks.backgroundPermissions.set(new Map());
+		await tick();
+		expect(heads()).toEqual(['alpha', 'Beta']);
+		expect(activeIds()).toEqual(['b1']);
+	});
+
+	it('names and places a project by its oldest chat, whichever of its chats a lane holds', async () => {
+		// One project whose chats carry two names, as a linked project's can.
+		const rows = [chat('o1', 'alpha', 1, 'Zebra'), chat('o2', 'alpha', 2, 'Alpha'), chat('m1', 'beta', 3, 'Mango')];
+		mocks.sessions.set(rows);
+		render(Sidebar, sidebarProps);
+		await tick();
+		expect(heads()).toEqual(['Mango', 'Zebra']);
+
+		mocks.backgroundPermissions.set(new Map([['o1', { count: 1, kind: 'permission' as const }]]));
+		await tick();
+		expect(heads()).toEqual(['Mango', 'Zebra']);
+		expect(activeIds()).toEqual(['m1', 'o2']);
+	});
 });
 
 const sidebarProps = {
@@ -1651,6 +1687,34 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
 			expect(mocks.banner).not.toHaveBeenCalled();
 			expect(selbar().getAttribute('aria-hidden')).toBe('true');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('drops a selected row from the pick when its project folds it away', async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.projects.set([{ id: 'alpha', name: 'Alpha' }, { id: 'beta', name: 'Beta' }]);
+			mocks.sessions.set([
+				session('a1', 'Alpha chat', 'alpha', true, false, { project_name: 'Alpha' }),
+				session('b1', 'Beta chat', 'beta', true, false, { project_name: 'Beta' }),
+			]);
+			render(Sidebar, { props: sidebarProps });
+			await longPress('a1');
+			await fireEvent.click(document.querySelector('[data-session-card="b1"] .scard') as HTMLElement);
+			expect(selbar().textContent).toContain('2 selected');
+
+			const alpha = [...document.querySelectorAll<HTMLButtonElement>('[data-group="active"] .proj-head')]
+				.find((el) => el.textContent?.includes('Alpha'))!;
+			await fireEvent.click(alpha);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(selbar().textContent).toContain('1 selected');
+
+			await fireEvent.click(within(selbar()).getByRole('button', { name: /Settle/ }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('b1', false);
+			expect(mocks.setSessionActive).not.toHaveBeenCalledWith('a1', false);
 		} finally {
 			vi.useRealTimers();
 		}
