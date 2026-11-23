@@ -14,7 +14,7 @@ from app.mcp.node_worker import NodeWorker
 
 
 def _edit(result, device_id):
-    worker = _FalToolWorker(worker_script="worker.js")
+    worker = _FalToolWorker(NodeWorker(worker_script="worker.js"))
     tools = {t.name: t for t in _create_image_tools(worker)}
     with patch.object(NodeWorker, "call", AsyncMock(return_value=result)), \
             patch("app.network.runners.self_device_id", return_value=device_id):

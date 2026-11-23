@@ -37,17 +37,24 @@ def _tool_result(result: dict) -> dict:
     return {"content": [{"type": "text", "text": json.dumps(result, indent=2, default=_json_default)}]}
 
 
-class _FalToolWorker(NodeWorker):
-    """The Node worker for the direct fal tools, naming this worker on each result.
+class _FalToolWorker:
+    """Wraps the Node worker for the direct fal tools, naming this worker on each result.
 
     These tools bill this worker's own FAL_KEY. A generation choice already
     names its worker (``app.core.generation_choices``); stamping the same id
     here lets the usage summary tell a charge run here from one a chat ran on
-    another worker before it was handed off.
+    another worker before it was handed off. A wrapper rather than a subclass,
+    so the ``NodeWorker`` this module builds stays the one tests replace.
     """
 
+    def __init__(self, inner: NodeWorker):
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
     async def call(self, tool_name: str, args: dict, timeout: float = 300) -> dict:
-        result = await super().call(tool_name, args, timeout)
+        result = await self._inner.call(tool_name, args, timeout)
         if isinstance(result, dict) and "worker" not in result:
             from app.core.generation_choices import _local_worker
             try:
@@ -1038,11 +1045,11 @@ def create_ai_tools_server(
 
     # Create persistent Node.js worker (started lazily on first tool call)
     worker_script = f"{tools_dir}/dist/worker.js"
-    worker = _FalToolWorker(
+    worker = _FalToolWorker(NodeWorker(
         worker_script=worker_script,
         env=tool_env,
         cwd=tool_cwd,
-    )
+    ))
 
     # Create all tool functions with the worker baked in via closure
     all_image_tools = _create_image_tools(worker, tool_env, tool_cwd)
