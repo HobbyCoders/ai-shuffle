@@ -1040,6 +1040,27 @@ describe('session-switcher · a chat another worker runs holds the shared projec
 		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false, device_name: 'This worker', model: 'm' } });
 		await vi.waitFor(() => expect(getState().modelOverride).toBe('m'));
 		expect(getState()).toMatchObject({ isRemote: true, project: '', projectV2Id: 'pv2-theirs' });
+		// Nor does it confirm the chat runs here: the newer word says it does not.
+		expect(getState().confirmedLocalSession).toBeNull();
+		switcher.destroy();
+	});
+
+	it('a /live answer saying "runs here" still confirms it when a newer row says the same', async () => {
+		// A boot restore: the sidebar list lands while /live is out and repeats
+		// that this worker runs the chat. Agreeing, it does not make the answer
+		// stale, so a hand-off while open keeps the transcript shown (#1932).
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false }];
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		let observed = 0;
+		deps.ownerObservation = () => observed;
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ isRemote: false, confirmedLocalSession: null });
+		observed++;
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false, model: 'm' } });
+		await vi.waitFor(() => expect(getState().modelOverride).toBe('m'));
+		expect(getState()).toMatchObject({ isRemote: false, project: 'app', confirmedLocalSession: 'session-B' });
 		switcher.destroy();
 	});
 
