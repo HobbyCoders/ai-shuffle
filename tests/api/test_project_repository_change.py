@@ -302,6 +302,91 @@ def test_the_last_pin_wins_even_at_the_same_generation(client, ws, test_db, fres
     assert _remote(ws / "demo") == winner
 
 
+def test_every_old_fetch_and_push_url_is_replaced(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    folder = ws / "demo"
+    mirror = _fork(ws, upstream, "demo-mirror")
+    git(folder, "config", "--add", "remote.origin.url", mirror)  # a second fetch URL
+    git(folder, "remote", "set-url", "--push", "origin", upstream)
+    fork = _fork(ws, upstream)
+
+    assert _change(client, pv2, fork).status_code == 200
+    assert git(folder, "remote", "get-url", "--all", "origin").split() == [fork]
+    assert git(folder, "remote", "get-url", "--push", "--all", "origin").split() == [fork]
+
+
+def test_a_fetch_that_times_out_is_undone_like_any_failure(client, ws, test_db, fresh_records, monkeypatch):
+    import subprocess
+
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    fork = _fork(ws, upstream)
+    real = project_remote._git
+
+    def stalled(folder, args, timeout=30):
+        if args[:1] == ["fetch"]:
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real(folder, args, timeout)
+
+    monkeypatch.setattr(project_remote, "_git", stalled)
+    out = asyncio.run(project_remote.handle_apply(
+        {"origin": pv2["origin"], "remote_url": fork, "generation": 1, "keep_upstream": True}))
+    assert out["status"] == "fetch_failed" and out["ok"] is False
+    assert git(ws / "demo", "remote", "get-url", "--all", "origin").split() == [upstream]
+    assert "upstream" not in git(ws / "demo", "remote").split()
+
+
+def test_a_current_pin_beats_an_older_merge(client, ws, test_db, fresh_records):
+    repo_a = _bare_remote(ws)
+    repo_b = _fork(ws, repo_a, "demo-b")
+    repo_c = _fork(ws, repo_a, "demo-c")
+    first = _peer_project(test_db, "first", "First", origin="manual:first")
+    _peer_project(test_db, "bee", "Bee", remote=repo_b)
+    assert _change(client, first, repo_b).json()["merged_duplicate"] is True  # Bee folded into First
+    assert _change(client, first, repo_c).status_code == 200  # First moves on
+    second = _peer_project(test_db, "second", "Second", origin="manual:second")
+    assert _change(client, second, repo_b).status_code == 200
+    assert project_remote.identity_for_remote(repo_b) == ("manual:second", True)
+
+
+def test_a_duplicate_held_only_as_an_on_demand_base_is_folded(client, ws, test_db, fresh_records):
+    from app.core import project_setup
+    from app.db import checkouts as checkouts_db
+
+    upstream = _bare_remote(ws)
+    fork = _fork(ws, upstream)
+    kept = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    dup = _peer_project(test_db, "demo-fork", "Demo fork", remote=fork)
+    base = ws / ".checkouts" / "demo-fork" / "__base__"
+    base.parent.mkdir(parents=True)
+    git(ws, "clone", "-q", fork, str(base))
+    checkouts_db.upsert_checkout(dup["id"], project_setup._me(), str(base), status="active")
+
+    assert _change(client, kept, fork).json()["merged_duplicate"] is True
+    assert project_remote._own_folders_for(kept["origin"], lock=False) == [str(base)]
+    assert checkouts_db.has_active_base_checkout(dup["id"], project_setup._me())  # its chats keep it
+    # A later change of the kept project reaches that checkout.
+    other = _fork(ws, upstream, "demo-other")
+    assert _change(client, kept, other).status_code == 200
+    assert _remote(base) == other
+
+
+def test_an_equal_generation_request_defers_to_the_synced_pin(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    winner = _fork(ws, upstream, "demo-winner")
+    loser = _fork(ws, upstream, "demo-loser")
+    projects_v2.pin_remote(pv2["origin"], winner, default_branch="main", generation=1,
+                           keep_upstream=False, previous=upstream)
+    asyncio.run(project_remote.handle_apply(
+        {"origin": pv2["origin"], "remote_url": loser, "generation": 1, "keep_upstream": False}))
+    assert _remote(ws / "demo") == winner
+
+
 def test_a_late_request_never_switches_a_copy_back(client, ws, test_db, fresh_records):
     upstream = _bare_remote(ws)
     pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)

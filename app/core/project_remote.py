@@ -130,14 +130,13 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     if not derived:
         return None
     try:
-        own = projects_v2.get_project_v2_by_origin(derived)
-        target = merged_into(own)
-        if target:
-            return target, True
         wanted = normalize_remote_url(url)
-        for row in _pinned_rows():
+        for row in _pinned_rows():  # a current pin beats an older merge
             if row["origin"] != derived and normalize_remote_url(pinned_remote(row)) == wanted:
                 return row["origin"], True
+        target = merged_into(projects_v2.get_project_v2_by_origin(derived))
+        if target:
+            return target, True
     except Exception:  # noqa: BLE001 - fall back to the remote's own identity
         logger.debug("identity_for_remote: lookup failed", exc_info=True)
     return derived, False
@@ -217,19 +216,19 @@ def _lock_to(row: Dict[str, Any], origin: str) -> Dict[str, Any]:
     return database.get_project(row["id"]) or row
 
 
-def _push_urls(folder: str) -> List[str]:
-    result = _git(folder, ["config", "--get-all", "remote.origin.pushurl"], timeout=10)
+def _config_all(folder: str, key: str) -> List[str]:
+    result = _git(folder, ["config", "--get-all", key], timeout=10)
     return [line.strip() for line in result.stdout.splitlines() if line.strip()] if result.returncode == 0 else []
 
 
 def is_switched(folder: str, url: str) -> bool:
-    """Whether this checkout already fetches from and pushes to ``url``."""
+    """Whether every URL this checkout's ``origin`` fetches from and pushes to is ``url``."""
     from app.core.project_links import normalize_remote_url
 
-    current = _remote_url(folder, "origin")
     wanted = normalize_remote_url(url)
-    return bool(current) and normalize_remote_url(current) == wanted and all(
-        normalize_remote_url(push) == wanted for push in _push_urls(folder))
+    urls = _config_all(folder, "remote.origin.url")
+    return bool(urls) and all(normalize_remote_url(u) == wanted
+                              for u in urls + _config_all(folder, "remote.origin.pushurl"))
 
 
 def _ahead_behind(folder: str, branch: str) -> Optional[Tuple[int, int]]:
@@ -240,12 +239,15 @@ def _ahead_behind(folder: str, branch: str) -> Optional[Tuple[int, int]]:
     return (int(parts[0]), int(parts[1])) if len(parts) == 2 else None
 
 
-def _restore(folder: str, previous: Optional[str], push_urls: List[str], added_upstream: bool) -> None:
+def _restore(folder: str, urls: List[str], push_urls: List[str], added_upstream: bool) -> None:
     """Put ``origin`` back as it was before a switch that could not fetch."""
-    if previous is None:
+    if not urls:
         _git(folder, ["remote", "remove", "origin"])
     else:
-        _git(folder, ["remote", "set-url", "origin", previous])
+        _git(folder, ["config", "--unset-all", "remote.origin.url"])
+        _git(folder, ["config", "--unset-all", "remote.origin.pushurl"])
+        for value in urls:
+            _git(folder, ["config", "--add", "remote.origin.url", value])
         for push in push_urls:
             _git(folder, ["config", "--add", "remote.origin.pushurl", push])
     if added_upstream:
@@ -269,29 +271,37 @@ def _apply_to_folder(folder: str, url: str, keep_upstream: bool) -> Dict[str, An
             return out
         current = _remote_url(folder, "origin")
         changed = not is_switched(folder, url)
-        push_urls = _push_urls(folder) if changed else []
+        urls = _config_all(folder, "remote.origin.url") if changed else []
+        push_urls = _config_all(folder, "remote.origin.pushurl") if changed else []
         added_upstream = False
         if changed and keep_upstream and current and _remote_url(folder, "upstream") is None:
             added_upstream = _git(folder, ["remote", "add", "upstream", current]).returncode == 0
             out["upstream"] = added_upstream or None
         if changed:
-            result = _git(folder, ["remote", "add", "origin", url] if current is None
-                          else ["remote", "set-url", "origin", url])
-            if result.returncode == 0 and push_urls:
-                # An explicit push URL would keep pushing to the old repository.
-                result = _git(folder, ["config", "--unset-all", "remote.origin.pushurl"])
+            if current is None:
+                result = _git(folder, ["remote", "add", "origin", url])
+            else:
+                # Every old fetch URL and explicit push URL goes: either would
+                # keep fetching from or pushing to the old repository.
+                result = _git(folder, ["config", "--replace-all", "remote.origin.url", url])
+                if result.returncode == 0 and push_urls:
+                    result = _git(folder, ["config", "--unset-all", "remote.origin.pushurl"])
             if result.returncode != 0:
-                _restore(folder, current, [], added_upstream)
+                _restore(folder, urls, push_urls, added_upstream)
                 out.pop("upstream", None)
                 out.update(status="error", error="Git refused to change this copy's remote.")
                 return out
         out["changed"] = changed
-        fetched = _git(folder, ["fetch", "--prune", "origin"], timeout=FETCH_TIMEOUT)
-        if fetched.returncode != 0:
+        try:
+            fetched = _git(folder, ["fetch", "--prune", "origin"], timeout=FETCH_TIMEOUT)
+            fetch_error = fetched.stderr if fetched.returncode != 0 else None
+        except Exception as exc:  # noqa: BLE001 - a timeout must undo the switch like any failure
+            fetch_error = f"fetch did not finish: {type(exc).__name__} (timed out)"
+        if fetch_error is not None:
             if changed:
-                _restore(folder, current, push_urls, added_upstream)
+                _restore(folder, urls, push_urls, added_upstream)
                 out.pop("upstream", None)
-            failure = classify_clone_failure(fetched.stderr, url)
+            failure = classify_clone_failure(fetch_error, url)
             out.update(status="fetch_failed", error=str(failure), error_code=failure.error_code)
             return out
         _git(folder, ["remote", "set-head", "origin", "--auto"], timeout=30)
@@ -390,13 +400,32 @@ def fold_local(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
     one worker never gets two base folders for one project.
     """
     dup_rows = _own_rows_for(duplicate_origin)
-    if not dup_rows:
-        return {"folded": 0}
-    if _own_rows_for(into_origin):
+    if _own_folders_for(into_origin, lock=False):
         return {"folded": 0, "skipped": len(dup_rows)}
+    if not dup_rows:
+        return _fold_base_checkout(duplicate_origin, into_origin)
     for row in dup_rows[:1]:
         _lock_to(row, into_origin)
     return {"folded": 1, "skipped": len(dup_rows) - 1}
+
+
+def _fold_base_checkout(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
+    """Register the duplicate's on-demand base checkout as the kept project's
+    base too, so the kept project's changes reach it. The duplicate's own row
+    stays: chats bound to it keep their folder."""
+    from app.core.checkout_manager import _resolve_checkout_path
+    from app.core.project_setup import _me
+    from app.db import checkouts as checkouts_db
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    dup_id, me = project_v2_id_for_origin(duplicate_origin), _me()
+    for ck in checkouts_db.list_active_base_checkouts():
+        if ck.get("project_id") == dup_id and ck.get("runner_id") == me and ck.get("path"):
+            path = _resolve_checkout_path(ck["path"])
+            if os.path.isdir(path):
+                checkouts_db.upsert_checkout(project_v2_id_for_origin(into_origin), me, path, status="active")
+                return {"folded": 1}
+    return {"folded": 0}
 
 
 def reconcile_local() -> int:
@@ -489,7 +518,7 @@ async def handle_apply(body: Dict[str, Any]) -> Dict[str, Any]:
         nonlocal url
         keep_upstream = bool(body.get("keep_upstream"))
         synced = projects_v2.get_project_v2_by_origin(origin)
-        if pinned_remote(synced) and generation(synced) > gen:
+        if pinned_remote(synced) and generation(synced) >= gen:
             url = pinned_remote(synced)
             keep_upstream = bool(_settings(synced).get(KEEP_UPSTREAM_KEY))
         if isinstance(duplicate, str) and duplicate and duplicate != origin:
