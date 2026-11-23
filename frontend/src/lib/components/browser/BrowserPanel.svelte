@@ -63,7 +63,7 @@
 		type DesignProp,
 		type DesignScope,
 	} from '$lib/browser-panel/design';
-	import type { PageRect } from '$lib/browser-panel/coords';
+	import { fitFrameToViewport, type PageRect } from '$lib/browser-panel/coords';
 	import BrowserLiveView from './BrowserLiveView.svelte';
 	import BrowserDesignRail from './BrowserDesignRail.svelte';
 	import BrowserWorkspaceToolbar from './BrowserWorkspaceToolbar.svelte';
@@ -346,12 +346,13 @@
 	let frameIdentity = $state<string | null>(null);
 	let keyboardOpen = $state(false);
 	// CSS viewport metadata, not JPEG dimensions (the stream may be downscaled).
+	// A phone-width page arrives on a wider minimum-size window: fitFrameToViewport
+	// accepts that padding rather than waiting for a frame that never comes.
 	const frameMatchesWorkspace = $derived(
 		!!workspace?.available && !!latestFrame &&
 		latestFrame.metadata.runtime_id === workspace.runtime_id &&
 		latestFrame.metadata.tab_id === workspace.active_tab_id &&
-		latestFrame.metadata.deviceWidth === workspace.viewport.width &&
-		latestFrame.metadata.deviceHeight === workspace.viewport.height,
+		fitFrameToViewport(latestFrame.metadata, workspace.viewport) !== null,
 	);
 	let commandSequence = 0;
 	let operation: PanelOperation | null = null;
@@ -393,6 +394,7 @@
 		trackedPage = false;
 		replies.clear();
 		awaitingReplies.clear();
+		resetContinuous();
 
 		if (framedSessionId !== sid) {
 			latestFrame = null;
@@ -428,6 +430,7 @@
 			onCommandResult: (_id, ok, error, text, choices) => {
 				if (!active) return;
 				if (awaitingReplies.has(_id)) replies.set(_id, { ok, error, text, choices });
+				continuousSettled(_id);
 				scope.notify();
 				// A failed copy or list lookup is reported where it was asked for, in plain words.
 				if (!ok && !quietRequests.has(_id))
@@ -442,6 +445,8 @@
 					if (frameIdentity !== identity) {
 						// Keep the last image until this target paints; input stays gated.
 						hoverRect = null;
+						// Held moves and scrolls were aimed at the previous page.
+						resetContinuous();
 						// Another tab or browser is another page, even at the same
 						// address: the marked elements are not on it.
 						if (frameIdentity !== null) clearDesign();
@@ -476,6 +481,7 @@
 		return () => {
 			active = false;
 			clearTimeout(releaseTimer);
+			resetContinuous();
 			controlRequest = null;
 			controlGeneration++;
 			releasingControl = false;
@@ -509,14 +515,75 @@
 		});
 	});
 
-	function sendIdentified(payload: Record<string, unknown>) {
+	function nextCommandId() {
+		return `panel-${Date.now()}-${++commandSequence}`;
+	}
+	function sendIdentified(payload: Record<string, unknown>, id = nextCommandId()) {
 		if (!workspace?.available || !client) return false;
 		return client.send({
 			...payload,
-			id: `panel-${Date.now()}-${++commandSequence}`,
+			id,
 			runtime_id: workspace.runtime_id,
 			tab_id: workspace.active_tab_id,
 		});
+	}
+
+	// ── Pointer-move and wheel flow control ─────────────────────────────
+	// A hovering mouse sends a move every animation frame and a trackpad a
+	// wheel event even faster, but each one waits its turn in the browser's
+	// single command queue. Sent blindly they outran a busy page, lagged every
+	// click behind seconds of stale moves and filled the queue ("workspace
+	// queue full"). So at most one of them is on its way at a time: newer moves
+	// replace a held one and wheel deltas add up until the last is answered.
+	const CONTINUOUS_REPLY_TIMEOUT_MS = 2000;
+	let continuousInFlight: string | null = null;
+	let continuousTimer: ReturnType<typeof setTimeout> | undefined;
+	let heldMove: Record<string, unknown> | null = null;
+	let heldWheel: Record<string, unknown> | null = null;
+
+	function isContinuous(payload: Record<string, unknown>) {
+		return payload.kind === 'mouse' && (payload.event === 'move' || payload.event === 'wheel');
+	}
+	function resetContinuous() {
+		clearTimeout(continuousTimer);
+		continuousInFlight = null;
+		heldMove = heldWheel = null;
+	}
+	function sendContinuous(payload: Record<string, unknown>) {
+		const id = nextCommandId();
+		if (!sendIdentified(payload, id)) return;
+		continuousInFlight = id;
+		clearTimeout(continuousTimer);
+		// A reply can be lost with a dropped viewer; never stall input on it.
+		continuousTimer = setTimeout(() => continuousSettled(id), CONTINUOUS_REPLY_TIMEOUT_MS);
+	}
+	function continuousSettled(id: string) {
+		if (id !== continuousInFlight) return;
+		clearTimeout(continuousTimer);
+		continuousInFlight = null;
+		const next = heldWheel ?? heldMove;
+		if (next === heldWheel) heldWheel = null;
+		else heldMove = null;
+		// Control can end while one waits: never send it to a page we no longer drive.
+		if (next && humanControl && frameMatchesWorkspace) sendContinuous(next);
+	}
+	function queueContinuous(payload: Record<string, unknown>) {
+		if (continuousInFlight === null) { sendContinuous(payload); return; }
+		if (payload.event === 'wheel') {
+			// The wheel carries the pointer position; a move held after it stays newer.
+			heldMove = null;
+			const clampDelta = (v: number) => Math.max(-10000, Math.min(10000, v));
+			heldWheel = heldWheel
+				? { ...payload, deltaX: clampDelta(Number(heldWheel.deltaX ?? 0) + Number(payload.deltaX ?? 0)), deltaY: clampDelta(Number(heldWheel.deltaY ?? 0) + Number(payload.deltaY ?? 0)) }
+				: payload;
+		} else heldMove = payload;
+	}
+	/** Clicks, keys and text go at once, after any scroll the user already made. */
+	function sendDiscrete(payload: Record<string, unknown>) {
+		// The press carries its own position, so a held hover is obsolete.
+		heldMove = null;
+		if (heldWheel) { const wheel = heldWheel; heldWheel = null; sendIdentified(wheel); }
+		sendIdentified(payload);
 	}
 	let controlRequest: Promise<void> | null = null;
 	let controlGeneration = 0;
@@ -611,7 +678,9 @@
 		const scope = operation;
 		try {
 			await ensureControl();
-			if (identity === frameIdentity && frameMatchesWorkspace) sendIdentified(payload);
+			if (identity !== frameIdentity || !frameMatchesWorkspace) return;
+			if (isContinuous(payload)) queueContinuous(payload);
+			else sendDiscrete(payload);
 		} catch (error) { if (operation === scope) commandError = error instanceof Error ? error.message : 'Browser input failed.'; }
 	}
 

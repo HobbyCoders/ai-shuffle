@@ -47,6 +47,7 @@
 		buttonName,
 		canvasToPage,
 		ClickCounter,
+		fitFrameToViewport,
 		fitScale,
 		heldButton,
 		letterbox,
@@ -204,11 +205,18 @@
 	// Wait for the matching bitmap to finish decoding too: receiving metadata
 	// alone does not mean the picture under the pointer has changed yet.
 	const waitingForFrame = $derived(currentMeta?.runtime_id !== frame?.metadata.runtime_id || currentMeta?.tab_id !== frame?.metadata.tab_id || (!!viewport && (
-		currentMeta?.deviceWidth !== viewport.width ||
-		currentMeta?.deviceHeight !== viewport.height ||
-		frame?.metadata.deviceWidth !== viewport.width ||
-		frame?.metadata.deviceHeight !== viewport.height
+		!currentMeta || !frame ||
+		fitFrameToViewport(currentMeta, viewport) === null ||
+		fitFrameToViewport(frame.metadata, viewport) === null
 	)));
+	// The drawn frame as the page sees it: a phone-width page on a wider
+	// minimum-size window is trimmed to the page, so drawing, pointer mapping and
+	// field overlays all use the page's own size. Derived (not fixed at draw
+	// time) because the workspace size can arrive after the frames that show it,
+	// and a still page sends no further frame.
+	const drawnMeta = $derived(
+		currentMeta && viewport ? (fitFrameToViewport(currentMeta, viewport) ?? currentMeta) : currentMeta,
+	);
 	const keyboardEnabled = $derived(keyboardAllowed && !waitingForFrame);
 	const interactive = $derived(inputEnabled && !waitingForFrame);
 
@@ -271,12 +279,13 @@
 	 * minority. Text is pure black or white, whichever contrasts more.
 	 */
 	function fieldSurface(f: BrowserEditor): { background: string; color: string } | null {
-		const meta = currentMeta;
+		const meta = drawnMeta;
 		const bitmap = currentBitmap;
 		if (!bitmap || !metaIsDrawable(meta)) return null;
 		try {
 			// The JPEG can be smaller than the CSS viewport it shows.
-			const kx = (bitmap.width || meta.deviceWidth) / meta.deviceWidth;
+			const surfaceWidth = meta.surfaceWidth ?? meta.deviceWidth;
+			const kx = (bitmap.width || surfaceWidth) / surfaceWidth;
 			const ky = (bitmap.height || meta.deviceHeight) / meta.deviceHeight;
 			// Stay clear of the border (and its blur in the scaled JPEG).
 			const ix = Math.min(4, f.width / 4);
@@ -418,7 +427,7 @@
 
 	function paint() {
 		const bitmap = currentBitmap;
-		const meta = currentMeta;
+		const meta = drawnMeta;
 		if (!canvasEl || !bitmap || !metaIsDrawable(meta)) return;
 		const rect = canvasEl.getBoundingClientRect();
 		if (rect.width <= 0 || rect.height <= 0) return;
@@ -443,8 +452,15 @@
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 		ctx.clearRect(0, 0, rect.width, rect.height);
 		ctx.imageSmoothingQuality = 'high';
+		// Only the page's part of a wider surface is drawn; the empty strip of a
+		// minimum-size window stays off screen.
+		const surfaceWidth = meta.surfaceWidth ?? meta.deviceWidth;
 		ctx.drawImage(
 			bitmap,
+			0,
+			0,
+			bitmap.width * (meta.deviceWidth / surfaceWidth),
+			bitmap.height,
 			off.x,
 			off.y,
 			meta.deviceWidth * scale,
@@ -678,12 +694,12 @@
 	// ── Input forwarding ───────────────────────────────────────────────────
 
 	function pagePoint(e: { clientX: number; clientY: number }) {
-		if (!canvasEl || !currentMeta) return null;
+		if (!canvasEl || !drawnMeta) return null;
 		return canvasToPage(
 			e.clientX,
 			e.clientY,
 			canvasEl.getBoundingClientRect(),
-			currentMeta,
+			drawnMeta,
 		);
 	}
 
