@@ -430,6 +430,10 @@ class UsageLimitsMonitor:
             ``{instance_id, device_name, online, windows, fetched_at,
             available, generation}``.
           * ``self_instance_id`` — this install's ``effective_instance_id``.
+          * ``self_networked`` — whether this worker is a member of a network
+            now. ``self_device_id`` cannot tell: a standalone install reports
+            its registry id there, and that may equal ``self_instance_id`` on
+            a member too.
 
         Rows whose ``instance_id`` is not in the installs registry are skipped
         UNLESS the row is self (so a brand-new install with no registry row yet
@@ -565,6 +569,7 @@ class UsageLimitsMonitor:
         base["snapshots"] = [s for s in snapshots if s["instance_id"] != self_id] + [own]
         base["self_instance_id"] = self_id
         base["self_device_id"] = own["device_id"]
+        base["self_networked"] = _network_self_device_id() is not None
         base["accounts"] = merge_account_snapshots(base["snapshots"])
         return base
 

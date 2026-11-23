@@ -62,6 +62,9 @@ vi.mock('$lib/api/sessions', async (importOriginal) => {
 	return { ...actual, getContextUsage: mocks.getContextUsage };
 });
 
+/** Both usage groups open, so each test reads the sections inside them. */
+const GROUPS_OPEN = { 'group:subscriptions': true, 'group:api': true };
+
 const T0 = Date.UTC(2026, 10, 12, 12, 0, 0);
 const KIMI_CODE = 'https://www.kimi.com/membership/subscription?tab=quota';
 const MINIMAX_BALANCE = 'https://platform.minimax.io/user-center/payment/balance';
@@ -145,9 +148,9 @@ beforeEach(() => {
 	vi.setSystemTime(T0);
 	vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
 	localStorage.clear();
-	mocks.adapters.get('context_usage_sections')?.apply(undefined);
+	mocks.adapters.get('context_usage_sections')?.apply(GROUPS_OPEN);
 	mocks.adapters.get('context_usage_hidden_providers')?.apply(undefined);
-	usageSections.set({});
+	usageSections.set(GROUPS_OPEN);
 	rateLimit.__resetForTests();
 	mocks.getContextUsage.mockReset();
 	mocks.getContextUsage.mockResolvedValue({ available: false, reason: 'not_connected' });

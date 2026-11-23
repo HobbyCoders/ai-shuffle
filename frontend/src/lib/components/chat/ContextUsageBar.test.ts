@@ -96,6 +96,9 @@ vi.mock('$lib/stores/auth.svelte', async (importOriginal) => {
 	} };
 });
 
+/** Both usage groups open, so each test reads the sections inside them. */
+const GROUPS_OPEN = { 'group:subscriptions': true, 'group:api': true };
+
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
 const past = () => new Date(Date.now() - 1_000).toISOString();
 
@@ -108,7 +111,7 @@ beforeEach(() => {
 	vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
 	localStorage.clear();
 	mocks.adapters.get('context_breakdown_open')!.apply(undefined);
-	mocks.adapters.get('context_usage_sections')!.apply(undefined);
+	mocks.adapters.get('context_usage_sections')!.apply(GROUPS_OPEN);
 	mocks.adapters.get('context_usage_hidden_providers')!.apply(undefined);
 	mocks.save.mockClear();
 	// Full reset: clears every bucket AND the per-install generation guard.
@@ -198,7 +201,7 @@ describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
 	});
 
 	it('summarizes a collapsed ChatGPT subscription by its 5-hour window too', async () => {
-		usageSections.set({ 'provider:codex-5h': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:codex-5h': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -219,7 +222,7 @@ describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
 
 describe('ContextUsageBar — immediate usage numbers', () => {
 	it.each([false, true])('shows current values on reopen and live updates without flipping (expanded=%s)', async (expanded) => {
-		usageSections.set({ plan: expanded, 'provider:credits': expanded, 'provider:codex': expanded });
+		usageSections.set({ ...GROUPS_OPEN, plan: expanded, 'provider:credits': expanded, 'provider:codex': expanded });
 		const snapshot = (balance: number, used = 40) => rateLimit.applySnapshot({
 			available: true, windows: [{ type: 'five_hour', utilization: 24, resets_at: future() }],
 			providers: [
@@ -264,13 +267,13 @@ describe('ContextUsageBar — popover positioning', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		mocks.adapters.get('context_breakdown_open')!.apply(false);
-		mocks.adapters.get('context_usage_sections')!.apply({ plan: false });
+		mocks.adapters.get('context_usage_sections')!.apply({ ...GROUPS_OPEN, plan: false });
 		await waitFor(() => expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('false'));
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
 		expect(container.querySelector('.sec-header')?.getAttribute('aria-expanded')).toBe('false');
 		expect(mocks.save).not.toHaveBeenCalled();
 		mocks.adapters.get('context_breakdown_open')!.apply(undefined);
-		mocks.adapters.get('context_usage_sections')!.apply(undefined);
+		mocks.adapters.get('context_usage_sections')!.apply(GROUPS_OPEN);
 		await waitFor(() => expect(container.querySelector('.ctx-header')?.getAttribute('aria-expanded')).toBe('true'));
 		expect(container.querySelector('.sec-header')?.getAttribute('aria-expanded')).toBe('true');
 	});
@@ -1680,7 +1683,7 @@ describe('ContextUsageBar — provider visibility', () => {
 			{ provider_id: 'api', provider_type: 'fal', provider_name: 'fal.ai', windows: [], credits: { balance_remaining: 12 } },
 			{ provider_id: 'other', provider_type: 'fal', provider_name: 'fal.ai', windows: [] }
 		] });
-		usageSections.set({ 'provider:api': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:api': false });
 		const { container, getByRole, getAllByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		await fireEvent.click(getAllByRole('button', { name: 'Hide fal.ai usage' })[0]);
@@ -1765,7 +1768,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('shows high OpenAI subscription quota remaining without warning or danger color', async () => {
-		usageSections.set({ 'provider:codex-91': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:codex-91': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1890,7 +1893,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('summarizes a collapsed Grok section with the least quota remaining', async () => {
-		usageSections.set({ 'provider:grok-2': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:grok-2': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -2104,7 +2107,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 
 	it('collapsed credits-only provider (no windows) shows a compact credits summary on the header', async () => {
 		// Persisted-collapsed before render so the header renders in its collapsed state.
-		usageSections.set({ 'provider:or-credits': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:or-credits': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -2185,7 +2188,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('collapsed balance provider shows a compact "$X left" chip', async () => {
-		usageSections.set({ 'provider:or-balance-collapsed': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:or-balance-collapsed': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -2227,7 +2230,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 	});
 
 	it('collapsed provider WITH windows keeps the % chip (not the credits summary)', async () => {
-		usageSections.set({ 'provider:or-both': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:or-both': false });
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -2559,7 +2562,7 @@ describe('ContextUsageBar — collapsed Antigravity summary', () => {
 	}
 
 	it('shows the Gemini Models weekly % left when collapsed, ignoring 5-hour, Claude/GPT and Argon buckets', async () => {
-		usageSections.set({ 'provider:agy-1': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:agy-1': false });
 		applyAntigravity([
 			{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() },
 			{ type: 'antigravity_gemini-5h', label: 'Gemini Models, 5-hour', utilization: 65, resets_at: future() },
@@ -2597,7 +2600,7 @@ describe('ContextUsageBar — collapsed Antigravity summary', () => {
 	});
 
 	it('picks the lowest remaining % when multiple split Gemini weekly windows exist', async () => {
-		usageSections.set({ 'provider:agy-1': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:agy-1': false });
 		applyAntigravity([
 			{ type: 'antigravity_gemini-pro-weekly', label: 'Gemini Pro, weekly', utilization: 30, resets_at: future() },
 			{ type: 'antigravity_gemini-flash-weekly', label: 'Gemini Flash, weekly', utilization: 75, resets_at: future() },
@@ -2641,7 +2644,7 @@ describe('ContextUsageBar — collapsed Antigravity summary', () => {
 		expect(collapsedBtn.contains(desc!)).toBe(false);
 
 		// Multiple Antigravity rows with special-character IDs keep unique non-colliding description IDs.
-		usageSections.set({ 'provider:agy-1': false, 'provider:agy:1': false, 'provider:agy_1': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:agy-1': false, 'provider:agy:1': false, 'provider:agy_1': false });
 		rateLimit.applySnapshot({
 			available: false,
 			windows: [],
@@ -2702,7 +2705,7 @@ describe('ContextUsageBar — collapsed Antigravity summary', () => {
 			{ type: 'antigravity_gemini-5h', label: 'Gemini Models, 5-hour', utilization: 40, resets_at: future() },
 		], {}],
 	])('falls back to "—" when no Gemini weekly window exists (%s)', async (_case, windows, overrides) => {
-		usageSections.set({ 'provider:agy-1': false });
+		usageSections.set({ ...GROUPS_OPEN, 'provider:agy-1': false });
 		applyAntigravity(windows, overrides);
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);

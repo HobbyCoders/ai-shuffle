@@ -228,6 +228,9 @@ class UsageSnapshot(BaseModel):
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
     self_device_id: Optional[str] = None
+    # True while this worker belongs to a network. Clients cannot infer it from
+    # the ids: a standalone install reports its registry id as self_device_id.
+    self_networked: Optional[bool] = None
     # Installs sharing a Claude account, merged (additive; see
     # ``app.core.usage_limits.merge_account_snapshots``).
     accounts: List[AccountUsageSnapshot] = []

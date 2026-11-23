@@ -6,8 +6,14 @@
 	import SettingsCard from '$lib/components/deck/cards/SettingsCard.svelte';
 	import { rateLimit } from '$lib/stores/rate-limit';
 	import { hydrateModelRegistry } from '$lib/constants/models';
+	import { usageSections } from '$lib/stores/expansion-preferences';
 
 	const view = new URLSearchParams(location.search).get('view') ?? 'usage';
+	// The Subscriptions / API keys groups start collapsed; open both so every
+	// fixture shows its rows (?groups=collapsed shows the collapsed headers).
+	if (new URLSearchParams(location.search).get('groups') !== 'collapsed') {
+		usageSections.set({ 'group:subscriptions': true, 'group:api': true });
+	}
 	const now = Date.now();
 	const inAnHour = String(Math.floor(now / 1000) + 3600);
 	// view=claude-limits: the three Claude limits, the weekly Fable one past its

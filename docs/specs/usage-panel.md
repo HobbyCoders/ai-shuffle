@@ -33,7 +33,28 @@ place where the code currently differs.
 | SuperGrok row | Subscription window remaining | Windows and plan |
 | OpenRouter row | Account credit left (key spend limit only when there is no account balance) | Same, plus the dashboard link |
 | fal.ai row | Credit balance left | Same, plus the dashboard link |
-| OpenAI API | Not shown | Not shown |
+| OpenAI API key | "—" (no meter: credit needs a Platform session or Admin key) | "Credit balance is shown only on the OpenAI Platform" and the link to its Usage page |
+
+### Subscriptions and API keys groups
+
+Below the context window the rows sit in two collapsible groups,
+**Subscriptions** (plans: Claude, ChatGPT, SuperGrok, Kimi Code, ...) then
+**API keys** (pay as you go: Claude API, OpenAI, OpenRouter, fal.ai, ...).
+Each group header shows its name and how many accounts it holds. A group
+starts collapsed, and its open state is remembered like a row's.
+
+A collapsed group shows only what **the current chat** uses, so the panel stays
+short:
+
+| Group | Collapsed shows | Empty when |
+| --- | --- | --- |
+| Subscriptions | The plan the chat runs on, named, with its **weekly** window's remaining % (the row's own headline when the plan has no weekly window) | The chat runs on an API key |
+| API keys | The API key the chat runs on; otherwise the paid API its tools last billed (fal.ai after generating an image, an OpenAI or xAI key after an image on that key), named, with that row's headline | The chat used no paid API |
+
+The paid API a chat's tools billed is read from the chat's own tool results:
+the generation tools' result names the source and account it ran on; plan
+sources (ChatGPT, SuperGrok) are not paid APIs. Inside an open group the
+chat's own account carries a neutral "in use" tag.
 
 The collapsed value of a multi-window row is the window a session most often
 hits first (5-hour for Claude), **not** the minimum of all windows (fixed in
@@ -55,13 +76,14 @@ unknown plan keeps every row.
 | Control | Desktop | Mobile |
 | --- | --- | --- |
 | Open panel | Click the ring | Tap the ring; tap outside closes |
+| Expand/collapse a group | Click the group header (chevron) | Tap the group header |
 | Expand/collapse a row | Click the row header (chevron) | Tap the row header |
 | Hide a provider row | Eye-off icon, shown on row hover | Eye-off icon always visible |
 | Restore hidden rows | "Hidden providers (n)" disclosure at the bottom | Same |
 | Refresh | Opening the panel requests a refresh, rate-limited by the cooldowns in the sources doc | Same |
 | Number changes | Remembered last value animates to the new value on open | Same, reduced motion respected |
 
-Row expand state and hidden providers are account-synced preferences
+Group and row expand state and hidden providers are account-synced preferences
 (`expansion-preferences`), so every device shows the same set.
 
 ## States
