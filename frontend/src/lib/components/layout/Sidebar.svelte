@@ -92,7 +92,6 @@
 		sessionDeviceId,
 		sessionPrState,
 		projectKey,
-		projectIdentity,
 		isVisibleSidebarSession,
 		sidebarGroup,
 		snoozeUntilMs,
@@ -378,9 +377,10 @@
 			// a project on that worker and can collide with an unrelated one here.
 			if (!s.is_remote && s.project_id && !option.ids.includes(s.project_id)) option.ids.push(s.project_id);
 		}
-		// A peer's chat reaches its local clones through the shared identity.
+		// A peer's chat reaches its local clones only through an explicit link
+		// group; an unlinked `local:<id>` key names a project on that worker.
 		for (const p of $projects) {
-			const option = map.get(projectIdentity(p) ?? '') ?? (p.link_group_id ? map.get(p.link_group_id) : undefined);
+			const option = p.link_group_id ? map.get(p.link_group_id) : undefined;
 			if (option && !option.ids.includes(p.id)) option.ids.push(p.id);
 		}
 		return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));

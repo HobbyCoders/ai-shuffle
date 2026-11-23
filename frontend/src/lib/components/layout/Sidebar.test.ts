@@ -777,9 +777,19 @@ describe('Sidebar session groups', () => {
 
 	it('shows project groups as folders, keeps keyboard focus, and ignores a peer chat\'s colliding local id', async () => {
 		mocks.adapters.get('groups')!.apply({
-			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { 'visible-project': 'Work' } },
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { 'visible-project': 'Work', demo: 'Work' } },
 		});
+		// A grouped, unlinked local project with no chats loaded.
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'demo', name: 'Demo' },
+		]);
 		mocks.sessions.set([
+			// An unrelated unlinked project on a peer that shares the slug.
+			session('peer-demo', 'Peer demo chat', 'demo', false, false, {
+				is_remote: true, instance_id: 'laptop', device_name: 'Laptop',
+				origin: 'local:demo', project_name: 'Peer demo',
+			}),
 			session('active', 'Active chat', 'visible-project', true),
 			// A peer's chat whose own project id happens to equal a local one, but
 			// whose shared identity names a different project.
@@ -792,7 +802,7 @@ describe('Sidebar session groups', () => {
 			render(Sidebar, { props: sidebarProps });
 			await openFilter();
 			const folder = filterOption('Work, 1 project');
-			expect(filterLabels()).toContain('Elsewhere');
+			expect(filterLabels()).toEqual(expect.arrayContaining(['Elsewhere', 'Peer demo']));
 
 			folder.focus();
 			await fireEvent.click(folder);
@@ -801,6 +811,7 @@ describe('Sidebar session groups', () => {
 			expect(document.activeElement).toBe(back);
 			expect(filterLabels()).toContain('Visible Project');
 			expect(filterLabels()).not.toContain('Elsewhere');
+			expect(filterLabels()).not.toContain('Peer demo');
 
 			await fireEvent.click(back);
 			await tick();
