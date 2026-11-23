@@ -304,14 +304,18 @@ _HELD_STATES = {"ready", "setting_up", "queued_offline", "offline_has"}
 _MAYBE_HELD_STATES = _HELD_STATES | {"unknown"}
 
 
-def _retired(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
-    """Forgotten by the owner, or a duplicate folded into another project."""
+def _folded(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
+    """A duplicate folded into another project that is still known here."""
     from app.core.project_remote import merged_into
 
-    project_settings = pv2.get("settings") if isinstance(pv2.get("settings"), dict) else {}
     target = merged_into(pv2)
-    return project_settings.get("forgotten") is True or bool(
-        target and any(row.get("origin") == target for row in pv2s.values()))
+    return bool(target and any(row.get("origin") == target for row in pv2s.values()))
+
+
+def _retired(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
+    """Forgotten by the owner, or a duplicate folded into another project."""
+    project_settings = pv2.get("settings") if isinstance(pv2.get("settings"), dict) else {}
+    return project_settings.get("forgotten") is True or _folded(pv2, pv2s)
 
 
 async def _gather(project_v2_id: Optional[str] = None) -> tuple:
@@ -349,6 +353,8 @@ async def projects_overview(request: Request, token: str = Depends(require_auth)
             w["state"] == "unknown" and pv2["id"] in offline_has.get(w["install_id"], set()) for w in workers)
         if not listed:
             continue
+        if not scoped_origin and _folded(pv2, snapshot["pv2s"]):
+            continue  # its copies are listed under the project it was folded into
         if _retired(pv2, snapshot["pv2s"]) and not any(w["state"] in _MAYBE_HELD_STATES for w in workers):
             continue  # nothing left of it anywhere: a failed old setup must not keep it stuck here
         info = _project_info(pv2, snapshot, views)

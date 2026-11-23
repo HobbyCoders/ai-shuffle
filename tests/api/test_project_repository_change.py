@@ -367,7 +367,8 @@ def test_a_duplicate_held_only_as_an_on_demand_base_is_folded(client, ws, test_d
 
     assert _change(client, kept, fork).json()["merged_duplicate"] is True
     assert project_remote._own_folders_for(kept["origin"], lock=False) == [str(base)]
-    assert not checkouts_db.has_active_base_checkout(dup["id"], project_setup._me())  # retired, not deleted
+    # Chats bound to the duplicate can still run (and move) here.
+    assert checkouts_db.has_active_base_checkout(dup["id"], project_setup._me())
     rows = checkouts_db.get_checkouts_by_path(str(base))
     assert [r["project_id"] for r in rows] == [kept["id"], dup["id"]]  # the kept project first
     assert checkouts_db.get_checkout_by_path(str(base), project_id=dup["id"])  # its chats still find it
