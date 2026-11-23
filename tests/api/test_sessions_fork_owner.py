@@ -141,6 +141,25 @@ def test_unreachable_owner_leaves_no_copy(fork_client, remote_parent, monkeypatc
     assert {s["id"] for s in sessions_db.get_sessions(limit=100)} == before
 
 
+def test_preview_link_cannot_fork_a_chat_another_worker_runs(fork_client, remote_parent, monkeypatch):
+    """The owner cannot see the preview cookie's principal, so its fork would
+    run there without the preview's ceiling: refused before anything is made."""
+    from app.core import preview_access
+    from app.network import control
+
+    async def never(*args, **kwargs):
+        raise AssertionError("the owner must not be asked")
+
+    monkeypatch.setattr(control, "call", never)
+    monkeypatch.setattr(preview_access, "grant", lambda request: {"token": "preview-cookie"})
+    before = {s["id"] for s in sessions_db.get_sessions(limit=100)}
+
+    resp = fork_client.post(f"/{remote_parent}/fork", json={})
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "The preview link can't fork a chat another worker runs."
+    assert {s["id"] for s in sessions_db.get_sessions(limit=100)} == before
+
+
 def test_owner_forks_its_chat_under_the_mirrors_id(mock_db, monkeypatch):
     """The owner side: a real fork (node tree copied) under the requested id,
     idempotent when the mirror asks again after a lost answer."""

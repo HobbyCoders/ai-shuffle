@@ -137,8 +137,16 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
     monkeypatch.setattr(config.settings, "claude_projects_dir", tmp_path / "cli-projects")
     monkeypatch.setattr(query_options, "get_security_instructions", lambda *a, **kw: "")
     principal = {"owner": "install-admin", "kind": "admin", "principal_id": "preview"}
-    # A fork the preview cookie makes records it too (``record_creator``).
-    monkeypatch.setattr(session_orchestration, "_principal", lambda sid: principal if preview else None)
+    # The parent was the preview's chat; the fork's record is the real one
+    # ``record_creator`` writes for the preview cookie the fork request carries.
+    read_principal = session_orchestration._principal
+    monkeypatch.setattr(
+        session_orchestration, "_principal",
+        lambda sid: principal if preview and sid == PARENT_SID else read_principal(sid),
+    )
+    if preview:
+        from app.core import preview_access
+        monkeypatch.setattr(preview_access, "grant", lambda request: {"token": "preview-cookie"})
     with get_db() as conn:
         get_cursor(conn).execute(
             "UPDATE sessions SET profile_id='fork-cwd-agent', mode='chat', branch=NULL, worktree_id=NULL, "

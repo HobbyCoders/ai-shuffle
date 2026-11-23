@@ -203,27 +203,7 @@ async def _fork_fluid_session(
         is_active=True,
         **_fork_inherited_fields(original_session),
     )
-    # Copy the ancestry FIRST: if it fails there is no orphan session row to
-    # clean up. Reseed for the prospective FORK's runtime row, not its parent:
-    # parent_session_id / api_user_id / the absent mode can select another cwd.
-    # Keep the creation fields shared so this cannot drift from create_session.
     from app.core.message_resolver import resolve_working_dir
-
-    parent_branch = (original_session.get("branch") or "").strip()
-    working_dir = resolve_working_dir({"id": new_session_id, "branch": parent_branch, **fork_fields})
-    try:
-        new_sdk_session_id, node_count = await run_sync(
-            fork_fluid_session,
-            sdk_session_id,
-            fork_node_id,
-            working_dir=working_dir,
-        )
-    except Exception:
-        logger.exception("Failed to fork fluid node tree for session %s", session_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create forked session",
-        )
 
     await run_sync(
         database.create_session,
@@ -237,8 +217,28 @@ async def _fork_fluid_session(
     # create_session cannot carry the logical v2 branch (no parameter) — a
     # branch-bound parent must hand it to the fork or the fork resolves its cwd
     # to the base checkout.
+    parent_branch = (original_session.get("branch") or "").strip()
     if parent_branch:
         await run_sync(_restore_fork_branch, new_session_id, parent_branch)
+
+    # Reseed where the FORK's runtime resumes, read from its written row (its
+    # lane, parent, branch and the creator just recorded each pick the cwd).
+    try:
+        fork_row = await run_sync(database.get_session, new_session_id)
+        working_dir = await run_sync(resolve_working_dir, fork_row)
+        new_sdk_session_id, node_count = await run_sync(
+            fork_fluid_session,
+            sdk_session_id,
+            fork_node_id,
+            working_dir=working_dir,
+        )
+    except Exception:
+        logger.exception("Failed to fork fluid node tree for session %s", session_id)
+        await run_sync(database.delete_session, new_session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create forked session",
+        )
 
     await run_sync(
         database.update_session,
@@ -533,6 +533,9 @@ async def _fork_owned(
 #: answers; a long chat takes a while.
 _OWNER_FORK_TIMEOUT = 120.0
 
+#: As ``sessions_create.PREVIEW_ELSEWHERE`` for starting a chat there.
+PREVIEW_FORK_ELSEWHERE = "The preview link can't fork a chat another worker runs."
+
 _FORK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
@@ -553,8 +556,15 @@ async def _fork_on_owner(
     owner then forks under the same id and publishes the real row over it.
     When the owner refuses or was never reached, the copy is removed again.
     """
+    from app.core import preview_access
     from app.core.mobile_tool_identity import request_principal
     from app.network import control
+
+    # The worker that runs the chat cannot see the preview cookie's principal,
+    # so the fork would lose the ceiling there (#641): refuse, as starting a
+    # chat on another worker does.
+    if preview_access.grant(request) is not None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, PREVIEW_FORK_ELSEWHERE)
 
     new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
     fork_title = f"Fork of {original_session.get('title') or 'Untitled'}"
