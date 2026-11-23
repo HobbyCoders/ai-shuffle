@@ -340,13 +340,7 @@ def receipts_passed(area, run, jobs) -> bool:
 
 
 def proven(area: str, key: str, lookup: Lookup) -> str | None:
-    """The run that passed this area on these files (its page), or None."""
-    run = proving_run(area, key, lookup)
-    return None if run is None else str(run.get("html_url") or run["id"])
-
-
-def proving_run(area: str, key: str, lookup: Lookup) -> dict | None:
-    """The run (as the API lists it) that passed this area on these files, or None."""
+    """The run that passed this area on these files, or None."""
     name = record_name(area, key)
     data = lookup.get(f"/actions/artifacts?per_page=100&name={urllib.parse.quote(name)}")
     for artifact in data.get("artifacts") or []:
@@ -365,7 +359,7 @@ def proving_run(area: str, key: str, lookup: Lookup) -> dict | None:
             continue
         jobs = lookup.jobs(origin["id"])
         if jobs and receipts_passed(area, run, jobs) and run_passed(area, jobs):
-            return {**run, "id": origin["id"]}
+            return str(run.get("html_url") or origin["id"])
     return None
 
 
@@ -405,22 +399,17 @@ def changed_files(root: Path = ROOT) -> list[str] | None:
 
 
 def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dict[str, dict]:
-    """{area: {key, record, proven, by, run, error}}. Any doubt or error means not proven: run it.
-
-    ``run`` is the id of the run whose record proved the area, "" otherwise.
-    """
+    """{area: {key, record, proven, by, error}}. Any doubt or error means not proven: run it."""
     names = list(areas or AREAS)
     try:
         entries = local_entries(root)
     except Exception as error:  # noqa: BLE001 - without keys nothing can be skipped or recorded
         print(f"[plan] could not read the commit's files, running everything: {error}", file=sys.stderr)
-        return {area: {"key": "", "record": "", "proven": False, "by": "", "run": "", "error": str(error)}
-                for area in names}
+        return {area: {"key": "", "record": "", "proven": False, "by": "", "error": str(error)} for area in names}
     found = {}
     for area in names:
         key = key_of(area, entries)
-        found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": "", "run": "",
-                       "error": ""}
+        found[area] = {"key": key, "record": record_name(area, key), "proven": False, "by": "", "error": ""}
     # A pull request runs only the areas its changes belong to (the module
     # docstring). The skip writes no record: nothing of the area ran.
     if environ.get("GITHUB_EVENT_NAME") == "pull_request":
@@ -441,13 +430,13 @@ def plan(root: Path = ROOT, environ=os.environ, call=request, areas=None) -> dic
         if found[area]["proven"]:
             continue
         try:
-            run = proving_run(area, found[area]["key"], lookup)
+            by = proven(area, found[area]["key"], lookup)
         except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
             print(f"[plan] lookup for {area} failed, it runs: {error}", file=sys.stderr)
             found[area]["error"] = str(error) or type(error).__name__
             continue
-        if run is not None:
-            found[area].update(proven=True, by=str(run.get("html_url") or run["id"]), run=str(run["id"]))
+        if by:
+            found[area].update(proven=True, by=by)
     return found
 
 
@@ -486,9 +475,6 @@ def main(argv=None) -> int:
             lines.append(f"| `{area}` | runs | no pass is recorded for these files |")
     print("records=" + json.dumps({area: state["record"] for area, state in found.items() if state["record"]},
                                   sort_keys=True))
-    # The run whose record proved the backend: main adopts its test map
-    # (ci.yml `backend-map`), as the files that run tested are main's files.
-    print(f"backend-run={found.get('backend', {}).get('run', '')}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:

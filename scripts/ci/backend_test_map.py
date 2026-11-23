@@ -19,16 +19,13 @@ is named in code that runs at import. Docstrings, comments and messages (a
 literal with whitespace) only mention a file; they do not read it. Tests that
 list a folder below the top level of it count as naming it; tests that list
 the whole checkout or a top-level folder run too, but cannot narrow the
-choice. A file nothing names that way, any conftest pytest loads for these
-tests, and any file under tests/ that is not Python (fixtures, data,
-snapshots) print ``all``. A conftest above none of these tests (fluid's own)
-counts as a file like any other.
+choice. A file nothing names that way, any conftest, and any file under
+tests/ that is not Python (fixtures, data, snapshots) print ``all``.
 
 In CI a pull request's change starts at the map's commit, so it holds what
 main changed since. Of those files, CI plumbing and files nothing names do not
 print ``all``: main's full run tested them, and they move no test onto or off
-the pull request's files. Main keeps the map current: a commit whose backend a
-pull request's record proves adopts that run's map (ci.yml ``backend-map``).
+the pull request's files.
 
     python scripts/ci/backend_test_map.py merge --hits DIR --out MAP --commit SHA
     python scripts/ci/backend_test_map.py select --map MAP --base REV [--head REV]
@@ -97,7 +94,7 @@ FULL_SUITE_SHARE = 0.6
 # A map covering fewer test files than this is broken, not small.
 MIN_MAPPED_TESTS = 100
 # Names too common to say which file a test means.
-GENERIC_NAMES = {"__init__.py", "conftest.py", "README.md", "package.json", "package-lock.json", "index.ts",
+GENERIC_NAMES = {"__init__.py", "README.md", "package.json", "package-lock.json", "index.ts",
                  "index.js", "main.py", "config.py", "utils.py", "base.py", "models.py"}
 # Code that lists files rather than naming them, and code that lists the whole checkout.
 WALKS = re.compile(r"\.(?:rglob|glob|iterdir|walk)\(|os\.(?:walk|listdir|scandir)\(|ls-files|ls-tree")
@@ -618,18 +615,6 @@ class Selector:
                 self.selected.add(test)
 
 
-def conftest_loaded(path: str, files) -> bool:
-    """Whether pytest loads the conftest at ``path`` for a test of the fast subset.
-
-    Pytest loads a conftest for the tests in its folder and below it. One above
-    none of them (fluid's own, under fluid/) is never loaded by these tests, and
-    cannot be imported by them either: the checkout's root and ``tests``
-    package come first on their path (PYTHONPATH=.:fluid).
-    """
-    folder = str(PurePosixPath(path).parent)
-    return folder == "." or any(fast_subset(test) and test.startswith(folder + "/") for test in files)
-
-
 def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source,
            main_only: frozenset[str] | set[str] = frozenset()) -> tuple[str | list[str], list[str]]:
     """``("all" | [tests], reasons)``.
@@ -649,8 +634,8 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 raise FullSuite(f"{path} changes the test setup or dependencies")
             if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
                 raise FullSuite(f"{path} is a package manifest or lockfile")
-            # A conftest, the root one too: pytest loads it for every test beneath it.
-            if PurePosixPath(path).name == "conftest.py" and conftest_loaded(path, files):
+            # Any conftest, the root one too: pytest loads it for every test beneath it.
+            if PurePosixPath(path).name == "conftest.py":
                 raise FullSuite(f"{path} is a conftest")
             if "\ufffd" in path:
                 raise FullSuite(f"{path!r} is not a UTF-8 file name")
@@ -669,10 +654,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 selector.python_change(path)
                 selector.subprocess_users(path)
             else:
-                # Python outside the mapped folders may be imported unseen; a
-                # conftest above no test (fluid's) is loaded by none of them.
-                unseen = p.suffix != ".py" or p.name == "conftest.py"
-                selector.other_change(path, main_only=path in main_only and unseen)
+                selector.other_change(path, main_only=path in main_only and p.suffix != ".py")
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):

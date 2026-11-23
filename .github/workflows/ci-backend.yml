@@ -91,10 +91,8 @@ jobs:
       # The chooser's count, not the matrix size: a rerun of failed jobs only
       # runs fewer matrix jobs but must partition the same way.
       SHARD_COUNT: ${{ needs.backend-select.outputs.count }}
-      # Every run of all the tests records the map: main publishes its own
-      # (backend-map below) and adopts a pull request's when that run's record
-      # proves main's backend (ci.yml `backend-map`).
-      RECORD_MAP: ${{ needs.backend-select.outputs.selection == 'all' }}
+      # Only a run that publishes the map records it (backend-map below).
+      RECORD_MAP: ${{ github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,10 +152,9 @@ jobs:
         # listed as flaky in the job summary; one that fails twice, a
         # collection error or more than 20 failures fails it. The receipt
         # counts only with the rerun's pass recorded on it (backend_gate.py).
-        # A full run also records which functions each test file runs
-        # (tests/_test_map.py): main merges it into the map (backend-map), and
-        # adopts a pull request's records once their pass proves main's files.
-        # A pull request that runs only some tests records nothing.
+        # A full run outside pull requests also records which functions each
+        # test file runs (tests/_test_map.py) for the backend-map job; a pull
+        # request records nothing, even when it runs every test.
         run: |
           if [ "$SELECTION" = all ]; then
             targets=(tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/test_*.py)

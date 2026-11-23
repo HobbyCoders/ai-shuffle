@@ -47,10 +47,9 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 WORKFLOW = "ci.yml"
 GATE_KEY = "ci"
 GATE = ci_plan.GATE
-# Jobs that cannot fail the run: the optional UI bundle cache, the
-# pass-record lookup (a failed lookup only means every area runs) and main's
-# adoption of a recorded run's backend test map (losing it keeps the old map).
-ADVISORY = ("source-ui", LOOKUP, "backend-map")
+# Jobs that cannot fail the run: the optional UI bundle cache and the
+# pass-record lookup (a failed lookup only means every area runs).
+ADVISORY = ("source-ui", LOOKUP)
 # Matrix members whose own workflow lets them fail (`continue-on-error`).
 # GitHub lists such a job as failed although the run goes on; here it counts
 # as passed once it has finished.
