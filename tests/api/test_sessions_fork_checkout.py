@@ -174,6 +174,23 @@ def test_fork_here_starts_at_the_local_commit_not_a_newer_remote_one(repo, tmp_p
     assert git(Path(row["worktree_path"]), "rev-parse", "HEAD") == local_head
 
 
+def test_a_non_git_project_inside_a_repository_forks_without_a_worktree(fork_client, repo):
+    """The enclosing repository's commit is not the project's: no 409, no worktree."""
+    from app.network import control
+
+    _parent, base, _tip = repo
+    notes = base / "notes"
+    notes.mkdir()
+    project = projects_v2.upsert_project("local:fork-nested-notes", name="Notes")
+    checkouts.upsert_checkout(project["id"], settings.effective_instance_id, str(notes))
+    nested = "sess-fork-nested-notes"
+    sessions_db.create_session(nested, "default", title="notes", model="sonnet", project_v2_id=project["id"])
+
+    row = sessions_db.get_session(control.fork_here(nested)["session_id"])
+    assert row["worktree_path"] is None and row["project_v2_id"] == project["id"]
+    assert _fork_branches(base) == ""
+
+
 def test_a_failed_fork_here_removes_its_checkout(repo, monkeypatch):
     from app.network import control
 

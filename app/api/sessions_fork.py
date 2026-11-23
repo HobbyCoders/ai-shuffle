@@ -104,7 +104,9 @@ def _fork_checkout(original_session: dict, new_session_id: str):
     base = None
     try:
         parent_path = project_resolver.resolve_session_cwd(dict(original_session))
-        if parent_path:
+        # A root check, as provisioning makes: a non-Git project folder inside
+        # another repository must not take that repository's commit.
+        if parent_path and git_service.is_git_repo(parent_path):
             head = git_service._run_git(parent_path, ["rev-parse", "HEAD"], timeout=5)
             if head.returncode == 0 and head.stdout.strip():
                 base = head.stdout.strip()
