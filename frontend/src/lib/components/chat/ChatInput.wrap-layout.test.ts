@@ -26,6 +26,8 @@ it('gives a narrow desktop column a full-width controls row', () => {
 	expect(narrowDock).toContain('grid-row: 2;');
 	expect(narrowDock).toContain('grid-column: 1 / -1;');
 	expect(source).toMatch(/\.composer-narrow \.composer-attach,\s*\.desktop-composer \.composer-narrow \.send-cluster \{\s*grid-row: 3;/);
+	// The stash menu opens upward from the circles over the controls row (z 30).
+	expect(source).toMatch(/\.desktop-composer \.composer-narrow \.send-cluster \{\s*z-index: 31;/);
 	const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 	const dockRule = (selector: string) => dock.split(`\t${selector} {`)[1]?.split('}')[0] ?? '';
 	expect(dockRule(':global(.composer-narrow) .controls-dock')).toContain('flex-wrap: wrap;');
