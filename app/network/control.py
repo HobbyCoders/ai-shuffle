@@ -441,6 +441,11 @@ def _session_files_handler():
     return handle_session_files
 
 
+def _session_fork_handler():
+    from app.api.sessions_fork import handle_fork
+    return handle_fork
+
+
 def _session_task_stop_handler():
     from app.api.task_stop_owner import handle_task_stop
     return handle_task_stop
@@ -703,6 +708,7 @@ _LAZY_HANDLERS = {
     REMOTE_USAGE_ACTION: _remote_usage_handler,
     "generation": _generation_handler,
     "rewind": _rewind_handler,
+    "session-fork": _session_fork_handler,
     "session-git": _session_git_handler,
     "session-files": _session_files_handler,
     # The "x" on one running task of a chat this worker runs.
@@ -1023,17 +1029,8 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                 {**create_fields, "profile_id": profile_id}, create_fields["context_window"])
         row = database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
                                       is_active=True, api_user_id=api_user_id, **create_fields)
-        if label:
-            # Who started the chat on the member (#1877): set once, when this
-            # worker creates the chat it will run. A later copy never labels
-            # it (#1873); this worker publishes the label to the mirrors.
-            from app.db import mobile_tool_identity
-            from app.db.base import get_db
-            if mobile_tool_identity.mirrored({"id": session_id, "provenance_owner": label}) is not None:
-                with get_db() as conn:
-                    conn.cursor().execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s",
-                                          (label, session_id))
-                row = database.get_session(session_id) or row
+        if label and stamp_provenance(session_id, label):
+            row = database.get_session(session_id) or row
         return row
 
     row = await run_sync(_create)
@@ -1050,6 +1047,25 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.network import catalog
     await run_sync(catalog.publish_owned)
     return result
+
+
+def stamp_provenance(session_id: str, label: Any) -> bool:
+    """Label who started a chat this worker just created for a peer (#1877).
+
+    Set once, when this worker creates the chat it will run. A later copy
+    never labels it (#1873); this worker publishes the label to the mirrors.
+    Returns whether the label was written. Blocking.
+    """
+    from app.db import mobile_tool_identity
+    from app.db.base import get_db
+    if not isinstance(label, str) or not label:
+        return False
+    if mobile_tool_identity.mirrored({"id": session_id, "provenance_owner": label}) is None:
+        return False
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s",
+                              (label, session_id))
+    return True
 
 
 async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:

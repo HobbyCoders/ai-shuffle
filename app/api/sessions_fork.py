@@ -5,7 +5,9 @@ Extracted from sessions.py for maintainability. The sub-router is
 included in the main sessions router for backward compatibility.
 """
 
+import re
 import uuid
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
@@ -99,11 +101,13 @@ def _copy_app_event_log(source_session_id: str, dest_session_id: str, *, at_head
 
 async def _fork_fluid_session(
     *,
-    request: Request,
     session_id: str,
     original_session: dict,
     sdk_session_id: str,
     message_index,
+    new_session_id: str,
+    api_user_id: Optional[str],
+    on_created: Callable[[str], Any],
 ) -> ForkSessionResponse:
     """Fork a fluid-harness session through its node tree.
 
@@ -147,9 +151,6 @@ async def _fork_fluid_session(
 
     fork_node_id = entries[fork_message_index]["uuid"]
 
-    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
-    api_user = get_api_user_from_request(request)
-    api_user_id = api_user["id"] if api_user else None
     original_title = original_session.get("title") or "Untitled"
     fork_title = f"Fork of {original_title}"
 
@@ -192,7 +193,7 @@ async def _fork_fluid_session(
     )
 
     # The fork is the caller's chat: a paired device keeps it (#1877).
-    await run_sync(record_creator, new_session_id, request)
+    await run_sync(on_created, new_session_id)
 
     # create_session cannot carry the logical v2 branch (no parameter) — a
     # branch-bound parent must hand it to the fork or the fork resolves its cwd
@@ -249,12 +250,55 @@ async def fork_session(
     Returns:
         Information about the forked session
     """
+    # Get the original session (404 unknown, 403 outside the caller's scope).
+    original_session = await require_transcript_session(request, session_id)
+
+    api_user = get_api_user_from_request(request)
+    api_user_id = api_user["id"] if api_user else None
+
+    # A chat another worker runs is only a mirror here: its transcript (fluid
+    # node tree or CLI JSONL) and its worktree live on the owner, so the copy
+    # below would always fail. Fork it there, as rewind and delete do.
+    from app.network import control
+
+    owner = control.owner_of(original_session)
+    if owner is not None:
+        return await _fork_on_owner(
+            request=request,
+            session_id=session_id,
+            original_session=original_session,
+            owner=owner,
+            message_index=body.message_index,
+            api_user_id=api_user_id,
+        )
+
+    return await _fork_owned(
+        session_id=session_id,
+        original_session=original_session,
+        message_index=body.message_index,
+        new_session_id=f"ses-{uuid.uuid4().hex[:16]}",
+        api_user_id=api_user_id,
+        on_created=lambda sid: record_creator(sid, request),
+    )
+
+
+async def _fork_owned(
+    *,
+    session_id: str,
+    original_session: dict,
+    message_index: Optional[int],
+    new_session_id: str,
+    api_user_id: Optional[str],
+    on_created: Callable[[str], Any],
+) -> ForkSessionResponse:
+    """Fork a session this worker runs, under ``new_session_id``.
+
+    ``on_created(new_session_id)`` runs (blocking) right after the fork's row
+    is written: it records who created the chat.
+    """
     import json
     from app.core.config import settings
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
-
-    # Get the original session
-    original_session = await require_transcript_session(request, session_id)
 
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:
@@ -278,11 +322,13 @@ async def fork_session(
 
     if await run_sync(is_fluid_session, sdk_session_id):
         return await _fork_fluid_session(
-            request=request,
             session_id=session_id,
             original_session=original_session,
             sdk_session_id=sdk_session_id,
-            message_index=body.message_index,
+            message_index=message_index,
+            new_session_id=new_session_id,
+            api_user_id=api_user_id,
+            on_created=on_created,
         )
 
     # Find the original JSONL file
@@ -313,7 +359,7 @@ async def fork_session(
 
     # Resolve the fork point. A null/omitted message_index means "fork the whole
     # session" (the sessions-board Fork action) → the last display message.
-    if body.message_index is None:
+    if message_index is None:
         if not display_entries:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -321,12 +367,12 @@ async def fork_session(
             )
         fork_message_index = len(display_entries) - 1
     else:
-        if body.message_index < 0 or body.message_index >= len(display_entries):
+        if message_index < 0 or message_index >= len(display_entries):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid message_index: {body.message_index}. Session has {len(display_entries)} messages (0-{len(display_entries)-1})"
+                detail=f"Invalid message_index: {message_index}. Session has {len(display_entries)} messages (0-{len(display_entries)-1})"
             )
-        fork_message_index = body.message_index
+        fork_message_index = message_index
 
     # Find the actual index in original_entries that corresponds to the fork_message_index in display_entries
     display_count = 0
@@ -345,13 +391,7 @@ async def fork_session(
             break
         display_count += 1
 
-    # Generate new IDs
-    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
     new_sdk_session_id = str(uuid.uuid4())
-
-    # Get API user if applicable
-    api_user = get_api_user_from_request(request)
-    api_user_id = api_user['id'] if api_user else None
 
     # Create title for fork
     original_title = original_session.get('title') or 'Untitled'
@@ -372,7 +412,7 @@ async def fork_session(
     )
 
     # The fork is the caller's chat: a paired device keeps it (#1877).
-    await run_sync(record_creator, new_session_id, request)
+    await run_sync(on_created, new_session_id)
 
     # Same branch hand-off as the fluid path above.
     parent_branch = (original_session.get("branch") or "").strip()
@@ -441,3 +481,172 @@ async def fork_session(
         message_count=fork_entry_index + 1,
         status="success"
     )
+
+
+# ---------------------------------------------------------------------------
+# A chat another worker runs: fork it on that worker
+# ---------------------------------------------------------------------------
+
+#: The owner copies the whole transcript (node tree, event log) before it
+#: answers; a long chat takes a while.
+_OWNER_FORK_TIMEOUT = 120.0
+
+_FORK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+async def _fork_on_owner(
+    *,
+    request: Request,
+    session_id: str,
+    original_session: dict,
+    owner: str,
+    message_index: Optional[int],
+    api_user_id: Optional[str],
+) -> ForkSessionResponse:
+    """Fork a mirrored chat on the worker that runs it.
+
+    Same shape as creating a chat on another device (``_create_on_owner``):
+    this worker first writes its own copy of the fork, stamped with the
+    owner, so the UI can open it at once and its turns go to the owner; the
+    owner then forks under the same id and publishes the real row over it.
+    When the owner refuses or was never reached, the copy is removed again.
+    """
+    from app.core.mobile_tool_identity import request_principal
+    from app.network import control
+
+    new_session_id = f"ses-{uuid.uuid4().hex[:16]}"
+    fork_title = f"Fork of {original_session.get('title') or 'Untitled'}"
+
+    def _create_copy() -> None:
+        from app.db.base import get_cursor, transaction
+
+        with transaction() as txn:
+            database.create_session(
+                session_id=new_session_id,
+                profile_id=original_session.get("profile_id"),
+                project_id=original_session.get("project_id"),
+                title=fork_title,
+                api_user_id=api_user_id,
+                parent_session_id=session_id,
+                fork_point_message_index=message_index,
+                is_active=True,
+                target_instance_id=owner,
+                _conn=txn,
+                **_fork_inherited_fields(original_session),
+            )
+            # create_session stamps the owner only for a runner it can find;
+            # the copy must name it regardless, or a send would run it here.
+            get_cursor(txn).execute(
+                "UPDATE sessions SET owner_device_id = %s WHERE id = %s",
+                (owner, new_session_id),
+            )
+            # The fork is the caller's chat: a paired device keeps it (#1877).
+            record_creator(new_session_id, request, conn=txn)
+
+    await run_sync(_create_copy)
+    principal = await run_sync(request_principal, request)
+    payload = {
+        "session_id": session_id,
+        "new_session_id": new_session_id,
+        "message_index": message_index,
+        "api_user_id": api_user_id,
+        # Who forked it; the worker that runs it labels it (#1877).
+        "provenance_owner": (principal or {}).get("owner"),
+    }
+    reached = False  # Whether an attempt may have forked it there.
+    try:
+        try:
+            result = await control.call(owner, "session-fork", payload, timeout=_OWNER_FORK_TIMEOUT)
+        except control.MaybeApplied:
+            # The owner's fork is keyed on new_session_id: asking again returns
+            # the fork it already made instead of making a second one.
+            reached = True
+            logger.info("Fork %s of %s: no answer from its owner; asking once more", new_session_id, session_id)
+            result = await control.call(owner, "session-fork", payload, timeout=_OWNER_FORK_TIMEOUT)
+    except control.ControlRefused as exc:
+        await run_sync(database.delete_session, new_session_id)
+        raise HTTPException(409, "The worker that runs this chat could not fork it. "
+                                 f"Check that it is online and updated. {exc}") from exc
+    except control.RunnerUnreachable as exc:
+        if not (reached or isinstance(exc, control.MaybeApplied)):
+            await run_sync(database.delete_session, new_session_id)
+            raise HTTPException(503, f"{exc} Forking runs on the worker that runs this chat; "
+                                     "try again once it is reachable.") from exc
+        # It may exist there: the copy stays, and the owner's row replaces it
+        # if it does. If it never forked, the copy does not respond.
+        raise HTTPException(503, f"{exc} The fork may or may not have been made on that worker. "
+                                 "If it doesn't respond, delete it and fork again.") from exc
+
+    if result.get("session_id") != new_session_id:
+        raise HTTPException(502, "The worker that runs this chat answered for a different fork")
+    try:
+        fork_point = int(result.get("fork_point_message_index"))
+    except (TypeError, ValueError):
+        fork_point = message_index if message_index is not None else 0
+    # A whole-session fork's copy has no fork point yet; the owner's published
+    # row (which replicates fork_point_message_index) fills it in.
+    return ForkSessionResponse(
+        session_id=new_session_id,
+        title=result.get("title") or fork_title,
+        parent_session_id=session_id,
+        fork_point_message_index=fork_point,
+        message_count=int(result.get("message_count") or 0),
+        status="success",
+    )
+
+
+async def handle_fork(body: dict, from_device: str) -> dict:
+    """Peer control ``session-fork``: fork a chat this worker runs for a mirror.
+
+    Device-token authentication is enforced by /peer/control, and the
+    requesting worker already checked its caller may read the transcript.
+    Ownership is checked again here: a peer must not fork a chat this
+    worker only mirrors. Keyed on ``new_session_id``, so a repeated request
+    after a lost answer returns the fork already made.
+    """
+    from app.network import catalog, control
+
+    session_id = str(body.get("session_id") or "")
+    new_session_id = body.get("new_session_id")
+    if not isinstance(new_session_id, str) or not _FORK_ID.fullmatch(new_session_id):
+        raise ValueError("new_session_id is required")
+    message_index = body.get("message_index")
+    if message_index is not None and (isinstance(message_index, bool) or not isinstance(message_index, int)):
+        raise ValueError("message_index must be an integer")
+    original_session = await run_sync(control._require_owned, session_id)
+
+    existing = await run_sync(database.get_session, new_session_id)
+    if existing is not None:
+        if existing.get("parent_session_id") != session_id or control.owner_of(existing) is not None:
+            raise ValueError("That session id is already in use")
+        fork_point = existing.get("fork_point_message_index") or 0
+        return ForkSessionResponse(
+            session_id=new_session_id, title=existing.get("title"), parent_session_id=session_id,
+            fork_point_message_index=fork_point, message_count=fork_point + 1, status="success",
+        ).model_dump()
+
+    # The fork keeps the API key that made it when this worker knows the key
+    # (api_users replicate); otherwise it is the owner's, as for a new chat.
+    requested = body.get("api_user_id")
+    api_user_id = None
+    if isinstance(requested, str) and requested:
+        api_user_id = requested if await run_sync(database.get_api_user, requested) is not None else None
+    label = body.get("provenance_owner")
+
+    try:
+        result = await _fork_owned(
+            session_id=session_id,
+            original_session=original_session,
+            message_index=message_index,
+            new_session_id=new_session_id,
+            api_user_id=api_user_id,
+            on_created=lambda sid: control.stamp_provenance(sid, label),
+        )
+    except HTTPException as exc:
+        # The requesting worker shows the reason; never ask it to retry.
+        raise ValueError(str(exc.detail)) from exc
+    try:
+        await run_sync(catalog.publish_owned, session_ids=[new_session_id])
+    except Exception:  # noqa: BLE001 — the periodic scan publishes it anyway
+        logger.warning("Fork %s made for %s; publishing it is delayed", new_session_id, from_device, exc_info=True)
+    return result.model_dump()
