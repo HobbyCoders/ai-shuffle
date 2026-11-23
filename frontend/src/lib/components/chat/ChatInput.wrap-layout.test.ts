@@ -16,17 +16,19 @@ it('keeps the desktop text and controls on fixed rows', () => {
 });
 
 // A narrow column on a wide window (a side panel open) is decided from the
-// column's own width, not the window's: the controls take a second line and
-// attach and the circles stay level with the first instead of squashing the
-// row until labels run under the icons.
-it('gives a narrow desktop column a second controls line', () => {
+// column's own width, not the window's: the controls get a full-width row of
+// their own and attach and the circles the row below, so the circles (Stop and
+// the stash included) never squeeze the controls until labels run under icons.
+it('gives a narrow desktop column a full-width controls row', () => {
 	expect(source).toContain('class:composer-narrow={composerNarrow}');
 	expect(source).toMatch(/new ResizeObserver\(read\)/);
-	expect(rule('.desktop-composer .composer-narrow .send-cluster')).toContain('align-self: start;');
+	const narrowDock = rule('.desktop-composer .composer-narrow .chat-island > :global(.controls-dock)');
+	expect(narrowDock).toContain('grid-row: 2;');
+	expect(narrowDock).toContain('grid-column: 1 / -1;');
+	expect(source).toMatch(/\.composer-narrow \.composer-attach,\s*\.desktop-composer \.composer-narrow \.send-cluster \{\s*grid-row: 3;/);
 	const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 	const dockRule = (selector: string) => dock.split(`\t${selector} {`)[1]?.split('}')[0] ?? '';
 	expect(dockRule(':global(.composer-narrow) .controls-dock')).toContain('flex-wrap: wrap;');
-	expect(dockRule(':global(.composer-narrow) .dock-right')).toContain('flex-basis: 100%;');
 	// Icons never shrink; text labels clip to an ellipsis instead of overlapping.
 	expect(dock).toMatch(/\.dock-ico,\s*\.away-badge \{\s*flex: none;/);
 	expect(dock).toContain('<span class="dock-txt-label">{permissionLabel}</span>');

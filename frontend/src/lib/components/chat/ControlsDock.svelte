@@ -899,20 +899,15 @@
 	}
 
 	/* A narrow column (ChatInput sets `.composer-narrow` from the column's own
-	   width): model, effort and the ring move to a second line, right-aligned,
-	   and access, browser and terminal keep the first beside attach and the
-	   circles. The first line matches the 32px circles so the three sit level. */
+	   width and gives this row the box's full width): when access, browser and
+	   terminal do not fit beside model and effort, the right group wraps to a
+	   line of its own and stays right-aligned. */
 	:global(.composer-narrow) .controls-dock {
 		flex-wrap: wrap;
 		row-gap: 2px;
 	}
-	:global(.composer-narrow) .dock-left {
-		height: 32px;
+	:global(.composer-narrow) .dock-group {
 		max-width: 100%;
-	}
-	:global(.composer-narrow) .dock-right {
-		flex-basis: 100%;
-		justify-content: flex-end;
 	}
 
 	.dock-pop-wrap {

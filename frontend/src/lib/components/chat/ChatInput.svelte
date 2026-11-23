@@ -2526,11 +2526,22 @@
 		z-index: 20;
 		margin: 0 8px 8px 0;
 	}
-	/* A narrow column: the controls take two lines (ControlsDock), and attach
-	   and the circles stay level with the first, beside access mode. */
+	/* A narrow column: the controls get the box's full width on their own row
+	   (wrapping in ControlsDock if they still need more), and attach and the
+	   circles take the row under them, Send still in the bottom-right corner.
+	   The circles (Stop and the stash included) never take width from the
+	   controls this way.
+	   [ text ...................................... ]
+	   [ access · browser · terminal  model · effort ]
+	   [+]                                 [circles] */
+	.desktop-composer .composer-narrow .chat-island > :global(.controls-dock) {
+		grid-row: 2;
+		grid-column: 1 / -1;
+		padding: 0 8px 0 9px;
+	}
 	.desktop-composer .composer-narrow .composer-attach,
 	.desktop-composer .composer-narrow .send-cluster {
-		align-self: start;
+		grid-row: 3;
 	}
 
 	/* ===== THE CIRCLES =====
