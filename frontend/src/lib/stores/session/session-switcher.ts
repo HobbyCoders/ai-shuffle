@@ -1041,6 +1041,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (metaOwner !== undefined) {
 				patch.isRemote = metaOwner;
 				patch.confirmedLocalSession = metaOwner ? null : sessionId;
+			} else if (meta.is_remote === false && getState().isRemote === false) {
+				// The newer word agrees that this worker runs it (the sidebar list
+				// landing while /live was out, as on every boot restore): the
+				// answer still confirms it, or a hand-off while open would hide
+				// the shown transcript for an opening catch-up.
+				patch.confirmedLocalSession = sessionId;
 			}
 			if (ownerCurrent && meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
 			// Reloads and deep links have no row to tell an archived chat apart.
