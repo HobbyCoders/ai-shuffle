@@ -136,6 +136,20 @@ describe('Vault panel above the composer', () => {
   expect(panel()).toBeNull();
   expect(document.activeElement).toBe(trigger());
  });
+ it('on a phone, with no chip, returns focus to the context line\'s Controls item on Escape', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  const controls = document.createElement('button');
+  controls.dataset.controlsTrigger = '';
+  document.body.append(controls);
+  render(VaultPanel, {sessionId: 's1'}); await flush();
+  // Chat controls' Vault action closes the sheet and opens the panel.
+  get(vaultSummary)!.open(); await flush();
+  expect(document.activeElement).toBe(panel());
+  await fireEvent.keyDown(document.body, {key: 'Escape'}); await flush();
+  expect(panel()).toBeNull();
+  expect(document.activeElement).toBe(controls);
+  controls.remove();
+ });
  it('closes on an outside click but not on clicks inside it', async () => {
   snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
   mount({sessionId: 's1'}); await flush();

@@ -116,14 +116,16 @@ async function dismissOnTheTurnRail(page, label, press, opened) {
 	expect(Math.abs(after - before) <= 1, `${label}: a ${press} that closes it leaves the reader where they were (scrollTop ${before} to ${after})`);
 }
 
-/** Sheets the composer opens on a phone: the trigger and what it opens. */
+/**
+ * Sheets the composer opens on a phone in a chat under way: the trigger, what
+ * it opens and how the user closes it. Tool access is not on the bar once the
+ * chat has started; the case checks it in Chat controls instead.
+ */
 const SHEETS = [
-	{ trigger: /^Model: /, sheet: (page) => page.getByRole('dialog', { name: 'Choose model' }) },
-	{ trigger: /^Permission mode: /, sheet: (page) => page.getByRole('dialog', { name: 'Tool access' }) },
+	{ trigger: /^Model: /, close: 'escape', sheet: (page) => page.getByRole('dialog', { name: 'Choose model' }) },
 	// Only for a model with effort levels to pick from: the dev instance's scripted AI has none.
-	{ trigger: /^Effort: /, optional: true, sheet: (page) => page.getByRole('dialog', { name: 'Reasoning effort' }) },
-	// A chat with nothing used shows no ring on the composer: Chat controls keeps the row.
-	{ trigger: /^Context and usage/, inControls: true, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
+	{ trigger: /^Reasoning effort: /, close: 'outside', optional: true, sheet: (page) => page.getByRole('dialog', { name: 'Reasoning effort' }) },
+	{ trigger: /^Context and usage/, close: 'outside', inControls: true, sheet: (page) => page.getByRole('dialog', { name: 'Context and usage' }) }
 ];
 
 /**
@@ -247,7 +249,7 @@ await runJourney({
 			// A long chat: its turn rail has turns to jump to, so a dismissing tap could move the reader.
 			setup: (ctx) => openSeededChat(ctx, 'long'),
 			async act({ page, mark, start }) {
-				for (const [index, { trigger, optional, inControls, sheet }] of SHEETS.entries()) {
+				for (const { trigger, close, optional, inControls, sheet } of SHEETS) {
 					const label = String(trigger).replace(/[/^:]/g, '').trim();
 					if (inControls) {
 						await mark(`open Chat controls for ${label}`);
@@ -275,8 +277,8 @@ await runJourney({
 						`${label} fits the screen (${JSON.stringify(box)} in ${vp.width}×${vp.height})`
 					);
 
-					// Alternate the two ways a phone user closes a sheet.
-					if (index % 2 === 0) {
+					// The two ways a phone user closes a sheet.
+					if (close === 'escape') {
 						await mark(`close ${label} with Escape`);
 						await page.keyboard.press('Escape');
 					} else {
@@ -299,6 +301,19 @@ await runJourney({
 					await page.waitForTimeout(400);
 					expectSameBottom(start, await composerGeometry(page), `after ${label}`);
 				}
+
+				// Tool access left the bar once the chat started: it is set in Chat controls.
+				await mark('Tool access lives in Chat controls');
+				const bar = page.getByRole('region', { name: INPUT });
+				expect((await bar.getByRole('button', { name: /^Permission mode: / }).count()) === 0, 'no Tool access cell on the bar of a chat under way');
+				await page.getByRole('button', { name: /^All chat controls/ }).tap();
+				const controls = page.getByRole('dialog', { name: 'Chat controls' });
+				await controls.waitFor({ timeout: 5000 });
+				await controls.getByRole('radiogroup', { name: 'Tool access' }).waitFor({ timeout: 5000 });
+				await page.keyboard.press('Escape');
+				await controls.waitFor({ state: 'hidden', timeout: 5000 });
+				await page.waitForTimeout(400);
+				expectSameBottom(start, await composerGeometry(page), 'after Chat controls');
 			}
 		},
 		{

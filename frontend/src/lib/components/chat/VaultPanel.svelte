@@ -88,6 +88,11 @@
 	let panelRef = $state<HTMLDivElement | null>(null);
 	/** The Vault chip in the composer row, which opens and closes this panel. */
 	const chip = () => document.querySelector<HTMLElement>('[data-vault-chip]');
+	/**
+	 * Where focus goes back on close: the chip, or on a phone (no chip; the
+	 * Vault opens from Chat controls) the context line's Controls item.
+	 */
+	const launcher = () => chip() ?? document.querySelector<HTMLElement>('[data-controls-trigger]');
 	// An open from outside the panel (the chip, the phone dock's Review) happens
 	// during that click, before the window click listener runs; this marks the
 	// event turn so the outside-click check does not close what was just opened
@@ -103,7 +108,7 @@
 		cancelSheetDrag();
 		const focusInside = !!panelRef && panelRef.contains(document.activeElement);
 		closeDropdown('vault');
-		if (restoreFocus || focusInside) chip()?.focus({ preventScroll: true });
+		if (restoreFocus || focusInside) launcher()?.focus({ preventScroll: true });
 	}
 	const togglePanel = () => (panelOpen ? closePanel() : openPanel());
 	/** Saved sign-ins are edited in Settings; they sync to the owner's other workers. */
