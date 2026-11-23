@@ -7,9 +7,10 @@ and turned into events:
 
 * **CI failed** on the current head, reported once per head and only after
   every check on that commit finished, so the agent sees all failures at once.
-* **Review activity** from people with write access (owner, members,
-  collaborators) and from bots the owner allows in Settings: change requests,
-  review comments, conversation comments, inline thread comments.
+* **Review activity** from people with write access to the repository
+  (asked of GitHub per person, :func:`has_write_access`) and from bots the
+  owner allows in Settings: change requests, review comments, conversation
+  comments, inline thread comments.
 * **Merge conflict**, or the branch fell behind a base that must be current.
 * **Merged or closed** ends the watch without a model call.
 
@@ -59,8 +60,15 @@ LIMITS: Dict[str, Tuple[float, float]] = {
 _INTS = ("max_wakes_per_day", "idle_days", "max_repeat_failures")
 MAX_TRUSTED_BOTS = 20
 
-#: GitHub author associations that may wake the agent.
-TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+#: Author associations worth asking GitHub about. ``MEMBER`` (any organization
+#: member) and ``COLLABORATOR`` (any invited collaborator, even read-only) do
+#: not prove write access, so each such author's permission is looked up.
+#: Everyone else (contributors, strangers) can only notify.
+ACCESS_CHECK_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
+#: How long a looked-up permission is trusted, and lookups allowed per poll.
+ACCESS_TTL = timedelta(hours=12)
+MAX_ACCESS_LOOKUPS = 10
 #: Check conclusions that count as a failure (cancelled is usually superseded).
 FAILED_CONCLUSIONS = frozenset({"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"})
 FAILED_STATUS_STATES = frozenset({"FAILURE", "ERROR"})
@@ -298,6 +306,22 @@ def fetch_snapshot(repo: str, number: int) -> Dict[str, Any]:
     return normalize_snapshot(answer.get("data") or {})
 
 
+def has_write_access(repo: str, login: str) -> bool:
+    """Can ``login`` push to ``repo``? Sync (subprocess). Any doubt is ``False``."""
+    from app.core.github_service import github_service
+
+    if not login or not all(ch.isalnum() or ch == "-" for ch in login):
+        return False
+    try:
+        result = github_service._run_gh(
+            ["api", f"repos/{repo}/collaborators/{login}/permission", "--jq", ".permission"],
+            timeout=20, quiet=True,
+        )
+    except Exception:  # noqa: BLE001 — unknown access only notifies
+        return False
+    return result.returncode == 0 and (result.stdout or "").strip() in WRITE_PERMISSIONS
+
+
 # ─── Comparing snapshots ─────────────────────────────────────────────────────
 
 def _at(value: Any) -> Optional[datetime]:
@@ -312,11 +336,56 @@ def _at(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def is_trusted(item: Dict[str, Any], trusted_bots: Iterable[str]) -> bool:
-    """May this comment wake the agent? Write access, or a bot the owner allowed."""
+def is_trusted(item: Dict[str, Any], trusted_bots: Iterable[str], writers: Iterable[str]) -> bool:
+    """May this comment wake the agent? A bot the owner allowed, or a person
+    GitHub confirmed has write access (``writers``, lower-case logins)."""
     if item.get("bot"):
         return _clean_bot(item.get("author")) in {_clean_bot(b) for b in trusted_bots}
-    return item.get("association") in TRUSTED_ASSOCIATIONS
+    return str(item.get("author") or "").lower() in set(writers)
+
+
+def _counts(item: Dict[str, Any], first: bool, since: Optional[datetime]) -> bool:
+    """On the first poll only activity newer than the watch counts."""
+    if not first:
+        return True
+    at = _at(item.get("at"))
+    return since is not None and at is not None and at > since
+
+
+def access_candidates(state: Dict[str, Any], snap: Dict[str, Any], since: Optional[datetime]) -> List[str]:
+    """Lower-case logins of new human comments whose write access must be known."""
+    first = "seen" not in state
+    seen = set(state.get("seen") or [])
+    out: List[str] = []
+    for item in snap["items"]:
+        if (item["id"] in seen or item.get("bot") or _is_noise(item)
+                or item.get("association") not in ACCESS_CHECK_ASSOCIATIONS
+                or not _counts(item, first, since)):
+            continue
+        login = str(item.get("author") or "").lower()
+        if login and login not in out:
+            out.append(login)
+    return out
+
+
+def refresh_access(state: Dict[str, Any], logins: List[str], lookup, now: datetime) -> Dict[str, Any]:
+    """Fill the per-watch access cache for ``logins``. Sync (calls ``lookup``).
+
+    Returns the new cache ``{login: {"write": bool, "at": iso}}``. At most
+    :data:`MAX_ACCESS_LOOKUPS` people are asked per poll; anyone left over is
+    treated as having no write access this time (their comment notifies).
+    """
+    cache = {k: v for k, v in (state.get("access") or {}).items()
+             if isinstance(v, dict) and (_at(v.get("at")) or now) > now - ACCESS_TTL}
+    asked = 0
+    for login in logins:
+        if login in cache:
+            continue
+        if asked >= MAX_ACCESS_LOOKUPS:
+            break
+        asked += 1
+        cache[login] = {"write": bool(lookup(login)), "at": now.isoformat()}
+    return cache
 
 
 def _is_noise(item: Dict[str, Any]) -> bool:
@@ -358,20 +427,24 @@ def diff(
     wakes: List[Dict[str, Any]],
     max_repeat_failures: int,
     now: datetime,
+    writers: Iterable[str] = (),
+    since: Optional[datetime] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Compare a snapshot with the saved state.
 
     Returns ``(new_state, wake_events, notify_events)``. ``wake_events`` may
     start an agent turn; ``notify_events`` only reach the owner's bell
     (comments from people without write access, the repeated-failure flag).
-    The first poll (no ``seen`` yet) records existing comments as seen, so
-    only what arrives after Watch was clicked counts; a CI failure or a
-    conflict that already exists counts at once.
+    ``writers`` are the lower-case logins GitHub confirmed can push.
+    The first poll (no ``seen`` yet) records comments from before ``since``
+    (when Watch was clicked) as seen; a CI failure or a conflict that already
+    exists counts at once.
     """
     new = dict(state)
     first = "seen" not in state
     seen = list(state.get("seen") or [])
     seen_set = set(seen)
+    writers = {w.lower() for w in writers}
     wake_events: List[Dict[str, Any]] = []
     notify_events: List[Dict[str, Any]] = []
 
@@ -380,12 +453,13 @@ def diff(
             continue
         seen.append(item["id"])
         seen_set.add(item["id"])
-        if first or _is_noise(item) or _own_reply(item, snap.get("viewer", ""), wakes, now):
+        if (not _counts(item, first, since) or _is_noise(item)
+                or _own_reply(item, snap.get("viewer", ""), wakes, now)):
             continue
         event = {"type": item["kind"], **{k: item.get(k) for k in
                  ("id", "author", "association", "state", "url", "path", "at")},
                  "body": item["body"][:QUOTE_CHARS]}
-        if is_trusted(item, trusted_bots):
+        if is_trusted(item, trusted_bots, writers):
             wake_events.append(event)
         else:
             notify_events.append({**event, "untrusted": True})
@@ -395,23 +469,33 @@ def diff(
     checks = snap["checks"]
     streaks: Dict[str, int] = dict(state.get("fail_streak") or {})
     if head and not checks["pending"] and checks["total"]:
-        failed_names = sorted({c["name"] for c in checks["failed"]})
-        if new.get("checked_head") != head:
-            new["checked_head"] = head
-            for name in list(streaks):
-                if name not in failed_names:
-                    streaks.pop(name)
-            for name in failed_names:
-                streaks[name] = streaks.get(name, 0) + 1
-            if failed_names:
-                wake_events.append({"type": "ci_failed", "head": head, "checks": checks["failed"]})
-        if not failed_names and new.get("needs_owner"):
-            new["needs_owner"] = None
+        # Every check on this commit finished. Report each failing check once
+        # per commit, so a check that fails later on the same commit (a rerun,
+        # a workflow started by another) still counts.
+        failing = {c["name"]: c for c in checks["failed"]}
+        reported = set(state.get("reported") or []) if state.get("checked_head") == head else set()
+        new["checked_head"] = head
+        for name in list(streaks):
+            if name not in failing:
+                streaks.pop(name)  # it passed: its repeat count starts over
+        fresh = [c for name, c in failing.items() if name not in reported]
+        for c in fresh:
+            streaks[c["name"]] = streaks.get(c["name"], 0) + 1
+            reported.add(c["name"])
+        new["reported"] = sorted(reported & set(failing))
+        if fresh:
+            wake_events.append({"type": "ci_failed", "head": head, "checks": fresh})
     new["fail_streak"] = streaks
+    # The hold covers exactly the checks still over their cap; it ends when they pass.
     repeated = sorted(n for n, count in streaks.items() if count >= max_repeat_failures)
-    if repeated and not new.get("needs_owner"):
-        new["needs_owner"] = {"checks": repeated, "at": now.isoformat()}
-        notify_events.append({"type": "repeated_failure", "checks": repeated})
+    held = set((state.get("needs_owner") or {}).get("checks") or [])
+    if repeated:
+        if set(repeated) - held:
+            notify_events.append({"type": "repeated_failure", "checks": repeated})
+        new["needs_owner"] = {"checks": repeated,
+                              "at": (state.get("needs_owner") or {}).get("at") or now.isoformat()}
+    else:
+        new["needs_owner"] = None
 
     conflict = snap["mergeable"] == "CONFLICTING"
     behind = snap["merge_state"] == "BEHIND"
@@ -532,10 +616,7 @@ def build_prompt(watch: Dict[str, Any], events: List[Dict[str, Any]], mode: str)
 def find_session_for_pr(repo: str, number: int, url: Optional[str]) -> Optional[str]:
     """The chat that opened this PR: newest non-worker chat listing it. Sync (DB)."""
     from app.db.base import get_db, row_to_dict
-    from app.db.sessions import decode_pull_requests
 
-    want_url = (url or "").rstrip("/").lower()
-    suffix = f"/{repo.lower()}/pull/{int(number)}"
     with get_db() as conn:
         c = conn.cursor()
         c.execute(
@@ -546,18 +627,28 @@ def find_session_for_pr(repo: str, number: int, url: Optional[str]) -> Optional[
         )
         rows = [row_to_dict(r) for r in c.fetchall()]
 
-    def matches(link: Any) -> bool:
-        link = str(link or "").rstrip("/").lower()
-        return bool(link) and (link == want_url or link.endswith(suffix))
-
     fallback = None
     for row in rows:
-        listed = [e.get("url") for e in decode_pull_requests(row.get("pull_requests"))]
-        if matches(row.get("pr_url")) or any(matches(u) for u in listed):
+        if session_lists_pr(row, repo, number, url):
             if not row.get("is_worker"):
                 return str(row["id"])
             fallback = fallback or str(row["id"])
     return fallback
+
+
+def session_lists_pr(session: Dict[str, Any], repo: str, number: int, url: Optional[str]) -> bool:
+    """Does this chat's PR list (or its single PR link) name this pull request?"""
+    from app.db.sessions import decode_pull_requests
+
+    want_url = (url or "").rstrip("/").lower()
+    suffix = f"/{repo.lower()}/pull/{int(number)}"
+
+    def matches(link: Any) -> bool:
+        link = str(link or "").rstrip("/").lower()
+        return bool(link) and (link == want_url or link.endswith(suffix))
+
+    listed = [e.get("url") for e in decode_pull_requests(session.get("pull_requests"))]
+    return matches(session.get("pr_url")) or any(matches(u) for u in listed)
 
 
 # ─── The poller ──────────────────────────────────────────────────────────────
@@ -588,7 +679,8 @@ def _refresh_wakes(watch: Dict[str, Any]) -> List[Dict[str, Any]]:
             wake["ended"] = True
             ended = row.get("ended_at")
             wake["ended_at"] = ended.isoformat() if isinstance(ended, datetime) else ended
-        cost = turn_cost({"session_id": watch["session_id"], "turn_id": wake["turn_id"]})
+        sid = wake.get("session_id") or watch.get("session_id")
+        cost = turn_cost({"session_id": sid, "turn_id": wake["turn_id"]}) if sid else None
         if cost is not None:
             wake["cost_usd"] = round(cost, 4)
     return wakes[-MAX_WAKE_HISTORY:]
@@ -630,15 +722,28 @@ async def _notify(watch: Dict[str, Any], key: str, message: str, *, severity: st
         logger.warning("PR watch %s: notification failed", watch["id"], exc_info=True)
 
 
-async def _wake(watch: Dict[str, Any], events: List[Dict[str, Any]], mode: str, seq: int) -> Optional[str]:
-    """Queue one turn in the PR's chat. Returns the turn id, or None if refused."""
-    from app.core import turn_manager
-    from app.core.wakeup_service import _session_api_user_id
-    from app.db import database
+#: Why a wake was not queued (``_wake`` returns one of these instead of a turn id).
+GONE = "The chat could not take the wake, so nothing was woken."
+ELSEWHERE = "Its chat runs on another worker, so the watch can only notify you."
+STOPPED = "stopped"
 
+
+async def _wake(watch: Dict[str, Any], events: List[Dict[str, Any]], mode: str, seq: int) -> Tuple[Optional[str], str]:
+    """Queue one turn in the PR's chat. Returns ``(turn_id, "")`` or ``(None, reason)``."""
+    from app.core import turn_manager
+    from app.core.limit_resume import is_local
+    from app.core.wakeup_service import _session_api_user_id
+    from app.db import database, pr_watches
+
+    current = await run_sync(pr_watches.get, watch["id"])
+    if not current or current.get("status") != "active":
+        return None, STOPPED  # stopped while this poll was reading GitHub
     session = await run_sync(database.get_session, watch["session_id"])
     if not session:
-        return None
+        return None, GONE
+    if not is_local(session):
+        # A paired worker has its own database: a turn queued here never runs there.
+        return None, ELSEWHERE
     api_user_id = await run_sync(_session_api_user_id, watch["session_id"])
     tid = await turn_manager.submit_async(
         watch["session_id"],
@@ -649,7 +754,7 @@ async def _wake(watch: Dict[str, Any], events: List[Dict[str, Any]], mode: str, 
         command_id=f"{COMMAND_PREFIX}{watch['id']}-{seq}",
         payload={"pr_watch_id": watch["id"], **({"api_user_id": api_user_id} if api_user_id else {})},
     )
-    return tid or None
+    return (tid, "") if tid else (None, GONE)
 
 
 async def deliver(watch: Dict[str, Any], state: Dict[str, Any], wakes: List[Dict[str, Any]],
@@ -678,15 +783,18 @@ async def deliver(watch: Dict[str, Any], state: Dict[str, Any], wakes: List[Dict
         return {**state, "pending": events, "last_event_at": now.isoformat(), "seq": seq - 1}, wakes
     if blocked is None:
         try:
-            tid = await _wake(watch, events, settings["mode"], seq)
+            tid, why = await _wake(watch, events, settings["mode"], seq)
         except Exception as exc:  # noqa: BLE001 — fall back to the bell, keep watching
             logger.warning("PR watch %s: wake failed: %s", watch["id"], exc)
-            tid = None
+            tid, why = None, GONE
         if tid:
-            wakes = [*wakes, {"turn_id": tid, "at": now.isoformat(), "seq": seq, "summary": summary}]
+            wakes = [*wakes, {"turn_id": tid, "session_id": watch["session_id"], "at": now.isoformat(),
+                              "seq": seq, "summary": summary}]
             await _notify(watch, f"wake-{seq}", f"{summary}. Woke the agent in its chat.")
             return state, wakes[-MAX_WAKE_HISTORY:]
-        blocked = "The chat could not take the wake, so nothing was woken."
+        if why == STOPPED:
+            return state, wakes
+        blocked = why
     if blocked == "notify":
         await _notify(watch, f"note-{seq}", summary + ".")
     else:
@@ -694,7 +802,7 @@ async def deliver(watch: Dict[str, Any], state: Dict[str, Any], wakes: List[Dict
     return state, wakes
 
 
-async def poll(watch: Dict[str, Any], *, fetch=None, now: Optional[datetime] = None) -> None:
+async def poll(watch: Dict[str, Any], *, fetch=None, access=None, now: Optional[datetime] = None) -> None:
     """Check one watch once and act on what changed."""
     from app.db import pr_watches
 
@@ -718,17 +826,25 @@ async def poll(watch: Dict[str, Any], *, fetch=None, now: Optional[datetime] = N
         return
 
     wakes = await run_sync(_refresh_wakes, watch)
+    prior = dict(watch.get("state") or {})
+    since = _at(watch.get("created_at"))
+    logins = access_candidates(prior, snap, since)
+    if logins or prior.get("access"):
+        lookup = access or (lambda login: has_write_access(watch["repo"], login))
+        prior["access"] = await asyncio.to_thread(refresh_access, prior, logins, lookup, now)
+    writers = [login for login, v in (prior.get("access") or {}).items() if v.get("write")]
     state, wake_events, notify_events = diff(
-        dict(watch.get("state") or {}), snap,
+        prior, snap,
         trusted_bots=settings["trusted_bots"], wakes=wakes,
         max_repeat_failures=settings["max_repeat_failures"], now=now,
+        writers=writers, since=since,
     )
     last_activity = _at(watch.get("last_activity_at")) or now
     if wake_events or notify_events or snap["head"] != (watch.get("state") or {}).get("head"):
         last_activity = now
     for event in notify_events:
         if event["type"] == "repeated_failure":
-            await _notify(watch, f"repeat-{snap['head'][:12]}",
+            await _notify(watch, f"repeat-{snap['head'][:12]}-{'-'.join(event['checks'])[:80]}",
                           f"{', '.join(event['checks'])} kept failing after the agent's fixes. "
                           "The watch stopped waking it until the check passes.", severity="warning")
         else:
@@ -854,13 +970,26 @@ def start_watch(*, repo: str, pr_number: int, pr_url: Optional[str], pr_title: O
     from app.core import owner_services
     from app.db import database, pr_watches
 
-    if session_id and not database.get_session(session_id):
-        raise ValueError("That chat no longer exists")
+    if session_id:
+        session = database.get_session(session_id)
+        if not session:
+            raise ValueError("That chat no longer exists")
+        # The watch may wake this chat with push rights, so it must be the chat
+        # that has this PR, not whichever chat sent the request.
+        if not session_lists_pr(session, repo, pr_number, pr_url):
+            raise ValueError("That chat has no record of this pull request")
     session_id = session_id or find_session_for_pr(repo, pr_number, pr_url)
     row = pr_watches.create(
         owner="admin", worker_id=owner_services.assistant_id(), repo=repo,
         pr_number=pr_number, pr_url=pr_url, pr_title=pr_title, session_id=session_id,
     )
+    if not row.get("wakes"):
+        # The daily caps are per PR: a stopped watch's wakes today still count.
+        carried = pr_watches.recent_wakes(repo, pr_number, since=_now() - timedelta(days=1),
+                                          exclude=row["id"])
+        if carried:
+            pr_watches.save(row["id"], wakes=carried[-MAX_WAKE_HISTORY:])
+            row = pr_watches.get(row["id"]) or row
     return view(row)
 
 

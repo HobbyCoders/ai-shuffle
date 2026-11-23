@@ -121,6 +121,33 @@ def list_watches(owner: Optional[str] = None, *, recent_hours: int = 24) -> list
         return [parse(r) for r in c.fetchall()]
 
 
+def recent_wakes(repo: str, pr_number: int, *, since: datetime, exclude: str) -> list[dict[str, Any]]:
+    """Wakes since ``since`` recorded by this PR's other watches, oldest first.
+
+    Each keeps the chat it ran in, so its cost is still read from that chat.
+    """
+    with get_db() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM pr_watches WHERE LOWER(repo)=LOWER(%s) AND pr_number=%s AND id<>%s "
+            "AND updated_at > %s ORDER BY created_at, id",
+            (repo, int(pr_number), exclude, since),
+        )
+        rows = [parse(r) for r in c.fetchall()]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        for wake in row["wakes"]:
+            if not isinstance(wake, dict):
+                continue
+            try:
+                at = datetime.fromisoformat(str(wake.get("at")).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) > since:
+                out.append({**wake, "session_id": wake.get("session_id") or row.get("session_id")})
+    return sorted(out, key=lambda w: str(w.get("at")))
+
+
 def list_due(worker_id: str, now: datetime, limit: int = 20) -> list[dict[str, Any]]:
     with get_db() as conn:
         c = conn.cursor()

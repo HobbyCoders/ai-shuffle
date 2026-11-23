@@ -30,9 +30,9 @@ def comment(cid, *, author="reviewer", association="MEMBER", bot=False, body="Pl
             "at": at, **extra}
 
 
-def run_diff(state, s, *, bots=(), wakes=(), repeats=3):
+def run_diff(state, s, *, bots=(), wakes=(), repeats=3, writers=("reviewer",), since=None):
     return pr_watch.diff(state, s, trusted_bots=list(bots), wakes=list(wakes),
-                         max_repeat_failures=repeats, now=NOW)
+                         max_repeat_failures=repeats, now=NOW, writers=list(writers), since=since)
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
@@ -126,6 +126,35 @@ def test_trusted_comments_wake_and_strangers_only_notify():
     assert all(e["untrusted"] for e in notify)
 
 
+def test_an_organization_member_without_write_access_only_notifies():
+    # GitHub says MEMBER for any organization member, read-only ones too.
+    items = [comment(1, author="read-only-member", association="MEMBER")]
+    _, wake, notify = run_diff({"seen": []}, snap(items=items), writers=["reviewer"])
+    assert wake == [] and [e["id"] for e in notify] == ["comment:1"]
+
+
+def test_access_is_asked_once_per_person_and_unknown_means_no():
+    items = [comment(1, author="Bob"), comment(2, author="bob"), comment(3, author="carol", association="COLLABORATOR"),
+             comment(4, author="stranger", association="NONE"), comment(5, author="bot", bot=True)]
+    logins = pr_watch.access_candidates({"seen": []}, snap(items=items), None)
+    assert logins == ["bob", "carol"]  # strangers and bots are never asked
+    asked = []
+    cache = pr_watch.refresh_access({}, logins, lambda login: asked.append(login) or login == "bob", NOW)
+    assert asked == ["bob", "carol"]
+    assert cache["bob"]["write"] is True and cache["carol"]["write"] is False
+    again = pr_watch.refresh_access({"access": cache}, logins, lambda login: asked.append(login), NOW)
+    assert asked == ["bob", "carol"] and again == cache  # cached
+    stale = pr_watch.refresh_access({"access": cache}, ["bob"], lambda _: False, NOW + timedelta(days=1))
+    assert stale["bob"]["write"] is False and "carol" not in stale
+
+
+def test_first_poll_counts_activity_newer_than_the_watch():
+    items = [comment(1, at="2026-11-23T17:00:00Z"), comment(2, at="2026-11-23T17:59:00Z")]
+    state, wake, _ = run_diff({}, snap(items=items), since=NOW - timedelta(minutes=30))
+    assert [e["id"] for e in wake] == ["comment:2"]
+    assert state["seen"] == ["comment:1", "comment:2"]
+
+
 def test_noise_is_dropped():
     items = [
         comment(1, kind="review", state="APPROVED", body=""),
@@ -142,7 +171,7 @@ def test_agents_own_replies_during_a_wake_are_ignored():
               "ended_at": "2026-11-23T17:58:00+00:00"}]
     items = [comment(1, author="owner-login", at="2026-11-23T17:55:00Z"),
              comment(2, author="owner-login", at="2026-11-23T17:59:30Z")]
-    _, wake, _ = run_diff({"seen": []}, snap(items=items), wakes=wakes)
+    _, wake, _ = run_diff({"seen": []}, snap(items=items), wakes=wakes, writers=["owner-login"])
     assert [e["id"] for e in wake] == ["comment:2"]  # the owner's own later comment still counts
 
 
@@ -164,6 +193,27 @@ def test_repeated_failure_flags_the_owner_and_clears_when_green():
     assert notify == [{"type": "repeated_failure", "checks": ["unit"]}]
     state, _, _ = run_diff(state, snap(head="z" * 40))
     assert state["needs_owner"] is None and state["fail_streak"] == {}
+
+
+def test_the_hold_ends_when_its_check_passes_even_if_another_fails():
+    unit = [{"id": 1, "name": "unit", "url": "u"}]
+    state = {"seen": []}
+    for n in range(3):
+        state, _, _ = run_diff(state, snap(head=str(n) * 40, failed=unit), repeats=3)
+    assert state["needs_owner"]["checks"] == ["unit"]
+    state, wake, _ = run_diff(state, snap(head="z" * 40, failed=[{"id": 2, "name": "lint", "url": "u"}]))
+    assert state["needs_owner"] is None
+    assert [c["name"] for c in wake[0]["checks"]] == ["lint"]
+
+
+def test_a_check_that_fails_later_on_the_same_commit_is_reported():
+    state, wake, _ = run_diff({"seen": []}, snap())  # every check passed on this commit
+    assert wake == [] and state["checked_head"] == "a" * 40
+    late = [{"id": 7, "name": "nightly", "url": "u"}]
+    state, wake, _ = run_diff(state, snap(failed=late, total=4))
+    assert [e["type"] for e in wake] == ["ci_failed"] and wake[0]["checks"] == late
+    state, wake, _ = run_diff(state, snap(failed=late, total=4))
+    assert wake == []  # the same failure is not reported twice
 
 
 # ─── Batching and wording ────────────────────────────────────────────────────
@@ -200,7 +250,7 @@ PENDING = {"pending": [{"type": "conflict"}], "last_event_at": NOW.isoformat()}
 
 @pytest.mark.asyncio
 async def test_deliver_wakes_and_records_the_turn():
-    with patch.object(pr_watch, "_wake", AsyncMock(return_value="turn-1")) as wake, \
+    with patch.object(pr_watch, "_wake", AsyncMock(return_value=("turn-1", ""))) as wake, \
             patch.object(pr_watch, "_notify", AsyncMock()) as notify:
         state, wakes = await pr_watch.deliver(WATCH, dict(PENDING), [], SETTINGS, NOW)
     wake.assert_awaited_once()
@@ -217,7 +267,7 @@ async def test_deliver_wakes_and_records_the_turn():
     (SETTINGS, [], dict(WATCH, session_id=None), "No chat"),
 ])
 async def test_deliver_respects_the_owners_limits(settings, wakes, watch, word):
-    with patch.object(pr_watch, "_wake", AsyncMock(return_value="t")) as wake, \
+    with patch.object(pr_watch, "_wake", AsyncMock(return_value=("t", ""))) as wake, \
             patch.object(pr_watch, "_notify", AsyncMock()) as notify:
         state, out = await pr_watch.deliver(watch, dict(PENDING), list(wakes), settings, NOW)
     wake.assert_not_awaited()
@@ -260,24 +310,24 @@ async def test_poll_end_to_end_batches_then_ends_on_merge(mock_db):
 
     first = snap(items=[comment(1)])
     with patch.object(pr_watch, "_notify", AsyncMock()), \
-            patch.object(pr_watch, "_wake", AsyncMock(return_value="turn-9")) as wake, \
+            patch.object(pr_watch, "_wake", AsyncMock(return_value=("turn-9", ""))) as wake, \
             patch.object(pr_watch, "_refresh_wakes", side_effect=lambda w: list(w.get("wakes") or [])):
-        await pr_watch.poll(row, fetch=lambda *_: first, now=NOW)
+        await pr_watch.poll(row, fetch=lambda *_: first, access=lambda _login: True, now=NOW)
         row = pr_watches.get(row["id"])
         assert row["state"]["seen"] == ["comment:1"] and row["pr_title"] == "Add a thing"
 
         later = snap(items=[comment(1), comment(2)])
-        await pr_watch.poll(row, fetch=lambda *_: later, now=NOW + timedelta(minutes=5))
+        await pr_watch.poll(row, fetch=lambda *_: later, access=lambda _login: True, now=NOW + timedelta(minutes=5))
         row = pr_watches.get(row["id"])
         assert len(row["state"]["pending"]) == 1
         wake.assert_not_awaited()  # still inside the quiet window
 
-        await pr_watch.poll(row, fetch=lambda *_: later, now=NOW + timedelta(minutes=9))
+        await pr_watch.poll(row, fetch=lambda *_: later, access=lambda _login: True, now=NOW + timedelta(minutes=9))
         row = pr_watches.get(row["id"])
         wake.assert_awaited_once()
         assert row["state"]["pending"] == [] and row["wakes"][0]["turn_id"] == "turn-9"
 
-        await pr_watch.poll(row, fetch=lambda *_: snap(state="MERGED"), now=NOW + timedelta(minutes=12))
+        await pr_watch.poll(row, fetch=lambda *_: snap(state="MERGED"), access=lambda _login: True, now=NOW + timedelta(minutes=12))
     row = pr_watches.get(row["id"])
     assert row["status"] == "ended" and row["reason"] == "PR merged"
 
@@ -321,3 +371,61 @@ def test_find_session_for_pr_prefers_the_opening_chat(mock_db):
                   (json.dumps([{"number": 7, "url": url, "state": "open"}]), "main-chat"))
     assert pr_watch.find_session_for_pr("acme/app", 7, None) == "main-chat"
     assert pr_watch.find_session_for_pr("acme/app", 99, None) is None
+
+
+def test_start_refuses_a_chat_that_does_not_have_the_pr(mock_db):
+    import json
+
+    from app.db.base import get_db
+    from tests.shared_fixtures import seed_session
+
+    seed_session("other-chat")
+    seed_session("pr-chat")
+    url = "https://github.com/acme/app/pull/7"
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET pull_requests=%s WHERE id=%s",
+                              (json.dumps([{"number": 7, "url": url, "state": "open"}]), "pr-chat"))
+    with pytest.raises(ValueError, match="no record of this pull request"):
+        pr_watch.start_watch(repo="acme/app", pr_number=7, pr_url=url, pr_title=None, session_id="other-chat")
+    row = pr_watch.start_watch(repo="acme/app", pr_number=7, pr_url=url, pr_title=None, session_id="pr-chat")
+    assert row["session_id"] == "pr-chat"
+
+
+def test_a_new_watch_keeps_counting_todays_wakes_for_the_pr(mock_db):
+    from app.db import pr_watches
+
+    old = pr_watches.create(owner="admin", worker_id="me", repo="acme/app", pr_number=7,
+                            pr_url=None, pr_title=None, session_id=None)
+    pr_watches.save(old["id"], wakes=[{"turn_id": "t1", "session_id": "s-old", "at": pr_watch._now().isoformat(),
+                                       "ended": True, "cost_usd": 0.5},
+                                      {"turn_id": "t0", "at": "2020-01-01T00:00:00+00:00", "ended": True}])
+    pr_watches.set_status(old["id"], "stopped", "Stopped by you")
+    row = pr_watch.start_watch(repo="acme/app", pr_number=7, pr_url=None, pr_title=None, session_id=None)
+    assert row["id"] != old["id"] and row["wakes_today"] == 1
+    carried = pr_watches.get(row["id"])["wakes"]
+    assert [w["turn_id"] for w in carried] == ["t1"] and carried[0]["session_id"] == "s-old"
+
+
+@pytest.mark.asyncio
+async def test_no_wake_after_stop_or_for_a_chat_on_another_worker(mock_db):
+    from app.db import pr_watches
+    from tests.shared_fixtures import seed_session
+
+    seed_session("s-here")
+    row = pr_watches.create(owner="admin", worker_id="me", repo="acme/app", pr_number=7,
+                            pr_url=None, pr_title=None, session_id="s-here")
+    submit = AsyncMock(return_value="turn-1")
+    with patch("app.core.turn_manager.submit_async", submit), \
+            patch("app.core.limit_resume.is_local", return_value=False):
+        assert await pr_watch._wake(row, [], "fix", 1) == (None, pr_watch.ELSEWHERE)
+    pr_watches.set_status(row["id"], "stopped", "Stopped by you")
+    with patch("app.core.turn_manager.submit_async", submit), \
+            patch("app.core.limit_resume.is_local", return_value=True):
+        assert await pr_watch._wake(row, [], "fix", 2) == (None, pr_watch.STOPPED)
+    submit.assert_not_awaited()
+
+    with patch.object(pr_watch, "_wake", AsyncMock(return_value=(None, pr_watch.STOPPED))), \
+            patch.object(pr_watch, "_notify", AsyncMock()) as notify:
+        state, wakes = await pr_watch.deliver(WATCH, dict(PENDING), [], SETTINGS, NOW)
+    assert state["pending"] == [] and wakes == []
+    notify.assert_not_awaited()  # a stopped watch stays quiet
