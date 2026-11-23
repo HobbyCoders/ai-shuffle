@@ -208,6 +208,10 @@ export interface ForkSessionResponse {
 	fork_point_message_index: number;
 	message_count: number;
 	status: string;
+	/** The fork's own branch, when it got its own checkout. */
+	branch?: string | null;
+	/** A fork to another worker that was made but could not move there. */
+	move_error?: string | null;
 }
 
 // ============================================================================
@@ -326,11 +330,17 @@ export async function exportAllData(): Promise<void> {
  * @param sessionId The session to fork from
  * @param messageIndex The 0-based message index to fork after
  */
-export async function forkSession(sessionId: string, messageIndex?: number): Promise<ForkSessionResponse> {
+export async function forkSession(
+	sessionId: string,
+	messageIndex?: number,
+	targetInstanceId?: string
+): Promise<ForkSessionResponse> {
 	// Omitting messageIndex forks the ENTIRE session (the sessions-board "Fork"
 	// action). Passing an index forks up to and including that display message.
+	// targetInstanceId: fork it onto that worker instead.
 	return api.post<ForkSessionResponse>(`/sessions/${sessionId}/fork`, {
-		message_index: messageIndex ?? null
+		message_index: messageIndex ?? null,
+		...(targetInstanceId ? { target_instance_id: targetInstanceId } : {})
 	});
 }
 

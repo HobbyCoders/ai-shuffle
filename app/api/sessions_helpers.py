@@ -93,6 +93,9 @@ class ForkSessionRequest(BaseModel):
     the fork happens up to and including that 0-based display-message index.
     """
     message_index: Optional[int] = None
+    #: Fork onto this worker instead of the one that runs the chat: the fork
+    #: is made there, then moved like "Move to another worker".
+    target_instance_id: Optional[str] = None
 
 
 class ForkSessionResponse(BaseModel):
@@ -103,6 +106,11 @@ class ForkSessionResponse(BaseModel):
     fork_point_message_index: int
     message_count: int
     status: str
+    #: The fork's own branch, when it got its own checkout.
+    branch: Optional[str] = None
+    #: Set when a fork to another worker was made but could not be moved
+    #: there: the fork stays on the worker that runs the parent chat.
+    move_error: Optional[str] = None
 
 
 class AdoptRequest(BaseModel):

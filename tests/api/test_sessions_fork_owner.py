@@ -89,6 +89,31 @@ def test_fork_of_a_mirror_runs_on_its_owner(fork_client, remote_parent, monkeypa
     assert data["session_id"] not in held
 
 
+def test_mirror_copy_takes_the_forks_own_branch(fork_client, remote_parent, monkeypatch):
+    from app.db.base import get_cursor, get_db
+    from app.network import control
+
+    with get_db() as conn:
+        get_cursor(conn).execute(
+            "UPDATE sessions SET branch = 'parent-branch', worktree_branch = 'parent-branch', "
+            "worktree_path = '/owner/parent' WHERE id = %s", (remote_parent,))
+
+    async def fake_call(device_id, action, body=None, **kwargs):
+        return {"session_id": body["new_session_id"], "title": "Fork of parent",
+                "parent_session_id": body["session_id"], "fork_point_message_index": 1,
+                "message_count": 2, "status": "success", "branch": "chore/fork-0123456789ab"}
+
+    monkeypatch.setattr(control, "call", fake_call)
+    resp = fork_client.post(f"/{remote_parent}/fork", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["branch"] == "chore/fork-0123456789ab"
+    row = sessions_db.get_session(resp.json()["session_id"])
+    # Bound to the fork's branch, never the parent's; the owner's folder is
+    # its own, so no path is recorded here.
+    assert (row["branch"], row["worktree_branch"], row["worktree_path"]) == (
+        "chore/fork-0123456789ab", "chore/fork-0123456789ab", None)
+
+
 def test_owner_does_not_acknowledge_a_fork_without_a_transcript(mock_db, monkeypatch):
     """A row under the requested id with no transcript yet (a fork still being
     made, or a copy that reached the owner by sync) is not a finished fork."""

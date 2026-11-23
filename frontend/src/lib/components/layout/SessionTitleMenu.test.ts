@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => {
 		setTitle: vi.fn(),
 		toastPush: vi.fn(),
 		auth: store({ status: { is_admin: true } as { is_admin: boolean } | null }),
+		sessions: store([] as Array<Record<string, unknown>>),
+		workerInstalls: store(null as Array<Record<string, unknown>> | null),
+		refreshWorkerPresence: vi.fn(),
 	};
 });
 
@@ -40,6 +43,13 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 		renameSession: mocks.renameSession,
 		loadSessions: mocks.loadSessions,
 	},
+	sessions: mocks.sessions,
+}));
+
+vi.mock('$lib/stores/worker-presence', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/stores/worker-presence')>()),
+	workerInstalls: mocks.workerInstalls,
+	refreshWorkerPresence: mocks.refreshWorkerPresence,
 }));
 
 vi.mock('$lib/stores/active-session', () => ({
@@ -88,7 +98,16 @@ beforeEach(() => {
 	mocks.renameSession.mockResolvedValue(undefined);
 	mocks.loadSessions.mockResolvedValue(undefined);
 	mocks.forkSession.mockResolvedValue({ session_id: 'forked-session' });
+	mocks.sessions.set([]);
+	mocks.workerInstalls.set(null);
+	mocks.refreshWorkerPresence.mockResolvedValue(undefined);
 });
+
+const INSTALLS = [
+	{ id: 'dev-self', device_name: 'Home server', is_self: true, online: true, approved: true },
+	{ id: 'dev-workstation', device_name: 'Workstation', is_self: false, online: true, approved: true },
+	{ id: 'dev-laptop', device_name: 'Laptop', is_self: false, online: false, approved: true },
+];
 
 afterEach(() => {
 	openHeaderDropdown.set(null);
@@ -168,6 +187,80 @@ describe('SessionTitleMenu', () => {
 			),
 		);
 		expect(mocks.loadSessions).not.toHaveBeenCalled();
+	});
+
+	describe('fork to another worker', () => {
+		it('is not offered when no other worker is known', async () => {
+			mocks.workerInstalls.set([INSTALLS[0]]);
+			renderMenu();
+			await openMenu();
+			expect(screen.queryByRole('menuitem', { name: 'Fork to another worker…' })).toBeNull();
+		});
+
+		it('lists the other workers, greys an offline one, and forks to the one picked', async () => {
+			mocks.workerInstalls.set(INSTALLS);
+			mocks.sessions.set([{ id: 'session-a', owner_device_id: 'dev-self', is_remote: false }]);
+			mocks.forkSession.mockResolvedValue({ session_id: 'forked-session', branch: 'chore/fork-abc' });
+			const opened: string[] = [];
+			const onOpen = (event: Event) => opened.push((event as CustomEvent<{ sessionId: string }>).detail.sessionId);
+			window.addEventListener('open-session', onOpen);
+			renderMenu();
+
+			await openMenu();
+			await fireEvent.click(screen.getByRole('menuitem', { name: 'Fork to another worker…' }));
+
+			// The click swaps the menu to the worker list instead of closing it.
+			expect(screen.queryByRole('menuitem', { name: 'Fork session' })).toBeNull();
+			expect(screen.queryByRole('menuitem', { name: /Home server/ })).toBeNull();
+			const laptop = screen.getByRole('menuitem', { name: /Laptop/ }) as HTMLButtonElement;
+			expect(laptop.disabled).toBe(true);
+			expect(laptop.textContent).toContain('offline');
+
+			await fireEvent.click(screen.getByRole('menuitem', { name: /Workstation/ }));
+			expect(mocks.forkSession).toHaveBeenCalledWith('session-a', undefined, 'dev-workstation');
+			await vi.waitFor(() => expect(opened).toEqual(['forked-session']));
+			expect(mocks.toastPush).toHaveBeenCalledWith('Chat forked to Workstation', { severity: 'success' });
+			window.removeEventListener('open-session', onOpen);
+		});
+
+		it('offers this worker for a chat another worker runs', async () => {
+			mocks.workerInstalls.set(INSTALLS);
+			mocks.sessions.set([{ id: 'session-a', owner_device_id: 'dev-workstation', is_remote: true }]);
+			renderMenu();
+
+			await openMenu();
+			await fireEvent.click(screen.getByRole('menuitem', { name: 'Fork to another worker…' }));
+			expect(screen.getByRole('menuitem', { name: /Home server/ })).toBeTruthy();
+			expect(screen.queryByRole('menuitem', { name: /Workstation/ })).toBeNull();
+		});
+
+		it('says so when the fork was made but could not move', async () => {
+			mocks.workerInstalls.set(INSTALLS);
+			mocks.forkSession.mockResolvedValue({
+				session_id: 'forked-session',
+				move_error: "This session's project isn't checked out on Workstation yet.",
+			});
+			renderMenu();
+
+			await openMenu();
+			await fireEvent.click(screen.getByRole('menuitem', { name: 'Fork to another worker…' }));
+			await fireEvent.click(screen.getByRole('menuitem', { name: /Workstation/ }));
+			await vi.waitFor(() =>
+				expect(mocks.toastPush).toHaveBeenCalledWith(
+					"Chat forked, but it could not move to Workstation: This session's project isn't checked out on Workstation yet.",
+					{ severity: 'warning' },
+				),
+			);
+		});
+
+		it('works from the phone sheet too', async () => {
+			mocks.workerInstalls.set(INSTALLS);
+			renderMenu({ variant: 'sheet' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Fork to another worker…' }));
+			await fireEvent.click(screen.getByRole('button', { name: /Workstation/ }));
+			expect(mocks.forkSession).toHaveBeenCalledWith('session-a', undefined, 'dev-workstation');
+		});
 	});
 
 	it('deletes after ConfirmDialog confirm and resets the open chat', async () => {
