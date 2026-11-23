@@ -891,8 +891,14 @@
 		) {
 			touch.moved = true;
 		}
-		// Content follows the finger: dragging up scrolls down.
-		if (touch.moved) sendMouse('wheel', e, { buttons: 0, deltaX: -dx, deltaY: -dy });
+		// Content follows the finger: dragging up scrolls down. Like a real touch
+		// scroll it stays aimed where the finger landed, so the whole swipe drives
+		// one scroller and its steps can add up while the page is busy.
+		if (touch.moved) sendMouse(
+			'wheel',
+			{ altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey, clientX: touch.startX, clientY: touch.startY, button: e.button, buttons: 0 },
+			{ buttons: 0, deltaX: -dx, deltaY: -dy },
+		);
 	}
 
 	function onTouchUp(e: PointerEvent) {

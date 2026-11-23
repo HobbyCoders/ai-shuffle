@@ -401,8 +401,29 @@ describe('pointer input on a phone-width page', () => {
   pointer(surface, 'wheel', { x: 12, deltaY: 25 }); await flush();
   pointer(surface, 'wheel', { x: 12, deltaY: 30, ctrlKey: true }); await flush();
   pointer(surface, 'wheel', { x: 300, y: 600, deltaY: 20 }); await flush();
-  for (let i = 0; i < 3; i++) await answer(inputs().at(-1)!);
-  expect(inputs().map((p) => [p.x, p.deltaY, p.modifiers])).toEqual([[10, 100, 0], [12, 75, 0], [12, 30, 2], [300, 20, 0]]);
+  await answer(inputs().at(-1)!);
+  // One scroll waits behind the one on its way; another spot or modifier
+  // replaces it instead of retargeting it.
+  expect(inputs().map((p) => [p.x, p.deltaY, p.modifiers])).toEqual([[10, 100, 0], [300, 20, 0]]);
+  pointer(surface, 'wheel', { x: 12, deltaY: 50 }); await flush();
+  pointer(surface, 'wheel', { x: 12, deltaY: 25 }); await flush();
+  await answer(inputs().at(-1)!);
+  expect(inputs().slice(2).map((p) => [p.x, p.deltaY])).toEqual([[12, 75]]);
+ });
+
+ it('sends at most one held scroll ahead of a tap, and nothing after the socket drops', async () => {
+  const { surface } = await setupPhone();
+  for (let i = 0; i < 20; i++) { pointer(surface, 'wheel', { x: 10 + i * 15, deltaY: 10 }); await flush(); }
+  pointer(surface, 'pointerdown', { x: 50, button: 0, buttons: 1 }); await flush();
+  expect(inputs().map((p) => p.event)).toEqual(['wheel', 'wheel', 'down']);
+  mocks.send.mockClear();
+  pointer(surface, 'wheel', { x: 10, deltaY: 10 }); await flush();
+  pointer(surface, 'wheel', { x: 10, deltaY: 10 }); await flush();
+  mocks.config!.onClose?.(false); await flush();
+  mocks.config!.onOpen?.(); await flush();
+  pointer(surface, 'pointerdown', { x: 50, button: 0, buttons: 1 }); await flush();
+  // The two held scrolls were dropped with the old socket.
+  expect(inputs().map((p) => p.event)).toEqual(['down']);
  });
 
  it('drops held scrolling when the page is navigated', async () => {

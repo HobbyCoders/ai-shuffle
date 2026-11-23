@@ -30,7 +30,9 @@ describe('ViewShell', () => {
 		const { container } = render(ViewHarness);
 		expect(container.querySelector('.view-main-slot > .view-titlebar[aria-hidden="true"]')).toBeTruthy();
 		const dragRule = desktopStyles.match(/html\.desktop :is\(\.sb-head[^}]+}/)?.[0] ?? '';
-		for (const selector of ['.rail-titlebar', '.panel-header', '.p-head', '.view-titlebar', '.st-dtop', '.page-terminal > .bar']) expect(dragRule).toContain(selector);
+		// Only the view panel's header: the Browser panel's `.panel-header` holds its address bar and buttons.
+		expect(dragRule).not.toMatch(/[(,]\s*\.panel-header/);
+		for (const selector of ['.rail-titlebar', '.view-panel > .panel-header', '.p-head', '.view-titlebar', '.st-dtop', '.page-terminal > .bar']) expect(dragRule).toContain(selector);
 		expect(dragRule).toContain('-webkit-app-region: drag');
 		expect(desktopStyles).toMatch(/html\.desktop :is\(\.sidebar, \.view-shell, \.reopen-panel\) :is\(button, a, input, textarea, select, summary[^}]+-webkit-app-region: no-drag/s);
 		expect(desktopStyles).toMatch(/:has\(> \.sidebar-slot:is\(\.floating, \.panel-overlay:not\(\.rail-only\)\)\)[^}]+-webkit-app-region: no-drag/s);

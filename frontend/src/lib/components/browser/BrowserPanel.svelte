@@ -471,6 +471,8 @@
 			onClose: (wasClean) => {
 				if (!active) return;
 				streamOpen = false;
+				// Replies to anything sent on the old socket will never come.
+				resetContinuous();
 				designOnPage = false; // the worker put the page back when this viewer left
 				if (!wasClean) browserPanel.setStatus('disconnected', undefined, sid);
 			},
@@ -533,17 +535,16 @@
 	// wheel event even faster, but each one waits its turn in the browser's
 	// single command queue. Sent blindly they outran a busy page, lagged every
 	// click behind seconds of stale moves and filled the queue ("workspace
-	// queue full"). So at most one of them is on its way at a time: newer moves
-	// replace a held one and wheel deltas add up until the last is answered.
+	// queue full"). So at most one of them is on its way and at most one move
+	// and one wheel wait behind it: newer moves replace the held one, and wheel
+	// deltas add up only at the same spot with the same modifiers. A wheel
+	// anywhere else replaces the held one rather than retarget its scroll (to
+	// another pane, or from a scroll into a Ctrl+wheel zoom).
 	const CONTINUOUS_REPLY_TIMEOUT_MS = 2000;
-	// Wheel samples merge only at about the same spot with the same modifiers:
-	// a scroll over another pane, or a Ctrl+wheel zoom, stays its own event.
-	const WHEEL_MERGE_SLOP_PX = 24;
-	const MAX_HELD_WHEELS = 16;
 	let continuousInFlight: string | null = null;
 	let continuousTimer: ReturnType<typeof setTimeout> | undefined;
 	let heldMove: Record<string, unknown> | null = null;
-	let heldWheels: Record<string, unknown>[] = [];
+	let heldWheel: Record<string, unknown> | null = null;
 
 	function isContinuous(payload: Record<string, unknown>) {
 		return payload.kind === 'mouse' && (payload.event === 'move' || payload.event === 'wheel');
@@ -558,8 +559,7 @@
 	}
 	/** Drop held input the user has moved past (a navigation or a new page). */
 	function dropHeld() {
-		heldMove = null;
-		heldWheels = [];
+		heldMove = heldWheel = null;
 	}
 	function resetContinuous() {
 		clearTimeout(continuousTimer);
@@ -578,9 +578,10 @@
 		if (id !== continuousInFlight) return;
 		clearTimeout(continuousTimer);
 		continuousInFlight = null;
-		// A held move is always newer than held wheels (a wheel drops it).
-		let next = heldWheels.shift() ?? null;
-		if (!next) { next = heldMove; heldMove = null; }
+		// A held move is always newer than a held wheel (a wheel drops it).
+		const next = heldWheel ?? heldMove;
+		if (next === heldWheel) heldWheel = null;
+		else heldMove = null;
 		// Control can end while one waits: never send it to a page we no longer drive.
 		if (next && humanControl && frameMatchesWorkspace) sendContinuous(next);
 	}
@@ -589,21 +590,22 @@
 		if (payload.event === 'wheel') {
 			// The wheel carries the pointer position; a move held after it stays newer.
 			heldMove = null;
-			const last = heldWheels.at(-1);
-			const mergeable = !!last && last.modifiers === payload.modifiers &&
-				Math.abs(Number(last.x) - Number(payload.x)) <= WHEEL_MERGE_SLOP_PX &&
-				Math.abs(Number(last.y) - Number(payload.y)) <= WHEEL_MERGE_SLOP_PX;
-			if (last && (mergeable || heldWheels.length >= MAX_HELD_WHEELS)) {
-				const clampDelta = (v: number) => Math.max(-10000, Math.min(10000, v));
-				heldWheels[heldWheels.length - 1] = { ...payload, deltaX: clampDelta(Number(last.deltaX ?? 0) + Number(payload.deltaX ?? 0)), deltaY: clampDelta(Number(last.deltaY ?? 0) + Number(payload.deltaY ?? 0)) };
-			} else heldWheels.push(payload);
+			const last = heldWheel;
+			const sameSpot = !!last && last.modifiers === payload.modifiers && last.x === payload.x && last.y === payload.y;
+			const clampDelta = (v: number) => Math.max(-10000, Math.min(10000, v));
+			heldWheel = sameSpot
+				? { ...payload, deltaX: clampDelta(Number(last!.deltaX ?? 0) + Number(payload.deltaX ?? 0)), deltaY: clampDelta(Number(last!.deltaY ?? 0) + Number(payload.deltaY ?? 0)) }
+				: payload;
 		} else heldMove = payload;
 	}
-	/** Clicks, keys and text go at once, after the scroll and drag the user already made. */
+	/**
+	 * Clicks, keys and text go at once, after the scroll and drag step the user
+	 * already made: at most two held commands go ahead of it.
+	 */
 	function sendDiscrete(payload: Record<string, unknown>) {
-		const move = heldMove, wheels = heldWheels;
+		const move = heldMove, wheel = heldWheel;
 		dropHeld();
-		for (const wheel of wheels) sendIdentified(wheel);
+		if (wheel) sendIdentified(wheel);
 		// A press carries its own position, so a held hover is obsolete; a held
 		// drag step is not: a slider saves on release where the last move left it.
 		if (isDrag(move)) sendIdentified(move!);
