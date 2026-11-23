@@ -44,12 +44,12 @@
 </script>
 
 <div class="exports" class:menu class:sheet aria-label="Chat exports">
-	<button type="button" class="export-btn"disabled={disabled || !!pending || !sessionId} aria-busy={pending === 'backup'}
+	<button type="button" class="export-btn" role={menu ? 'menuitem' : undefined} disabled={disabled || !!pending || !sessionId} aria-busy={pending === 'backup'}
 		aria-label="Download private backup (.jsonl)" title={privateNote} onclick={() => download('backup')}>
 		{#if pending === 'backup'}<LoaderCircle class="export-spinner" size={iconSize} strokeWidth={1.5} aria-hidden="true" />{:else}<Download size={iconSize} strokeWidth={1.5} aria-hidden="true" />{/if}
 		{#if labelled}<span class="copy"><span class="label">{pending === 'backup' ? 'Downloading private backup…' : 'Download private backup'}</span><span class="note">.jsonl · Raw history; may contain secrets. Do not share.</span></span>{/if}
 	</button>
-	<button type="button" class="export-btn"disabled={disabled || !!pending || !sessionId} aria-busy={pending === 'sharing'}
+	<button type="button" class="export-btn" role={menu ? 'menuitem' : undefined} disabled={disabled || !!pending || !sessionId} aria-busy={pending === 'sharing'}
 		aria-label="Export for sharing (.md)" title={sharingNote} onclick={() => download('sharing')}>
 		{#if pending === 'sharing'}<LoaderCircle class="export-spinner" size={iconSize} strokeWidth={1.5} aria-hidden="true" />{:else}<FileDown size={iconSize} strokeWidth={1.5} aria-hidden="true" />{/if}
 		{#if labelled}<span class="copy"><span class="label">{pending === 'sharing' ? 'Exporting for sharing…' : 'Export for sharing'}</span><span class="note">.md · Recognized secrets removed; review before sharing.</span></span>{/if}

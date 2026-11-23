@@ -21,6 +21,7 @@
 	import { ChevronDown, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { forkSession, getErrorMessage } from '$lib/api/client';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -51,6 +52,8 @@
 
 	let rootRef = $state<HTMLDivElement | null>(null);
 	let chevronRef = $state<HTMLButtonElement | null>(null);
+	let triggerRef = $state<HTMLButtonElement | null>(null);
+	let menuRef = $state<HTMLDivElement | null>(null);
 	let sheetRef = $state<HTMLElement | null>(null);
 	const sheetTitleId = $props.id();
 	let renaming = $state(false);
@@ -107,15 +110,23 @@
 	});
 
 	function onDocClick(e: MouseEvent) {
-		if (rootRef && !rootRef.contains(e.target as Node)) closeMenu();
+		// The menu floats in <body>, outside this root.
+		const target = e.target as Node;
+		if (rootRef && !rootRef.contains(target) && !menuRef?.contains(target)) closeMenu();
 	}
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && open) {
 			e.preventDefault();
 			e.stopPropagation();
-			if (sheet) closeSheet();
-			else closeMenu();
+			if (sheet) {
+				closeSheet();
+				return;
+			}
+			// A focused row is about to unmount: hand focus back to the title.
+			const focusInside = !!menuRef && menuRef.contains(document.activeElement);
+			closeMenu();
+			if (focusInside) triggerRef?.focus({ preventScroll: true });
 		}
 	}
 
@@ -290,6 +301,7 @@
 			/>
 		{:else if bound}
 			<button
+				bind:this={triggerRef}
 				type="button"
 				class="title-trigger"
 				class:open
@@ -307,7 +319,13 @@
 		{/if}
 
 		{#if open && bound && !renaming}
-			<div class="menu" role="menu" aria-label="Session actions">
+			<div
+				bind:this={menuRef}
+				class="menu"
+				role="menu"
+				aria-label="Session actions"
+				use:floatingMenu={{ anchor: triggerRef, align: 'start', gap: 4 }}
+			>
 				<button type="button" class="dropdown-item" role="menuitem" onclick={startRename}>
 					<Pencil size={16} strokeWidth={1.5} aria-hidden="true" />Rename session
 				</button>
@@ -431,14 +449,13 @@
 		outline: none;
 	}
 
+	/* Position, z-index and the viewport clamp come from floatingMenu
+	   (it lifts the menu into <body> so the main panel cannot clip it). */
 	.menu {
-		position: absolute;
-		top: calc(100% + 4px);
-		left: 0;
-		right: auto;
 		/* Room for the export rows' notes to wrap once at most. */
 		width: 280px;
-		max-width: calc(100vw - 24px);
+		max-width: calc(100vw - 16px);
+		overflow-y: auto;
 		background: var(--card);
 		border: 1px solid var(--menu-border);
 		border-radius: var(--menu-radius);

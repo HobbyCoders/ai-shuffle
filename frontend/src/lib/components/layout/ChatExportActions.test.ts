@@ -6,29 +6,31 @@ import { exportSession } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 vi.mock('$lib/api/sessions', () => ({ exportSession: vi.fn() }));
 vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
-const backup = () => screen.getByRole('button', { name: 'Download private backup (.jsonl)' });
-const sharing = () => screen.getByRole('button', { name: 'Export for sharing (.md)' });
+// The desktop dropdown's rows are menu items; the phone sheet's are plain buttons.
+let role: 'menuitem' | 'button' = 'button';
+const backup = () => screen.getByRole(role, { name: 'Download private backup (.jsonl)' });
+const sharing = () => screen.getByRole(role, { name: 'Export for sharing (.md)' });
 beforeEach(() => vi.resetAllMocks());
 afterEach(cleanup);
 
-for (const menu of [false, true]) {
-	describe(menu ? 'narrow-menu controls' : 'header controls', () => {
+for (const menu of [true, false]) {
+	const sheet = !menu;
+	describe(menu ? 'desktop dropdown rows' : 'phone sheet rows', () => {
+		beforeEach(() => { role = menu ? 'menuitem' : 'button'; });
 		it('labels raw backups private and warns about limited sharing filtering', () => {
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			expect(backup().title).toMatch(/may contain secrets.*private.*do not share/i);
 			expect(sharing().title).toMatch(/recognized secrets removed; review content before sharing/i);
-			if (menu) {
-				expect(screen.getByText(/Raw history; may contain secrets/)).toBeTruthy();
-				expect(screen.getByText(/Recognized secrets removed; review before sharing/)).toBeTruthy();
-			}
+			expect(screen.getByText(/Raw history; may contain secrets/)).toBeTruthy();
+			expect(screen.getByText(/Recognized secrets removed; review before sharing/)).toBeTruthy();
 		});
 		it('keeps the existing raw JSONL request unchanged', async () => {
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			await fireEvent.click(backup());
 			expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'jsonl');
 		});
 		it('requests only opt-in sharing Markdown and reminds the owner to review', async () => {
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			await fireEvent.click(sharing());
 			expect(exportSession).toHaveBeenCalledExactlyOnceWith('synthetic-session', 'markdown', { shareSafe: true });
 			expect(notify).toHaveBeenCalledWith(expect.stringMatching(/review content before sharing/), { severity: 'success' });
@@ -36,7 +38,7 @@ for (const menu of [false, true]) {
 		it('disables both choices while downloading, then restores them', async () => {
 			let finish!: () => void;
 			vi.mocked(exportSession).mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			await fireEvent.click(sharing());
 			expect(sharing().getAttribute('aria-busy')).toBe('true');
 			expect((sharing() as HTMLButtonElement).disabled).toBe(true);
@@ -46,7 +48,7 @@ for (const menu of [false, true]) {
 		});
 		it('reports a sharing failure and never downloads a raw backup instead', async () => {
 			vi.mocked(exportSession).mockRejectedValue(new Error('synthetic failure'));
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			await fireEvent.click(sharing());
 			expect(exportSession).toHaveBeenCalledTimes(1);
 			expect(notify).toHaveBeenCalledWith(expect.stringMatching(/Private backup was not downloaded/), { severity: 'error' });
@@ -54,13 +56,13 @@ for (const menu of [false, true]) {
 		});
 		it('uses the usual API error detail without fallback', async () => {
 			vi.mocked(exportSession).mockRejectedValue({ detail: 'Cannot safely export malformed session JSONL' });
-			render(ChatExportActions, { sessionId: 'synthetic-session', menu });
+			render(ChatExportActions, { sessionId: 'synthetic-session', menu, sheet });
 			await fireEvent.click(sharing());
 			expect(notify).toHaveBeenCalledWith('Cannot safely export malformed session JSONL', { severity: 'error' });
 			expect(exportSession).toHaveBeenCalledTimes(1);
 		});
 		it('disables both choices without a session', () => {
-			render(ChatExportActions, { sessionId: '', menu });
+			render(ChatExportActions, { sessionId: '', menu, sheet });
 			expect((backup() as HTMLButtonElement).disabled).toBe(true);
 			expect((sharing() as HTMLButtonElement).disabled).toBe(true);
 		});
@@ -68,6 +70,7 @@ for (const menu of [false, true]) {
 }
 
 it('closes the existing menu on start without adding confirmation', async () => {
+	role = 'menuitem';
 	const onStart = vi.fn();
 	render(ChatExportActions, { sessionId: 'synthetic-session', menu: true, onStart });
 	await fireEvent.click(sharing());
@@ -76,6 +79,7 @@ it('closes the existing menu on start without adding confirmation', async () => 
 });
 
 describe('sheet rows (the phone chat actions sheet)', () => {
+	beforeEach(() => { role = 'button'; });
 	it('labels both rows with their notes and downloads the chosen export', async () => {
 		render(ChatExportActions, { sessionId: 'synthetic-session', sheet: true });
 		expect(screen.getByText('Export for sharing')).toBeTruthy();

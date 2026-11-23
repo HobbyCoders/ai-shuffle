@@ -114,20 +114,32 @@ describe('SessionTitleMenu', () => {
 			expect(screen.getByRole('menuitem', { name }).querySelector('svg')).toBeTruthy();
 		}
 		// No transcript loaded for this chat: nothing to export yet.
-		expect(screen.queryByRole('button', { name: 'Export for sharing (.md)' })).toBeNull();
+		expect(screen.queryByRole('menuitem', { name: 'Export for sharing (.md)' })).toBeNull();
 	});
 
-	it('carries both exports in the dropdown once the chat has messages, and closes on start', async () => {
+	it('carries both exports as menu items once the chat has messages, and closes on start', async () => {
 		mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
 		renderMenu();
 
 		await openMenu();
 		const menu = screen.getByRole('menu', { name: 'Session actions' });
-		expect(menu.contains(screen.getByRole('button', { name: 'Download private backup (.jsonl)' }))).toBe(true);
-		await fireEvent.click(screen.getByRole('button', { name: 'Export for sharing (.md)' }));
+		expect(menu.contains(screen.getByRole('menuitem', { name: 'Download private backup (.jsonl)' }))).toBe(true);
+		await fireEvent.click(screen.getByRole('menuitem', { name: 'Export for sharing (.md)' }));
 
 		expect(mocks.exportSession).toHaveBeenCalledExactlyOnceWith('session-a', 'markdown', { shareSafe: true });
 		expect(screen.queryByRole('menu')).toBeNull();
+	});
+
+	it('hands focus back to the title when Escape closes the menu from a row', async () => {
+		mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
+		renderMenu();
+
+		await openMenu();
+		screen.getByRole('menuitem', { name: 'Export for sharing (.md)' }).focus();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Design review' }));
 	});
 
 	it('renders a non-interactive title when unbound', () => {
