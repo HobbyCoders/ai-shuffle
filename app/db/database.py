@@ -657,6 +657,9 @@ def _run_column_migrations(cursor: Any) -> None:
     from app.db.watches import create_schema as create_watches_schema
 
     create_watches_schema(cursor)
+    from app.db.pr_watches import create_schema as create_pr_watches_schema
+
+    create_pr_watches_schema(cursor)
 
     # Session messages profile tracking (v30)
     if table_exists(cursor, "session_messages"):

@@ -10,7 +10,8 @@
 	 */
 	import { onMount } from 'svelte';
  import { platform } from '$lib/stores/platform.svelte';
-	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, ExternalLink } from 'lucide-svelte';
+	import { GitPullRequest, GitPullRequestDraft, GitMerge, GitPullRequestClosed, RefreshCw, ListFilter, Check, X, MessageSquare, CircleCheck, CircleX, ExternalLink, Eye } from 'lucide-svelte';
+	import { prWatches, watchKey, watchSummary } from '$lib/stores/pr-watches.svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, Segmented, SettingRow, SelectField, Switch, DetailPane, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
 	import PanelField from '$lib/components/layout/view/PanelField.svelte';
 	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
@@ -92,7 +93,12 @@
 
 	onMount(() => {
 		void load();
+		void prWatches.load(true);
 	});
+
+	function watchable(pr: InboxPullRequest): boolean {
+		return pr.state === 'open' || pr.state === 'draft';
+	}
 
 	let detailOpen = $state(false);
 </script>
@@ -146,6 +152,7 @@
 										<span class="pri-repo" title="{pr.repo}#{pr.number}">{pr.repo}#{pr.number}</span>
 										<span class="pri-attribution"><span>by {pr.author}</span><span class="pri-projects" title={pr.projects.map((p) => p.name).join(', ')}>{pr.projects.map((p) => p.name).join(', ')}</span></span>
 									</div>
+									{#if prWatches.error[watchKey(pr.repo, pr.number)]}<div class="pri-watch-error" role="alert">{prWatches.error[watchKey(pr.repo, pr.number)]}</div>{/if}
 								</div>
 								<div class="pri-badges">
 									{#if pr.review !== 'none' && REVIEW_LABELS[pr.review]}
@@ -162,6 +169,17 @@
 									{/if}
 									<span class="pri-age" title={new Date(pr.updated_at).toLocaleString()}>{activityAge(pr.updated_at, now)}</span>
 								</div>
+								{#if watchable(pr)}
+									{@const watch = prWatches.active(pr.repo, pr.number)}
+									{@const key = watchKey(pr.repo, pr.number)}
+									<button type="button" class="st-btn pri-watch" aria-pressed={!!watch} data-on={watch ? '' : undefined}
+										disabled={!!prWatches.busy[key]}
+										aria-label={watch ? `Stop watching ${pr.repo}#${pr.number}` : `Watch ${pr.repo}#${pr.number}`}
+										title={prWatches.error[key] || (watch ? `Watching: ${watchSummary(watch)}. Click to stop.` : 'Watch for failed CI, reviews and conflicts, and wake the chat that opened this PR. Limits are in Settings > Usage > PR watch.')}
+										onclick={() => prWatches.toggle({ repo: pr.repo, number: pr.number, url: pr.url, title: pr.title })}>
+										<Eye size={14} aria-hidden="true" /><span>{watch ? (watch.needs_owner ? 'Needs you' : 'Watching') : 'Watch'}</span>
+									</button>
+								{/if}
 							</li>
 						{/each}
 					</ul>
@@ -237,6 +255,10 @@
  .pri-badges { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; color: var(--st-mfg); font-size: 12px; }
  .pri-chip, .pri-checks { display: inline-flex; align-items: center; gap: 5px; color: var(--st-mfg); white-space: nowrap; }
  .pri-age { font-variant-numeric: tabular-nums; }
+ /* Watch: a quiet outline button; filled with the primary tint while on. */
+ .pri-watch { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+ .pri-watch-error { margin-top: 4px; color: var(--st-destructive); font-size: 12px; }
+ .pri-watch[data-on] { color: var(--st-primary); border-color: color-mix(in srgb, var(--st-primary) 45%, transparent); background: color-mix(in srgb, var(--st-primary) 10%, transparent); }
  .pri-empty { padding: 48px 0; color: var(--st-mfg); display: grid; justify-items: center; gap: 16px; text-align: center; }
  .pri-skipped { margin-top: 24px; color: var(--st-mfg); font-size: 13px; }
  .pri-skipped summary { cursor: pointer; }
@@ -249,5 +271,6 @@
   .pri-badges { grid-column: 2; flex-wrap: nowrap; justify-content: flex-start; min-width: 0; overflow: hidden; }
   .pri-chip, .pri-checks { min-width: 0; }
   .pri-chip > span, .pri-checks > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .pri-watch { grid-column: 2; justify-self: start; min-height: 44px; }
  }
 </style>

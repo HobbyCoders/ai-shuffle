@@ -58,6 +58,20 @@ When the project folder is a Git repository, you can:
 
 When you sign in to GitHub, you can also create pull requests, follow their checks and merge them.
 
+### Watching a pull request
+
+Click **Watch** on a pull request in the Pull requests view, or turn on **Watch PR** in a chat's Git menu, to have an agent keep an eye on it. AI Shuffle checks the pull request on GitHub every few minutes without using a model. When a CI check fails, a reviewer with write access comments or requests changes, or the branch has a merge conflict, it waits a few minutes for related events to arrive, then wakes the chat that opened the pull request once with everything that happened. The agent fixes what it can and pushes. It never merges, closes or force-pushes.
+
+Comments from people without write access, and from bots you have not listed, only put a note in the notification bell, because anyone can comment on a public repository. GitHub tells only people who can push to a repository who else can, so on a pull request to a repository you cannot push to (from your fork, for example), review comments also only notify you. A watch ends by itself when the pull request is merged or closed, or after a number of quiet days. When no chat opened the pull request, or that chat runs on another worker, the watch only notifies you.
+
+You decide what a watch may cost in **Settings > Usage > PR watch**:
+
+- **When a watched PR needs attention**: **Fix it** (push fixes and answer reviews), **Triage** (assess and suggest only) or **Notify only** (no model at all).
+- **Wakes per day** and **Spending per day**: the most one watched pull request may wake its agent, and spend, in 24 hours. After that, events go to the bell. Your daily spending limit still applies.
+- **Ask me after the same check fails**: after this many failed fixes of the same check, the watch stops waking the agent and asks you instead.
+- **End a quiet watch after**: the number of days without new commits, comments or CI results.
+- **Bots that may wake the agent**: GitHub logins of review bots whose comments should wake it.
+
 A project folder inside another repository remains usable for chat. Its Git indicator says **Inside repository** and identifies the enclosing root. Open that root as a project to use Git controls: the subfolder does not display the parent's changes, initialize a nested repository, or offer parent-wide Git actions. A folder with its own nested repository uses that repository normally. Plain folders still work without Git, and a missing or unreadable checkout still reports an error.
 
 ## Separate branches for each chat
