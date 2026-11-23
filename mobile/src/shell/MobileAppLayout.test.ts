@@ -56,14 +56,13 @@ describe('MobileAppLayout', () => {
 		expect(screen.queryByRole('banner', { name: 'Chat actions' })).toBeNull();
 	});
 
-	// #1816: export moved into the composer's Chat controls; the bar keeps Git.
-	it('puts the chat actions (Git, Vault) on the one bar in a chat, with no export there', () => {
+	// Export lives in the title's chat actions sheet; the bar keeps Git.
+	it('puts the chat actions (Git, Vault) on the one bar in a chat', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
 		renderLayout();
 		const header = screen.getByTestId('app-top-bar');
 		const git = screen.getByRole('button', { name: 'Commit' });
-		expect(screen.queryByRole('button', { name: 'Download chat' })).toBeNull();
 		expect(screen.getByTestId('bar-actions').contains(git)).toBe(true);
 		expect(header.contains(git)).toBe(true);
 		expect(header.getAttribute('data-hide-stt')).toBe('true');

@@ -30,10 +30,8 @@ type HeaderDropdownId =
 	// The new-session row's searchable project picker (Cmd/Ctrl+P).
 	| 'new-project'
 	| 'notifications'
-	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
+	// Bound-chat session title in the header breadcrumb (rename / fork / export / delete).
 	| 'session-title'
-	// The chat header's one Export button.
-	| 'chat-export'
 	// The Vault panel above the composer (VaultPanel), opened by the composer's
 	// Vault chip. Not in the header, but one panel at a time still holds.
 	| 'vault'

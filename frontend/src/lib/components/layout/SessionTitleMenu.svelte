@@ -1,6 +1,9 @@
 <script lang="ts">
 	/**
-	 * SessionTitleMenu — the bound chat's actions (Rename / Fork / Delete).
+	 * SessionTitleMenu — the bound chat's actions (Rename / Fork / Export / Delete).
+	 *
+	 * Export (private backup and sharing copy) shows once the chat has messages.
+	 * This menu is its only home, on the desktop bar and in the phone app.
 	 *
 	 * `crumb` (desktop StudioTopBar): the title itself is the trigger and opens
 	 * a compact text-row menu under it. Unbound "New Chat" and non-chat pages
@@ -15,9 +18,10 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { ChevronDown, ChevronLeft, GitFork, Pencil, X } from 'lucide-svelte';
+	import { ChevronDown, ChevronLeft, GitFork, Pencil, Trash2, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { forkSession, getErrorMessage } from '$lib/api/client';
 	import { appData, sessions } from '$lib/stores/app-data.svelte';
 	import { workerInstalls, refreshWorkerPresence } from '$lib/stores/worker-presence';
@@ -43,9 +47,15 @@
 	const bound = $derived(!!sessionId);
 	const open = $derived($openHeaderDropdown === 'session-title');
 	const sheet = $derived(variant === 'sheet');
+	/** Exports need this chat's transcript loaded, with something in it. */
+	const canExport = $derived(
+		!!sessionId && $activeSession.sessionId === sessionId && ($activeSession.messages?.length ?? 0) > 0
+	);
 
 	let rootRef = $state<HTMLDivElement | null>(null);
 	let chevronRef = $state<HTMLButtonElement | null>(null);
+	let triggerRef = $state<HTMLButtonElement | null>(null);
+	let menuRef = $state<HTMLDivElement | null>(null);
 	let sheetRef = $state<HTMLElement | null>(null);
 	const sheetTitleId = $props.id();
 	let renaming = $state(false);
@@ -121,17 +131,55 @@
 		};
 	});
 
+	// The desktop menu floats at the end of <body>, outside the page's tab
+	// order: move focus to its first item on open, and Tabbing off either end
+	// closes it and returns to the title, as if the menu sat right after it.
+	// Swapping to or from the worker list removes the focused row, so focus
+	// moves to the first row of the new list.
+	$effect(() => {
+		if (sheet || !open || !menuRef) return;
+		void pickingWorker;
+		const menu = menuRef;
+		const items = () => [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)')];
+		items()[0]?.focus({ preventScroll: true });
+		const onTab = (e: KeyboardEvent) => {
+			if (e.key !== 'Tab') return;
+			const list = items();
+			const edge = e.shiftKey ? list[0] : list[list.length - 1];
+			if (document.activeElement !== edge) return;
+			e.preventDefault();
+			closeMenu();
+			triggerRef?.focus({ preventScroll: true });
+		};
+		menu.addEventListener('keydown', onTab);
+		return () => menu.removeEventListener('keydown', onTab);
+	});
+
 	function onDocClick(e: MouseEvent) {
-		if (rootRef && !rootRef.contains(e.target as Node)) closeMenu();
+		// The menu floats in <body>, outside this root.
+		const target = e.target as Node;
+		// A row the click itself removed (Back swaps the worker list out).
+		if (!target.isConnected) return;
+		if (rootRef && !rootRef.contains(target) && !menuRef?.contains(target)) closeMenu();
 	}
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape' && open) {
 			e.preventDefault();
 			e.stopPropagation();
-			if (sheet) closeSheet();
-			else closeMenu();
+			if (sheet) {
+				closeSheet();
+				return;
+			}
+			closeMenuKeepingFocus();
 		}
+	}
+
+	/** Desktop: a focused row is about to unmount, so hand focus back to the title. */
+	function closeMenuKeepingFocus() {
+		const focusInside = !!menuRef && menuRef.contains(document.activeElement);
+		closeMenu();
+		if (focusInside) triggerRef?.focus({ preventScroll: true });
 	}
 
 	function focusSelect(node: HTMLInputElement) {
@@ -287,7 +335,7 @@
 							<button type="button" class="sheet-row" onclick={() => (pickingWorker = false)}><ChevronLeft size={17} aria-hidden="true" />Fork to another worker</button>
 							{#each targets as target (target.id)}
 								<button type="button" class="sheet-row" disabled={!target.online} onclick={() => handleFork(target)}>
-									<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+									<span class="worker-dot" class:online={target.online} aria-hidden="true"></span><span class="worker-name">{target.label}</span>{#if !target.online}<span class="worker-note">offline</span>{/if}
 								</button>
 							{/each}
 						</div>
@@ -298,7 +346,10 @@
 							{#if targets.length}
 								<button type="button" class="sheet-row" disabled={renaming} onclick={() => (pickingWorker = true)}><GitFork size={17} aria-hidden="true" />Fork to another worker…</button>
 							{/if}
-							<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
+							{#if canExport && sessionId}
+								<ChatExportActions {sessionId} sheet disabled={renaming} onStart={closeSheet} />
+							{/if}
+							<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}><Trash2 size={17} aria-hidden="true" />Delete</button>
 						</div>
 					{/if}
 				</div>
@@ -324,6 +375,7 @@
 			/>
 		{:else if bound}
 			<button
+				bind:this={triggerRef}
 				type="button"
 				class="title-trigger"
 				class:open
@@ -340,42 +392,48 @@
 			<span class="title-trigger" aria-current="page">{title}</span>
 		{/if}
 
-		{#if open && bound && !renaming && pickingWorker}
-			<div class="menu" role="menu" aria-label="Fork to another worker">
-				<button type="button" class="dropdown-item menu-back" role="menuitem" onclick={() => (pickingWorker = false)}>
-					<ChevronLeft size={14} aria-hidden="true" />Fork to another worker
-				</button>
-				<div class="dropdown-divider" role="separator"></div>
-				{#each targets as target (target.id)}
-					<button type="button" class="dropdown-item worker-item" role="menuitem" disabled={!target.online} onclick={() => handleFork(target)}>
-						<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+		{#if open && bound && !renaming}
+			<!-- One floated menu: picking a worker swaps its rows in place. -->
+			<div
+				bind:this={menuRef}
+				class="menu"
+				class:picking={pickingWorker}
+				role="menu"
+				aria-label={pickingWorker ? 'Fork to another worker' : 'Session actions'}
+				use:floatingMenu={{ anchor: triggerRef, align: 'start', gap: 4 }}
+			>
+				{#if pickingWorker}
+					<button type="button" class="dropdown-item menu-back" role="menuitem" onclick={() => (pickingWorker = false)}>
+						<ChevronLeft size={16} strokeWidth={1.5} aria-hidden="true" />Fork to another worker
 					</button>
-				{/each}
-			</div>
-		{:else if open && bound && !renaming}
-			<div class="menu" role="menu" aria-label="Session actions">
-				<button type="button" class="dropdown-item" role="menuitem" onclick={startRename}>
-					Rename session
-				</button>
-				<button type="button" class="dropdown-item" role="menuitem" onclick={() => handleFork()}>
-					Fork session
-				</button>
-				{#if targets.length}
-					<!-- Keeps the menu open: the click swaps it to the worker list. -->
-					<button type="button" class="dropdown-item" role="menuitem" onclick={(e) => { e.stopPropagation(); pickingWorker = true; }}>
-						Fork to another worker…
+					<div class="dropdown-divider" role="separator"></div>
+					{#each targets as target (target.id)}
+						<button type="button" class="dropdown-item worker-item" role="menuitem" disabled={!target.online} onclick={() => handleFork(target)}>
+							<span class="worker-dot" class:online={target.online} aria-hidden="true"></span><span class="worker-name">{target.label}</span>{#if !target.online}<span class="worker-note">offline</span>{/if}
+						</button>
+					{/each}
+				{:else}
+					<button type="button" class="dropdown-item" role="menuitem" onclick={startRename}>
+						<Pencil size={16} strokeWidth={1.5} aria-hidden="true" />Rename session
 					</button>
-				{/if}
-				{#if sessionId && activeSession.current.sessionId === sessionId && (activeSession.current.messages?.length ?? 0) > 0}
-					<div class="menu-exports">
+					<button type="button" class="dropdown-item" role="menuitem" onclick={() => handleFork()}>
+						<GitFork size={16} strokeWidth={1.5} aria-hidden="true" />Fork session
+					</button>
+					{#if targets.length}
+						<!-- Keeps the menu open: the click swaps it to the worker list. -->
+						<button type="button" class="dropdown-item" role="menuitem" onclick={(e) => { e.stopPropagation(); pickingWorker = true; }}>
+							<GitFork size={16} strokeWidth={1.5} aria-hidden="true" />Fork to another worker…
+						</button>
+					{/if}
+					{#if canExport && sessionId}
 						<div class="dropdown-divider" role="separator"></div>
-						<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
-					</div>
+						<ChatExportActions {sessionId} menu onStart={closeMenuKeepingFocus} />
+					{/if}
+					<div class="dropdown-divider" role="separator"></div>
+					<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
+						<Trash2 size={16} strokeWidth={1.5} aria-hidden="true" />Delete
+					</button>
 				{/if}
-				<div class="dropdown-divider" role="separator"></div>
-				<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
-					Delete
-				</button>
 			</div>
 		{/if}
 	</div>
@@ -485,13 +543,13 @@
 		outline: none;
 	}
 
+	/* Position, z-index and the viewport clamp come from floatingMenu
+	   (it lifts the menu into <body> so the main panel cannot clip it). */
 	.menu {
-		position: absolute;
-		top: calc(100% + 4px);
-		left: 0;
-		right: auto;
-		min-width: 180px;
-		max-width: calc(100vw - 24px);
+		/* Room for the export rows' notes to wrap once at most. */
+		width: 280px;
+		max-width: calc(100vw - 16px);
+		overflow-y: auto;
 		background: var(--card);
 		border: 1px solid var(--menu-border);
 		border-radius: var(--menu-radius);
@@ -509,6 +567,7 @@
 	.dropdown-item {
 		display: flex;
 		align-items: center;
+		gap: 9px;
 		width: 100%;
 		min-height: var(--menu-row);
 		padding: 7px 10px;
@@ -532,7 +591,12 @@
 		outline: 2px solid var(--ring);
 		outline-offset: -2px;
 	}
-	.dropdown-item.danger {
+	.dropdown-item :global(svg) {
+		flex: none;
+		color: var(--muted-foreground);
+	}
+	.dropdown-item.danger,
+	.dropdown-item.danger :global(svg) {
 		color: var(--destructive);
 	}
 	.dropdown-item.danger:hover {
@@ -563,17 +627,26 @@
 		background: var(--success, oklch(0.7 0.15 150));
 		opacity: 1;
 	}
+	/* The worker list sizes to its names (two long ones may differ only at the
+	   end); past the cap a name wraps and the offline note stays in view. */
+	.menu.picking {
+		width: max-content;
+		min-width: 280px;
+		max-width: min(440px, calc(100vw - 16px));
+	}
+	.worker-item {
+		white-space: normal;
+	}
+	.worker-name {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
 	.worker-note {
+		flex: none;
 		margin-left: auto;
 		padding-left: 12px;
 		font-size: 12px;
 		color: var(--muted-foreground);
-	}
-
-	/* The header shows these as icons until a phone-width bar needs the room. */
-	.menu-exports { display: none; }
-	@media (max-width: 480px) {
-		.menu-exports { display: block; }
 	}
 
 	.dropdown-divider {

@@ -34,8 +34,8 @@
 	 *                   the desktop's; picking closes the menu and slides back.
 	 *                   A saved chat that may move (session-move.ts) titles
 	 *                   its page "Move to another worker" (#645);
-	 *   Running tasks   RunningTasksList as a page;
-	 *   Export chat     ChatExportActions as a page with a pinned button.
+	 *   Running tasks   RunningTasksList as a page.
+	 * Export lives in the title's chat actions sheet (SessionTitleMenu).
 	 * There is no visible close button; a visually hidden one stays for
 	 * keyboard and screen-reader users. While open the panel is modal: Tab and
 	 * Shift+Tab wrap inside it instead of reaching the page behind (#1407).
@@ -51,7 +51,7 @@
 	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { page } from '$app/state';
 	import {
-		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
+		ChevronDown, ChevronLeft, ChevronRight, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
 		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, X, Zap
 	} from 'lucide-svelte';
 	import { activeSession, streamingSessions } from '$lib/stores/active-session';
@@ -65,7 +65,6 @@
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
 	import VaultChip from '$lib/components/chat/VaultChip.svelte';
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
-	import ChatExportActions from '$lib/components/layout/ChatExportActions.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusModelSearch, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { wrapTabWithin } from '$lib/components/ui/focus-trap';
@@ -96,7 +95,7 @@
 	const effortDefaultNoteId = `${uid}-effort-default`;
 
 	type Picker = 'access';
-	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'project' | 'tasks' | 'export';
+	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'project' | 'tasks';
 	const PAGE_TITLES: Record<Page, string> = {
 		main: 'Chat controls',
 		model: 'Model',
@@ -104,8 +103,7 @@
 		agent: 'Agent',
 		runner: 'Runs on',
 		project: 'Project',
-		tasks: 'Running tasks',
-		export: 'Export chat'
+		tasks: 'Running tasks'
 	};
 	/**
 	 * A saved chat's "Runs on" row opens the shared Move menu (#645): its page
@@ -214,7 +212,8 @@
 		runningCount ? `${runningCount} ${runningCount === 1 ? 'task' : 'tasks'} running` : runHead
 	);
 	const showRunChip = $derived(runningCount > 0 || liveWatches > 0 || preferenceOnly);
-	const canExport = $derived(!!$activeSession.sessionId && $activeSession.messages.length > 0);
+	/** The bottom action bar shows only when it has an action to carry. */
+	const hasFootActions = $derived(!!callAction || !!onBrowserToggle || !!terminal);
 
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
 	let picker = $state<Picker | null>(null);
@@ -1022,7 +1021,7 @@
 
 		<div class="mcp-pages">
 			<!-- ═══ Main: the inset grouped list ═══ -->
-			<section class="mcp-page" data-page="main" class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
+			<section class="mcp-page" data-page="main" class:no-foot={!hasFootActions} class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
 				<div class="mcp-scroll" bind:this={bodyRef}>
 					{#if rendered || panelVisible}
 						{#if showRunChip}
@@ -1158,6 +1157,7 @@
 					{/if}
 				</div>
 
+				{#if hasFootActions}
 				<footer class="mcp-foot">
 					<div class="actions" role="group" aria-label="More actions">
 						{#if callAction}
@@ -1174,11 +1174,9 @@
 								<SquareTerminal size={18} aria-hidden="true" /><span class="act-label">Terminal</span>
 							</button>
 						{/if}
-						<button type="button" class="act" disabled={!canExport} onclick={(e) => goTo('export', e.currentTarget)} aria-label="Export chat">
-							<Download size={18} aria-hidden="true" /><span class="act-label">Export</span>
-						</button>
 					</div>
 				</footer>
+				{/if}
 			</section>
 
 			<!-- ═══ Sub-pages: slide in from the right ═══ -->
@@ -1230,12 +1228,6 @@
 			<section class="mcp-page" data-page="tasks" class:active={pageName === 'tasks'} inert={pageName !== 'tasks'} aria-label="Running tasks">
 				{#if mounted('tasks')}
 					<RunningTasksList sessionId={$activeSession.sessionId} variant="page" onClose={closePanel} />
-				{/if}
-			</section>
-
-			<section class="mcp-page" data-page="export" class:active={pageName === 'export'} inert={pageName !== 'export'} aria-label="Export chat">
-				{#if mounted('export') && $activeSession.sessionId}
-					<ChatExportActions sessionId={$activeSession.sessionId} page />
 				{/if}
 			</section>
 		</div>
@@ -2027,6 +2019,7 @@
 	   anything passing under the bar's top edge fades out instead of being cut. */
 	.mcp-page[data-page='main'] { --mcp-foot-height: calc(61px + env(safe-area-inset-bottom, 0px)); }
 	.mcp-page[data-page='main'] > .mcp-scroll { padding-bottom: calc(var(--mcp-foot-height) + 16px); }
+	.mcp-page[data-page='main'].no-foot > .mcp-scroll { padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
 	.mcp-foot {
 		position: absolute;
 		inset: auto 0 0;

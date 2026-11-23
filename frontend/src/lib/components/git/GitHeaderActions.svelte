@@ -27,7 +27,6 @@
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState, gitOperations } from '$lib/stores/gitOperations.svelte';
-	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
 	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
 	import { autoMerge } from '$lib/stores/auto-merge.svelte';
@@ -85,15 +84,13 @@
 		onClickShipIt?: (opts?: ShipItOptions) => void;
 		/** Open diff review panel (side-by-side) */
 		onOpenDiffReview?: () => void;
-		/** Private backup and sharing exports live in the existing narrow-screen panel. */
-		showChatExports?: boolean;
 		/** The phone's one-bar header: an icon-sized trigger (glyph + count
 		 *  badge) instead of the labelled pill. The words stay in its
 		 *  accessible name and the panel; the panel itself is unchanged. */
 		compact?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickShipIt, onOpenDiffReview, compact = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -842,14 +839,6 @@
 				{/if}
 			</div>
 			{/if}
-
-			{#if showChatExports && sessionId}
-				<div class="gp-foot narrow-only">
-					<div class="row-group">
-						<ChatExportActions {sessionId} menu onStart={closePanel} />
-					</div>
-				</div>
-			{/if}
 			{/if}
 		</div>
 	{/if}
@@ -1515,17 +1504,6 @@
 		margin-left: 4px;
 	}
 
-	.gp-foot {
-		padding: 6px;
-		border-top: 1px solid var(--border);
-		display: grid;
-		gap: 1px;
-	}
-
-	.narrow-only {
-		display: none;
-	}
-
 	:global(.spin) {
 		animation: spin 1s linear infinite;
 	}
@@ -1640,7 +1618,7 @@
 		padding: 0;
 	}
 
-	.sheet-layout .gp-rows, .sheet-layout .gp-files, .sheet-layout .gp-foot {
+	.sheet-layout .gp-rows, .sheet-layout .gp-files {
 		padding: 6px 10px;
 	}
 
@@ -1667,9 +1645,6 @@
 		font-size: 0.75rem;
 	}
 
-	.sheet-layout .narrow-only {
-		display: grid;
-	}
 	/* Phones keep a short label: the same one desktop shows (or the +/−
 	   numbers), or the branch name for an unreadable checkout. It truncates so
 	   the session title and download keep their room; the dimmer detail drops.
