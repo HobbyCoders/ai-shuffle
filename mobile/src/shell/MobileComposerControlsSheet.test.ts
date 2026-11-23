@@ -18,6 +18,7 @@ import { api } from '$lib/api/client';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 import { __resetWatches } from '$lib/stores/watches';
+import { vaultSummary, type VaultSummary } from '$lib/stores/vault';
 import { page } from '$app/state';
 
 vi.hoisted(() => {
@@ -88,7 +89,7 @@ async function drag(target: Element, dx: number, dy: number, from = { x: 100, y:
 }
 
 describe('quick bar', () => {
-	it('shows each control\'s state through its own icon and label', () => {
+	it('shows each control\'s state through its own icon and label', async () => {
 		Object.assign(activeSession.current, {
 			activeTasks: [
 				{ id: 'a', subject: 'Agent', status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: '', updatedAt: '' },
@@ -96,15 +97,44 @@ describe('quick bar', () => {
 			]
 		});
 		activeSession.setDraft('');
-		render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true, permissionValue: 'acceptEdits' }) });
+		const view = render(MobileComposerControlsSheet, { props: props({ fastSupported: true, fastEnabled: true, permissionValue: 'acceptEdits' }) });
+		// A chat under way: model and effort on the left, the context ring on the right.
 		expect(cell(/^Model: Opus, fast mode$/).textContent).toContain('Opus');
-		// Reasoning effort is not on the bar; it lives in the panel.
-		expect(bar().querySelector('[data-cell="effort"]')).toBeNull();
-		expect(cell(/^Permission mode: Accept edits$/).textContent).toContain('Edits');
+		expect(cell(/^Reasoning effort: High$/).textContent).toContain('High');
 		expect(within(bar()).getByRole('button', { name: /^Context and usage/ })).toBeTruthy();
-		expect(cell(/^All chat controls, 2 running$/).textContent).toContain('Controls');
+		// Tool access, the Vault and Controls are off the bar, and so is the running count.
+		expect(bar().querySelector('[data-cell="access"], [data-cell="controls"], .vault-chip')).toBeNull();
+		expect(within(bar()).queryByRole('button', { name: /running/ })).toBeNull();
 		// No information lines and no drag handle: every cell is a word or two.
 		expect(bar().querySelectorAll('p, small, .qbar-grip')).toHaveLength(0);
+		// A new chat adds Tool access after effort.
+		await view.rerender(props({ newChat: true, permissionValue: 'acceptEdits' }));
+		expect([...bar().querySelectorAll('[data-cell]')].map((c) => c.getAttribute('data-cell'))).toEqual(['model', 'effort', 'access', 'usage']);
+		expect(cell(/^Permission mode: Accept edits$/).textContent).toContain('Edits');
+	});
+
+	it('names Auto on the effort cell until a level is pinned, and hides it where there is no level to pick', async () => {
+		const view = render(MobileComposerControlsSheet, { props: props({ effortValue: null, effortDefaultValue: 'high' }) });
+		expect(cell(/^Reasoning effort:/).querySelector('.ql')!.textContent).toBe('Auto');
+		await view.rerender(props({ effortOptions: [], effortValue: null, effortExplanation: 'Set by the model' }));
+		expect(bar().querySelector('[data-cell="effort"]')).toBeNull();
+	});
+
+	it('picks effort from a compact picker over the bar, Auto included', async () => {
+		const onEffortSelect = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ onEffortSelect, effortValue: 'high', effortDefaultValue: 'medium' }) });
+		await fireEvent.click(cell(/^Reasoning effort/));
+		const picker = screen.getByRole('dialog', { name: 'Reasoning effort' });
+		const radios = within(picker).getAllByRole('radio');
+		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Auto', 'Low', 'Medium', 'High', 'XHigh', 'Max']);
+		expect(within(picker).getByRole('radio', { name: 'High' }).getAttribute('aria-checked')).toBe('true');
+		expect(within(picker).getByRole('radio', { name: 'Medium', description: 'Model default' })).toBeTruthy();
+		await fireEvent.click(within(picker).getByRole('radio', { name: 'Low' }));
+		expect(onEffortSelect).toHaveBeenCalledExactlyOnceWith('low');
+		expect(screen.queryByRole('dialog', { name: 'Reasoning effort' })).toBeNull();
+		await fireEvent.click(cell(/^Reasoning effort/));
+		await fireEvent.click(within(screen.getByRole('dialog', { name: 'Reasoning effort' })).getByRole('radio', { name: 'Auto' }));
+		expect(onEffortSelect).toHaveBeenLastCalledWith(null);
 	});
 
 	it('says at the switch when Fast waits for the next message', async () => {
@@ -116,7 +146,7 @@ describe('quick bar', () => {
 	});
 
 	it('styles Bypass like every other mode and names saving', () => {
-		render(MobileComposerControlsSheet, { props: props({ permissionValue: 'bypassPermissions', permissionUpdating: true }) });
+		render(MobileComposerControlsSheet, { props: props({ newChat: true, permissionValue: 'bypassPermissions', permissionUpdating: true }) });
 		const access = cell(/^Permission mode: Bypass, saving$/);
 		// No mode-specific class: Bypass uses the same theme tokens as Ask or Edits.
 		expect([...access.classList].filter((c) => !c.startsWith('svelte-'))).toEqual(['qcell']);
@@ -125,7 +155,7 @@ describe('quick bar', () => {
 
 	it('opens a compact tool-access picker, with Bypass reachable by a deliberate tap', async () => {
 		const onPermissionSelect = vi.fn();
-		render(MobileComposerControlsSheet, { props: props({ onPermissionSelect }) });
+		render(MobileComposerControlsSheet, { props: props({ newChat: true, onPermissionSelect }) });
 		await fireEvent.click(cell(/^Permission mode/));
 		const picker = screen.getByRole('dialog', { name: 'Tool access' });
 		expect(within(picker).getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['Ask first', 'Auto', 'Accept edits', 'Bypass']);
@@ -134,7 +164,7 @@ describe('quick bar', () => {
 	});
 
 	it('closes a picker with Escape and on a tap elsewhere', async () => {
-		render(MobileComposerControlsSheet, { props: props() });
+		render(MobileComposerControlsSheet, { props: props({ newChat: true }) });
 		await fireEvent.click(cell(/^Permission mode/));
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(screen.queryByRole('dialog', { name: 'Tool access' })).toBeNull();
@@ -145,11 +175,11 @@ describe('quick bar', () => {
 
 	it('steps tool access with a swipe but never onto Bypass', async () => {
 		const onPermissionSelect = vi.fn();
-		const view = render(MobileComposerControlsSheet, { props: props({ onPermissionSelect, permissionValue: 'auto' }) });
+		const view = render(MobileComposerControlsSheet, { props: props({ newChat: true, onPermissionSelect, permissionValue: 'auto' }) });
 		await drag(cell(/^Permission mode/), 60, 0);
 		expect(onPermissionSelect).toHaveBeenCalledExactlyOnceWith('acceptEdits');
 		onPermissionSelect.mockClear();
-		await view.rerender(props({ onPermissionSelect, permissionValue: 'acceptEdits' }));
+		await view.rerender(props({ newChat: true, onPermissionSelect, permissionValue: 'acceptEdits' }));
 		await drag(cell(/^Permission mode/), 120, 0);
 		expect(onPermissionSelect).not.toHaveBeenCalled();
 		// The swipe did not open the picker either.
@@ -183,12 +213,14 @@ describe('quick bar', () => {
 		expect(onEffortSelect).not.toHaveBeenCalled();
 	});
 
-	it('marks the usage ring calm so the footer only shows it when it is actionable', () => {
-		render(MobileComposerControlsSheet, { props: props() });
-		const usage = bar().querySelector<HTMLElement>('.qcell.usage')!;
-		// Still mounted either way: it measures usage and hosts the details sheet.
-		expect(usage.classList.contains('calm')).toBe(true);
-		// Everything off the bar stays reachable in the panel.
+	it('shows the context ring in every chat under way, and hides it on a new chat', async () => {
+		// Low usage still shows: the ring is no longer kept for when it is actionable.
+		const view = render(MobileComposerControlsSheet, { props: props() });
+		const usage = () => bar().querySelector<HTMLElement>('.qcell.usage')!;
+		expect(usage().classList.contains('calm')).toBe(false);
+		// A new chat has used no context: still mounted (it hosts the details sheet), but no ring.
+		await view.rerender(props({ newChat: true }));
+		expect(usage().classList.contains('calm')).toBe(true);
 		expect(panel().querySelector('[data-row="usage"], [aria-label^="Context and usage"]')).not.toBeNull();
 	});
 
@@ -203,12 +235,11 @@ describe('quick bar', () => {
 });
 
 describe('Chat controls panel', () => {
-	it('opens from Controls, and closes from its hidden Close button, the scrim and Escape', async () => {
+	it('opens when its owner opens it, and closes from its hidden Close button, the scrim and Escape', async () => {
+		// The Controls item on the context line (ComposerContextLine) opens it through the dock.
 		const onOpenChange = vi.fn();
 		const view = render(MobileComposerControlsSheet, { props: props({ onOpenChange }) });
 		expect(panel().getAttribute('aria-hidden')).toBe('true');
-		await fireEvent.click(cell(/^All chat controls/));
-		expect(onOpenChange).toHaveBeenLastCalledWith(true);
 		await view.rerender(props({ onOpenChange, open: true }));
 		expect(panel().getAttribute('aria-hidden')).toBe('false');
 		expect(screen.getByRole('dialog', { name: 'Chat controls' })).toBe(panel());
@@ -393,7 +424,7 @@ describe('Chat controls panel', () => {
 	});
 
 	it('holds labels, values and controls with no description paragraphs', () => {
-		render(MobileComposerControlsSheet, { props: props({ open: true, fastSupported: true }) });
+		render(MobileComposerControlsSheet, { props: props({ open: true, fastSupported: true, onBrowserToggle: vi.fn() }) });
 		const dialog = panel();
 		expect(within(dialog).getByRole('button', { name: 'Model: Opus' })).toBeTruthy();
 		expect(within(dialog).getByRole('button', { name: /Context and usage/ })).toBeTruthy();
@@ -432,14 +463,15 @@ describe('Chat controls panel', () => {
 	});
 
 	it('shows Away on the quick bar, as the desktop composer does, without opening the panel', async () => {
+		// A chat under way has no Tool access cell: Away's moon rides the model cell.
 		const view = render(MobileComposerControlsSheet, { props: props({ awayEnabled: true }) });
-		const access = cell(/^Permission mode: Ask first, Away mode on$/);
-		expect(access.querySelector('[data-away-badge]')).toBeTruthy();
+		expect(cell(/^Model: Opus, Away mode on$/).querySelector('[data-away-badge]')).toBeTruthy();
 		await view.rerender(props({ awayEnabled: false }));
-		expect(cell(/^Permission mode: Ask first$/).querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Model: Opus$/).querySelector('[data-away-badge]')).toBeNull();
 		// Before the first message Away cannot be on, whatever the store says.
-		await view.rerender(props({ awayEnabled: true, awayAvailable: false }));
-		expect(cell(/^Permission mode: Ask first$/).querySelector('[data-away-badge]')).toBeNull();
+		await view.rerender(props({ newChat: true, awayEnabled: true, awayAvailable: false }));
+		expect(bar().querySelector('[data-away-badge]')).toBeNull();
+		expect(cell(/^Permission mode: Ask first$/)).toBeTruthy();
 	});
 
 	it('offers fast mode only where the model supports it', async () => {
@@ -512,7 +544,8 @@ describe('Chat controls panel', () => {
 		render(MobileComposerControlsSheet, { props: props({ open: true }) });
 		const row = await within(panel()).findByRole('button', { name: '2 watches: 1 paused. Open the list' });
 		expect(row.textContent).toContain('2 watches');
-		expect(cell(/^All chat controls$/)).toBeTruthy();
+		// Nothing on the bar counts them (nor running tasks).
+		expect(within(bar()).queryByRole('button', { name: /watch|running/ })).toBeNull();
 	});
 
 	it('keeps the row with no live watch while a worker is chosen for new ones (#565)', async () => {
@@ -526,15 +559,22 @@ describe('Chat controls panel', () => {
 		expect(await within(panel()).findByRole('button', { name: 'Watches: Where new watches run. Open the list' })).toBeTruthy();
 	});
 
-	it('carries Call, Browser and Export as actions, and no stash button', async () => {
+	it('carries Browser as an action, with no Call, Export or stash button', async () => {
 		const onBrowserToggle = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ open: true, onBrowserToggle }) });
 		const actions = within(panel()).getByRole('group', { name: 'More actions' });
 		expect(within(actions).getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
-		expect(within(actions).getByRole('button', { name: 'Export chat' })).toBeTruthy();
+		// Voice calls start from the composer itself; export lives in the chat title menu.
+		expect(within(panel()).queryByRole('button', { name: /^(Call|Start a call|Export chat)/i })).toBeNull();
+		expect(panel().querySelector('[data-page="export"]')).toBeNull();
 		expect(within(panel()).queryByRole('button', { name: /stash/i })).toBeNull();
 		await fireEvent.click(within(actions).getByRole('button', { name: 'Toggle live browser view' }));
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
+	});
+
+	it('drops the action bar when it has nothing to offer', () => {
+		render(MobileComposerControlsSheet, { props: props({ open: true, newChat: true }) });
+		expect(within(panel()).queryByRole('group', { name: 'More actions' })).toBeNull();
 	});
 
 	it('has no Phone cell: the phone opens when the agent uses it', () => {
@@ -649,18 +689,39 @@ describe('Chat controls panel', () => {
 		expect(go).toHaveBeenCalledExactlyOnceWith(-1);
 	});
 
-	it('opens Export as a page with its button pinned under the choices', async () => {
-		Object.assign(activeSession.current, { sessionId: 'chat-1', messages: [{ role: 'user', content: 'hi' }] });
-		activeSession.setDraft('');
-		render(MobileComposerControlsSheet, { props: props({ open: true }) });
-		await fireEvent.click(within(within(panel()).getByRole('group', { name: 'More actions' })).getByRole('button', { name: 'Export chat' }));
-		expect(panel().getAttribute('aria-label')).toBe('Export chat');
-		const page = panel().querySelector<HTMLElement>('[data-page="export"]')!;
-		const choices = within(page).getByRole('radiogroup', { name: 'Export format' });
-		expect(within(choices).getByRole('radio', { name: /Export for sharing/ }).getAttribute('aria-checked')).toBe('true');
-		await fireEvent.click(within(choices).getByRole('radio', { name: /Private backup/ }));
-		const primary = within(page).getByRole('button', { name: 'Download private backup' });
-		expect(primary.closest('.page-foot')).toBeTruthy();
+	describe('the Vault action', () => {
+		afterEach(() => vaultSummary.set(null));
+		const summary = (over: Partial<VaultSummary> = {}): VaultSummary => ({
+			sessionId: 'chat-1', pending: 0, active: 0, saved: 1, error: false, manageable: true,
+			open: vi.fn(), toggle: vi.fn(), ...over
+		});
+		const vaultAction = () => within(panel()).queryByRole('button', { name: /^Vault/ });
+
+		it('opens the Vault panel and steps Chat controls aside', async () => {
+			const open = vi.fn();
+			const onOpenChange = vi.fn();
+			vaultSummary.set(summary({ open, pending: 2 }));
+			render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange }) });
+			onOpenChange.mockClear();
+			const action = vaultAction()!;
+			expect(action.getAttribute('aria-label')).toBe('Vault: 2 waiting for you');
+			expect(action.querySelector('.act-dot')).toBeTruthy();
+			await fireEvent.click(action);
+			expect(open).toHaveBeenCalledOnce();
+			expect(onOpenChange).toHaveBeenLastCalledWith(false);
+		});
+
+		it('shows only in a chat under way that has something in its Vault', async () => {
+			vaultSummary.set(summary({ manageable: false }));
+			const view = render(MobileComposerControlsSheet, { props: props({ open: true }) });
+			expect(vaultAction()).toBeNull();
+			vaultSummary.set(summary());
+			await tick();
+			expect(vaultAction()).toBeTruthy();
+			expect(vaultAction()!.querySelector('.act-dot')).toBeNull();
+			await view.rerender(props({ open: true, newChat: true }));
+			expect(vaultAction()).toBeNull();
+		});
 	});
 
 	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {
@@ -685,7 +746,8 @@ describe('every chat (#371 step 5)', () => {
 		render(MobileComposerControlsSheet, { props: props({
 			open: true, showSetup: false, showEffort: false, fastSupported: true
 		}) });
-		expect(cell(/^Permission mode: Ask first$/)).toBeTruthy();
+		// In a chat under way Tool access is changed in the panel, not on the bar.
+		expect(bar().querySelector('[data-cell="access"]')).toBeNull();
 		const dialog = panel();
 		expect(within(dialog).getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(within(dialog).getByRole('switch', { name: 'Away mode' })).toBeTruthy();

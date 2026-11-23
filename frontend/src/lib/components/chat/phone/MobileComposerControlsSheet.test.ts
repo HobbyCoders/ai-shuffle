@@ -23,7 +23,6 @@ vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No route
 vi.mock('$lib/components/chat/ContextPillBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/ContextUsageBar.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/chat/RunningTasksList.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
-vi.mock('$lib/components/layout/ChatExportActions.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/settings/ModelPickerPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 afterEach(cleanup);

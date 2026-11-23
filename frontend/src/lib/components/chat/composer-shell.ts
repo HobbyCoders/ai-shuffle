@@ -14,7 +14,7 @@
  * Keeping the hooks in `$lib` (rather than importing mobile code into shared
  * components) is what keeps the rest of the mobile UI out of the web build.
  */
-import type { Component, Snippet } from 'svelte';
+import type { Component } from 'svelte';
 import type { PickerGroup } from '$lib/constants/model-picker';
 import type { ContextWindowChoice } from '$lib/constants/model-context';
 import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
@@ -162,8 +162,6 @@ export interface ComposerSheetProps {
 	onToggleAway?: () => void;
 	/** The usage details opened or closed (the dock polls provider limits while open). */
 	onUsageOpenChange?: (open: boolean) => void;
-	/** The composer's start-a-call button, for the controls' action row. */
-	callAction?: Snippet;
 	browserOpen?: boolean;
 	onBrowserToggle?: () => void;
 	onBrowserPreload?: () => void;

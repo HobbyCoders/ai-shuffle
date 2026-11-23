@@ -30,7 +30,7 @@
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
 	 * session is the Stop button's job.
 	 */
-	import { onDestroy, tick, type Snippet } from 'svelte';
+	import { onDestroy, tick } from 'svelte';
 	import { activeSession, ultrafastRefusedHere } from '$lib/stores/active-session';
 	import { fastChangeWaits } from '$lib/utils/fast-outcome';
 	import { standardContextCap } from '$lib/stores/session/context-window';
@@ -89,11 +89,14 @@
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
 		inertToolbar?: boolean;
-		/** The start-a-call button, for a shell whose controls sheet carries it. */
-		callAction?: Snippet;
+		/**
+		 * The phone panel's DOM id, so a trigger outside the dock (the Controls
+		 * item on the context line) can name it in `aria-controls`.
+		 */
+		panelId?: string;
 	}
 
-	let { callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, newChat = false }: Props = $props();
+	let { panelId, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, newChat = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -213,7 +216,8 @@
 	let mobileSheetOpen = $state(false);
 	/** The Setup row the sheet opened on (a name on the composer's context line), else null. */
 	let mobileSheetRow = $state<ComposerSetupRow | null>(null);
-	const mobilePanelId = $props.id();
+	const ownPanelId = $props.id();
+	const mobilePanelId = $derived(panelId ?? ownPanelId);
 	const ControlsSheet = $derived(phoneLayout.ControlsSheet);
 	// A window widened past phone width drops the sheet: its open state goes too.
 	$effect(() => {
@@ -683,9 +687,10 @@
 		{/if}
 
 		<!-- What this chat can reach through the Vault. Renders only when the chat
-		     has a request, active access or a saved sign-in to offer. The phone
-		     shell's quick bar carries its own. -->
-		{#if !ControlsSheet}<VaultChip />{/if}
+		     has a request, active access or a saved sign-in to offer, and, like the
+		     browser and terminal, only once the chat is under way. The phone opens
+		     it from Chat controls. -->
+		{#if !ControlsSheet && !newChat}<VaultChip />{/if}
 
 
 	</div>
@@ -850,7 +855,6 @@
 	showSetup
 	showEffort
 	onUsageOpenChange={onUsageOpenChange}
-	{callAction}
 	{browserOpen}
 	{onBrowserToggle}
 	{onBrowserPreload}

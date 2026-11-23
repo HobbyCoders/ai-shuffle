@@ -23,12 +23,21 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 beforeEach(() => composerPreferences.set('modelEfforts', {}));
 afterEach(() => cleanup());
 import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registry';
-const renderDock = () => render(ControlsDock, { props: {} });
+let dock: { component: { setMobileSheetOpen(open: boolean): void } } | null = null;
+const renderDock = () => {
+ const view = render(ControlsDock, { props: {} });
+ dock = view;
+ return view;
+};
 /** The Chat controls panel's effort choices (#1816), portaled to <body>: one radio per level. */
 const panelEfforts = () => document.querySelectorAll<HTMLButtonElement>('.mcp [data-row="effort"] [role="radiogroup"][aria-label="Reasoning effort"] [role="radio"]');
 /** The value the panel's Reasoning effort row shows on its right. */
 const panelEffortValue = () => document.querySelector('.mcp [data-row="effort"] .mcp-val')?.textContent?.trim();
-const openPanel = () => fireEvent.click(screen.getByRole('button', { name: /^All chat controls/ }));
+/** The Controls item on the context line opens the panel through the dock's exported setter. */
+const openPanel = async () => {
+ dock!.component.setMobileSheetOpen(true);
+ await tick();
+};
 afterEach(() => document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()));
 
 describe('ControlsDock dynamic effort', () => {

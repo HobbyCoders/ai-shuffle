@@ -60,7 +60,7 @@ describe('no assistant mode anywhere', () => {
 		expect(chatInput).toMatch(/\{#if !phone && !newSession\}\s*<ContextPillBar \/>\s*\{\/if\}/);
 		expect(chatInput).toMatch(/\{:else if newSession\}[\s\S]*?<NewSessionSentence \/>\s*\{\/if\}/);
 		// The phone composer says the same in one line and keeps them in Chat controls.
-		expect(chatInput).toMatch(/\{#if phone\}\s*<ComposerContextLine /);
+		expect(chatInput).toMatch(/\{#if phone\}\s*<ComposerContextLine\s/);
 		expect(chatInput).toMatch(/<ControlsDock[\s\S]*?\{onBrowserToggle\}/);
 	});
 });

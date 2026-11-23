@@ -97,8 +97,8 @@ describe('phone controls on a hidden Task worker (#418)', () => {
 		// Loading, not the parent's Overseer or the amber "pick one".
 		await waitFor(() => expect(agentChip().getAttribute('aria-label')).toBe('Agent: Loading agent…'));
 		expect(agentChip().getAttribute('aria-busy')).toBe('true');
-		// Quick bar and panel: no access is claimed, Ask included.
-		expect(document.querySelector('[data-cell="access"]')?.getAttribute('aria-label')).toMatch(/^Permission mode: loading/);
+		// A chat under way keeps Tool access in the panel only, and claims none there, Ask included.
+		expect(document.querySelector('[data-cell="access"]')).toBeNull();
 		expect(panelAccess().getAllByRole('radio').filter(r => r.getAttribute('aria-checked') === 'true')).toHaveLength(0);
 		// Fast is neither On nor Off and cannot be flipped from a guess.
 		// A switch has no "mixed": it reports busy, and On is not claimed.
@@ -109,7 +109,6 @@ describe('phone controls on a hidden Task worker (#418)', () => {
 
 		releaseLive!({ session_meta: WORKER_META });
 		await waitFor(() => expect(agentChip().getAttribute('aria-label')).toBe('Agent: Investigator'));
-		expect(document.querySelector('[data-cell="access"]')?.getAttribute('aria-label')).toMatch(/^Permission mode: Bypass/);
 		expect(panelAccess().getByRole('radio', { name: 'Bypass' }).getAttribute('aria-checked')).toBe('true');
 		expect(fastSwitch()!.getAttribute('aria-checked')).toBe('true');
 		expect(fastSwitch()!.hasAttribute('aria-busy')).toBe(false);
