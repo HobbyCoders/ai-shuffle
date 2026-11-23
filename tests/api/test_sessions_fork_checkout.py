@@ -152,6 +152,28 @@ def test_fork_here_gets_its_own_worktree_from_this_workers_checkout(repo):
     assert project_resolver.resolve_existing_cwd(row) == str(fork_path)
 
 
+def test_fork_here_starts_at_the_local_commit_not_a_newer_remote_one(repo, tmp_path):
+    from app.network import control
+
+    _parent, base, _tip = repo
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "clone", "--bare", str(base), str(origin))
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    git(other, "config", "user.name", "Fork Test")
+    git(other, "config", "user.email", "fork@example.test")
+    (other / "code.txt").write_text("newer on origin\n")
+    git(other, "commit", "-am", "ahead")
+    git(other, "push", "origin", "main")
+    git(base, "remote", "add", "origin", str(origin))
+    git(base, "fetch", "origin")
+    local_head = git(base, "rev-parse", "HEAD")
+    assert git(base, "rev-parse", "origin/main") != local_head
+
+    row = sessions_db.get_session(control.fork_here(PARENT_SID)["session_id"])
+    assert git(Path(row["worktree_path"]), "rev-parse", "HEAD") == local_head
+
+
 def test_a_failed_fork_here_removes_its_checkout(repo, monkeypatch):
     from app.network import control
 

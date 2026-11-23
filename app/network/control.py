@@ -1282,14 +1282,11 @@ def _fork_here_checkout(original: Dict[str, Any], new_id: str):
     """The copy's own worktree, like every fork's (``sessions_fork._fork_checkout``).
 
     The owner is offline, so its branch and uncommitted work may not exist
-    here: the copy starts from this worker's checkout of the project, never
-    inside it. ``None`` when this worker has no checkout of it (as before).
-    Raises ``WorkerCheckoutError`` when the checkout cannot be made.
+    here: the copy starts at the commit this worker's checkout of the project
+    has (not a newer fetched one), never inside it. ``None`` when this worker
+    has no checkout of it (as before); a 409 when one cannot be made.
     """
-    if not (original.get("project_v2_id") or original.get("project_id")):
-        return None
-    from app.api.sessions_fork import fork_branch
-    from app.core.worker_checkout import prepare_worker_checkout
+    from app.api.sessions_fork import _fork_checkout
     local = {**original, "worktree_id": None, "worktree_path": None, "worktree_branch": None, "branch": None}
-    return prepare_worker_checkout(local, new_id, original.get("profile_id"),
-                                   share_read_only=False, branch=fork_branch(new_id))
+    checkout, _parent_path = _fork_checkout(local, new_id)
+    return checkout

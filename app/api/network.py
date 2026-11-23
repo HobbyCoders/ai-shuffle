@@ -737,13 +737,10 @@ async def fork_session_here(session_id: str, request: Request, _: str = Depends(
         return control.fork_here(session_id, api_user_id=(api_user or {}).get("id") if api_user else None,
                                  creator=request_principal(request))
 
-    from app.core.worker_checkout import WorkerCheckoutError
     try:
         result = await run_sync(_fork)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except WorkerCheckoutError as exc:
-        raise HTTPException(409, f"Could not give the copy its own checkout: {exc} Nothing was forked.") from exc
     engine.kick()
     return result
 
