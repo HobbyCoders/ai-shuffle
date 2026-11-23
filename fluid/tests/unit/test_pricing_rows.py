@@ -1,7 +1,8 @@
 """Pins the pricing rows the fluid v2 review found wrong (caching-cost L9).
 
 * gpt-6-luna fell through to the unpriced ``gpt-6`` row, so its calls
-  recorded no cost and the host stored $0. gpt-6.1-sol did the same (#106).
+  recorded no cost and the host stored $0. gpt-6.1-sol did the same (#106),
+  and so did gpt-6.2-astra and gpt-6.2-sol until Nov 2026.
 * Claude Opus 5.5 matched the family-wide ``claude-opus`` row and priced at
   Opus 5's $5/$25 instead of its own $4/$20, with cache reads at $0.20.
 * Every Anthropic cache write billed at the 5-minute 1.25x rate, including
@@ -71,21 +72,56 @@ def test_gpt_6_1_sol_row_is_priced() -> None:
 def test_an_unpriced_id_in_a_known_family_warns_once(caplog, monkeypatch) -> None:
     monkeypatch.setattr(pricing_mod, "_WARNED_UNPRICED", set())
     with caplog.at_level(logging.WARNING, logger="fluid.providers.pricing"):
-        assert estimate_cost("gpt-6.2-sol", _only("output_tokens")) is None
-        assert estimate_cost("openai/gpt-6.2-sol", _only("output_tokens")) is None
+        assert estimate_cost("gpt-6.2-luna", _only("output_tokens")) is None
+        assert estimate_cost("openai/gpt-6.2-luna", _only("output_tokens")) is None
         assert estimate_cost("gpt-6.1-sol", _only("output_tokens")) == pytest.approx(10.00)
         assert estimate_cost("wholly-made-up-9000", _only("output_tokens")) is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1, warnings
-    assert "'gpt-6.2-sol'" in warnings[0] and "'gpt-6' family row" in warnings[0]
+    assert "'gpt-6.2-luna'" in warnings[0] and "'gpt-6' family row" in warnings[0]
 
 
 def test_a_host_rate_silences_the_unpriced_family_warning(caplog, monkeypatch) -> None:
     monkeypatch.setattr(pricing_mod, "_WARNED_UNPRICED", set())
     with caplog.at_level(logging.WARNING, logger="fluid.providers.pricing"):
-        cost = estimate_cost("gpt-6.2-sol", _only("output_tokens"), resolver=lambda m: {"output": 7.0})
+        cost = estimate_cost("gpt-6.2-luna", _only("output_tokens"), resolver=lambda m: {"output": 7.0})
     assert cost == pytest.approx(7.00)
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+# ─── gpt-6.2-astra and gpt-6.2-sol ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "rates"),
+    [
+        ("gpt-6.2-astra", (8.00, 0.40, 10.00, 40.00)),
+        ("gpt-6.2-sol", (2.00, 0.10, 2.50, 10.00)),
+    ],
+)
+def test_gpt_6_2_rows_are_priced(model: str, rates: tuple, caplog, monkeypatch) -> None:
+    monkeypatch.setattr(pricing_mod, "_WARNED_UNPRICED", set())
+    price = resolve_price(model)
+    assert price is not None and price.priced
+    assert (price.input, price.cached_input, price.cache_write, price.output) == rates
+    assert "2026-11-23" in price.source
+    with caplog.at_level(logging.WARNING, logger="fluid.providers.pricing"):
+        assert estimate_cost(model, _only("input_tokens")) == pytest.approx(rates[0])
+        assert estimate_cost(model, _only("cache_read_input_tokens")) == pytest.approx(rates[1])
+        assert estimate_cost(model, _only("cache_creation_input_tokens")) == pytest.approx(rates[2])
+        assert estimate_cost(model, _only("output_tokens")) == pytest.approx(rates[3])
+        assert estimate_cost(f"openai/{model}", _only("output_tokens")) == pytest.approx(rates[3])
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_gpt_6_2_astra_law_prices_as_astra() -> None:
+    assert estimate_cost("gpt-6.2-astra-law", _only("output_tokens")) == pytest.approx(40.00)
+
+
+def test_the_gpt_6_2_rows_do_not_disturb_older_gpt_6_rows() -> None:
+    # gpt-6-astra and gpt-6-sol keep their own (different) rates.
+    assert estimate_cost("gpt-6-astra", _only("output_tokens")) == pytest.approx(50.00)
+    assert estimate_cost("gpt-6-sol", _only("cache_read_input_tokens")) == pytest.approx(0.20)
 
 
 # ─── gpt-6-astra cache writes and gpt-6-sol ─────────────────────────────────

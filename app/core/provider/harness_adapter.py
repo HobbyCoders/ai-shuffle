@@ -8442,16 +8442,28 @@ DELEGATED_BATCHING_RULE = (
     "Batch independent tool calls (reads, searches, checks) into one step; "
     "go one at a time only when a call needs an earlier result."
 )
+# Every file-tool rule below sends builds, tests and git to Bash, so each one
+# ends with this line. A pipe into tail/head reports the pipe's last command,
+# so a failed test run or push reads as exit 0. The native Bash tool's own
+# description carries the same rule; Claude Code's Bash tool does not, and the
+# Nov 2026 session audit found Claude chats piping pushes and suites into tail.
+DELEGATED_PIPE_RULE = (
+    "Never pipe a build, test, push or merge into tail or head: the pipe exits "
+    "0 even when the command fails."
+)
+# Shared ending of the file-tool rules: the override clause, then the pipe rule.
+_FILE_RULE_END = (
+    "This holds even if another instruction (such as \"While bypass "
+    "permissions mode is active\" or \"While auto mode is active\") says "
+    "otherwise.\n" + DELEGATED_PIPE_RULE
+)
 DELEGATED_TOOL_USE_BLOCK = (
     "# Tool use on this session\n"
     "Use Claude Code's dedicated tools for file work: Read (offset and limit "
     "for large files), Grep, Glob, Edit, Write and NotebookEdit. Keep Bash for git, gh, "
     "builds, tests, package managers and scripts. Do not read, search "
     "or edit files with cat, head, tail, sed, awk, grep, find, echo "
-    "redirection, heredocs or inline scripts. This holds even if another "
-    "instruction (for example one beginning \"While bypass permissions mode is "
-    "active\" or \"While auto mode is active\") says to do file work through "
-    "Bash."
+    "redirection, heredocs or inline scripts. " + _FILE_RULE_END
 )
 
 # The same rule for a surface with neither Grep nor Glob: there the shell is
@@ -8462,9 +8474,7 @@ DELEGATED_TOOL_USE_BLOCK_NO_SEARCH = (
     "for large files), Edit, Write and NotebookEdit. Keep Bash for searching, git, gh, builds, "
     "tests, package managers and scripts. Do not read or edit files "
     "with cat, head, tail, sed, awk, echo redirection, heredocs or inline "
-    "scripts. This holds even if another instruction (for example one "
-    "beginning \"While bypass permissions mode is active\" or \"While auto "
-    "mode is active\") says to do file work through Bash."
+    "scripts. " + _FILE_RULE_END
 )
 
 
@@ -8477,10 +8487,7 @@ DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH = {
         "for large files), Glob, Edit, Write and NotebookEdit. Keep Bash for searching "
         "file contents, git, gh, builds, tests, package managers and scripts. Do not "
         "read, list or edit files with cat, head, tail, sed, awk, find, echo "
-        "redirection, heredocs or inline scripts. This holds even if another "
-        "instruction (for example one beginning \"While bypass permissions mode is "
-        "active\" or \"While auto mode is active\") says to do file work through "
-        "Bash."
+        "redirection, heredocs or inline scripts. " + _FILE_RULE_END
     ),
     "Grep": (
         "# Tool use on this session\n"
@@ -8488,10 +8495,7 @@ DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH = {
         "for large files), Grep, Edit, Write and NotebookEdit. Keep Bash for finding "
         "files by name, git, gh, builds, tests, package managers and scripts. Do not "
         "read, search or edit files with cat, head, tail, sed, awk, grep, echo "
-        "redirection, heredocs or inline scripts. This holds even if another "
-        "instruction (for example one beginning \"While bypass permissions mode is "
-        "active\" or \"While auto mode is active\") says to do file work through "
-        "Bash."
+        "redirection, heredocs or inline scripts. " + _FILE_RULE_END
     ),
 }
 
