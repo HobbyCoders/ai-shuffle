@@ -380,6 +380,33 @@ async def test_saved_anthropic_key_gets_its_own_link_section(mock_db, upstream):
     assert upstream.requests == []
 
 
+OPENAI_USAGE = "https://platform.openai.com/usage"
+
+
+async def test_openai_platform_key_gets_a_link_section(mock_db, upstream):
+    """An OpenAI API key lists with a Platform link and is never polled for credit."""
+    from pathlib import Path
+
+    from app.api.usage import _load_usage_links
+
+    key_row = {"id": "openai-key", "name": "OpenAI", "provider_type": "openai",
+               "auth_mode": "api_key", "base_url": "https://api.openai.com/v1", "enabled": True}
+    link = usage_sources.usage_link_for(key_row)
+    assert (link.id, link.dashboard_url, link.subscription) == ("openai_api", OPENAI_USAGE, False)
+    assert link.note == "Credit balance is shown only on the OpenAI Platform"
+    assert usage_sources.polled_sources(key_row) == ()
+    # A custom OpenAI-compatible host and a ChatGPT sign-in are not the Platform key.
+    assert usage_sources.usage_link_for({**key_row, "base_url": "https://llm.example.com/v1"}) is None
+    assert usage_sources.usage_link_for({**key_row, "provider_type": "chatgpt", "auth_mode": "chatgpt"}) is None
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "provider-usage-sources.md").read_text(encoding="utf-8")
+    assert OPENAI_USAGE in doc
+
+    make_row("openai-key", "openai", "api_key", "sk-test-unused", base_url="https://api.openai.com/v1")
+    links = await _load_usage_links([])
+    assert ("openai-key", "openai_api", "openai") in {(l.provider_id, l.kind, l.provider_type) for l in links}
+    assert upstream.requests == []
+
+
 async def test_poll_failure_logs_never_carry_the_key(kimi, upstream, caplog):
     def boom(request):
         raise httpx.ConnectError(f"refused with {request.headers['authorization']}")

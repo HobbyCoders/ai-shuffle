@@ -106,6 +106,9 @@ vi.mock('$lib/stores/auth.svelte', async (importOriginal) => {
 	};
 });
 
+/** Both usage groups open, so each test reads the sections inside them. */
+const GROUPS_OPEN = { 'group:subscriptions': true, 'group:api': true };
+
 const T0 = Date.UTC(2026, 8, 25, 12, 0, 0);
 
 function row(overrides: Partial<ProviderUsageEntry> & { provider_id: string }): ProviderUsageEntry {
@@ -149,9 +152,9 @@ beforeEach(() => {
 	vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
 	localStorage.clear();
 	mocks.adapters.get('context_breakdown_open')?.apply(undefined);
-	mocks.adapters.get('context_usage_sections')?.apply(undefined);
+	mocks.adapters.get('context_usage_sections')?.apply(GROUPS_OPEN);
 	mocks.adapters.get('context_usage_hidden_providers')?.apply(undefined);
-	usageSections.set({});
+	usageSections.set(GROUPS_OPEN);
 	rateLimit.__resetForTests();
 	mocks.activeSession.set({ ...mocks.DEFAULT });
 	mocks.claudePlan = 'max';
@@ -488,9 +491,11 @@ function skeleton(container: HTMLElement, name: string): string[] {
 	const sections = Array.from(container.querySelectorAll('.popover-section'));
 	const header = sections.find((s) => s.querySelector('.section-device')?.textContent === name);
 	if (!header) return ['<missing section>'];
-	// The header holds the name, the account subtext and nothing else.
+	// The header holds the name, the account subtext and nothing else. The
+	// "in use" tag marks the session's own account whatever its usage state,
+	// so it is not part of the state skeleton (tested in session-groups).
 	const labels = header.querySelector('.sec-head-labels') as HTMLElement;
-	const parts = [`header:${Array.from(labels.children).map((c) => c.classList[0]).join('+')}`];
+	const parts = [`header:${Array.from(labels.children).map((c) => c.classList[0]).filter((c) => c !== 'section-in-use').join('+')}`];
 	for (let el = header.nextElementSibling; el && !el.classList.contains('popover-section'); el = el.nextElementSibling) {
 		if (el.classList.contains('popover-row')) parts.push(`row:${el.querySelector('.row-label')?.textContent}`);
 		else if (el.classList.contains('usage-credits')) parts.push('credits');

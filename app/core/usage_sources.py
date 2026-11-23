@@ -550,6 +550,15 @@ _LINKS: tuple[UsageLink, ...] = (
         dashboard_url="https://platform.claude.com/settings/billing", subscription=False,
         applies=lambda row: _is_claude_api_row(row),
     ),
+    # An OpenAI Platform API key. Credit and spend are not collected (#840):
+    # the balance needs a Platform session or an organization Admin key, so
+    # the section only points at the Platform usage page.
+    UsageLink(
+        id="openai_api", label="OpenAI API (pay as you go)",
+        note="Credit balance is shown only on the OpenAI Platform",
+        dashboard_url="https://platform.openai.com/usage", subscription=False,
+        applies=lambda row: is_openai_platform_row(row),
+    ),
     # Per-turn cost is recorded from responses; only a balance is missing.
     UsageLink(
         id="opencode_console", label="OpenCode Console (pay as you go)", note="No balance meter for this key",

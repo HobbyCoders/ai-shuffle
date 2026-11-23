@@ -80,6 +80,10 @@ expanded details, not on its collapsed header.
 
 OpenAI API credit and organization spend are not collected or displayed. No
 Platform session, organization Admin key or entered balance is configured.
+An OpenAI Platform key (provider type `openai` on `api.openai.com`) still gets
+its own section among the API accounts, like the Claude API key: it says
+"Credit balance is shown only on the OpenAI Platform" and links to the Platform
+[Usage page](https://platform.openai.com/usage) (link kind `openai_api`).
 ChatGPT/Codex subscription usage and banked resets are separate and unchanged.
 
 The `xai_management` source resolves the team using the inference key and reads

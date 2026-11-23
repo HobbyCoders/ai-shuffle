@@ -52,6 +52,7 @@
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
+	import { lastPaidApiAccount } from './session-api-usage';
 	import { providerStatusAt } from '$lib/stores/rate-limit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
@@ -1022,6 +1023,71 @@
 		});
 	}
 
+	/**
+	 * A section's collapsed headline: a window percentage, a credit figure, a
+	 * status note or "—". The section header and the group header (which names
+	 * the session's own account) draw the same headline.
+	 */
+	interface Headline {
+		kind: 'pct' | 'credits' | 'note' | 'empty';
+		text: string;
+		severity?: UsageSeverity;
+		danger?: boolean;
+		title?: string;
+		/** The window the percentage reads, for the group header ("Weekly"). */
+		window?: string | null;
+	}
+
+	const EMPTY_HEADLINE: Headline = { kind: 'empty', text: '—' };
+
+	/** Claude's headline: the 5-hour summary, or the weekly window for the group header. */
+	function claudeHeadline(weekly: boolean): Headline {
+		const week = weekly ? items.find((item) => item.type === 'seven_day') : undefined;
+		const pct = week ? week.pct : planSummaryRemaining;
+		if (pct == null) return EMPTY_HEADLINE;
+		return { kind: 'pct', text: `${pct}% left`, severity: remainingSeverity(pct), window: week ? 'Weekly' : null };
+	}
+
+	/**
+	 * A provider bucket's headline. A credit balance outranks the window
+	 * percentage; `weekly` reads a plan's weekly window when it reports one.
+	 */
+	function providerHeadline(pb: ProviderUsageBucket, nowMs: number, weekly: boolean): Headline {
+		const isAntigravity = providerUsageType(pb) === 'antigravity';
+		const windows = isAntigravity ? Object.values(pb.windows) : planDisplayWindows(pb.windows, providerNoFiveHour(pb), nowMs);
+		const showsRemaining = providerShowsRemaining(pb);
+		const week = weekly && showsRemaining && !isAntigravity ? windows.find((w) => w.type === 'seven_day') : undefined;
+		const agSummary = isAntigravity ? antigravitySummary(windows, nowMs, showsRemaining) : null;
+		const summary = week
+			? providerWindowPercent(week, nowMs, showsRemaining)
+			: isAntigravity ? agSummary : providerWindowSummary(windows, nowMs, showsRemaining);
+		const short = creditsShort(providerCredits(pb), pb.providerType);
+		const credits: Headline | null = short
+			? { kind: 'credits', text: short, danger: creditsExhausted(pb), title: creditsSummary(pb.credits, pb.providerType) ?? undefined }
+			: null;
+		if (credits && creditsNum(pb.credits, 'balance_remaining') != null) return credits;
+		if (summary) {
+			return {
+				kind: 'pct',
+				text: `${summary.pct}%${showsRemaining ? ' left' : ''}`,
+				severity: summary.severity,
+				window: week ? 'Weekly' : agSummary?.label ?? null,
+			};
+		}
+		// ChatGPT extra credits live in the expanded rows only.
+		if (credits && pb.providerType !== 'chatgpt') return credits;
+		if (reportedBalanceSource(pb) || keyReadBalance(pb)) {
+			return { kind: 'note', text: keyReadBalance(pb) && transientFailure(pb) ? 'Check failed' : 'Balance unavailable' };
+		}
+		return EMPTY_HEADLINE;
+	}
+
+	function sectionHeadline(section: SectionEntry, nowMs: number, weekly: boolean): Headline {
+		if (section.kind === 'claude') return claudeHeadline(weekly);
+		if (section.pb) return providerHeadline(section.pb, nowMs, weekly);
+		return { ...EMPTY_HEADLINE, title: section.link?.note };
+	}
+
 	const sections = $derived.by<SectionEntry[]>(() => {
 		const entries: SectionEntry[] = sortedProviderBuckets().map((pb) => {
 			const display = providerDisplayFor(pb);
@@ -1037,7 +1103,9 @@
 		// A key kind with no usage meter: the backend names the row, the line and
 		// the vendor's page. A row with a reading keeps its reading section.
 		for (const link of Object.values($usageLinks)) {
-			if ($rateLimit.providerBuckets?.[link.providerId]) continue;
+			// An OpenAI key's hidden rate-limit reading does not replace its link row.
+			const reading = $rateLimit.providerBuckets?.[link.providerId];
+			if (reading && reading.providerType !== 'openai' && reading.providerType !== 'openai_balance') continue;
 			const display = linkDisplay(link);
 			entries.push({
 				id: `provider:${link.providerId}`,
@@ -1076,6 +1144,47 @@
 		)
 	);
 	const hasUsageSections = $derived(sections.length > 0);
+
+	// ── Subscriptions / API keys groups ───────────────────────────────────
+	// The sections split into two collapsible groups, subscriptions first
+	// (the order `compareSections` already gives). A group starts collapsed and
+	// its open state is remembered with the sections'. Collapsed, a group shows
+	// only what THIS session uses: the plan it runs on (its weekly window), or
+	// for API keys the key it runs on, else the paid API its tools last billed
+	// (fal after generating images). Nothing when the session uses none.
+	interface UsageGroup {
+		id: string;
+		title: string;
+		sections: SectionEntry[];
+		live: SectionEntry | null;
+	}
+
+	function isGroupOpen(id: string): boolean { return $usageSections[id] === true; }
+	function toggleGroup(id: string) {
+		usageSections.set({ ...$usageSections, [id]: !isGroupOpen(id) });
+	}
+
+	const visibleSections = $derived(sections.filter((s) => !$hiddenUsageProviders[s.id]));
+	/** The session's own account: its provider row, or Claude when it runs natively. */
+	const sessionSection = $derived.by<SectionEntry | null>(() => {
+		if (!effectiveProviderId) return visibleSections.find((s) => s.kind === 'claude') ?? null;
+		const ids = [`provider:${effectiveProviderId}`, `provider:openrouter-account:${effectiveProviderId}`];
+		return visibleSections.find((s) => ids.includes(s.id)) ?? null;
+	});
+	const toolApiAccount = $derived(lastPaidApiAccount($activeSession.messages ?? []));
+	const usageGroups = $derived.by<UsageGroup[]>(() => {
+		const subscriptions = visibleSections.filter((s) => s.subscription);
+		const apis = visibleSections.filter((s) => !s.subscription);
+		const toolApi = toolApiAccount ? apis.find((s) => s.id === `provider:${toolApiAccount}`) ?? null : null;
+		const liveSub = sessionSection?.subscription ? sessionSection : null;
+		const liveApi = sessionSection && !sessionSection.subscription ? sessionSection : toolApi;
+		return [
+			{ id: 'group:subscriptions', title: 'Subscriptions', sections: subscriptions, live: liveSub },
+			{ id: 'group:api', title: 'API keys', sections: apis, live: liveApi },
+		].filter((group) => group.sections.length > 0);
+	});
+	/** Sections tagged "in use" inside an open group. */
+	const inUseIds = $derived(new Set(usageGroups.flatMap((g) => (g.live ? [g.live.id] : []))));
 
 	function setProviderHidden(id: string, hidden: boolean) {
 		hiddenUsageProviders.update(current => {
@@ -1193,6 +1302,9 @@
 					{#if subtext}
 						<span class="section-account">{subtext}</span>
 					{/if}
+					{#if inUseIds.has(id)}
+						<span class="section-in-use" title="This chat uses this account">in use</span>
+					{/if}
 				</span>
 				{#if !isOpen}{@render summary()}{/if}
 				<svg
@@ -1220,12 +1332,20 @@
      5-hour and weekly rows always (placeholders until reported; no 5-hour row
      on Ultra unless a live one is reported), any other reported window, then
      the meta line. -->
-{#snippet claudeSummary()}
-	{#if planSummaryRemaining != null}
-		<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary">{planSummaryRemaining}% left</span>
+{#snippet headline(h: Headline)}
+	{#if h.kind === 'pct'}
+		<span class="row-pct {h.severity} sec-summary">{h.text}</span>
+	{:else if h.kind === 'credits'}
+		<span class="sec-summary sec-credits" class:danger={h.danger} title={h.title}>{h.text}</span>
+	{:else if h.kind === 'note'}
+		<span class="sec-summary sec-credits">{h.text}</span>
 	{:else}
-		<span class="sec-summary sec-credits sec-empty">—</span>
+		<span class="sec-summary sec-credits sec-empty" title={h.title}>—</span>
 	{/if}
+{/snippet}
+
+{#snippet claudeSummary()}
+	{@render headline(claudeHeadline(false))}
 {/snippet}
 
 {#snippet claudeSection()}
@@ -1256,29 +1376,15 @@
 	{@const pbWindows = isAntigravity ? Object.values(pb.windows) : planDisplayWindows(pb.windows, pbNoFiveHour, now)}
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
-	{@const agSummary = isAntigravity ? antigravitySummary(pbWindows, now, pbShowsRemaining) : null}
-	{@const pbSummary = isAntigravity ? agSummary : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-	{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
-	{@const showsCreditHeadline = creditsNum(pb.credits, 'balance_remaining') != null && Boolean(pbCreditsShort)}
-	{@const summaryDescription = !pbOpen && agSummary && !showsCreditHeadline
-		? { id: `${uid}-ag-summary-${safeDomToken(pb.providerId)}`, text: `${agSummary.label}: ${agSummary.pct}%${suffix}` }
+	{@const pbHeadline = providerHeadline(pb, now, false)}
+	{@const summaryDescription = !pbOpen && isAntigravity && pbHeadline.kind === 'pct' && pbHeadline.window
+		? { id: `${uid}-ag-summary-${safeDomToken(pb.providerId)}`, text: `${pbHeadline.window}: ${pbHeadline.text}` }
 		: null}
 	{#snippet providerSummary()}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
-		{#if showsCreditHeadline}
-			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
-		{:else if pbSummary}
-			<span class="row-pct {pbSummary.severity} sec-summary">{pbSummary.pct}%{suffix}</span>
-		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
-			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
-		{:else if reportedBalanceSource(pb) || keyReadBalance(pb)}
-			<span class="sec-summary sec-credits">{keyReadBalance(pb) && transientFailure(pb) ? 'Check failed' : 'Balance unavailable'}</span>
-		{:else}
-			<span class="sec-summary sec-credits sec-empty">—</span>
-		{/if}
+		{@render headline(pbHeadline)}
 	{/snippet}
 	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, providerAriaName(pb, pbDisplay), providerSummary, summaryDescription)}
 	{#if pbOpen}
@@ -1301,7 +1407,7 @@
 	{@const display = linkDisplay(link)}
 	{@const linkOpen = isSectionOpen(sectionId)}
 	{#snippet linkSummary()}
-		<span class="sec-summary sec-credits sec-empty" title={link.note}>—</span>
+		{@render headline({ ...EMPTY_HEADLINE, title: link.note })}
 	{/snippet}
 	{@render sectionHeader(sectionId, display.name, display.subtext, linkOpen, `${display.name} usage`, linkSummary)}
 	{#if linkOpen}
@@ -1442,15 +1548,47 @@
 				<div class="popover-divider"></div>
 			{/if}
 
-			<!-- ═══ Usage sections, one order for all (#1845) ═══ -->
-			{#each sections.filter((s) => !$hiddenUsageProviders[s.id]) as section (section.id)}
-				{#if section.kind === 'claude'}
-					{@render claudeSection()}
-				{:else if section.pb}
-					{@render providerSection(section.pb)}
-				{:else if section.link}
-					{@render linkSection(section.link)}
-				{/if}
+			<!-- ═══ Usage sections, one order for all (#1845), in two groups ═══ -->
+			{#each usageGroups as group (group.id)}
+				{@const groupOpen = isGroupOpen(group.id)}
+				{@const liveHeadline = group.live ? sectionHeadline(group.live, now, group.id === 'group:subscriptions') : null}
+				<div class="usage-group" data-group={group.id}>
+					<button
+						type="button"
+						class="group-header"
+						aria-expanded={groupOpen}
+						onclick={() => toggleGroup(group.id)}
+					>
+						<span class="group-title">{group.title}</span>
+						<span class="group-count" aria-label="{group.sections.length} accounts">{group.sections.length}</span>
+						{#if !groupOpen && group.live && liveHeadline}
+							<span class="group-summary">
+								<span class="group-who">{group.live.name}{liveHeadline.window ? ` · ${liveHeadline.window}` : ''}</span>
+								{@render headline(liveHeadline)}
+							</span>
+						{/if}
+						<svg
+							class="ctx-chevron {groupOpen ? '' : 'collapsed'}"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							aria-hidden="true"
+						>
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+						</svg>
+					</button>
+					{#if groupOpen}
+						{#each group.sections as section (section.id)}
+							{#if section.kind === 'claude'}
+								{@render claudeSection()}
+							{:else if section.pb}
+								{@render providerSection(section.pb)}
+							{:else if section.link}
+								{@render linkSection(section.link)}
+							{/if}
+						{/each}
+					{/if}
+				</div>
 			{/each}
 			{#if hiddenRows.length > 0}
 				<details class="hidden-providers">
@@ -2032,6 +2170,97 @@
 	}
 	.section-account {
 		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	/* Subscriptions / API keys groups: a quiet caption header with a count, the
+	   session's own headline on the right while collapsed, and the group's
+	   sections below it at the popover's own spacing. */
+	.usage-group {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.usage-group + .usage-group {
+		padding-top: 10px;
+		border-top: 1px dashed var(--border);
+	}
+	.group-header {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		min-height: 20px;
+		padding: 0;
+		background: none;
+		border: none;
+		border-radius: 6px;
+		font: inherit;
+		text-align: left;
+		color: inherit;
+		cursor: pointer;
+		transition: background-color 160ms ease, box-shadow 160ms ease;
+	}
+	.group-header:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
+	}
+	@media (min-width: 769px) and (hover: hover) and (pointer: fine) {
+		.group-header:hover {
+			background: var(--accent);
+			box-shadow: 0 0 0 4px var(--accent);
+		}
+	}
+	@media (max-width: 768px), (hover: none), (pointer: coarse) {
+		.group-header { min-height: 44px; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.group-header { transition: none; }
+	}
+	.group-title {
+		font-size: 10.5px;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.group-count {
+		padding: 0 5px;
+		border-radius: 999px;
+		background: var(--muted, var(--accent));
+		font-family: var(--font-mono);
+		font-size: 10px;
+		line-height: 15px;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+	}
+	.group-summary {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
+		min-width: 0;
+		margin-left: auto;
+	}
+	.group-who {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 10.5px;
+		color: var(--muted-foreground);
+	}
+	.group-header .ctx-chevron { margin-left: auto; }
+	.group-summary + .ctx-chevron { margin-left: 0; }
+	/* Neutral, so it never reads as a usage level. */
+	.section-in-use {
+		align-self: center;
+		padding: 0 5px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		font-size: 9.5px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		line-height: 14px;
+		text-transform: uppercase;
 		color: var(--muted-foreground);
 	}
 	.sr-only {

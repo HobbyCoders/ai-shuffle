@@ -43,6 +43,7 @@ vi.mock('$lib/stores/usage-target', () => ({
 
 import ContextUsageBar from './ContextUsageBar.svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
+import { usageSections } from '$lib/stores/expansion-preferences';
 
 const future = () => new Date(Date.now() + 3_600_000).toISOString();
 
@@ -78,6 +79,8 @@ beforeEach(() => {
 	_deviceName = null;
 	localStorage.clear();
 	rateLimit.__resetForTests();
+	// Both usage groups open, so the tests read the sections inside them.
+	usageSections.set({ 'group:subscriptions': true, 'group:api': true });
 });
 afterEach(() => cleanup());
 
