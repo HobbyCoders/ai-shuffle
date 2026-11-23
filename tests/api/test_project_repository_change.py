@@ -21,6 +21,13 @@ from tests.git_repo_helpers import git
 from tests.shared_fixtures import pin_runner  # noqa: F401  (autouse fixture)
 
 
+@pytest.fixture(autouse=True)
+def _no_remembered_failures():
+    project_remote._failed.clear()
+    yield
+    project_remote._failed.clear()
+
+
 def _fork(ws: Path, upstream: str, name: str = "demo-fork") -> str:
     """A bare fork of ``upstream`` with one extra commit on main."""
     bare = ws / "_remotes" / f"{name}.git"
@@ -187,19 +194,155 @@ def test_a_worker_that_was_offline_applies_it_on_its_next_pass(client, ws, test_
     assert project_remote.reconcile_local() == 0  # applied once, not every pass
 
 
-def test_a_failed_fetch_is_retried_later_not_every_pass(client, ws, test_db, fresh_records, monkeypatch):
+def test_a_failed_fetch_keeps_the_old_remote_and_is_retried_later(client, ws, test_db, fresh_records, monkeypatch):
     upstream = _bare_remote(ws)
     pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
-    row = _set_up_here(client, pv2)
+    _set_up_here(client, pv2)
     projects_v2.pin_remote(pv2["origin"], (ws / "_remotes" / "gone.git").as_uri(), default_branch=None,
-                           generation=1, keep_upstream=False, previous=upstream)
+                           generation=1, keep_upstream=True, previous=upstream)
 
     assert project_remote.reconcile_local() == 1
-    applied = database.get_project(row["id"])["settings"]["remote_applied"]
-    assert applied["ok"] is False and applied["status"] == "fetch_failed"
-    assert project_remote.reconcile_local() == 0
-    monkeypatch.setattr(time, "time", lambda: applied["at"] + project_remote.RETRY_FAILED_AFTER + 1)
+    assert _remote(ws / "demo") == upstream  # put back: the copy keeps working
+    assert "upstream" not in git(ws / "demo", "remote").split()
+    assert project_remote.reconcile_local() == 0  # not every pass
+    later = time.monotonic() + project_remote.RETRY_FAILED_AFTER + 1
+    monkeypatch.setattr(project_remote.time, "monotonic", lambda: later)
     assert project_remote.reconcile_local() == 1
+
+
+def test_a_base_checkout_the_app_cloned_on_demand_switches_too(client, ws, test_db, fresh_records):
+    from app.core import project_setup
+    from app.db import checkouts as checkouts_db
+
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)  # no project row on this worker
+    base = ws / ".checkouts" / "demo" / "__base__"
+    base.parent.mkdir(parents=True)
+    git(ws, "clone", "-q", upstream, str(base))
+    checkouts_db.upsert_checkout(pv2["id"], project_setup._me(), str(base), status="active")
+    fork = _fork(ws, upstream)
+
+    resp = _change(client, pv2, fork)
+    assert resp.status_code == 200, resp.text
+    me = next(w for w in resp.json()["workers"] if w["install_id"] == ME)
+    assert me["status"] == "updated"
+    assert _remote(base) == fork
+
+    # One that missed the request switches on the next pass.
+    git(base, "remote", "set-url", "origin", upstream)
+    assert project_remote.reconcile_local() == 1
+    assert _remote(base) == fork
+
+
+def test_the_switch_never_overwrites_an_ignored_local_file(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    folder = ws / "demo"
+    (folder / ".git" / "info" / "exclude").write_text(".env\n")
+    (folder / ".env").write_text("LOCAL=1\n")
+    fork = _fork(ws, upstream)
+    work = ws.parent / "demo-fork-work"
+    (work / ".env").write_text("FROM_FORK=1\n")
+    git(work, "add", ".env")
+    git(work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "env")
+    git(work, "push", "-q", "origin", "main")
+
+    resp = _change(client, pv2, fork)
+    assert resp.status_code == 200, resp.text
+    me = next(w for w in resp.json()["workers"] if w["install_id"] == ME)
+    assert me["status"] == "updated" and me["base"] == "behind"
+    assert (folder / ".env").read_text() == "LOCAL=1\n"
+
+
+def test_an_explicit_push_url_is_switched_too(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    folder = ws / "demo"
+    git(folder, "remote", "set-url", "--push", "origin", upstream)
+    fork = _fork(ws, upstream)
+
+    assert _change(client, pv2, fork).status_code == 200
+    assert git(folder, "remote", "get-url", "--push", "origin").strip() == fork
+    assert project_remote.is_switched(str(folder), fork)
+
+
+def test_a_project_that_moved_on_is_not_folded_as_a_duplicate(client, ws, test_db, fresh_records):
+    repo_a = _bare_remote(ws)
+    repo_b = _fork(ws, repo_a)
+    moved = _peer_project(test_db, "demo", "Demo", remote=repo_a)
+    moved_row = _set_up_here(client, moved)
+    assert _change(client, moved, repo_b).status_code == 200  # Demo now uses repo B
+    other = _peer_project(test_db, "other", "Other", origin="manual:other")
+
+    resp = _change(client, other, repo_a)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["merged_duplicate"] is False
+    assert project_remote.merged_into(projects_v2.get_project_v2(moved["id"])) is None
+    assert database.get_project(moved_row["id"])["link_group_id"] == moved["origin"]
+    assert _remote(ws / "demo") == repo_b
+    assert project_remote.reconcile_local() == 0
+
+
+def test_the_last_pin_wins_even_at_the_same_generation(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    loser = _fork(ws, upstream, "demo-loser")
+    winner = _fork(ws, upstream, "demo-winner")
+    # Two disconnected workers pinned generation 1; this one applied the losing URL.
+    asyncio.run(project_remote.handle_apply(
+        {"origin": pv2["origin"], "remote_url": loser, "generation": 1, "keep_upstream": False}))
+    assert _remote(ws / "demo") == loser
+    projects_v2.pin_remote(pv2["origin"], winner, default_branch="main", generation=1,
+                           keep_upstream=False, previous=upstream)
+
+    assert project_remote.reconcile_local() == 1
+    assert _remote(ws / "demo") == winner
+
+
+def test_a_late_request_never_switches_a_copy_back(client, ws, test_db, fresh_records):
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    _set_up_here(client, pv2)
+    fork = _fork(ws, upstream)
+    projects_v2.pin_remote(pv2["origin"], fork, default_branch="main", generation=2,
+                           keep_upstream=False, previous=upstream)
+    out = asyncio.run(project_remote.handle_apply(
+        {"origin": pv2["origin"], "remote_url": upstream, "generation": 1, "keep_upstream": False}))
+    assert out["ok"] is True
+    assert _remote(ws / "demo") == fork
+
+
+def test_a_queued_setup_clones_the_current_repository(client, ws, test_db, fresh_records):
+    from app.core import project_setup
+
+    upstream = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
+    fork = _fork(ws, upstream)
+    projects_v2.pin_remote(pv2["origin"], fork, default_branch="main", generation=1,
+                           keep_upstream=False, previous=upstream)
+    op = {"id": "op-queued", "project_v2_id": pv2["id"],
+          "params": {"origin": pv2["origin"], "kind": "git", "clone_url": upstream, "folder": "demo",
+                     "name": "Demo"}}
+    project_setup.execute_setup(op)  # the queued request still names the old repository
+    assert _remote(ws / "demo") == fork
+    assert (ws / "demo" / "FORK.md").is_file()
+
+
+def test_forget_is_refused_while_a_worker_cannot_be_read(client, ws, test_db, fresh_records, network):
+    remote = _bare_remote(ws)
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=remote)
+    test_db.execute("DELETE FROM projects WHERE id = 'demo'")
+
+    async def unreadable(device_id, action, body):
+        raise RuntimeError("timed out")
+
+    network.state["handler"] = unreadable
+    resp = client.post("/api/v1/projects/catalog/forget", params={"project_v2_id": pv2["id"]})
+    assert resp.status_code == 409 and "Couldn't check whether Studio" in resp.json()["detail"]
+    assert projects_v2.get_project_v2(pv2["id"])["settings"].get("forgotten") is not True
 
 
 def test_online_peers_are_told_and_an_older_peer_is_reported(client, ws, test_db, fresh_records, network):
@@ -230,7 +373,7 @@ def test_online_peers_are_told_and_an_older_peer_is_reported(client, ws, test_db
     assert project_remote.generation(projects_v2.get_project_v2(pv2["id"])) == 2
 
 
-def test_peer_side_apply_skips_a_generation_it_already_applied(client, ws, test_db, fresh_records):
+def test_peer_side_apply_skips_a_copy_already_switched(client, ws, test_db, fresh_records):
     upstream = _bare_remote(ws)
     pv2 = _peer_project(test_db, "demo", "Demo", remote=upstream)
     _set_up_here(client, pv2)
@@ -239,7 +382,7 @@ def test_peer_side_apply_skips_a_generation_it_already_applied(client, ws, test_
     first = asyncio.run(project_remote.handle_apply(body))
     assert first["status"] == "updated"
     again = asyncio.run(project_remote.handle_apply(body))
-    assert again["status"] == "updated" and again["copies"] == 1  # last result, no second fetch
+    assert again["status"] == "already" and again["copies"] == 1  # no second fetch
 
 
 @pytest.mark.parametrize("url,message", [

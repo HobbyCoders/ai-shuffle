@@ -25,14 +25,21 @@ Changing the repository is now one request (``change_repository``):
    switch left behind) is marked ``merged_into`` the kept project; each worker
    relinks its copy of it to the kept project.
 
+Whether a copy is switched is read from the checkout itself (its ``origin``
+and push URLs, :func:`is_switched`), so every copy counts: registered project
+folders and base checkouts the app cloned on demand. A switch that cannot
+fetch is undone and retried later.
+
 Nothing here deletes or rewrites files or branches. The only branch change is
 a fast-forward of a clean base checkout that is strictly behind the new
-remote.
+remote, which never overwrites a local file.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -46,8 +53,6 @@ GENERATION_KEY = "remote_generation"
 KEEP_UPSTREAM_KEY = "remote_keep_upstream"
 PREVIOUS_KEY = "previous_remote_url"
 MERGED_INTO_KEY = "merged_into"
-#: Local (never synced) ``projects.settings`` key: what this worker last did.
-APPLIED_KEY = "remote_applied"
 
 APPLY_ACTION = "apply-remote"
 LS_REMOTE_TIMEOUT = 30
@@ -164,15 +169,38 @@ def _own_rows_for(origin: str) -> List[Dict[str, Any]]:
     return [row for row in _own_project_rows() if _origin_of(row) == origin]
 
 
-def _record_applied(project_id: str, outcome: Dict[str, Any]) -> None:
-    from app.db import database
+def _folder_key(folder: str) -> str:
+    return os.path.normcase(os.path.realpath(folder))
 
-    row = database.get_project(project_id)
-    if not row:
-        return
-    merged = dict(row.get("settings") or {})
-    merged[APPLIED_KEY] = outcome
-    database.update_project(project_id, settings_dict=merged)
+
+def _own_folders_for(origin: str, *, lock: bool) -> List[str]:
+    """Every folder on THIS worker that holds ``origin``: its registered
+    project folders and its base checkouts (a base the app cloned on demand
+    has no project row), once each. ``lock`` pins the project rows to
+    ``origin`` so a remote change never moves them."""
+    from app.core.checkout_manager import _resolve_checkout_path
+    from app.core.project_setup import _me
+    from app.core.project_utils import get_project_working_dir
+    from app.db import checkouts as checkouts_db
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    folders: Dict[str, str] = {}
+    for row in _own_rows_for(origin):
+        if lock:
+            row = _lock_to(row, origin)
+        try:
+            folder = get_project_working_dir(row)
+        except (OSError, ValueError):
+            continue
+        folders.setdefault(_folder_key(folder), folder)
+    pv2_id, me = project_v2_id_for_origin(origin), _me()
+    for ck in checkouts_db.list_active_base_checkouts():
+        if ck.get("project_id") != pv2_id or ck.get("runner_id") != me or not ck.get("path"):
+            continue
+        folder = _resolve_checkout_path(ck["path"])
+        if os.path.isdir(folder):
+            folders.setdefault(_folder_key(folder), folder)
+    return list(folders.values())
 
 
 def _lock_to(row: Dict[str, Any], origin: str) -> Dict[str, Any]:
@@ -189,6 +217,21 @@ def _lock_to(row: Dict[str, Any], origin: str) -> Dict[str, Any]:
     return database.get_project(row["id"]) or row
 
 
+def _push_urls(folder: str) -> List[str]:
+    result = _git(folder, ["config", "--get-all", "remote.origin.pushurl"], timeout=10)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()] if result.returncode == 0 else []
+
+
+def is_switched(folder: str, url: str) -> bool:
+    """Whether this checkout already fetches from and pushes to ``url``."""
+    from app.core.project_links import normalize_remote_url
+
+    current = _remote_url(folder, "origin")
+    wanted = normalize_remote_url(url)
+    return bool(current) and normalize_remote_url(current) == wanted and all(
+        normalize_remote_url(push) == wanted for push in _push_urls(folder))
+
+
 def _ahead_behind(folder: str, branch: str) -> Optional[Tuple[int, int]]:
     result = _git(folder, ["rev-list", "--left-right", "--count", f"{branch}...origin/{branch}"], timeout=15)
     if result.returncode != 0:
@@ -197,10 +240,26 @@ def _ahead_behind(folder: str, branch: str) -> Optional[Tuple[int, int]]:
     return (int(parts[0]), int(parts[1])) if len(parts) == 2 else None
 
 
+def _restore(folder: str, previous: Optional[str], push_urls: List[str], added_upstream: bool) -> None:
+    """Put ``origin`` back as it was before a switch that could not fetch."""
+    if previous is None:
+        _git(folder, ["remote", "remove", "origin"])
+    else:
+        _git(folder, ["remote", "set-url", "origin", previous])
+        for push in push_urls:
+            _git(folder, ["config", "--add", "remote.origin.pushurl", push])
+    if added_upstream:
+        _git(folder, ["remote", "remove", "upstream"])
+
+
 def _apply_to_folder(folder: str, url: str, keep_upstream: bool) -> Dict[str, Any]:
-    """Point one checkout's ``origin`` at ``url`` and fetch it. Never raises."""
+    """Point one checkout's ``origin`` at ``url`` and fetch it. Never raises.
+
+    The switch only sticks once the new repository fetched: otherwise
+    ``origin`` is put back, so the copy keeps working and the next reconcile
+    pass tries again (``is_switched`` is the only record of a switch).
+    """
     from app.core.git_service import git_service
-    from app.core.project_links import normalize_remote_url
     from app.core.project_setup import classify_clone_failure
 
     out: Dict[str, Any] = {"ok": False}
@@ -209,22 +268,29 @@ def _apply_to_folder(folder: str, url: str, keep_upstream: bool) -> Dict[str, An
             out.update(status="no_git", error="This worker's copy is not a Git checkout.")
             return out
         current = _remote_url(folder, "origin")
-        changed = not current or normalize_remote_url(current) != normalize_remote_url(url)
+        changed = not is_switched(folder, url)
+        push_urls = _push_urls(folder) if changed else []
+        added_upstream = False
         if changed and keep_upstream and current and _remote_url(folder, "upstream") is None:
-            _git(folder, ["remote", "add", "upstream", current])
-            out["upstream"] = True
-        if current is None:
-            result = _git(folder, ["remote", "add", "origin", url])
-        elif changed:
-            result = _git(folder, ["remote", "set-url", "origin", url])
-        else:
-            result = None
-        if result is not None and result.returncode != 0:
-            out.update(status="error", error="Git refused to change this copy's remote.")
-            return out
+            added_upstream = _git(folder, ["remote", "add", "upstream", current]).returncode == 0
+            out["upstream"] = added_upstream or None
+        if changed:
+            result = _git(folder, ["remote", "add", "origin", url] if current is None
+                          else ["remote", "set-url", "origin", url])
+            if result.returncode == 0 and push_urls:
+                # An explicit push URL would keep pushing to the old repository.
+                result = _git(folder, ["config", "--unset-all", "remote.origin.pushurl"])
+            if result.returncode != 0:
+                _restore(folder, current, [], added_upstream)
+                out.pop("upstream", None)
+                out.update(status="error", error="Git refused to change this copy's remote.")
+                return out
         out["changed"] = changed
         fetched = _git(folder, ["fetch", "--prune", "origin"], timeout=FETCH_TIMEOUT)
         if fetched.returncode != 0:
+            if changed:
+                _restore(folder, current, push_urls, added_upstream)
+                out.pop("upstream", None)
             failure = classify_clone_failure(fetched.stderr, url)
             out.update(status="fetch_failed", error=str(failure), error_code=failure.error_code)
             return out
@@ -239,9 +305,10 @@ def _apply_to_folder(folder: str, url: str, keep_upstream: bool) -> Dict[str, An
                 out["base"] = "unrelated"
             else:
                 ahead, behind = counts
-                clean = not any(status.get(k) for k in ("staged", "modified", "conflicts"))
+                clean = not any(status.get(k) for k in ("staged", "modified", "untracked", "conflicts"))
                 if ahead == 0 and behind and clean:
-                    ff = _git(folder, ["merge", "--ff-only", f"origin/{default}"], timeout=60)
+                    ff = _git(folder, ["merge", "--ff-only", "--no-overwrite-ignore", f"origin/{default}"],
+                              timeout=60)
                     out["base"] = "fast_forwarded" if ff.returncode == 0 else "behind"
                 else:
                     out["base"] = ("same" if not ahead and not behind else
@@ -254,44 +321,66 @@ def _apply_to_folder(folder: str, url: str, keep_upstream: bool) -> Dict[str, An
     return out
 
 
-def _refresh_repo_record(project_id: str, folder: str) -> None:
+def _refresh_repo_records(origin: str) -> None:
     from app.api import git_helpers
+    from app.core.project_utils import get_project_working_dir
 
-    git_helpers._repo_record_cache.pop(project_id, None)
-    try:
-        git_helpers.ensure_git_repository_record(project_id, folder)
-    except Exception:  # noqa: BLE001 - the next poll records it
-        logger.debug("project remote: repository record refresh failed for %s", project_id, exc_info=True)
+    for row in _own_rows_for(origin):
+        git_helpers._repo_record_cache.pop(row["id"], None)
+        try:
+            git_helpers.ensure_git_repository_record(row["id"], get_project_working_dir(row))
+        except Exception:  # noqa: BLE001 - the next poll records it
+            logger.debug("project remote: repository record refresh failed for %s", row["id"], exc_info=True)
 
 
-def apply_local(origin: str, url: str, gen: int, *, keep_upstream: bool) -> Dict[str, Any]:
+RETRY_FAILED_AFTER = 1800  # seconds before the reconcile pass retries a failed switch
+#: folder key -> (url, monotonic time) of the last switch that failed (this process only).
+_failed: Dict[str, Tuple[str, float]] = {}
+#: One switch per folder at a time (a request and a reconcile pass can overlap).
+_folder_locks: Dict[str, threading.Lock] = {}
+_folder_locks_guard = threading.Lock()
+
+
+def _folder_lock(key: str) -> threading.Lock:
+    with _folder_locks_guard:
+        return _folder_locks.setdefault(key, threading.Lock())
+
+
+def apply_local(origin: str, url: str, *, keep_upstream: bool, only_pending: bool = False,
+                retry_failed: bool = True) -> Dict[str, Any]:
     """Apply a pinned remote to THIS worker's copies of ``origin`` (sync).
 
     Returns ``{"status": ..., ...}``: ``updated``/``already`` on success,
     ``no_copy`` when this worker has none, else an error status with a
-    user-facing ``error``.
+    user-facing ``error``. ``only_pending`` skips copies already switched;
+    ``retry_failed=False`` also skips copies that failed to switch to ``url``
+    in the last :data:`RETRY_FAILED_AFTER` seconds.
     """
-    from app.core.project_utils import get_project_working_dir
-
-    rows = _own_rows_for(origin)
-    if not rows:
+    folders = _own_folders_for(origin, lock=True)
+    if not folders:
         return {"status": "no_copy", "ok": True}
     results = []
-    for row in rows:
-        row = _lock_to(row, origin)
-        try:
-            folder = get_project_working_dir(row)
-        except (OSError, ValueError):
-            results.append({"status": "error", "ok": False, "error": "This worker's project folder is unreadable."})
-            continue
-        outcome = _apply_to_folder(folder, url, keep_upstream)
-        outcome.update(generation=gen, at=time.time(), project_id=row["id"])
-        _record_applied(row["id"], outcome)
-        if outcome.get("ok"):
-            _refresh_repo_record(row["id"], folder)
+    for folder in folders:
+        key = _folder_key(folder)
+        with _folder_lock(key):
+            if only_pending and is_switched(folder, url):
+                results.append({"status": "already", "ok": True})
+                continue
+            last = _failed.get(key)
+            if not retry_failed and last and last[0] == url and time.monotonic() - last[1] < RETRY_FAILED_AFTER:
+                continue
+            outcome = _apply_to_folder(folder, url, keep_upstream)
+            if outcome.get("ok"):
+                _failed.pop(key, None)
+            else:
+                _failed[key] = (url, time.monotonic())
         results.append(outcome)
+    if not results:
+        return {"status": "retry_later", "ok": False, "copies": len(folders)}
+    if any(r.get("changed") for r in results):
+        _refresh_repo_records(origin)
     first_error = next((r for r in results if not r.get("ok")), None)
-    return {**(first_error or results[0]), "copies": len(results)}
+    return {**(first_error or results[0]), "copies": len(folders)}
 
 
 def fold_local(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
@@ -310,51 +399,41 @@ def fold_local(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
     return {"folded": 1, "skipped": len(dup_rows) - 1}
 
 
-RETRY_FAILED_AFTER = 1800  # seconds before the reconcile pass retries a failed apply
-
-
-def _applied_generation(row: Dict[str, Any], *, retry_failed: bool = True) -> int:
-    """The generation this copy already applied; a failure counts as applied
-    for :data:`RETRY_FAILED_AFTER` (never with ``retry_failed=False``)."""
-    last = _settings(row).get(APPLIED_KEY) or {}
-    value = last.get("generation")
-    if not isinstance(value, int):
-        return 0
-    if last.get("ok"):
-        return value
-    at = last.get("at")
-    recent = isinstance(at, (int, float)) and time.time() - at < RETRY_FAILED_AFTER
-    return value if retry_failed and recent else value - 1
-
-
 def reconcile_local() -> int:
-    """Apply every pinned remote and merge this worker has not applied yet (sync).
-
-    Cheap when nothing changed: two small table reads. Returns how many
-    copies it changed.
+    """Switch every copy on this worker that is not on its project's pinned
+    remote yet, and fold merged duplicates (sync). Returns how many projects
+    it changed; a copy that just failed waits :data:`RETRY_FAILED_AFTER`.
     """
-    from app.core.project_setup import _origin_of, _own_project_rows
+    from app.core.project_setup import _me, _origin_of, _own_project_rows
+    from app.db import checkouts as checkouts_db
     from app.db import projects_v2
 
-    rows = _own_project_rows()
-    if not rows:
-        return 0
-    by_origin = projects_v2.get_projects_v2_by_origins({_origin_of(row) for row in rows})
+    me = _me()
+
+    def held() -> Dict[str, Dict[str, Any]]:
+        origins = {_origin_of(row) for row in _own_project_rows()}
+        base_ids = {ck["project_id"] for ck in checkouts_db.list_active_base_checkouts()
+                    if ck.get("runner_id") == me}
+        return {row["origin"]: row for row in projects_v2.list_projects_v2()
+                if row.get("origin") in origins or row.get("id") in base_ids}
+
+    by_origin = held()
     changed = 0
     for origin, pv2 in by_origin.items():
         target = merged_into(pv2)
         if target and projects_v2.get_project_v2_by_origin(target):
             changed += fold_local(origin, target).get("folded", 0)
     if changed:
-        rows = _own_project_rows()
-        by_origin = projects_v2.get_projects_v2_by_origins({_origin_of(row) for row in rows})
-    for row in rows:
-        pv2 = by_origin.get(_origin_of(row))
-        url, gen = pinned_remote(pv2), generation(pv2)
-        if not url or gen <= _applied_generation(row):
+        by_origin = held()
+    for origin, pv2 in by_origin.items():
+        url = pinned_remote(pv2)
+        if not url or merged_into(pv2):
             continue
-        apply_local(pv2["origin"], url, gen, keep_upstream=bool(_settings(pv2).get(KEEP_UPSTREAM_KEY)))
-        changed += 1
+        if all(is_switched(folder, url) for folder in _own_folders_for(origin, lock=False)):
+            continue
+        outcome = apply_local(origin, url, keep_upstream=bool(_settings(pv2).get(KEEP_UPSTREAM_KEY)),
+                              only_pending=True, retry_failed=False)
+        changed += 1 if outcome.get("status") != "retry_later" else 0
     return changed
 
 
@@ -389,9 +468,11 @@ async def handle_apply(body: Dict[str, Any]) -> Dict[str, Any]:
     """Control action ``apply-remote``: apply what the requester just pinned.
 
     The request carries the pinned remote so a peer whose copy of the synced
-    row has not arrived yet still applies it now; it only applies a generation
-    newer than the one it already applied.
+    row has not arrived yet still applies it now. When this worker's synced
+    row already holds a NEWER generation, that one wins: a late request never
+    switches a copy back.
     """
+    from app.db import projects_v2
     from app.db.async_database import run_sync
 
     origin = body.get("origin")
@@ -405,13 +486,15 @@ async def handle_apply(body: Dict[str, Any]) -> Dict[str, Any]:
     _check_url_shape(url)
 
     def run() -> Dict[str, Any]:
+        nonlocal url
+        keep_upstream = bool(body.get("keep_upstream"))
+        synced = projects_v2.get_project_v2_by_origin(origin)
+        if pinned_remote(synced) and generation(synced) > gen:
+            url = pinned_remote(synced)
+            keep_upstream = bool(_settings(synced).get(KEEP_UPSTREAM_KEY))
         if isinstance(duplicate, str) and duplicate and duplicate != origin:
             fold_local(duplicate, origin)
-        rows = _own_rows_for(origin)
-        if rows and all(_applied_generation(row, retry_failed=False) >= gen for row in rows):
-            last = _settings(rows[0]).get(APPLIED_KEY) or {}
-            return {**last, "copies": len(rows)}
-        return apply_local(origin, url, gen, keep_upstream=bool(body.get("keep_upstream")))
+        return apply_local(origin, url, keep_upstream=keep_upstream, only_pending=True)
 
     return await run_sync(run)
 
@@ -483,7 +566,10 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
     derived = auto_link_group_id(clean)
     if derived and derived != origin:
         dup = projects_v2.get_project_v2_by_origin(derived)
-        if dup is not None:
+        dup_now = pinned_remote(dup)
+        # Only a project still on that repository is a duplicate: one that
+        # since moved to another repository is a live project of its own.
+        if dup is not None and not merged_into(dup) and (dup_now is None or normalize_remote_url(dup_now) == wanted):
             duplicate = derived
             projects_v2.mark_merged(derived, origin)
     gen = generation(pv2) + 1

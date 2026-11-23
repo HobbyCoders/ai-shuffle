@@ -242,9 +242,12 @@ export function workerFilterSlot(geometry: FilterGeometry | null, supported: boo
 	return supported === true && overviewWorkerCount > 1 ? 'shown' : 'reserved';
 }
 
-/** No worker holds a copy or is getting one: only a failed or never-run setup keeps it listed. */
+/**
+ * No worker holds a copy or is getting one: only a failed or never-run setup
+ * keeps it listed. A worker whose state can't be read might hold one.
+ */
 export function heldByNoWorker(workers: Pick<ProjectWorker, 'state' | 'setup'>[]): boolean {
-	return workers.length > 0 && !workers.some((w) => hasProject(w.state) || isPending(w));
+	return workers.length > 0 && !workers.some((w) => hasProject(w.state) || isPending(w) || w.state === 'unknown');
 }
 
 function names(list: string[]): string {

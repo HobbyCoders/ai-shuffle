@@ -200,6 +200,7 @@ describe('heldByNoWorker', () => {
 		expect(heldByNoWorker([w('missing'), w('setting_up', 'running')])).toBe(false);
 		expect(heldByNoWorker([w('queued_offline', 'queued_offline')])).toBe(false);
 		expect(heldByNoWorker([])).toBe(false);
+		expect(heldByNoWorker([w('failed', 'error'), w('unknown')])).toBe(false);
 	});
 });
 

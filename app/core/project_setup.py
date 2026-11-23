@@ -332,7 +332,7 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     that remote. Any other origin can only name one through the remote stored
     on its replicated ``projects_v2`` row.
     """
-    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.core.project_links import normalize_remote_url
     from app.db import projects_v2
 
     from app.core.project_remote import remote_names_origin
@@ -356,7 +356,6 @@ def _validate_clone_url(url: str, origin: str) -> str:
     check for typed URLs is unchanged.
     """
     from app.core.git_service import classify_clone_url
-    from app.core.project_links import auto_link_group_id
     from app.core.scrub import strip_url_userinfo
     from app.api.common import is_path_served
 
@@ -660,7 +659,7 @@ def remove_local(project_v2_id: str) -> Dict[str, Any]:
 
 def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
     from app.core.git_service import git_service
-    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.core.project_links import normalize_remote_url
 
     if not path.is_dir() or not git_service.is_git_repo(str(path)):
         return False
@@ -874,6 +873,18 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     kind = params.get("kind")
     mode = params.get("mode") or "auto"
     clone_url = params.get("clone_url")
+    if kind == "git" and origin:
+        from app.core.project_remote import pinned_remote
+        from app.db import projects_v2
+
+        # A request queued before the project moved to another repository
+        # still carries the old URL: a new copy clones the current one.
+        pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
+        if pinned:
+            try:
+                clone_url = _validate_clone_url(pinned, origin)
+            except ValueError as exc:
+                raise SetupError(INTERNAL, str(exc)) from exc
     existing = _registered_row(origin) if origin else None
     if existing is not None:
         return {"project_id": existing["id"], "already": True, "progress": 100}
@@ -1208,6 +1219,9 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         result = await run_sync(folder_action, action, body)
         if action == "change-folder" and "error" not in result:
             _after_local_registration_change()  # announce the updated local catalog
+            from app.core.project_remote import reconcile_soon
+
+            reconcile_soon()  # a copy of the project's previous repository switches now
         return result
     if action == "apply-remote":
         from app.core.project_remote import handle_apply

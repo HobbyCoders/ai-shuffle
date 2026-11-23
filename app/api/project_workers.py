@@ -300,6 +300,8 @@ def _worker_entry(pv2_id: str, view: Dict[str, Any], snapshot: Dict[str, Any],
 _LISTED_STATES = {"ready", "setting_up", "queued_offline", "failed", "offline_has"}
 #: A worker in one of these holds (or is getting) a copy: the project is live.
 _HELD_STATES = {"ready", "setting_up", "queued_offline", "offline_has"}
+#: Online but unreadable: it may hold a copy, so the project is never treated as unheld.
+_MAYBE_HELD_STATES = _HELD_STATES | {"unknown"}
 
 
 def _retired(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
@@ -347,7 +349,7 @@ async def projects_overview(request: Request, token: str = Depends(require_auth)
             w["state"] == "unknown" and pv2["id"] in offline_has.get(w["install_id"], set()) for w in workers)
         if not listed:
             continue
-        if _retired(pv2, snapshot["pv2s"]) and not any(w["state"] in _HELD_STATES for w in workers):
+        if _retired(pv2, snapshot["pv2s"]) and not any(w["state"] in _MAYBE_HELD_STATES for w in workers):
             continue  # nothing left of it anywhere: a failed old setup must not keep it stuck here
         info = _project_info(pv2, snapshot, views)
         projects.append({
@@ -641,7 +643,10 @@ async def _worker_folder_action(request: Request, install_id: str, project_id: O
         raise HTTPException(code if code in (400, 403, 404, 409) else 409, result["error"])
     if action == "change-folder":
         if local:
+            from app.core.project_remote import reconcile_soon
+
             setup._after_local_registration_change()  # announce the updated local catalog
+            reconcile_soon()  # a copy of the project's previous repository switches now
         else:
             setup.emit_changed()
     return result
@@ -711,13 +716,16 @@ async def forget_project(request: Request,
         raise HTTPException(status_code=404, detail="Project not found")
     installs, _me, snapshot, views, offline_has, latest = await _gather(pv2["id"])
     origin = pv2.get("origin") or ""
-    holders = [w["device_name"] or "a worker"
-               for w in (_worker_entry(pv2["id"], view, snapshot, offline_has, latest, origin)
-                         for view in _ordered_views(views))
-               if w["state"] in _HELD_STATES]
+    entries = [_worker_entry(pv2["id"], view, snapshot, offline_has, latest, origin)
+               for view in _ordered_views(views)]
+    holders = [w["device_name"] or "a worker" for w in entries if w["state"] in _HELD_STATES]
     if holders:
         raise HTTPException(status_code=409, detail=f"{', '.join(holders)} still has this project. "
                                                     "Remove it from Workers first.")
+    unread = [w["device_name"] or "a worker" for w in entries if w["state"] in _MAYBE_HELD_STATES]
+    if unread:
+        raise HTTPException(status_code=409, detail=f"Couldn't check whether {', '.join(unread)} still has "
+                                                    "this project. Try again in a moment.")
     await run_sync(projects_v2.set_forgotten, origin, True)
     for install in installs:
         await run_sync(setup_db.delete_requests_for, pv2["id"], install["id"])
