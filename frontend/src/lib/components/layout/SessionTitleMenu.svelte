@@ -109,6 +109,27 @@
 		};
 	});
 
+	// The desktop menu floats at the end of <body>, outside the page's tab
+	// order: move focus to its first item on open, and Tabbing off either end
+	// closes it and returns to the title, as if the menu sat right after it.
+	$effect(() => {
+		if (sheet || !open || !menuRef) return;
+		const menu = menuRef;
+		const items = () => [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)')];
+		items()[0]?.focus({ preventScroll: true });
+		const onTab = (e: KeyboardEvent) => {
+			if (e.key !== 'Tab') return;
+			const list = items();
+			const edge = e.shiftKey ? list[0] : list[list.length - 1];
+			if (document.activeElement !== edge) return;
+			e.preventDefault();
+			closeMenu();
+			triggerRef?.focus({ preventScroll: true });
+		};
+		menu.addEventListener('keydown', onTab);
+		return () => menu.removeEventListener('keydown', onTab);
+	});
+
 	function onDocClick(e: MouseEvent) {
 		// The menu floats in <body>, outside this root.
 		const target = e.target as Node;

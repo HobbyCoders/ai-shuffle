@@ -62,6 +62,7 @@ vi.mock('$lib/stores/notifications', () => ({
 	notify: mocks.toastPush,
 }));
 
+import { tick } from 'svelte';
 import SessionTitleMenu from './SessionTitleMenu.svelte';
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
@@ -130,16 +131,44 @@ describe('SessionTitleMenu', () => {
 		expect(screen.queryByRole('menu')).toBeNull();
 	});
 
-	it('hands focus back to the title when Escape closes the menu from a row', async () => {
+	it('moves focus into the menu on open and back to the title on Escape', async () => {
 		mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
 		renderMenu();
 
-		await openMenu();
-		screen.getByRole('menuitem', { name: 'Export for sharing (.md)' }).focus();
+		const title = screen.getByRole('button', { name: 'Design review' });
+		title.focus();
+		await fireEvent.click(title);
+		await tick();
+
+		expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Rename session' }));
 		await fireEvent.keyDown(window, { key: 'Escape' });
 
 		expect(screen.queryByRole('menu')).toBeNull();
-		expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Design review' }));
+		expect(document.activeElement).toBe(title);
+	});
+
+	it('closes and returns to the title when Tab leaves the last or first item', async () => {
+		renderMenu();
+		const title = screen.getByRole('button', { name: 'Design review' });
+
+		await openMenu();
+		await tick();
+		const del = screen.getByRole('menuitem', { name: 'Delete' });
+		del.focus();
+		await fireEvent.keyDown(del, { key: 'Tab' });
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(document.activeElement).toBe(title);
+
+		await openMenu();
+		await tick();
+		const first = screen.getByRole('menuitem', { name: 'Rename session' });
+		expect(document.activeElement).toBe(first);
+		// Tab between rows is left to the browser.
+		await fireEvent.keyDown(first, { key: 'Tab' });
+		expect(screen.queryByRole('menu')).not.toBeNull();
+		await fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(document.activeElement).toBe(title);
 	});
 
 	it('renders a non-interactive title when unbound', () => {
