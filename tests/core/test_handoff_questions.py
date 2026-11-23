@@ -88,7 +88,7 @@ async def test_question_only_move_keeps_answerable_card(by):
             "Your hand-off note: Keep implementing the reviewed change"
             in resume["prompt"]
         )
-        assert "Continue the work" in resume["prompt"]
+        assert "carry on from your last step" in resume["prompt"]
     else:
         assert resume is None
     [row] = interactions.get_pending_interactions("s1")
