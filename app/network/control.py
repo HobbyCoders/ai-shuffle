@@ -1247,24 +1247,46 @@ def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Opti
     original = database.get_session(session_id)
     if original is None:
         raise LookupError("Unknown session")
+    from app.api.sessions_fork import _discard_fork_checkout
     context_text = catalog.transcript_text(session_id)
     new_id = str(uuid.uuid4())
-    with transaction() as txn:
-        database.create_session(
-            session_id=new_id, profile_id=original.get("profile_id") or "default", project_id=None,
-            project_v2_id=original.get("project_v2_id"),
-            title=title or f"{original.get('title') or 'Session'} (forked)", api_user_id=api_user_id,
-            parent_session_id=session_id, is_active=True, model=original.get("model"),
-            effort=original.get("effort"), permission_mode=original.get("permission_mode"),
-            context_window=original.get("context_window"), **stored_pair(prior=original),
-            mode=original.get("mode"),
-            _conn=txn)
-        if creator:
-            from app.db import mobile_tool_identity
-            mobile_tool_identity.bind(new_id, creator, new=True, conn=txn)
-        if context_text:
-            database.add_session_message(
-                session_id=new_id, role="user", content=(
-                    "Context from the original session, which ran on another device:\n\n" + context_text),
-                metadata={"forked_from": session_id, "forked_context": True}, _conn=txn)
+    checkout = _fork_here_checkout(original, new_id)
+    bound = ({"project_v2_id": checkout.project_v2_id, "worktree_branch": checkout.branch,
+              "worktree_path": checkout.path} if checkout is not None
+             else {"project_v2_id": original.get("project_v2_id")})
+    try:
+        with transaction() as txn:
+            database.create_session(
+                session_id=new_id, profile_id=original.get("profile_id") or "default", project_id=None,
+                title=title or f"{original.get('title') or 'Session'} (forked)", api_user_id=api_user_id,
+                parent_session_id=session_id, is_active=True, model=original.get("model"),
+                effort=original.get("effort"), permission_mode=original.get("permission_mode"),
+                context_window=original.get("context_window"), **stored_pair(prior=original),
+                mode=original.get("mode"), **bound,
+                _conn=txn)
+            if creator:
+                from app.db import mobile_tool_identity
+                mobile_tool_identity.bind(new_id, creator, new=True, conn=txn)
+            if context_text:
+                database.add_session_message(
+                    session_id=new_id, role="user", content=(
+                        "Context from the original session, which ran on another device:\n\n" + context_text),
+                    metadata={"forked_from": session_id, "forked_context": True}, _conn=txn)
+    except BaseException:
+        _discard_fork_checkout(checkout)
+        raise
     return {"session_id": new_id, "parent_session_id": session_id, "context_chars": len(context_text)}
+
+
+def _fork_here_checkout(original: Dict[str, Any], new_id: str):
+    """The copy's own worktree, like every fork's (``sessions_fork._fork_checkout``).
+
+    The owner is offline, so its branch and uncommitted work may not exist
+    here: the copy starts at the commit this worker's checkout of the project
+    has (not a newer fetched one), never inside it. ``None`` when this worker
+    has no checkout of it (as before); a 409 when one cannot be made.
+    """
+    from app.api.sessions_fork import _fork_checkout
+    local = {**original, "worktree_id": None, "worktree_path": None, "worktree_branch": None, "branch": None}
+    checkout, _parent_path = _fork_checkout(local, new_id)
+    return checkout

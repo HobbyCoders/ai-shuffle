@@ -31,23 +31,30 @@ logger = logging.getLogger(__name__)
 fork_router = APIRouter(tags=["Sessions"])
 
 
-def _fork_inherited_fields(original_session: dict) -> dict:
+def _fork_inherited_fields(original_session: dict, checkout=None) -> dict:
     """The parent-session fields a fork must carry over.
 
-    A fork is a second driver for the SAME working context, so it inherits the
-    worktree binding (worktree_id / legacy columns / logical v2 branch) and the
-    run binding (model / effort / permission_mode / context_window / fast /
-    provider). Without this the fork row resolves its cwd to the project's BASE
-    checkout — sending a message in it then runs against the main checkout's
-    branch instead of the parent's worktree — and the composer shows registry
-    defaults instead of what the parent was running.
+    The fork inherits the run binding (model / effort / permission_mode /
+    context_window / fast / provider), or the composer would show registry
+    defaults instead of what the parent was running. With ``checkout`` (the
+    fork's own worktree, see ``_fork_checkout``) it is bound there; without
+    one (no project, or a folder that is not a Git repository) it shares the
+    parent's binding (worktree_id / legacy columns), or its cwd would resolve
+    to the project's base checkout instead of the parent's folder.
     """
+    if checkout is not None:
+        own = {"project_v2_id": checkout.project_v2_id, "worktree_id": None,
+               "worktree_branch": checkout.branch, "worktree_path": checkout.path}
+    else:
+        own = {"project_v2_id": original_session.get("project_v2_id"),
+               "worktree_id": original_session.get("worktree_id"),
+               "worktree_branch": original_session.get("worktree_branch"),
+               "worktree_path": original_session.get("worktree_path")}
     return {
         # The chat lane: a chat-lane chat has no project by design; forked into
         # the code lane it would ask for one before it could take a file. A
         # voice row's fork is a normal conversation, with no call bound to it.
         "mode": "chat" if original_session.get("mode") == "chat" else None,
-        "project_v2_id": original_session.get("project_v2_id"),
         "provider_id": original_session.get("provider_id"),
         "derive_provider_from_profile": False,
         "model": original_session.get("model"),
@@ -56,10 +63,140 @@ def _fork_inherited_fields(original_session: dict) -> dict:
         "context_window": original_session.get("context_window"),
         # The parent's pair at the tier it runs (never a stale refinement).
         **stored_pair(prior=original_session),
-        "worktree_id": original_session.get("worktree_id"),
-        "worktree_branch": original_session.get("worktree_branch"),
-        "worktree_path": original_session.get("worktree_path"),
+        **own,
     }
+
+
+#: A fork's own branch: ``chore/`` is a name an origin restricted to fix/,
+#: feat/ and chore/ branches accepts.
+FORK_BRANCH_PREFIX = "chore/fork-"
+
+#: Untracked files carried into a fork's checkout, at most (count, bytes):
+#: past either, none are copied, so a stray build folder can't stall a fork.
+_CARRY_UNTRACKED_LIMITS = (2000, 200 * 1024 * 1024)
+
+
+def fork_branch(new_session_id: str) -> str:
+    return f"{FORK_BRANCH_PREFIX}{new_session_id.removeprefix('ses-')[:12]}"
+
+
+def _fork_checkout(original_session: dict, new_session_id: str):
+    """``(checkout, parent_path)``: the fork's own worktree and branch, or
+    ``(None, None)`` when it has nothing to fork; ``parent_path`` is the
+    folder whose uncommitted changes ``_carry_uncommitted`` copies over once
+    the fork succeeded (while the checkout is clean, a failed fork can still
+    remove it).
+
+    Two chats in one folder switch and commit over each other, and a fork
+    moved to another worker would push to its parent's branch from a second
+    checkout. So a fork of a project chat gets a ``chore/fork-<id>`` worktree
+    made from the parent's current commit, with its uncommitted changes
+    carried over. A chat with no project, or one whose folder is not a Git
+    repository, has no branch to fork: the fork shares its folder, as before.
+    """
+    if not (original_session.get("project_v2_id") or original_session.get("project_id")):
+        return None, None
+    from app.core import project_resolver
+    from app.core.git_service import git_service
+    from app.core.worker_checkout import WorkerCheckoutError, prepare_worker_checkout
+
+    parent_path = None
+    base = None
+    try:
+        parent_path = project_resolver.resolve_session_cwd(dict(original_session))
+        # A root check, as provisioning makes: a non-Git project folder inside
+        # another repository must not take that repository's commit.
+        if parent_path and git_service.is_git_repo(parent_path):
+            head = git_service._run_git(parent_path, ["rev-parse", "HEAD"], timeout=5)
+            if head.returncode == 0 and head.stdout.strip():
+                base = head.stdout.strip()
+    except Exception:  # provisioning finds the checkout itself
+        logger.debug("Could not read the parent's commit for fork %s", new_session_id, exc_info=True)
+    try:
+        # Pinned to the parent's commit: the fork starts where its history
+        # left the files, not at a newer default branch.
+        checkout = prepare_worker_checkout(
+            original_session, new_session_id, original_session.get("profile_id"),
+            base_commit=base, share_read_only=False, branch=fork_branch(new_session_id),
+        )
+    except WorkerCheckoutError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"Could not give the fork its own checkout: {exc} Nothing was forked.") from exc
+    return checkout, (parent_path if base else None)
+
+
+def _carry_uncommitted(parent_path: str, fork_path: str, new_session_id: str) -> None:
+    """Copy the parent's uncommitted changes into the fork's new checkout.
+
+    ``git stash create`` records tracked changes as a commit without touching
+    the parent's files or index; applying it in the fork (a worktree of the
+    same repository) reproduces them. Untracked, non-ignored files are copied
+    as files, and a symlink as the same link: following it would turn a link
+    to an ignored file (``.env``) into a copy of its contents that a move
+    could commit. Best effort: the fork still works from the committed state.
+    """
+    import shutil
+    from pathlib import Path
+
+    from app.core.git_service import git_service
+
+    try:
+        stash = git_service._run_git(parent_path, ["stash", "create"], timeout=30)
+        sha = stash.stdout.strip() if stash.returncode == 0 else ""
+        if sha:
+            # --index keeps staged content that the working copy has since
+            # changed back; without it the staged edit is lost.
+            applied = git_service._run_git(fork_path, ["stash", "apply", "--index", sha], timeout=30)
+            if applied.returncode:
+                applied = git_service._run_git(fork_path, ["stash", "apply", sha], timeout=30)
+            if applied.returncode:
+                logger.warning("Fork %s: could not apply the parent's uncommitted changes: %s",
+                               new_session_id, (applied.stderr or "").strip()[:300])
+        listed = git_service._run_git(parent_path, ["ls-files", "--others", "--exclude-standard", "-z"],
+                                      timeout=30)
+        if listed.returncode:
+            return
+        names = [name for name in listed.stdout.split("\0") if name]
+        source, dest = Path(parent_path), Path(fork_path)
+        files = [source / name for name in names
+                 if (source / name).is_symlink() or (source / name).is_file()]
+        max_count, max_bytes = _CARRY_UNTRACKED_LIMITS
+        if len(files) > max_count or sum(f.lstat().st_size for f in files) > max_bytes:
+            logger.warning("Fork %s: %d untracked files are too many to copy; left behind",
+                           new_session_id, len(files))
+            return
+        for file in files:
+            target = dest / file.relative_to(source)
+            if target.exists() or target.is_symlink():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(file, target, follow_symlinks=False)
+            except OSError:
+                # Windows without symlink rights: leave the link behind
+                # rather than copy what it points at.
+                logger.warning("Fork %s: could not carry %s", new_session_id, file.name, exc_info=True)
+    except Exception:
+        logger.warning("Fork %s: could not carry the parent's uncommitted changes", new_session_id, exc_info=True)
+
+
+def _discard_fork_checkout(checkout) -> None:
+    """Remove a fork's checkout when the fork itself failed."""
+    if checkout is None:
+        return
+    from app.core.worker_checkout import discard_unused_worker_checkout
+
+    try:
+        discard_unused_worker_checkout(checkout)
+    except Exception:  # keep the fork's own error
+        logger.warning("Could not reclaim the unused fork checkout %s", checkout.path, exc_info=True)
+
+
+def _fork_logical_branch(original_session: dict, checkout) -> str:
+    """The fork's ``sessions.branch``: its own checkout's, else the parent's."""
+    if checkout is not None:
+        return checkout.branch
+    return (original_session.get("branch") or "").strip()
 
 
 def _restore_fork_branch(new_session_id: str, branch: str) -> None:
@@ -182,6 +319,7 @@ async def _fork_fluid_session(
     new_session_id: str,
     api_user_id: Optional[str],
     on_created: Callable[[str], Any],
+    checkout=None,
 ) -> ForkSessionResponse:
     """Fork a fluid-harness session through its node tree.
 
@@ -236,7 +374,7 @@ async def _fork_fluid_session(
         parent_session_id=session_id,
         fork_point_message_index=fork_message_index,
         is_active=True,
-        **_fork_inherited_fields(original_session),
+        **_fork_inherited_fields(original_session, checkout),
     )
     from app.core.message_resolver import resolve_working_dir
 
@@ -271,9 +409,9 @@ async def _fork_fluid_session(
     # create_session cannot carry the logical v2 branch (no parameter) — a
     # branch-bound parent must hand it to the fork or the fork resolves its cwd
     # to the base checkout.
-    parent_branch = (original_session.get("branch") or "").strip()
-    if parent_branch:
-        await run_sync(_restore_fork_branch, new_session_id, parent_branch)
+    fork_branch_name = _fork_logical_branch(original_session, checkout)
+    if fork_branch_name:
+        await run_sync(_restore_fork_branch, new_session_id, fork_branch_name)
 
     await run_sync(
         _copy_app_event_log,
@@ -333,9 +471,13 @@ async def fork_session(
     # below would always fail. Fork it there, as rewind and delete do.
     from app.network import control
 
+    target = (body.target_instance_id or "").strip() or None
+    if target is not None:
+        await _check_fork_target(request, original_session, target)
+
     owner = control.owner_of(original_session)
     if owner is not None:
-        return await _fork_on_owner(
+        result = await _fork_on_owner(
             request=request,
             session_id=session_id,
             original_session=original_session,
@@ -343,15 +485,83 @@ async def fork_session(
             message_index=body.message_index,
             api_user_id=api_user_id,
         )
+    else:
+        result = await _fork_owned(
+            session_id=session_id,
+            original_session=original_session,
+            message_index=body.message_index,
+            new_session_id=f"ses-{uuid.uuid4().hex[:16]}",
+            api_user_id=api_user_id,
+            on_created=lambda sid: record_creator(sid, request),
+        )
+    if target is not None:
+        result = await _move_fork(result, target)
+    return result
 
-    return await _fork_owned(
-        session_id=session_id,
-        original_session=original_session,
-        message_index=body.message_index,
-        new_session_id=f"ses-{uuid.uuid4().hex[:16]}",
-        api_user_id=api_user_id,
-        on_created=lambda sid: record_creator(sid, request),
-    )
+
+#: How long a fork to another worker waits for that worker to receive the
+#: fork's row before moving it there (the catalog replicates it).
+_FORK_MOVE_WAIT = 45.0
+_FORK_MOVE_POLL_SECONDS = 1.5
+
+
+async def _check_fork_target(request: Request, original_session: dict, target: str) -> None:
+    """Refuse a fork to a worker the fork could not move to, before forking.
+
+    The move itself checks all of this again (and the project checkout); this
+    only spares the user a fork left behind on the wrong worker.
+    """
+    from app.api.git_owner import refuse_subagent_git
+    from app.core.placement import capable_runners
+
+    # Moving a chat commits and pushes its branch. A preview link may move a
+    # chat this worker runs, so it may fork one to another worker too; forking
+    # a chat another worker runs is refused by ``_fork_on_owner`` (#641).
+    refuse_subagent_git(original_session)
+    install = await run_sync(database.get_install, target)
+    if not install:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown device: {target}")
+    device = install.get("device_name") or target
+    if target not in await run_sync(capable_runners, None, {}):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"{device} is offline. Bring it online or pick another worker. Nothing was forked.")
+
+
+async def _move_fork(result: ForkSessionResponse, target: str) -> ForkSessionResponse:
+    """Move a fork just made to ``target``, as "Move to another worker" does.
+
+    The fork already exists: a refused move leaves it where it was made and
+    says why in ``move_error``, and never deletes it.
+    """
+    from app.api.sessions import move_session_to
+    from app.network import catalog, control, engine
+
+    new_id = result.session_id
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _FORK_MOVE_WAIT
+    # The destination reads the fork from its own copy of the catalog: send
+    # the row now instead of at the next periodic scan.
+    if control.owner_of(await run_sync(database.get_session, new_id) or {}) is None:
+        try:
+            await run_sync(catalog.publish_owned, session_ids=[new_id])
+            engine.kick()
+        except Exception:  # the periodic scan publishes it anyway
+            logger.warning("Could not publish fork %s before moving it", new_id, exc_info=True)
+    while True:
+        row = await run_sync(database.get_session, new_id)
+        if row is None:
+            return result.model_copy(update={"move_error": "The fork was removed before it could move."})
+        try:
+            await move_session_to(new_id, row, target)
+            return result
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            # Not there yet: the destination has not received the fork's row.
+            if "Unknown session" in detail and loop.time() < deadline:
+                await asyncio.sleep(_FORK_MOVE_POLL_SECONDS)
+                continue
+            logger.info("Fork %s stays where it was made; moving it to %s failed: %s", new_id, target, detail)
+            return result.model_copy(update={"move_error": detail})
 
 
 async def _fork_owned(
@@ -368,16 +578,45 @@ async def _fork_owned(
     ``on_created(new_session_id)`` runs (blocking) right after the fork's row
     is written: it records who created the chat.
     """
-    import json
-    from app.core.config import settings
-    from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
-
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot fork session without SDK session ID"
         )
+
+    checkout, parent_path = await run_sync(_fork_checkout, original_session, new_session_id)
+    try:
+        result = await _fork_owned_copy(
+            session_id=session_id, original_session=original_session, sdk_session_id=sdk_session_id,
+            message_index=message_index, new_session_id=new_session_id, api_user_id=api_user_id,
+            on_created=on_created, checkout=checkout,
+        )
+    except BaseException:
+        await run_sync(_discard_fork_checkout, checkout)
+        raise
+    if checkout is not None:
+        if parent_path:
+            await run_sync(_carry_uncommitted, parent_path, checkout.path, new_session_id)
+        result.branch = checkout.branch
+    return result
+
+
+async def _fork_owned_copy(
+    *,
+    session_id: str,
+    original_session: dict,
+    sdk_session_id: str,
+    message_index: Optional[int],
+    new_session_id: str,
+    api_user_id: Optional[str],
+    on_created: Callable[[str], Any],
+    checkout,
+) -> ForkSessionResponse:
+    """The transcript copy and row of ``_fork_owned``, bound to ``checkout``."""
+    import json
+    from app.core.config import settings
+    from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
 
     # Get working directory
     working_dir = "/workspace"
@@ -401,6 +640,7 @@ async def _fork_owned(
             new_session_id=new_session_id,
             api_user_id=api_user_id,
             on_created=on_created,
+            checkout=checkout,
         )
 
     # Find the original JSONL file
@@ -480,16 +720,16 @@ async def _fork_owned(
         parent_session_id=session_id,
         fork_point_message_index=fork_message_index,
         is_active=True,
-        **_fork_inherited_fields(original_session),
+        **_fork_inherited_fields(original_session, checkout),
     )
 
     # The fork is the caller's chat: a paired device keeps it (#1877).
     await run_sync(on_created, new_session_id)
 
     # Same branch hand-off as the fluid path above.
-    parent_branch = (original_session.get("branch") or "").strip()
-    if parent_branch:
-        await run_sync(_restore_fork_branch, new_session_id, parent_branch)
+    fork_branch_name = _fork_logical_branch(original_session, checkout)
+    if fork_branch_name:
+        await run_sync(_restore_fork_branch, new_session_id, fork_branch_name)
 
     # Update with SDK session ID
     await run_sync(
@@ -497,6 +737,11 @@ async def _fork_owned(
         session_id=new_session_id,
         sdk_session_id=new_sdk_session_id
     )
+
+    # The CLI resumes a transcript from the folder the chat runs in: the
+    # fork's own checkout when it has one.
+    if checkout is not None:
+        working_dir = checkout.path
 
     # Create new JSONL file with entries up to and including fork point
     try:
@@ -668,6 +913,11 @@ async def _fork_on_owner(
 
     if result.get("session_id") != new_session_id:
         raise HTTPException(502, "The worker that runs this chat answered for a different fork")
+    branch = result.get("branch") if isinstance(result.get("branch"), str) else None
+    if branch:
+        # The copy was bound like its parent; the fork has its own branch
+        # there. Checkout paths are per worker, so none is recorded here.
+        await run_sync(_bind_copy_to_branch, new_session_id, branch)
     try:
         fork_point = int(result.get("fork_point_message_index"))
     except (TypeError, ValueError):
@@ -681,7 +931,19 @@ async def _fork_on_owner(
         fork_point_message_index=fork_point,
         message_count=int(result.get("message_count") or 0),
         status="success",
+        branch=branch,
     )
+
+
+def _bind_copy_to_branch(new_session_id: str, branch: str) -> None:
+    from app.db.base import get_cursor, get_db
+
+    with get_db() as conn:
+        get_cursor(conn).execute(
+            "UPDATE sessions SET branch = %s, worktree_branch = %s, worktree_path = NULL, worktree_id = NULL "
+            "WHERE id = %s",
+            (branch, branch, new_session_id),
+        )
 
 
 #: How long a repeated request waits for the first one to finish the copy.
@@ -768,9 +1030,13 @@ async def _fork_for_peer(
             raise ValueError("That session id is already in use")
         existing = await _completed_fork(new_session_id)
         fork_point = existing.get("fork_point_message_index") or 0
+        # A repeat must name the fork's own branch too, or the caller's copy
+        # stays bound to the parent's.
+        own_branch = fork_branch(new_session_id)
         return ForkSessionResponse(
             session_id=new_session_id, title=existing.get("title"), parent_session_id=session_id,
             fork_point_message_index=fork_point, message_count=fork_point + 1, status="success",
+            branch=own_branch if existing.get("worktree_branch") == own_branch else None,
         ).model_dump()
 
     # The fork keeps the API key that made it when this worker knows the key

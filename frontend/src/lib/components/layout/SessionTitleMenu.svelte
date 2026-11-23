@@ -15,11 +15,13 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { ChevronDown, GitFork, Pencil, X } from 'lucide-svelte';
+	import { ChevronDown, ChevronLeft, GitFork, Pencil, X } from 'lucide-svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { forkSession, getErrorMessage } from '$lib/api/client';
-	import { appData } from '$lib/stores/app-data.svelte';
+	import { appData, sessions } from '$lib/stores/app-data.svelte';
+	import { workerInstalls, refreshWorkerPresence } from '$lib/stores/worker-presence';
+	import { forkTargets, type ForkTarget } from './fork-targets';
 	import { activeSession } from '$lib/stores/active-session';
 	import ChatExportActions from './ChatExportActions.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -49,6 +51,26 @@
 	let renaming = $state(false);
 	let renameValue = $state('');
 	let pendingDelete = $state(false);
+	/** The menu shows the workers to fork to instead of the actions. */
+	let pickingWorker = $state(false);
+
+	// The owner decides, as on the runner badge; instance_id only counts on a
+	// row with no owner.
+	const sessionRow = $derived(($sessions ?? []).find((s) => s.id === sessionId) ?? null);
+	const targets = $derived(
+		forkTargets(
+			$workerInstalls,
+			sessionRow?.owner_device_id || sessionRow?.instance_id || null,
+			sessionRow?.is_remote ?? false
+		)
+	);
+
+	// Each opening reloads presence: a worker that came online since the list
+	// was loaded must be offered, and nothing else may be polling it.
+	$effect(() => {
+		if (!open) pickingWorker = false;
+		else void refreshWorkerPresence().catch(() => {});
+	});
 
 	function closeMenu() {
 		closeDropdown('session-title');
@@ -168,14 +190,22 @@
 		}
 	}
 
-	async function handleFork() {
+	async function handleFork(target?: ForkTarget) {
 		if (!sessionId || !bound) return;
 		if (sheet) closeSheet();
 		else closeMenu();
 		try {
-			const result = await forkSession(sessionId);
+			// Moving the fork pushes its branch and syncs the other worker: say
+			// it started, it can take a while.
+			if (target) notify(`Forking to ${target.label}…`, { severity: 'info' });
+			const result = target ? await forkSession(sessionId, undefined, target.id) : await forkSession(sessionId);
 			await appData.loadSessions();
-			notify('Chat forked', { severity: 'success' });
+			if (result.move_error) {
+				notify(`Chat forked, but it could not move to ${target?.label ?? 'that worker'}: ${result.move_error}`,
+					{ severity: 'warning' });
+			} else {
+				notify(target ? `Chat forked to ${target.label}` : 'Chat forked', { severity: 'success' });
+			}
 			window.dispatchEvent(new CustomEvent('open-session', { detail: { sessionId: result.session_id } }));
 		} catch (e) {
 			// The server says why (for a chat another worker runs: that worker
@@ -252,11 +282,25 @@
 					{:else}
 						<p class="stm-title">{title}</p>
 					{/if}
-					<div class="stm-list" role="group" aria-label="Session actions">
-						<button type="button" class="sheet-row" disabled={renaming} onclick={startRename}><Pencil size={17} aria-hidden="true" />Rename session</button>
-						<button type="button" class="sheet-row" disabled={renaming} onclick={handleFork}><GitFork size={17} aria-hidden="true" />Fork session</button>
-						<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
-					</div>
+					{#if pickingWorker}
+						<div class="stm-list" role="group" aria-label="Fork to another worker">
+							<button type="button" class="sheet-row" onclick={() => (pickingWorker = false)}><ChevronLeft size={17} aria-hidden="true" />Fork to another worker</button>
+							{#each targets as target (target.id)}
+								<button type="button" class="sheet-row" disabled={!target.online} onclick={() => handleFork(target)}>
+									<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+								</button>
+							{/each}
+						</div>
+					{:else}
+						<div class="stm-list" role="group" aria-label="Session actions">
+							<button type="button" class="sheet-row" disabled={renaming} onclick={startRename}><Pencil size={17} aria-hidden="true" />Rename session</button>
+							<button type="button" class="sheet-row" disabled={renaming} onclick={() => handleFork()}><GitFork size={17} aria-hidden="true" />Fork session</button>
+							{#if targets.length}
+								<button type="button" class="sheet-row" disabled={renaming} onclick={() => (pickingWorker = true)}><GitFork size={17} aria-hidden="true" />Fork to another worker…</button>
+							{/if}
+							<button type="button" class="sheet-row danger" disabled={renaming} onclick={startDelete}>Delete</button>
+						</div>
+					{/if}
 				</div>
 			</div>
 		{/if}
@@ -296,14 +340,32 @@
 			<span class="title-trigger" aria-current="page">{title}</span>
 		{/if}
 
-		{#if open && bound && !renaming}
+		{#if open && bound && !renaming && pickingWorker}
+			<div class="menu" role="menu" aria-label="Fork to another worker">
+				<button type="button" class="dropdown-item menu-back" role="menuitem" onclick={() => (pickingWorker = false)}>
+					<ChevronLeft size={14} aria-hidden="true" />Fork to another worker
+				</button>
+				<div class="dropdown-divider" role="separator"></div>
+				{#each targets as target (target.id)}
+					<button type="button" class="dropdown-item worker-item" role="menuitem" disabled={!target.online} onclick={() => handleFork(target)}>
+						<span class="worker-dot" class:online={target.online} aria-hidden="true"></span>{target.label}{#if !target.online}<span class="worker-note">offline</span>{/if}
+					</button>
+				{/each}
+			</div>
+		{:else if open && bound && !renaming}
 			<div class="menu" role="menu" aria-label="Session actions">
 				<button type="button" class="dropdown-item" role="menuitem" onclick={startRename}>
 					Rename session
 				</button>
-				<button type="button" class="dropdown-item" role="menuitem" onclick={handleFork}>
+				<button type="button" class="dropdown-item" role="menuitem" onclick={() => handleFork()}>
 					Fork session
 				</button>
+				{#if targets.length}
+					<!-- Keeps the menu open: the click swaps it to the worker list. -->
+					<button type="button" class="dropdown-item" role="menuitem" onclick={(e) => { e.stopPropagation(); pickingWorker = true; }}>
+						Fork to another worker…
+					</button>
+				{/if}
 				{#if sessionId && activeSession.current.sessionId === sessionId && (activeSession.current.messages?.length ?? 0) > 0}
 					<div class="menu-exports">
 						<div class="dropdown-divider" role="separator"></div>
@@ -456,6 +518,9 @@
 		color: var(--foreground);
 		font-family: inherit;
 		font-size: 13px;
+		/* Keep a row on one line: the menu sizes to its widest row, not to a
+		   short chat title it hangs from. */
+		white-space: nowrap;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease, color 120ms ease;
@@ -472,6 +537,37 @@
 	}
 	.dropdown-item.danger:hover {
 		background: color-mix(in oklch, var(--destructive) 12%, transparent);
+	}
+	.dropdown-item:disabled,
+	.sheet-row:disabled {
+		color: var(--muted-foreground);
+		cursor: default;
+	}
+	.dropdown-item:disabled:hover { background: transparent; }
+	.menu-back {
+		gap: 4px;
+		color: var(--muted-foreground);
+	}
+
+	/* "Fork to another worker" rows: a presence dot, and why a row is greyed. */
+	.worker-dot {
+		flex: none;
+		width: 7px;
+		height: 7px;
+		margin-right: 8px;
+		border-radius: 50%;
+		background: var(--muted-foreground);
+		opacity: 0.5;
+	}
+	.worker-dot.online {
+		background: var(--success, oklch(0.7 0.15 150));
+		opacity: 1;
+	}
+	.worker-note {
+		margin-left: auto;
+		padding-left: 12px;
+		font-size: 12px;
+		color: var(--muted-foreground);
 	}
 
 	/* The header shows these as icons until a phone-width bar needs the room. */
