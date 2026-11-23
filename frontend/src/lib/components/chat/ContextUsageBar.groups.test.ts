@@ -262,6 +262,19 @@ describe('usage groups', () => {
 		expect(group(await open(), 'group:api').summary()).toBe('');
 	});
 
+	it('a standalone install (device id = its instance id) still names its fal balance for a fal-only tool', async () => {
+		rateLimit.applySnapshot({
+			available: true, fetched_at: T0 / 1000, windows: [], providers: [FAL, KIMI_API], usage_links: [],
+			self_instance_id: 'install-here', self_device_id: 'install-here',
+			snapshots: [{ instance_id: 'install-here', available: false, windows: [] }],
+		});
+		mocks.state.messages = [{
+			...falImage(), toolName: 'mcp__ai-tools__editImage',
+			toolResult: JSON.stringify({ success: true, provider_used: 'fal-ai' }),
+		} as ChatMessage];
+		expect(group(await open(), 'group:api').summary()).toBe('fal.ai $8.40 left');
+	});
+
 	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		snapshot();

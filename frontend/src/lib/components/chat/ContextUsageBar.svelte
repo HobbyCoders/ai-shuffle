@@ -1177,14 +1177,18 @@
 	// result naming its worker counts only when that is this device. One that
 	// names none (the fal-only tools, older results, or "local") cannot be
 	// placed once a chat has moved between workers, so it counts only on an
-	// install with no network identity, where the chat never left this one.
+	// install with no network identity, where the chat never left this one. A
+	// standalone install reports its own registry id as its device id
+	// (app/core/usage_limits.py), so a device id equal to the instance id is
+	// not a network one.
 	const toolApiAccount = $derived.by(() => {
 		const charge = lastPaidApiCharge($activeSession.messages ?? []);
 		if (!charge || charge.account !== FAL_USAGE_ACCOUNT) return charge?.account ?? null;
 		const self = $rateLimit.selfDeviceId;
+		const networked = Boolean(self) && self !== $rateLimit.selfInstanceId;
 		const ranHere = charge.worker && charge.worker !== 'local'
 			? charge.worker === self
-			: !self && isSelfTarget($rateLimit, target);
+			: !networked && isSelfTarget($rateLimit, target);
 		return ranHere ? charge.account : null;
 	});
 	const usageGroups = $derived.by<UsageGroup[]>(() => {
