@@ -21,7 +21,7 @@ list a folder below the top level of it count as naming it; tests that list
 the whole checkout or a top-level folder run too, but cannot narrow the
 choice. A file nothing names that way, any conftest, and any file under
 tests/ that is not Python (fixtures, data, snapshots) print ``all``. Fluid's
-own conftests (``FLUID_CONFTESTS``) are the exception: the selectable backend
+own conftests (``EXEMPT_CONFTESTS``) are the exception: the selectable backend
 shards never load them, so they count as files like any other.
 
 In CI a pull request's change starts at the map's commit, so it holds what
@@ -103,7 +103,7 @@ MIN_MAPPED_TESTS = 100
 # so does a test of the policy suite that starts pytest on a Fluid test, but
 # that suite always runs in full, outside shard selection.
 # Any other conftest, a new one under fluid/ too, still runs every test.
-FLUID_CONFTESTS = frozenset({"fluid/conftest.py", "fluid/tests/conftest.py"})
+EXEMPT_CONFTESTS = frozenset({"fluid/conftest.py", "fluid/tests/conftest.py"})
 # Names too common to say which file a test means.
 GENERIC_NAMES = {"__init__.py", "conftest.py", "README.md", "package.json", "package-lock.json", "index.ts",
                  "index.js", "main.py", "config.py", "utils.py", "base.py", "models.py"}
@@ -647,7 +647,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
                 raise FullSuite(f"{path} is a package manifest or lockfile")
             # Any conftest, the root one too: pytest loads it for every test
             # beneath it, and those in test* folders even with no test beneath.
-            if PurePosixPath(path).name == "conftest.py" and path not in FLUID_CONFTESTS:
+            if PurePosixPath(path).name == "conftest.py" and path not in EXEMPT_CONFTESTS:
                 raise FullSuite(f"{path} is a conftest")
             if "\ufffd" in path:
                 raise FullSuite(f"{path!r} is not a UTF-8 file name")
@@ -668,7 +668,7 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
             else:
                 # Python outside the mapped folders may be imported unseen;
                 # Fluid's conftests are loaded by no selectable backend test.
-                unseen = p.suffix != ".py" or path in FLUID_CONFTESTS
+                unseen = p.suffix != ".py" or path in EXEMPT_CONFTESTS
                 selector.other_change(path, main_only=path in main_only and unseen)
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))

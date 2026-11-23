@@ -156,7 +156,7 @@ def test_any_conftest_runs_everything(changed):
     assert result == "all" and reasons == [f"{changed} is a conftest"]
 
 
-@pytest.mark.parametrize("changed", sorted(tm.FLUID_CONFTESTS))
+@pytest.mark.parametrize("changed", sorted(tm.EXEMPT_CONFTESTS))
 def test_a_fluid_conftest_is_a_file_like_any_other(changed):
     # The selectable backend shards never load it; CI Fluid runs the tests that do.
     result, reasons = select([changed], **{changed: "import os\n"})
