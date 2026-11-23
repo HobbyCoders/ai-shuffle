@@ -12,8 +12,8 @@
 	import { vaultSummary } from '$lib/stores/vault';
 	import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
-	/** `dock`: the desktop composer's icon row. `cell`: the phone quick bar. */
-	let { variant = 'dock' }: { variant?: 'dock' | 'cell' } = $props();
+	/** `dock`: the desktop composer's icon row. (The phone opens the Vault from Chat controls.) */
+	let { variant = 'dock' }: { variant?: 'dock' } = $props();
 
 	// The store describes the one mounted panel (the open chat's), which clears
 	// its entry when it unmounts: the chip always controls the panel on screen.
@@ -76,8 +76,6 @@
 	.vault-chip:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.vault-chip.open, .vault-chip[data-state='waiting'] { color: var(--foreground); }
 	.vault-chip.open { background: var(--muted); }
-	/* The phone quick bar's cell size: a full 44px touch target. */
-	.vault-chip.cell { width: 44px; height: 44px; min-height: 44px; border-radius: var(--radius, 0.75rem); }
 	@media (max-width: 480px) { .vault-chip.dock { width: 40px; height: 44px; } }
 	@media (max-width: 340px) { .vault-chip.dock { width: 32px; } }
 

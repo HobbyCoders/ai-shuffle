@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode } from '$lib/stores/sessionMode.svelte';
+import { vaultSummary } from '$lib/stores/vault';
 import ControlsDock from './ControlsDock.svelte';
 import '../../test-stubs/composer-dom';
 import { api } from '$lib/api/client';
@@ -45,5 +46,15 @@ describe('ControlsDock in every chat', () => {
 		expect(screen.getByRole('button', { name: /^Effort:/ })).toBeTruthy();
 		expect(screen.getAllByRole('button', { name: /^Context and usage/ }).length).toBeGreaterThan(0);
 		expect(screen.getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
+	});
+
+	it('shows the Vault only in a chat under way, like the browser and terminal', async () => {
+		vaultSummary.set({ sessionId: 'chat-1', pending: 1, active: 0, saved: 0, error: false, manageable: true, panelId: 'vault-panel', open: vi.fn(), toggle: vi.fn() });
+		const view = render(ControlsDock, { props: { onBrowserToggle: vi.fn(), newChat: true } });
+		await waitFor(() => expect(screen.getByRole('button', { name: /^Model:/ })).toBeTruthy());
+		expect(screen.queryByRole('button', { name: /^Vault/ })).toBeNull();
+		await view.rerender({ onBrowserToggle: vi.fn(), newChat: false });
+		expect(screen.getByRole('button', { name: 'Vault: 1 waiting for you' })).toBeTruthy();
+		vaultSummary.set(null);
 	});
 });

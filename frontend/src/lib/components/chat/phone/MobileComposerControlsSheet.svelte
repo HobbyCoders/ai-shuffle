@@ -12,11 +12,12 @@
 	 * The phone's chat controls (issue #1816, design 4): a quick bar under the
 	 * composer's text field and the full "Chat controls" panel it pulls up.
 	 *
-	 * Quick bar: one quiet line of words, Model · Access · Controls, plus the
-	 * usage ring only while usage needs attention. A tap opens a compact picker
-	 * (Access) or a page (Model, usage); a sideways swipe on Access steps one
-	 * level but never lands on Bypass. Reasoning effort lives in the panel.
-	 * Dragging the bar up, or
+	 * Quick bar: one quiet line of words. Model and Effort on the left; a new
+	 * chat adds Access, a chat under way has the usage ring on the right, always
+	 * shown. A tap opens a compact picker (Effort, Access) or a page (Model,
+	 * usage); a sideways swipe on Access steps one level but never lands on
+	 * Bypass. The Controls button is not on the bar: it sits on the context
+	 * line under the composer (ComposerContextLine). Dragging the bar up, or
 	 * tapping Controls, opens the panel; dragging its grip or header down, the
 	 * scrim and Escape close it. Every gesture follows the finger and has a tap.
 	 *
@@ -24,8 +25,9 @@
 	 * main page is an inset grouped list: a running-work chip, then Model (model, context and usage, reasoning
 	 * effort, Fast mode), Permissions (tool access, Away) and Setup (the
 	 * shared ContextPillBar selectors drawn as rows), over a pinned action bar
-	 * (Call / Browser / Terminal / Export). Rows with a chevron open a page
-	 * that slides in from the right inside the same sheet, under a centred
+	 * (Browser / Terminal / Vault). Voice calls start from the composer's Talk
+	 * circle and exports from the chat's title menu. Rows with a chevron open a
+	 * page that slides in from the right inside the same sheet, under a centred
 	 * title and a Back arrow:
 	 *   Model           the app's own ModelPickerPanel;
 	 *   Context/usage   the shared ContextUsageBar details, inline;
@@ -52,7 +54,7 @@
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
-		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, X, Zap
+		Moon, ShieldCheck, ShieldOff, Sparkles, SquareTerminal, Vault, X, Zap
 	} from 'lucide-svelte';
 	import { activeSession, streamingSessions } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
@@ -61,9 +63,9 @@
 	import { swarms } from '$lib/stores/swarms';
 	import { buildRows, plural, watchCount } from '$lib/components/chat/running-tasks';
 	import { closeDropdown } from '$lib/stores/header-dropdowns';
+	import { vaultSummary } from '$lib/stores/vault';
 	import ContextPillBar from '$lib/components/chat/ContextPillBar.svelte';
 	import ContextUsageBar from '$lib/components/chat/ContextUsageBar.svelte';
-	import VaultChip from '$lib/components/chat/VaultChip.svelte';
 	import RunningTasksList from '$lib/components/chat/RunningTasksList.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusModelSearch, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
@@ -89,12 +91,13 @@
 		ultrafastSupported = false, ultrafastEnabled = false, ultrafastBilling = 'api', onSelectSpeed,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, awayGlobal = false, onToggleAway,
-		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
+		onUsageOpenChange, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
 	const uid = $props.id();
 	const effortDefaultNoteId = `${uid}-effort-default`;
+	const quickEffortNoteId = `${uid}-quick-effort-default`;
 
-	type Picker = 'access';
+	type Picker = 'access' | 'effort';
 	type Page = 'main' | 'model' | 'usage' | 'agent' | 'runner' | 'project' | 'tasks';
 	const PAGE_TITLES: Record<Page, string> = {
 		main: 'Chat controls',
@@ -157,8 +160,14 @@
 	]);
 	/** The effort row's value: the level, or why there is no choice. */
 	const panelEffortValue = $derived(effortLocked && effortKnown ? 'Set by the model' : effortLabel);
+	/** The quick bar's effort cell: only where there is a level to pick. */
+	const effortCellShown = $derived(!effortLocked);
+	/** The bar's effort word: the pinned level, else "Auto". */
+	const effortCellLabel = $derived(effortPinned ? (effortOptions.find((o) => o.value === effortValue)?.label ?? effortLabel) : 'Auto');
 	// Tool access exists in code chats; chat and voice run a fixed tool surface.
 	const accessShown = $derived(showCodeControls);
+	/** On the bar only before the first message; a chat under way changes it in the panel. */
+	const accessCellShown = $derived(accessShown && newChat);
 	const accessValues = $derived(permissionOptions.map((o) => o.value));
 	// While the chat's own access is still loading (#418) no mode is selected:
 	// showing Ask would be a guess, and stepping from a guess picks the wrong one.
@@ -168,6 +177,8 @@
 	/** Away as the quick bar shows it: the desktop composer's "· Away" badge. */
 	const awayChecked = $derived(awayGlobal || (awayEnabled && awayAvailable));
 	const awayOn = $derived(awayShown && awayChecked);
+	/** Away's moon rides the Tool access cell; with that cell off the bar it moves to the model cell. */
+	const awayOnModel = $derived(awayOn && !accessCellShown);
 	const fastShown = $derived(fastSupported && !modelLocked);
 	// Where the route carries Ultrafast, Fast becomes a Standard / Fast /
 	// Ultrafast pick; elsewhere the Fast switch stays as it is.
@@ -212,8 +223,19 @@
 		runningCount ? `${runningCount} ${runningCount === 1 ? 'task' : 'tasks'} running` : runHead
 	);
 	const showRunChip = $derived(runningCount > 0 || liveWatches > 0 || preferenceOnly);
-	/** The bottom action bar shows only when it has an action to carry. */
-	const hasFootActions = $derived(!!callAction || !!onBrowserToggle || !!terminal);
+	// The Vault action: a chat under way whose Vault panel has something to show
+	// (a request, access or a saved sign-in), as the composer's Vault chip was.
+	const vault = $derived($vaultSummary);
+	const vaultShown = $derived(!newChat && !!vault?.manageable && !!vault.toggle);
+	/** The pinned action bar shows only when it has an action to offer. */
+	const footShown = $derived(!!onBrowserToggle || !!terminal || (vaultShown && !!vault));
+	const vaultLabel = $derived(
+		!vault ? 'Vault'
+			: vault.pending > 0 ? `Vault: ${vault.pending} waiting for you`
+			: vault.error ? 'Vault: unavailable'
+			: vault.active > 0 ? `Vault: ${vault.active} active`
+			: 'Vault'
+	);
 
 	// ── Quick bar: pickers and sideways steps ─────────────────────────────
 	let picker = $state<Picker | null>(null);
@@ -221,7 +243,6 @@
 	let preview = $state<{ cell: Picker; value: string } | null>(null);
 	let barRef = $state<HTMLElement | null>(null);
 	let pickerRef = $state<HTMLElement | null>(null);
-	let controlsCellRef = $state<HTMLButtonElement | null>(null);
 	let usageBar = $state<ContextUsageBar | null>(null);
 	/** Context used, read back from the shared ring for the panel's usage row. */
 	let usagePercent = $state(0);
@@ -232,8 +253,6 @@
 	let usageWindowTokens = $state<string | null>(null);
 	const RING_C = 2 * Math.PI * 11;
 	const usageSeverity = $derived(usagePercent > 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'ok');
-	/** The footer shows usage only when there is something to do about it. */
-	const usageCalm = $derived(usageSeverity === 'ok' && !usageOverLimit);
 	const usageTokensLine = $derived(
 		usageUnknownUsed != null ? `${usageUnknownUsed} tokens used`
 			: usageUsedTokens && usageWindowTokens ? `${usageUsedTokens} of ${usageWindowTokens} tokens`
@@ -257,6 +276,13 @@
 	function pickAccess(value: string) {
 		picker = null;
 		if (value !== accessValue && !permissionUpdating) onPermissionSelect(value);
+	}
+
+	/** The bar's effort picker: a level pins it; null goes back to Auto. */
+	function pickEffort(value: string | null) {
+		// The picked option goes away with the picker: focus goes back to its cell.
+		closePicker(true);
+		if (value === null ? effortPinned : value !== effortValue || !effortPinned) onEffortSelect(value);
 	}
 
 	function handleDocumentPointerDown(event: PointerEvent) {
@@ -300,7 +326,19 @@
 		else if (!next) onClose();
 	}
 
+	/** Set from a close until the page state goes back to the list (after the slide, or on reopening). */
+	let resetPending = false;
+	function resetPages() {
+		resetPending = false;
+		setPage('main');
+		leaving = null;
+		direct = false;
+		opener = null;
+	}
+
 	function openPanel(target: Page = 'main') {
+		// The bar picks its own page: a pending reset must not undo it.
+		resetPending = false;
 		closePicker();
 		setPage(target);
 		direct = target !== 'main';
@@ -534,6 +572,10 @@
 			if (isOpen) {
 				closingPanel = false;
 				escapeLostFocus = false;
+				// Reopened inside the closing slide by a trigger outside the sheet
+				// (Controls on the context line): start from the list, not the page
+				// it closed on, which would close it again (a direct page with no menu).
+				if (resetPending) resetPages();
 				clearGhosts();
 				rendered = true;
 				picker = null;
@@ -554,22 +596,24 @@
 			} else {
 				setupDirect = false;
 				dismissHostedMenus();
+				resetPending = true;
 				renderTimer = setTimeout(() => {
 					rendered = false;
 					clearGhosts();
-					setPage('main');
-					leaving = null;
-					direct = false;
-					opener = null;
+					resetPages();
 				}, 400);
 				// Focus on another control is never taken back.
 				const holds = escapeLostFocus ? pickerHoldsFocus(panelRef) : panelRef?.contains(document.activeElement);
 				escapeLostFocus = false;
 				if (holds) {
 					// A page opened straight from its bar cell hands focus back to
-					// that cell (Escape on the model page, #1339); else the controls cell.
+					// that cell (Escape on the model page, #1339); else the Controls
+					// item on the context line, which names this panel.
 					const cell = direct ? barRef?.querySelector<HTMLElement>(`[data-cell="${pageName}"]`) : null;
-					(cell ?? controlsCellRef)?.focus({ preventScroll: true });
+					const trigger = panelId
+						? [...document.querySelectorAll<HTMLElement>('[data-controls-trigger]')].find((el) => el.getAttribute('aria-controls') === panelId)
+						: undefined;
+					(cell ?? trigger)?.focus({ preventScroll: true });
 				}
 				if (historyEntry) {
 					historyEntry = false;
@@ -884,16 +928,32 @@
 			class:locked={modelLocked}
 			data-cell="model"
 			aria-haspopup="dialog"
-			aria-label={`Model: ${modelLabel}${labelSpeed !== 'standard' ? `, ${SPEED_NAMES[labelSpeed].toLowerCase()} mode` : ''}${modelLocked ? ', locked' : ''}`}
+			aria-label={`Model: ${modelLabel}${labelSpeed !== 'standard' ? `, ${SPEED_NAMES[labelSpeed].toLowerCase()} mode` : ''}${modelLocked ? ', locked' : ''}${awayOnModel ? ', Away mode on' : ''}`}
 			aria-disabled={modelLocked || undefined}
 			onclick={() => { if (!modelLocked) openPanel('model'); }}
 		>
 			<span class="ql"><SpeedLabel text={modelLabel} speed={labelSpeed} bolt={false} /></span>
 			{#if labelSpeed !== 'standard'}<span class="qi" data-fast-badge data-speed={labelSpeed} aria-hidden="true"><Zap size={12} fill="currentColor" />{#if labelSpeed === 'ultrafast'}<Zap size={12} fill="currentColor" />{/if}</span>{/if}
+			{#if awayOnModel}<span class="qi" data-away-badge aria-hidden="true"><Moon size={12} fill="currentColor" /></span>{/if}
 			{#if modelLocked}<Lock size={14} class="qchev" aria-hidden="true" />{:else}<ChevronDown size={14} class="qchev" aria-hidden="true" />{/if}
 		</button>
 
-		{#if accessShown}
+		{#if effortCellShown}
+			<button
+				type="button"
+				class="qcell"
+				data-cell="effort"
+				aria-haspopup="dialog"
+				aria-expanded={picker === 'effort'}
+				aria-label={`Reasoning effort: ${effortLabel}`}
+				onclick={() => togglePicker('effort')}
+			>
+				<span class="ql">{effortCellLabel}</span>
+				<ChevronDown size={14} class="qchev" aria-hidden="true" />
+			</button>
+		{/if}
+
+		{#if accessCellShown}
 			<button
 				type="button"
 				class="qcell"
@@ -911,15 +971,12 @@
 			</button>
 		{/if}
 
-		<!-- The Vault: only when this chat has a request, access or a saved sign-in. -->
-		<VaultChip variant="cell" />
-
 		<!-- Always mounted: this cell measures usage and hosts its details sheet.
-		     Only the ring is hidden while there is nothing to act on; the same numbers
-		     stay one tap away under Context and usage in Chat controls. -->
+		     The ring shows in every chat under way; a new chat has used no
+		     context yet, so its ring is hidden. -->
 		<div
 			class="qcell usage"
-			class:calm={usageCalm}
+			class:calm={newChat}
 			class:held={usageHeld}
 			class:moved={usageDragOffset !== null}
 			data-cell="usage"
@@ -934,22 +991,6 @@
 				{/snippet}
 			</ContextUsageBar>
 		</div>
-
-		<button
-			bind:this={controlsCellRef}
-			type="button"
-			class="qcell controls"
-			data-cell="controls"
-			aria-haspopup="dialog"
-			aria-controls={panelId}
-			aria-expanded={open}
-			aria-label={`All chat controls${runningCount ? `, ${runningCount} running` : ''}`}
-			onclick={() => (open ? closePanel() : openPanel('main'))}
-		>
-			<span class="ql">Controls</span>
-			{#if runningCount}<span class="qcount" aria-hidden="true">{runningCount}</span>{/if}
-			<ChevronDown size={14} class="qchev" aria-hidden="true" />
-		</button>
 	</div>
 
 	{#if picker}
@@ -957,10 +998,32 @@
 			bind:this={pickerRef}
 			class="qpick"
 			role="dialog"
-			aria-label="Tool access"
+			aria-label={picker === 'effort' ? 'Reasoning effort' : 'Tool access'}
 			data-composer-owned-overlay="true"
 			data-no-drawer-swipe
 		>
+			{#if picker === 'effort'}
+				<div class="qp-h">
+					<span>Reasoning effort</span>
+					<span class="qp-help">{effortDefaultValue ? 'Dashed: model default' : ''}</span>
+				</div>
+				<div class="segs effort" role="radiogroup" aria-label="Reasoning effort" style:--n={effortOptions.length + 1}>
+					<span id={quickEffortNoteId} hidden>Model default</span>
+					<button type="button" class="seg" role="radio" aria-checked={!effortPinned}
+						title="Auto: run at the model's default" onclick={() => pickEffort(null)}>
+						<span>Auto</span>
+					</button>
+					{#each effortOptions as option (option.value)}
+						<button type="button" class="seg" role="radio"
+							aria-checked={effortPinned && option.value === effortValue}
+							class:auto={option.value === effortDefaultValue}
+							aria-describedby={option.value === effortDefaultValue ? quickEffortNoteId : undefined}
+							title={option.description} onclick={() => pickEffort(option.value)}>
+							<span>{option.label}</span>
+						</button>
+					{/each}
+				</div>
+			{:else}
 				<div class="qp-h">
 					<span>Tool access</span>
 					<span class="qp-help" aria-live="polite">
@@ -978,6 +1041,7 @@
 						</button>
 					{/each}
 				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -1021,7 +1085,7 @@
 
 		<div class="mcp-pages">
 			<!-- ═══ Main: the inset grouped list ═══ -->
-			<section class="mcp-page" data-page="main" class:no-foot={!hasFootActions} class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
+			<section class="mcp-page" data-page="main" class:no-foot={!footShown} class:active={!onSubPage} class:under={onSubPage} inert={onSubPage} aria-label="Chat controls">
 				<div class="mcp-scroll" bind:this={bodyRef}>
 					{#if rendered || panelVisible}
 						{#if showRunChip}
@@ -1157,12 +1221,9 @@
 					{/if}
 				</div>
 
-				{#if hasFootActions}
+				{#if footShown}
 				<footer class="mcp-foot">
 					<div class="actions" role="group" aria-label="More actions">
-						{#if callAction}
-							<div class="act call-act">{@render callAction()}<span class="act-label" aria-hidden="true">Call</span></div>
-						{/if}
 						{#if onBrowserToggle}
 							<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Toggle live browser view">
 								<Globe size={18} aria-hidden="true" /><span class="act-label">Browser</span>
@@ -1172,6 +1233,14 @@
 							<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
 								onclick={toggleTerminal} aria-label="Toggle terminal" title={terminal.disabledReason ?? undefined}>
 								<SquareTerminal size={18} aria-hidden="true" /><span class="act-label">Terminal</span>
+							</button>
+						{/if}
+						{#if vaultShown && vault}
+							<!-- The Vault panel is its own dialog: Chat controls step aside for it. -->
+							<button type="button" class="act" data-vault-action aria-label={vaultLabel}
+								onclick={() => { closePanel(); vault.open(); }}>
+								<Vault size={18} aria-hidden="true" /><span class="act-label">Vault</span>
+								{#if vault.pending > 0}<span class="act-dot" aria-hidden="true"></span>{/if}
 							</button>
 						{/if}
 					</div>
@@ -1275,7 +1344,6 @@
 	.qcell[aria-expanded='true'] { background: var(--muted); }
 	/* The model name is the only cell that gives way on a narrow phone. */
 	.qcell.model { flex: 0 1 auto; min-width: 0; }
-	.qcell.controls { margin-left: auto; }
 	.qi { display: grid; place-items: center; flex: none; color: var(--primary); }
 	.qi[data-speed='ultrafast'] { display: flex; }
 	.qi[data-speed='ultrafast'] :global(svg + svg) { margin-left: -5px; }
@@ -1292,29 +1360,13 @@
 	.qcell :global(.qchev) { flex: none; opacity: 0.75; }
 	.qcell.locked { color: var(--subtle-foreground); }
 	.qcell.stepping { background: var(--muted); transform: scale(1.04); }
-	.qcount {
-		display: grid;
-		place-items: center;
-		flex: none;
-		min-width: 18px;
-		height: 18px;
-		padding: 0 5px;
-		border-radius: 9px;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		font-size: 12px;
-		font-weight: 600;
-		line-height: 1;
-	}
 	.qcell:focus-visible, .seg:focus-visible, .act:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* The usage cell hosts the shared ring button, stretched over the cell. */
 	.qcell.usage { cursor: default; padding: 0; margin-left: auto; }
-	.qcell.usage + .qcell.controls { margin-left: 0; }
-	/* Nothing to act on: no ring and no width. The cell itself stays, because its
+	/* A new chat: no ring and no width. The cell itself stays, because its
 	   details sheet is position: fixed and still has to open from here. */
 	.qcell.usage.calm { min-width: 0; min-height: 0; margin-left: 0; }
-	.qcell.usage.calm + .qcell.controls { margin-left: auto; }
 	.qcell.usage.calm :global(.usage-indicator) { display: none; }
 	.qcell.usage :global(.usage-context-wrapper) { position: static; display: contents; }
 	.qcell.usage :global(.usage-indicator) {
@@ -1445,6 +1497,9 @@
 		font-weight: 600;
 	}
 	.segs[aria-busy='true'] .seg { cursor: wait; opacity: 0.6; }
+	/* Effort levels are words only: a 44px row. The model's default is outlined dashed. */
+	.segs.effort .seg { min-height: 44px; font-size: 12.5px; }
+	.segs.effort .seg.auto { outline: 1px dashed color-mix(in oklch, var(--foreground) 35%, transparent); outline-offset: -3px; }
 
 	/* ── Panel ───────────────────────────────────────────────────────── */
 	.mcp-scrim {
@@ -2037,7 +2092,7 @@
 		background: linear-gradient(to top, var(--popover), transparent);
 		pointer-events: none;
 	}
-	/* One equal column per action that is actually shown (Call hides itself when the composer has none). */
+	/* One equal column per action that is actually shown. */
 	.actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: var(--phone-action-gap); }
 	/* The shared phone action size (app.css --phone-action-*, as Files' Upload):
 	   drawn the full 44px touch height on a hairline with no fill. */
@@ -2070,28 +2125,8 @@
 	.act[aria-pressed='true'] :global(svg), .act[aria-pressed='true'] .act-label { color: var(--primary); }
 	.act:disabled { opacity: 0.45; cursor: not-allowed; }
 	.act-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
-	/* Four actions: the same row, a step tighter, so every name fits at 360px. */
-	.actions:has(:global(.voice-call-btn)):has(> button:nth-of-type(3)) .act { --act-gap: 4px; padding: 0 4px; font-size: 12px; }
-	/* Call is the composer's own VoiceCallButton, stretched over the whole cell;
-	   its icon sits where the other cells draw theirs ("Call" is about 2em wide). */
-	.call-act :global(.voice-call-btn) {
-		position: absolute;
-		inset: 0;
-		width: auto;
-		height: auto;
-		display: flex;
-		align-items: center;
-		justify-content: flex-start;
-		padding: 0 0 0 calc(50% - (var(--act-icon) + var(--act-gap) + 2em) / 2);
-		border: 0;
-		border-radius: inherit;
-		background: transparent;
-		color: var(--muted-foreground);
-		font-size: inherit;
-	}
-	.call-act :global(.voice-call-btn svg) { width: var(--act-icon); height: var(--act-icon); }
-	.call-act .act-label { padding-left: calc(var(--act-icon) + var(--act-gap)); }
-	.call-act:not(:has(:global(.voice-call-btn))) { display: none; }
+	/* Vault has something waiting for you: a dot on the action's corner. */
+	.act-dot { position: absolute; top: 7px; right: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); pointer-events: none; }
 
 	:global(.mcc-spin) { animation: mcc-spin 0.9s linear infinite; }
 	@keyframes mcc-spin { to { transform: rotate(360deg); } }

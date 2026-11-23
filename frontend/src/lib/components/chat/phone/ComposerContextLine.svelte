@@ -6,10 +6,11 @@
 	 * "Dev agent · Dev sandbox" or "Dev agent · No project".
 	 * Each name is its own button: a tap opens Chat controls straight on that
 	 * name's selector (the agent list, the project picker, Runs on), so changing
-	 * one takes a single tap. The Controls cell above still opens the full list.
+	 * one takes a single tap. Controls, the line's last item, opens (or closes)
+	 * the full panel.
 	 * Under a new chat the line is the `New session` region until the sheet takes over.
 	 */
-	import { ChevronDown } from 'lucide-svelte';
+	import { ChevronDown, SlidersHorizontal } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
 	import { gitStatus } from '$lib/stores/git.svelte';
@@ -25,9 +26,13 @@
 		sheetOpen: boolean;
 		/** Open Chat controls on the selector for the tapped name. */
 		onOpen: (row: ComposerSetupRow) => void;
+		/** The line's Controls item: open Chat controls, or close them when open. */
+		onToggleControls?: () => void;
+		/** The panel's DOM id, for the Controls item's `aria-controls`. */
+		panelId?: string;
 	}
 
-	let { newChat, sheetOpen, onOpen }: Props = $props();
+	let { newChat, sheetOpen, onOpen, onToggleControls, panelId }: Props = $props();
 
 	/** What each name is, for its button's accessible name. */
 	const ROW_LABELS: Record<ComposerSetupRow, string> = {
@@ -87,23 +92,68 @@
 			</button>
 		{/each}
 	</div>
+	{#if onToggleControls}
+		<span class="ccl-sep" aria-hidden="true">·</span>
+		<button
+			type="button"
+			class="ccl-controls"
+			data-controls-trigger
+			aria-haspopup="dialog"
+			aria-controls={panelId}
+			aria-expanded={sheetOpen}
+			aria-label="All chat controls"
+			onclick={onToggleControls}
+		>
+			<SlidersHorizontal size={14} strokeWidth={2} aria-hidden="true" />
+			<span>Controls</span>
+		</button>
+	{/if}
 </section>
 
 <style>
 	.composer-context-line {
 		display: flex;
+		align-items: center;
 		justify-content: center;
 		min-width: 0;
+		padding: 0 4px;
 		margin-top: 4px;
 	}
 	.ccl-row {
 		display: flex;
+		flex: 0 1 auto;
 		align-items: center;
 		justify-content: center;
 		max-width: 100%;
 		min-width: 0;
-		padding: 0 4px;
 	}
+	/* Controls: the line's last item, never shortened. A name gives way first. */
+	.ccl-controls {
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		gap: 5px;
+		min-width: 44px;
+		min-height: 44px;
+		margin-block: -6px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: var(--radius-control);
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 13px;
+		line-height: 1.3;
+		white-space: nowrap;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.ccl-controls :global(svg) { flex: none; opacity: 0.85; }
+	@media (hover: hover) {
+		.ccl-controls:hover { background: var(--hover-overlay); }
+	}
+	.ccl-controls[aria-expanded='true'] { background: var(--active-overlay); }
+	.ccl-controls:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	/* Each name is its own 44px-tall tap target; the text itself is a 13px line. */
 	.ccl-btn {
 		display: inline-flex;
