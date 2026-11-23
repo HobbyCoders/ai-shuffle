@@ -135,10 +135,16 @@ def recent_wakes(repo: str, pr_number: int, *, since: datetime, exclude: str) ->
         )
         rows = [parse(r) for r in c.fetchall()]
     out: list[dict[str, Any]] = []
+    turns: set[str] = set()
     for row in rows:
         for wake in row["wakes"]:
             if not isinstance(wake, dict):
                 continue
+            # A restarted watch carries its predecessor's wakes: count each turn once.
+            tid = str(wake.get("turn_id") or "")
+            if tid and tid in turns:
+                continue
+            turns.add(tid)
             try:
                 at = datetime.fromisoformat(str(wake.get("at")).replace("Z", "+00:00"))
             except ValueError:

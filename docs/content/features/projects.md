@@ -62,7 +62,7 @@ When you sign in to GitHub, you can also create pull requests, follow their chec
 
 Click **Watch** on a pull request in the Pull requests view, or turn on **Watch PR** in a chat's Git menu, to have an agent keep an eye on it. AI Shuffle checks the pull request on GitHub every few minutes without using a model. When a CI check fails, a reviewer with write access comments or requests changes, or the branch has a merge conflict, it waits a few minutes for related events to arrive, then wakes the chat that opened the pull request once with everything that happened. The agent fixes what it can and pushes. It never merges, closes or force-pushes.
 
-Comments from people without write access, and from bots you have not listed, only put a note in the notification bell, because anyone can comment on a public repository. A watch ends by itself when the pull request is merged or closed, or after a number of quiet days. When no chat opened the pull request, or that chat runs on another worker, the watch only notifies you.
+Comments from people without write access, and from bots you have not listed, only put a note in the notification bell, because anyone can comment on a public repository. GitHub tells only people who can push to a repository who else can, so on a pull request to a repository you cannot push to (from your fork, for example), review comments also only notify you. A watch ends by itself when the pull request is merged or closed, or after a number of quiet days. When no chat opened the pull request, or that chat runs on another worker, the watch only notifies you.
 
 You decide what a watch may cost in **Settings > Usage > PR watch**:
 

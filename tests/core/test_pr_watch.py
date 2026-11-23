@@ -14,11 +14,14 @@ NOW = datetime(2026, 11, 23, 18, 0, tzinfo=timezone.utc)
 
 
 def snap(*, items=None, pending=False, failed=None, head="a" * 40, mergeable="MERGEABLE",
-         merge_state="CLEAN", state="OPEN", viewer="owner-login", total=3):
+         merge_state="CLEAN", state="OPEN", viewer="owner-login", total=3, passed=None):
+    failed = failed or []
+    if passed is None:  # every other usual check passed
+        passed = [n for n in ("unit", "lint", "build") if n not in {c["name"] for c in failed}]
     return {
         "viewer": viewer, "number": 7, "title": "Add a thing", "url": "https://github.com/acme/app/pull/7",
         "state": state, "head": head, "mergeable": mergeable, "merge_state": merge_state,
-        "checks": {"pending": pending, "failed": failed or [], "total": total},
+        "checks": {"pending": pending, "failed": failed, "passed": passed, "total": total},
         "items": items or [],
     }
 
@@ -30,9 +33,10 @@ def comment(cid, *, author="reviewer", association="MEMBER", bot=False, body="Pl
             "at": at, **extra}
 
 
-def run_diff(state, s, *, bots=(), wakes=(), repeats=3, writers=("reviewer",), since=None):
+def run_diff(state, s, *, bots=(), wakes=(), repeats=3, writers=("reviewer",), since=None, unknown=()):
     return pr_watch.diff(state, s, trusted_bots=list(bots), wakes=list(wakes),
-                         max_repeat_failures=repeats, now=NOW, writers=list(writers), since=since)
+                         max_repeat_failures=repeats, now=NOW, writers=list(writers), since=since,
+                         unknown=list(unknown))
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
@@ -87,7 +91,8 @@ def test_normalize_snapshot_flattens_checks_and_comments():
     }
     s = pr_watch.normalize_snapshot(data)
     assert s["viewer"] == "me" and s["head"] == "h" and s["mergeable"] == "CONFLICTING"
-    assert s["checks"] == {"pending": True, "failed": [{"id": 1, "name": "unit", "url": "d"}], "total": 3}
+    assert s["checks"] == {"pending": True, "failed": [{"id": 1, "name": "unit", "url": "d"}],
+                           "passed": ["lint"], "total": 3}
     kinds = {i["id"]: i for i in s["items"]}
     assert kinds["review:5"]["state"] == "CHANGES_REQUESTED"
     assert kinds["comment:6"]["bot"] is True
@@ -133,19 +138,38 @@ def test_an_organization_member_without_write_access_only_notifies():
     assert wake == [] and [e["id"] for e in notify] == ["comment:1"]
 
 
-def test_access_is_asked_once_per_person_and_unknown_means_no():
+def test_access_is_asked_once_per_person_per_poll():
     items = [comment(1, author="Bob"), comment(2, author="bob"), comment(3, author="carol", association="COLLABORATOR"),
              comment(4, author="stranger", association="NONE"), comment(5, author="bot", bot=True)]
     logins = pr_watch.access_candidates({"seen": []}, snap(items=items), None)
     assert logins == ["bob", "carol"]  # strangers and bots are never asked
     asked = []
-    cache = pr_watch.refresh_access({}, logins, lambda login: asked.append(login) or login == "bob", NOW)
-    assert asked == ["bob", "carol"]
-    assert cache["bob"]["write"] is True and cache["carol"]["write"] is False
-    again = pr_watch.refresh_access({"access": cache}, logins, lambda login: asked.append(login), NOW)
-    assert asked == ["bob", "carol"] and again == cache  # cached
-    stale = pr_watch.refresh_access({"access": cache}, ["bob"], lambda _: False, NOW + timedelta(days=1))
-    assert stale["bob"]["write"] is False and "carol" not in stale
+    answers = pr_watch.check_access(logins, lambda login: asked.append(login) or login == "bob")
+    assert asked == ["bob", "carol"] and answers == {"bob": True, "carol": False}
+    # Nothing is cached: revoked access is noticed on the person's next comment.
+    assert pr_watch.check_access(["bob"], lambda _: False) == {"bob": False}
+    many = [f"u{i}" for i in range(pr_watch.MAX_ACCESS_LOOKUPS + 2)]
+    capped = pr_watch.check_access(many, lambda _: True)
+    assert sum(v is True for v in capped.values()) == pr_watch.MAX_ACCESS_LOOKUPS
+    assert capped[many[-1]] is None  # not asked: unknown, only notifies
+
+
+def test_a_refused_permission_lookup_is_unknown_not_no(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core.github_service import github_service
+
+    answers = {"maintainer": SimpleNamespace(returncode=1, stdout="", stderr="403 Must have push access"),
+               "writer": SimpleNamespace(returncode=0, stdout="write\n", stderr=""),
+               "reader": SimpleNamespace(returncode=0, stdout="read\n", stderr="")}
+    monkeypatch.setattr(github_service, "_run_gh",
+                        lambda args, **_: answers[args[1].split("/")[-2]])
+    assert pr_watch.has_write_access("acme/app", "maintainer") is None
+    assert pr_watch.has_write_access("acme/app", "writer") is True
+    assert pr_watch.has_write_access("acme/app", "reader") is False
+    _, wake, notify = run_diff({"seen": []}, snap(items=[comment(1, author="maintainer")]),
+                               writers=[], unknown=["maintainer"])
+    assert wake == [] and notify[0]["access_unknown"] is True
 
 
 def test_first_poll_counts_activity_newer_than_the_watch():
@@ -153,6 +177,14 @@ def test_first_poll_counts_activity_newer_than_the_watch():
     state, wake, _ = run_diff({}, snap(items=items), since=NOW - timedelta(minutes=30))
     assert [e["id"] for e in wake] == ["comment:2"]
     assert state["seen"] == ["comment:1", "comment:2"]
+
+
+def test_first_poll_counts_a_comment_in_the_same_second_as_the_click():
+    # GitHub reports whole seconds; Watch was clicked 0.2 s into that second.
+    since = datetime(2026, 11, 23, 17, 30, 0, 200000, tzinfo=timezone.utc)
+    items = [comment(1, at="2026-11-23T17:29:59Z"), comment(2, at="2026-11-23T17:30:00Z")]
+    _, wake, _ = run_diff({}, snap(items=items), since=since)
+    assert [e["id"] for e in wake] == ["comment:2"]
 
 
 def test_noise_is_dropped():
@@ -214,6 +246,29 @@ def test_a_check_that_fails_later_on_the_same_commit_is_reported():
     assert [e["type"] for e in wake] == ["ci_failed"] and wake[0]["checks"] == late
     state, wake, _ = run_diff(state, snap(failed=late, total=4))
     assert wake == []  # the same failure is not reported twice
+
+
+def test_fail_pass_fail_on_one_commit_wakes_once():
+    unit = [{"id": 1, "name": "unit", "url": "u"}]
+    state, wake, _ = run_diff({"seen": []}, snap(failed=unit))
+    assert [e["type"] for e in wake] == ["ci_failed"]
+    state, wake, _ = run_diff(state, snap())  # the rerun passed
+    assert wake == [] and state["reported"] == ["unit"]
+    state, wake, _ = run_diff(state, snap(failed=unit))  # and failed again
+    assert wake == []
+
+
+def test_a_held_check_not_yet_reported_on_a_new_commit_keeps_its_count():
+    unit = [{"id": 1, "name": "unit", "url": "u"}]
+    state = {"seen": []}
+    for n in range(3):
+        state, _, _ = run_diff(state, snap(head=str(n) * 40, failed=unit), repeats=3)
+    assert state["needs_owner"]["checks"] == ["unit"]
+    # A new push: only lint has finished; unit's workflow has not appeared yet.
+    state, _, _ = run_diff(state, snap(head="n" * 40, passed=["lint"], total=1))
+    assert state["needs_owner"]["checks"] == ["unit"] and state["fail_streak"]["unit"] == 3
+    state, _, notify = run_diff(state, snap(head="n" * 40, failed=unit, passed=["lint"], total=2))
+    assert state["fail_streak"]["unit"] == 4 and notify == []  # still held, not flagged again
 
 
 # ─── Batching and wording ────────────────────────────────────────────────────
@@ -404,6 +459,11 @@ def test_a_new_watch_keeps_counting_todays_wakes_for_the_pr(mock_db):
     assert row["id"] != old["id"] and row["wakes_today"] == 1
     carried = pr_watches.get(row["id"])["wakes"]
     assert [w["turn_id"] for w in carried] == ["t1"] and carried[0]["session_id"] == "s-old"
+    # Stop and start again with no new turns: the one wake still counts once.
+    pr_watches.set_status(row["id"], "stopped", "Stopped by you")
+    third = pr_watch.start_watch(repo="acme/app", pr_number=7, pr_url=None, pr_title=None, session_id=None)
+    assert third["wakes_today"] == 1
+    assert [w["turn_id"] for w in pr_watches.get(third["id"])["wakes"]] == ["t1"]
 
 
 @pytest.mark.asyncio
