@@ -1,0 +1,21 @@
+{
+  "description": "Two-worker dev pair: starts one child chat on Dev worker B that keeps replying for a few minutes. The parent's running-tasks list on A shows it as a chat row whose Stop must reach B.",
+  "steps": [
+    {
+      "tool_calls": [
+        {
+          "name": "StartSession",
+          "input": {
+            "title": "Running child on B",
+            "prompt": "[script:long tps=3]",
+            "request_id": "running-remote-child-job",
+            "worker": "Dev worker B"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Started the child on B."
+    }
+  ]
+}

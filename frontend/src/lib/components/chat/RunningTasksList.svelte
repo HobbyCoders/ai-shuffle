@@ -72,7 +72,7 @@
 	import { watches } from '$lib/stores/watches';
 	import { refreshWorkerPresence, watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
-	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
+	import { stopSession, stopSessionTask } from '$lib/api/sessions';
 	import { cancelLimitResume } from '$lib/api/limit-resume';
 	import { pausedLabel, pausedWorkers } from './limit-resume';
 	import { notify } from '$lib/stores/notifications';
@@ -416,11 +416,15 @@
 				if (!quiet) stopFailed(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.", requestedSessionId);
 			}
 		} else if (row.type === 'chat') {
+			// The chat's own Stop, sent to whichever worker runs it.
 			try {
-				await interruptSession(row.id);
+				const result = await stopSession(row.id);
 				ok = true;
-			} catch {
-				if (!quiet) stopFailed("Couldn't stop the chat. It may have already finished.", requestedSessionId);
+				if (result.incomplete && result.message && !quiet) stopFailed(result.message, requestedSessionId);
+			} catch (error) {
+				const detail = (error as { detail?: unknown } | null)?.detail;
+				const why = typeof detail === 'string' && detail ? detail : 'It may have already finished.';
+				if (!quiet) stopFailed(`Couldn't stop the chat. ${why}`, requestedSessionId);
 			}
 		} else {
 			const result = await stopTask(row.id);

@@ -258,6 +258,25 @@ curl -X POST http://localhost:8000/api/v1/session/sess_abc123/interrupt \
 
 A Stop applies to the turn running the session. If what holds the session is something a Stop cannot reach (a `POST /api/v1/query` turn, a rewind, or a turn that has ended), the Stop applies to each turn waiting for the session at that moment. A turn with a Stop is saved and ends as `interrupted`. A waiting turn still runs its reply once it gets the session, and it keeps its Stop even if the session has no live connection, or a rewind replaces it. The Stop goes with the turns it was for, so a turn sent later does not get it. A turn still setting up keeps a Stop once the session has a live connection; before that the answer is `404`. A Stop sent when no turn is running or waiting has nothing to stop, and it does not carry over to the next turn. `POST /api/v1/query` turns do not use a pooled connection, so this route does not stop them.
 
+### POST /api/v1/session/{session_id}/stop
+
+Stop a session the way its Stop button does: end the running turn, the session's background tasks and its queued turns. A session that runs on another worker in your network is stopped on that worker.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/session/sess_abc123/stop \
+  -H "Authorization: Bearer aih_your_key"
+```
+
+**Response:**
+```json
+{
+  "status": "stopped",
+  "session_id": "sess_abc123"
+}
+```
+
+`status` is `stopping` when an earlier Stop is still ending the turn. When some background work could not be confirmed stopped, the response adds `"incomplete": true` and a `message` naming it. The answer is `409` when the session had already finished (or its worker refused the Stop) and `503` when the worker that runs it cannot be reached.
+
 ### GET /api/v1/streaming/active
 
 List the sessions that are currently streaming (actively generating a response).

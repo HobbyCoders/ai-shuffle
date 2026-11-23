@@ -39,7 +39,7 @@ const mocks = vi.hoisted(() => {
 		mobile: false,
 		stopSessionTask: vi.fn(),
 		cancelLimitResume: vi.fn(),
-		interruptSession: vi.fn(),
+		stopSession: vi.fn(),
 		cancel: vi.fn(),
 		hydrate: vi.fn(async () => {}),
 		openSession: vi.fn(),
@@ -67,7 +67,7 @@ vi.mock('$lib/stores/swarms', () => ({
 	}
 }));
 vi.mock('$lib/stores/usage-target', () => ({ usageTargetDeviceName: mocks.deviceName }));
-vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask, interruptSession: mocks.interruptSession }));
+vi.mock('$lib/api/sessions', () => ({ stopSessionTask: mocks.stopSessionTask, stopSession: mocks.stopSession }));
 vi.mock('$lib/api/limit-resume', () => ({ cancelLimitResume: mocks.cancelLimitResume }));
 // No watches here (RunningTasksList.watches.test.ts covers them).
 vi.mock('$lib/api/watches', () => ({
@@ -132,7 +132,7 @@ beforeEach(() => {
 	setSwarms([]);
 	mocks.sessions.set([]);
 	mocks.streaming.set(new Set());
-	mocks.interruptSession.mockReset().mockResolvedValue({ status: 'interrupted' });
+	mocks.stopSession.mockReset().mockResolvedValue({ status: 'stopped', session_id: 'chat-a' });
 	mocks.stopSessionTask.mockReset().mockResolvedValue({ ok: true });
 	mocks.cancel.mockReset().mockResolvedValue(undefined);
 	mocks.openSession.mockReset();
@@ -173,8 +173,27 @@ describe('RunningTasksList chats this one started', () => {
 		expect(mocks.openSession).toHaveBeenCalledWith('chat-a');
 
 		await fireEvent.click(within(row).getByRole('button', { name: 'Stop: Clean up old worktrees' }));
-		await waitFor(() => expect(mocks.interruptSession).toHaveBeenCalledWith('chat-a'));
+		await waitFor(() => expect(mocks.stopSession).toHaveBeenCalledWith('chat-a'));
 		expect(mocks.stopSessionTask).not.toHaveBeenCalled();
+	});
+
+	it("names why a started chat did not stop, in the server's words", async () => {
+		setTasks([], [startSession('m1', 'chat-a', 'Clean worktrees')]);
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working', device_name: 'OfficeWorker' }]);
+		mocks.stopSession.mockRejectedValue({ status: 503, detail: 'The worker that runs this chat is offline (no route).' });
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		await fireEvent.click(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' }));
+		await waitFor(() => stopFailedWith("Couldn't stop the chat. The worker that runs this chat is offline (no route)."));
+		expect(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' })).toBeTruthy();
+	});
+
+	it('reports a stopped chat whose background cleanup was incomplete', async () => {
+		setTasks([], [startSession('m1', 'chat-a', 'Clean worktrees')]);
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
+		mocks.stopSession.mockResolvedValue({ status: 'stopped', session_id: 'chat-a', incomplete: true, message: 'One task may still run.' });
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		await fireEvent.click(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' }));
+		await waitFor(() => stopFailedWith('One task may still run.'));
 	});
 
 	it('shows a streaming started chat missing from the session list, by its StartSession title', () => {
@@ -192,7 +211,7 @@ describe('RunningTasksList chats this one started', () => {
 		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
 		await fireEvent.click(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' }));
-		await waitFor(() => expect(mocks.interruptSession).toHaveBeenCalledWith('chat-a'));
+		await waitFor(() => expect(mocks.stopSession).toHaveBeenCalledWith('chat-a'));
 		// The stop lands before the idle update; then it is the only row and leaves.
 		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'idle' }]);
 		await tick();
