@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { FAL_USAGE_ACCOUNT, lastPaidApiAccount, paidApiAccountOf } from './session-api-usage';
+import { FAL_USAGE_ACCOUNT, lastPaidApiAccount, paidApiAccountOf, paidApiChargeOf } from './session-api-usage';
 
 let seq = 0;
 function call(tool: string, result: unknown, status: ChatMessage['toolStatus'] = 'complete'): ChatMessage {
@@ -42,6 +42,13 @@ describe('paidApiAccountOf', () => {
 		expect(paidApiAccountOf(call('mcp__ai-tools__imageToVideo', { success: true }))).toBe(FAL_USAGE_ACCOUNT);
 		expect(paidApiAccountOf(call('mcp__ai-tools__editImage', { success: true, provider_used: 'chatgpt_subscription' }))).toBeNull();
 		expect(paidApiAccountOf(call('mcp__ai-tools__editImage', { success: false }))).toBeNull();
+	});
+
+	it('a charge keeps the worker that ran it; the fal-only tools name none', () => {
+		const remote = { ...completed('fal', 'fal-ai'), choice: { source: 'fal', account: 'fal-ai', worker: 'device-other' } };
+		expect(paidApiChargeOf(call('mcp__ai-tools__generateImage', remote))).toEqual({ account: FAL_USAGE_ACCOUNT, worker: 'device-other' });
+		expect(paidApiChargeOf(call('mcp__ai-tools__generateImage', completed('fal', 'fal-ai')))).toEqual({ account: FAL_USAGE_ACCOUNT, worker: null });
+		expect(paidApiChargeOf(call('mcp__ai-tools__editImage', { success: true }))).toEqual({ account: FAL_USAGE_ACCOUNT, worker: null });
 	});
 
 	it('other tools and unreadable results are ignored', () => {

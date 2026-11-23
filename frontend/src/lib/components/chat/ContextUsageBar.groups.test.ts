@@ -235,6 +235,25 @@ describe('usage groups', () => {
 		expect(group(container, 'group:api').summary()).toBe('');
 	});
 
+	it('a fal model another worker ran is not pinned to this worker\'s fal balance, even on a local chat', async () => {
+		const falOn = (worker: string): ChatMessage => ({
+			...falImage(),
+			toolResult: JSON.stringify({ status: 'completed', choice: { source: 'fal', account: 'fal-ai', worker } }),
+		} as ChatMessage);
+		// A networked install's payload: per-install snapshots plus its own ids.
+		rateLimit.applySnapshot({
+			available: true, fetched_at: T0 / 1000, windows: [], providers: [FAL, KIMI_API], usage_links: [],
+			self_instance_id: 'install-here', self_device_id: 'device-here',
+			snapshots: [{ instance_id: 'install-here', available: false, windows: [] }],
+		});
+		mocks.state.messages = [falOn('device-other')];
+		expect(group(await open(), 'group:api').summary()).toBe('');
+		cleanup();
+		// The same charge run on this worker names its balance.
+		mocks.state.messages = [falOn('device-here')];
+		expect(group(await open(), 'group:api').summary()).toBe('fal.ai $8.40 left');
+	});
+
 	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {
 		mocks.claudeAuth = { auth_kind: 'api', plan_type: null };
 		snapshot();

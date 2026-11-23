@@ -37,8 +37,19 @@ function parseResult(text: string | undefined): Record<string, unknown> | null {
 	}
 }
 
-/** The account one finished tool call billed, or null when it billed no paid API. */
-export function paidApiAccountOf(message: ChatMessage): string | null {
+/**
+ * One paid charge: the account billed and the worker that ran the call — the
+ * resolver's `choice.worker` (a device id, or "local" on an install with no
+ * network identity). Null when the result does not say (the fal-only tools,
+ * which run on the chat's own worker).
+ */
+export interface PaidApiCharge {
+	account: string;
+	worker: string | null;
+}
+
+/** What one finished tool call billed, or null when it billed no paid API. */
+export function paidApiChargeOf(message: ChatMessage): PaidApiCharge | null {
 	if (message.type !== 'tool_use' || message.toolStatus !== 'complete') return null;
 	const tool = AI_TOOL_NAME.exec(message.toolName ?? '')?.[1];
 	if (!tool) return null;
@@ -46,20 +57,31 @@ export function paidApiAccountOf(message: ChatMessage): string | null {
 	if (!result) return null;
 	const choice = result.choice;
 	if (choice && typeof choice === 'object') {
-		const { source, account } = choice as Record<string, unknown>;
+		const { source, account, worker } = choice as Record<string, unknown>;
 		if (result.status !== 'completed' || typeof source !== 'string' || !PAID_API_SOURCES.has(source)) return null;
-		return typeof account === 'string' && account ? account : source === 'fal' ? FAL_USAGE_ACCOUNT : null;
+		const billed = typeof account === 'string' && account ? account : source === 'fal' ? FAL_USAGE_ACCOUNT : null;
+		return billed ? { account: billed, worker: typeof worker === 'string' && worker ? worker : null } : null;
 	}
 	if (!FAL_ONLY_TOOLS.has(tool) || result.success !== true) return null;
 	const used = result.provider_used;
-	return typeof used !== 'string' || /fal/i.test(used) ? FAL_USAGE_ACCOUNT : null;
+	return typeof used !== 'string' || /fal/i.test(used) ? { account: FAL_USAGE_ACCOUNT, worker: null } : null;
+}
+
+/** The account one finished tool call billed, or null when it billed no paid API. */
+export function paidApiAccountOf(message: ChatMessage): string | null {
+	return paidApiChargeOf(message)?.account ?? null;
+}
+
+/** The chat's most recent paid charge, or null. */
+export function lastPaidApiCharge(messages: readonly ChatMessage[]): PaidApiCharge | null {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const charge = paidApiChargeOf(messages[i]);
+		if (charge) return charge;
+	}
+	return null;
 }
 
 /** The account the chat's most recent paid tool call billed, or null. */
 export function lastPaidApiAccount(messages: readonly ChatMessage[]): string | null {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const account = paidApiAccountOf(messages[i]);
-		if (account) return account;
-	}
-	return null;
+	return lastPaidApiCharge(messages)?.account ?? null;
 }

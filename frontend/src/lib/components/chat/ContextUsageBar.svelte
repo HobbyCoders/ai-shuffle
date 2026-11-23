@@ -52,7 +52,7 @@
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
-	import { FAL_USAGE_ACCOUNT, lastPaidApiAccount } from './session-api-usage';
+	import { FAL_USAGE_ACCOUNT, lastPaidApiCharge } from './session-api-usage';
 	import { providerStatusAt } from '$lib/stores/rate-limit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
@@ -1173,12 +1173,18 @@
 		return visibleSections.find((s) => ids.includes(s.id)) ?? null;
 	});
 	// The fal row is this install's own FAL_KEY (every worker uses the id
-	// `fal-ai`), so a fal charge made on another worker may be another account:
-	// only a session this install owns names it (`isSelf` would also accept an
-	// unknown owner whose usage falls back to this install's bucket).
+	// `fal-ai`), so a fal charge another worker ran may be another account. A
+	// result naming its worker counts only when that is this install; one that
+	// does not (or says "local") ran on the chat's own worker, so the chat must
+	// be this install's (`isSelf` would also accept an unknown owner whose
+	// usage falls back to this install's bucket).
 	const toolApiAccount = $derived.by(() => {
-		const account = lastPaidApiAccount($activeSession.messages ?? []);
-		return account === FAL_USAGE_ACCOUNT && !isSelfTarget($rateLimit, target) ? null : account;
+		const charge = lastPaidApiCharge($activeSession.messages ?? []);
+		if (!charge || charge.account !== FAL_USAGE_ACCOUNT) return charge?.account ?? null;
+		const ranHere = charge.worker && charge.worker !== 'local'
+			? charge.worker === $rateLimit.selfDeviceId
+			: isSelfTarget($rateLimit, target);
+		return ranHere ? charge.account : null;
 	});
 	const usageGroups = $derived.by<UsageGroup[]>(() => {
 		const subscriptions = visibleSections.filter((s) => s.subscription);

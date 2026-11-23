@@ -575,8 +575,8 @@ _LINKS: tuple[UsageLink, ...] = (
         dashboard_url="https://platform.openai.com/usage", subscription=False,
         applies=lambda row: is_openai_platform_row(row),
     ),
-    # An xAI API key whose team balance is not read: no management key is
-    # saved, or its first poll has not finished. A balance reading replaces it.
+    # An xAI API key with no balance row (no management key saved). Any
+    # balance row, pending or read, replaces it.
     UsageLink(
         id="xai_api", label="xAI API (pay as you go)",
         note="No balance reading for this key",
