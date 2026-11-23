@@ -137,11 +137,13 @@ def _build_cluster_catalog(
     installs: list,
     local_projects: list,
     me: str,
+    scoped_origin: Optional[str] = None,
 ) -> list:
     """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
     rows with no active base checkout on an approved online install. Never
     expose foreign ``path``."""
     from app.core.project_resolver import origin_for_legacy_project
+    from app.db.checkouts import merged_into_origin
 
     by_pv2: Dict[str, list] = {}
     for row in bases:
@@ -166,6 +168,7 @@ def _build_cluster_catalog(
             relinked.add(synthesized)
 
     install_map = {row.get("id"): row for row in installs if row.get("id")}
+    known_origins = {row.get("origin") for row in pv2s if row.get("origin")}
 
     catalog = []
     for pv2 in pv2s:
@@ -173,6 +176,8 @@ def _build_cluster_catalog(
         rows = by_pv2.get(pv2_id, [])
         if not rows:
             continue
+        if pv2.get("origin") != scoped_origin and merged_into_origin(pv2.get("settings")) in known_origins:
+            continue  # folded into another project by a repository change: offer that one
         origin = pv2.get("origin") or ""
         superseded_here = origin in relinked
         local_id = _local_project_id_for_origin(origin, local_by_origin)
@@ -264,6 +269,7 @@ async def list_cluster_projects(
         installs=installs,
         local_projects=local_projects,
         me=me,
+        scoped_origin=scoped_origin,
     )
     if scoped_origin:
         catalog = [row for row in catalog if row.get("origin") == scoped_origin]

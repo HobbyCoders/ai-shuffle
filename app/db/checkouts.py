@@ -200,7 +200,7 @@ def _canonical_of_family(cursor: Any, project_ids: List[str]) -> Optional[str]:
     placeholders = {pid: o[len("local:"):] for pid, o in origins.items() if o.startswith("local:")}
     # A duplicate folded into another project of this set (a repository
     # change, ``merged_into``) shares its folder with that project.
-    merged = {row["id"] for row in fetched if _merged_into(row.get("settings")) in origins.values()}
+    merged = {row["id"] for row in fetched if merged_into_origin(row.get("settings")) in origins.values()}
     canonical = [pid for pid in origins if pid not in placeholders and pid not in merged]
     if len(canonical) != 1:
         return None
@@ -212,7 +212,8 @@ def _canonical_of_family(cursor: Any, project_ids: List[str]) -> Optional[str]:
     return canonical[0]
 
 
-def _merged_into(settings: Any) -> Optional[str]:
+def merged_into_origin(settings: Any) -> Optional[str]:
+    """The origin a project was folded into (``settings.merged_into``), if any."""
     if isinstance(settings, str):
         try:
             settings = json.loads(settings)
