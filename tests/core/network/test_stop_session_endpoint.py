@@ -64,3 +64,17 @@ async def test_stop_on_a_mirror_stops_the_chat_on_its_owner(workers, monkeypatch
     # The owner ran the chat's own Stop: the turn and its background work.
     assert interrupted == [("child", "stop", True, None, "user_stop")]
     assert swept == ["child"]
+
+
+async def test_stop_on_an_idle_chat_is_a_harmless_success(workers):
+    """A chat that already finished: the row may lag, so Stop must not fail."""
+    a = workers("runs-chat")
+    with a.active():
+        database.create_session(session_id="idle", profile_id="default", project_id=None,
+                                title="Finished chat", is_active=True)
+        from app.api.query import stop
+        first = await stop(_owner_request(), "idle", "token")
+        again = await stop(_owner_request(), "idle", "token")
+
+    assert first == {"status": "stopped", "session_id": "idle"}
+    assert again == first

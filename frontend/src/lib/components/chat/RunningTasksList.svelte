@@ -401,42 +401,50 @@
 		(closeRef ?? sheetRef)?.focus();
 	}
 
-	/** Stop one row. `quiet` leaves the error toast to the caller (Stop all). */
-	async function stopRow(row: RunRow, quiet = false): Promise<boolean> {
-		if (!sessionId || row.state !== 'running' || !canAct()) return false;
+	/** Stop one chat on whichever worker runs it, as its own Stop button does. */
+	async function stopChat(id: string): Promise<{ ok: boolean; message?: string }> {
+		try {
+			const result = await stopSession(id);
+			// Background work it could not confirm stopped: keep the × to try again.
+			return result.incomplete ? { ok: false, message: result.message } : { ok: true };
+		} catch (error) {
+			const detail = (error as { detail?: unknown } | null)?.detail;
+			return { ok: false, message: typeof detail === 'string' && detail ? `Couldn't stop the chat. ${detail}` : undefined };
+		}
+	}
+
+	/**
+	 * Stop one row: whether it stopped, and the server's words when it says why
+	 * not. `quiet` leaves the error toast to the caller (Stop all).
+	 */
+	async function stopRow(row: RunRow, quiet = false): Promise<{ ok: boolean; message?: string }> {
+		if (!sessionId || row.state !== 'running' || !canAct()) return { ok: false };
 		if (!quiet) sheetStopError = null;
 		const requestedSessionId = sessionId;
 		markStopping(row.key, true);
-		let ok = false;
+		let result: { ok: boolean; message?: string };
+		let fallback = STOP_FAILED;
 		if (row.type === 'swarm') {
+			fallback = "Couldn't stop the swarm. Try again.";
 			try {
 				await swarms.cancel(sessionId, row.id);
-				ok = true;
+				result = { ok: true };
 			} catch (error) {
-				if (!quiet) stopFailed(error instanceof Error ? error.message : "Couldn't stop the swarm. Try again.", requestedSessionId);
+				result = { ok: false, message: error instanceof Error ? error.message : undefined };
 			}
 		} else if (row.type === 'chat') {
-			// The chat's own Stop, sent to whichever worker runs it.
-			try {
-				const result = await stopSession(row.id);
-				ok = true;
-				if (result.incomplete && result.message && !quiet) stopFailed(result.message, requestedSessionId);
-			} catch (error) {
-				const detail = (error as { detail?: unknown } | null)?.detail;
-				const why = typeof detail === 'string' && detail ? detail : 'It may have already finished.';
-				if (!quiet) stopFailed(`Couldn't stop the chat. ${why}`, requestedSessionId);
-			}
+			fallback = "Couldn't stop the chat. It may have already finished.";
+			result = await stopChat(row.id);
 		} else {
-			const result = await stopTask(row.id);
-			ok = result.ok;
-			if (!ok && !quiet) stopFailed(result.message || STOP_FAILED, requestedSessionId);
+			result = await stopTask(row.id);
 		}
-		if (sessionId !== requestedSessionId || !canAct()) return ok;
-		if (ok) {
+		if (!result.ok && !quiet) stopFailed(result.message || fallback, requestedSessionId);
+		if (sessionId !== requestedSessionId || !canAct()) return result;
+		if (result.ok) {
 			confirmedStops.add(row.key);
 			remember(row);
 		} else markStopping(row.key, false);
-		return ok;
+		return result;
 	}
 
 	async function stopMember(swarm: SwarmRow, member: SwarmMemberRow) {
@@ -460,8 +468,16 @@
 		sheetStopError = null;
 		const requestedSessionId = sessionId;
 		const results = await Promise.all(scope.map((row) => stopRow(row, true)));
-		const failed = results.filter((ok) => !ok).length;
-		if (failed) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`, requestedSessionId);
+		const failures = results.filter((result) => !result.ok);
+		if (!failures.length) return;
+		// The server's own reasons for tasks and chats when it gave them (an offline
+		// worker, cleanup it could not confirm), else the usual guess.
+		const reasons = [...new Set(results.flatMap((result, i) =>
+			!result.ok && result.message && scope[i].type !== 'swarm' ? [result.message] : []))];
+		const failed = failures.length;
+		if (failed === 1 && reasons.length === 1) stopFailed(reasons[0], requestedSessionId);
+		else if (reasons.length) stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${reasons.join(' ')}`, requestedSessionId);
+		else stopFailed(`Couldn't stop ${plural(failed, 'task')}. ${failed === 1 ? 'It' : 'They'} may have already finished.`, requestedSessionId);
 	}
 
 	async function confirmSwarmStop(row: SwarmRow) {

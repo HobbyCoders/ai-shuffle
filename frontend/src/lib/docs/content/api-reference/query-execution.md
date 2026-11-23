@@ -275,7 +275,7 @@ curl -X POST http://localhost:8000/api/v1/session/sess_abc123/stop \
 }
 ```
 
-`status` is `stopping` when an earlier Stop is still ending the turn. When some background work could not be confirmed stopped, the response adds `"incomplete": true` and a `message` naming it. The answer is `409` when the session had already finished (or its worker refused the Stop) and `503` when the worker that runs it cannot be reached.
+`status` is `stopping` when an earlier Stop is still ending the turn. When some background work could not be confirmed stopped, the response adds `"incomplete": true` and a `message` naming it. A session with nothing running answers `stopped` too, so a Stop is safe to repeat. The answer is `409` when its worker refused the Stop and `503` when the worker that runs it cannot be reached.
 
 ### GET /api/v1/streaming/active
 

@@ -763,9 +763,10 @@ async def stop(
     """Stop a chat as its own Stop button does, on whichever worker runs it.
 
     Ends the running turn, the chat's background work and its queued turns. A
-    chat another worker runs is stopped there. 409 when it had already
-    finished or the worker refused, 503 when that worker cannot be reached.
-    ``incomplete`` and ``message`` say when some background work may still run.
+    chat another worker runs is stopped there. A chat with nothing running
+    answers ``stopped`` too (a Stop is safe to repeat). 409 when the worker
+    refused, 503 when that worker cannot be reached. ``incomplete`` and
+    ``message`` say when some background work may still run.
     """
     session = await require_session(request, session_id)
     from app.network import control
@@ -793,9 +794,6 @@ async def stop(
                             detail=f"The worker that runs this chat is offline ({exc}).")
     except control.ControlRefused as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    if result.get("finished"):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail="It had already finished.")
     return {
         "status": "stopped" if result.get("interrupted") else "stopping",
         "session_id": session_id,

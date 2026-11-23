@@ -567,7 +567,8 @@ export interface StopSessionResponse {
 
 /**
  * Stop a chat as its own Stop button does, on whichever worker runs it. Rejects
- * with an ApiError whose detail says why (409 already finished, 503 offline).
+ * with an ApiError whose detail says why (409 refused, 503 offline). A chat with
+ * nothing running answers `stopped`.
  */
 export async function stopSession(sessionId: string): Promise<StopSessionResponse> {
 	return api.post<StopSessionResponse>(`/session/${encodeURIComponent(sessionId)}/stop`);

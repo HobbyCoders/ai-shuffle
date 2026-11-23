@@ -187,13 +187,27 @@ describe('RunningTasksList chats this one started', () => {
 		expect(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' })).toBeTruthy();
 	});
 
-	it('reports a stopped chat whose background cleanup was incomplete', async () => {
+	it('reports incomplete cleanup and keeps the × to try again', async () => {
 		setTasks([], [startSession('m1', 'chat-a', 'Clean worktrees')]);
 		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
 		mocks.stopSession.mockResolvedValue({ status: 'stopped', session_id: 'chat-a', incomplete: true, message: 'One task may still run.' });
 		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
 		await fireEvent.click(within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' }));
 		await waitFor(() => stopFailedWith('One task may still run.'));
+		const retry = within(rowOf('Clean worktrees')).getByRole('button', { name: 'Stop: Clean worktrees' });
+		expect(retry.hasAttribute('disabled')).toBe(false);
+		await fireEvent.click(retry);
+		await waitFor(() => expect(mocks.stopSession).toHaveBeenCalledTimes(2));
+	});
+
+	it("Stop all names a started chat's reason, not a guess", async () => {
+		setTasks([], [startSession('m1', 'chat-a', 'Clean worktrees')]);
+		mocks.sessions.set([{ id: 'chat-a', title: 'Clean worktrees', remote_runtime_state: 'working' }]);
+		mocks.stopSession.mockRejectedValue({ status: 503, detail: 'The worker that runs this chat is offline (no route).' });
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		await fireEvent.click(screen.getByRole('button', { name: /^Stop all/ }));
+		await fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: /^Stop/ }));
+		await waitFor(() => stopFailedWith("Couldn't stop the chat. The worker that runs this chat is offline (no route)."));
 	});
 
 	it('shows a streaming started chat missing from the session list, by its StartSession title', () => {

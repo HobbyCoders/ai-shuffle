@@ -942,15 +942,6 @@ class TestStopSession:
                                                 source="user_stop")
         deps["local"].assert_not_awaited()
 
-    async def test_a_finished_chat_is_a_conflict_that_says_so(self, deps):
-        from fastapi import HTTPException
-        from app.api.query import stop
-        deps["local"].return_value = {"interrupted": False, "finished": True}
-        with pytest.raises(HTTPException) as exc_info:
-            await stop(_owner_request(), "chat-1", "token")
-        assert exc_info.value.status_code == 409
-        assert exc_info.value.detail == "It had already finished."
-
     async def test_an_offline_owner_is_named_not_reported_as_finished(self, deps):
         from fastapi import HTTPException
         from app.api.query import stop
