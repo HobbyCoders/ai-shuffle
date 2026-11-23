@@ -375,7 +375,9 @@
 			}
 			// Only this worker's chats carry a local project id; a peer's id names
 			// a project on that worker and can collide with an unrelated one here.
-			if (!s.is_remote && s.project_id && !option.ids.includes(s.project_id)) option.ids.push(s.project_id);
+			// A chat started here from a peer may carry only its `local:<id>` origin.
+			const localId = s.is_remote ? null : s.project_id || (key.startsWith('local:') ? key.slice('local:'.length) : null);
+			if (localId && !option.ids.includes(localId)) option.ids.push(localId);
 		}
 		// A peer's chat reaches its local clones only through an explicit link
 		// group; an unlinked `local:<id>` key names a project on that worker.

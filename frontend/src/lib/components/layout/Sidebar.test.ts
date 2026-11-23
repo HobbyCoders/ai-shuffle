@@ -821,6 +821,28 @@ describe('Sidebar session groups', () => {
 		}
 	});
 
+	it('groups a chat this worker owns that carries only its local origin', async () => {
+		mocks.adapters.get('groups')!.apply({
+			projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { demo: 'Work' } },
+		});
+		mocks.projects.set([{ id: 'demo', name: 'Demo' }]);
+		mocks.clusterProjects.set([
+			{ project_v2_id: 'v2-demo', origin: 'local:demo', name: 'Demo', local_project_id: 'demo', remote_only: false, eligible: [] },
+		]);
+		// Started here from a peer: no legacy project id, only the catalog origin.
+		mocks.sessions.set([
+			session('owned', 'Owned chat', null, true, false, { origin: 'local:demo', project_name: 'Demo' }),
+		]);
+		try {
+			render(Sidebar, { props: sidebarProps });
+			await openFilter();
+			await fireEvent.click(filterOption('Work, 1 project'));
+			expect(filterLabels()).toContain('Demo');
+		} finally {
+			mocks.adapters.get('groups')!.apply(undefined);
+		}
+	});
+
 	it('closes the filter sheet on Escape and on the scrim', async () => {
 		render(Sidebar, { props: sidebarProps });
 
