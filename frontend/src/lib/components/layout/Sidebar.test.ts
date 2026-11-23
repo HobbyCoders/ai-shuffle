@@ -224,12 +224,20 @@ describe('Archived sessions', () => {
 	});
 });
 
-describe('A new chat changing the order of the project groups (#1307)', () => {
-	const row = (id: string, title: string, project: string | null, minute: number) =>
-		session(id, title, project, true, false, { created_at: `2026-08-20T12:${minute}:00Z` });
+describe('A project joining or leaving a lane moves the groups below it', () => {
+	const row = (id: string, title: string, project: string | null, minute: number, extra = {}) =>
+		session(id, title, project, true, false, { created_at: `2026-08-20T12:${minute}:00Z`, ...extra });
 	const projectChat = row('project', 'Project chat', 'visible-project', 20);
 	const looseChat = row('loose', 'Loose chat', null, 10);
 	const newLooseChat = row('new', 'New loose chat', null, 30);
+	// Alphabetically ahead of Visible Project, so it joins at the top.
+	const alphaChat = row('alpha', 'Alpha chat', 'alpha-project', 30, { project_name: 'Alpha Project' });
+	beforeEach(() => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'alpha-project', name: 'Alpha Project' },
+		]);
+	});
 
 	/** Lets the groups have a place on the page, and records what asks to move. */
 	function watchMotion(reducedMotion = false, listBottom?: number) {
@@ -264,10 +272,11 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 		await tick();
 
 		expect(cardFrame('Project chat')).toBe(before);
-		expect(cardIds()).toEqual(['new', 'project']);
+		// Chats with no project come after every named project.
+		expect(cardIds()).toEqual(['project', 'new']);
 	});
 
-	it('slides the groups a new chat reorders instead of jumping them', async () => {
+	it('moves no group when a new chat joins a project already listed', async () => {
 		const moved = watchMotion();
 		mocks.sessions.set([projectChat, looseChat]);
 		render(Sidebar, sidebarProps);
@@ -275,11 +284,24 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 
 		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
 		await tick();
+
+		expect(cardIds()).toEqual(['project', 'loose', 'new']);
+		expect(moved.filter(({ frames }) => frames.length > 2)).toEqual([]);
+	});
+
+	it('slides the groups below a project that joins above them instead of jumping them', async () => {
+		const moved = watchMotion();
+		mocks.sessions.set([projectChat, looseChat]);
+		render(Sidebar, sidebarProps);
+		expect(cardIds()).toEqual(['project', 'loose']);
+
+		mocks.sessions.set([alphaChat, projectChat, looseChat]);
+		await tick();
 		// Svelte first holds each group where it was, then plays the glide.
 		const glides = () => moved.filter(({ frames }) => frames.length > 2);
 		await vi.waitFor(() => expect(glides().length).toBe(2));
 
-		expect(cardIds()).toEqual(['new', 'loose', 'project']);
+		expect(cardIds()).toEqual(['alpha', 'project', 'loose']);
 		for (const { el, frames } of glides()) {
 			expect(el.classList.contains('proj-group')).toBe(true);
 			expect(String(frames[0].transform)).toMatch(/translateY\(-?[1-9]/);
@@ -292,23 +314,28 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 		mocks.sessions.set([projectChat, looseChat]);
 		render(Sidebar, sidebarProps);
 
-		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
+		// Visible Project sinks from 0 to 400 under the new Alpha Project.
+		mocks.sessions.set([alphaChat, projectChat, looseChat]);
 		await tick();
 		const glides = () => moved.filter(({ frames }) => frames.length > 2);
 		await vi.waitFor(() => expect(glides().length).toBe(2));
-
-		const travel = glides().map(({ frames }) => [frames[0].transform, frames.at(-1)?.transform]);
-		// Rising from 400 to 0: starts at the edge, not at its true place below it.
-		expect(travel).toContainEqual(['translateY(300px)', 'translateY(0px)']);
 		// Sinking from 0 to 400: starts where it was and ends at its real place,
 		// so taking the animation off can never move it.
-		expect(travel).toContainEqual(['translateY(-400px)', 'translateY(0px)']);
-
-		// It stays with the panel for most of the glide and leaves late.
 		const sinking = glides().find(({ frames }) => frames[0].transform === 'translateY(-400px)');
+		expect(String(sinking?.frames.at(-1)?.transform)).toBe('translateY(0px)');
+		// It stays with the panel for most of the glide and leaves late.
 		const tops = sinking!.frames.map(({ transform }) => 400 + parseFloat(String(transform).slice(11)));
 		expect(tops).toEqual([...tops].sort((a, b) => a - b));
 		expect(tops[Math.floor(tops.length / 4)]).toBeLessThan(150);
+
+		// Alpha Project leaving lifts Visible Project from 400 back to 0: it
+		// starts at the edge, not at its true place below it.
+		moved.length = 0;
+		mocks.sessions.set([{ ...alphaChat, is_active: false }, projectChat, looseChat]);
+		await tick();
+		await vi.waitFor(() => expect(glides().length).toBeGreaterThan(0));
+		const travel = glides().map(({ frames }) => [frames[0].transform, frames.at(-1)?.transform]);
+		expect(travel).toContainEqual(['translateY(300px)', 'translateY(0px)']);
 	});
 
 	it('puts the groups straight in place for reduced motion', async () => {
@@ -316,11 +343,66 @@ describe('A new chat changing the order of the project groups (#1307)', () => {
 		mocks.sessions.set([projectChat, looseChat]);
 		render(Sidebar, sidebarProps);
 
-		mocks.sessions.set([newLooseChat, projectChat, looseChat]);
+		mocks.sessions.set([alphaChat, projectChat, looseChat]);
 		await tick();
 
-		expect(cardIds()).toEqual(['new', 'loose', 'project']);
+		expect(cardIds()).toEqual(['alpha', 'project', 'loose']);
 		expect(moved).toEqual([]);
+	});
+});
+
+describe('Project groups in alphabetical order, foldable', () => {
+	const chat = (id: string, project: string | null, minute: number, name?: string) =>
+		session(id, `Chat ${id}`, project, true, false, {
+			created_at: `2026-08-20T12:${String(minute).padStart(2, '0')}:00Z`,
+			...(name ? { project_name: name } : {}),
+		});
+	const activeIds = () => cardIds(document.querySelector('[data-group="active"]') ?? undefined);
+	const heads = () => [...document.querySelectorAll('[data-group="active"] .proj-head')].map((el) => el.querySelector('.name')?.textContent);
+	beforeEach(() => {
+		mocks.projects.set([
+			{ id: 'zeta', name: 'zeta' },
+			{ id: 'beta', name: 'Beta' },
+			{ id: 'alpha', name: 'alpha' },
+		]);
+	});
+
+	it('orders projects by name whatever their chats did, chats with no project last', async () => {
+		const rows = [chat('z1', 'zeta', 1, 'zeta'), chat('n1', null, 2), chat('b1', 'beta', 3, 'Beta'), chat('a1', 'alpha', 4, 'alpha')];
+		mocks.sessions.set(rows);
+		render(Sidebar, sidebarProps);
+		expect(heads()).toEqual(['alpha', 'Beta', 'zeta', 'No project']);
+		expect(activeIds()).toEqual(['a1', 'b1', 'z1', 'n1']);
+
+		// A new chat in the last project, and a reply in the first, move no project.
+		mocks.sessions.set([{ ...rows[3], updated_at: '2026-08-20T23:00:00Z' }, rows[0], rows[1], rows[2], chat('z2', 'zeta', 9, 'zeta')]);
+		await tick();
+		expect(heads()).toEqual(['alpha', 'Beta', 'zeta', 'No project']);
+		expect(activeIds()).toEqual(['a1', 'b1', 'z1', 'z2', 'n1']);
+	});
+
+	it('folds a project from its header, keeps the choice, and leaves the other lanes open', async () => {
+		const rows = [chat('a1', 'alpha', 1, 'alpha'), chat('a2', 'alpha', 2, 'alpha'), chat('b1', 'beta', 3, 'Beta')];
+		mocks.sessions.set(rows);
+		mocks.backgroundPermissions.set(new Map([['a2', { count: 1, kind: 'permission' as const }]]));
+		render(Sidebar, sidebarProps);
+		await tick();
+		const head = () => [...document.querySelectorAll<HTMLButtonElement>('[data-group="active"] .proj-head')]
+			.find((el) => el.textContent?.includes('alpha'))!;
+		expect(head().getAttribute('aria-expanded')).toBe('true');
+
+		await fireEvent.click(head());
+		expect(head().getAttribute('aria-expanded')).toBe('false');
+		expect(head().querySelector('.n')?.textContent).toBe('1');
+		expect(activeIds()).toEqual(['b1']);
+		// Saved with the account's other folds, under this lane only.
+		expect(Object.entries(sidebarGroups.current).filter(([key, folded]) => folded && key.startsWith('project:')))
+			.toEqual([[expect.stringMatching(/^project:active:.*alpha/), true]]);
+		// Its chat waiting on a prompt still shows in Needs you.
+		expect(cardIds(document.querySelector('[data-group="needs-you"]') ?? undefined)).toEqual(['a2']);
+
+		await fireEvent.click(head());
+		expect(activeIds()).toEqual(['a1', 'b1']);
 	});
 });
 
@@ -584,23 +666,23 @@ describe('Sidebar session groups', () => {
 		render(Sidebar, { props: sidebarProps });
 		const activeTitles = () =>
 			[...document.querySelectorAll('[data-group="active"] .scard-frame .title')].map((el) => el.textContent);
-		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
+		// Other Project before Visible Project by name; oldest chat first inside each.
+		expect(activeTitles()).toEqual(['Middle', 'Oldest', 'Newest']);
 
-		// Settled: the project keeps its place, though Middle is now newer than
-		// anything of that project left in this lane.
+		// Settled: the project keeps its place.
 		mocks.sessions.set([visible('newest', 'Newest', false, 1), before[1], before[2]]);
 		await tick();
-		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+		expect(activeTitles()).toEqual(['Middle', 'Oldest']);
 
 		// Archived, until the server has answered: the row is still in the list.
 		mocks.sessions.set([visible('newest', 'Newest', false, 1, { status: 'archived' }), before[1], before[2]]);
 		await tick();
-		expect(activeTitles()).toEqual(['Oldest', 'Middle']);
+		expect(activeTitles()).toEqual(['Middle', 'Oldest']);
 
 		// Refused: it comes back to where it was, and nothing else moved.
 		mocks.sessions.set(before);
 		await tick();
-		expect(activeTitles()).toEqual(['Newest', 'Oldest', 'Middle']);
+		expect(activeTitles()).toEqual(['Middle', 'Oldest', 'Newest']);
 	});
 
 	it('keeps a remote-only catalog project in the list and filter', async () => {
@@ -770,8 +852,8 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
 		expect(cardIds()).toEqual(['active', 'peer']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		// Visible Project holds the newest-started chat, so it comes first in every lane.
-		expect(cardIds()).toEqual(['active', 'peer', 'other']);
+		// In Settled, Other Project comes before Visible Project by name.
+		expect(cardIds()).toEqual(['active', 'other', 'peer']);
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
 
@@ -1036,7 +1118,7 @@ describe('Sidebar ordering (must never change silently)', () => {
 		]);
 	});
 
-	it('lists Active cards by when they were started, newest first, above the Settled group', () => {
+	it('lists Active cards by when they were started, oldest first, above the Settled group', () => {
 		mocks.sessions.set([
 			// Started first, and the one that last had activity.
 			session('a-first', 'Started first', 'visible-project', true, false, {
@@ -1055,7 +1137,7 @@ describe('Sidebar ordering (must never change silently)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		const groups = document.querySelectorAll('.cards');
-		expect(cardIds(groups[0])).toEqual(['a-last', 'a-first']);
+		expect(cardIds(groups[0])).toEqual(['a-first', 'a-last']);
 		expect(cardIds(groups[1])).toEqual(['s-one']);
 	});
 });
@@ -1070,24 +1152,40 @@ describe('Sidebar rows keep their place', () => {
 		const rows = [chat('one', null, 8), chat('two', null, 9), chat('three', null, 10)];
 		mocks.sessions.set(rows);
 		render(Sidebar, { props: sidebarProps });
-		expect(activeIds()).toEqual(['three', 'two', 'one']);
+		expect(activeIds()).toEqual(['one', 'two', 'three']);
 
 		// The oldest chat is now the one with the newest activity, and the store
 		// hands it over first as well.
 		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z', turn_count: 9 }, rows[1], rows[2]]);
 		await tick();
-		expect(activeIds()).toEqual(['three', 'two', 'one']);
+		expect(activeIds()).toEqual(['one', 'two', 'three']);
 	});
 
-	it('adds a new chat on top and leaves the rest as they were', async () => {
+	it('adds a new chat at the bottom and leaves the rest as they were', async () => {
 		const rows = [chat('one', null, 8, { updated_at: started(22) }), chat('two', null, 9)];
 		mocks.sessions.set(rows);
 		render(Sidebar, { props: sidebarProps });
-		expect(activeIds()).toEqual(['two', 'one']);
+		expect(activeIds()).toEqual(['one', 'two']);
 
 		mocks.sessions.set([...rows, chat('three', null, 12)]);
 		await tick();
-		expect(activeIds()).toEqual(['three', 'two', 'one']);
+		expect(activeIds()).toEqual(['one', 'two', 'three']);
+	});
+
+	it('puts a chat back in its own place in Active once its question is answered', async () => {
+		const rows = [chat('one', null, 8), chat('two', null, 9), chat('three', null, 10)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['one', 'two', 'three']);
+
+		mocks.backgroundPermissions.set(new Map([['two', { count: 1, kind: 'permission' as const }]]));
+		await tick();
+		expect(activeIds()).toEqual(['one', 'three']);
+		expect(cardIds(document.querySelector('[data-group="needs-you"]') ?? undefined)).toEqual(['two']);
+
+		mocks.backgroundPermissions.set(new Map());
+		await tick();
+		expect(activeIds()).toEqual(['one', 'two', 'three']);
 	});
 
 	it('does not move a project group when one of its chats gets a reply', async () => {
@@ -1150,11 +1248,11 @@ describe('Sidebar rows keep their place', () => {
 		const rows = [chat('a08', 'visible-project', 8), chat('b09', 'other-project', 9, { project_name: 'Other Project' })];
 		mocks.sessions.set([...rows, snoozed]);
 		render(Sidebar, { props: sidebarProps });
-		expect(activeIds()).toEqual(['a08', 'b09']);
+		expect(activeIds()).toEqual(['b09', 'a08']);
 
 		mocks.sessions.set([...rows, { ...snoozed, is_active: true, snoozed_until: null }]);
 		await tick();
-		expect(activeIds()).toEqual(['a10', 'a08', 'b09']);
+		expect(activeIds()).toEqual(['b09', 'a08', 'a10']);
 	});
 
 	it('counts a chat that started and settled while a filter hid the other project', async () => {
@@ -1173,16 +1271,16 @@ describe('Sidebar rows keep their place', () => {
 		const a10 = chat('a10', 'visible-project', 10);
 		mocks.sessions.set([...rows, a10]);
 		await tick();
-		expect(activeIds()).toEqual(['a10', 'a08']);
+		expect(activeIds()).toEqual(['a08', 'a10']);
 		mocks.sessions.set([...rows, { ...a10, is_active: false }]);
 		await tick();
 		expect(activeIds()).toEqual(['a08']);
 
-		// Unfiltered, the new chat would have lifted its project and settling it
-		// would have left the project there. The filter changes neither.
+		// Unfiltered, the projects are back in name order; nothing that happened
+		// under the filter moved them.
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
 		await tick();
-		expect(activeIds()).toEqual(['a08', 'b09']);
+		expect(activeIds()).toEqual(['b09', 'a08']);
 	});
 
 	it('keeps two projects started at the same moment in place when a row leaves the lane', async () => {
@@ -1221,11 +1319,11 @@ describe('Sidebar rows keep their place', () => {
 		render(Sidebar, { props: sidebarProps });
 		await tick();
 		const needsIds = () => cardIds(document.querySelector('[data-group="needs-you"]') ?? undefined);
-		expect(needsIds()).toEqual(['two', 'one']);
+		expect(needsIds()).toEqual(['one', 'two']);
 
 		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z' }, rows[1]]);
 		await tick();
-		expect(needsIds()).toEqual(['two', 'one']);
+		expect(needsIds()).toEqual(['one', 'two']);
 	});
 
 	it('orders chats started at the same moment the same way whatever order they arrive in', async () => {
@@ -2270,9 +2368,8 @@ describe('Sidebar unified conversation history', () => {
 		appMode.set(mode);
 		mocks.sessions.set(fixture());
 		render(Sidebar, { props: sidebarProps });
-		// All four share one start time, so the two groups fall to their project
-		// key ("No project" sorts first), not to which row the list holds first.
-		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
+		// Named projects come first, chats with no project after them.
+		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
 		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
 	});
 	it('says one thing when there is nothing at all, with no empty Settled lane', () => {
@@ -2292,7 +2389,7 @@ describe('Sidebar unified conversation history', () => {
 		await tick();
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
+		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
 	});
 });
 

@@ -25,18 +25,19 @@
 //   stopped           the user's own Stop is not a failure
 //   project-choice-survives  choosing a project and a branch holds while it gains a remote (#1078)
 //   project-once      a project is listed once after its first worktree chat
-//   new-chat-from-elsewhere  a chat arriving from another tab or device lifts its
-//                     project to the top of a crowded lane, and the rest of the
-//                     lane slides out of the way instead of jumping (#1307)
+//   new-chat-from-elsewhere  a chat arriving from another tab or device joins the
+//                     bottom of its project in a crowded lane, and no row above
+//                     it moves: projects sit in name order, never lifted
 //   new-chat-first-send  the same when this page's own first send brings the row
-//   new-chat-glide-has-no-step  a row in the group being pushed down follows the
-//                     glide with no jump in position at any frame (#1307)
-//   new-chat-glide-ends-in-place  the list scrolls during that glide and the group
-//                     finishes where it is really laid out, with no jump when
-//                     the animation is removed (#1307)
+//   new-chat-glide-has-no-step  a new chat growing the project above pushes the
+//                     next group down on a glide with no jump at any frame (#1307)
+//   new-chat-glide-ends-in-place  the list scrolls during that glide, as the group
+//                     sinks past the list's bottom edge, and it finishes where it
+//                     is really laid out, with no jump when the animation is
+//                     removed (#1307)
 //   reply-keeps-row-in-place  a reply in an older chat leaves its row where it
-//                     was: rows sit in the order the chats were started, and
-//                     activity never moves one
+//                     was: rows sit in the order the chats were started, oldest
+//                     first, and activity never moves one
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -726,41 +727,61 @@ const PROJECT_ONCE = {
 	}
 };
 
-const FIRST_ROW = '[data-group="active"] .scard-frame';
-const activeHeads = (page) => page.locator('[data-group="active"] .proj-head').allInnerTexts();
+const NO_PROJECT = 'No project';
+
+/** The Active lane top to bottom: its project headers, and its rows by chat id. */
+const activeLane = (page) => page.evaluate(() => ({
+	heads: [...document.querySelectorAll('[data-group="active"] .proj-head .name')].map((el) => el.textContent.trim()),
+	rows: [...document.querySelectorAll('[data-group="active"] [data-session-card]')].map((el) => el.getAttribute('data-session-card'))
+}));
 
 /**
- * A lane crowded enough that its project groups swapping places moves most of
- * what is on screen: rows in no project, then rows of a project, which leaves the
- * project on top and "No project" under it. The hosted failure of #1307 needed an
- * instance earlier journeys had filled the same way; this states that on its own.
+ * A lane crowded enough that its groups run past the bottom of the list: rows in
+ * no project, then more rows of a project. Projects sit in name order with "No
+ * project" last, so the project comes first and "No project" under it, wherever
+ * a seeded project sorts. The hosted failure of #1307 needed an instance earlier
+ * journeys had filled the same way; this states that on its own.
  */
 async function crowdedProjects(ctx) {
 	const { page } = ctx;
 	await openNewChat(ctx);
 	const dev = (await api(page, 'GET', '/projects')).find((p) => p.name === PROJECT);
 	expect(dev, `the seeded project ${PROJECT} exists`);
+	ctx.dev = dev;
 	const create = (body, n) => Promise.all(Array.from({ length: n }, () => api(page, 'POST', '/sessions', body)));
 	await create({}, 13);
-	const newest = await create({ project_id: dev.id }, 13);
+	const last = await create({ project_id: dev.id }, 20);
 	await showSidebar(page);
-	await page.locator(CARD(newest[0].session_id)).waitFor({ state: 'attached', timeout: 30_000 });
-	await page.waitForFunction(() => document.querySelector('[data-group="active"] .proj-head')?.textContent?.trim() === 'Dev sandbox', null, { timeout: 30_000 });
+	await page.locator(CARD(last.at(-1).session_id)).waitFor({ state: 'attached', timeout: 30_000 });
+	await page.waitForFunction(({ project, none }) => {
+		const heads = [...document.querySelectorAll('[data-group="active"] .proj-head .name')].map((el) => el.textContent.trim());
+		return heads.includes(project) && heads.at(-1) === none;
+	}, { project: PROJECT, none: NO_PROJECT }, { timeout: 30_000 });
 	await page.waitForTimeout(1200);
 }
 
-/** The new row leads the lane, under its own project, above the project that led it. */
-async function expectLiftedToTop(page, id) {
-	const heads = await activeHeads(page);
-	expect(heads[0] === 'No project' && heads.includes(PROJECT), `the new chat's project leads the lane: ${JSON.stringify(heads)}`);
-	const first = await page.locator(FIRST_ROW).first().getAttribute('data-session-card');
-	expect(first === id, `the new chat is the lane's first row (found ${first})`);
+/**
+ * The new row is the last of its project, and nothing above or around it moved:
+ * the projects keep their order and every row already listed keeps its place.
+ */
+async function expectJoinedInPlace(page, before, id, label) {
+	const after = await activeLane(page);
+	expect(after.heads.join() === before.heads.join(), `no project moved: ${JSON.stringify(before.heads)} became ${JSON.stringify(after.heads)}`);
+	const kept = after.rows.filter((row) => row !== id);
+	expect(kept.join() === before.rows.join(), `every row already listed kept its place (${before.rows.length} before, ${kept.length} after)`);
+	const lastOfGroup = await page.evaluate((label) => {
+		const group = [...document.querySelectorAll('[data-group="active"] .proj-group')]
+			.find((g) => g.querySelector('.proj-head .name')?.textContent.trim() === label);
+		return [...(group?.querySelectorAll('[data-session-card]') ?? [])].at(-1)?.getAttribute('data-session-card') ?? null;
+	}, label);
+	expect(lastOfGroup === id, `the new chat is the last row of ${label} (found ${lastOfGroup})`);
 }
 
 const NEW_CHAT_FROM_ELSEWHERE = {
 	name: 'new-chat-from-elsewhere',
 	setup: crowdedProjects,
 	async act({ page, mark }) {
+		const before = await activeLane(page);
 		await mark('a chat with no project starts in another tab');
 		// Answered to the journey alone: this page learns of it by its push, as it
 		// would for another tab or device, with no click of its own nearby to
@@ -768,7 +789,7 @@ const NEW_CHAT_FROM_ELSEWHERE = {
 		const { session_id: id } = await api(page, 'POST', '/sessions', {});
 		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
 		await page.waitForTimeout(1000);
-		await expectLiftedToTop(page, id);
+		await expectJoinedInPlace(page, before, id, NO_PROJECT);
 	}
 };
 
@@ -778,13 +799,21 @@ const NEW_CHAT_FIRST_SEND = {
 	setup: crowdedProjects,
 	async act({ page, mark, variant }) {
 		await page.waitForTimeout(800);
+		const before = await activeLane(page);
 		await mark('first send of a chat with no project');
 		const token = `first-send-${uniq()}`;
 		await typeAndSend(page, `${token} ${scriptTag(variant, 'default', { latency_ms: 1500 })}`);
 		await waitTurnSettled(page, { text: `You said: “${token}`, timeout: 120_000 });
-		await expectLiftedToTop(page, await chatIdByToken(page, token));
+		await expectJoinedInPlace(page, before, await chatIdByToken(page, token), NO_PROJECT);
 	}
 };
+
+/** The first row of the group under the seeded project's: a new chat there pushes it down. */
+const rowUnderProject = (page) => page.evaluate((label) => {
+	const groups = [...document.querySelectorAll('[data-group="active"] .proj-group')];
+	const at = groups.findIndex((g) => g.querySelector('.proj-head .name')?.textContent.trim() === label);
+	return at < 0 ? null : groups[at + 1]?.querySelector('[data-session-card]')?.getAttribute('data-session-card') ?? null;
+}, PROJECT);
 
 /** A glide played this slowly moves a row under a pixel a frame, so a real step stands out. */
 const GLIDE_SLOWDOWN = 0.002;
@@ -825,17 +854,21 @@ async function traceRowTop(page, id) {
 const NEW_CHAT_GLIDE_HAS_NO_STEP = {
 	name: 'new-chat-glide-has-no-step',
 	setup: crowdedProjects,
-	async act({ page, mark }) {
-		const pushedDown = await page.locator('[data-group="active"] .proj-group').first()
-			.locator('.scard-frame').first().getAttribute('data-session-card');
-		await mark('a new chat lifts its project above the one holding this row');
+	async act({ page, mark, dev }) {
+		const pushedDown = await rowUnderProject(page);
+		expect(pushedDown, `a group sits under ${PROJECT}`);
+		// In view, where a jump would show.
+		await page.locator(CARD(pushedDown)).evaluate((el) => el.scrollIntoView({ block: 'center' }));
+		await page.waitForTimeout(300);
+		const before = await activeLane(page);
+		await mark('a new chat grows the project above the group holding this row');
 		const stop = await traceRowTop(page, pushedDown);
-		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		const { session_id: id } = await api(page, 'POST', '/sessions', { project_id: dev.id });
 		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
 		await page.waitForTimeout(1500);
 		const frames = await stop();
 		await page.waitForTimeout(1000);
-		await expectLiftedToTop(page, id);
+		await expectJoinedInPlace(page, before, id, PROJECT);
 		expect(frames.length > 10 && frames.every(({ top }) => top !== null), `the row stays mounted through the glide (${frames.length} frames)`);
 		const restTop = (await page.locator(CARD(pushedDown)).boundingBox()).y;
 		const distance = restTop - frames[0].top;
@@ -859,10 +892,21 @@ const GLIDE_FRAMES_BEFORE_SCROLL = 12;
 const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
 	name: 'new-chat-glide-ends-in-place',
 	setup: crowdedProjects,
-	async act({ page, mark }) {
-		const sinking = await page.locator('[data-group="active"] .proj-group').first()
-			.locator('.scard-frame').first().getAttribute('data-session-card');
-		await mark('the list scrolls while a new chat lifts its project over this row');
+	async act({ page, mark, dev }) {
+		const sinking = await rowUnderProject(page);
+		expect(sinking, `a group sits under ${PROJECT}`);
+		// Park the group's top just above the list's bottom edge, so a row added
+		// above sinks it past that edge: the glide that must end at its real place.
+		const parked = await page.evaluate((selector) => {
+			const group = document.querySelector(selector).closest('.proj-group');
+			const list = group.closest('.list');
+			list.scrollTop += group.getBoundingClientRect().top - (list.getBoundingClientRect().bottom - 20);
+			return list.getBoundingClientRect().bottom - group.getBoundingClientRect().top;
+		}, CARD(sinking));
+		expect(parked > 0 && parked < 40, `the group is parked just above the list's bottom edge (${parked.toFixed(1)} px)`);
+		await page.waitForTimeout(300);
+		const before = await activeLane(page);
+		await mark('the list scrolls while a new chat in the project above sinks this row');
 		const cdp = await page.context().newCDPSession(page);
 		await cdp.send('Animation.enable');
 		await cdp.send('Animation.setPlaybackRate', { playbackRate: GLIDE_END_SLOWDOWN });
@@ -891,7 +935,7 @@ const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
 			};
 			requestAnimationFrame(tick);
 		}, { selector: CARD(sinking), GLIDE_FRAMES_BEFORE_SCROLL });
-		const { session_id: id } = await api(page, 'POST', '/sessions', {});
+		const { session_id: id } = await api(page, 'POST', '/sessions', { project_id: dev.id });
 		await page.locator(CARD(id)).waitFor({ state: 'attached', timeout: 30_000 });
 		await page.waitForFunction(() => {
 			const trace = window.__glideEnd;
@@ -910,7 +954,7 @@ const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
 		});
 		await cdp.send('Animation.setPlaybackRate', { playbackRate: 1 });
 		await cdp.detach();
-		await expectLiftedToTop(page, id);
+		await expectJoinedInPlace(page, before, id, PROJECT);
 		expect(scrolled.realTop > scrolled.bottom, `the group is headed past the list's bottom edge (${scrolled.realTop} against ${scrolled.bottom})`);
 		expect(scrolled.realTop - scrolled.by < scrolled.bottom, `the scroll brings its real place into view (${scrolled.realTop} less ${scrolled.by}, bottom ${scrolled.bottom})`);
 		// Every end counts: a busy page can play a second, smaller glide after it.
@@ -940,7 +984,7 @@ const REPLY_KEEPS_ROW_IN_PLACE = {
 		await showSidebar(page);
 		const ours = async () => (await activeOrder(page)).filter((id) => [a.id, b.id, c.id].includes(id));
 		const before = await ours();
-		expect(before.join() === [c.id, b.id, a.id].join(), `the chats are listed newest-started first: ${JSON.stringify(before)}`);
+		expect(before.join() === [a.id, b.id, c.id].join(), `the chats are listed oldest-started first: ${JSON.stringify(before)}`);
 
 		await mark('the chat started first gets a new reply');
 		await openRow(page, a.id);
@@ -977,7 +1021,7 @@ const REPLY_KEEPS_ROW_IN_PLACE = {
 		// On a phone the list is closed after a reload; waitLane opens it first.
 		await waitLane(page, a.id, 'active', 60_000);
 		const order = (await activeOrder(page)).filter((id) => [a.id, b.id, c.id].includes(id));
-		expect(order.join() === [c.id, b.id, a.id].join(), `a reload keeps the same order: ${JSON.stringify(order)}`);
+		expect(order.join() === [a.id, b.id, c.id].join(), `a reload keeps the same order: ${JSON.stringify(order)}`);
 	}
 };
 
