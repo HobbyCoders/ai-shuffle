@@ -516,6 +516,9 @@
 		color: var(--foreground);
 		font-family: inherit;
 		font-size: 13px;
+		/* Keep a row on one line: the menu sizes to its widest row, not to a
+		   short chat title it hangs from. */
+		white-space: nowrap;
 		cursor: pointer;
 		text-align: left;
 		transition: background-color 120ms ease, color 120ms ease;

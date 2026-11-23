@@ -108,7 +108,7 @@ def _fork_checkout(original_session: dict, new_session_id: str):
             head = git_service._run_git(parent_path, ["rev-parse", "HEAD"], timeout=5)
             if head.returncode == 0 and head.stdout.strip():
                 base = head.stdout.strip()
-    except Exception:  # noqa: BLE001 — provisioning finds the checkout itself
+    except Exception:  # provisioning finds the checkout itself
         logger.debug("Could not read the parent's commit for fork %s", new_session_id, exc_info=True)
     try:
         # Pinned to the parent's commit: the fork starts where its history
@@ -162,7 +162,7 @@ def _carry_uncommitted(parent_path: str, fork_path: str, new_session_id: str) ->
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(file, target)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("Fork %s: could not carry the parent's uncommitted changes", new_session_id, exc_info=True)
 
 
@@ -174,7 +174,7 @@ def _discard_fork_checkout(checkout) -> None:
 
     try:
         discard_unused_worker_checkout(checkout)
-    except Exception:  # noqa: BLE001 — keep the fork's own error
+    except Exception:  # keep the fork's own error
         logger.warning("Could not reclaim the unused fork checkout %s", checkout.path, exc_info=True)
 
 
@@ -498,14 +498,12 @@ async def _check_fork_target(request: Request, original_session: dict, target: s
     only spares the user a fork left behind on the wrong worker.
     """
     from app.api.git_owner import refuse_subagent_git
-    from app.core import preview_access
     from app.core.placement import capable_runners
 
-    # Moving a chat commits and pushes its branch.
+    # Moving a chat commits and pushes its branch. A preview link may move a
+    # chat this worker runs, so it may fork one to another worker too; forking
+    # a chat another worker runs is refused by ``_fork_on_owner`` (#641).
     refuse_subagent_git(original_session)
-    # The destination cannot see the preview cookie's principal (#641).
-    if preview_access.grant(request) is not None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "The preview link can't fork a chat to another worker.")
     install = await run_sync(database.get_install, target)
     if not install:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown device: {target}")
@@ -533,7 +531,7 @@ async def _move_fork(result: ForkSessionResponse, target: str) -> ForkSessionRes
         try:
             await run_sync(catalog.publish_owned, session_ids=[new_id])
             engine.kick()
-        except Exception:  # noqa: BLE001 — the periodic scan publishes it anyway
+        except Exception:  # the periodic scan publishes it anyway
             logger.warning("Could not publish fork %s before moving it", new_id, exc_info=True)
     while True:
         row = await run_sync(database.get_session, new_id)
