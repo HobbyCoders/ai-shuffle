@@ -17,7 +17,7 @@
 	 * Overlays (More, the filter, Customize) live inside the panel, so on the
 	 * phone they ride with the drawer and on desktop they never cover the chat.
 	 */
-	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
+	import { onDestroy, onMount, tick, untrack, type Snippet } from 'svelte';
 	import type { AnimationConfig } from 'svelte/animate';
 	import { cubicOut } from 'svelte/easing';
 	import {
@@ -25,6 +25,7 @@
 		ListFilter,
 		ChevronDown,
 		ChevronRight,
+		ChevronLeft,
 		Loader2,
 		SlidersHorizontal,
 		RefreshCw,
@@ -55,6 +56,7 @@
 		sessionsHasMore,
 		settledTotal
 	} from '$lib/stores/app-data.svelte';
+	import { groups as userGroups, organizeByGroups } from '$lib/stores/groups.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { vaultPending } from '$lib/stores/vault';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
@@ -360,6 +362,8 @@
 	let deviceFilter = $state<string | null>(null);
 
 	interface FilterOption { id: string; label: string }
+	/** A project option with the local project ids its group may be saved under. */
+	interface ProjectFilterOption extends FilterOption { ids: string[] }
 
 	// One name per project, so the name (and the project's place, which goes by
 	// it) never depends on which of its chats a lane holds or which history
@@ -367,35 +371,89 @@
 	// from different workers. This worker's own project list names it first (a
 	// rename there is the owner's word), then the shared catalog for projects
 	// that live only elsewhere; only a project in neither goes by its oldest
-	// chat in the list.
+	// chat in the list. Only a link group is shared: an unlinked `local:<id>`
+	// key names a project on whichever worker owns the chat, so a local project
+	// names it only when the group holds one of this worker's own chats (a
+	// peer's chat may merely share the slug).
 	const catalogNames = $derived.by(() => {
-		const names = new Map<string, string>();
-		for (const c of $clusterProjects) if (c.origin && c.name) names.set(c.origin, c.name);
+		const shared = new Map<string, string>();
+		const unlinked = new Map<string, string>();
+		for (const c of $clusterProjects) if (c.origin && c.name) shared.set(c.origin, c.name);
 		const local = new Set<string>();
 		for (const p of $projects) {
 			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });
 			if (!key || !p.name || local.has(key)) continue;
 			local.add(key);
-			names.set(key, p.name);
+			(p.link_group_id ? shared : unlinked).set(key, p.name);
 		}
-		return names;
+		return { shared, unlinked };
 	});
 	const projectNames = $derived.by(() => {
 		const oldest = new Map<string, { at: number; id: string; name: string }>();
+		const ownHere = new Set<string>();
 		for (const s of sidebarSessions) {
 			const key = projectKey(s);
+			if (!s.is_remote) ownHere.add(key);
 			const at = sessionStartedAt(s);
 			const seen = oldest.get(key);
 			if (seen && (seen.at < at || (seen.at === at && seen.id < s.id))) continue;
 			oldest.set(key, { at, id: s.id, name: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s) });
 		}
-		return new Map([...oldest].map(([key, { name }]) => [key, catalogNames.get(key) ?? name]));
+		const { shared, unlinked } = catalogNames;
+		return new Map([...oldest].map(([key, { name }]) => [
+			key,
+			(ownHere.has(key) ? unlinked.get(key) : undefined) ?? shared.get(key) ?? name,
+		]));
 	});
 
-	const projectOptions = $derived.by((): FilterOption[] => {
-		return [...projectNames.entries()]
-			.map(([id, label]) => ({ id, label }))
-			.sort((a, b) => a.label.localeCompare(b.label));
+	const projectOptions = $derived.by((): ProjectFilterOption[] => {
+		const map = new Map<string, ProjectFilterOption>();
+		for (const s of sidebarSessions) {
+			const key = projectKey(s);
+			let option = map.get(key);
+			if (!option) {
+				option = { id: key, label: projectNames.get(key) ?? (key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s)), ids: [] };
+				map.set(key, option);
+			}
+			// Only this worker's chats carry a local project id; a peer's id names
+			// a project on that worker and can collide with an unrelated one here.
+			// A chat started here from a peer may carry only its `local:<id>` origin.
+			const localId = s.is_remote ? null : s.project_id || (key.startsWith('local:') ? key.slice('local:'.length) : null);
+			if (localId && !option.ids.includes(localId)) option.ids.push(localId);
+		}
+		// A peer's chat reaches its local clones only through an explicit link
+		// group; an unlinked `local:<id>` key names a project on that worker.
+		for (const p of $projects) {
+			const option = p.link_group_id ? map.get(p.link_group_id) : undefined;
+			if (option && !option.ids.includes(p.id)) option.ids.push(p.id);
+		}
+		return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+	});
+	// The user's project groups are folders here too: a group chip opens its
+	// projects, the Back chip returns.
+	let filterGroup = $state<string | null>(null);
+	const projectFilterGroups = $derived.by(() => {
+		const organized = organizeByGroups(projectOptions, 'projects', $userGroups, (o) => o.ids);
+		const rows = organized.groupOrder
+			.map((g) => ({ name: g.name, options: organized.grouped.get(g.name) ?? [] }))
+			.filter((g) => g.options.length > 0);
+		return { rows, ungrouped: rows.length ? organized.ungrouped : projectOptions };
+	});
+	const openFilterGroup = $derived(projectFilterGroups.rows.find((g) => g.name === filterGroup) ?? null);
+	let filterOpts = $state<HTMLElement | null>(null);
+	// The chip that held focus is removed on drill-in and on Back: move focus to
+	// its counterpart so a keyboard user is not dropped to the page.
+	async function showFilterGroup(name: string | null) {
+		const leaving = filterGroup;
+		filterGroup = name;
+		await tick();
+		const target = name
+			? filterOpts?.querySelector<HTMLElement>('[data-filter-back]')
+			: [...(filterOpts?.querySelectorAll<HTMLElement>('[data-filter-group]') ?? [])].find((el) => el.dataset.filterGroup === leaving);
+		target?.focus();
+	}
+	$effect(() => {
+		if (sheet !== 'filter') filterGroup = null;
 	});
 
 	const deviceOptions = $derived.by((): FilterOption[] => {
@@ -1218,11 +1276,22 @@
 			<p class="text-xs text-muted-foreground px-2 py-1">Filters apply to loaded chats only. Search reaches all history.</p>
 			{#if projectOptions.length > 0}
 				<h4>Project</h4>
-				<div class="opts">
-					<button class="opt" type="button" aria-pressed={!projectFilter} onclick={() => (projectFilter = null)}>All projects</button>
-					{#each projectOptions as opt (opt.id)}
-						<button class="opt" type="button" aria-pressed={projectFilter === opt.id} onclick={() => (projectFilter = opt.id)}>{opt.label}</button>
-					{/each}
+				<div class="opts" bind:this={filterOpts}>
+					{#if openFilterGroup}
+						<button class="opt opt-back" type="button" data-filter-back onclick={() => showFilterGroup(null)}><ChevronLeft size={14} strokeWidth={2} aria-hidden="true" />{openFilterGroup.name}</button>
+						{#each openFilterGroup.options as opt (opt.id)}
+							<button class="opt" type="button" aria-pressed={projectFilter === opt.id} onclick={() => (projectFilter = opt.id)}>{opt.label}</button>
+						{/each}
+					{:else}
+						<button class="opt" type="button" aria-pressed={!projectFilter} onclick={() => (projectFilter = null)}>All projects</button>
+						{#each projectFilterGroups.rows as group (group.name)}
+							{@const holdsFilter = group.options.some((o) => o.id === projectFilter)}
+							<button class="opt opt-group" class:holds-filter={holdsFilter} type="button" aria-label="{group.name}, {group.options.length} {group.options.length === 1 ? 'project' : 'projects'}{holdsFilter ? ', has the active filter' : ''}" data-filter-group={group.name} onclick={() => showFilterGroup(group.name)}><Folder size={13} strokeWidth={2} aria-hidden="true" />{group.name}<span class="opt-count">{group.options.length}</span><ChevronRight size={13} strokeWidth={2} aria-hidden="true" /></button>
+						{/each}
+						{#each projectFilterGroups.ungrouped as opt (opt.id)}
+							<button class="opt" type="button" aria-pressed={projectFilter === opt.id} onclick={() => (projectFilter = opt.id)}>{opt.label}</button>
+						{/each}
+					{/if}
 				</div>
 			{/if}
 			<h4>Device</h4>
@@ -1655,6 +1724,11 @@
 	}
 	.phone .opt { height: 36px; padding: 0 13px; border-radius: 18px; font-size: 13.5px; }
 	.opt:hover { color: var(--foreground); border-color: var(--border-strong); }
+	.opt-group, .opt-back { display: inline-flex; align-items: center; gap: 5px; }
+	.opt-group { color: var(--foreground); font-weight: 500; }
+	.opt-group.holds-filter { border-color: color-mix(in oklch, var(--primary) 45%, transparent); }
+	.opt-back { border-style: dashed; }
+	.opt-count { font-size: 11px; font-weight: 400; color: var(--muted-foreground); }
 	.opt[aria-pressed='true'] {
 		background: color-mix(in oklch, var(--primary) 16%, transparent);
 		border-color: color-mix(in oklch, var(--primary) 45%, transparent);

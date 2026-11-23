@@ -907,6 +907,9 @@
 	let composerFocused = $state(false);
 	let mobileControlsOpen = $state(false);
 	let controlsDockRef = $state<ControlsDock | null>(null);
+	/** The phone's Chat controls panel, named by the Controls item on the context line. */
+	const composerUid = $props.id();
+	const controlsPanelId = `${composerUid}-chat-controls`;
 	function composerOpenGesture(node: HTMLFormElement) {
 		return composerShell().attachComposerOpen(node, {
 			enabled: () => isMobileComposerViewport(),
@@ -2295,8 +2298,7 @@
 				</div>
 
 				<!-- Controls row. ControlsDock owns access mode, the browser and
-				     terminal toggles, model, effort and the context ring. The phone
-				     shell's controls panel also offers a call. -->
+				     terminal toggles, model, effort and the context ring. -->
 				<ControlsDock
 					bind:this={controlsDockRef}
 					newChat={newSession}
@@ -2304,8 +2306,8 @@
 					{onBrowserPreload}
 					{browserOpen}
 					{terminal}
+					panelId={controlsPanelId}
 					inertToolbar={toolbarPointerBlocked}
-					callAction={phone && !newSession ? caller : undefined}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
 						if (open) keepMobileComposerExpanded();
@@ -2325,7 +2327,13 @@
 		</form>
 
 		{#if phone}
-			<ComposerContextLine newChat={newSession} sheetOpen={mobileControlsOpen} onOpen={(row) => controlsDockRef?.setMobileSheetOpen(true, row)} />
+			<ComposerContextLine
+				newChat={newSession}
+				sheetOpen={mobileControlsOpen}
+				panelId={controlsPanelId}
+				onOpen={(row) => controlsDockRef?.setMobileSheetOpen(true, row)}
+				onToggleControls={() => controlsDockRef?.setMobileSheetOpen(!mobileControlsOpen)}
+			/>
 			{#if newSession && ($activeSession.project || $activeSession.projectV2Id)}
 				<!-- The picked worker lacks the project: say so, and that Send sets it up first. -->
 				<NewChatSetupCallout />
@@ -2338,8 +2346,7 @@
 	</div>
 </div>
 
-<!-- The dictate mic, the Talk circle in the send slot, and the call button
-     the phone shell's controls panel shows. -->
+<!-- The dictate mic and the Talk circle in the send slot. -->
 {#snippet recorder()}
 	<!-- Voice Input (delegated to VoiceRecorder component) -->
 	<VoiceRecorder
@@ -2369,13 +2376,6 @@
 		variant="circle"
 		agentName={newSession ? agentName : null}
 		bind:available={callAvailable}
-		disabled={isUploading || isRecording || isTranscribing}
-		disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
-	/>
-{/snippet}
-
-{#snippet caller()}
-	<VoiceCallButton
 		disabled={isUploading || isRecording || isTranscribing}
 		disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
 	/>

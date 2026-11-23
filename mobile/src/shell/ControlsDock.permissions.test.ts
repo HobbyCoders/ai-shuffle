@@ -42,7 +42,8 @@ afterAll(() => vi.unstubAllGlobals());
 /** The Chat controls panel's Tool access radios (#1816). */
 const panelAccess = () => within(document.querySelector<HTMLElement>('.mcp [role="radiogroup"][aria-label="Tool access"]')!);
 async function openControls() {
-	const view = render(ControlsDock, { props: {} });
+	// A compose screen, as ChatInput renders it: the quick bar carries Tool access there.
+	const view = render(ControlsDock, { props: { newChat: true } });
 	view.component.setMobileSheetOpen(true);
 	await tick();
 	return { ...view, access: panelAccess() };

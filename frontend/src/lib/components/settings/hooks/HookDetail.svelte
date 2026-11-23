@@ -6,6 +6,7 @@
 	 */
 	import { Play } from 'lucide-svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
+	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
 	import type { HookEventType } from '$lib/api/hooks';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -53,10 +54,7 @@
 	const enabled = $derived(hook?.enabled ?? form?.enabled ?? true);
 	const needsSecret = $derived(!isDraft && !hook && form?.type === 'webhook' && form.hasSecret);
 
-	const scopeOptions = $derived([
-		{ value: '', label: 'App (all chats)' },
-		...$projects.map((p) => ({ value: p.id, label: p.name }))
-	]);
+	const scopeOptions = $derived(projectSelectGroups($projects, $groups, [{ value: '', label: 'App (all chats)' }]));
 	const scopeName = $derived.by(() => {
 		const pid = form?.projectId;
 		if (!pid) return 'App';
@@ -190,7 +188,7 @@
 					{#if isDraft}
 						<SelectField
 							value={form.projectId ?? ''}
-							options={scopeOptions}
+							groups={scopeOptions}
 							onchange={(v) => (form.projectId = v || null)}
 						/>
 					{:else}

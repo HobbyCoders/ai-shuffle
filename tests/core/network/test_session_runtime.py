@@ -94,7 +94,9 @@ def test_owner_runtime_transitions_and_project_label_on_mirror(workers):
 
 @pytest.mark.parametrize("mode, expected", [("queued", "working"), ("blocked_setup", "working"),
                                              ("expired_run", "idle"), ("terminal_task", "idle"),
-                                             ("running_task", "parked"), ("running_task_and_turn", "working")])
+                                             ("running_task", "parked"), ("running_task_and_turn", "working"),
+                                             ("armed_wake", "parked"), ("held_wake", "idle"),
+                                             ("notice_wake", "idle"), ("stopped_wake", "idle")])
 def test_runtime_uses_live_owner_work_not_terminal_history(workers, mode, expected):
     a = workers("runtime-cases")
     with a.active():
@@ -107,6 +109,19 @@ def test_runtime_uses_live_owner_work_not_terminal_history(workers, mode, expect
                 a.sql("UPDATE turns SET state = 'blocked_setup' WHERE id = ?", (turn["id"],))
         elif mode == "expired_run":
             runs.claim_run("case", "expired-owner", -1)
+        elif mode.endswith("_wake"):
+            # A scheduled wakeup is work the chat waits on; a held note (no
+            # timer), a removed agent's notice and a wake a Stop retired are not.
+            import time
+            from app.core.wakeup_service import NEVER_FIRE_AT
+            from app.db import wakeups
+            wakeups.create_wakeup(
+                id="wake", session_id="case", prompt="Check the build",
+                fire_at=NEVER_FIRE_AT if mode == "held_wake" else time.time() + 600,
+                source="profile_cancelled" if mode == "notice_wake" else "schedule_wakeup",
+                stop_seq=0)
+            if mode == "stopped_wake":
+                a.sql("INSERT INTO session_stops (session_id, stop_seq) VALUES ('case', 1)")
         elif mode == "terminal_task":
             background_tasks.upsert_background_task({"task_id": "done", "session_id": "case",
                                                      "kind": "shell", "status": "completed"})

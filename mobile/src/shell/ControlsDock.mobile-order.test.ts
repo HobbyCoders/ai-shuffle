@@ -4,6 +4,8 @@ import { get } from 'svelte/store';
 import { getContextUsage } from '$lib/api/sessions';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import ControlsDock from '$lib/components/chat/ControlsDock.svelte';
+import ComposerContextLine from '$lib/components/chat/phone/ComposerContextLine.svelte';
+import type { ComposerSetupRow } from '$lib/components/chat/composer-shell';
 import { tick } from 'svelte';
 import '$lib/test-stubs/composer-dom';
 import { installMobileShell } from './register';
@@ -52,15 +54,45 @@ it.each(['code', 'chat', 'voice'] as const)('the phone quick bar is the sole con
 	activeSession.newChat();
 });
 
+/**
+ * The dock beside the context line, wired as ChatInput wires them: the line's
+ * Controls item toggles the dock's panel and names it in `aria-controls`.
+ */
+function renderWithContextLine(onSheetOpenChange: (open: boolean) => void) {
+	const panelId = 'chat-controls-under-test';
+	let open = false;
+	let line: { rerender(props: Record<string, unknown>): Promise<void> } | null = null;
+	const dock = render(ControlsDock, {
+		props: {
+			panelId,
+			onSheetOpenChange: (next: boolean) => {
+				open = next;
+				onSheetOpenChange(next);
+				void line?.rerender({ sheetOpen: next });
+			}
+		}
+	});
+	line = render(ComposerContextLine, {
+		props: {
+			newChat: false,
+			sheetOpen: false,
+			panelId,
+			onOpen: (row: ComposerSetupRow) => dock.component.setMobileSheetOpen(true, row),
+			onToggleControls: () => dock.component.setMobileSheetOpen(!open)
+		}
+	});
+	return { component: dock.component, controls: screen.getByRole('button', { name: 'All chat controls' }) };
+}
+
 describe('ControlsDock mobile control order', () => {
 	// #1816: the dock's open state drives the Chat controls panel, a dialog
-	// over the chat; it takes focus while open and hands it back to the quick
-	// bar's Controls cell when it closes.
+	// over the chat; it takes focus while open and hands it back to the
+	// Controls item on the context line when it closes.
 	it('opens the Chat controls panel through the exported setter and returns focus to Controls', async () => {
 		const onSheetOpenChange = vi.fn();
-		const { component } = render(ControlsDock, { props: { onSheetOpenChange } });
+		const { component, controls } = renderWithContextLine(onSheetOpenChange);
 		const panel = document.querySelector<HTMLElement>('.mcp')!;
-		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		expect(controls.getAttribute('aria-controls')).toBe(panel.id);
 		expect(panel.getAttribute('aria-hidden')).toBe('true');
 		component.setMobileSheetOpen(true);
 		await tick();
@@ -76,8 +108,9 @@ describe('ControlsDock mobile control order', () => {
 
 	it('toggles the panel from Controls and closes it with Escape', async () => {
 		const onSheetOpenChange = vi.fn();
-		render(ControlsDock, { props: { onSheetOpenChange } });
-		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		const { controls } = renderWithContextLine(onSheetOpenChange);
+		// The quick bar no longer carries a Controls cell: the context line's Controls item is the one way in.
+		expect(document.querySelector('[data-cell="controls"]')).toBeNull();
 		await fireEvent.click(controls);
 		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
 		expect(controls.getAttribute('aria-expanded')).toBe('true');

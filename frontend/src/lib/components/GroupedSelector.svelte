@@ -6,15 +6,15 @@
 	 * clicking one slides to a sub-panel with that group's items.
 	 * Back button slides back. Works well on mobile and desktop.
 	 *
-	 * `searchable` adds a search field over the main panel and lists the items
-	 * flat, ignoring groups, in the resting order `rank` gives (a quick picker:
-	 * most recently used first). Typing lists the matches best first, ↑/↓ move
-	 * the highlight, Enter
-	 * picks it, and with `numbered` a digit picks one of the first nine rows
-	 * while the field is empty. Escape is left to the menu's owner.
+	 * `searchable` adds a search field over the main panel. Its rows keep the
+	 * groups, each in the resting order `rank` gives (a quick picker: most
+	 * recently used first). Typing searches every item, grouped or not, as one
+	 * flat list, best match first; ↑/↓ move the highlight, Enter picks it (or
+	 * opens a group), and with `numbered` a digit picks one of the first nine
+	 * rows while the field is empty. Escape is left to the menu's owner.
 	 */
 	import { Check, ChevronRight, ChevronLeft, FolderClosed, FolderPlus, Search } from 'lucide-svelte';
-	import { groups, organizeByGroups, type EntityType } from '$lib/stores/groups.svelte';
+	import { groups, organizeByGroups, type EntityType, type GroupIds } from '$lib/stores/groups.svelte';
 	import { tick } from 'svelte';
 
 	interface Item {
@@ -53,6 +53,8 @@
 		trailingIcon?: any;
 		/** Focus the search field when the menu mounts. */
 		autofocus?: boolean;
+		/** Ids an item's group may be saved under (default: its id). */
+		groupIds?: GroupIds<Item>;
 	}
 
 	let {
@@ -73,7 +75,8 @@
 		numbered = false,
 		trailingItem = null,
 		trailingIcon,
-		autofocus = false
+		autofocus = false,
+		groupIds
 	}: Props = $props();
 
 	const uid = $props.id();
@@ -110,7 +113,7 @@
 	// Organize items by groups
 	const organized = $derived.by(() => {
 		const groupsState = $groups;
-		return organizeByGroups(ordered, entityType, groupsState);
+		return organizeByGroups(ordered, entityType, groupsState, groupIds);
 	});
 
 	// Groups that actually have items
@@ -125,11 +128,8 @@
 		return result;
 	});
 
-	// Has any groups at all
-	const hasGroups = $derived(populatedGroups.length > 0);
-	/** Group rows on the main panel. A searchable list stays flat, so its
-	 *  resting order and 1–9 keys cover every item, grouped or not. */
-	const grouped = $derived(hasGroups && !searchable);
+	/** Group rows on the main panel (a search lists every match flat). */
+	const grouped = $derived(populatedGroups.length > 0);
 
 	const extraPopulated = $derived(extraGroups.filter(g => g.items.length > 0));
 
@@ -161,7 +161,7 @@
 		if (addLabel && onAdd) list.push({ kind: 'add', id: 'add' });
 		return list;
 	});
-	const rowIndex = $derived(new Map(rows.map((row, index) => [`${row.kind}:${row.id}`, index])));
+	const rowIndex = $derived(new Map(rows.map((row, index) => [keyOf(row.kind, row.id), index])));
 	const active = $derived(rows.length ? Math.min(highlight, rows.length - 1) : -1);
 	/** The row Enter takes: Add Project only once moved to, never as the default ("No matches"). */
 	const current = $derived(rows[active]?.kind === 'add' && !navigated ? -1 : active);
@@ -169,15 +169,16 @@
 	const typedDigits = $derived(new Set(items.map(item => item.name.trim().charAt(0)).filter(char => /^[0-9]$/.test(char))));
 	/** A digit is a row key only while the search is empty and no name starts with it. */
 	const digitKey = (digit: number) => numbered && !query && !typedDigits.has(String(digit));
-	/** Item ids with their 1–9 key. */
+	const keyOf = (kind: Row['kind'], id: string) => `${kind}:${id}`;
+	/** Item and group rows (by `keyOf`) with their 1–9 key, in screen order. */
 	const digitOf = $derived(
-		new Map(rows.filter(row => row.kind === 'item').slice(0, 9).map((row, i) => [row.id, i + 1] as const).filter(([, digit]) => digitKey(digit)))
+		new Map(rows.filter(row => row.kind === 'item' || row.kind === 'group').slice(0, 9).map((row, i) => [keyOf(row.kind, row.id), i + 1] as const).filter(([, digit]) => digitKey(digit)))
 	);
 	const rowId = (index: number | undefined) => (index === undefined ? undefined : `${uid}-row-${index}`);
 	/** Attributes a main-panel row carries while the menu is searchable. */
 	function rowProps(kind: Row['kind'], id: string): Record<string, unknown> {
 		if (!searchable) return {};
-		const index = rowIndex.get(`${kind}:${id}`);
+		const index = rowIndex.get(keyOf(kind, id));
 		return {
 			id: rowId(index),
 			'data-highlighted': index === current ? '' : undefined,
@@ -207,7 +208,7 @@
 			// No row for that digit: it types, as in any search.
 			const row = event.key === '0'
 				? rows.find(r => r.kind === 'trailing')
-				: rows.find(r => r.kind === 'item' && digitOf.get(r.id) === Number(event.key));
+				: rows.find(r => digitOf.get(keyOf(r.kind, r.id)) === Number(event.key));
 			if (row) {
 				event.preventDefault();
 				activate(row);
@@ -223,6 +224,15 @@
 
 	/** Put the cursor in the search field (the menu was opened from the keyboard). */
 	export function focusSearch() {
+		if (activeGroup !== null) {
+			// Back to the main panel: its search field is inert under a group.
+			activeGroup = null;
+			containerHeight = null;
+			isAnimating = false;
+			opener = null;
+			void tick().then(() => searchInput?.focus({ preventScroll: true }));
+			return;
+		}
 		searchInput?.focus({ preventScroll: true });
 	}
 
@@ -300,8 +310,8 @@
 	}
 </script>
 
-{#snippet rowKey(id: string)}
-	{#if digitOf.has(id)}<kbd class="row-key" aria-hidden="true">{digitOf.get(id)}</kbd>{/if}
+{#snippet rowKey(kind: Row['kind'], id: string)}
+	{#if digitOf.has(keyOf(kind, id))}<kbd class="row-key" aria-hidden="true">{digitOf.get(keyOf(kind, id))}</kbd>{/if}
 {/snippet}
 
 {#snippet itemButton(item: Item)}
@@ -321,7 +331,7 @@
 		{#if selectedId === item.id}
 			<Check size={16} strokeWidth={2} class="check-icon" />
 		{/if}
-		{@render rowKey(item.id)}
+		{@render rowKey('item', item.id)}
 	</button>
 {/snippet}
 
@@ -403,6 +413,7 @@
 						<span class="item-name">{group.name}</span>
 						<span class="group-count">{group.items.length}</span>
 						<ChevronRight size={16} strokeWidth={1.5} class="chevron-right" />
+						{@render rowKey('group', group.name)}
 					</button>
 				{/each}
 
@@ -431,6 +442,7 @@
 						<span class="item-name">{group.name}</span>
 						<span class="group-count">{group.items.length}</span>
 						<ChevronRight size={16} strokeWidth={1.5} class="chevron-right" />
+						{@render rowKey('group', group.name)}
 					</button>
 				{/each}
 			{/if}

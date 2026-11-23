@@ -44,6 +44,8 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
     def only(column: str) -> str:
         return f" AND {column} IN ({', '.join(['%s'] * len(only_params))})" if only_params else ""
 
+    from app.db.wakeups import armed_wake_sql
+
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -60,9 +62,11 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
                     OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.id
                         AND t.state IN ('queued', 'running', 'blocked_setup')) THEN 'working'
                 -- No turn is running: live background work (a Monitor shell,
-                -- a sub-agent) means the chat is parked on it, marker or not.
+                -- a sub-agent) or a scheduled wakeup means the chat is parked
+                -- on it, marker or not.
                 WHEN s.parked_task_kind IS NOT NULL OR EXISTS (SELECT 1 FROM background_tasks b
-                    WHERE b.session_id = s.id AND b.status = 'running') THEN 'parked'
+                    WHERE b.session_id = s.id AND b.status = 'running')
+                    OR """ + armed_wake_sql("s.id") + """ THEN 'parked'
                 ELSE 'idle' END AS state
             FROM sessions s
             WHERE (s.owner_device_id = %s OR

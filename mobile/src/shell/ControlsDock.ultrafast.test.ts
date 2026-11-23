@@ -122,9 +122,10 @@ describe('the effort label shows the speed tier', () => {
 
 describe('the phone controls offer the three tiers', () => {
 	it('swaps the Fast switch for a Speed pick and badges the quick bar', async () => {
-		render(ControlsDock, { props: {} });
+		const { component } = render(ControlsDock, { props: {} });
 		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: /^All chat controls/ }));
+		component.setMobileSheetOpen(true);
+		await tick();
 		const group = document.querySelector('.mcp [data-row="speed"] [role="radiogroup"][aria-label="Speed"]')!;
 		const radios = Array.from(group.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
 		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Standard', 'Fast', 'Ultrafast']);
@@ -143,9 +144,10 @@ describe('the phone controls offer the three tiers', () => {
 
 	it('keeps the plain Fast switch on a model without Ultrafast', async () => {
 		activeSession.setModelOverride(SOL);
-		render(ControlsDock, { props: {} });
+		const { component } = render(ControlsDock, { props: {} });
 		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: /^All chat controls/ }));
+		component.setMobileSheetOpen(true);
+		await tick();
 		expect(screen.getByRole('switch', { name: 'Fast mode' })).toBeTruthy();
 		expect(document.querySelector('[data-row="speed"]')).toBeNull();
 	});

@@ -9,6 +9,7 @@
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import { SUBSCRIPTION_OWNER_ONLY_REASON } from '$lib/constants/model-picker';
 	import { appData, apiUserSessions } from '$lib/stores/app-data.svelte';
+	import { groups, projectSelectGroups } from '$lib/stores/groups.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { layout } from '$lib/stores/layout.svelte';
 	import type { Session } from '$lib/api/sessions';
@@ -54,10 +55,7 @@
 	const user = $derived(isDraft ? undefined : model.userById(id));
 	const draft = $derived(isDraft ? model.draft : null);
 	const sessions = $derived(user ? sessionsFor($apiUserSessions, user.id) : []);
-	const projectOptions = $derived([
-		{ value: '', label: 'None' },
-		...model.projects.map((p) => ({ value: p.id, label: p.name }))
-	]);
+	const projectOptions = $derived(projectSelectGroups(model.projects, $groups, [{ value: '', label: 'None' }]));
 	const tabs = $derived(
 		isDraft
 			? ['Overview', 'Run', 'Access']
@@ -167,7 +165,7 @@
 						<TextField bind:value={draft.description} placeholder="Optional" />
 					</SettingRow>
 					<SettingRow label="Project" hint="Limits to one workspace">
-						<SelectField bind:value={draft.projectId} options={projectOptions} />
+						<SelectField bind:value={draft.projectId} groups={projectOptions} />
 					</SettingRow>
 				</RowGroup>
 			{:else if tab === 'Run'}
@@ -261,7 +259,7 @@
 						<SettingRow label="Project" hint="Limits to one workspace">
 							<SelectField
 								value={user.project_id ?? ''}
-								options={projectOptions}
+								groups={projectOptions}
 								onchange={(v) => save(user, { project_id: v })}
 							/>
 						</SettingRow>

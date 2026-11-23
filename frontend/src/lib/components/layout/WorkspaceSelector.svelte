@@ -23,6 +23,7 @@
 	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		buildWorkspacePickerItems,
+		pickerGroupIds,
 		pickerItemName,
 		projectRecency,
 		rankPickerItems,
@@ -307,6 +308,7 @@
 				trailingItem={noProjectRow}
 				trailingIcon={FolderX}
 				autofocus={searchable && autofocusSearch}
+				groupIds={pickerGroupIds}
 			/>
 			<p class="sentence-hint">
 				<span>Optional · adds checkout, branch and git</span>
@@ -360,6 +362,7 @@
 					onAdd={openAddModal}
 					emptyMessage="No workspaces available"
 					itemIcon={FolderClosed}
+					groupIds={pickerGroupIds}
 				/>
 			</div>
 		{/if}

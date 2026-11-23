@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onDestroy, tick } from 'svelte';
-	import { ArrowLeftRight, ChevronDown, FolderClosed, Plus, Search, X } from 'lucide-svelte';
+	import { ArrowLeftRight, ChevronDown, ChevronLeft, ChevronRight, FolderClosed, Plus, Search, X } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { projects } from '$lib/stores/app-data.svelte';
+	import { groups, organizeByGroups } from '$lib/stores/groups.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
@@ -33,8 +34,8 @@
 	const open = $derived($openHeaderDropdown === dropdownId);
 	const folderIds = $derived($activeSession.workspaceProjectIds ?? []);
 	const mainProject = $derived($projects.find(p => p.id === $activeSession.project));
-	const available = $derived($projects.filter(p =>
-		p.id !== $activeSession.project && !folderIds.includes(p.id) &&
+	const addable = $derived($projects.filter(p => p.id !== $activeSession.project && !folderIds.includes(p.id)));
+	const available = $derived(addable.filter(p =>
 		`${p.name} ${p.path}`.toLowerCase().includes(search.toLowerCase().trim())
 	));
 	let root = $state<HTMLDivElement>();
@@ -42,6 +43,24 @@
 	let searchInput = $state<HTMLInputElement>();
 	let adding = $state(false);
 	let search = $state('');
+	// With the search empty, the user's project groups are folders: a group row
+	// opens its projects, Back returns. A search lists every match flat.
+	let addGroup = $state<string | null>(null);
+	const organized = $derived(organizeByGroups(addable, 'projects', $groups));
+	const groupRows = $derived(
+		organized.groupOrder
+			.map(g => ({ name: g.name, items: organized.grouped.get(g.name) ?? [] }))
+			.filter(g => g.items.length > 0)
+	);
+	const searching = $derived(search.trim() !== '');
+	const openGroup = $derived(searching ? null : groupRows.find(g => g.name === addGroup) ?? null);
+	const listed = $derived(searching ? available : openGroup ? openGroup.items : groupRows.length ? organized.ungrouped : addable);
+	let optionsList = $state<HTMLDivElement>();
+	async function enterGroup(name: string | null) {
+		addGroup = name;
+		await tick();
+		optionsList?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+	}
 	let saving = $state(false);
 	let error = $state('');
 	let showCreateProject = $state(false);
@@ -52,6 +71,7 @@
 		closeDropdown(dropdownId);
 		adding = false;
 		search = '';
+		addGroup = null;
 		error = '';
 		showCreateProject = false;
 	});
@@ -62,10 +82,11 @@
 	}
 	function toggle() {
 		if (open) close();
-		else { adding = false; search = ''; error = ''; openDropdown(dropdownId); }
+		else { adding = false; search = ''; addGroup = null; error = ''; openDropdown(dropdownId); }
 	}
 	async function startAdding() {
 		adding = true;
+		addGroup = null;
 		await tick();
 		searchInput?.focus();
 	}
@@ -154,12 +175,24 @@
 			{/if}
 			{#if adding}
 				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects" aria-label="Search projects" /></div>
-				<div class="project-options">
-					{#each available as project (project.id)}
+				<div class="project-options" bind:this={optionsList}>
+					{#if openGroup}
+						<button type="button" class="project-option group-back" onclick={() => enterGroup(null)}>
+							<ChevronLeft size={15} aria-hidden="true" /><span class="group-name">{openGroup.name}</span>
+						</button>
+					{:else if !searching}
+						{#each groupRows as group (group.name)}
+							<button type="button" class="project-option group-option" aria-label="{group.name}, {group.items.length} {group.items.length === 1 ? 'project' : 'projects'}" onclick={() => enterGroup(group.name)}>
+								<FolderClosed size={15} aria-hidden="true" /><span class="group-name">{group.name}</span><span class="group-count">{group.items.length}</span><ChevronRight size={14} aria-hidden="true" />
+							</button>
+						{/each}
+						{#if groupRows.length && listed.length}<div class="group-divider" role="separator"></div>{/if}
+					{/if}
+					{#each listed as project (project.id)}
 						<button type="button" class="project-option" disabled={saving} onclick={() => save([...folderIds, project.id])}>
 							<FolderClosed size={15} aria-hidden="true" /><div class="folder-details"><span>{project.name}</span><small>{project.path}</small></div><Plus size={14} aria-hidden="true" />
 						</button>
-					{:else}<p class="empty-projects">{search ? 'No matching projects.' : 'No more projects to add.'}</p>{/each}
+					{:else}{#if !groupRows.length || searching}<p class="empty-projects">{search ? 'No matching projects.' : 'No more projects to add.'}</p>{/if}{/each}
 				</div>
 				<button type="button" class="add-project" disabled={saving} onclick={createProject}><Plus size={14} />Browse for a new project…</button>
 			{:else}
@@ -199,6 +232,10 @@
 	button:disabled { opacity: 0.5; cursor: default; }
 	button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 	.project-option { width: 100%; }
+	.group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8125rem; font-weight: 500; text-align: left; }
+	.group-back .group-name { color: var(--muted-foreground); }
+	.group-count { font-size: 0.6875rem; color: var(--muted-foreground); background: var(--muted); border-radius: 999px; padding: 1px 7px; }
+	.group-divider { height: 1px; margin: 4px 0; background: var(--border-subtle); }
 	.add-project { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px; margin-top: 4px; font-size: 0.8125rem; text-align: left; }
 	.project-search { display: flex; align-items: center; gap: 8px; padding: 8px; margin: 4px 0; border-top: 1px solid var(--border-subtle); color: var(--muted-foreground); }
 	.project-search input { width: 100%; min-width: 0; background: transparent; color: var(--foreground); border: 0; font-size: 0.8125rem; padding: 4px; }

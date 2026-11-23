@@ -220,9 +220,9 @@ export async function openPopup(trigger, popup) {
 }
 
 /**
- * Phone width keeps the selectors in Chat controls, reached from the Controls
- * cell of the composer's quick bar (each name on the context line under the
- * composer opens its own selector instead). Opens the sheet's list; does
+ * Phone width keeps the selectors in Chat controls, reached from Controls, the
+ * last item of the context line under the composer (each name before it opens
+ * its own selector instead). Opens the sheet's list; does
  * nothing on a wider window. Returns whether it opened one, so the caller can
  * close it again.
  */
@@ -320,6 +320,18 @@ export async function withoutSavedAgentPick(page) {
  * before every Python cell on all platforms.
  */
 export async function pickAccess(page, mode) {
+	// A phone chat under way has no Tool access cell on its bar: the choice is
+	// in Chat controls.
+	if (!(await page.getByRole('button', { name: /^Permission mode:/ }).first().isVisible())
+		&& (await page.getByRole('button', { name: /^All chat controls/ }).isVisible())) {
+		const opened = await openChatSetup(page);
+		const group = page.getByRole('dialog', { name: 'Chat controls' }).getByRole('radiogroup', { name: 'Tool access' });
+		const radio = group.getByRole('radio', { name: new RegExp(`^${mode}\\b`, 'i') });
+		await radio.click();
+		await page.waitForFunction((el) => el.getAttribute('aria-checked') === 'true', await radio.elementHandle(), { timeout: 10_000 });
+		await closeChatSetup(page, opened);
+		return;
+	}
 	// A menu at desktop width; phones share the composer sheet's small picker,
 	// which stays up after a pick so its help line can be read.
 	const menu = page.getByRole('menu', { name: 'Tool access' });

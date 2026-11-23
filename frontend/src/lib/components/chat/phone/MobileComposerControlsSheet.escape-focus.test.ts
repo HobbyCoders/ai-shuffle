@@ -38,18 +38,29 @@ afterEach(() => {
 	document.body.innerHTML = '';
 });
 
-/** Render the sheet as the dock does: it owns `open` and follows the sheet's requests. */
+const PANEL_ID = 'chat-controls-test';
+
+/**
+ * Render the sheet as the dock does: it owns `open` and follows the sheet's
+ * requests. `controls` stands in for the context line's Controls item, which
+ * lives outside the sheet and names the panel in `aria-controls`.
+ */
 async function openFromCell(cellName: 'model' | 'controls') {
+	const trigger = document.createElement('button');
+	trigger.dataset.controlsTrigger = '';
+	trigger.setAttribute('aria-controls', PANEL_ID);
+	document.body.append(trigger);
 	const p = props();
-	const utils = render(MobileComposerControlsSheet, { ...p, onOpenChange: (next: boolean) => void utils.rerender({ open: next }) });
-	const cell = document.querySelector<HTMLElement>(`[data-cell="${cellName}"]`)!;
+	const utils = render(MobileComposerControlsSheet, { ...p, panelId: PANEL_ID, onOpenChange: (next: boolean) => void utils.rerender({ open: next }) });
+	trigger.addEventListener('click', () => void utils.rerender({ open: true }));
+	const cell = cellName === 'controls' ? trigger : document.querySelector<HTMLElement>(`[data-cell="${cellName}"]`)!;
 	cell.focus();
 	await fireEvent.click(cell);
 	await tick();
 	await tick();
 	const page = document.querySelector<HTMLElement>(`.mcp [data-page="${cellName === 'controls' ? 'main' : cellName}"]`)!;
 	expect(page.inert).toBe(false);
-	return { cell };
+	return { cell, trigger };
 }
 
 async function escape() {
@@ -58,7 +69,7 @@ async function escape() {
 	await tick();
 }
 
-const panelOpen = () => document.querySelector('[data-cell="controls"]')!.getAttribute('aria-expanded') === 'true';
+const panelOpen = () => document.querySelector('.mcp')!.getAttribute('aria-hidden') === 'false';
 
 describe('phone controls panel: Escape after focus was lost to the page', () => {
 	it('returns focus to the Model cell that opened the Model page', async () => {
@@ -96,13 +107,13 @@ describe('phone controls panel: Escape after focus was lost to the page', () => 
 		expect(document.activeElement).toBe(other);
 	});
 
-	it('falls back to the controls cell, as with focus inside, when the Model cell is gone', async () => {
-		const { cell } = await openFromCell('model');
+	it('falls back to the context line\'s Controls item, as with focus inside, when the Model cell is gone', async () => {
+		const { cell, trigger } = await openFromCell('model');
 		(document.activeElement as HTMLElement).blur();
 		cell.remove();
 		await escape();
 		expect(panelOpen()).toBe(false);
-		expect(document.activeElement).toBe(document.querySelector('[data-cell="controls"]'));
+		expect(document.activeElement).toBe(trigger);
 	});
 
 	it('does not throw when the sheet is unmounted while open with focus on the page', async () => {

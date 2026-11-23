@@ -910,6 +910,57 @@ class TestInterruptSession:
         assert "No active session found" in str(exc_info.value.detail)
 
 
+class TestStopSession:
+    """POST /api/v1/session/{session_id}/stop: the chat's own Stop, on any worker."""
+
+    @pytest.fixture
+    def deps(self):
+        from app.network import control
+        with patch("app.api.query.require_session", new=AsyncMock(return_value={"id": "chat-1"})), \
+             patch.object(control, "owner_of", return_value=None) as owner_of, \
+             patch.object(control, "interrupt", new=AsyncMock()) as remote, \
+             patch("app.core.query_session_lifecycle.interrupt_owned_session", new=AsyncMock(
+                 return_value={"interrupted": True, "finished": False, "turn_id": "t1"})) as local, \
+             patch("app.core.turn_claim.notify_turns_changed") as notify:
+            yield {"owner_of": owner_of, "remote": remote, "local": local, "notify": notify}
+
+    async def test_stops_a_chat_running_here(self, deps):
+        from app.api.query import stop
+        result = await stop(_owner_request(), "chat-1", "token")
+        assert result == {"status": "stopped", "session_id": "chat-1"}
+        deps["local"].assert_awaited_once_with("chat-1", "stop", stop_background=True, source="user_stop")
+        deps["notify"].assert_called_once_with("chat-1")
+        deps["remote"].assert_not_awaited()
+
+    async def test_relays_to_the_worker_that_runs_the_chat(self, deps):
+        from app.api.query import stop
+        deps["owner_of"].return_value = "dev_other"
+        deps["remote"].return_value = {"interrupted": True, "finished": False}
+        result = await stop(_owner_request(), "chat-1", "token")
+        assert result["status"] == "stopped"
+        deps["remote"].assert_awaited_once_with("dev_other", "chat-1", "stop", stop_background=True,
+                                                source="user_stop")
+        deps["local"].assert_not_awaited()
+
+    async def test_an_offline_owner_is_named_not_reported_as_finished(self, deps):
+        from fastapi import HTTPException
+        from app.api.query import stop
+        from app.network import control
+        deps["owner_of"].return_value = "dev_other"
+        deps["remote"].side_effect = control.RunnerUnreachable("no route")
+        with pytest.raises(HTTPException) as exc_info:
+            await stop(_owner_request(), "chat-1", "token")
+        assert exc_info.value.status_code == 503
+        assert "offline" in exc_info.value.detail
+
+    async def test_incomplete_cleanup_is_reported(self, deps):
+        from app.api.query import stop
+        deps["local"].return_value = {"interrupted": True, "finished": False, "incomplete": True,
+                                      "message": "One task may still run."}
+        result = await stop(_owner_request(), "chat-1", "token")
+        assert result["incomplete"] is True and result["message"] == "One task may still run."
+
+
 # =============================================================================
 # Test List Active Sessions Endpoint
 # =============================================================================
