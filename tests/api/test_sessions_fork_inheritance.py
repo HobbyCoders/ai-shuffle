@@ -155,9 +155,14 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
         database.get_profile("fork-cwd-agent"), session_id=fork_id,
     )
     # Exercise the runtime producer against the exact persisted fork fields,
-    # including the absent mode and the recorded parent session.
-    assert row["mode"] is None and row["parent_session_id"] == PARENT_SID
-    assert options.cwd != parent_options.cwd
+    # including the inherited chat lane and the recorded parent session.
+    assert row["mode"] == "chat" and row["parent_session_id"] == PARENT_SID
+    # The owner's no-project chat runs in its own folder; a preview chat stays
+    # in the chat lane's one shared folder, like its parent.
+    if preview:
+        assert options.cwd == parent_options.cwd
+    else:
+        assert options.cwd != parent_options.cwd
     handle = fluid_transcript.get_cli_session_id(row["sdk_session_id"])
     assert handle
     expected = fluid_transcript._cli_project_dir(tmp_path / "cli-projects", options.cwd) / f"{handle}.jsonl"

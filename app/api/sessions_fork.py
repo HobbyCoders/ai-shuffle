@@ -43,6 +43,9 @@ def _fork_inherited_fields(original_session: dict) -> dict:
     defaults instead of what the parent was running.
     """
     return {
+        # The lane: a chat-lane chat has no project by design; forked into the
+        # code lane it would ask for one before it could take a file.
+        "mode": original_session.get("mode"),
         "project_v2_id": original_session.get("project_v2_id"),
         "provider_id": original_session.get("provider_id"),
         "derive_provider_from_profile": False,
@@ -93,7 +96,8 @@ def _seed_cli_fork_events(new_session_id: str, new_sdk_session_id: str, working_
         from app.core.jsonl_parser import parse_session_history_from_store
         from app.db import session_events as session_events_db
 
-        if session_events_db.get_max_seq(new_session_id):
+        # A copied log of cancellations only carries no conversation: seed it.
+        if not session_events_db.can_backfill_events(new_session_id):
             return  # The whole-session copy already seeded it.
         messages, _usage = parse_session_history_from_store(
             new_sdk_session_id,

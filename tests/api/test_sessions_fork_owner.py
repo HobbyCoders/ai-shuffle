@@ -179,19 +179,15 @@ def test_owner_forks_its_chat_under_the_mirrors_id(mock_db, monkeypatch):
     assert len(sessions_db.get_sessions(limit=100)) == count
 
 
-def test_owner_seeds_a_cli_forks_history_before_publishing(mock_db, monkeypatch, tmp_path):
-    """A CLI-backed chat forked at an earlier message: the store holds nothing
-    for the new transcript and heals from its JSONL only once the file has sat
-    idle, so the owner seeds the fork's events from the lines it wrote."""
-    import asyncio
+def _cli_parent(monkeypatch, tmp_path, parent):
+    """A CLI-backed parent with a two-turn JSONL transcript and no app events.
+    Returns the list each publish appends the fork's (type, payload) events to."""
     import json
-    from app.api import sessions_fork
     from app.core import jsonl_parser
     from app.core.config import settings
     from app.db import session_events as events_db
     from app.network import catalog, control
 
-    parent = "sess-cli-fork-parent"
     sessions_db.create_session(parent, "default", title="cli parent")
     sessions_db.update_session(parent, sdk_session_id="sdk-cli-parent")
     rows = [
@@ -213,11 +209,23 @@ def test_owner_seeds_a_cli_forks_history_before_publishing(mock_db, monkeypatch,
 
     def capture(**kw):
         sid = kw["session_ids"][0]
-        published.append([(e.get("type"), json.dumps(e.get("payload"))) for e in events_db.get_events(sid)])
+        published.append([(e.get("event_type"), json.dumps(e.get("payload"))) for e in events_db.get_events(sid)])
         return 0
 
     monkeypatch.setattr(catalog, "publish_owned", capture)
     monkeypatch.setattr(control, "stamp_provenance", lambda sid, label: True)
+    return published
+
+
+def test_owner_seeds_a_cli_forks_history_before_publishing(mock_db, monkeypatch, tmp_path):
+    """A CLI-backed chat forked at an earlier message: the store holds nothing
+    for the new transcript and heals from its JSONL only once the file has sat
+    idle, so the owner seeds the fork's events from the lines it wrote."""
+    import asyncio
+    from app.api import sessions_fork
+
+    parent = "sess-cli-fork-parent"
+    published = _cli_parent(monkeypatch, tmp_path, parent)
 
     asyncio.run(sessions_fork.handle_fork(
         {"session_id": parent, "new_session_id": "ses-cli0123456789ab", "message_index": 1}, "dev-mirror"))
@@ -226,6 +234,26 @@ def test_owner_seeds_a_cli_forks_history_before_publishing(mock_db, monkeypatch,
     seeded = " ".join(payload for _type, payload in published[0])
     assert "first question" in seeded and "first answer" in seeded
     assert "second question" not in seeded
+
+
+def test_owner_seeds_a_whole_cli_fork_whose_log_holds_only_cancellations(mock_db, monkeypatch, tmp_path):
+    """The parent's log has a cancelled queued turn and no history yet: the
+    whole-chat copy brings only that, so the fork still needs seeding."""
+    import asyncio
+    from app.api import sessions_fork
+    from app.db import session_events as events_db
+
+    parent = "sess-cli-cancelled-parent"
+    published = _cli_parent(monkeypatch, tmp_path, parent)
+    events_db.append_events(parent, [{"type": "queue.cancelled", "payload": {"cancelled_turn_ids": ["peer"]}}])
+
+    asyncio.run(sessions_fork.handle_fork(
+        {"session_id": parent, "new_session_id": "ses-clicancel01234a"}, "dev-mirror"))
+
+    assert len(published) == 1
+    assert published[0][0][0] == "queue.cancelled"
+    seeded = " ".join(payload for _type, payload in published[0])
+    assert "first question" in seeded and "second answer" in seeded
 
 
 def test_owner_refuses_a_chat_it_only_mirrors(mock_db, remote_parent):
