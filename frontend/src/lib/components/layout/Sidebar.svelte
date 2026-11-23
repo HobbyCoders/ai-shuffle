@@ -92,7 +92,8 @@
 		sessionTimestamp,
 		sessionDeviceId,
 		sessionPrState,
-		projectKey,
+		foldedProjectKeys,
+		groupedProjectKey,
 		isVisibleSidebarSession,
 		sidebarGroup,
 		snoozeUntilMs,
@@ -393,11 +394,14 @@
 		}
 		return { shared, unlinked };
 	});
+	// A duplicate folded into another project groups with that project.
+	const foldedKeys = $derived(foldedProjectKeys($clusterProjects));
+	const groupKey = (s: Session) => groupedProjectKey(s, foldedKeys);
 	const projectNames = $derived.by(() => {
 		const oldest = new Map<string, { at: number; id: string; name: string }>();
 		const ownHere = new Set<string>();
 		for (const s of sidebarSessions) {
-			const key = projectKey(s);
+			const key = groupKey(s);
 			if (!s.is_remote) ownHere.add(key);
 			const at = sessionStartedAt(s);
 			const seen = oldest.get(key);
@@ -414,7 +418,7 @@
 	const projectOptions = $derived.by((): ProjectFilterOption[] => {
 		const map = new Map<string, ProjectFilterOption>();
 		for (const s of sidebarSessions) {
-			const key = projectKey(s);
+			const key = groupKey(s);
 			let option = map.get(key);
 			if (!option) {
 				option = { id: key, label: projectNames.get(key) ?? (key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s)), ids: [] };
@@ -494,7 +498,7 @@
 	const visibleSessions = $derived(
 		sidebarSessions.filter(
 			(s) =>
-				(!projectFilter || projectKey(s) === projectFilter) &&
+				(!projectFilter || groupKey(s) === projectFilter) &&
 				(!deviceFilter || sessionDeviceId(s) === deviceFilter)
 		)
 	);
@@ -746,7 +750,7 @@
 	function byProject(lane: FoldLane, laneRows: CardRow[]): ProjectGroup[] {
 		const groups = new Map<string, CardRow[]>();
 		for (const row of laneRows) {
-			const key = projectKey(row.session);
+			const key = groupKey(row.session);
 			const group = groups.get(key);
 			if (group) group.push(row);
 			else groups.set(key, [row]);
@@ -809,7 +813,7 @@
 	}
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
-	const spansProjects = $derived(new Set(rows.map((r) => projectKey(r.session))).size > 1);
+	const spansProjects = $derived(new Set(rows.map((r) => groupKey(r.session))).size > 1);
 	const needsYouGroups = $derived(byProject('needs', needsYouRows));
 	const activeGroups = $derived(byProject('active', activeRows));
 

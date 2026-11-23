@@ -35,6 +35,8 @@ import {
 	isRemovedProjectSession,
 	isVisibleSidebarSession,
 	liveProjectKeys,
+	foldedProjectKeys,
+	groupedProjectKey,
 	projectKey,
 	prStateText,
 	sessionPrState,
@@ -148,6 +150,17 @@ describe('liveProjectKeys', () => {
 		);
 		const chat = session({ project_id: null, origin: 'git:dup', project_v2_id: 'pv2-dup', link_group_id: null });
 		expect(isRemovedProjectSession(chat, keys)).toBe(false);
+	});
+
+	it('groups and filters a folded duplicate\'s chats under the kept project', () => {
+		const folded = foldedProjectKeys([
+			{ origin: 'git:kept', project_v2_id: 'pv2-kept', local_project_id: null, aliases: ['git:dup', 'pv2-dup'] }
+		]);
+		const old = session({ project_id: null, origin: 'git:dup', project_v2_id: 'pv2-dup', link_group_id: null });
+		const kept = session({ project_id: null, origin: 'git:kept', project_v2_id: 'pv2-kept', link_group_id: null });
+		expect(groupedProjectKey(old, folded)).toBe('git:kept');
+		expect(groupedProjectKey(kept, folded)).toBe('git:kept');
+		expect(groupedProjectKey(session({ origin: 'git:other' }), folded)).toBe('git:other');
 	});
 });
 
