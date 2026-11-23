@@ -147,6 +147,20 @@ describe('SessionTitleMenu', () => {
 		expect(document.activeElement).toBe(title);
 	});
 
+	it('returns focus to the title when an export row closes the menu', async () => {
+		mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review', messages: [{ role: 'user', content: 'hi' }] });
+		renderMenu();
+
+		await openMenu();
+		await tick();
+		const row = screen.getByRole('menuitem', { name: 'Export for sharing (.md)' });
+		row.focus();
+		await fireEvent.click(row);
+
+		expect(screen.queryByRole('menu')).toBeNull();
+		expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Design review' }));
+	});
+
 	it('closes and returns to the title when Tab leaves the last or first item', async () => {
 		renderMenu();
 		const title = screen.getByRole('button', { name: 'Design review' });

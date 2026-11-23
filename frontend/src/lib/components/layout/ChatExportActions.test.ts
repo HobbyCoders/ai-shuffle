@@ -78,6 +78,32 @@ it('closes the existing menu on start without adding confirmation', async () => 
 	expect(screen.queryByRole('dialog')).toBeNull();
 });
 
+it('keeps a running export blocked when the menu closes and reopens', async () => {
+	role = 'menuitem';
+	let finish!: () => void;
+	vi.mocked(exportSession).mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
+	const first = render(ChatExportActions, { sessionId: 'synthetic-session', menu: true });
+	await fireEvent.click(sharing());
+	first.unmount();
+
+	// Reopened while the first request is still running: no duplicate download.
+	render(ChatExportActions, { sessionId: 'synthetic-session', menu: true });
+	expect((sharing() as HTMLButtonElement).disabled).toBe(true);
+	expect(sharing().getAttribute('aria-busy')).toBe('true');
+	await fireEvent.click(sharing());
+	expect(exportSession).toHaveBeenCalledTimes(1);
+	cleanup();
+
+	// Another chat is not blocked by it.
+	render(ChatExportActions, { sessionId: 'other-synthetic-session', menu: true });
+	expect((sharing() as HTMLButtonElement).disabled).toBe(false);
+	cleanup();
+
+	render(ChatExportActions, { sessionId: 'synthetic-session', menu: true });
+	finish();
+	await waitFor(() => expect((sharing() as HTMLButtonElement).disabled).toBe(false));
+});
+
 describe('sheet rows (the phone chat actions sheet)', () => {
 	beforeEach(() => { role = 'button'; });
 	it('labels both rows with their notes and downloads the chosen export', async () => {

@@ -1,3 +1,12 @@
+<script lang="ts" module>
+	import { SvelteMap } from 'svelte/reactivity';
+
+	/** In-flight export per chat. The menu that hosts these rows closes (and
+	 *  unmounts them) as soon as a download starts, so reopening it must still
+	 *  see the request running instead of offering a duplicate download. */
+	const pendingBySession = new SvelteMap<string, 'backup' | 'sharing'>();
+</script>
+
 <script lang="ts">
 	/**
 	 * Separate private backups from reviewable sharing exports; never fall back to raw.
@@ -17,28 +26,29 @@
 		disabled?: boolean;
 		onStart?: () => void;
 	} = $props();
-	let pending = $state<'backup' | 'sharing' | null>(null);
+	const pending = $derived(sessionId ? (pendingBySession.get(sessionId) ?? null) : null);
 	const labelled = $derived(menu || sheet);
 	const iconSize = $derived(sheet ? 17 : 16);
 	const privateNote = 'Raw JSONL may contain secrets. Keep this backup private; do not share.';
 	const sharingNote = 'Recognized secrets removed; review content before sharing. Not a raw backup.';
 
 	async function download(kind: 'backup' | 'sharing') {
-		if (!sessionId || pending) return;
-		pending = kind;
+		const id = sessionId;
+		if (!id || pendingBySession.has(id)) return;
+		pendingBySession.set(id, kind);
 		onStart?.();
 		try {
 			if (kind === 'sharing') {
-				await exportSession(sessionId, 'markdown', { shareSafe: true });
+				await exportSession(id, 'markdown', { shareSafe: true });
 				notify(sharingNote, { severity: 'success' });
 			} else {
-				await exportSession(sessionId, 'jsonl');
+				await exportSession(id, 'jsonl');
 			}
 		} catch (err) {
 			const detail = (err as { detail?: string })?.detail;
 			notify(detail || (kind === 'sharing' ? 'Failed to export for sharing. Private backup was not downloaded.' : 'Failed to download private backup'), { severity: 'error' });
 		} finally {
-			pending = null;
+			pendingBySession.delete(id);
 		}
 	}
 </script>

@@ -144,11 +144,15 @@
 				closeSheet();
 				return;
 			}
-			// A focused row is about to unmount: hand focus back to the title.
-			const focusInside = !!menuRef && menuRef.contains(document.activeElement);
-			closeMenu();
-			if (focusInside) triggerRef?.focus({ preventScroll: true });
+			closeMenuKeepingFocus();
 		}
+	}
+
+	/** Desktop: a focused row is about to unmount, so hand focus back to the title. */
+	function closeMenuKeepingFocus() {
+		const focusInside = !!menuRef && menuRef.contains(document.activeElement);
+		closeMenu();
+		if (focusInside) triggerRef?.focus({ preventScroll: true });
 	}
 
 	function focusSelect(node: HTMLInputElement) {
@@ -355,7 +359,7 @@
 				</button>
 				{#if canExport && sessionId}
 					<div class="dropdown-divider" role="separator"></div>
-					<ChatExportActions {sessionId} menu onStart={() => closeDropdown('session-title')} />
+					<ChatExportActions {sessionId} menu onStart={closeMenuKeepingFocus} />
 				{/if}
 				<div class="dropdown-divider" role="separator"></div>
 				<button type="button" class="dropdown-item danger" role="menuitem" onclick={startDelete}>
