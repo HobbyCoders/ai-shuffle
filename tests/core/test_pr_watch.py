@@ -412,6 +412,23 @@ async def test_a_wake_queued_as_stop_lands_still_counts(mock_db):
     assert again["wakes_today"] == 1
 
 
+def test_a_wake_recorded_after_the_restart_is_still_counted(mock_db):
+    from app.db import pr_watches
+
+    old = pr_watches.create(owner="admin", worker_id="me", repo="acme/app", pr_number=10,
+                            pr_url=None, pr_title=None, session_id=None)
+    pr_watches.set_status(old["id"], "stopped", "Stopped by you")
+    new = pr_watch.start_watch(repo="acme/app", pr_number=10, pr_url=None, pr_title=None, session_id=None)
+    assert new["wakes_today"] == 0
+    # The stopped watch's poll writes its queued turn only now.
+    pr_watches.record_wakes(old["id"], [{"turn_id": "t-late", "session_id": "s1", "seq": 1,
+                                         "at": pr_watch._now().isoformat(), "ended": True}])
+    with patch("app.core.watch_manager.turn_cost", return_value=None):
+        wakes = pr_watch._refresh_wakes(pr_watches.get(new["id"]))
+    assert [w["turn_id"] for w in wakes] == ["t-late"]
+    assert len(pr_watch._within_day(wakes, pr_watch._now())) == 1
+
+
 def test_a_cancelled_run_does_not_clear_the_hold():
     unit = [{"id": 1, "name": "unit", "url": "u"}]
     state = {"seen": []}

@@ -681,11 +681,22 @@ def _within_day(wakes: List[Dict[str, Any]], now: datetime) -> List[Dict[str, An
 
 
 def _refresh_wakes(watch: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Mark finished wake turns and record their cost. Sync (DB)."""
+    """Mark finished wake turns and record their cost. Sync (DB).
+
+    Also takes in wakes this PR's earlier watches recorded after this one
+    started (a stopped watch writes its last queued turn late), so the daily
+    caps count every turn once.
+    """
     from app.core.watch_manager import turn_cost
-    from app.db import turns
+    from app.db import pr_watches, turns
 
     wakes = [dict(w) for w in watch.get("wakes") or []]
+    known = {w.get("turn_id") for w in wakes}
+    others = pr_watches.recent_wakes(watch["repo"], watch["pr_number"],
+                                     since=_now() - timedelta(days=1), exclude=watch["id"])
+    late = [dict(w) for w in others if w.get("turn_id") and w["turn_id"] not in known]
+    if late:
+        wakes = sorted([*wakes, *late], key=lambda w: str(w.get("at")))
     for wake in wakes:
         if wake.get("ended") or not wake.get("turn_id"):
             continue
