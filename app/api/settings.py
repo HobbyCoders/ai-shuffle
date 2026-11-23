@@ -828,6 +828,37 @@ async def set_limit_resume(request: LimitResumeUpdate, token: str = Depends(requ
     return await _update_limit_resume(request)
 
 
+class PrWatchSettingsUpdate(BaseModel):
+    mode: Optional[str] = None
+    max_wakes_per_day: Optional[float] = None
+    max_usd_per_day: Optional[float] = None
+    idle_days: Optional[float] = None
+    max_repeat_failures: Optional[float] = None
+    trusted_bots: Optional[List[str]] = None
+
+
+@router.get("/pr-watch")
+async def get_pr_watch_settings(token: str = Depends(require_auth)):
+    """PR watch limits (Settings > Usage): mode, wakes and dollars per PR per
+    day, quiet days before a watch ends, repeated failures, allowed bots."""
+    from app.core import pr_watch
+
+    return await run_sync(pr_watch.all_settings)
+
+
+@router.put("/pr-watch")
+async def set_pr_watch_settings(request: PrWatchSettingsUpdate, token: str = Depends(require_admin)):
+    """Change PR watch limits (admin only). Omitted fields keep their value."""
+    from app.core import pr_watch
+
+    changes = request.model_dump(exclude_none=True)
+    try:
+        await run_sync(lambda: pr_watch.update_settings(**changes))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await run_sync(pr_watch.all_settings)
+
+
 @router.put("/limit-resume/{provider_key}", include_in_schema=False)
 async def set_limit_resume_for_provider(
     provider_key: str, request: LimitResumeUpdate, token: str = Depends(require_admin),

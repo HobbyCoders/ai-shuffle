@@ -28,8 +28,9 @@
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState, gitOperations } from '$lib/stores/gitOperations.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
+	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, Rocket, TriangleAlert, ExternalLink, X, GitMerge, Eye } from 'lucide-svelte';
 	import { autoMerge } from '$lib/stores/auto-merge.svelte';
+	import { prWatches, repoFromPrUrl, watchKey, watchSummary } from '$lib/stores/pr-watches.svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
@@ -343,6 +344,13 @@
 	const mergeWhenGreen = $derived(autoMerge.enabled(sessionId));
 	$effect(() => {
 		if (sessionId && shownPr?.number) void autoMerge.load(sessionId);
+	});
+	// PR watch: polls this PR in plain code and wakes this chat when it needs it.
+	const watchRepo = $derived(repoFromPrUrl(shownPr?.url));
+	const prWatch = $derived(prWatches.active(watchRepo, shownPr?.number));
+	const watchBusyKey = $derived(watchRepo && shownPr?.number ? watchKey(watchRepo, shownPr.number) : '');
+	$effect(() => {
+		if (watchRepo && shownPr?.number) void prWatches.load();
 	});
 	const lastKnownSuffix = $derived(prIsLastKnown ? ' (last known state — GitHub unreachable)' : '');
 
@@ -794,6 +802,20 @@
 								<span class="row-text">
 									<span class="row-title">Merge when green{mergeWhenGreen ? ': on' : ''}</span>
 									<span class="row-sub">{autoMerge.error[sessionId] || (mergeWhenGreen ? 'watching CI, merges when it passes' : 'merge after CI passes')}</span>
+								</span>
+							</button>
+						</div>
+					{/if}
+					{#if watchRepo}
+						<div class="row-group">
+							<button class="row" role="switch" aria-checked={!!prWatch}
+								disabled={!!prWatches.busy[watchBusyKey]}
+								onclick={() => watchRepo && shownPr && prWatches.toggle({ repo: watchRepo, number: shownPr.number, url: shownPr.url, title: shownPr.title, sessionId })}
+								title="Check this PR for failed CI, reviews and conflicts, and wake this chat when it needs attention. Limits are in Settings > Usage > PR watch.">
+								<Eye size={14} strokeWidth={1.5} />
+								<span class="row-text">
+									<span class="row-title">Watch PR{prWatch ? ': on' : ''}</span>
+									<span class="row-sub">{prWatches.error[watchBusyKey] || watchSummary(prWatch)}</span>
 								</span>
 							</button>
 						</div>
