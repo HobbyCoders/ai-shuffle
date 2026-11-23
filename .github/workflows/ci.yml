@@ -74,6 +74,7 @@ jobs:
       android: ${{ steps.plan.outputs.android }}
       android-minified: ${{ steps.plan.outputs.android-minified }}
       records: ${{ steps.plan.outputs.records }}
+      backend-run: ${{ steps.plan.outputs.backend-run }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -90,6 +91,58 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
+
+  # Pull requests choose their backend tests from the test map of main's last
+  # full backend run (scripts/ci/backend_test_map.py). When a record proves the
+  # backend, main runs none and would leave that map behind, so every later
+  # pull request ran all eight shards. The recorded run tested exactly these
+  # files (the backend reads the whole tree) and saved what each test ran:
+  # main adopts it as the map of this commit. Only a shortcut: no verdict
+  # waits on it, and losing it leaves pull requests the previous map.
+  backend-map:
+    name: Adopt the backend test map
+    needs: [plan]
+    if: ${{ github.event_name == 'push' && needs.plan.outputs.backend == 'true' && needs.plan.outputs.backend-run != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download the recorded run's test records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-map-hits-*-a*
+          path: hit-attempts
+          run-id: ${{ needs.plan.outputs.backend-run }}
+          github-token: ${{ github.token }}
+      - name: Download the recorded run's shard timings
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-a*
+          path: shard-attempts
+          run-id: ${{ needs.plan.outputs.backend-run }}
+          github-token: ${{ github.token }}
+      - name: Merge the backend test map
+        env:
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python scripts/ci/shard_evidence.py --prefix backend-map-hits --count 8 --source hit-attempts --destination hits
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count 8 --source shard-attempts --destination shards
+          python scripts/ci/backend_test_map.py merge --hits hits --durations shards --out backend-test-map.json.gz --commit "$HEAD_SHA"
+          ls -l backend-test-map.json.gz
+      - name: Save the map for pull requests
+        uses: actions/cache/save@v4
+        with:
+          path: backend-test-map.json.gz
+          key: backend-test-map-${{ github.run_id }}-${{ github.run_attempt }}
 
   backend:
     needs: [plan]

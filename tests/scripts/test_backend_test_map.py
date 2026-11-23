@@ -139,11 +139,41 @@ def test_a_reader_that_does_not_parse_is_read_file_wide():
     assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + f"\nx = '{GUIDE}'\ndef broken(:\n"})[0] == "all"
 
 
-@pytest.mark.parametrize("changed", ["conftest.py", "fluid/conftest.py", "tests/core/network/conftest.py"])
-def test_any_conftest_runs_everything(changed):
+NETWORK_TEST = "tests/core/network/test_link.py"
+
+
+@pytest.mark.parametrize("changed", ["conftest.py", "tests/conftest.py", "tests/core/network/conftest.py"])
+def test_a_conftest_above_a_test_runs_everything(changed):
     # The root conftest is outside the source folders; it reaches every test all the same.
-    result, reasons = select([changed], **{changed: "import os\n"})
+    result, reasons = select([changed], **{changed: "import os\n", NETWORK_TEST: ""})
     assert result == "all" and "conftest" in reasons[0]
+
+
+@pytest.mark.parametrize("changed", ["fluid/conftest.py", "fluid/tests/conftest.py"])
+def test_a_conftest_above_no_test_is_a_file_like_any_other(changed):
+    # Pytest loads it for none of these tests: fluid's tests run in their own job.
+    assert not tm.conftest_loaded(changed, head_files())
+    result, reasons = select([changed], **{changed: "import os\n"})
+    assert result == "all" and "no code reads it by name" in reasons[0]
+    # Main changed it and nothing names it: it keeps the pull request's choice.
+    source = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
+    chosen, reasons = tm.select(["app/a.py", changed], fake_map(), head_files(**{"app/a.py": source}), BASE.get,
+                                main_only={changed})
+    assert chosen == sorted(A_TESTS)
+    assert any(f"{changed}: only main changed it" in reason for reason in reasons)
+    # Only its full path names it, never the bare name every conftest shares.
+    named = {FILLER[5]: "def test_x():\n    assert 'conftest.py'\n"}
+    assert select([changed], **{changed: "", **named})[0] == "all"
+    assert select([changed], **{changed: "", FILLER[5]: f"def test_x():\n    assert '{changed}'\n"})[0] == [FILLER[5]]
+
+
+def test_a_conftest_counts_as_loaded_only_above_a_test():
+    files = head_files(**{NETWORK_TEST: "", "tests/smoke/conftest.py": ""})
+    assert tm.conftest_loaded("conftest.py", {})
+    assert tm.conftest_loaded("tests/core/network/conftest.py", files)
+    assert not tm.conftest_loaded("tests/core/network/conftest.py", head_files())
+    # tests/smoke is not in the fast subset; its conftest is mapped Python like any helper.
+    assert not tm.conftest_loaded("tests/smoke/conftest.py", files | {"tests/smoke/test_boot.py": ""})
 
 
 def test_a_file_nothing_names_runs_everything():
@@ -433,6 +463,8 @@ UNREAD_DOC = "misc/deep/unread.md"
 @pytest.mark.parametrize("path, text", [
     (".github/workflows/ci-backend.yml", "jobs: {}\n"),
     (UNREAD_DOC, "nothing reads this\n"),
+    # The fluid harness's own conftest: no backend test sits beneath it.
+    ("fluid/tests/conftest.py", "import os\n"),
 ])
 def test_ci_plumbing_or_an_unread_file_only_main_changed_keeps_the_selection(pull_request, path, text):
     # Main's full run tested it; it cannot change which tests reach the pull request's files.

@@ -222,9 +222,9 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert jobs["backend-shard"]["env"]["SHARD_COUNT"] == "${{ needs.backend-select.outputs.count }}"
     assert "job-total" not in json.dumps(jobs)
     assert select_outputs(jobs) >= {"shards", "count", "tests", "selection"}
-    # Only a run that publishes the map records it; a pull request never does.
-    assert jobs["backend-shard"]["env"]["RECORD_MAP"] == (
-        "${{ github.event_name != 'pull_request' && needs.backend-select.outputs.selection == 'all' }}")
+    # Every run of all the tests records the map, a pull request's too: main
+    # adopts it when that run's record proves main's backend (ci.yml backend-map).
+    assert jobs["backend-shard"]["env"]["RECORD_MAP"] == "${{ needs.backend-select.outputs.selection == 'all' }}"
     for name in ("backend-security", "backend-postgres"):
         assert jobs[name]["if"] == "always()"
         assert "needs" not in jobs[name]

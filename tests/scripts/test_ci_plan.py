@@ -824,6 +824,9 @@ def test_the_plan_skips_exactly_the_areas_with_a_record(checkout):
     assert list(found) == list(plan.AREAS)
     assert [area for area, state in found.items() if state["proven"]] == ["fluid", "android"]
     assert found["android"]["by"] == "https://example.invalid/run/7"
+    # The id of the run behind the record, for main to adopt its backend test map.
+    assert found["android"]["run"] == str(RUN) and found["fluid"]["run"] == str(RUN)
+    assert all(state["run"] == "" for area, state in found.items() if not state["proven"])
     for area, state in found.items():
         assert state["record"] == f"pass-{area}-{state['key']}" and len(state["key"]) == 40
 
@@ -869,7 +872,8 @@ def test_the_plan_step_names_a_failed_lookup_apart_from_no_record(checkout, monk
     monkeypatch.setattr(plan, "plan", lambda: real(checkout, environment(), call))
     assert plan.main(["plan"]) == 0
     captured = capsys.readouterr()
-    assert all(line.endswith("=false") for line in captured.out.splitlines()[:-1])
+    assert all(line.endswith("=false") for line in captured.out.splitlines()[:-2])
+    assert captured.out.splitlines()[-1] == "backend-run="
     assert "::warning title=Pass records::The lookup for android failed, so it runs: unreachable" in captured.err
     assert "| `android` | runs | the lookup failed: unreachable |" in summary.read_text()
 
@@ -877,7 +881,7 @@ def test_the_plan_step_names_a_failed_lookup_apart_from_no_record(checkout, monk
 def test_a_checkout_that_cannot_be_read_runs_everything_and_records_nothing(tmp_path, capsys):
     found = plan.plan(tmp_path / "missing", environment(), records)
     assert list(found) == list(plan.AREAS)
-    assert all({**state, "error": ""} == {"key": "", "record": "", "proven": False, "by": "", "error": ""}
+    assert all({**state, "error": ""} == {"key": "", "record": "", "proven": False, "by": "", "run": "", "error": ""}
                and state["error"] for state in found.values())  # the system's own wording
     assert "running everything" in capsys.readouterr().err
 
@@ -890,9 +894,11 @@ def test_the_plan_step_writes_one_answer_per_area_and_the_record_names(checkout,
     assert plan.main(["plan"]) == 0
     lines = capsys.readouterr().out.splitlines()
     answers = dict(line.split("=", 1) for line in lines)
-    assert list(answers) == [*plan.AREAS, "records"]
+    assert list(answers) == [*plan.AREAS, "records", "backend-run"]
     assert {area: answers[area] for area in plan.AREAS} == {
         area: "true" if area == "android" else "false" for area in plan.AREAS}
+    # No record proves the backend here, so main has no test map to adopt.
+    assert answers["backend-run"] == ""
     named = json.loads(answers["records"])
     assert sorted(named) == sorted(plan.AREAS)
     assert all(re.fullmatch(rf"pass-{area}-[0-9a-f]{{40}}", record) for area, record in named.items())
@@ -901,6 +907,34 @@ def test_the_plan_step_writes_one_answer_per_area_and_the_record_names(checkout,
     text = summary.read_text()
     assert "| `android` | skipped | its files are unchanged since it passed in https://example.invalid/run/7 |" in text
     assert "| `backend` | runs | no pass is recorded for these files |" in text
+
+
+def test_the_plan_step_names_the_run_whose_record_proved_the_backend(monkeypatch, capsys):
+    """ci.yml's backend-map adopts that run's test map; it reads this one output."""
+    state = {"key": "k", "record": "pass-backend-k", "proven": True, "by": "https://example.invalid/run/45",
+             "run": "45", "error": ""}
+    monkeypatch.setattr(plan, "plan", lambda: {"backend": state})
+    assert plan.main(["plan"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "backend-run=45"
+    workflow_jobs = workflow("ci.yml")["jobs"]
+    adopt = workflow_jobs["backend-map"]
+    assert adopt["if"] == ("${{ github.event_name == 'push' && needs.plan.outputs.backend == 'true'"
+                           " && needs.plan.outputs.backend-run != '' }}")
+    assert adopt["continue-on-error"] == "true" and adopt["needs"] == ["plan"]
+    assert adopt["permissions"] == {"contents": "read", "actions": "read"}
+    downloads = [step["with"] for step in adopt["steps"] if step.get("uses") == "actions/download-artifact@v4"]
+    assert [item["pattern"] for item in downloads] == ["backend-map-hits-*-a*", "backend-shard-*-a*"]
+    assert all(item["run-id"] == "${{ needs.plan.outputs.backend-run }}" for item in downloads)
+    # Stamped with main's commit: the pull requests diff from it, so it must be on main.
+    assert '--commit "$HEAD_SHA"' in adopt["steps"][-2]["run"]
+    assert adopt["steps"][-2]["env"] == {"HEAD_SHA": "${{ github.sha }}"}
+    # The same merge and cache key as main's own full run (ci-backend.yml backend-map).
+    own = workflow("ci-backend.yml")["jobs"]["backend-map"]
+    merge = next(step["run"] for step in own["steps"] if step.get("id") == "merge")
+    assert adopt["steps"][-2]["run"] == merge
+    assert adopt["steps"][-1]["with"] == own["steps"][-1]["with"]
+    # No verdict waits on it.
+    assert not any("backend-map" in (job.get("needs") or ()) for key, job in workflow_jobs.items())
 
 
 def merged(checkout, *paths):

@@ -68,7 +68,7 @@ def test_one_workflow_checks_pull_requests_and_main_and_requires_all_parity_jobs
     # queues for a runner once the last job finishes; it judges the jobs itself.
     assert gate["if"] == "${{ !cancelled() }}"
     assert gate["needs"] == ["plan"]
-    assert set(suite.REQUIRED) == set(jobs) - {"ci", "source-ui", "plan"}
+    assert set(suite.REQUIRED) == set(jobs) - {"ci", "source-ui", "plan", "backend-map"}
     for job, name in CALLED.items():
         assert jobs[job]["uses"] == f"./.github/workflows/{name}.yml"
         called = workflow(name + ".yml")
@@ -146,7 +146,8 @@ def test_a_run_skips_only_the_areas_whose_files_already_passed():
     areas = [*suite.PROVABLE, "javascript-checks"]
     assert sorted(plan.AREAS) == sorted(areas)
     assert lookup["outputs"] == {**{area: f"${{{{ steps.plan.outputs.{area} }}}}" for area in plan.AREAS},
-                                 "records": "${{ steps.plan.outputs.records }}"}
+                                 "records": "${{ steps.plan.outputs.records }}",
+                                 "backend-run": "${{ steps.plan.outputs.backend-run }}"}
     step = lookup["steps"][-1]
     assert step["id"] == "plan"
     assert step["run"] == 'python scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"'
@@ -223,7 +224,8 @@ def test_main_suite_has_no_test_secrets_or_paid_runners():
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
         for name, job in config["jobs"].items():
             assert "environment" not in job
-            if name == suite.LOOKUP:
+            # The lookup and main's adoption of a test map are shortcuts only.
+            if name in (suite.LOOKUP, "backend-map"):
                 assert job["continue-on-error"] == "true"
             else:
                 assert "continue-on-error" not in job
