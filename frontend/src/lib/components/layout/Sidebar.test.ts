@@ -938,6 +938,8 @@ describe('Sidebar session groups', () => {
 		// A grouped, unlinked local project with no chats loaded.
 		mocks.projects.set([
 			{ id: 'visible-project', name: 'Visible Project' },
+			// A folder copied from another worker keeps a `local:` link group.
+			{ id: 'copy', name: 'My Demo', link_group_id: 'local:demo' },
 			{ id: 'demo', name: 'Demo' },
 		]);
 		// The shared catalog lists this worker's unlinked project under the same key.

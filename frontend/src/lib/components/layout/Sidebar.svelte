@@ -388,7 +388,8 @@
 			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });
 			if (!key || !p.name || local.has(key)) continue;
 			local.add(key);
-			(p.link_group_id ? shared : unlinked).set(key, p.name);
+			// A copied folder can carry a `local:` link group: still not shared.
+			(key.startsWith('local:') ? unlinked : shared).set(key, p.name);
 		}
 		return { shared, unlinked };
 	});
