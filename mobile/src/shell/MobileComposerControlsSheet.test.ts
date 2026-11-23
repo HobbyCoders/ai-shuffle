@@ -260,6 +260,26 @@ describe('Chat controls panel', () => {
 		expect(onOpenChange).toHaveBeenLastCalledWith(false);
 	});
 
+	it('reopened during its closing slide, it starts from the list, not the page it closed on', async () => {
+		// Controls on the context line reopens it from outside the sheet: a page
+		// opened straight from the bar (or a context-line name) must not come
+		// back with it, or a hosted page with no menu would close it at once.
+		const onOpenChange = vi.fn();
+		const view = render(MobileComposerControlsSheet, { props: props({ onOpenChange }) });
+		await fireEvent.click(document.querySelector('[data-cell="model"]')!);
+		expect(onOpenChange).toHaveBeenLastCalledWith(true);
+		await view.rerender(props({ onOpenChange, open: true }));
+		const shownPage = () => document.querySelector<HTMLElement>('.mcp-page.active')?.dataset.page;
+		expect(shownPage()).toBe('model');
+		await view.rerender(props({ onOpenChange, open: false }));
+		onOpenChange.mockClear();
+		await view.rerender(props({ onOpenChange, open: true }));
+		await tick();
+		expect(panel().getAttribute('aria-hidden')).toBe('false');
+		expect(shownPage()).toBe('main');
+		expect(onOpenChange).not.toHaveBeenCalled();
+	});
+
 	it('opens when the quick bar is dragged up, not on a short drag down', async () => {
 		const onOpenChange = vi.fn();
 		render(MobileComposerControlsSheet, { props: props({ onOpenChange }) });

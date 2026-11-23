@@ -326,7 +326,19 @@
 		else if (!next) onClose();
 	}
 
+	/** Set from a close until the page state goes back to the list (after the slide, or on reopening). */
+	let resetPending = false;
+	function resetPages() {
+		resetPending = false;
+		setPage('main');
+		leaving = null;
+		direct = false;
+		opener = null;
+	}
+
 	function openPanel(target: Page = 'main') {
+		// The bar picks its own page: a pending reset must not undo it.
+		resetPending = false;
 		closePicker();
 		setPage(target);
 		direct = target !== 'main';
@@ -560,6 +572,10 @@
 			if (isOpen) {
 				closingPanel = false;
 				escapeLostFocus = false;
+				// Reopened inside the closing slide by a trigger outside the sheet
+				// (Controls on the context line): start from the list, not the page
+				// it closed on, which would close it again (a direct page with no menu).
+				if (resetPending) resetPages();
 				clearGhosts();
 				rendered = true;
 				picker = null;
@@ -580,13 +596,11 @@
 			} else {
 				setupDirect = false;
 				dismissHostedMenus();
+				resetPending = true;
 				renderTimer = setTimeout(() => {
 					rendered = false;
 					clearGhosts();
-					setPage('main');
-					leaving = null;
-					direct = false;
-					opener = null;
+					resetPages();
 				}, 400);
 				// Focus on another control is never taken back.
 				const holds = escapeLostFocus ? pickerHoldsFocus(panelRef) : panelRef?.contains(document.activeElement);
