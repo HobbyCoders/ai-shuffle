@@ -158,7 +158,7 @@ def test_any_conftest_runs_everything(changed):
 
 @pytest.mark.parametrize("changed", sorted(tm.FLUID_CONFTESTS))
 def test_a_fluid_conftest_is_a_file_like_any_other(changed):
-    # The backend suite never loads it; CI Fluid runs the tests that do.
+    # The selectable backend shards never load it; CI Fluid runs the tests that do.
     result, reasons = select([changed], **{changed: "import os\n"})
     assert result == "all" and "no code reads it by name" in reasons[0]
     # Main changed it and nothing names it: it keeps the pull request's choice.
@@ -460,7 +460,7 @@ UNREAD_DOC = "misc/deep/unread.md"
 @pytest.mark.parametrize("path, text", [
     (".github/workflows/ci-backend.yml", "jobs: {}\n"),
     (UNREAD_DOC, "nothing reads this\n"),
-    # The Fluid harness's own conftest, which no backend run loads (PR #1943's case).
+    # The Fluid harness's own conftest, which no selectable shard loads (PR #1943's case).
     ("fluid/tests/conftest.py", "import os\n"),
 ])
 def test_ci_plumbing_or_an_unread_file_only_main_changed_keeps_the_selection(pull_request, path, text):

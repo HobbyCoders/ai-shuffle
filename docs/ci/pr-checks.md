@@ -233,8 +233,10 @@ PostgreSQL safety always run in full.
   name with a line break, a change the map cannot place, more than 60% of the
   test files affected, or any error. The one conftest exception is Fluid's own
   pair, `fluid/conftest.py` and `fluid/tests/conftest.py`
-  (`FLUID_CONFTESTS`): no backend run loads them, so they count as files like
-  any other, and CI Fluid runs the tests that do. Any other conftest, a new
+  (`FLUID_CONFTESTS`): the selectable backend shards never load them, so they
+  count as files like any other. CI Fluid runs the tests that do, and the
+  policy suite, which always runs in full, has one that starts pytest on a
+  Fluid test. Any other conftest, a new
   one under `fluid/` too, still runs every test.
 - When no shard test can reach the change, no shard runs (`none`).
 - `scripts/ci/backend_gate.py` checks one receipt from each chosen shard, each

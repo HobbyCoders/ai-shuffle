@@ -519,8 +519,8 @@ jobs:
           "$lint_dir/actionlint" -shellcheck=
 
       # Four workers, each test file on one of them (--dist loadfile): one
-      # serial run took nine minutes. `policy` runs the slowest files, longest
-      # first (about 150 s each for the first three); `checks` runs every other
+      # serial run took nine minutes. `policy` runs the slowest files (about
+      # 150 s each for the three slowest); `checks` runs every other
       # file of the suite. Both halves come from the one list below, so
       # together they run the whole suite once.
       - name: Full workflow, publication, security and docs policy regressions

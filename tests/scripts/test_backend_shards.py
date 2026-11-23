@@ -335,8 +335,11 @@ def pytest_calls(job, step_name, part):
     with tempfile.TemporaryDirectory() as scratch:
         calls = Path(scratch) / "calls"
         calls.touch()
-        subprocess.run(["bash", "-e", "-c", stub + step["run"]], cwd=ROOT, check=True,
-                       env={**os.environ, "PART": part, "CALLS": str(calls)})
+        # On Windows a bare `bash` is System32's WSL launcher; use Git's own bash,
+        # as test_ci_parallel_gates.py does, and give it a POSIX path.
+        bash = str(Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe") if os.name == "nt" else "bash"
+        subprocess.run([bash, "-e", "-c", stub + step["run"]], cwd=ROOT, check=True,
+                       env={**os.environ, "PART": part, "CALLS": calls.as_posix()})
         text = calls.read_text()
     return [call.split("\n") for call in text.split("\n--end--\n") if call.strip()]
 
