@@ -2287,6 +2287,24 @@ def test_every_file_rule_variant_opens_the_same_way():
         assert rule.startswith(FILE_RULE_OPENING)
 
 
+def test_every_file_rule_variant_warns_that_a_pipe_hides_a_failure():
+    """Each variant sends builds, tests and git to Bash, and Claude Code's Bash
+    tool never says that `cmd | tail` reports tail's exit code."""
+    from app.core.provider.harness_adapter import (
+        DELEGATED_PIPE_RULE,
+        DELEGATED_TOOL_USE_BLOCK,
+        DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
+        DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH,
+    )
+
+    for rule in (DELEGATED_TOOL_USE_BLOCK, DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
+                 *DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH.values()):
+        assert rule.endswith("\n" + DELEGATED_PIPE_RULE)
+        assert rule.count(DELEGATED_PIPE_RULE) == 1
+        assert "While bypass permissions mode is active" in rule
+    assert "tail or head" in DELEGATED_PIPE_RULE and "exits 0" in DELEGATED_PIPE_RULE
+
+
 def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools(cli_ships_search):
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,

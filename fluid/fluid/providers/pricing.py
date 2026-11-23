@@ -25,7 +25,7 @@ This module is the seam under all of them:
 * **Nothing here raises.** Every entry point swallows its own errors and
   returns ``None``. A missing price is an accounting gap, never a failed turn.
 * **An unpriced family match is logged.** An id that only matches a
-  family-wide unpriced row (``gpt-6.2-sol`` under ``gpt-6``) logs one warning
+  family-wide unpriced row (``gpt-6.2-luna`` under ``gpt-6``) logs one warning
   per id, so a new model in a known family is not silently recorded as free.
 * **Subscriptions are priced too.** A call on a ChatGPT/Codex (or other
   subscription) login gets the same API-price estimate as an API-key call;
@@ -171,6 +171,10 @@ _OPENAI_6_LUNA = "developers.openai.com/api/docs/pricing, 2026-09-23; short-cont
 # gpt-6.1-sol, the only gpt-6.1 id the page lists (Standard table, short
 # context, <=272K input). gpt-6.1-terra and gpt-6.1-astra are not listed.
 _OPENAI_6_1 = "developers.openai.com/api/docs/pricing, 2026-10-16; Standard, short-context tier"
+# gpt-6.2-astra and gpt-6.2-sol (Standard table, short context, <=272K input,
+# 30-minute cache write). The page lists no gpt-6.2-luna or gpt-6.2-terra, so
+# those stay on the unpriced "gpt-6" row and keep warning.
+_OPENAI_6_2 = "developers.openai.com/api/docs/pricing, 2026-11-23; Standard, short-context tier"
 
 PRICES: list[tuple[str, ModelPrice]] = [
     # ── xAI, reached through the openai_responses dialect ────────────────
@@ -229,6 +233,23 @@ PRICES: list[tuple[str, ModelPrice]] = [
         ModelPrice(
             input=2.00, cached_input=0.10, cache_write=2.50, output=10.00,
             source=_OPENAI_6_1,
+        ),
+    ),
+    # Without these rows every gpt-6.2-astra and gpt-6.2-sol call fell through
+    # to the unpriced "gpt-6" row and recorded no cost. The astra prefix also
+    # covers gpt-6.2-astra-law, which the page lists at the same rates.
+    (
+        "gpt-6.2-astra",
+        ModelPrice(
+            input=8.00, cached_input=0.40, cache_write=10.00, output=40.00,
+            source=_OPENAI_6_2,
+        ),
+    ),
+    (
+        "gpt-6.2-sol",
+        ModelPrice(
+            input=2.00, cached_input=0.10, cache_write=2.50, output=10.00,
+            source=_OPENAI_6_2,
         ),
     ),
     # Without this row luna would fall through to the unpriced "gpt-6" row

@@ -79,9 +79,14 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # steering, safety, context-window, planning, model-family, recall and
 # verification blocks the leg lacked. Claude Code's own prompt, which this
 # replaces, was never in the measured number. Native budgets unchanged.
+# Pipe rule (Nov 2026 session audit): Claude Code's Bash tool, unlike the
+# native one, never said a pipe into tail/head hides a failed build, test or
+# push, so every delegated file-tool rule now ends with DELEGATED_PIPE_RULE.
+# Shortening the rules' override clause paid back 37 of its 105 chars:
+# measured 21,530 -> 21,598 (+68), so the baseline moves by the same +68.
 MEASURED_FULL = 135_468
 MEASURED_EAGER = 52_253
-MEASURED_DELEGATED_APPEND = 21_324
+MEASURED_DELEGATED_APPEND = 21_392
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327
 
 
