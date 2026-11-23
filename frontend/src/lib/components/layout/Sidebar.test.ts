@@ -465,6 +465,19 @@ describe('Project groups in alphabetical order, foldable', () => {
 		expect(heads()).toEqual(['alpha', 'Beta']);
 		expect(activeIds()).toEqual(['o0', 'o1', 'm1']);
 	});
+
+	it('names a project by this worker’s list over the shared catalog', async () => {
+		// The owner renamed the linked project here; the shared catalog still has the old name.
+		mocks.projects.set([{ id: 'alpha', name: 'Zebra', link_group_id: 'group-alpha' }, { id: 'beta', name: 'Mango' }]);
+		mocks.clusterProjects.set([{ origin: 'group-alpha', name: 'Alpha', project_v2_id: 'v2-alpha', local_project_id: 'alpha' }]);
+		mocks.sessions.set([
+			{ ...chat('a1', 'alpha', 1, 'Alpha'), link_group_id: 'group-alpha' },
+			chat('m1', 'beta', 2, 'Mango'),
+		]);
+		render(Sidebar, sidebarProps);
+		await tick();
+		expect(heads()).toEqual(['Mango', 'Zebra']);
+	});
 });
 
 const sidebarProps = {

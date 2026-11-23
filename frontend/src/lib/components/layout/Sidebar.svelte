@@ -364,16 +364,20 @@
 	// One name per project, so the name (and the project's place, which goes by
 	// it) never depends on which of its chats a lane holds or which history
 	// pages have loaded: chats of one linked project can carry different names
-	// from different workers. The shared catalog names it first, then this
-	// worker's own project list; only a project in neither goes by its oldest
+	// from different workers. This worker's own project list names it first (a
+	// rename there is the owner's word), then the shared catalog for projects
+	// that live only elsewhere; only a project in neither goes by its oldest
 	// chat in the list.
 	const catalogNames = $derived.by(() => {
 		const names = new Map<string, string>();
+		for (const c of $clusterProjects) if (c.origin && c.name) names.set(c.origin, c.name);
+		const local = new Set<string>();
 		for (const p of $projects) {
 			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });
-			if (key && p.name && !names.has(key)) names.set(key, p.name);
+			if (!key || !p.name || local.has(key)) continue;
+			local.add(key);
+			names.set(key, p.name);
 		}
-		for (const c of $clusterProjects) if (c.origin && c.name) names.set(c.origin, c.name);
 		return names;
 	});
 	const projectNames = $derived.by(() => {
