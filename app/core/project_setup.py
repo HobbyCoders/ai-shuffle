@@ -220,6 +220,11 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
         url = strip_url_userinfo(url) if url else None
         origin = row["origin"]
+        if url and parse_jsonb(row["settings"]).get(projects_v2.PINNED_KEY) is True:
+            # The owner pointed this project at a repository: that beats what a
+            # worker that has not applied it yet still records.
+            out[origin] = {"clone_url": url, "default_branch": branch}
+            continue
         if not url or (origin.startswith("git:") and auto_link_group_id(url) != origin):
             continue
         out.setdefault(origin, {"clone_url": url, "default_branch": branch})
@@ -330,8 +335,10 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     from app.core.project_links import auto_link_group_id, normalize_remote_url
     from app.db import projects_v2
 
+    from app.core.project_remote import remote_names_origin
+
     if origin.startswith("git:"):
-        return auto_link_group_id(clean) == origin
+        return remote_names_origin(clean, origin)
     stored, _branch = projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(origin))
     return bool(stored) and normalize_remote_url(stored) == normalize_remote_url(clean)
 
@@ -364,7 +371,9 @@ def _validate_clone_url(url: str, origin: str) -> str:
         if not _is_recorded_remote(clean, origin) and not is_path_served(path, settings.effective_workspace_dir):
             raise ValueError("A local clone source must be the project's own remote, "
                              "or inside the workspace or a project folder")
-    if origin.startswith("git:") and auto_link_group_id(clean) != origin:
+    from app.core.project_remote import remote_names_origin
+
+    if origin.startswith("git:") and not remote_names_origin(clean, origin):
         raise ValueError("The remote does not match this project")
     return clean
 
@@ -659,7 +668,9 @@ def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
     if not remote:
         return False
     if origin.startswith("git:"):
-        return auto_link_group_id(remote) == origin
+        from app.core.project_remote import remote_names_origin
+
+        return remote_names_origin(remote, origin)
     return bool(clone_url) and normalize_remote_url(remote) == normalize_remote_url(clone_url)
 
 
@@ -1197,6 +1208,12 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         result = await run_sync(folder_action, action, body)
         if action == "change-folder" and "error" not in result:
             _after_local_registration_change()  # announce the updated local catalog
+        return result
+    if action == "apply-remote":
+        from app.core.project_remote import handle_apply
+
+        result = await handle_apply(body)
+        _after_local_registration_change()
         return result
     raise ValueError("Unknown setup action")
 

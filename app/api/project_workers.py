@@ -298,6 +298,18 @@ def _worker_entry(pv2_id: str, view: Dict[str, Any], snapshot: Dict[str, Any],
 
 
 _LISTED_STATES = {"ready", "setting_up", "queued_offline", "failed", "offline_has"}
+#: A worker in one of these holds (or is getting) a copy: the project is live.
+_HELD_STATES = {"ready", "setting_up", "queued_offline", "offline_has"}
+
+
+def _retired(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
+    """Forgotten by the owner, or a duplicate folded into another project."""
+    from app.core.project_remote import merged_into
+
+    project_settings = pv2.get("settings") if isinstance(pv2.get("settings"), dict) else {}
+    target = merged_into(pv2)
+    return project_settings.get("forgotten") is True or bool(
+        target and any(row.get("origin") == target for row in pv2s.values()))
 
 
 async def _gather(project_v2_id: Optional[str] = None) -> tuple:
@@ -335,6 +347,8 @@ async def projects_overview(request: Request, token: str = Depends(require_auth)
             w["state"] == "unknown" and pv2["id"] in offline_has.get(w["install_id"], set()) for w in workers)
         if not listed:
             continue
+        if _retired(pv2, snapshot["pv2s"]) and not any(w["state"] in _HELD_STATES for w in workers):
+            continue  # nothing left of it anywhere: a failed old setup must not keep it stuck here
         info = _project_info(pv2, snapshot, views)
         projects.append({
             "project_v2_id": pv2["id"],
@@ -482,6 +496,9 @@ async def setup_project(request: Request, body: SetupRequest,
     if spec["kind"] == "git" and not spec["clone_url"]:
         raise HTTPException(status_code=409, detail=(
             "Can't find this project's Git remote. Bring a worker that has the project online and try again."))
+    from app.db import projects_v2
+
+    await run_sync(projects_v2.set_forgotten, access["project_v2"]["origin"], False)  # wanted again
     op_id = setup.new_op_id()
 
     if target_id == me:
@@ -649,6 +666,63 @@ async def change_worker_folder(request: Request, install_id: str, body: ChangeFo
     """Retarget one worker's project registration; do not move any files."""
     return await _worker_folder_action(request, install_id, project_id, project_v2_id,
                                        "change-folder", **body.model_dump())
+
+
+class ChangeRepositoryRequest(BaseModel):
+    remote_url: str = Field(min_length=1, max_length=2048)
+    keep_upstream: bool = False
+
+
+@router.put("/catalog/repository")
+async def change_repository(request: Request, body: ChangeRepositoryRequest,
+                            project_id: Optional[str] = Query(None),
+                            project_v2_id: Optional[str] = Query(None),
+                            token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Point the project at another Git repository on every worker; it stays one project."""
+    from app.core.project_remote import RepositoryChangeError, change_repository as change
+
+    access = await run_sync(require_origin_access, request=request, project_id=project_id,
+                            project_v2_id=project_v2_id)
+    pv2 = access["project_v2"]
+    if not pv2:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return await change(pv2["id"], body.remote_url, keep_upstream=body.keep_upstream)
+    except RepositoryChangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/catalog/forget")
+async def forget_project(request: Request,
+                         project_id: Optional[str] = Query(None),
+                         project_v2_id: Optional[str] = Query(None),
+                         token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Take a project no worker holds off the Projects page, on every worker.
+
+    Nothing is deleted: chats that used it keep it, and it comes back as soon
+    as any worker has a copy again. Refused while a worker still holds one.
+    """
+    from app.db import project_setup as setup_db, projects_v2
+
+    access = await run_sync(require_origin_access, request=request, project_id=project_id,
+                            project_v2_id=project_v2_id)
+    pv2 = access["project_v2"]
+    if not pv2:
+        raise HTTPException(status_code=404, detail="Project not found")
+    installs, _me, snapshot, views, offline_has, latest = await _gather(pv2["id"])
+    origin = pv2.get("origin") or ""
+    holders = [w["device_name"] or "a worker"
+               for w in (_worker_entry(pv2["id"], view, snapshot, offline_has, latest, origin)
+                         for view in _ordered_views(views))
+               if w["state"] in _HELD_STATES]
+    if holders:
+        raise HTTPException(status_code=409, detail=f"{', '.join(holders)} still has this project. "
+                                                    "Remove it from Workers first.")
+    await run_sync(projects_v2.set_forgotten, origin, True)
+    for install in installs:
+        await run_sync(setup_db.delete_requests_for, pv2["id"], install["id"])
+    setup._after_local_registration_change()
+    return {"ok": True, "project_v2_id": pv2["id"]}
 
 
 @router.delete("/workers/{install_id}")

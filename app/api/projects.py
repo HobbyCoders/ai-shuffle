@@ -77,11 +77,11 @@ def _backfill_link_groups(projects: List[dict]) -> None:
     if not pending:
         return
     try:
-        from app.core.project_links import auto_link_group_id
+        from app.core.project_remote import identity_for_remote
 
         remotes = database.get_remote_urls_for_projects([p["id"] for p in pending])
         for project in pending:
-            group_id = auto_link_group_id(remotes.get(project["id"]))
+            group_id = (identity_for_remote(remotes.get(project["id"])) or (None,))[0]
             if group_id:
                 database.set_project_link_group(project["id"], group_id)
                 project["link_group_id"] = group_id
@@ -295,13 +295,14 @@ def remote_link_group(project_path: Path) -> Optional[str]:
     for a folder without a remote (it stays ``local:<id>``) or on any error.
     """
     from app.core.git_service import git_service
-    from app.core.project_links import auto_link_group_id
+    from app.core.project_remote import identity_for_remote
     from app.core.scrub import strip_url_userinfo
 
     try:
         if not project_path.is_dir() or not git_service.is_git_repo(str(project_path)):
             return None
-        return auto_link_group_id(strip_url_userinfo(git_service.get_remote_url(str(project_path)) or ""))
+        found = identity_for_remote(strip_url_userinfo(git_service.get_remote_url(str(project_path)) or ""))
+        return found[0] if found else None
     except Exception:  # noqa: BLE001 - adding the folder must not fail on this read
         logger.debug("remote read failed for %s", project_path, exc_info=True)
         return None

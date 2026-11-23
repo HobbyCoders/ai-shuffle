@@ -144,6 +144,9 @@ def _create_discovery_tools() -> list:
                 "list_tool": "listProjects",
                 "create_tool": "createProject",
                 "source": "Folder path on this worker, or a new workspace folder if omitted. No git clone URL.",
+                "change_repository_tool": "changeProjectRepository",
+                "change_repository": "Point an existing project at another Git repository or a fork on "
+                                     "every worker at once; it stays one project.",
             },
             "generation_preferences": {
                 "tool": "generationPreferences",
@@ -201,6 +204,7 @@ def get_app_config_tool_names() -> list[str]:
         # Projects
         "mcp__app-config__listProjects",
         "mcp__app-config__createProject",
+        "mcp__app-config__changeProjectRepository",
         # Profiles
         "mcp__app-config__listProfiles",
         "mcp__app-config__getProfile",

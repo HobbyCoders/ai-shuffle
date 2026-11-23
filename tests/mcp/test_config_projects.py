@@ -58,6 +58,7 @@ def test_registration_and_permission_categories():
     for name, risk, level in (
         ("listProjects", "safe", background_permissions.LOW),
         ("createProject", "write", background_permissions.HIGH),
+        ("changeProjectRepository", "write", background_permissions.HIGH),
     ):
         full_name = "mcp__app-config__" + name
         assert full_name in get_app_config_tool_names()

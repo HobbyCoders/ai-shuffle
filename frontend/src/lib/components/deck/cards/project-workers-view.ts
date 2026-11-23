@@ -10,6 +10,7 @@ import type {
 	ProjectKind,
 	ProjectOverviewRow,
 	ProjectWorker,
+	RepositoryChangeResponse,
 	WorkerProjectState
 } from '$lib/api/project-workers';
 
@@ -239,4 +240,33 @@ export function workerFilterSlot(geometry: FilterGeometry | null, supported: boo
 	if (geometry === null) return 'unknown';
 	if (geometry === 'none') return 'hidden';
 	return supported === true && overviewWorkerCount > 1 ? 'shown' : 'reserved';
+}
+
+/** No worker holds a copy or is getting one: only a failed or never-run setup keeps it listed. */
+export function heldByNoWorker(workers: Pick<ProjectWorker, 'state' | 'setup'>[]): boolean {
+	return workers.length > 0 && !workers.some((w) => hasProject(w.state) || isPending(w));
+}
+
+function names(list: string[]): string {
+	if (list.length <= 1) return list[0] ?? '';
+	return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+/**
+ * A repository change's outcome in plain sentences: what switched now, what
+ * switches later, and what failed and why. `ok` is false when any worker
+ * that has a copy could not switch.
+ */
+export function repositoryChangeSummary(res: RepositoryChangeResponse): { ok: boolean; lines: string[] } {
+	const name = (w: { device_name: string | null; is_self: boolean }) => w.device_name || (w.is_self ? 'This worker' : 'A worker');
+	const done = res.workers.filter((w) => w.status === 'updated' || w.status === 'already').map(name);
+	const later = res.workers.filter((w) => w.status === 'offline' || w.status === 'pending').map(name);
+	const failed = res.workers.filter((w) => !w.ok);
+	const lines = [`Now using ${res.repository ?? res.remote_url}.`];
+	if (res.kept_as_upstream && res.previous_repository) lines.push(`${res.previous_repository} stays available as the upstream remote.`);
+	if (res.merged_duplicate) lines.push('The separate project for that repository was folded into this one.');
+	if (done.length) lines.push(`Switched on ${names(done)}.`);
+	if (later.length) lines.push(`${names(later)} ${later.length === 1 ? 'switches' : 'switch'} when ${later.length === 1 ? 'it comes' : 'they come'} back online.`);
+	for (const w of failed) lines.push(`${name(w)}: ${w.error || "couldn't switch."}`);
+	return { ok: failed.length === 0, lines };
 }

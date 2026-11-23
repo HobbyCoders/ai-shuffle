@@ -81,4 +81,57 @@ def _create_project_tools(is_admin: bool) -> list:
             "path": get_project_working_dir(created),
         })
 
-    return [list_projects, create_project]
+    @tool(
+        "changeProjectRepository",
+        "Point an existing project at another Git repository (a new repo or a fork) "
+        "on every worker at once. The project, its chats and its folders stay the "
+        "same; each worker's copy switches its origin and fetches. Never clone a "
+        "second copy or add a project for this.",
+        {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project ID or name (from listProjects)."},
+                "remote_url": {"type": "string", "description": "New HTTPS or SSH repository URL."},
+                "keep_upstream": {
+                    "type": "boolean",
+                    "description": "Keep the current repository as the 'upstream' remote (use for a fork).",
+                },
+            },
+            "required": ["project", "remote_url"],
+            "additionalProperties": False,
+        },
+    )
+    async def change_repository(args: dict) -> dict:
+        if not is_admin:
+            return _error("App configuration tools require admin access.")
+        from app.core.project_remote import RepositoryChangeError, change_repository as change
+        from app.core.project_resolver import origin_for_legacy_project
+        from app.db import projects_v2
+
+        wanted = args.get("project")
+        url = args.get("remote_url")
+        if not isinstance(wanted, str) or not wanted.strip() or not isinstance(url, str) or not url.strip():
+            return _error("project and remote_url are required.")
+        wanted = wanted.strip()
+
+        def find() -> object:
+            rows = database.get_all_projects()
+            exact = [p for p in rows if p["id"] == wanted]
+            named = exact or [p for p in rows if (p.get("name") or "").strip().lower() == wanted.lower()]
+            if len(named) != 1:
+                return None if not named else "ambiguous"
+            pv2 = projects_v2.get_project_v2_by_origin(origin_for_legacy_project(named[0]))
+            return pv2["id"] if pv2 else None
+
+        pv2_id = await run_sync(find)
+        if pv2_id == "ambiguous":
+            return _error(f"More than one project is named {wanted!r}; pass its ID from listProjects.")
+        if not pv2_id:
+            return _error(f"No project {wanted!r} on this worker; call listProjects.")
+        try:
+            result = await change(pv2_id, url, keep_upstream=bool(args.get("keep_upstream")))
+        except RepositoryChangeError as exc:
+            return _error(str(exc))
+        return _tool_result({"success": True, **result})
+
+    return [list_projects, create_project, change_repository]

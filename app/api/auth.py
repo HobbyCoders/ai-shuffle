@@ -270,6 +270,8 @@ _PREVIEW_DEV_CHANGE = re.compile(
     r"|POST /api/v1/projects/setup/[^/]+/cancel"
     r"|DELETE /api/v1/projects/workers/[^/]+"
     r"|PUT /api/v1/projects/workers/[^/]+/folder"
+    r"|PUT /api/v1/projects/catalog/repository"
+    r"|POST /api/v1/projects/catalog/forget"
     r"|POST /api/v1/agents"
     r"|PUT /api/v1/agents/[^/]+"
     r"|PUT /api/v1/away-mode"
@@ -290,8 +292,9 @@ def _preview_may_change_dev_data(request: Request) -> bool:
     and same-origin rule still apply.
 
     Only these changes: add a project, set one up on a worker, cancel that
-    setup, remove or retarget a worker's copy, create or update an agent, and toggle
-    global Away. Every other owner-only change (deleting or relinking a project;
+    setup, remove or retarget a worker's copy, point a project at another
+    repository or take an unheld one off the list, create or update an agent, and
+    toggle global Away. Every other owner-only change (deleting or relinking a project;
     deleting, importing or restoring an agent) stays refused even here.
     """
     if not _PREVIEW_DEV_CHANGE.fullmatch(

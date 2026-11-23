@@ -4,9 +4,11 @@
  * every surface (cross-worker project sync).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ProjectWorker } from '$lib/api/project-workers';
+import type { ProjectWorker, RepositoryChangeResponse, RepositoryChangeWorker } from '$lib/api/project-workers';
 import {
 	errorAction,
+	heldByNoWorker,
+	repositoryChangeSummary,
 	failureReason,
 	isOnThisWorker,
 	isPending,
@@ -186,5 +188,52 @@ describe('startFilterDeadline', () => {
 		startFilterDeadline(cancelled)();
 		passes[1]();
 		expect(cancelled).not.toHaveBeenCalled();
+	});
+});
+
+describe('heldByNoWorker', () => {
+	const w = (state: string, status?: string) => ({ state, setup: status ? { op_id: 'op', status, progress: null } : null });
+
+	it('is true only when nothing holds or is getting a copy', () => {
+		expect(heldByNoWorker([w('failed', 'error'), w('missing'), w('offline_missing')])).toBe(true);
+		expect(heldByNoWorker([w('failed', 'error'), w('offline_has')])).toBe(false);
+		expect(heldByNoWorker([w('missing'), w('setting_up', 'running')])).toBe(false);
+		expect(heldByNoWorker([w('queued_offline', 'queued_offline')])).toBe(false);
+		expect(heldByNoWorker([])).toBe(false);
+	});
+});
+
+describe('repositoryChangeSummary', () => {
+	const worker = (device_name: string, status: string, extra: Partial<RepositoryChangeWorker> = {}): RepositoryChangeWorker =>
+		({ install_id: device_name, device_name, is_self: false, status, ok: !['fetch_failed', 'unsupported', 'error'].includes(status), ...extra });
+	const response = (workers: RepositoryChangeWorker[], extra: Partial<RepositoryChangeResponse> = {}): RepositoryChangeResponse => ({
+		project_v2_id: 'pv2', name: 'Demo', repository: 'github.com/someone/demo', remote_url: 'https://github.com/someone/demo.git',
+		previous_repository: 'github.com/example/demo', kept_as_upstream: false, default_branch: 'main', merged_duplicate: false,
+		workers, workers_without_copy: [], ...extra
+	});
+
+	it('says what switched now and what switches later', () => {
+		const out = repositoryChangeSummary(response([worker('Studio', 'updated'), worker('Laptop', 'already'), worker('Tower', 'offline')]));
+		expect(out.ok).toBe(true);
+		expect(out.lines).toEqual([
+			'Now using github.com/someone/demo.',
+			'Switched on Studio and Laptop.',
+			'Tower switches when it comes back online.'
+		]);
+	});
+
+	it('names the kept upstream, a folded duplicate and each failure', () => {
+		const out = repositoryChangeSummary(response(
+			[worker('Studio', 'fetch_failed', { error: 'Sign in to GitHub on Studio.' }), worker('Tower', 'unsupported', { error: 'Update Tower first.' })],
+			{ kept_as_upstream: true, merged_duplicate: true }
+		));
+		expect(out.ok).toBe(false);
+		expect(out.lines).toEqual([
+			'Now using github.com/someone/demo.',
+			'github.com/example/demo stays available as the upstream remote.',
+			'The separate project for that repository was folded into this one.',
+			'Studio: Sign in to GitHub on Studio.',
+			'Tower: Update Tower first.'
+		]);
 	});
 });
