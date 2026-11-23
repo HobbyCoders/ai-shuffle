@@ -86,6 +86,7 @@
 		branchLabel,
 		deriveStatus,
 		sessionStartedAt,
+		projectIdentity,
 		sessionTimestamp,
 		sessionDeviceId,
 		sessionPrState,
@@ -360,10 +361,21 @@
 
 	interface FilterOption { id: string; label: string }
 
-	// One name per project, taken from its oldest chat in the whole list, so the
-	// name (and the project's place, which goes by it) never depends on which of
-	// its chats a lane happens to hold: chats of one linked project can carry
-	// different names from different workers.
+	// One name per project, so the name (and the project's place, which goes by
+	// it) never depends on which of its chats a lane holds or which history
+	// pages have loaded: chats of one linked project can carry different names
+	// from different workers. The shared catalog names it first, then this
+	// worker's own project list; only a project in neither goes by its oldest
+	// chat in the list.
+	const catalogNames = $derived.by(() => {
+		const names = new Map<string, string>();
+		for (const p of $projects) {
+			const key = projectIdentity({ link_group_id: p.link_group_id, id: p.id });
+			if (key && p.name && !names.has(key)) names.set(key, p.name);
+		}
+		for (const c of $clusterProjects) if (c.origin && c.name) names.set(c.origin, c.name);
+		return names;
+	});
 	const projectNames = $derived.by(() => {
 		const oldest = new Map<string, { at: number; id: string; name: string }>();
 		for (const s of sidebarSessions) {
@@ -373,7 +385,7 @@
 			if (seen && (seen.at < at || (seen.at === at && seen.id < s.id))) continue;
 			oldest.set(key, { at, id: s.id, name: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(s) });
 		}
-		return new Map([...oldest].map(([key, { name }]) => [key, name]));
+		return new Map([...oldest].map(([key, { name }]) => [key, catalogNames.get(key) ?? name]));
 	});
 
 	const projectOptions = $derived.by((): FilterOption[] => {
@@ -662,8 +674,9 @@
 	// last. Nothing a chat does moves its project: not a reply, a new chat, a
 	// chat settling or a page of history arriving. Only the name places it.
 	type ProjectGroup = { key: string; label: string | null; rows: CardRow[] };
+	type FoldLane = 'needs' | 'active' | 'settled';
 	const byName = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
-	function byProject(laneRows: CardRow[]): ProjectGroup[] {
+	function byProject(lane: FoldLane, laneRows: CardRow[]): ProjectGroup[] {
 		const groups = new Map<string, CardRow[]>();
 		for (const row of laneRows) {
 			const key = projectKey(row.session);
@@ -673,10 +686,13 @@
 		}
 		// Headers show whenever the list spans projects, even over a lane holding
 		// just one: a header appearing as a second project joins would push every
-		// row down, and a folded project would open again with nothing to fold it.
+		// row down. A folded project keeps its header even as the only project
+		// left, or its rows would open again with nothing to fold them.
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
-		if (!spansProjects && groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
+		const only = [...groups.keys()][0];
+		const keepsFold = only !== undefined && only !== UNGROUPED_PROJECT && !!collapsedGroups[projectFold(lane, only)];
+		if (!spansProjects && groups.size < 2 && !keepsFold) return [{ key: only ?? 'all', label: null, rows: laneRows }];
 		return [...groups]
 			.map(([key, rows]) => ({
 				key,
@@ -727,8 +743,8 @@
 	// A lane with no project headers still needs its rows to say where they
 	// belong, unless the whole list is one project and it goes without saying.
 	const spansProjects = $derived(new Set(rows.map((r) => projectKey(r.session))).size > 1);
-	const needsYouGroups = $derived(byProject(needsYouRows));
-	const activeGroups = $derived(byProject(activeRows));
+	const needsYouGroups = $derived(byProject('needs', needsYouRows));
+	const activeGroups = $derived(byProject('active', activeRows));
 
 	const settledDays = $derived.by(() => {
 		const out: { label: string; rows: CardRow[] }[] = [];
@@ -738,12 +754,12 @@
 			if (last?.label === label) last.rows.push(row);
 			else out.push({ label, rows: [row] });
 		}
-		return out.map((day) => ({ label: day.label, groups: byProject(day.rows) }));
+		return out.map((day) => ({ label: day.label, groups: byProject('settled', day.rows) }));
 	});
 	// Chats a folded project header hides, whichever lane folded them.
 	const foldedIds = $derived.by(() => {
 		const hidden = new Set<string>();
-		const lanes: ['needs' | 'active' | 'settled', ProjectGroup[]][] = [
+		const lanes: [FoldLane, ProjectGroup[]][] = [
 			['needs', needsYouGroups],
 			['active', activeGroups],
 			...settledDays.map((day): ['settled', ProjectGroup[]] => ['settled', day.groups])
@@ -962,7 +978,7 @@
 	/>
 {/snippet}
 
-{#snippet laneRows(lane: 'needs' | 'active' | 'settled', groups: ProjectGroup[], compact = false)}
+{#snippet laneRows(lane: FoldLane, groups: ProjectGroup[], compact = false)}
 	{#each groups as group (group.key)}
 		{@const fold = projectFold(lane, group.key)}
 		{@const folded = !!group.label && !!collapsedGroups[fold]}

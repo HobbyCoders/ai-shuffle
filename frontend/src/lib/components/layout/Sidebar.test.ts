@@ -427,18 +427,43 @@ describe('Project groups in alphabetical order, foldable', () => {
 		expect(activeIds()).toEqual(['b1']);
 	});
 
-	it('names and places a project by its oldest chat, whichever of its chats a lane holds', async () => {
-		// One project whose chats carry two names, as a linked project's can.
-		const rows = [chat('o1', 'alpha', 1, 'Zebra'), chat('o2', 'alpha', 2, 'Alpha'), chat('m1', 'beta', 3, 'Mango')];
+	it('keeps a folded project folded when it becomes the only project in the list', async () => {
+		const rows = [chat('a1', 'alpha', 1, 'alpha'), chat('b1', 'beta', 2, 'Beta')];
 		mocks.sessions.set(rows);
 		render(Sidebar, sidebarProps);
 		await tick();
-		expect(heads()).toEqual(['Mango', 'Zebra']);
+		const head = () => [...document.querySelectorAll<HTMLButtonElement>('[data-group="active"] .proj-head')]
+			.find((el) => el.textContent?.includes('alpha'));
+		await fireEvent.click(head()!);
 
-		mocks.backgroundPermissions.set(new Map([['o1', { count: 1, kind: 'permission' as const }]]));
+		// Beta's only chat leaves the list: alpha keeps its header and its fold.
+		mocks.sessions.set([rows[0]]);
 		await tick();
-		expect(heads()).toEqual(['Mango', 'Zebra']);
-		expect(activeIds()).toEqual(['m1', 'o2']);
+		expect(head()?.getAttribute('aria-expanded')).toBe('false');
+		expect(activeIds()).toEqual([]);
+
+		// Unfolded as the only project, it goes without a header again.
+		await fireEvent.click(head()!);
+		expect(heads()).toEqual([]);
+		expect(activeIds()).toEqual(['a1']);
+	});
+
+	it('names and places a project by the catalog, whichever of its chats are loaded', async () => {
+		// One project whose chats carry two names, as a linked project's can.
+		const rows = [chat('o1', 'alpha', 2, 'Zebra'), chat('o2', 'alpha', 3, 'Alpha'), chat('m1', 'beta', 4, 'Mango')];
+		mocks.sessions.set(rows);
+		render(Sidebar, sidebarProps);
+		await tick();
+		// The catalog's names, not the names its chats carry.
+		expect(heads()).toEqual(['alpha', 'Beta']);
+
+		// An older history page brings an earlier chat under another name, and a
+		// chat leaves for Needs you: neither renames or moves a project.
+		mocks.sessions.set([...rows, chat('o0', 'alpha', 1, 'Aardvark')]);
+		mocks.backgroundPermissions.set(new Map([['o2', { count: 1, kind: 'permission' as const }]]));
+		await tick();
+		expect(heads()).toEqual(['alpha', 'Beta']);
+		expect(activeIds()).toEqual(['o0', 'o1', 'm1']);
 	});
 });
 
