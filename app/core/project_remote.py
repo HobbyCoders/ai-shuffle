@@ -410,9 +410,10 @@ def fold_local(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
 
 
 def _fold_base_checkout(duplicate_origin: str, into_origin: str) -> Dict[str, Any]:
-    """Register the duplicate's on-demand base checkout as the kept project's
-    base too, so the kept project's changes reach it. The duplicate's own row
-    stays: chats bound to it keep their folder."""
+    """Move the duplicate's on-demand base checkout to the kept project, so the
+    kept project's changes reach it. The duplicate's row is retired, not
+    deleted: chats bound to it still find the folder, and a path lookup
+    resolves it to the kept project (``merged_into``)."""
     from app.core.checkout_manager import _resolve_checkout_path
     from app.core.project_setup import _me
     from app.db import checkouts as checkouts_db
@@ -424,6 +425,7 @@ def _fold_base_checkout(duplicate_origin: str, into_origin: str) -> Dict[str, An
             path = _resolve_checkout_path(ck["path"])
             if os.path.isdir(path):
                 checkouts_db.upsert_checkout(project_v2_id_for_origin(into_origin), me, path, status="active")
+                checkouts_db.set_checkout_status(ck["id"], checkouts_db.REMOVED_STATUS)
                 return {"folded": 1}
     return {"folded": 0}
 
