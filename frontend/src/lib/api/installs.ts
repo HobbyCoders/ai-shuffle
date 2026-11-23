@@ -140,6 +140,9 @@ export interface ClusterProject {
 	local_project_id: string | null;
 	remote_only: boolean;
 	eligible: ClusterProjectEligible[];
+	/** Origin and v2 id of a duplicate folded into this project by a repository
+	 * change: chats bound to it are still this project's. */
+	aliases?: string[];
 }
 
 export interface ClusterProjectsResponse {

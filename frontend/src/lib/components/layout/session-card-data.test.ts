@@ -140,6 +140,15 @@ describe('liveProjectKeys', () => {
 		);
 		expect(keys).toEqual(new Set(['local-1', 'lg-1', 'git:example.git', 'pv2-1']));
 	});
+
+	it('keeps chats on a duplicate folded into a project by a repository change', () => {
+		const keys = liveProjectKeys(
+			[],
+			[{ origin: 'git:kept', project_v2_id: 'pv2-kept', local_project_id: null, aliases: ['git:dup', 'pv2-dup'] }]
+		);
+		const chat = session({ project_id: null, origin: 'git:dup', project_v2_id: 'pv2-dup', link_group_id: null });
+		expect(isRemovedProjectSession(chat, keys)).toBe(false);
+	});
 });
 
 describe('projectKey', () => {

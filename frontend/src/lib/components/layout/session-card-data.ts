@@ -895,11 +895,13 @@ export type LiveClusterProject = {
 	origin: string;
 	project_v2_id: string;
 	local_project_id: string | null;
+	/** Origin and v2 id of a duplicate folded into this project by a repository change. */
+	aliases?: string[];
 };
 
 /**
  * Keys a session can match against to prove its project still exists:
- * local id, link group, origin, v2 id.
+ * local id, link group, origin, v2 id, and folded duplicates' aliases.
  */
 export function liveProjectKeys(
 	projects: LiveProject[],
@@ -914,6 +916,7 @@ export function liveProjectKeys(
 		if (c.origin) keys.add(c.origin);
 		if (c.project_v2_id) keys.add(c.project_v2_id);
 		if (c.local_project_id) keys.add(c.local_project_id);
+		for (const alias of c.aliases ?? []) keys.add(alias);
 	}
 	return keys;
 }

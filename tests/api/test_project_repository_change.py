@@ -145,17 +145,17 @@ def _fail_setup_here(client, pv2, ws):
     _run_setups()
 
 
-def _offered() -> set:
-    """Project ids the new-chat picker's catalog offers on this worker."""
+def _catalog() -> list:
+    """The cluster catalog (new-chat picker, sidebar liveness) on this worker."""
     from app.api.cluster import _build_cluster_catalog
     from app.core import project_setup
     from app.db import checkouts as checkouts_db
 
     me = project_setup._me()
-    return {row["project_v2_id"] for row in _build_cluster_catalog(
+    return _build_cluster_catalog(
         bases=checkouts_db.list_active_base_checkouts(), pv2s=projects_v2.list_projects_v2(),
         installs=[{"id": me, "online": True, "approved": True}],
-        local_projects=database.get_all_projects(), me=me)}
+        local_projects=database.get_all_projects(), me=me)
 
 
 def _listed(client) -> set:
@@ -387,8 +387,9 @@ def test_a_duplicate_held_only_as_an_on_demand_base_is_folded(client, ws, test_d
     assert checkouts_db.get_checkout_by_path(str(base), project_id=dup["id"])  # its chats still find it
     listed = {p["project_v2_id"] for p in client.get("/api/v1/projects/overview").json()["projects"]}
     assert kept["id"] in listed and dup["id"] not in listed  # one project, not two
-    offered = _offered()
-    assert kept["id"] in offered and dup["id"] not in offered  # the new-chat picker offers one project
+    offered = {row["project_v2_id"]: row for row in _catalog()}
+    assert list(offered) == [kept["id"]]  # the new-chat picker offers one project...
+    assert offered[kept["id"]]["aliases"] == [dup["origin"], dup["id"]]  # ...and the duplicate's chats stay live
     # A later change of the kept project reaches that checkout.
     other = _fork(ws, upstream, "demo-other")
     assert _change(client, kept, other).status_code == 200
