@@ -189,6 +189,34 @@ def test_no_project_fork_reseeds_its_own_runtime_cwd(fork_client, monkeypatch, t
     assert [entry["message"]["content"] for entry in entries if entry["type"] == "user"] == ["hello"]
 
 
+def test_fluid_fork_stays_hidden_until_its_history_is_copied(fork_client, monkeypatch):
+    """A fork row visible mid-copy can take a turn whose event log then blocks
+    the inherited one for good; the row appears only once the copy is done."""
+    from app.core.provider import fluid_transcript
+
+    _seed_parent()
+    real_fork = fluid_transcript.fork_fluid_session
+    rows_during_copy = []
+
+    def paused_copy(*args, **kwargs):
+        from app.db.base import get_cursor, get_db
+
+        with get_db() as conn:
+            cur = get_cursor(conn)
+            cur.execute("SELECT id FROM sessions WHERE parent_session_id=%s", (PARENT_SID,))
+            rows_during_copy.extend(r["id"] for r in cur.fetchall())
+        return real_fork(*args, **kwargs)
+
+    monkeypatch.setattr(fluid_transcript, "fork_fluid_session", paused_copy)
+    response = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert response.status_code == 200, response.text
+    assert rows_during_copy == []
+    row = sessions_db.get_session(response.json()["session_id"])
+    # Created already bound to its copied transcript.
+    assert row["sdk_session_id"] and row["sdk_session_id"] != PARENT_SDK
+    assert len(fluid_transcript.fluid_transcript_entries(row["sdk_session_id"])) == 2
+
+
 def test_voice_fork_is_a_normal_conversation(fork_client):
     from app.db.base import get_cursor, get_db
 

@@ -138,6 +138,41 @@ def _copy_app_event_log(source_session_id: str, dest_session_id: str, *, at_head
         )
 
 
+def _reseed_fork_cli(
+    source_sdk_session_id: str,
+    new_session_id: str,
+    new_sdk_session_id: str,
+    resolve_working_dir: Callable[[dict], str],
+) -> None:
+    """Materialize a Fluid fork's copied path as its own Claude Code transcript.
+
+    Best effort, like the reseed after a rewind: the node copy is the source of
+    truth, and a failed reseed only means the next delegated turn starts a new
+    Claude Code conversation.
+    """
+    from app.core.provider.fluid_transcript import (
+        delegated_window_for,
+        get_cli_session_id,
+        reseed_delegated_cli_session,
+    )
+
+    try:
+        if not get_cli_session_id(source_sdk_session_id):
+            return
+        working_dir = resolve_working_dir(database.get_session(new_session_id))
+        reseed = reseed_delegated_cli_session(
+            new_sdk_session_id, working_dir, force=True,
+            context_window=delegated_window_for(source_sdk_session_id),
+        )
+        if reseed.status == "failed":
+            logger.warning(
+                "fork CLI re-seed failed for %s (parent %s): %s",
+                new_sdk_session_id, source_sdk_session_id, reseed.error,
+            )
+    except Exception:
+        logger.exception("fork CLI re-seed failed for %s", new_session_id)
+
+
 async def _fork_fluid_session(
     *,
     session_id: str,
@@ -205,10 +240,29 @@ async def _fork_fluid_session(
     )
     from app.core.message_resolver import resolve_working_dir
 
+    # Copy the node tree BEFORE the row exists: a visible fork could take a
+    # turn mid-copy, and that turn's event log would block the inherited one
+    # for good.
+    try:
+        new_sdk_session_id, node_count = await run_sync(
+            fork_fluid_session, sdk_session_id, fork_node_id,
+        )
+    except Exception:
+        logger.exception("Failed to fork fluid node tree for session %s", session_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create forked session",
+        )
+
     await run_sync(
         database.create_session,
         session_id=new_session_id,
         **fork_fields,
+    )
+    await run_sync(
+        database.update_session,
+        session_id=new_session_id,
+        sdk_session_id=new_sdk_session_id,
     )
 
     # The fork is the caller's chat: a paired device keeps it (#1877).
@@ -221,37 +275,16 @@ async def _fork_fluid_session(
     if parent_branch:
         await run_sync(_restore_fork_branch, new_session_id, parent_branch)
 
-    # Reseed where the FORK's runtime resumes, read from its written row (its
-    # lane, parent, branch and the creator just recorded each pick the cwd).
-    try:
-        fork_row = await run_sync(database.get_session, new_session_id)
-        working_dir = await run_sync(resolve_working_dir, fork_row)
-        new_sdk_session_id, node_count = await run_sync(
-            fork_fluid_session,
-            sdk_session_id,
-            fork_node_id,
-            working_dir=working_dir,
-        )
-    except Exception:
-        logger.exception("Failed to fork fluid node tree for session %s", session_id)
-        await run_sync(database.delete_session, new_session_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create forked session",
-        )
-
-    await run_sync(
-        database.update_session,
-        session_id=new_session_id,
-        sdk_session_id=new_sdk_session_id,
-    )
-
     await run_sync(
         _copy_app_event_log,
         session_id,
         new_session_id,
         at_head=(fork_message_index == len(entries) - 1),
     )
+
+    # Reseed where the FORK's runtime resumes, read from its written row (its
+    # lane, parent, branch and the creator just recorded each pick the cwd).
+    await run_sync(_reseed_fork_cli, sdk_session_id, new_session_id, new_sdk_session_id, resolve_working_dir)
 
     logger.debug(
         "Forked fluid session %s -> %s (fluid %s, %d nodes) at message index %d",
