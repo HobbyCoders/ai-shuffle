@@ -334,6 +334,87 @@ describe('native keyboard in fit viewport', () => {
  });
 });
 
+describe('pointer input on a phone-width page', () => {
+ type Sent = Record<string, unknown>;
+ function pointer(target: HTMLElement, type: string, init: { x?: number; y?: number; button?: number; buttons?: number; ctrlKey?: boolean; deltaY?: number } = {}) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.assign(event, {
+   pointerType: 'mouse', pointerId: 7, clientX: init.x ?? 10, clientY: init.y ?? 10,
+   button: init.button ?? -1, buttons: init.buttons ?? 0, deltaX: 0, deltaY: init.deltaY ?? 0,
+   altKey: false, ctrlKey: init.ctrlKey ?? false, metaKey: false, shiftKey: false,
+  });
+  target.dispatchEvent(event);
+ }
+ const inputs = () => mocks.send.mock.calls.map(([p]) => p as Sent).filter((p) => p.type === 'input');
+ const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); await tick(); };
+ async function setupPhone() {
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1; });
+  vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ close: vi.fn(), width: 500, height: 700 }));
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+   x: 0, y: 0, left: 0, top: 0, right: 375, bottom: 700, width: 375, height: 700, toJSON() {},
+  }));
+  const workspace = state('human');
+  workspace.viewport = { mode: 'fixed', width: 375, height: 700 };
+  const view = await setup(workspace);
+  // The window cannot be narrower than about 500 px: the page is its left 375 px.
+  mocks.config!.onFrame('AA==', { deviceWidth: 500, deviceHeight: 700, runtime_id: 'runtime', tab_id: 'tab' });
+  await tick(); await Promise.resolve(); await tick();
+  mocks.send.mockClear();
+  return { view, surface: view.getByRole('application') };
+ }
+ async function answer(payload: Sent) { mocks.config!.onCommandResult?.(payload.id as string, true); await flush(); }
+ afterEach(() => vi.restoreAllMocks());
+
+ it('accepts the padded frame and keeps only the newest hover while one is on its way', async () => {
+  const { view, surface } = await setupPhone();
+  expect(view.queryByText(/waiting for the current frame/)).toBeNull();
+  pointer(surface, 'pointermove', { x: 10 }); await flush();
+  pointer(surface, 'pointermove', { x: 20 }); await flush();
+  pointer(surface, 'pointermove', { x: 30 }); await flush();
+  expect(inputs().map((p) => p.x)).toEqual([10]);
+  await answer(inputs()[0]);
+  expect(inputs().map((p) => p.x)).toEqual([10, 30]);
+ });
+
+ it('sends the last drag step before the release', async () => {
+  const { surface } = await setupPhone();
+  pointer(surface, 'pointerdown', { x: 10, button: 0, buttons: 1 }); await flush();
+  pointer(surface, 'pointermove', { x: 20, buttons: 1 }); await flush();
+  pointer(surface, 'pointermove', { x: 40, buttons: 1 }); await flush();
+  pointer(surface, 'pointerup', { x: 40, button: 0, buttons: 0 }); await flush();
+  expect(inputs().map((p) => [p.event, p.x])).toEqual([['down', 10], ['move', 20], ['move', 40], ['up', 40]]);
+ });
+
+ it('drops a held hover when a button is pressed', async () => {
+  const { surface } = await setupPhone();
+  pointer(surface, 'pointermove', { x: 10 }); await flush();
+  pointer(surface, 'pointermove', { x: 20 }); await flush();
+  pointer(surface, 'pointerdown', { x: 30, button: 0, buttons: 1 }); await flush();
+  expect(inputs().map((p) => [p.event, p.x])).toEqual([['move', 10], ['down', 30]]);
+ });
+
+ it('adds up wheel steps only at the same spot with the same modifiers', async () => {
+  const { surface } = await setupPhone();
+  pointer(surface, 'wheel', { x: 10, deltaY: 100 }); await flush();
+  pointer(surface, 'wheel', { x: 12, deltaY: 50 }); await flush();
+  pointer(surface, 'wheel', { x: 12, deltaY: 25 }); await flush();
+  pointer(surface, 'wheel', { x: 12, deltaY: 30, ctrlKey: true }); await flush();
+  pointer(surface, 'wheel', { x: 300, y: 600, deltaY: 20 }); await flush();
+  for (let i = 0; i < 3; i++) await answer(inputs().at(-1)!);
+  expect(inputs().map((p) => [p.x, p.deltaY, p.modifiers])).toEqual([[10, 100, 0], [12, 75, 0], [12, 30, 2], [300, 20, 0]]);
+ });
+
+ it('drops held scrolling when the page is navigated', async () => {
+  const { view, surface } = await setupPhone();
+  pointer(surface, 'wheel', { deltaY: 100 }); await flush();
+  pointer(surface, 'wheel', { deltaY: 50 }); await flush();
+  await fireEvent.click(view.getByRole('button', { name: 'Go back' })); await flush();
+  expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ op: 'command', args: { command: 'back' } }));
+  await answer(inputs()[0]);
+  expect(inputs().map((p) => p.deltaY)).toEqual([100]);
+ });
+});
 
 describe('browser control handoff', () => {
  it('releases without taking control and waits for authoritative ownership', async () => {

@@ -536,18 +536,35 @@
 	// queue full"). So at most one of them is on its way at a time: newer moves
 	// replace a held one and wheel deltas add up until the last is answered.
 	const CONTINUOUS_REPLY_TIMEOUT_MS = 2000;
+	// Wheel samples merge only at about the same spot with the same modifiers:
+	// a scroll over another pane, or a Ctrl+wheel zoom, stays its own event.
+	const WHEEL_MERGE_SLOP_PX = 24;
+	const MAX_HELD_WHEELS = 16;
 	let continuousInFlight: string | null = null;
 	let continuousTimer: ReturnType<typeof setTimeout> | undefined;
 	let heldMove: Record<string, unknown> | null = null;
-	let heldWheel: Record<string, unknown> | null = null;
+	let heldWheels: Record<string, unknown>[] = [];
 
 	function isContinuous(payload: Record<string, unknown>) {
 		return payload.kind === 'mouse' && (payload.event === 'move' || payload.event === 'wheel');
 	}
+	/**
+	 * Navigation, tab and viewport changes keep the same runtime and tab ids,
+	 * so held input would otherwise land on the next document or layout.
+	 */
+	const PAGE_CHANGING_OPS = new Set(['navigate', 'command', 'tabs', 'viewport']);
+	function isDrag(move: Record<string, unknown> | null) {
+		return !!move && move.button !== 'none';
+	}
+	/** Drop held input the user has moved past (a navigation or a new page). */
+	function dropHeld() {
+		heldMove = null;
+		heldWheels = [];
+	}
 	function resetContinuous() {
 		clearTimeout(continuousTimer);
 		continuousInFlight = null;
-		heldMove = heldWheel = null;
+		dropHeld();
 	}
 	function sendContinuous(payload: Record<string, unknown>) {
 		const id = nextCommandId();
@@ -561,9 +578,9 @@
 		if (id !== continuousInFlight) return;
 		clearTimeout(continuousTimer);
 		continuousInFlight = null;
-		const next = heldWheel ?? heldMove;
-		if (next === heldWheel) heldWheel = null;
-		else heldMove = null;
+		// A held move is always newer than held wheels (a wheel drops it).
+		let next = heldWheels.shift() ?? null;
+		if (!next) { next = heldMove; heldMove = null; }
 		// Control can end while one waits: never send it to a page we no longer drive.
 		if (next && humanControl && frameMatchesWorkspace) sendContinuous(next);
 	}
@@ -572,17 +589,24 @@
 		if (payload.event === 'wheel') {
 			// The wheel carries the pointer position; a move held after it stays newer.
 			heldMove = null;
-			const clampDelta = (v: number) => Math.max(-10000, Math.min(10000, v));
-			heldWheel = heldWheel
-				? { ...payload, deltaX: clampDelta(Number(heldWheel.deltaX ?? 0) + Number(payload.deltaX ?? 0)), deltaY: clampDelta(Number(heldWheel.deltaY ?? 0) + Number(payload.deltaY ?? 0)) }
-				: payload;
+			const last = heldWheels.at(-1);
+			const mergeable = !!last && last.modifiers === payload.modifiers &&
+				Math.abs(Number(last.x) - Number(payload.x)) <= WHEEL_MERGE_SLOP_PX &&
+				Math.abs(Number(last.y) - Number(payload.y)) <= WHEEL_MERGE_SLOP_PX;
+			if (last && (mergeable || heldWheels.length >= MAX_HELD_WHEELS)) {
+				const clampDelta = (v: number) => Math.max(-10000, Math.min(10000, v));
+				heldWheels[heldWheels.length - 1] = { ...payload, deltaX: clampDelta(Number(last.deltaX ?? 0) + Number(payload.deltaX ?? 0)), deltaY: clampDelta(Number(last.deltaY ?? 0) + Number(payload.deltaY ?? 0)) };
+			} else heldWheels.push(payload);
 		} else heldMove = payload;
 	}
-	/** Clicks, keys and text go at once, after any scroll the user already made. */
+	/** Clicks, keys and text go at once, after the scroll and drag the user already made. */
 	function sendDiscrete(payload: Record<string, unknown>) {
-		// The press carries its own position, so a held hover is obsolete.
-		heldMove = null;
-		if (heldWheel) { const wheel = heldWheel; heldWheel = null; sendIdentified(wheel); }
+		const move = heldMove, wheels = heldWheels;
+		dropHeld();
+		for (const wheel of wheels) sendIdentified(wheel);
+		// A press carries its own position, so a held hover is obsolete; a held
+		// drag step is not: a slider saves on release where the last move left it.
+		if (isDrag(move)) sendIdentified(move!);
 		sendIdentified(payload);
 	}
 	let controlRequest: Promise<void> | null = null;
@@ -667,6 +691,7 @@
 			if (op === 'release') { await releaseControl(); return; }
 			await ensureControl();
 			if (operation !== scope || frameIdentity !== identity) return;
+			if (PAGE_CHANGING_OPS.has(op)) dropHeld();
 			if (!sendIdentified({ type: 'workspace-command', op, args })) throw new Error('Command not sent. Check the connection and try again.');
 		} catch (error) { if (operation === scope) commandError = error instanceof Error ? error.message : 'Browser command failed.'; }
 	}
@@ -859,6 +884,7 @@
 		const id = `panel-${Date.now()}-${++commandSequence}`;
 		awaitingReplies.add(id);
 		track?.(id);
+		if (PAGE_CHANGING_OPS.has(op)) dropHeld();
 		try {
 			if (!client.send({ type: 'workspace-command', id, op, args,
 				runtime_id: workspace.runtime_id, tab_id: workspace.active_tab_id }))
