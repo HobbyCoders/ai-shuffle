@@ -252,6 +252,14 @@ describe('usage groups', () => {
 		// The same charge run on this worker names its balance.
 		mocks.state.messages = [falOn('device-here')];
 		expect(group(await open(), 'group:api').summary()).toBe('fal.ai $8.40 left');
+		cleanup();
+		// A fal-only tool names no worker: on a networked install the chat may
+		// have moved here after it ran elsewhere, so it is not pinned.
+		mocks.state.messages = [{
+			...falImage(), toolName: 'mcp__ai-tools__editImage',
+			toolResult: JSON.stringify({ success: true, provider_used: 'fal-ai' }),
+		} as ChatMessage];
+		expect(group(await open(), 'group:api').summary()).toBe('');
 	});
 
 	it('Claude on a cloud provider (API auth, "Cloud") sits under API keys, not Subscriptions', async () => {

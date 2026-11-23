@@ -1174,16 +1174,17 @@
 	});
 	// The fal row is this install's own FAL_KEY (every worker uses the id
 	// `fal-ai`), so a fal charge another worker ran may be another account. A
-	// result naming its worker counts only when that is this install; one that
-	// does not (or says "local") ran on the chat's own worker, so the chat must
-	// be this install's (`isSelf` would also accept an unknown owner whose
-	// usage falls back to this install's bucket).
+	// result naming its worker counts only when that is this device. One that
+	// names none (the fal-only tools, older results, or "local") cannot be
+	// placed once a chat has moved between workers, so it counts only on an
+	// install with no network identity, where the chat never left this one.
 	const toolApiAccount = $derived.by(() => {
 		const charge = lastPaidApiCharge($activeSession.messages ?? []);
 		if (!charge || charge.account !== FAL_USAGE_ACCOUNT) return charge?.account ?? null;
+		const self = $rateLimit.selfDeviceId;
 		const ranHere = charge.worker && charge.worker !== 'local'
-			? charge.worker === $rateLimit.selfDeviceId
-			: isSelfTarget($rateLimit, target);
+			? charge.worker === self
+			: !self && isSelfTarget($rateLimit, target);
 		return ranHere ? charge.account : null;
 	});
 	const usageGroups = $derived.by<UsageGroup[]>(() => {
