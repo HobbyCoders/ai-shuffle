@@ -562,3 +562,30 @@ def test_switched_origin_does_not_reuse_the_old_default(trunk_repo, fetched):
                                             create_new_branch=True, provision_runtime=False)
     assert path and git(path, "rev-parse", "HEAD") == stable_tip
     assert git(r["base"], "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/stable"
+
+
+def test_chat_right_after_set_url_asks_the_new_origin(trunk_repo):
+    """S4 r5: no status refresh between set-url and the chat; origin/HEAD still says trunk."""
+    r = trunk_repo
+    new_origin = r["base"].parent / "stable-origin-direct.git"
+    git(r["base"].parent, "init", "--bare", "-b", "stable", str(new_origin))
+    seed = clone(r["origin"], r["base"].parent / "stable-seed-direct")
+    git(seed, "checkout", "-q", "-b", "stable")
+    stable_tip = commit(seed, "stable.txt", "stable work\n")
+    git(seed, "push", "-q", str(new_origin), "trunk", "stable")
+    git(new_origin, "symbolic-ref", "HEAD", "refs/heads/stable")
+    git(r["base"], "remote", "set-url", "origin", str(new_origin))
+    assert git(r["base"], "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/trunk"
+
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-direct-after-set-url", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == stable_tip
+
+
+def test_unreachable_origin_uses_the_recorded_default(trunk_repo):
+    """Offline, a recorded origin/HEAD is still the base (cached origin/trunk)."""
+    r = trunk_repo
+    r["origin"].rename(r["origin"].with_name("moved-away.git"))
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-offline-recorded", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == r["tip"]

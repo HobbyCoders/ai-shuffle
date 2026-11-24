@@ -388,21 +388,27 @@ def _ref_exists(base_dir: str, branch: str) -> bool:
 def _fork_default(base_dir: str) -> Tuple[Optional[str], bool]:
     """The repository's default branch for a new chat, asking origin if unknown.
 
-    A checkout whose ``origin/HEAD`` was never recorded asks origin which
-    branch its HEAD names, fetches that branch and records it, as a fresh
-    clone would. A local main/master is only a fallback for when origin
-    cannot answer: a stale ``master`` must not beat a remote ``trunk``.
-    Returns ``(branch, named_by_origin)``; branch is ``None`` when nothing
-    is known. ``named_by_origin`` means origin just named it, so a missing
-    branch is an error, never a reason to fork from something else.
+    Origin is asked first which branch its HEAD names; that branch is fetched
+    and recorded as ``origin/HEAD``, as a fresh clone would. A recorded
+    ``origin/HEAD`` can belong to a previous URL (``git remote set-url``
+    leaves it behind), so it is only the answer when origin can't be asked,
+    and a local main/master only after that: a stale ``master`` must not
+    beat a remote ``trunk``. Returns ``(branch, named_by_origin)``; branch is
+    ``None`` when nothing is known. ``named_by_origin`` means origin just
+    named it, so a missing branch is an error, never a reason to fork from
+    something else.
     """
     confirmed = git_service.known_default_branch(base_dir, confirmed=True)
-    if confirmed:
-        return confirmed, False
     if git_service.has_origin(base_dir):
-        learned = _learn_origin_default(base_dir)
+        # With a recorded fallback, don't let an unreachable origin hold the
+        # chat for the full fetch deadline before the fetch itself times out.
+        learned = _learn_origin_default(
+            base_dir, ls_remote_timeout=ORIGIN_HEAD_REVALIDATE_TIMEOUT if confirmed else None,
+        )
         if learned:
             return learned, True
+    if confirmed:
+        return confirmed, False
     return git_service.known_default_branch(base_dir), False
 
 
@@ -458,13 +464,13 @@ def revalidate_origin_head(base_dir: str) -> None:
     _git_cache.invalidate(f"default_branch:{base_dir}")
 
 
-def _learn_origin_default(base_dir: str) -> Optional[str]:
+def _learn_origin_default(base_dir: str, *, ls_remote_timeout: Optional[float] = None) -> Optional[str]:
     """Ask origin for its HEAD branch, fetch it and record ``origin/HEAD``."""
     from app.core import checkout_transfer
     from app.core.git_cache import _git_cache
     from app.core.git_fork_base import CHAT_FETCH_TIMEOUT, fetch_base
 
-    branch = _origin_head_branch(base_dir, CHAT_FETCH_TIMEOUT)
+    branch = _origin_head_branch(base_dir, ls_remote_timeout or CHAT_FETCH_TIMEOUT)
     if not branch:
         return None
     # Once origin has named its default, that is the base even if fetching it
