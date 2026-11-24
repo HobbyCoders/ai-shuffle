@@ -408,7 +408,10 @@ async def test_a_wake_queued_as_stop_lands_still_counts(mock_db):
         await pr_watch.poll(row, fetch=lambda *_: snap(mergeable="CONFLICTING"), now=NOW)
     stopped = pr_watches.get(row["id"])
     assert stopped["status"] == "stopped" and [w["turn_id"] for w in stopped["wakes"]] == ["turn-late"]
-    again = pr_watch.start_watch(repo="acme/app", pr_number=9, pr_url=None, pr_title=None, session_id=None)
+    # The wake was recorded at the fixed NOW; restart the watch on that clock too,
+    # or the wake ages out of the 24-hour window once the real date passes NOW.
+    with patch.object(pr_watch, "_now", return_value=NOW + timedelta(minutes=1)):
+        again = pr_watch.start_watch(repo="acme/app", pr_number=9, pr_url=None, pr_title=None, session_id=None)
     assert again["wakes_today"] == 1
 
 
