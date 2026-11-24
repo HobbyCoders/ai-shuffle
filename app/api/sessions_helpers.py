@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from fastapi import HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import threading
 import time
@@ -177,7 +177,9 @@ class CreateWorktreeSessionRequest(BaseModel):
     project_id: Optional[str] = None
     project_v2_id: Optional[str] = None
     branch_name: str
-    base_branch: str = "main"
+    # None (or blank) forks a new branch from the repository's own default
+    # branch, resolved by the worker that holds the checkout.
+    base_branch: Optional[str] = None
     profile_id: Optional[str] = None
     create_new_branch: bool = False  # False = use existing branch, True = create new branch
     # Optional first-prompt kickoff — when ``prompt`` is set the backend
@@ -203,6 +205,11 @@ class CreateWorktreeSessionRequest(BaseModel):
     # not exist on this machine and never will.
     target_instance_id: Optional[str] = None
 
+    @field_validator("base_branch")
+    @classmethod
+    def _blank_base_is_default(cls, value: Optional[str]) -> Optional[str]:
+        return (value or "").strip() or None
+
 
 class WorktreeSessionResponse(BaseModel):
     """Response for worktree session creation"""
@@ -212,7 +219,8 @@ class WorktreeSessionResponse(BaseModel):
     # deterministic checkout is materialized lazily at spawn).
     worktree_id: Optional[str] = None
     branch_name: str
-    base_branch: str
+    # None: a new branch forked from the repository's default branch.
+    base_branch: Optional[str] = None
     # The materialized checkout path (v2) or the legacy worktree path.
     worktree_path: Optional[str] = None
     status: str

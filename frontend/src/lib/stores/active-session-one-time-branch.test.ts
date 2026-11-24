@@ -98,7 +98,7 @@ describe('one-time branch choice (#1528)', () => {
 		newProjectChat();
 		// Auto from the default base: the picked branch's base was part of the spent choice.
 		expect(activeSession.current).toMatchObject({ sessionId: null, project: PROJECT, worktreeIntent: 'worktree',
-			worktreeBranch: '', worktreeBaseBranch: 'main', worktreeId: null, worktreeCreateNewBranch: false });
+			worktreeBranch: '', worktreeBaseBranch: '', worktreeId: null, worktreeCreateNewBranch: false });
 	});
 
 	it('is not staged by a New Chat opened while the first create is still in flight', async () => {
@@ -281,6 +281,6 @@ describe('one-time branch choice (#1528)', () => {
 		activeSession.setWorktreeBaseBranch('develop');
 		expect(composerPreferences.current.checkout).toBeNull();
 		newProjectChat();
-		expect(activeSession.current).toMatchObject({ worktreeBranch: '', worktreeBaseBranch: 'main' });
+		expect(activeSession.current).toMatchObject({ worktreeBranch: '', worktreeBaseBranch: '' });
 	});
 });

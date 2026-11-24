@@ -287,6 +287,17 @@ describe('autoCreateWorktree', () => {
 		expect(state().messages).toEqual([]);
 	});
 
+	it('leaves an unpicked base to the worker instead of assuming main', async () => {
+		post.mockResolvedValueOnce({ session_id: 'wt-d', branch_name: 'feat/auto-name', base_branch: null, worktree_path: '/w', status: 'ok', query_started: true });
+		const { sender } = setup({ worktreeBaseBranch: '' });
+
+		await sender.autoCreateWorktree('hello there');
+
+		expect(post).toHaveBeenCalledExactlyOnceWith('/sessions/with-worktree', expect.objectContaining({
+			base_branch: null, create_new_branch: true,
+		}), { keepalive: true });
+	});
+
 	it('commits the new session in one step and opens its feed when the backend started the turn', async () => {
 		post.mockResolvedValueOnce({ session_id: 'wt-1', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
 		const { sender, deps, state, sendMessage } = setup();

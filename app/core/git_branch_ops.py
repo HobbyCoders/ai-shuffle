@@ -100,36 +100,47 @@ class GitBranchMixin:
 
         return self._get_default_branch_cli(working_dir)
 
-    def _get_default_branch_cli(self, working_dir: str) -> str:
-        cache_key = f"default_branch:{working_dir}"
-        try:
-            # Try to get remote HEAD
-            result = self._run_git(
-                working_dir,
-                ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
-                timeout=5
-            )
-            if result.returncode == 0:
-                branch = result.stdout.strip().replace("origin/", "")
-                _git_cache.put(cache_key, branch)
-                return branch
+    def known_default_branch(self, working_dir: str, *, confirmed: bool = False) -> Optional[str]:
+        """The default branch when the repository says so, else ``None``.
 
-            # Fallback: check if main or master exists
-            for branch in ["main", "master"]:
+        Evidence: origin's recorded HEAD, then a local main/master. Never the
+        branch a checkout has out (a feature branch is not the default) and
+        never a bare guess. ``confirmed`` drops the main/master guess when the
+        repository has an origin, whose own HEAD is then the only proof.
+        """
+        try:
+            result = self._run_git(
+                working_dir, ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"], timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().replace("origin/", "", 1)
+            if confirmed and self.has_origin(working_dir):
+                return None
+            for branch in ("main", "master"):
                 result = self._run_git(
-                    working_dir,
-                    ["rev-parse", "--verify", f"refs/heads/{branch}"],
-                    timeout=5
+                    working_dir, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], timeout=5,
                 )
                 if result.returncode == 0:
-                    _git_cache.put(cache_key, branch)
                     return branch
-
-            _git_cache.put(cache_key, "main")
-            return "main"  # Default fallback
         except (subprocess.SubprocessError, OSError) as e:
-            logger.warning(f"get_default_branch failed for '{working_dir}': {e}")
-            return "main"
+            logger.warning(f"known_default_branch failed for '{working_dir}': {e}")
+        return None
+
+    def has_origin(self, working_dir: str) -> bool:
+        """Whether the repository has an ``origin`` remote configured."""
+        try:
+            result = self._run_git(working_dir, ["config", "--get", "remote.origin.url"], timeout=5)
+        except (subprocess.SubprocessError, OSError):
+            return False
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def _get_default_branch_cli(self, working_dir: str) -> str:
+        # Callers that must not act on a guess (cleanup, ship) check that the
+        # returned branch exists; a repository with no known default still
+        # answers "main" here, which they then find missing and stop.
+        branch = self.known_default_branch(working_dir) or "main"
+        _git_cache.put(f"default_branch:{working_dir}", branch)
+        return branch
 
     def list_branches(
         self,

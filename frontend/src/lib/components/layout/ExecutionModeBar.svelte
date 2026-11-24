@@ -192,8 +192,9 @@
 	const currentBranch = $derived($activeSession.selectedWorktreeBranch || $activeSession.worktreeBranch || 'Auto');
 	const isAutoMode = $derived(!$activeSession.selectedWorktreeBranch && !$activeSession.worktreeBranch && !$activeSession.worktreeId);
 
-	// Base branch an auto-created worktree branch forks FROM (defaults to 'main').
-	const baseBranch = $derived($activeSession.worktreeBaseBranch || 'main');
+	// Base branch an auto-created worktree branch forks FROM. Unpicked, the
+	// worker uses the repository's own default branch (not always 'main').
+	const baseBranch = $derived($activeSession.worktreeBaseBranch || $git.status?.default_branch || 'the default branch');
 	const branchChipLabel = $derived(isAutoMode ? `Auto from ${baseBranch}` : currentBranch);
 
 	// Branches valid as a fork base. Unlike `filteredBranches` this keeps main/master,

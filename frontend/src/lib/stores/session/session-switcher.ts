@@ -139,7 +139,7 @@ interface LiveSnapshot {
 /** A compose's checkout once an opening has spent it: no branch, no picked
  *  worktree. Worktree on/off (`worktreeIntent`) is the user's and stays. */
 export const SPENT_CHECKOUT = {
-	worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null, worktreeMode: 'new', worktreeBaseBranch: 'main',
+	worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null, worktreeMode: 'new', worktreeBaseBranch: '',
 	worktreeCreateNewBranch: false, worktreeCheckoutPending: false, worktreeDeleted: false,
 } as const satisfies Partial<SessionEphemeral>;
 
@@ -873,7 +873,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			deviceIntent: ephemeral?.deviceIntent ?? null,
 			worktreeId: ephemeral?.worktreeId ?? worktreeInfo?.worktreeId ?? null,
 			worktreeBranch: ephemeral?.worktreeBranch ?? worktreeInfo?.worktreeBranch ?? '',
-			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? 'main',
+			worktreeBaseBranch: ephemeral?.worktreeBaseBranch ?? '',
 			selectedWorktreeBranch: ephemeral?.selectedWorktreeBranch ?? null,
 			worktreeMode: ephemeral?.worktreeMode ?? 'new',
 			worktreeDeleted: ephemeral?.worktreeDeleted ?? worktreeInfo?.worktreeDeleted ?? false,
@@ -1284,7 +1284,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A restored compose keeps its explicit pick (including Local/null).
 			// Otherwise use the last worker chosen, not the session being left.
 			deviceIntent: newChatEphemeral ? newChatEphemeral.deviceIntent : getPersistedDeviceIntent(),
-			worktreeBaseBranch: 'main',
+			worktreeBaseBranch: '',
 			worktreeCreateNewBranch: false,
 			worktreeCheckoutPending: false,
 			worktreeMode: 'new' as const,

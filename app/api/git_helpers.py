@@ -436,7 +436,12 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
     # repository commonly gains its origin only after its first status load.
     # The row (and the 60 s cache the UI reads) never holds a clone token.
     remote_url = strip_url_userinfo(git_service.get_remote_url(working_dir))
-    default_branch = git_service.get_default_branch(working_dir)
+    # Only origin's own HEAD may overwrite a stored default; a local
+    # main/master guess may label a new record but never replace a stored one.
+    # Unknown stays None so the composer says "the default branch", not a
+    # made-up "main"; the first new chat asks origin and records its HEAD.
+    confirmed_default = git_service.known_default_branch(working_dir, confirmed=True)
+    default_branch = confirmed_default or git_service.known_default_branch(working_dir)
 
     # Try to extract GitHub repo name from URL
     github_repo_name = None
@@ -457,10 +462,15 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
                 logger.warning(f"Failed to parse GitHub repo name from URL '{remote_url}': {e}")
 
     if repo:
-        if (repo.get("remote_url") or "") != (remote_url or ""):
+        # The default branch is refreshed too: a record made with the "main"
+        # guess (or before a repository switch) must not keep labelling new
+        # chats with a branch the repository doesn't have.
+        url_changed = (repo.get("remote_url") or "") != (remote_url or "")
+        if url_changed or (confirmed_default and repo.get("default_branch") != confirmed_default):
             repo = database.update_git_repository(
                 repo["id"], remote_url=remote_url or "",
-                default_branch=default_branch, github_repo_name=github_repo_name or "",
+                default_branch=default_branch if url_changed else confirmed_default,
+                github_repo_name=github_repo_name or "",
             )
         _auto_link_from_repo(project_id, repo)
         _repo_record_cache[project_id] = (repo, now)

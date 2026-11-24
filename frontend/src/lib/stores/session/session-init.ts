@@ -247,7 +247,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 			// A branch the first send creates has no checkout to ask Git about.
 			worktreeCreateNewBranch: saved.worktreeCreateNewBranch ?? false,
 			worktreeCheckoutPending: saved.worktreeCheckoutPending ?? false,
-			worktreeBaseBranch: saved.worktreeBaseBranch || 'main',
+			worktreeBaseBranch: saved.worktreeBaseBranch || '',
 			worktreeId: saved.worktreeId ?? null,
 			worktreeMode: saved.worktreeMode || 'new',
 			selectedWorktreeBranch: saved.selectedWorktreeBranch ?? null,
@@ -431,7 +431,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeCreateNewBranch: persisted.worktreeCreateNewBranch ?? false,
 						worktreeCheckoutPending: persisted.worktreeCheckoutPending ?? false,
-						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
+						worktreeBaseBranch: persisted.worktreeBaseBranch || '',
 						worktreeId: persisted.worktreeId ?? null,
 						worktreeMode: persisted.worktreeMode || 'new',
 						selectedWorktreeBranch: persisted.selectedWorktreeBranch ?? null,

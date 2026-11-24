@@ -371,3 +371,115 @@ def test_remote_receiver_fetches_only_for_negotiated_policy(world, monkeypatch, 
         assert git(w["target"], "rev-parse", "origin/main") == w["old"]
     assert git(w["target"], "rev-parse", "HEAD") == w["old"]
     assert git(w["caller"], "rev-parse", "HEAD") == caller
+
+
+@pytest.fixture
+def trunk_repo(mock_db, tmp_path):
+    """A project whose repository has no ``main``: its default branch is ``trunk``."""
+    origin = tmp_path / "trunk-origin.git"
+    git(tmp_path, "init", "--bare", "-b", "trunk", str(origin))
+    seed = clone(origin, tmp_path / "trunk-seed")
+    (seed / ".gitignore").write_text(".fluid/\n")
+    git(seed, "add", ".gitignore")
+    tip = commit(seed, "code.txt", "trunk work\n")
+    git(seed, "push", "origin", "trunk")
+    base = clone(origin, tmp_path / "trunk-base")
+    project = projects_v2.upsert_project("local:trunk-base", name="Trunk")
+    checkouts.upsert_checkout(project["id"], LOCAL_ME, str(base))
+    return dict(project=project, base=base, origin=origin, tip=tip)
+
+
+@pytest.mark.parametrize("asked", [None, "", "main"])
+def test_new_chat_forks_from_the_real_default_when_main_is_missing(trunk_repo, asked):
+    """Older composers ask for ``main`` when they don't know the default branch."""
+    r = trunk_repo
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-trunk", base_branch=asked,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == r["tip"]
+
+
+def test_new_chat_missing_main_falls_back_offline_too(trunk_repo, tmp_path):
+    r = trunk_repo
+    git(r["base"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-trunk-offline", base_branch="main",
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == r["tip"]
+
+
+def test_unknown_default_is_never_the_checked_out_branch(tmp_path):
+    """No origin/HEAD and no main/master: the branch a checkout has out is not the default."""
+    from app.core.git_service import git_service
+    repo = tmp_path / "plain"
+    git(tmp_path, "init", "-b", "feature/wip", str(repo))
+    commit(repo, "a.txt", "a\n")
+    assert git_service.known_default_branch(str(repo)) is None
+    assert git_service._get_default_branch_cli(str(repo)) == "main"
+
+
+def test_new_chat_asks_origin_when_its_head_is_missing(trunk_repo):
+    """A checkout on a feature branch with no recorded origin/HEAD forks from origin's default."""
+    from app.core.git_cache import _git_cache
+    r = trunk_repo
+    git(r["base"], "checkout", "-q", "-b", "feature/wip")
+    commit(r["base"], "wip.txt", "unrelated\n")
+    git(r["base"], "remote", "set-head", "origin", "--delete")
+    _git_cache.invalidate_prefix("default_branch:")
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-no-head", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == r["tip"]
+
+
+def test_a_missing_picked_base_is_reported_not_replaced(trunk_repo):
+    """Only the legacy ``main`` falls back; a branch the user picked that is gone fails."""
+    r = trunk_repo
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-gone-base", base_branch="release/2",
+                                            create_new_branch=True, provision_runtime=False)
+    assert path is None
+
+
+def _stale_master_checkout(r):
+    """origin defaults to an unfetched ``trunk``; the checkout only knows a stale ``master``."""
+    from app.core.git_cache import _git_cache
+    git(r["base"], "branch", "-m", "trunk", "master")
+    git(r["base"], "update-ref", "refs/remotes/origin/master", "HEAD")
+    git(r["base"], "update-ref", "-d", "refs/remotes/origin/trunk")
+    git(r["base"], "remote", "set-head", "origin", "--delete")
+    _git_cache.invalidate_prefix("default_branch:")
+    seed = clone(r["origin"], r["base"].parent / "trunk-seed-2")
+    return commit_and_push(seed, "newer.txt")
+
+
+def commit_and_push(repo, name):
+    tip = commit(repo, name, "newer trunk work\n")
+    git(repo, "push", "-q", "origin", "trunk")
+    return tip
+
+
+def test_origin_default_beats_a_stale_local_master(trunk_repo):
+    """S1: no origin/HEAD and a cached master; origin's unfetched trunk is still the base."""
+    r = trunk_repo
+    tip = _stale_master_checkout(r)
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-stale-master", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == tip
+    assert git(r["base"], "symbolic-ref", "--short", "refs/remotes/origin/HEAD") == "origin/trunk"
+
+
+def test_unreachable_origin_falls_back_to_local_master(trunk_repo, tmp_path):
+    """S1: only when origin cannot answer does a local main/master stand in."""
+    r = trunk_repo
+    _stale_master_checkout(r)
+    git(r["base"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    assert checkout_manager._fork_default(str(r["base"])) == "master"
+
+
+def test_a_cached_remote_master_is_not_a_known_default(tmp_path):
+    """S2: worktree cleanup must not treat a cached origin/master as the proven default."""
+    from app.core.git_service import git_service
+    repo = tmp_path / "cached"
+    git(tmp_path, "init", "-b", "feature/wip", str(repo))
+    commit(repo, "a.txt", "a\n")
+    git(repo, "remote", "add", "origin", str(tmp_path / "nowhere.git"))
+    git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+    assert git_service.known_default_branch(str(repo)) is None
+    assert git_service.known_default_branch(str(repo), confirmed=True) is None

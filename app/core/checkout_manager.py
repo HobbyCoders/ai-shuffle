@@ -372,6 +372,70 @@ def _accept_branch_checkout(
         return path
 
 
+def _ref_exists(base_dir: str, branch: str) -> bool:
+    """Whether ``branch`` exists here as a cached origin ref or a local branch."""
+    return any(
+        git_service._run_git(base_dir, ["rev-parse", "--verify", "--quiet", ref], timeout=5).returncode == 0
+        for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}")
+    )
+
+
+def _fork_default(base_dir: str) -> Optional[str]:
+    """The repository's default branch for a new chat, asking origin if unknown.
+
+    A checkout whose ``origin/HEAD`` was never recorded asks origin which
+    branch its HEAD names, fetches that branch and records it, as a fresh
+    clone would. A local main/master is only a fallback for when origin
+    cannot answer: a stale ``master`` must not beat a remote ``trunk``.
+    ``None`` when nothing is known.
+    """
+    confirmed = git_service.known_default_branch(base_dir, confirmed=True)
+    if confirmed:
+        return confirmed
+    if git_service.has_origin(base_dir):
+        learned = _learn_origin_default(base_dir)
+        if learned:
+            return learned
+    return git_service.known_default_branch(base_dir)
+
+
+def _learn_origin_default(base_dir: str) -> Optional[str]:
+    """Ask origin for its HEAD branch, fetch it and record ``origin/HEAD``."""
+    from app.core import checkout_transfer
+    from app.core.git_cache import _git_cache
+    from app.core.git_fork_base import CHAT_FETCH_TIMEOUT
+
+    try:
+        listed = checkout_transfer._run(
+            base_dir, "ls-remote", "--symref", "origin", "HEAD", timeout=CHAT_FETCH_TIMEOUT,
+        )
+        if listed.returncode != 0:
+            return None
+        output = (listed.stdout or b"").decode("utf-8", "replace")
+        branch = next((line[len("ref: refs/heads/"):-len("\tHEAD")]
+                       for line in output.splitlines()
+                       if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD")), "")
+        valid = branch and not branch.startswith("-") and subprocess.run(
+            ["git", "check-ref-format", "--branch", branch], cwd=base_dir,
+            capture_output=True, timeout=5,
+        ).returncode == 0
+        if not valid:
+            return None
+        tracking = f"refs/remotes/origin/{branch}"
+        checkout_transfer._run(
+            base_dir, "fetch", "--no-tags", "origin", f"+refs/heads/{branch}:{tracking}",
+            timeout=CHAT_FETCH_TIMEOUT,
+        )
+        if checkout_transfer._run(base_dir, "rev-parse", "--verify", "--quiet", tracking,
+                                  timeout=5).returncode != 0:
+            return None
+        checkout_transfer._run(base_dir, "symbolic-ref", "refs/remotes/origin/HEAD", tracking, timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):  # ValueError: _run timed out
+        return None
+    _git_cache.invalidate(f"default_branch:{base_dir}")
+    return branch
+
+
 def _branch_plan(
     base_dir: str,
     branch: str,
@@ -399,14 +463,25 @@ def _branch_plan(
     if create_new_branch:
         from app.core.git_fork_base import CHAT_FETCH_TIMEOUT, fetch_base
 
-        fetched_branch, fetched = fetch_base(base_dir, base_branch, timeout=CHAT_FETCH_TIMEOUT)
+        fetched_branch, fetched = fetch_base(
+            base_dir, base_branch or _fork_default(base_dir), timeout=CHAT_FETCH_TIMEOUT,
+        )
+        if base_branch == "main" and not fetched and not _ref_exists(base_dir, "main"):
+            # Older composers (and saved drafts) send ``main`` when nothing was
+            # picked. If the repository has no main, use its real default
+            # branch. Any other missing base still fails, so a deleted branch
+            # the user picked is reported instead of silently replaced.
+            logger.info("checkout_manager: legacy base 'main' not found; using the default branch")
+            base_branch = None
+            fetched_branch, fetched = fetch_base(
+                base_dir, _fork_default(base_dir), timeout=CHAT_FETCH_TIMEOUT,
+            )
         if base_branch or fetched:
             return True, base_branch or fetched_branch
         # Offline, prefer the same default branch if either cached ref exists;
         # retain HEAD only for repositories with no default ref at all.
-        for ref in (f"refs/remotes/origin/{fetched_branch}", f"refs/heads/{fetched_branch}"):
-            if git_service._run_git(base_dir, ["rev-parse", "--verify", ref], timeout=5).returncode == 0:
-                return True, fetched_branch
+        if _ref_exists(base_dir, fetched_branch):
+            return True, fetched_branch
         return True, None
     try:
         return resolve_rebound_branch_plan(
