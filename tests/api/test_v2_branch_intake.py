@@ -295,6 +295,40 @@ async def test_missing_base_checkout_raises_409(monkeypatch):
     m["set_session_branch"].assert_not_called()
 
 
+async def test_unavailable_default_branch_is_named_in_the_409(monkeypatch):
+    """Origin named a default that can't be fetched: say so, not "clone it here"."""
+    from app.core.git_worktree_ops import BaseBranchUnavailableError
+    m = _wire_v2(monkeypatch)
+    m["ensure_checkout"].side_effect = BaseBranchUnavailableError("release/stable")
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(create_new_branch=True),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    assert "release/stable" in ei.value.detail and "isn't checked out" not in ei.value.detail
+    assert m["ensure_checkout"].call_args.kwargs["raise_add_errors"] is True
+    m["create_session"].assert_not_called()
+
+
+async def test_other_add_errors_keep_the_generic_409(monkeypatch):
+    from app.core.git_worktree_ops import WorktreeAddError
+    m = _wire_v2(monkeypatch)
+    m["ensure_checkout"].side_effect = WorktreeAddError("fatal: something else")
+
+    with pytest.raises(HTTPException) as ei:
+        await worktree_api._create_v2_branch_session(
+            body=_body(create_new_branch=True),
+            project={"id": "proj-A", "settings": {}},
+            api_user_id=None,
+        )
+    assert ei.value.status_code == 409
+    assert "isn't checked out on this device yet" in ei.value.detail
+    m["create_session"].assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # R5.3: intake threads base_branch/create_new_branch into ensure_checkout, and
 # the response reports the ACTUAL base honestly.

@@ -95,15 +95,17 @@ def test_a_new_url_does_not_inherit_the_old_default(mock_db, tmp_path):
 
     repo = tmp_path / "repo"
     run("init", "-b", "feature/wip", str(repo))
-    run("remote", "add", "origin", "https://github.com/example/old.git", cwd=repo)
+    # Local paths that don't exist: the URL change asks the new origin, offline here.
+    old_url, new_url = str(tmp_path / "old.git"), str(tmp_path / "new.git")
+    run("remote", "add", "origin", old_url, cwd=repo)
     project_id = "switched-url"
     database.create_project(project_id, "Example", "", str(repo), {})
     git_helpers._repo_record_cache.pop(project_id, None)
     first = git_helpers.ensure_git_repository_record(project_id, str(repo))
     database.update_git_repository(first["id"], default_branch="trunk")
 
-    run("remote", "set-url", "origin", "https://github.com/example/new.git", cwd=repo)
+    run("remote", "set-url", "origin", new_url, cwd=repo)
     git_helpers._repo_record_cache.pop(project_id, None)
     refreshed = git_helpers.ensure_git_repository_record(project_id, str(repo))
-    assert refreshed["remote_url"] == "https://github.com/example/new.git"
+    assert refreshed["remote_url"] == new_url
     assert refreshed["default_branch"] is None

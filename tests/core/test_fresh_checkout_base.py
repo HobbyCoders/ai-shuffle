@@ -513,3 +513,52 @@ def test_learning_the_default_keeps_fetch_head(trunk_repo):
                                             create_new_branch=True, provision_runtime=False)
     assert path and git(path, "rev-parse", "HEAD") == tip
     assert git(r["base"], "rev-parse", "FETCH_HEAD") == topic
+
+
+def test_unavailable_origin_default_is_named_in_the_error(trunk_repo):
+    """S1 r4: callers that ask for errors get the branch name, not "not checked out"."""
+    from app.core.git_worktree_ops import BaseBranchUnavailableError
+    r = trunk_repo
+    _stale_master_checkout(r)
+    seed = clone(r["origin"], r["base"].parent / "release-seed-2")
+    git(seed, "checkout", "-q", "-b", "release/stable")
+    git(seed, "push", "-q", "origin", "release/stable")
+    git(r["origin"], "symbolic-ref", "HEAD", "refs/heads/release/stable")
+    git(r["base"], "update-ref", "refs/remotes/origin/release", "HEAD")  # blocks origin/release/stable
+    with pytest.raises(BaseBranchUnavailableError, match="release/stable"):
+        checkout_manager.ensure_checkout(r["project"], "chore/chat-named-error", base_branch=None,
+                                         create_new_branch=True, provision_runtime=False,
+                                         raise_add_errors=True)
+
+
+@pytest.mark.parametrize("fetched", [True, False])
+def test_switched_origin_does_not_reuse_the_old_default(trunk_repo, fetched):
+    """S4 r4: set-url leaves origin/HEAD on the old repository's trunk; the new default wins."""
+    from app.api import git_helpers
+    from app.core.git_cache import _git_cache
+    r = trunk_repo
+    new_origin = r["base"].parent / "stable-origin.git"
+    git(r["base"].parent, "init", "--bare", "-b", "stable", str(new_origin))
+    seed = clone(r["origin"], r["base"].parent / "stable-seed")
+    git(seed, "checkout", "-q", "-b", "stable")
+    stable_tip = commit(seed, "stable.txt", "stable work\n")
+    git(seed, "push", "-q", str(new_origin), "trunk", "stable")
+    git(new_origin, "symbolic-ref", "HEAD", "refs/heads/stable")
+
+    database.create_project("switched-origin", "Example", "", str(r["base"]), {})
+    git_helpers._repo_record_cache.pop("switched-origin", None)
+    assert git_helpers.ensure_git_repository_record("switched-origin", str(r["base"]))["default_branch"] == "trunk"
+
+    git(r["base"], "remote", "set-url", "origin", str(new_origin))
+    if fetched:
+        git(r["base"], "fetch", "-q", "origin")
+    assert git(r["base"], "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/trunk"
+    git_helpers._repo_record_cache.pop("switched-origin", None)
+    _git_cache.invalidate_prefix("default_branch:")
+    record = git_helpers.ensure_git_repository_record("switched-origin", str(r["base"]))
+    assert record["default_branch"] == ("stable" if fetched else None)
+
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-switched-origin", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == stable_tip
+    assert git(r["base"], "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/stable"

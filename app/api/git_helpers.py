@@ -436,6 +436,11 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
     # repository commonly gains its origin only after its first status load.
     # The row (and the 60 s cache the UI reads) never holds a clone token.
     remote_url = strip_url_userinfo(git_service.get_remote_url(working_dir))
+    previous_url = (repo or {}).get("remote_url") or ""
+    if previous_url and remote_url and previous_url != remote_url:
+        # origin/HEAD may still name the previous repository's default.
+        from app.core.checkout_manager import revalidate_origin_head
+        revalidate_origin_head(working_dir)
     # Only origin's own HEAD may overwrite a stored default; a local
     # main/master guess may label a new record but never replace a stored one.
     # Unknown stays None so the composer says "the default branch", not a

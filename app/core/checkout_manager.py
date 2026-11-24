@@ -50,7 +50,12 @@ from fluid.tools.child_env import scrub_child_env
 from app.core.config import settings
 from app.core.fs_utils import force_rmtree
 from app.core.git_service import git_service
-from app.core.git_worktree_ops import WorktreeAddError, repo_worktree_lock, worktree_error_detail
+from app.core.git_worktree_ops import (
+    BaseBranchUnavailableError,
+    WorktreeAddError,
+    repo_worktree_lock,
+    worktree_error_detail,
+)
 from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
@@ -401,15 +406,13 @@ def _fork_default(base_dir: str) -> Tuple[Optional[str], bool]:
     return git_service.known_default_branch(base_dir), False
 
 
-def _learn_origin_default(base_dir: str) -> Optional[str]:
-    """Ask origin for its HEAD branch, fetch it and record ``origin/HEAD``."""
+def _origin_head_branch(base_dir: str, timeout: float) -> Optional[str]:
+    """The branch origin's HEAD names (``ls-remote --symref``), or ``None``."""
     from app.core import checkout_transfer
-    from app.core.git_cache import _git_cache
-    from app.core.git_fork_base import CHAT_FETCH_TIMEOUT, fetch_base
 
     try:
         listed = checkout_transfer._run(
-            base_dir, "ls-remote", "--symref", "origin", "HEAD", timeout=CHAT_FETCH_TIMEOUT,
+            base_dir, "ls-remote", "--symref", "origin", "HEAD", timeout=timeout,
         )
         if listed.returncode != 0:
             return None
@@ -421,9 +424,48 @@ def _learn_origin_default(base_dir: str) -> Optional[str]:
             ["git", "check-ref-format", "--branch", branch], cwd=base_dir,
             capture_output=True, timeout=5,
         ).returncode == 0
-        if not valid:
-            return None
     except (subprocess.SubprocessError, OSError, ValueError):  # ValueError: _run timed out
+        return None
+    return branch if valid else None
+
+
+ORIGIN_HEAD_REVALIDATE_TIMEOUT = 15
+
+
+def revalidate_origin_head(base_dir: str) -> None:
+    """Re-check ``origin/HEAD`` after origin's URL changed.
+
+    ``git remote set-url`` leaves ``origin/HEAD`` naming the previous
+    repository's default, which would otherwise be trusted as confirmed. Point
+    it at the new origin's default when that branch is already fetched;
+    otherwise drop it (a cache Git rebuilds with ``remote set-head``), so the
+    next new chat asks origin instead of reusing the old repository's branch.
+    """
+    from app.core import checkout_transfer
+    from app.core.git_cache import _git_cache
+
+    branch = _origin_head_branch(base_dir, ORIGIN_HEAD_REVALIDATE_TIMEOUT)
+    tracking = f"refs/remotes/origin/{branch}" if branch else ""
+    try:
+        if tracking and git_service._run_git(
+                base_dir, ["rev-parse", "--verify", "--quiet", tracking], timeout=5).returncode == 0:
+            checkout_transfer._run(base_dir, "symbolic-ref", "refs/remotes/origin/HEAD", tracking, timeout=5)
+        else:
+            git_service._run_git(base_dir, ["symbolic-ref", "--delete", "--quiet", "refs/remotes/origin/HEAD"],
+                                 timeout=5)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        logger.debug("checkout_manager: revalidating origin/HEAD failed for %s", base_dir, exc_info=True)
+    _git_cache.invalidate(f"default_branch:{base_dir}")
+
+
+def _learn_origin_default(base_dir: str) -> Optional[str]:
+    """Ask origin for its HEAD branch, fetch it and record ``origin/HEAD``."""
+    from app.core import checkout_transfer
+    from app.core.git_cache import _git_cache
+    from app.core.git_fork_base import CHAT_FETCH_TIMEOUT, fetch_base
+
+    branch = _origin_head_branch(base_dir, CHAT_FETCH_TIMEOUT)
+    if not branch:
         return None
     # Once origin has named its default, that is the base even if fetching it
     # fails; the caller reports an unavailable base rather than substitute a
@@ -490,7 +532,7 @@ def _branch_plan(
             return True, fetched_branch
         if named_by_origin:
             logger.warning("checkout_manager: origin's default branch %r could not be fetched", fetched_branch)
-            return None
+            raise BaseBranchUnavailableError(fetched_branch)
         return True, None
     try:
         return resolve_rebound_branch_plan(

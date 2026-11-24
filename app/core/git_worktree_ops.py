@@ -50,6 +50,18 @@ class WorktreeAddError(RuntimeError):
     """Git attempted a checkout and failed, rather than a missing base/branch."""
 
 
+class BaseBranchUnavailableError(WorktreeAddError):
+    """Origin named the default branch to fork from, but it can't be fetched here."""
+
+    def __init__(self, branch: str):
+        self.branch = branch
+        super().__init__(
+            f"The repository's default branch '{branch}' couldn't be fetched from origin "
+            f"on this device, so the new branch wasn't created. Try again, run "
+            f"`git fetch --prune origin` in the project folder, or pick a base branch."
+        )
+
+
 class WorktreeLockError(WorktreeAddError, WorktreeError, ValueError):
     """Bounded lock refusal for checkout, legacy-worktree and transfer callers."""
 
