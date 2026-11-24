@@ -130,14 +130,23 @@ afterEach(() => {
 describe('NewSessionSentence', () => {
 	it('names every control for a git project in a worktree, each one a button', async () => {
 		render(NewSessionSentence);
-		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle New branch from main Worktree'));
-		for (const name of [/^Runs on office-pc$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from main$/, /Runs in a worktree/]) {
+		// The repository's default isn't known yet: the worker picks it, so the
+		// sentence never guesses "main".
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle New branch from the default branch Worktree'));
+		for (const name of [/^Runs on office-pc$/, /^Workspace folders: ai-shuffle$/, /^Worktree branch: a new branch from the default branch$/, /Runs in a worktree/]) {
 			expect(screen.getByRole('button', { name })).toBeTruthy();
 		}
 		// The status dot replaces the worker's icon: one mark, never both.
 		const runsOn = screen.getByRole('button', { name: /^Runs on office-pc$/ });
 		expect(runsOn.querySelector('.worker-status-dot')).toBeTruthy();
 		expect(runsOn.querySelector('svg')).toBeNull();
+	});
+
+	it("names the repository's own default branch once Git reports it", async () => {
+		stores.git.set({ hydrated: true, projectId: 'p1', sessionId: null, worktreeId: null, status: { is_git_repo: true, default_branch: 'trunk' } });
+		render(NewSessionSentence);
+		await waitFor(() => expect(text()).toBe('office-pc ai-shuffle New branch from trunk Worktree'));
+		expect(screen.getByRole('button', { name: /^Worktree branch: a new branch from trunk$/ })).toBeTruthy();
 	});
 
 	it('names a picked branch instead of "a new branch"', async () => {
@@ -180,7 +189,7 @@ describe('NewSessionSentence', () => {
 
 	it('closes the branch menu on Escape and puts focus back on the branch word', async () => {
 		render(NewSessionSentence);
-		const word = await screen.findByRole('button', { name: /^Worktree branch: a new branch from main$/ });
+		const word = await screen.findByRole('button', { name: /^Worktree branch: a new branch from the default branch$/ });
 		expect(word.getAttribute('aria-haspopup')).toBe('dialog');
 		await fireEvent.click(word);
 		const menu = await screen.findByRole('dialog', { name: 'Worktree branch' });

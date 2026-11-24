@@ -406,12 +406,19 @@ def test_new_chat_missing_main_falls_back_offline_too(trunk_repo, tmp_path):
     assert path and git(path, "rev-parse", "HEAD") == r["tip"]
 
 
+def _init_wip_repo(repo):
+    """A repository on feature/wip with one commit; its own identity, as CI has no global one."""
+    git(repo.parent, "init", "-b", "feature/wip", str(repo))
+    git(repo, "config", "user.name", "Remote Test")
+    git(repo, "config", "user.email", "remote@example.test")
+    commit(repo, "a.txt", "a\n")
+    return repo
+
+
 def test_unknown_default_is_never_the_checked_out_branch(tmp_path):
     """No origin/HEAD and no main/master: the branch a checkout has out is not the default."""
     from app.core.git_service import git_service
-    repo = tmp_path / "plain"
-    git(tmp_path, "init", "-b", "feature/wip", str(repo))
-    commit(repo, "a.txt", "a\n")
+    repo = _init_wip_repo(tmp_path / "plain")
     assert git_service.known_default_branch(str(repo)) is None
     assert git_service._get_default_branch_cli(str(repo)) == "main"
 
@@ -476,9 +483,7 @@ def test_unreachable_origin_falls_back_to_local_master(trunk_repo, tmp_path):
 def test_a_cached_remote_master_is_not_a_known_default(tmp_path):
     """S2: worktree cleanup must not treat a cached origin/master as the proven default."""
     from app.core.git_service import git_service
-    repo = tmp_path / "cached"
-    git(tmp_path, "init", "-b", "feature/wip", str(repo))
-    commit(repo, "a.txt", "a\n")
+    repo = _init_wip_repo(tmp_path / "cached")
     git(repo, "remote", "add", "origin", str(tmp_path / "nowhere.git"))
     git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
     assert git_service.known_default_branch(str(repo)) is None

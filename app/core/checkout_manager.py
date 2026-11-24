@@ -428,7 +428,7 @@ def _origin_head_branch(base_dir: str, timeout: float) -> Optional[str]:
                        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD")), "")
         valid = branch and not branch.startswith("-") and subprocess.run(
             ["git", "check-ref-format", "--branch", branch], cwd=base_dir,
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=5, env=scrub_child_env(),
         ).returncode == 0
     except (subprocess.SubprocessError, OSError, ValueError):  # ValueError: _run timed out
         return None
