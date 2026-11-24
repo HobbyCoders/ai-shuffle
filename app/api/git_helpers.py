@@ -469,7 +469,10 @@ def ensure_git_repository_record(project_id: str, working_dir: str) -> Optional[
         if url_changed or (confirmed_default and repo.get("default_branch") != confirmed_default):
             repo = database.update_git_repository(
                 repo["id"], remote_url=remote_url or "",
-                default_branch=default_branch if url_changed else confirmed_default,
+                # A new URL never inherits the old repository's default:
+                # unknown clears it ("" -> NULL). A same-URL refresh writes
+                # only origin's confirmed HEAD.
+                default_branch=(default_branch or "") if url_changed else confirmed_default,
                 github_repo_name=github_repo_name or "",
             )
         _auto_link_from_repo(project_id, repo)

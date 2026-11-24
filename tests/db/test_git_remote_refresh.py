@@ -86,3 +86,24 @@ def test_unknown_default_is_reported_as_unknown(mock_db, tmp_path):
     git_helpers._repo_record_cache.pop(project_id, None)
     record = git_helpers.ensure_git_repository_record(project_id, str(repo))
     assert record["default_branch"] is None
+
+
+def test_a_new_url_does_not_inherit_the_old_default(mock_db, tmp_path):
+    """S4 r3: switching origin to a repository whose default is unknown clears the old trunk."""
+    def run(*args, cwd=tmp_path):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    repo = tmp_path / "repo"
+    run("init", "-b", "feature/wip", str(repo))
+    run("remote", "add", "origin", "https://github.com/example/old.git", cwd=repo)
+    project_id = "switched-url"
+    database.create_project(project_id, "Example", "", str(repo), {})
+    git_helpers._repo_record_cache.pop(project_id, None)
+    first = git_helpers.ensure_git_repository_record(project_id, str(repo))
+    database.update_git_repository(first["id"], default_branch="trunk")
+
+    run("remote", "set-url", "origin", "https://github.com/example/new.git", cwd=repo)
+    git_helpers._repo_record_cache.pop(project_id, None)
+    refreshed = git_helpers.ensure_git_repository_record(project_id, str(repo))
+    assert refreshed["remote_url"] == "https://github.com/example/new.git"
+    assert refreshed["default_branch"] is None

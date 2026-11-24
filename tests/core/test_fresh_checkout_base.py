@@ -470,7 +470,7 @@ def test_unreachable_origin_falls_back_to_local_master(trunk_repo, tmp_path):
     r = trunk_repo
     _stale_master_checkout(r)
     git(r["base"], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
-    assert checkout_manager._fork_default(str(r["base"])) == "master"
+    assert checkout_manager._fork_default(str(r["base"])) == ("master", False)
 
 
 def test_a_cached_remote_master_is_not_a_known_default(tmp_path):
@@ -483,3 +483,33 @@ def test_a_cached_remote_master_is_not_a_known_default(tmp_path):
     git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
     assert git_service.known_default_branch(str(repo)) is None
     assert git_service.known_default_branch(str(repo), confirmed=True) is None
+
+
+def test_origin_named_default_that_cannot_be_fetched_is_reported(trunk_repo):
+    """S1 r3: origin names release/stable, a stale origin/release blocks its ref: fail, not master."""
+    r = trunk_repo
+    _stale_master_checkout(r)
+    seed = clone(r["origin"], r["base"].parent / "release-seed")
+    git(seed, "checkout", "-q", "-b", "release/stable")
+    git(seed, "push", "-q", "origin", "release/stable")
+    git(r["origin"], "symbolic-ref", "HEAD", "refs/heads/release/stable")
+    git(r["base"], "update-ref", "refs/remotes/origin/release", "HEAD")  # blocks origin/release/stable
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-blocked-default", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path is None
+
+
+def test_learning_the_default_keeps_fetch_head(trunk_repo):
+    """S5: the discovery fetch must not overwrite a FETCH_HEAD the developer made."""
+    r = trunk_repo
+    tip = _stale_master_checkout(r)
+    seed = clone(r["origin"], r["base"].parent / "topic-seed")
+    git(seed, "checkout", "-q", "-b", "topic/inspect")
+    topic = commit(seed, "topic.txt", "topic\n")
+    git(seed, "push", "-q", "origin", "topic/inspect")
+    git(r["base"], "fetch", "-q", "origin", "topic/inspect")
+    assert git(r["base"], "rev-parse", "FETCH_HEAD") == topic
+    path = checkout_manager.ensure_checkout(r["project"], "chore/chat-keeps-fetch-head", base_branch=None,
+                                            create_new_branch=True, provision_runtime=False)
+    assert path and git(path, "rev-parse", "HEAD") == tip
+    assert git(r["base"], "rev-parse", "FETCH_HEAD") == topic
