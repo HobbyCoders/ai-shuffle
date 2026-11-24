@@ -453,6 +453,22 @@ export const providers = {
 		}
 	},
 
+	/**
+	 * Turn the Claude API off: no saved key stays selected, every saved key is
+	 * kept, and the pickers drop Claude · API models. "Use" or the switch on a
+	 * saved key turns it back on. Throws.
+	 */
+	async deactivateAnthropicAccount(id: string) {
+		if (_state.claudeAccountBusy) return;
+		_update((s) => ({ ...s, claudeAccountBusy: id }));
+		try {
+			await providers.clearAnthropicKey();
+			await Promise.all([providers.loadClaude(), hydrateModelRegistry()]);
+		} finally {
+			_update((s) => ({ ...s, claudeAccountBusy: null }));
+		}
+	},
+
 	async deleteAnthropicAccount(id: string) {
 		const result = await deleteClaudeKey(id);
 		await providers.refreshClaudeAccounts(result.accounts);
