@@ -428,6 +428,8 @@ export const providers = {
 	/** Account mutations keep the selected key separate from the Claude Code mode. */
 	async refreshClaudeAccounts(accounts: ClaudeAccounts) {
 		_update((s) => ({ ...s, claude: s.claude ? { ...s.claude, accounts } : null }));
+		// A selected key or sign-in can be the only ready provider: the composer's gate reads auth.
+		auth.checkAuth().catch(() => {});
 		await Promise.all([providers.loadClaude(), providers.loadIntegrations(), hydrateModelRegistry()]);
 	},
 
@@ -463,6 +465,7 @@ export const providers = {
 		_update((s) => ({ ...s, claudeAccountBusy: id }));
 		try {
 			await providers.clearAnthropicKey();
+			auth.checkAuth().catch(() => {});
 			await Promise.all([providers.loadClaude(), hydrateModelRegistry()]);
 		} finally {
 			_update((s) => ({ ...s, claudeAccountBusy: null }));

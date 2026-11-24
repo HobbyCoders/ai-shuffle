@@ -205,6 +205,24 @@ it('a saved gateway that is off says Off once, has no switch until it is on, and
 	expect(screen.getByText(/Vertex AI key file/)).toBeTruthy();
 });
 
+it('the list switch on a saved gateway opens the warning; backing out leaves it Off and the next tap asks again', async () => {
+	cloud = savedGateway();
+	worker.state.claude = claudeSummary({ cloud: cloud.status });
+	await show();
+	// The list's row: the list stays mounted while the detail beside it changes.
+	const gw = () => within(screen.getByRole('group', { name: 'Claude' })).getByRole('switch', { name: 'Use LLM gateway' });
+	await fireEvent.click(gw());
+	await waitFor(() => expect(settingsNav.selectedItem('providers')).toBe(CLAUDE_CLOUD_ITEM));
+	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+	// Back without acknowledging: the hidden list's switch never moved.
+	settingsNav.go({ category: 'providers', item: 'provider:claude' });
+	await flush();
+	expect(gw().getAttribute('aria-checked')).toBe('false');
+	await fireEvent.click(gw());
+	await waitFor(() => expect(settingsNav.selectedItem('providers')).toBe(CLAUDE_CLOUD_ITEM));
+	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+});
+
 it('an older worker without per-method warnings: a saved gateway, Bedrock and Foundry name no key file (#1583)', async () => {
 	const legacyWarning = `Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. Use an account with the smallest permissions that work, and only on a worker you trust.`;
 	cloud = { ...savedGateway(), warning: legacyWarning, method_warnings: undefined };

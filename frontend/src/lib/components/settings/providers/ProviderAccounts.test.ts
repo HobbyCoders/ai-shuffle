@@ -36,6 +36,7 @@ async function show(readOnly = false) {
 }
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.checkAuth.mockResolvedValue(undefined);
 	providers.clear(); settingsNav.reset(); providerDrafts.list = []; providerDrafts.gateways = [];
 	worker = fakeWorker({
 		rows: [row({ id: 'personal', name: 'Personal key' }), row({ id: 'work', name: 'Work key', enabled: false }), chatgptRow()],
@@ -176,6 +177,8 @@ describe('saved account controls', () => {
 		expect(group('Claude').getByRole('switch', { name: 'Use Work' }).getAttribute('aria-checked')).toBe('false');
 		expect(worker.sent('POST', '/settings/claude-auth/accounts/api_key/personal/activate')).toHaveLength(1);
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+		// The key may be the only ready provider: the composer's gate is re-read.
+		expect(mocks.checkAuth).toHaveBeenCalled();
 	});
 
 	it('switches Claude API off, keeping every saved key and the subscription on', async () => {
@@ -187,6 +190,7 @@ describe('saved account controls', () => {
 		expect(providers.current.claude?.mode).toBe('subscription');
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 		expect(group('Claude').getByRole('switch', { name: 'Use Work' }).getAttribute('aria-checked')).toBe('false');
+		expect(mocks.checkAuth).toHaveBeenCalled();
 	});
 
 	it('switches the Claude subscription off and on, leaving Claude API on', async () => {
@@ -198,6 +202,7 @@ describe('saved account controls', () => {
 		expect(providers.current.claude?.accounts?.api_key.find((a) => a.id === 'work')?.active).toBe(true);
 		await waitFor(() => expect(sub().getAttribute('aria-checked')).toBe('false'));
 		expect(group('Claude').getByRole('switch', { name: 'Work on' }).getAttribute('aria-checked')).toBe('true');
+		await waitFor(() => expect((sub() as HTMLButtonElement).disabled).toBe(false)); // the save has finished
 		await fireEvent.click(sub());
 		await waitFor(() => expect(providers.current.claude?.mode).toBe('subscription'));
 		expect(worker.sent('PUT', '/settings/claude-auth')[1].body).toEqual({ mode: 'subscription' });

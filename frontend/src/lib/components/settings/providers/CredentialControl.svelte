@@ -47,7 +47,9 @@
 <span class="wrap">
 <span class="control" aria-busy={saving}>
 	{#if showState || saving}<span class="state">{saving ? 'Saving…' : claudeProblem ? credential.statusText : credential.enabled ? (credential.active || saved ? 'Active' : 'On') : 'Off'}</span>{/if}
-	<Switch {size} checked={credential.enabled} disabled={busy}
+	<!-- Controlled: it shows what is saved, so backing out of the cloud
+	     warning or a failed save never leaves it showing the unsaved value. -->
+	<Switch controlled {size} checked={credential.enabled} disabled={busy}
 		label={credential.enabled ? `${credential.name} on` : `Use ${credential.name}`}
 		onchange={(v) => setEnabled(v)} />
 </span>
