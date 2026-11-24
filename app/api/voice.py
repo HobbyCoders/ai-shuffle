@@ -974,7 +974,7 @@ async def create_voice_session(
             project_id=request.project_id or None,
             project_v2_id=None if request.project_id else resolved_pv2_id,
             branch_name=branch_name,
-            base_branch=(request.base_branch or "main").strip() or "main",
+            base_branch=(request.base_branch or "").strip() or None,
             profile_id=profile_id,
             create_new_branch=not bool(selected_branch),
         )

@@ -718,13 +718,20 @@ async def _create_v2_branch_session(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=new_branch_exists_detail(branch_name),
                 )
-            checkout_path = await run_sync(
-                checkout_manager.ensure_checkout,
-                pv2,
-                branch_name,
-                base_branch=body.base_branch,
-                create_new_branch=True,
-            )
+            try:
+                checkout_path = await run_sync(
+                    checkout_manager.ensure_checkout,
+                    pv2,
+                    branch_name,
+                    base_branch=body.base_branch,
+                    create_new_branch=True,
+                    raise_add_errors=True,
+                )
+            except checkout_manager.BaseBranchUnavailableError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            except checkout_manager.WorktreeAddError:
+                # Any other add failure keeps the generic answer below.
+                checkout_path = None
     else:
         checkout_path = await run_sync(
             checkout_manager.ensure_checkout,

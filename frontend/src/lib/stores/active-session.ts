@@ -489,7 +489,7 @@ function defaultState(): ActiveSessionState {
 		worktreeIntent: 'local',
 		deviceIntent: getPersistedDeviceIntent(),
 		worktreeBranch: '',
-		worktreeBaseBranch: 'main',
+		worktreeBaseBranch: '',
 		worktreeCreateNewBranch: false,
 		worktreeCheckoutPending: false,
 		worktreeId: null,
@@ -1115,7 +1115,7 @@ function composerCheckoutDefaults(code: boolean, selectedProject: {projectId:str
 		worktreeIntent:intent,
 		worktreeId:localCheckout ? existing!.worktreeId : null,
 		selectedWorktreeBranch:existing?.branch ?? null,
-		worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? 'main',
+		worktreeBranch:branch?.branch ?? '', worktreeBaseBranch:branch?.baseBranch ?? '',
 		worktreeCreateNewBranch:branch?.createNew ?? false, worktreeCheckoutPending:branch?.checkoutPending ?? false, worktreeMode:existing ? 'existing' as const : 'new' as const,
 		worktreeError:existing && !localCheckout ? 'The selected worktree belongs to another device. Select an available worktree to continue.' : null,
 	};

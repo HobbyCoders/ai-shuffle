@@ -78,7 +78,7 @@ it('starts an untyped compose left for another chat over without a project, keep
 
 	expect(active.current).toMatchObject({
 		sessionId: null, mode: 'chat', deviceIntent: PEER, project: '', projectV2Id: null,
-		worktreeIntent: 'local', worktreeBranch: '', worktreeBaseBranch: 'main',
+		worktreeIntent: 'local', worktreeBranch: '', worktreeBaseBranch: '',
 	});
 });
 
@@ -285,7 +285,7 @@ describe('one-time new branch picked, sent, and left while the session is still 
 		active.setProject('a');
 		expect(active.current).toMatchObject({
 			mode: 'code', project: 'a', worktreeIntent: 'worktree',
-			worktreeBranch: '', worktreeBaseBranch: 'main', worktreeCreateNewBranch: false,
+			worktreeBranch: '', worktreeBaseBranch: '', worktreeCreateNewBranch: false,
 		});
 	});
 

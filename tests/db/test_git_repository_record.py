@@ -42,6 +42,7 @@ def test_concurrent_first_status_loads_share_one_row(mock_db, project):
     git.is_git_repo.return_value = True
     git.get_remote_url.return_value = "https://github.com/owner/repo.git"
     git.get_default_branch.return_value = "main"
+    git.known_default_branch.return_value = "main"
     both_checked = threading.Barrier(2, timeout=10)
     real_lookup = db.get_git_repository_by_project
 

@@ -1070,14 +1070,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			try {
 				const response = await api.post<{
 					session_id: string; branch_name: string;
-					base_branch: string; worktree_path: string; status: string;
+					base_branch: string | null; worktree_path: string; status: string;
 					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {
 					...(remoteOnly
 						? { project_v2_id: projectV2Id }
 						: { project_id: projectId }),
 					branch_name: branchName,
-					base_branch: _state.worktreeBaseBranch || 'main',
+					// Blank: the worker forks from the repository's own default branch.
+					base_branch: _state.worktreeBaseBranch || null,
 					profile_id: queryProfileId,
 					create_new_branch: _state.worktreeCreateNewBranch,
 					// No prompt rides this request, so the backend stores these as
@@ -1252,7 +1253,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const projectId = _state.project;
 			const projectV2Id = _state.projectV2Id;
 			const remoteOnly = !projectId && !!projectV2Id;
-			const baseBranch = _state.worktreeBaseBranch || 'main';
+			const baseBranch = _state.worktreeBaseBranch || null;
 			const modelOverrideSnap = _state.modelOverride;
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
@@ -1338,7 +1339,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				if (pendingOpening()?.id === clientMessageId) keepOpening({ ...opening, dispatched: true });
 				const postCreate = (name: string) => api.post<{
 					session_id: string; branch_name: string;
-					base_branch: string; worktree_path: string; status: string;
+					base_branch: string | null; worktree_path: string; status: string;
 					query_started?: boolean;
 					upload_migration_errors?: string[] | null;
 				}>('/sessions/with-worktree', {

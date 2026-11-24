@@ -153,7 +153,7 @@ def update_git_repository(
         values.append(remote_url if remote_url else None)
     if default_branch is not None:
         updates.append("default_branch = %s")
-        values.append(default_branch)
+        values.append(default_branch if default_branch else None)  # "" clears it
     if github_repo_name is not None:
         updates.append("github_repo_name = %s")
         values.append(github_repo_name if github_repo_name else None)

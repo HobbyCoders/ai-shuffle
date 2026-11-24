@@ -70,6 +70,7 @@ def mock_git_service():
     # Known repository records now refresh these real Git reads after the TTL.
     mock.get_remote_url.return_value = "https://github.com/test/repo.git"
     mock.get_default_branch.return_value = "main"
+    mock.known_default_branch.return_value = "main"
     return mock
 
 
@@ -439,6 +440,7 @@ class TestGetGitStatus:
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_remote_url.return_value = "https://github.com/test/repo.git"
         mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.known_default_branch.return_value = "main"
         mock_database.get_git_repository_by_project.return_value = None
         mock_database.create_git_repository.return_value = {
             "id": "repo-new123",
@@ -2101,6 +2103,7 @@ class TestHelperFunctions:
         mock_db.get_git_repository_by_project.return_value = None
         mock_git.get_remote_url.return_value = "https://github.com/owner/repo.git"
         mock_git.get_default_branch.return_value = "main"
+        mock_git.known_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {
             "id": "repo-new123",
             "project_id": "test-project",
@@ -2125,10 +2128,11 @@ class TestHelperFunctions:
         mock_git = MagicMock()
         mock_db = MagicMock()
 
-        existing_repo = {"id": "repo-existing", "project_id": "test-project"}
+        existing_repo = {"id": "repo-existing", "project_id": "test-project", "default_branch": "main"}
         mock_git.is_git_repo.return_value = True
         mock_git.get_remote_url.return_value = None
         mock_git.get_default_branch.return_value = "main"
+        mock_git.known_default_branch.return_value = "main"
         mock_db.get_git_repository_by_project.return_value = existing_repo
 
         with (patch("app.api.git.git_service", mock_git),
@@ -2168,6 +2172,7 @@ class TestHelperFunctions:
         mock_db.get_git_repository_by_project.return_value = None
         mock_git.get_remote_url.return_value = "git@github.com:owner/repo.git"
         mock_git.get_default_branch.return_value = "main"
+        mock_git.known_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
         with (patch("app.api.git.git_service", mock_git),
@@ -2191,6 +2196,7 @@ class TestHelperFunctions:
         # Malformed URL that would cause parsing issues
         mock_git.get_remote_url.return_value = "git@"  # Incomplete URL
         mock_git.get_default_branch.return_value = "main"
+        mock_git.known_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
         with (patch("app.api.git.git_service", mock_git),
@@ -2215,6 +2221,7 @@ class TestHelperFunctions:
         # Non-GitHub URL
         mock_git.get_remote_url.return_value = "https://gitlab.com/owner/repo.git"
         mock_git.get_default_branch.return_value = "main"
+        mock_git.known_default_branch.return_value = "main"
         mock_db.create_git_repository.return_value = {"id": "repo-new"}
 
         with (patch("app.api.git.git_service", mock_git),

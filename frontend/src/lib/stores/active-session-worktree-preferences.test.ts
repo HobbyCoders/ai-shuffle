@@ -28,12 +28,12 @@ it('remembers A without enabling B, and re-reads branch/base/new-branch picks on
  status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
  active.setWorktreeBranch('topic/a'); active.setWorktreeBaseBranch('develop'); active.setWorktreeCreateNewBranch(true);
  status('b',true); active.setProject('b');
- expect(active.current).toMatchObject({project:'b',worktreeIntent:'local',worktreeBranch:'',worktreeBaseBranch:'main',worktreeCreateNewBranch:false});
+ expect(active.current).toMatchObject({project:'b',worktreeIntent:'local',worktreeBranch:'',worktreeBaseBranch:'',worktreeCreateNewBranch:false});
  active.setWorktreeIntent('worktree'); active.setWorktreeBranch('topic/b');
  status('a',true); active.setProject('a');
  expect(active.current).toMatchObject({project:'a',worktreeIntent:'worktree',worktreeBranch:'topic/a',worktreeBaseBranch:'develop',worktreeCreateNewBranch:true});
  status('b',true); active.setProject('b');
- expect(active.current).toMatchObject({project:'b',worktreeBranch:'topic/b',worktreeBaseBranch:'main',worktreeCreateNewBranch:false});
+ expect(active.current).toMatchObject({project:'b',worktreeBranch:'topic/b',worktreeBaseBranch:'',worktreeCreateNewBranch:false});
 });
 it('restores project settings after reload and late Git status, including under a typed draft', async () => {
  status('a',true); active.setProject('a'); active.setWorktreeIntent('worktree');
