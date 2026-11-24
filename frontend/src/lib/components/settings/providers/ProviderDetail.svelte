@@ -124,7 +124,9 @@
 		<ClaudeCompaction />
 	{/if}
 
-	{#if !provider.claude && !provider.media && !provider.gateway && provider.id !== 'antigravity'}
+	{#if provider.claude}
+		<p class="pv-note">The sign-in and API key you turn on sync to your other workers. Update all workers before relying on a switch: older workers may keep using their previous account. Turning the subscription or cloud off applies only to this worker.</p>
+	{:else if !provider.media && !provider.gateway && provider.id !== 'antigravity'}
 		<p class="pv-note">Switching accounts keeps existing chats and automations on the active account. API keys and subscriptions can be active together.</p>
 	{/if}
 	<div data-setting-anchor={provider.claude ? 'providers.claudeAccounts' : undefined}>
