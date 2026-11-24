@@ -115,11 +115,11 @@ describe('openSettings', () => {
 		settingsNav.stacked = true;
 		settingsNav.resetStack();
 		layout.openFeaturePage('automations');
-		openSettings({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
+		openSettings({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeAccounts' });
 		expect(layout.current.activeView).toEqual({
 			type: 'settings',
 			sessionId: null,
-			itemId: 'category=providers&item=provider%3Aclaude&anchor=providers.claudeMode'
+			itemId: 'category=providers&item=provider%3Aclaude&anchor=providers.claudeAccounts'
 		});
 		expect(nav.pushState).not.toHaveBeenCalled();
 		expect(settingsNav.view).toBe('index');

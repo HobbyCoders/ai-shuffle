@@ -138,6 +138,11 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 			return { ...selectClaude(id), account_id: id };
 		},
 		'POST /settings/claude-auth/accounts/api_key/:id/activate': (_body, path) => selectClaude(path.split('/')[5]),
+		// Claude API's switch off: no key selected, every saved key kept.
+		'DELETE /settings/integrations/anthropic': () => {
+			selectClaude(null);
+			return { success: true };
+		},
 		'PATCH /settings/claude-auth/accounts/api_key/:id': (body, path) => {
 			const a = state.claude.accounts!.api_key.find((a) => a.id === path.split('/')[5])!;
 			a.label = (body as { label: string }).label;

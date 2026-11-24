@@ -5,8 +5,8 @@
 	 *    provider's fixed endpoint, then the models step picks what to offer. A
 	 *    created row is reused on retry, never created twice; the retry's key
 	 *    replaces the stored one (the provider may have rejected the first).
-	 *  - Anthropic (`anthropic`): saves a named account and selects it for API key
-	 *    mode, without changing the Claude Code mode.
+	 *  - Anthropic (`anthropic`): saves a named account and turns it on for
+	 *    Claude API, without touching the subscription switch.
 	 */
 	import { getErrorMessage } from '$lib/api/client';
 	import { createModelProvider, updateModelProvider, isNativeProvider } from '$lib/api/model-providers';
@@ -90,7 +90,7 @@
 	<ModelCuration mode="setup" providerId={draft.rowId} onDone={() => onFinish(rowItem(draft.rowId!))} />
 {:else}
 	<p class="pv-note">{draft.flavor === 'anthropic'
-		? 'This becomes the selected Anthropic key. The Claude Code mode stays unchanged.'
+		? 'This key is turned on for Claude · API. The subscription keeps its own switch.'
 		: draft.flavor === 'plan-key'
 			? 'This plan key becomes active. Other saved plan keys for this provider turn off; API keys stay as they are.'
 			: 'This key becomes active. Other saved API keys for this provider turn off; subscriptions stay as they are.'}</p>

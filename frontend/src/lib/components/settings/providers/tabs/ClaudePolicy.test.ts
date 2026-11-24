@@ -63,10 +63,10 @@ it('says it does nothing on a cloud provider or gateway', async () => {
 	expect(screen.queryByLabelText('Per session')).toBeNull();
 });
 
-it('says it does nothing while Claude is off', async () => {
+it('says it does nothing while the subscription is off', async () => {
 	worker.state.loopGuard = loopGuardStatus({ applies: false });
 	await show('off');
-	expect(screen.getByText('Off while Claude is off')).toBeTruthy();
+	expect(screen.getByText('Off while the subscription is off')).toBeTruthy();
 	expect(screen.queryByRole('switch')).toBeNull();
 });
 

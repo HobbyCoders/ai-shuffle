@@ -242,9 +242,9 @@ describe('ModelsCollection', () => {
 		expect(await screen.findByText('fal.ai is off, so this tool cannot run.')).toBeTruthy();
 	});
 
-	it('saves the text model effort and warns when Claude is off', async () => {
+	it('saves the text model effort and warns when the Claude subscription is off', async () => {
 		await open('Text tasks');
-		expect(screen.queryByText(/Claude is off\./)).toBeNull();
+		expect(screen.queryByText(/subscription is off\./)).toBeNull();
 		const effort = screen.getByRole('combobox', { name: 'Effort' }) as HTMLSelectElement;
 		expect(effort.value).toBe('low');
 		await fireEvent.change(effort, { target: { value: 'high' } });
@@ -252,7 +252,7 @@ describe('ModelsCollection', () => {
 		cleanup();
 		integrations = { ...integrations, claude_auth_mode: 'off' };
 		await open('Text tasks');
-		expect(await screen.findByText('Claude is off. Pick another model.')).toBeTruthy();
+		expect(await screen.findByText('The Claude subscription is off. Pick another model.')).toBeTruthy();
 	});
 
 	it('does not warn about Claude for a model from another provider', async () => {
@@ -261,7 +261,7 @@ describe('ModelsCollection', () => {
 		render(ModelsCollection);
 		await waitFor(() => expect(item('Text tasks').textContent).toContain('gpt-6.1, default effort'));
 		await fireEvent.click(item('Text tasks'));
-		expect(screen.queryByText('Claude is off. Pick another model.')).toBeNull();
+		expect(screen.queryByText('The Claude subscription is off. Pick another model.')).toBeNull();
 	});
 
 	it('saves the dictation model through the voice settings', async () => {

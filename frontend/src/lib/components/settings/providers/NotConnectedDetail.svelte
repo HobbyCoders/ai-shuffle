@@ -2,8 +2,8 @@
 	import { detailLine } from './credential-display';
 	/**
 	 * A provider with nothing connected: the kinds it supports, each with Set up.
-	 * Claude also shows its mode and the installed CLI (version, update check,
-	 * Remove), so an owner without a Claude sign-in can still change or remove them.
+	 * Claude also shows the installed CLI (version, update check, Remove), so an
+	 * owner without a Claude sign-in can still change or remove it.
 	 * Antigravity shows its installed agent the same way: the update notice
 	 * appears for any installed agent, so its switch has to be reachable here.
 	 */
@@ -17,7 +17,6 @@
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
-	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import AntigravityInstall from './setup/AntigravityInstall.svelte';
 	import { antigravity } from './antigravity.svelte';
 	import { kindsOf, type CredentialFlavor, type ProviderView } from './providers-model';
@@ -62,13 +61,13 @@
 	item={provider.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
-	{#if provider.claude}<ClaudeModeRow {provider} />{/if}
 	{#if isNativeProvider(provider.id) && !kinds.length}
 		{#if nativeOptions.error}
 			<p class="pv-msg err" role="alert">{nativeOptions.error}</p>
 			<button type="button" class="st-btn" onclick={() => loadNativeOptions()}>Retry provider options</button>
 		{:else}<p class="pv-msg" role="status">Loading provider options…</p>{/if}
 	{/if}
+	<div data-setting-anchor={provider.claude ? 'providers.claudeAccounts' : undefined}>
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
 			<SettingRow label={k.label} hint={k.hint}>
@@ -76,6 +75,7 @@
 			</SettingRow>
 		{/each}
 	</RowGroup>
+	</div>
 	{#if provider.claude && (cliInstalled || showCli)}
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} onDismiss={() => (showCli = false)} />
 	{/if}

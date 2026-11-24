@@ -1,14 +1,14 @@
 <script lang="ts">
 	import { detailLine } from './credential-display';
 	/**
-	 * A connected provider: its saved accounts and slot controls, the separate
-	 * Claude mode, the kinds it can still add, and removing everything.
+	 * A connected provider: its saved accounts with their switches, the kinds
+	 * it can still add, and removing everything. Claude's subscription and API
+	 * key rows switch separately, like ChatGPT and the OpenAI API key.
 	 */
 	import { ChevronRight, Plus } from 'lucide-svelte';
 	import { getModels } from '$lib/constants/models.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import type { ClaudeAuthMode } from '$lib/api/claude-auth';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import type { DangerAction } from '../shell/DangerZone.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -20,7 +20,6 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import ClaudeCompaction from './ClaudeCompaction.svelte';
-	import ClaudeModeRow from './ClaudeModeRow.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
@@ -40,7 +39,6 @@
 	const access = getSettingsAccess();
 
 	const claude = $derived(providers.current.claude);
-	const mode = $derived<ClaudeAuthMode>(claude?.mode ?? 'subscription');
 	const claudeNotice = $derived(claudeGateNotice(claude));
 	const kinds = $derived(addableKinds(provider));
 	const live = $derived(provider.credentials.filter((c) => c.on));
@@ -55,7 +53,7 @@
 
 	const line = $derived(
 		provider.claude
-			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'One sign-in and one key selected' : 'One key selected for Claude · API')
+			? detailLine(`${getModels().length} built-in models`, 'This worker', provider.claudeSubscriptions ? 'Subscription and API key switch separately' : 'One key on for Claude · API')
 			: provider.media
 				? detailLine(head.text, 'Used by media tools')
 				: detailLine(
@@ -69,7 +67,7 @@
 					)
 	);
 
-	const credsCount = $derived(provider.claude ? (mode === 'off' ? 'none active' : 'one active') : `${live.length} on`);
+	const credsCount = $derived(`${live.length} on`);
 
 	/** Throws on the first failure: the Danger zone shows it and the page stays. */
 	async function removeAll() {
@@ -122,7 +120,6 @@
 		{/if}
 	{/snippet}
 	{#if provider.claude}
-		<ClaudeModeRow {provider} />
 		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
 		<ClaudeCompaction />
 	{/if}
@@ -130,6 +127,7 @@
 	{#if !provider.claude && !provider.media && !provider.gateway && provider.id !== 'antigravity'}
 		<p class="pv-note">Switching accounts keeps existing chats and automations on the active account. API keys and subscriptions can be active together.</p>
 	{/if}
+	<div data-setting-anchor={provider.claude ? 'providers.claudeAccounts' : undefined}>
 	<RowGroup title="Credentials" count={credsCount} id="providers-credentials">
 		{#each provider.credentials as c (c.item)}
 			<SettingRow label={c.name} hint={hintFor(c)}>
@@ -149,6 +147,7 @@
 			</SettingRow>
 		{/each}
 	</RowGroup>
+	</div>
 
 	{#if kinds.length && !provider.draft}
 		<RowGroup title="Add">

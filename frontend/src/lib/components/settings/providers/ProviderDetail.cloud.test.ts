@@ -46,7 +46,11 @@ async function show(item = 'provider:claude', options: { readOnly?: boolean } = 
 	await flush();
 }
 
-const modes = () => screen.getByRole('group', { name: 'Runs on' });
+/** "Add" on the Claude page's "Cloud provider or gateway" row: there is no mode picker. */
+async function addCloud() {
+	const row = within(screen.getByRole('region', { name: 'Add' })).getByText('Cloud provider or gateway').closest('.st-row') as HTMLElement;
+	await fireEvent.click(within(row).getByRole('button', { name: 'Add' }));
+}
 
 /** A gateway saved with its token stored (the worker never returns the token). */
 function savedGateway(): ClaudeCloudConfig {
@@ -108,7 +112,7 @@ afterEach(() => {
 
 it('is off by default: no cloud row, nothing read or sent', async () => {
 	await show();
-	expect(within(modes()).getByRole('button', { name: 'Cloud' }).getAttribute('aria-pressed')).toBe('false');
+	expect(screen.queryByRole('group', { name: 'Runs on' })).toBeNull();
 	const creds = screen.getByRole('region', { name: /^Credentials/ });
 	expect(within(creds).queryByText(/Cloud provider|LLM gateway/)).toBeNull();
 	expect(worker.sent('GET', '/settings/claude-auth/cloud')).toHaveLength(0);
@@ -117,12 +121,12 @@ it('is off by default: no cloud row, nothing read or sent', async () => {
 	expect(within(screen.getByRole('region', { name: 'Add' })).getByText('Cloud provider or gateway')).toBeTruthy();
 });
 
-it('picking Cloud opens the setup with the warning instead of switching the mode', async () => {
+it('adding a cloud provider opens the setup with the warning and switches nothing', async () => {
 	await show();
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Cloud' }));
+	await addCloud();
 	await flush();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	expect(screen.queryByRole('group', { name: 'Runs on' })).toBeNull(); // now on the setup
+	expect(screen.queryByRole('region', { name: 'Add' })).toBeNull(); // now on the setup
 	expect(screen.getByText(WARNING)).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });
@@ -130,7 +134,7 @@ it('picking Cloud opens the setup with the warning instead of switching the mode
 it('saves a gateway, then phone Back recovers the removed setup draft to the list', async () => {
 	await show();
 	settingsNav.stacked = true;
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Cloud' }));
+	await addCloud();
 	await flush();
 	// This is the history entry made by the actual setup producer.
 	const setupItem = settingsNav.selectedItem('providers')!;
@@ -172,7 +176,7 @@ it('saves a gateway, then phone Back recovers the removed setup draft to the lis
 
 it('names the Vertex AI key file only for Vertex AI (#1583)', async () => {
 	await show();
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Cloud' }));
+	await addCloud();
 	await flush();
 	const warning = () => screen.getByText(WARNING).textContent ?? '';
 	expect(warning()).not.toContain('key file'); // no method chosen yet
@@ -183,13 +187,17 @@ it('names the Vertex AI key file only for Vertex AI (#1583)', async () => {
 	}
 });
 
-it('a saved gateway on standby says Standby once, and its page does not name a key file (#1583)', async () => {
+it('a saved gateway that is off says Off once, has no switch until it is on, and does not name a key file (#1583)', async () => {
 	cloud = savedGateway();
 	worker.state.claude = claudeSummary({ cloud: cloud.status });
 	await show(CLAUDE_CLOUD_ITEM);
 	const subtitle = document.querySelector('.st-dhs')?.textContent ?? '';
-	expect(subtitle).toContain('Standby for Claude');
-	expect(subtitle.match(/Standby/g)).toHaveLength(1);
+	expect(subtitle).toContain('Off');
+	expect(subtitle.match(/\bOff\b/g)).toHaveLength(1);
+	// Turning it on needs the warning acknowledged: that is "Save and use for Claude".
+	const detail = document.querySelector('.st-dwrap') as HTMLElement;
+	expect(within(detail).queryByRole('switch')).toBeNull();
+	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toBeTruthy();
 	expect(screen.getByText(WARNING).textContent).not.toContain('key file');
 	// Switching the form to Vertex AI shows that method's warning with it.
 	await fireEvent.change(screen.getByLabelText('Cloud method'), { target: { value: 'vertex' } });
@@ -220,7 +228,9 @@ it('keeps the warning on the page while the method is on, and Remove deletes it'
 	});
 	await show();
 	expect(screen.getByText('Runs on LLM gateway')).toBeTruthy();
-	expect(within(modes()).getByRole('button', { name: 'Cloud' }).getAttribute('aria-pressed')).toBe('true');
+	const creds = screen.getByRole('region', { name: /^Credentials/ });
+	expect(within(creds).getByRole('switch', { name: 'LLM gateway on' }).getAttribute('aria-checked')).toBe('true');
+	expect(within(creds).getByRole('switch', { name: /Claude Max subscription/ }).getAttribute('aria-checked')).toBe('false');
 
 	settingsNav.go({ category: 'providers', item: CLAUDE_CLOUD_ITEM });
 	await flush();

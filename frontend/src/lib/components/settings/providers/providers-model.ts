@@ -19,7 +19,6 @@
 import { isNativeProvider, type ModelProvider, type NativeProviderId } from '$lib/api/model-providers';
 import { nativeOption, nativeOptions } from './native-options.svelte';
 import type {
-	ClaudeAuthMode,
 	ClaudeAuthSummary,
 	ClaudeKeyAccount,
 	ClaudeSubscriptionAccount
@@ -287,17 +286,6 @@ export const AGENT_PROVIDER_ORDER: readonly Exclude<BuiltInProviderId, 'fal'>[] 
 	.map((b) => b.id)
 	.filter((id): id is Exclude<BuiltInProviderId, 'fal'> => id !== 'fal');
 
-export const MODE_LABEL: Record<ClaudeAuthMode, string> = {
-	subscription: 'Subscription',
-	cloud: 'Cloud provider or gateway',
-	off: 'Off'
-};
-export const MODE_OPTIONS: { value: ClaudeAuthMode; label: string }[] = [
-	{ value: 'subscription', label: 'Subscription' },
-	{ value: 'cloud', label: 'Cloud' },
-	{ value: 'off', label: 'Off' }
-];
-
 function plural(n: number, one: string, many = `${one}s`): string {
 	return `${n} ${n === 1 ? one : many}`;
 }
@@ -361,20 +349,19 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 		out.push(cliCredential(claude));
 	}
 	// The selected key is the "Claude API" provider beside the subscription,
-	// in use whenever Claude is not Off (Off stops Claude API too).
-	const claudeOff = mode === 'off';
+	// with its own switch: the subscription being off never stops it. One saved
+	// key is on at a time; turning another on moves the selection to it.
 	for (const account of claude.accounts?.api_key ?? []) {
-		const on = !claudeOff && account.active;
 		out.push({
 			item: claudeKeyItem(account.id),
 			providerId: 'claude',
 			flavor: 'anthropic',
 			name: account.label || 'Anthropic API key',
 			kind: 'API key',
-			summary: safeKeyHint(account.masked_key) || 'Saved',
-			status: on ? 'ok' : account.active ? 'off' : 'standby',
-			statusText: account.active ? (claudeOff ? 'Off' : 'Active for Claude API') : 'Saved',
-			on,
+			summary: account.active ? safeKeyHint(account.masked_key) || 'Saved' : `${safeKeyHint(account.masked_key) || 'Saved'}, off`,
+			status: account.active ? 'ok' : 'off',
+			statusText: account.active ? 'Active for Claude API' : 'Off',
+			on: account.active,
 			active: account.active,
 			switchable: true,
 			enabled: account.active,
@@ -385,17 +372,16 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	// Compatibility with older workers that list no saved accounts.
 	if (!claude.accounts && claude.api_key.set) {
 		const masked = safeKeyHint(keyMasked) || (claude.api_key.last4 ? `sk-ant-…${claude.api_key.last4}` : 'Saved');
-		const statusText = claudeOff ? 'Off' : 'Active for Claude API';
 		out.push({
 			item: CLAUDE_KEY_ITEM,
 			providerId: 'claude',
 			flavor: 'anthropic',
 			name: 'Anthropic API key',
 			kind: 'API key',
-			summary: `${masked}, ${claudeOff ? 'off' : 'active for Claude API'}`,
-			status: claudeOff ? 'off' : 'ok',
-			statusText,
-			on: !claudeOff,
+			summary: `${masked}, active for Claude API`,
+			status: 'ok',
+			statusText: 'Active for Claude API',
+			on: true,
 			switchable: false,
 			enabled: true,
 			attention: false
@@ -405,16 +391,16 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	const cloudActive = mode === 'cloud';
 	if (cloud?.configured || cloudActive) {
 		const ready = !!cloud?.ready;
-		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : cloudActive ? 'ok' : 'standby';
+		// Claude Code runs on the subscription or the cloud, never both: turning
+		// this on turns the subscription off, and the other way round.
+		const status: StatusTone = !ready ? (cloudActive ? 'warn' : 'off') : cloudActive ? 'ok' : 'off';
 		const statusText = !ready
 			? cloud?.configured
 				? 'Values missing'
 				: 'Not set up'
-			: mode === 'off'
-				? 'Off'
-				: cloudActive
-					? 'Active for Claude'
-					: 'Standby';
+			: cloudActive
+				? 'Active for Claude'
+				: 'Off';
 		const label = cloud?.method_label || 'Cloud provider or gateway';
 		out.push({
 			item: CLAUDE_CLOUD_ITEM,
@@ -422,11 +408,11 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 			flavor: 'cloud',
 			name: label,
 			kind: 'Cloud',
-			summary: ready ? (cloudActive ? 'Active' : statusText) : statusText,
+			summary: ready ? (cloudActive ? 'Active' : 'Off') : statusText,
 			status,
 			statusText,
 			on: cloudActive && ready,
-			switchable: false,
+			switchable: true,
 			enabled: cloudActive,
 			attention: cloudActive && !ready
 		});
@@ -449,16 +435,14 @@ function cliCredential(claude: ClaudeAuthSummary): CredentialView {
 	const ready = !!cli.signed_in;
 	const plan = claudePlan(cli.plan);
 	const account = [cli.email, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
-	const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : subActive ? 'ok' : 'standby';
+	const status: StatusTone = !ready ? 'warn' : subActive ? 'ok' : 'off';
 	const statusText = !ready
 		? cli.installed === false
 			? 'CLI not installed'
 			: 'Not signed in'
-		: mode === 'off'
-			? 'Off'
-			: subActive
-				? 'Active for Claude'
-				: 'Standby';
+		: subActive
+			? 'Active for Claude'
+			: 'Off';
 	return {
 		item: CLAUDE_SUB_ITEM,
 		providerId: 'claude',
@@ -466,12 +450,12 @@ function cliCredential(claude: ClaudeAuthSummary): CredentialView {
 		name: plan ? `Claude ${plan} subscription` : 'Claude subscription',
 		kind: 'Subscription',
 		summary: ready
-			? [account || 'Signed in', subActive ? '' : statusText.toLowerCase()].filter(Boolean).join(', ')
+			? [account || 'Signed in', subActive ? '' : 'off'].filter(Boolean).join(', ')
 			: statusText,
 		status,
 		statusText,
 		on: subActive && ready,
-		switchable: false,
+		switchable: true,
 		enabled: subActive,
 		attention: subActive && !ready
 	};
@@ -495,17 +479,12 @@ function subscriptionCredential(claude: ClaudeAuthSummary, account: ClaudeSubscr
 	const live = account.active && claude.cli?.signed_in;
 	const email = (live ? claude.cli.email : null) ?? account.email;
 	const plan = claudePlan((live ? claude.cli.plan : null) ?? account.plan);
-	const on = subActive && account.active && ready;
-	const statusText = !ready
-		? 'Sign in again'
-		: !account.active
-			? 'Saved'
-			: mode === 'off'
-				? 'Off'
-				: subActive
-					? 'Active for Claude'
-					: 'Selected for subscription mode';
-	const status: StatusTone = on ? 'ok' : !ready && account.active && subActive ? 'warn' : account.active && mode === 'off' ? 'off' : 'standby';
+	// One saved sign-in is on at a time: its switch is on while the
+	// subscription runs on it. Turning another on moves to that sign-in.
+	const enabled = subActive && account.active;
+	const on = enabled && ready;
+	const statusText = !ready ? 'Sign in again' : enabled ? 'Active for Claude' : 'Off';
+	const status: StatusTone = on ? 'ok' : !ready && enabled ? 'warn' : 'off';
 	const identity = [email && email !== account.label ? email : null, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
 	return {
 		item: claudeSubItem(account.id),
@@ -515,13 +494,13 @@ function subscriptionCredential(claude: ClaudeAuthSummary, account: ClaudeSubscr
 		kind: 'Subscription',
 		summary: !ready
 			? 'Sign in again'
-			: [identity || 'Signed in', account.active && !subActive ? statusText.toLowerCase() : null].filter(Boolean).join(', '),
+			: [identity || 'Signed in', enabled ? null : 'off'].filter(Boolean).join(', '),
 		status,
 		statusText,
 		on,
 		active: account.active,
 		switchable: true,
-		enabled: account.active,
+		enabled,
 		attention: account.active && subActive && !ready,
 		subscription: account
 	};
@@ -910,7 +889,12 @@ export const KEY_CONFIG: Record<
 /** The Claude provider header status. */
 export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: StatusTone; text: string } {
 	if (!claude) return { status: 'off', text: 'Loading' };
-	if (claude.mode === 'off') return { status: 'off', text: 'Off, not in the picker' };
+	// Subscription and cloud switched off: Claude API still runs on its own switch.
+	if (claude.mode === 'off') {
+		return claude.api_key.set
+			? { status: 'ok', text: 'Subscription off · API key on' }
+			: { status: 'off', text: 'Off, not in the picker' };
+	}
 	const ready = claude.gate
 		? claude.gate.claude_credential_ready
 		: claude.mode === 'subscription'

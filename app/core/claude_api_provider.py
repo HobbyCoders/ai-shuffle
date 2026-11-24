@@ -14,6 +14,12 @@ mode runs natively), the credential bridge and usage accounting all treat it
 like any other API-key provider. The active key is a shared setting, so a
 switch of key applies on every worker.
 
+The row is on whenever a key is selected, whatever the Claude Code mode:
+turning the subscription off (the ``off`` mode) leaves Claude API running,
+the way turning ChatGPT off leaves the OpenAI API key on. Turning Claude API
+off clears the selected key (``claude_accounts.deactivate_api_key``) and keeps
+every saved key.
+
 The row's ``auth_mode`` is always ``api_key``: a subscription sign-in never
 becomes this row, and ``fluid_credentials`` refuses subscription modes for the
 native Anthropic client anyway.
@@ -83,12 +89,6 @@ def _active_key() -> Optional[str]:
     if choice is not None:
         return claude_auth_mode.selected_api_key(choice)
     return claude_auth_mode.stored_api_key()
-
-
-def _claude_off() -> bool:
-    from app.core import claude_auth_mode
-
-    return claude_auth_mode.current_mode() == claude_auth_mode.MODE_OFF
 
 
 def _base_url(key: str) -> Optional[str]:
@@ -275,14 +275,12 @@ def save_curated_models(key: str, models: List[Dict[str, Any]]) -> List[Dict[str
 
 
 def virtual_row(include_token: bool = False) -> Optional[Dict[str, Any]]:
-    """The Claude API provider row, or None without an active key (or Claude off).
+    """The Claude API provider row, or None without an active key.
 
     ``include_token`` adds the encrypted key as ``auth_token``, exactly like a
     stored row's blob; it is never present on a default read.
     """
     try:
-        if _claude_off():
-            return None
         key = _active_key()
     except Exception:  # noqa: BLE001 — an unreadable key is no row
         logger.warning("Could not read the saved Anthropic API key", exc_info=True)
@@ -357,8 +355,6 @@ def refresh_models_once() -> bool:
     from app.core import claude_api_models
 
     try:
-        if _claude_off():
-            return False
         key = _active_key()
     except Exception:  # noqa: BLE001 — an unreadable key is no refresh
         return False

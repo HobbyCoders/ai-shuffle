@@ -34,7 +34,7 @@
 {#snippet banner()}
 	{#if text.blocked}
 		<InlineBanner tone="warn">
-			Claude is off. Pick another model.
+			The Claude subscription is off. Pick another model.
 			{#snippet actions()}
 				<button type="button" class="st-btn sm" onclick={() => settingsNav.go({ category: 'providers' })}>
 					Open providers
@@ -48,7 +48,7 @@
 	name="Text tasks"
 	icon={TEXT_ICON}
 	status={text.blocked ? 'warn' : 'ok'}
-	statusText={text.blocked ? 'Claude is off' : 'Ready'}
+	statusText={text.blocked ? 'Subscription off' : 'Ready'}
 	badge="Text"
 	subtitle="Background text jobs"
 	facts={text.status === 'ok' ? facts : []}

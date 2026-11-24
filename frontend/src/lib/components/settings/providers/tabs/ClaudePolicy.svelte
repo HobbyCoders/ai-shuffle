@@ -31,7 +31,7 @@
 			label="Loop guard"
 			hint={mode === 'off' ? undefined : "Your cloud provider's billing applies"}
 		>
-			<ValueText value={mode === 'off' ? 'Off while Claude is off' : 'Off with a cloud provider or gateway'} />
+			<ValueText value={mode === 'off' ? 'Off while the subscription is off' : 'Off with a cloud provider or gateway'} />
 		</SettingRow>
 	</RowGroup>
 {:else}

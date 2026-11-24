@@ -72,8 +72,9 @@ def test_off_mode_refuses_claude_whatever_credentials_exist(mock_db):
     assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (
         False, credential_gate.OFF_MESSAGE)
     assert credential_gate.OFF_MESSAGE == (
-        "Claude is off on this worker. Turn it on in Settings > Providers > Claude, "
-        "or pick a model from another provider.")
+        "The Claude subscription is off on this worker. Turn it on in Settings > "
+        "Providers > Claude, pick a \"Claude · API\" model to use your Anthropic API "
+        "key, or pick a model from another provider.")
 
 
 def test_off_mode_refuses_the_claude_leg_but_not_a_provider_leg(mock_db):

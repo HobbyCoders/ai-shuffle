@@ -1,8 +1,8 @@
 /**
- * Settings > Providers > Claude: the Claude Code mode and the credentials it
- * picks between. Ported from ClaudeAuthModePanel.test.ts: the active mode,
- * the CLI account and the key's last four, the warning when the active mode
- * has no credential, a mode change only on an explicit pick, and read-only.
+ * Settings > Providers > Claude: its credentials, each with its own switch
+ * like ChatGPT and the OpenAI API key. The CLI account and the key's last
+ * four, the warning when the subscription has no credential, the
+ * subscription switch (Claude API keeps running), and read-only.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
@@ -42,7 +42,7 @@ async function show(options: { readOnly?: boolean } = {}) {
 	await flush();
 }
 
-const modes = () => screen.getByRole('group', { name: 'Runs on' });
+const subSwitch = () => within(credentials()).getByRole('switch', { name: /Claude Max subscription/ });
 const credentials = () => screen.getByRole('region', { name: /^Credentials/ });
 
 beforeEach(() => {
@@ -73,19 +73,21 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
-it('shows the active mode, the CLI account and the key’s last four', async () => {
+it('shows the subscription switch, the CLI account and the key’s last four, and no mode picker', async () => {
 	await show();
 	expect(screen.getByRole('heading', { level: 2, name: 'Claude' })).toBeTruthy();
 	expect(screen.getByText('Runs on subscription')).toBeTruthy();
-	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
+	expect(screen.queryByRole('group', { name: 'Runs on' })).toBeNull();
+	expect(subSwitch().getAttribute('aria-checked')).toBe('true');
 
 	const creds = credentials();
 	expect(within(creds).getByText('Claude Max subscription')).toBeTruthy();
-	expect(within(creds).getByText('Active for Claude')).toBeTruthy();
+	// Its switch (on, above) says it is in use, like every other provider's row.
 	expect(within(creds).getByText('Anthropic API key')).toBeTruthy();
 	// The key is the Claude API provider beside the subscription, not a standby.
 	expect(within(creds).getByText('Active for Claude API')).toBeTruthy();
-	expect(within(creds).queryByRole('switch')).toBeNull();
+	// Older workers list no saved keys: that single key row has nothing to switch.
+	expect(within(creds).getAllByRole('switch')).toHaveLength(1);
 
 	// The list rows carry the account and the key's last four.
 	expect(screen.getByText('owner@example.com, Max plan')).toBeTruthy();
@@ -127,40 +129,32 @@ it('keeps Claude API running on the saved key while the subscription is signed o
 	expect(screen.getByText(/Claude subscription cannot run: the Claude Code CLI is not signed in on this worker\. Claude API models run on the saved key\./)).toBeTruthy();
 });
 
-it('changes the mode only when the owner picks one, and offers no API key mode', async () => {
+it('turns the subscription back on from its switch', async () => {
 	worker.state.claude = claudeSummary({ ...worker.state.claude, mode: 'off' });
 	await show();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
-	// The key runs beside the subscription, so it is not a mode to pick.
-	expect(within(modes()).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Subscription', 'Cloud', 'Off']);
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Subscription' }));
+	expect(subSwitch().getAttribute('aria-checked')).toBe('false');
+	await fireEvent.click(subSwitch());
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
-	expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
-		mode: 'subscription'
-	});
-	await waitFor(() =>
-		expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true')
-	);
+	expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({ mode: 'subscription' });
+	await waitFor(() => expect(subSwitch().getAttribute('aria-checked')).toBe('true'));
 	await waitFor(() => expect(within(credentials()).getByText('Active for Claude API')).toBeTruthy());
 	expect(mocks.hydrate).toHaveBeenCalled();
 });
 
-it('turns Claude off and says it is out of the picker', async () => {
+it('turns the subscription off and keeps Claude API on', async () => {
 	await show();
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Off' }));
-	await waitFor(() =>
-		expect(worker.sent('PUT', '/settings/claude-auth')[0]?.body).toEqual({
-			mode: 'off'
-		})
-	);
-	await waitFor(() => expect(screen.getByText('Off, not in the picker')).toBeTruthy());
-	expect(within(credentials()).getAllByText('Off')).toHaveLength(2);
+	await fireEvent.click(subSwitch());
+	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')[0]?.body).toEqual({ mode: 'off' }));
+	await waitFor(() => expect(screen.getByText('Subscription off · API key on')).toBeTruthy());
+	expect(within(credentials()).getByText('Active for Claude API')).toBeTruthy();
+	expect(subSwitch().getAttribute('aria-checked')).toBe('false');
 });
 
 it('is read-only for other devices', async () => {
 	await show({ readOnly: true });
-	for (const b of within(modes()).getAllByRole('button')) expect((b as HTMLButtonElement).disabled).toBe(true);
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Off' }));
+	expect((subSwitch() as HTMLButtonElement).disabled).toBe(true);
+	await fireEvent.click(subSwitch());
 	await flush();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 });
@@ -240,7 +234,7 @@ it('carries the Claude compaction switch, on by default, and saves a change', as
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-compaction')[0]?.body).toEqual({ enabled: false }));
 });
 
-it('lists saved sign-ins with "Another Subscription" and keeps the mode control separate', async () => {
+it('lists saved sign-ins with "Another Subscription"; the active one\'s switch turns the subscription off', async () => {
 	worker.state.claude = claudeSummary({
 		api_key: { set: false, last4: null },
 		accounts: claudeAccounts({
@@ -253,15 +247,15 @@ it('lists saved sign-ins with "Another Subscription" and keeps the mode control 
 	const creds = credentials();
 	expect(within(creds).getByText('Personal')).toBeTruthy();
 	expect(within(creds).getByText('Work')).toBeTruthy();
-	expect(within(creds).getByRole('button', { name: 'Use Personal' })).toBeTruthy();
+	expect(within(creds).getByRole('switch', { name: 'Use Personal' }).getAttribute('aria-checked')).toBe('false');
 	expect(within(creds).getByText('Active')).toBeTruthy();
 	const add = screen.getByRole('region', { name: 'Add' });
 	expect(within(add).getByText('Another Subscription')).toBeTruthy();
 	expect(within(add).getByText('Becomes active after sign-in')).toBeTruthy();
-	// Which sign-in is active never moves the Claude Code mode.
-	expect(within(modes()).getByRole('button', { name: 'Subscription' }).getAttribute('aria-pressed')).toBe('true');
-	await fireEvent.click(within(modes()).getByRole('button', { name: 'Off' }));
+	// Off keeps the selected sign-in, so turning the subscription back on resumes it.
+	await fireEvent.click(within(creds).getByRole('switch', { name: 'Work on' }));
 	await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
+	expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({ mode: 'off' });
 	expect(worker.state.claude.accounts?.subscription.map((a) => a.active)).toEqual([false, true]);
 	expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/work/activate')).toHaveLength(0);
 });

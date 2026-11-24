@@ -412,9 +412,11 @@ describe('the list', () => {
 		expect(screen.queryByRole('group', { name: 'OpenRouter' })).toBeNull();
 	});
 
-	it('has a switch on every credential but Claude’s', async () => {
+	it('has a switch on every credential, Claude’s included', async () => {
 		await show();
-		expect(within(group('Claude')).queryAllByRole('switch')).toHaveLength(0);
+		// The subscription has a switch; this fixture's key predates saved keys
+		// (no accounts list), so it has none, as before.
+		expect(within(group('Claude')).getByRole('switch', { name: /subscription/ })).toBeTruthy();
 		expect(within(group('OpenAI')).getAllByRole('switch')).toHaveLength(2);
 		expect(within(group('fal.ai')).getByRole('switch', { name: 'Media key on' })).toBeTruthy();
 	});
@@ -492,38 +494,32 @@ describe('fal.ai', () => {
 });
 
 describe('Claude', () => {
-	const openClaude = async () => {
-		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
-		await flush();
-		return screen.getByRole('group', { name: 'Runs on' });
-	};
-
-	it("gives Claude's row the same one-tap shape as the others: no mode control on it", async () => {
+	it("gives Claude's rows the same shape as the others: one open button and a switch", async () => {
 		await show();
 		const row = group('Claude').querySelector('.cred') as HTMLElement;
 		expect(within(row).getAllByRole('button')).toHaveLength(1);
+		expect(within(row).getByRole('switch').getAttribute('aria-checked')).toBe('true');
 		expect(row.querySelector('.sm-kind')?.textContent).toContain('Subscription');
-		expect(row.textContent).toContain('Signed in');
 	});
 
-	it("turns Claude off from Claude's page", async () => {
+	it('turns the subscription off with its switch and leaves the API key on', async () => {
 		await show();
-		await fireEvent.click(within(await openClaude()).getByRole('button', { name: 'Off' }));
+		const before = credentialNames('Claude');
+		await fireEvent.click(within(group('Claude')).getByRole('switch', { name: /subscription/ }));
 		await waitFor(() => expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(1));
-		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({
-			mode: 'off'
-		});
-		await waitFor(() =>
-			expect(within(screen.getByRole('group', { name: 'Runs on' })).getByRole('button', { name: 'Off' }).getAttribute('aria-pressed')).toBe('true')
-		);
-		await waitFor(() => expect(credentialNames('Claude')).toEqual(['Claude Max subscription, Off', 'Anthropic API key, Off']));
+		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({ mode: 'off' });
+		await waitFor(() => expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Off'));
+		// The key row is untouched: its own switch, still on.
+		expect(credentialNames('Claude')[1]).toBe(before[1]);
+		expect(credentialNames('Claude')[1]).not.toMatch(/, Off$/);
+		expect(worker.sent('DELETE', '/settings/integrations/anthropic')).toHaveLength(0);
 	});
 
-	it('does not save when the current mode is picked again', async () => {
+	it("has no mode picker on Claude's page", async () => {
 		await show();
-		await fireEvent.click(within(await openClaude()).getByRole('button', { name: 'Subscription' }));
+		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
 		await flush();
-		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+		expect(screen.queryByRole('group', { name: 'Runs on' })).toBeNull();
 	});
 });
 
@@ -583,14 +579,10 @@ describe('adding', () => {
 });
 
 describe('read-only', () => {
-	it('disables the switches, the modes and Add provider, and hides "+"', async () => {
+	it('disables the switches (Claude’s too) and Add provider, and hides "+"', async () => {
 		await show({ readOnly: true });
+		expect(within(group('Claude')).getAllByRole('switch').length).toBeGreaterThan(0);
 		for (const sw of screen.getAllByRole('switch')) expect((sw as HTMLButtonElement).disabled).toBe(true);
-		await fireEvent.click(within(group('Claude')).getByRole('button', { name: 'Claude' }));
-		await flush();
-		for (const mode of within(screen.getByRole('group', { name: 'Runs on' })).getAllByRole('button')) {
-			expect((mode as HTMLButtonElement).disabled).toBe(true);
-		}
 		expect(screen.queryByRole('button', { name: 'Add account to OpenAI' })).toBeNull();
 		expect(
 			(
@@ -629,7 +621,7 @@ describe('Claude Code on the Not connected page', () => {
 		return claude;
 	}
 
-	it('keeps the mode control reachable with no Claude account row, in every mode', async () => {
+	it('offers Set up with no Claude account row, in every mode, and no mode control', async () => {
 		for (const mode of ['subscription', 'off'] as const) {
 			cleanup();
 			providers.clear();
@@ -641,8 +633,8 @@ describe('Claude Code on the Not connected page', () => {
 			settingsNav.go({ category: 'providers', item: 'provider:claude' });
 			render(ProvidersCollection);
 			await flush();
-			const runsOn = screen.getByRole('group', { name: 'Runs on' });
-			expect(within(runsOn).getByRole('button', { name: 'Off' })).toHaveProperty('disabled', false);
+			expect(screen.queryByRole('group', { name: 'Runs on' })).toBeNull();
+			expect(within(screen.getByRole('region', { name: 'Connect' })).getAllByRole('button', { name: 'Set up' }).length).toBeGreaterThan(0);
 		}
 	});
 

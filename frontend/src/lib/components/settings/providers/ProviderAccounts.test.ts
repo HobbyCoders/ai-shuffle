@@ -100,7 +100,7 @@ describe('a failed action says so where it was taken (#1523)', () => {
 			'DELETE /settings/claude-auth/accounts/subscription/:id': () => { throw { status: 500, detail: 'Database is busy' }; }
 		});
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Saved' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Off' }));
 		expect((await failedRemove('Work')).textContent).toContain('Database is busy');
 	});
 
@@ -168,14 +168,39 @@ describe('saved account controls', () => {
 		await waitFor(() => expect(providers.current.providers.filter((r) => r.provider_type === 'openai').every((r) => !r.enabled)).toBe(true));
 	});
 
-	it('selects a saved Anthropic key without changing the Claude Code mode', async () => {
+	it('switches a saved Anthropic key on without touching the subscription', async () => {
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Use Personal' }));
+		await fireEvent.click(group('Claude').getByRole('switch', { name: 'Use Personal' }));
 		await waitFor(() => expect(providers.current.claude?.accounts?.api_key.map((a) => a.active)).toEqual([true, false]));
 		expect(providers.current.claude?.mode).toBe('subscription');
-		expect(group('Claude').getByRole('button', { name: 'Use Work' })).toBeTruthy();
+		expect(group('Claude').getByRole('switch', { name: 'Use Work' }).getAttribute('aria-checked')).toBe('false');
 		expect(worker.sent('POST', '/settings/claude-auth/accounts/api_key/personal/activate')).toHaveLength(1);
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+	});
+
+	it('switches Claude API off, keeping every saved key and the subscription on', async () => {
+		await show();
+		await fireEvent.click(group('Claude').getByRole('switch', { name: 'Work on' }));
+		await waitFor(() => expect(providers.current.claude?.accounts?.api_key.map((a) => a.active)).toEqual([false, false]));
+		expect(worker.sent('DELETE', '/settings/integrations/anthropic')).toHaveLength(1);
+		expect(providers.current.claude?.accounts?.api_key.map((a) => a.id)).toEqual(['personal', 'work']);
+		expect(providers.current.claude?.mode).toBe('subscription');
+		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
+		expect(group('Claude').getByRole('switch', { name: 'Use Work' }).getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('switches the Claude subscription off and on, leaving Claude API on', async () => {
+		await show();
+		const sub = () => group('Claude').getByRole('switch', { name: /Claude Max subscription/ });
+		await fireEvent.click(sub());
+		await waitFor(() => expect(providers.current.claude?.mode).toBe('off'));
+		expect(worker.sent('PUT', '/settings/claude-auth')[0].body).toEqual({ mode: 'off' });
+		expect(providers.current.claude?.accounts?.api_key.find((a) => a.id === 'work')?.active).toBe(true);
+		await waitFor(() => expect(sub().getAttribute('aria-checked')).toBe('false'));
+		expect(group('Claude').getByRole('switch', { name: 'Work on' }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(sub());
+		await waitFor(() => expect(providers.current.claude?.mode).toBe('subscription'));
+		expect(worker.sent('PUT', '/settings/claude-auth')[1].body).toEqual({ mode: 'subscription' });
 	});
 
 	it('renames and deletes only the selected Anthropic account, without selecting a sibling', async () => {
@@ -221,7 +246,7 @@ describe('saved account controls', () => {
 
 	it('disables saved-key selection for read-only Settings', async () => {
 		await show(true);
-		expect((group('Claude').getByRole('button', { name: 'Use Personal' }) as HTMLButtonElement).disabled).toBe(true);
+		expect((group('Claude').getByRole('switch', { name: 'Use Personal' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 });
 
@@ -379,7 +404,7 @@ describe('saved Claude subscriptions', () => {
 		expect(screen.getByText(/CLAUDE_CONFIG_DIR/)).toBeTruthy();
 	});
 
-	it('switches, renames and removes saved sign-ins without changing the Claude Code mode', async () => {
+	it('switches, renames and removes saved sign-ins; Claude API keeps its own switch', async () => {
 		worker = fakeWorker({
 			rows: [chatgptRow()],
 			claude: claudeSummary({ accounts: claudeAccounts({
@@ -388,13 +413,13 @@ describe('saved Claude subscriptions', () => {
 			}) })
 		});
 		await show();
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Use Personal' }));
+		await fireEvent.click(group('Claude').getByRole('switch', { name: 'Use Personal' }));
 		await waitFor(() => expect(providers.current.claude?.accounts?.subscription.map((a) => a.active)).toEqual([true, false]));
 		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/sub-default/activate')).toHaveLength(1);
-		expect(group('Claude').getByRole('button', { name: 'Use Work' })).toBeTruthy();
+		expect(group('Claude').getByRole('switch', { name: 'Use Work' }).getAttribute('aria-checked')).toBe('false');
 		expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 
-		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Saved' }));
+		await fireEvent.click(group('Claude').getByRole('button', { name: 'Work, Off' }));
 		const name = await screen.findByRole('textbox', { name: 'Name' });
 		await fireEvent.focus(name); await fireEvent.input(name, { target: { value: 'Team' } }); await fireEvent.blur(name);
 		await waitFor(() => expect(worker.sent('PATCH', '/settings/claude-auth/accounts/subscription/work')[0]?.body).toEqual({ label: 'Team' }));

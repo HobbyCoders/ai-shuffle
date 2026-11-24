@@ -42,12 +42,22 @@ describe('agent credentials', () => {
 		expect(mocks.get).toHaveBeenCalledWith('/settings/claude-auth', { cache: 'no-store' });
 	});
 
-	it('keeps the off mode and reports no credential in use', () => {
+	it('with the subscription off, keeps Claude API on its own switch', () => {
 		const creds = credentialsFromSummary(summary({ mode: 'off', api_key: { set: true, last4: 'abcd' }, gate: undefined }));
 		expect(creds.mode).toBe('off');
 		expect(creds.credentialReady).toBe(false);
-		expect(creds.apiKeyReady).toBe(false);
-		expect(creds.ready).toBe(false);
+		expect(creds.apiKeyReady).toBe(true);
+		expect(creds.ready).toBe(true);
+		const none = credentialsFromSummary(summary({ mode: 'off', api_key: { set: false, last4: null }, gate: undefined }));
+		expect(none.apiKeyReady).toBe(false);
+		expect(none.ready).toBe(false);
+	});
+
+	it('trusts the gate when the worker lists its ready providers', () => {
+		// An older worker still stops Claude API with the subscription: its list says so.
+		const older = summary({ mode: 'off', api_key: { set: true, last4: 'abcd' } });
+		older.gate = { ...older.gate!, ready: false, ready_providers: [] } as typeof older.gate;
+		expect(credentialsFromSummary(older).apiKeyReady).toBe(false);
 	});
 
 	it('asks the worker to re-run the CLI check on refresh', async () => {
