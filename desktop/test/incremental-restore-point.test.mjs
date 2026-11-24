@@ -138,6 +138,53 @@ test('an interrupted copy cannot be retained or selected, and retry makes a comp
 });
 
 
+async function manyFiles(root) {
+  for (let i = 0; i < 30; i++) {
+    const file = path.join(root, 'data/base', String(i % 3 + 2), `segment-${String(i).padStart(2, '0')}`);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `rows ${i} `.repeat(i + 1));
+  }
+}
+
+test('files are copied several at a time and the installed launcher accepts the manifest', async t => {
+  const { root, copy } = await cluster(t);
+  await manyFiles(root);
+  const open = fs.open; let active = 0, most = 0;
+  t.mock.method(fs, 'open', async (file, ...args) => {
+    if (args[0] !== 'r+') return open(file, ...args);
+    most = Math.max(most, ++active);
+    try { await new Promise(resolve => setTimeout(resolve, 5)); return await open(file, ...args); } finally { active--; }
+  });
+  await copy.snapshot();
+  t.mock.restoreAll();
+  assert.ok(most > 1, `files were copied one at a time (${most})`);
+  await legacy(root).validate(); // key order and every hash, as the installed launcher checks
+  await fs.writeFile(path.join(root, 'data/base/3/segment-07'), 'bad migration');
+  await legacy(root).restore();
+  assert.equal(await fs.readFile(path.join(root, 'data/base/3/segment-07'), 'utf8'), 'rows 7 '.repeat(8));
+});
+
+test('after one copy fails, no copy is still writing when the point is rejected', async t => {
+  const { root, copy } = await cluster(t);
+  await manyFiles(root);
+  const open = fs.open; let active = 0;
+  t.mock.method(fs, 'open', async (file, ...args) => {
+    if (args[0] !== 'r+') return open(file, ...args);
+    active++;
+    try {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      if (String(file).endsWith('segment-04')) throw Error('disk full');
+      return await open(file, ...args);
+    } finally { active--; }
+  });
+  await assert.rejects(copy.snapshot(), /disk full/);
+  assert.equal(active, 0);
+  await assert.rejects(legacy(root).validate());
+  await copy.discard();
+  t.mock.restoreAll();
+  await copy.snapshot(); await legacy(root).validate();
+});
+
 test('cache rename interrupted after update-copy-cache is disposable and retryable', async t => {
   const { root, copy } = await cluster(t);
   await copy.snapshot(); await leaveLegacyCache(root);
