@@ -71,11 +71,13 @@ Use an API key for anything that runs while you are not watching:
 - **connectors** that answer Telegram, Discord, Slack or other messages;
 - **many agents at once**.
 
-## Claude: choosing a mode
+## Claude: turning each way on or off
 
-Claude Code runs in one mode at a time: **Subscription**, **Cloud** or **Off**. Change it in **Settings → Providers → Claude**, which also shows the signed-in account. AI Shuffle never switches modes on its own.
+In **Settings → Providers → Claude**, each way Claude can run has its own on/off switch, like every other provider: your subscription sign-ins, your Anthropic API keys and a cloud provider or gateway. AI Shuffle never turns one on for you.
 
-An Anthropic API key is not a mode. It runs beside the subscription as **Claude · API** models, and only when you pick one: a chat, task or automation that names no model never falls back to the key. **Off** turns the key off too.
+- **Subscription.** Claude Code uses one sign-in at a time. Turning a saved sign-in on turns the others off. Turning it off turns Claude Code off on this worker: Claude Code models leave the pickers until you turn a sign-in or a cloud provider back on.
+- **Cloud provider or gateway.** It replaces the subscription for Claude Code: turning it on turns the subscription off, and the other way round.
+- **API key.** The key runs on its own, as **Claude · API** models, whether the subscription is on or off. One saved key is on at a time. It runs only when you pick one of its models: a chat, task or automation that names no model never falls back to the key.
 
 ## Claude through a cloud provider or gateway
 

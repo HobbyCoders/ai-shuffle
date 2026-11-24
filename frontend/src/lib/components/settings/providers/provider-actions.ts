@@ -1,9 +1,7 @@
 /**
- * Actions the provider list and details share: switches, the Claude mode,
- * and starting a setup.
+ * Actions the provider list and details share: switches and starting a setup.
  */
 import { getErrorMessage } from '$lib/api/client';
-import type { ClaudeAuthMode } from '$lib/api/claude-auth';
 import { providers } from '$lib/stores/providers.svelte';
 import { notify } from '$lib/stores/notifications';
 import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -13,14 +11,38 @@ import { CLAUDE_CLOUD_ITEM, type CredentialFlavor, type CredentialView, type Pro
 
 /**
  * A credential row's switch: PATCH `{enabled}` for model_providers rows, the
- * fal flag for fal.ai, activation for saved Claude keys and sign-ins.
+ * fal flag for fal.ai, and for Claude:
+ *
+ * - a saved API key: on selects it for Claude API, off turns Claude API off
+ *   (every saved key is kept);
+ * - a subscription sign-in: on selects it (if saved) and runs Claude Code on
+ *   the subscription, off turns the subscription off. Claude API is not
+ *   affected either way;
+ * - the cloud provider or gateway: off turns it off; on opens its page, where
+ *   its warning is acknowledged ("Save and use for Claude").
+ *
  * Resolves to the error message on failure, else null.
  */
 export async function setCredentialEnabled(c: CredentialView, enabled: boolean): Promise<string | null> {
 	try {
-		if (c.account && enabled) await providers.activateAnthropicAccount(c.account.id);
-		else if (c.subscription && enabled) await providers.activateClaudeSubscriptionAccount(c.subscription.id);
-		else if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
+		if (c.account) {
+			if (enabled) await providers.activateAnthropicAccount(c.account.id);
+			else await providers.deactivateAnthropicAccount(c.account.id);
+		} else if (c.providerId === 'claude' && c.flavor === 'cli') {
+			if (enabled) {
+				if (c.subscription && !c.subscription.active) await providers.activateClaudeSubscriptionAccount(c.subscription.id);
+				if (providers.current.claude?.mode !== 'subscription') await providers.setClaudeMode('subscription');
+			} else if (c.enabled) {
+				await providers.setClaudeMode('off');
+			} else return null;
+		} else if (c.providerId === 'claude' && c.flavor === 'cloud') {
+			if (enabled) {
+				settingsNav.selectItem(CLAUDE_CLOUD_ITEM, 'providers');
+				return null;
+			}
+			if (!c.enabled) return null;
+			await providers.setClaudeMode('off');
+		} else if (c.flavor === 'fal') await providers.setFalEnabled(enabled);
 		else if (c.row) await providers.setProviderEnabled(c.row.id, enabled);
 		else return null;
 		flashSaved();
@@ -31,47 +53,6 @@ export async function setCredentialEnabled(c: CredentialView, enabled: boolean):
 		notify(message, { severity: 'error' });
 		return message;
 	}
-}
-
-/** Claude's Subscription | API key | Off. */
-export async function changeClaudeMode(mode: ClaudeAuthMode): Promise<void> {
-	if (providers.current.claude?.mode === mode) return;
-	try {
-		await providers.setClaudeMode(mode);
-		flashSaved();
-	} catch (e) {
-		notify(getErrorMessage(e, 'Could not change the Claude Code mode'), { severity: 'error' });
-	}
-}
-
-/**
- * "Cloud" in the Claude mode control. Turning it on needs the warning
- * acknowledged, so this opens the cloud credential (or its setup) where the
- * warning is, instead of switching the mode here.
- */
-export function openClaudeCloud(provider: Pick<ProviderView, 'id' | 'credentials'>): void {
-	if (provider.credentials.some((c) => c.flavor === 'cloud' && !c.draft)) {
-		settingsNav.selectItem(CLAUDE_CLOUD_ITEM, 'providers');
-		return;
-	}
-	const draft = provider.credentials.find((c) => c.flavor === 'cloud' && c.draft);
-	if (draft) settingsNav.selectItem(draft.item, 'providers');
-	else startSetup(provider, 'cloud');
-}
-
-/**
- * A pick in any Claude mode control (the provider header and its detail).
- * "Cloud" never switches here and never sends the acknowledgement: it opens
- * the cloud credential or its setup, where the warning is. Resolves false
- * for "Cloud" so the control keeps showing the current mode.
- */
-export function pickClaudeMode(
-	provider: Pick<ProviderView, 'id' | 'credentials'>,
-	mode: ClaudeAuthMode
-): Promise<unknown> {
-	if (mode !== 'cloud') return changeClaudeMode(mode);
-	openClaudeCloud(provider);
-	return Promise.resolve(false);
 }
 
 /** One draft row for a kind, selected so its setup shows in the detail. */

@@ -19,6 +19,7 @@
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
 	import ClaudeCloudForm from './ClaudeCloudForm.svelte';
 	import { cloudWarning, GATEWAY_WARNING } from './claude-cloud';
+	import CredentialControl from './CredentialControl.svelte';
 	import { CLAUDE_CLOUD_ITEM, type CredentialView, type ProviderView } from './providers-model';
 
 	interface Props {
@@ -34,14 +35,14 @@
 	let loadError = $state('');
 
 	const position = $derived(
-		mode === 'off'
-			? 'Claude is off'
-			: mode === 'cloud'
-				? status?.ready
-					? 'Runs every Claude session'
-					: 'Selected, not ready'
-				: 'Standby for Claude'
+		mode === 'cloud'
+			? status?.ready
+				? 'Runs every Claude session'
+				: 'Selected, not ready'
+			: 'Off'
 	);
+	// Its switch shows only while on: turning it on needs the warning
+	// acknowledged, so that is the form's "Save and use for Claude".
 	const gateway = $derived((config?.method ?? status?.method) === 'gateway');
 
 	async function load() {
@@ -103,6 +104,9 @@
 	item={CLAUDE_CLOUD_ITEM}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
+	{#snippet primary()}
+		{#if credential.enabled}<CredentialControl {credential} showState />{/if}
+	{/snippet}
 	{#snippet banner()}
 		<InlineBanner tone="warn">{cloudWarning(config, config?.method ?? status?.method)}</InlineBanner>
 		{#if gateway}<InlineBanner tone="warn">{config?.gateway_warning ?? GATEWAY_WARNING}</InlineBanner>{/if}

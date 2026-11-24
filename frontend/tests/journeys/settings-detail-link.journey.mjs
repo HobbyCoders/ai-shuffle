@@ -50,10 +50,10 @@ await runJourney({ name: 'settings-detail-link', allow: DEV_INSTANCE_NOISE, case
    await notice.or(create).filter({visible:true}).first().waitFor();
    if(!await notice.isVisible()) await create.click();
    await notice.click();
-   const target=page.locator('[data-setting-anchor="providers.claudeMode"]');
+   const target=page.locator('[data-setting-anchor="providers.claudeAccounts"]');
    await target.waitFor({state:'visible',timeout:15000});
    expect(await page.locator('.settings-shell[data-view="detail"]').count()===1,'target detail is not the hidden Settings index');
-   expect(await target.isVisible(),'Claude mode row is actually rendered');
+   expect(await target.isVisible(),'Claude account rows are actually rendered');
    const bar=page.locator('.topbar');
    await bar.getByRole('button',{name:'Back to Providers',exact:true}).click();
    await page.getByRole('heading',{name:'Providers',exact:true}).waitFor();

@@ -428,6 +428,8 @@ export const providers = {
 	/** Account mutations keep the selected key separate from the Claude Code mode. */
 	async refreshClaudeAccounts(accounts: ClaudeAccounts) {
 		_update((s) => ({ ...s, claude: s.claude ? { ...s.claude, accounts } : null }));
+		// A selected key or sign-in can be the only ready provider: the composer's gate reads auth.
+		auth.checkAuth().catch(() => {});
 		await Promise.all([providers.loadClaude(), providers.loadIntegrations(), hydrateModelRegistry()]);
 	},
 
@@ -448,6 +450,23 @@ export const providers = {
 		try {
 			const result = await activateClaudeKey(id);
 			await providers.refreshClaudeAccounts(result.accounts);
+		} finally {
+			_update((s) => ({ ...s, claudeAccountBusy: null }));
+		}
+	},
+
+	/**
+	 * Turn the Claude API off: no saved key stays selected, every saved key is
+	 * kept, and the pickers drop Claude · API models. "Use" or the switch on a
+	 * saved key turns it back on. Throws.
+	 */
+	async deactivateAnthropicAccount(id: string) {
+		if (_state.claudeAccountBusy) return;
+		_update((s) => ({ ...s, claudeAccountBusy: id }));
+		try {
+			await providers.clearAnthropicKey();
+			auth.checkAuth().catch(() => {});
+			await Promise.all([providers.loadClaude(), hydrateModelRegistry()]);
 		} finally {
 			_update((s) => ({ ...s, claudeAccountBusy: null }));
 		}

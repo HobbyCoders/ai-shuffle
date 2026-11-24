@@ -115,9 +115,21 @@ def test_claude_api_models_report_the_native_effort_table(key, authenticated_cli
     assert _effective_effort(bound("claude-live-1"), "xhigh") == "xhigh"
 
 
-def test_off_mode_hides_the_row(key):
+def test_subscription_off_keeps_the_row(key):
+    """The subscription switch (the ``off`` mode) never turns Claude API off:
+    each row has its own switch, like ChatGPT and the OpenAI API key."""
     claude_auth_mode.set_mode("off")
+    row = cap.virtual_row()
+    assert row is not None and row["enabled"] is True
+
+
+def test_turning_claude_api_off_hides_the_row_and_keeps_the_keys(key):
+    from app.core import claude_accounts
+
+    claude_auth_mode.set_mode("subscription")
+    claude_accounts.deactivate_api_key()
     assert cap.virtual_row() is None
+    assert claude_auth_mode.current_mode() == claude_auth_mode.MODE_SUBSCRIPTION
 
 
 def test_models_follow_the_active_keys_catalog_only(key):
@@ -312,13 +324,13 @@ def test_one_shot_generation_bound_to_claude_api_runs_natively(key):
     assert (options.env or {}).get("ANTHROPIC_API_KEY") == ""
 
 
-@pytest.mark.parametrize("state", ["no_key", "off", "locked"])
+@pytest.mark.parametrize("state", ["no_key", "locked"])
 def test_a_claude_api_binding_without_its_key_fails_plainly(key, monkeypatch, state):
-    """Key removed, Claude off or storage locked: a clear refusal, never the
-    CLI or another key."""
+    """Key removed (Claude API switched off) or storage locked: a clear
+    refusal, never the CLI or another key."""
     from app.core.provider_agent import validate_provider_model
 
-    claude_auth_mode.set_mode("off" if state == "off" else "subscription")
+    claude_auth_mode.set_mode("subscription")
     if state == "no_key":
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: None)
     elif state == "locked":

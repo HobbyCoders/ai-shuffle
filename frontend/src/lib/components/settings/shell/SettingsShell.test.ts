@@ -450,7 +450,7 @@ describe('SettingsShell stacked mode', () => {
 		await tick();
 		page.state = { viewPanelDetail: 'automations' } as App.PageState;
 		await tick();
-		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
+		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeAccounts' });
 		await view.rerender({ initialItemId: target });
 		await tick();
 		expect(mocks.pushState).not.toHaveBeenCalled();
@@ -479,7 +479,7 @@ describe('SettingsShell stacked mode', () => {
 		onTestFinished(() => { Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth }); });
 		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
 		render(SettingsShell, {
-			initialItemId: encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' })
+			initialItemId: encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeAccounts' })
 		});
 		await waitFor(() => expect(settingsNav.stacked).toBe(true));
 		await waitFor(() => expect(settingsNav.view).toBe('detail'));

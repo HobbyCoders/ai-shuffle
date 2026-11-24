@@ -12,10 +12,12 @@ and the user picks it:
   or an LLM gateway), with only that method's allowlisted values
   (:mod:`app.core.claude_cloud_auth`). An explicit cloud selector or gateway
   in the worker environment also selects this mode, unless Claude is off.
-- ``off``: Claude is turned off on this worker. Claude models leave the model
-  pickers, every Claude turn is refused with a setup message, and no Anthropic
-  credential reaches a CLI child. Only the user turns this on; the startup
-  default never picks it.
+- ``off``: Claude Code is turned off on this worker: the owner switched off
+  the subscription (or cloud) row in Settings. Claude Code models leave the
+  model pickers, every Claude Code turn is refused with a setup message, and
+  no Anthropic credential reaches a CLI child. Claude API is not affected: it
+  has its own switch. Only the user turns this on; the startup default never
+  picks it.
 
 The Anthropic API key is not a mode. The active saved key is its own provider,
 "Claude API" (:mod:`app.core.claude_api_provider`), run on fluid's native

@@ -89,13 +89,13 @@ await runJourney({
 			await page.getByRole('button', { name: 'Open Claude settings', exact: true }).waitFor();
 		},
 		async act({ page, mark, variant }) {
-			await mark('follow the Claude mode link from the automation detail');
+			await mark('follow the Claude settings link from the automation detail');
 			await page.getByRole('button', { name: 'Open Claude settings', exact: true }).click();
-			const target = page.locator('[data-setting-anchor="providers.claudeMode"]');
+			const target = page.locator('[data-setting-anchor="providers.claudeAccounts"]');
 			await target.waitFor({ state: 'attached' });
 			// The outgoing ViewShell pop is asynchronous; it must not undo the target.
 			await page.waitForTimeout(500);
-			expect(await target.isVisible(), 'Claude mode stays visible after the outgoing history entry retires');
+			expect(await target.isVisible(), 'Claude account rows stay visible after the outgoing history entry retires');
 			if (variant.viewport === 'desktop') return;
 			await mark('Back restores the Providers category');
 			await page.goBack();

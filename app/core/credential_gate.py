@@ -14,8 +14,10 @@ Claude Code CLI leg needs the active Claude auth mode's credential
 a sign-in (``claude auth status``, via ``claude_cli_status``; the CLI's
 credential files are never read); in ``api_key`` mode an Anthropic API key is
 stored on this worker; in ``cloud`` mode the owner's chosen cloud provider or
-gateway has its required values stored (``claude_cloud_auth``); in ``off`` mode Claude is turned off and every Claude
-run is refused with :data:`OFF_MESSAGE`. There is no fallback: a Claude turn
+gateway has its required values stored (``claude_cloud_auth``); in ``off`` mode the
+subscription (and cloud) row is switched off and every Claude Code run is refused with
+:data:`OFF_MESSAGE`. A "Claude · API" model runs on its own provider row and is
+not affected by the mode. There is no fallback: a Claude turn
 with no Claude credential does not borrow another one, it is refused with a
 Claude setup message. The refusal applies whatever the turn's source: chat,
 connector, automation, wake-up, background worker or a turn handed over from
@@ -60,14 +62,14 @@ CHECK_FAILED_MESSAGE = (
 CLOUD_NOT_SET_MESSAGE = (
     "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
     "mode and no cloud provider or gateway is set up here. Set one up in Settings > "
-    "Providers > Claude, or switch Claude to another mode. You can also pick a model "
-    "from another provider."
+    "Providers > Claude, or turn on the subscription there instead. You can also pick "
+    "a model from another provider."
 )
 CLOUD_MISSING_MESSAGE = (
     "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
     "mode with {method}, and {missing} is missing. Add it in Settings > Providers > "
-    "Claude, or switch Claude to another mode. You can also pick a model from "
-    "another provider."
+    "Claude, or turn on the subscription there instead. You can also pick a model "
+    "from another provider."
 )
 CLOUD_LOCKED_MESSAGE = (
     "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
@@ -75,8 +77,9 @@ CLOUD_LOCKED_MESSAGE = (
     "locked. Unlock it, or pick a model from another provider."
 )
 OFF_MESSAGE = (
-    "Claude is off on this worker. Turn it on in Settings > Providers > Claude, "
-    "or pick a model from another provider."
+    "The Claude subscription is off on this worker. Turn it on in Settings > "
+    "Providers > Claude, pick a \"Claude · API\" model to use your Anthropic API "
+    "key, or pick a model from another provider."
 )
 # Worker-level message: no provider of any kind can run an agent.
 NO_PROVIDER_MESSAGE = (

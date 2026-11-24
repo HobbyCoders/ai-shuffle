@@ -65,10 +65,12 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 				? !!summary.cloud?.ready
 				: false;
 	// The key runs on the separate "Claude API" provider, so its readiness is
-	// that provider's, never the Claude Code CLI's. Off turns it off too.
-	const apiKeyReady = mode !== 'off' && (gate?.ready_providers
+	// that provider's, never the Claude Code CLI's. The subscription being off
+	// (the `off` mode) does not turn it off: it has its own switch. The gate's
+	// list decides, so an older worker that still stops it when off says so.
+	const apiKeyReady = gate?.ready_providers
 		? gate.ready_providers.includes(CLAUDE_API_READY_ID)
-		: summary.api_key.set);
+		: summary.api_key.set;
 	return {
 		mode,
 		modeLabel: summary.mode_label,

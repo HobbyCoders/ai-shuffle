@@ -834,7 +834,6 @@
 			"globs": [
 				"frontend/tests/journeys/claude-account-switch.journey.mjs",
 				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
-				"frontend/src/lib/components/settings/providers/ClaudeModeRow.svelte",
 				"app/core/claude_auth_mode.py",
 				"app/core/claude_subscriptions.py",
 				"app/api/settings_claude_accounts.py"

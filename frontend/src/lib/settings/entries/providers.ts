@@ -23,8 +23,8 @@ import {
 } from '$lib/components/settings/providers/providers-model';
 import type { Attention, SearchItem, SettingEntry } from '../types';
 
-export const MODE_HELP =
-	'Claude models run through the Claude Code CLI on this worker. Subscription uses the CLI’s own sign-in; API key passes the stored Anthropic key. Every Claude session here uses the one you pick; nothing switches on its own. Off removes Claude models from the picker. Prefer to pay per use? An API key suits scheduled and unattended runs.';
+export const ACCOUNTS_HELP =
+	'Each Claude row has its own switch, like ChatGPT and the OpenAI API key. The subscription switch turns the selected sign-in on or off for Claude Code; turning on another saved sign-in moves to it. The API key switch runs Claude · API models with that key, whether the subscription is on or off. Prefer to pay per use? An API key suits scheduled and unattended runs.';
 export const LOOP_HELP =
 	'While Claude runs on your subscription, work that starts without you (automations, wake-ups, connectors, and the workers they start) counts against an hourly budget. Past it, the next turn waits for you under Waiting for you. Nothing you start yourself is held or timed, including the workers your chats start.';
 const LOOP_WORKER_LIMIT_HELP =
@@ -66,14 +66,14 @@ export const entries: SettingEntry[] = [
 		default: true
 	},
 	{
-		id: 'providers.claudeMode',
+		id: 'providers.claudeAccounts',
 		category: 'providers',
-		section: 'Claude Code mode',
-		label: 'Runs on',
-		hint: 'Every Claude session here',
-		help: MODE_HELP,
+		section: 'Credentials',
+		label: 'Subscription and API key',
+		hint: 'Each has its own switch',
+		help: ACCOUNTS_HELP,
 		item: CLAUDE_PROVIDER_ITEM,
-		keywords: ['claude code mode', 'subscription', 'api key', 'off', 'turn claude off', 'disable claude', 'which credential', 'pay per use']
+		keywords: ['claude code mode', 'subscription', 'api key', 'off', 'turn claude off', 'disable claude', 'which credential', 'pay per use', 'switch', 'enable']
 	},
 	{
 		id: 'providers.loopGuard',

@@ -188,11 +188,12 @@ describe('ChatGPT and SuperGrok subscriptions', () => {
 });
 
 describe('Claude', () => {
-	it('subscription mode: the subscription and the key are both active, no switches', () => {
+	it('subscription mode: the subscription and the key are both active; the subscription has a switch', () => {
 		const claude = byId(buildProviders(input()), 'claude');
-		expect(claude.credentials.map((c) => [c.item, c.status, c.on, c.switchable])).toEqual([
-			[CLAUDE_SUB_ITEM, 'ok', true, false],
-			[CLAUDE_KEY_ITEM, 'ok', true, false]
+		// The legacy single-key row (older workers list no saved keys) has no account to switch.
+		expect(claude.credentials.map((c) => [c.item, c.status, c.on, c.switchable, c.enabled])).toEqual([
+			[CLAUDE_SUB_ITEM, 'ok', true, true, true],
+			[CLAUDE_KEY_ITEM, 'ok', true, false, true]
 		]);
 		expect(claude.credentials[0].name).toBe('Claude Max subscription');
 		expect(hasPlusMenu(claude)).toBe(true);
@@ -204,15 +205,17 @@ describe('Claude', () => {
 		expect(claude.credentials[1].summary).toBe('sk-ant-…4f2a, active for Claude API');
 	});
 
-	it('off: nothing is active and both rows read Off', () => {
+	it('subscription off: the subscription reads Off and the API key stays on', () => {
 		const summary = claudeSummary({ mode: 'off' });
 		const claude = byId(buildProviders(input({ claude: summary })), 'claude');
-		expect(claude.credentials.map((c) => [c.on, c.status, c.statusText])).toEqual([
-			[false, 'off', 'Off'],
-			[false, 'off', 'Off']
+		expect(claude.credentials.map((c) => [c.on, c.enabled, c.status, c.statusText])).toEqual([
+			[false, false, 'off', 'Off'],
+			[true, true, 'ok', 'Active for Claude API']
 		]);
-		expect(claude.onCount).toBe(0);
-		expect(claudeHeaderStatus(summary)).toEqual({ status: 'off', text: 'Off, not in the picker' });
+		expect(claude.onCount).toBe(1);
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Subscription off · API key on' });
+		const noKey = claudeSummary({ mode: 'off', api_key: { set: false, last4: null } });
+		expect(claudeHeaderStatus(noKey)).toEqual({ status: 'off', text: 'Off, not in the picker' });
 	});
 
 	it('is not connected and needs nothing when Claude was never set up', () => {
@@ -416,7 +419,7 @@ describe('saved accounts and active slots', () => {
 		expect(addableKinds(openai).map((k) => k.hint)).toEqual(['Becomes active after sign-in', 'New key becomes active']);
 	});
 
-	it.each(['subscription', 'cloud', 'off'] as const)('lists saved Anthropic keys separately from %s mode', (mode) => {
+	it.each(['subscription', 'cloud', 'off'] as const)('lists saved Anthropic keys with their own switch in %s mode', (mode) => {
 		const accounts = {
 			api_key: [
 				{ id: 'personal', label: 'Personal', active: false, masked_key: 'sk-ant-…1111', last4: '1111' },
@@ -427,9 +430,9 @@ describe('saved accounts and active slots', () => {
 		};
 		const claude = byId(buildProviders(input({ claude: claudeSummary({ mode, accounts }) })), 'claude');
 		const keys = claude.credentials.filter((c) => c.flavor === 'anthropic');
-		expect(keys.map((c) => [c.item, c.name, c.active, c.on])).toEqual([
-			['claude:api-key:personal', 'Personal', false, false],
-			['claude:api-key:work', 'Work', true, mode !== 'off']
+		expect(keys.map((c) => [c.item, c.name, c.active, c.on, c.enabled, c.switchable])).toEqual([
+			['claude:api-key:personal', 'Personal', false, false, false, true],
+			['claude:api-key:work', 'Work', true, true, true, true]
 		]);
 		expect(addableKinds(claude).map((k) => k.menuLabel)).toContain('Another API key');
 		expect(addableKinds(claude).map((k) => k.flavor)).not.toContain('cli');
@@ -487,13 +490,14 @@ describe('saved Claude subscriptions', () => {
 		};
 		const claude = withSubs(accounts, { cli: { ...claudeSummary().cli, email: 'work@example.com', plan: 'pro' } });
 		expect(claude.credentials.map((c) => [c.item, c.name, c.summary, c.statusText, c.active, c.on, c.switchable])).toEqual([
-			[claudeSubItem('sub-default'), 'Personal', 'owner@example.com, Max plan', 'Saved', false, false, true],
+			[claudeSubItem('sub-default'), 'Personal', 'owner@example.com, Max plan, off', 'Off', false, false, true],
 			[claudeSubItem('work'), 'Work', 'work@example.com, Pro plan', 'Active for Claude', true, true, true]
 		]);
 		const cloudMode = withSubs(accounts, { mode: 'cloud' });
-		expect(cloudMode.credentials.filter((c) => c.flavor === 'cli').map((c) => [c.statusText, c.on, c.status])).toEqual([
-			['Saved', false, 'standby'],
-			['Selected for subscription mode', false, 'standby']
+		// Claude Code on the cloud: the subscription is off, so every sign-in's switch is off.
+		expect(cloudMode.credentials.filter((c) => c.flavor === 'cli').map((c) => [c.statusText, c.on, c.enabled, c.status])).toEqual([
+			['Off', false, false, 'off'],
+			['Off', false, false, 'off']
 		]);
 		expect(addableKinds(claude).find((k) => k.flavor === 'cli')?.menuLabel).toBe('Another Subscription');
 	});
@@ -514,7 +518,7 @@ describe('saved Claude subscriptions', () => {
 		}, { cli: { ...claudeSummary().cli, signed_in: false } });
 		expect(claude.credentials.map((c) => [c.item, c.statusText, c.status, c.on, c.attention])).toEqual([
 			[CLAUDE_SUB_ITEM, 'Not signed in', 'warn', false, true],
-			[claudeSubItem('work'), 'Saved', 'standby', false, false]
+			[claudeSubItem('work'), 'Off', 'off', false, false]
 		]);
 		expect(attentionCount([claude])).toBe(1);
 	});
@@ -530,7 +534,7 @@ describe('saved Claude subscriptions', () => {
 		}, { cli: { ...claudeSummary().cli, signed_in: false } });
 		expect(saved.credentials.map((c) => [c.name, c.summary, c.statusText, c.status, c.attention])).toEqual([
 			['A', 'Sign in again', 'Sign in again', 'warn', true],
-			['B', 'Sign in again', 'Sign in again', 'standby', false]
+			['B', 'Sign in again', 'Sign in again', 'off', false]
 		]);
 		expect(attentionCount([saved])).toBe(1);
 		expect(JSON.stringify(saved.credentials)).not.toMatch(/unofficial|unsupported/i);

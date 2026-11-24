@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * One saved Anthropic key. The selected key is the "Claude API" provider
-	 * beside the subscription; selecting a key never changes the Claude Code mode.
+	 * beside the subscription, with its own switch: the subscription being off never
+	 * stops it.
 	 */
 	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -78,7 +79,7 @@
 					<SettingRow label="Name"><TextField value={account.label} width={260} maxlength={120} disabled={saving} onchange={rename} /></SettingRow>
 				{/if}
 				<SettingRow id="providers.anthropicKey" label="Key"><ValueText mono tone="fg" value={masked} /></SettingRow>
-				<SettingRow label="Account selection" hint="The selected key runs Claude · API models; changing it keeps the Claude Code mode unchanged">
+				<SettingRow label="Account selection" hint="The key that is on runs Claude · API models, whether the subscription is on or off">
 					<ValueText value={credential.statusText} status={credential.status} />
 				</SettingRow>
 				<SettingRow label="Another API key" hint="The new key becomes selected">

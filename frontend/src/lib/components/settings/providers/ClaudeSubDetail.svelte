@@ -44,7 +44,7 @@
 	import { ClaudeCliLogin } from './claude-cli-login.svelte';
 	import { LoopGuard } from './loop-guard.svelte';
 	import { claudePlan, type CredentialView, type ProviderView } from './providers-model';
-	import { changeClaudeMode, startSetup } from './provider-actions';
+	import { startSetup } from './provider-actions';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { terminals } from '$lib/stores/terminals.svelte';
 	import { terminalAccess } from '$lib/terminal/gating';
@@ -87,11 +87,9 @@
 
 	const position = $derived(
 		inactive
-			? 'Saved, not active'
-			: mode === 'off'
-			? 'Claude is off'
+			? 'Saved, off'
 			: mode !== 'subscription'
-				? 'Standby for Claude'
+				? 'Off'
 				: signedIn
 					? 'Runs every Claude session'
 					: 'Selected, not ready'
@@ -239,11 +237,9 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
-		{#if account}<CredentialControl {credential} showState />{/if}
+		{#if account || credential.switchable}<CredentialControl {credential} showState />{/if}
 		{#if account?.kind === 'saved' && account.needs_sign_in}
 			{#if !cli.terminalOpen}<button type="button" class="st-btn primary" disabled={access.readOnly || saving} onclick={signInAgain}><SquareTerminal />Sign in again</button>{/if}
-		{:else if !inactive && mode !== 'subscription'}
-			<button type="button" class="st-btn" onclick={() => changeClaudeMode('subscription')}>Use for Claude</button>
 		{:else if !inactive && !signedIn && canUseTerminal && status?.installed && !cli.terminalOpen}
 			<button type="button" class="st-btn primary" onclick={startSignIn}><SquareTerminal />Sign in</button>
 		{:else if !inactive}
@@ -258,7 +254,7 @@
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Overview'}
 			{#if several}
-				<p class="pv-note">Save several Claude sign-ins on this worker; Claude Code uses one at a time. Switching keeps the Claude Code mode unchanged.</p>
+				<p class="pv-note">Save several Claude sign-ins on this worker; Claude Code uses one at a time: turning one on turns the others off. Your API key has its own switch.</p>
 			{:else}
 				<p class="pv-note">Claude uses one subscription sign-in on this worker. To change it, sign out and sign in again. You can save multiple Anthropic API keys separately.</p>
 			{/if}
@@ -267,7 +263,7 @@
 					<SettingRow label="Name">
 						<TextField value={account.label} width={220} maxlength={120} disabled={saving || access.readOnly} label="Name" onchange={rename} />
 					</SettingRow>
-					<SettingRow label="Account selection" hint="Switching keeps the Claude Code mode unchanged">
+					<SettingRow label="Account selection" hint="Turning this on turns your other sign-ins off; the API key keeps its own switch">
 						<ValueText value={credential.statusText} status={credential.status} />
 					</SettingRow>
 					<SettingRow label="Another Subscription" hint="Saved after sign-in; select it when ready">

@@ -491,7 +491,10 @@ def test_payload_carries_the_credential_gate(authenticated_client):
 
 
 @pytest.mark.real_agent_gate
-def test_put_off_turns_claude_off(authenticated_client):
+def test_put_off_turns_the_subscription_off_and_leaves_claude_api_on(authenticated_client):
+    """``off`` is the subscription row's switch: Claude Code runs are refused,
+    but the saved key's "Claude · API" provider has its own switch and still
+    runs, so the worker as a whole can start agents."""
     from app.core import credential_gate
 
     db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
@@ -504,7 +507,8 @@ def test_put_off_turns_claude_off(authenticated_client):
     assert [m["value"] for m in body["modes"]] == ["subscription", "cloud", "off"]
     assert body["gate"]["mode"] == "off"
     assert body["gate"]["claude_credential_ready"] is False
-    assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
+    assert body["gate"]["reason"] is None  # Claude · API still runs on the key
+    assert body["gate"]["ready_providers"] == ["gw:claude-api"]
     assert body["claude_reason"] == credential_gate.OFF_MESSAGE
     integrations = authenticated_client.get("/api/v1/settings/integrations").json()
     assert integrations["claude_auth_mode"] == "off"
