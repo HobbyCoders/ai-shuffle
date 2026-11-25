@@ -9,8 +9,9 @@ This module was split for maintainability. Sub-modules:
 """
 
 import asyncio
+import functools
 import uuid
-from typing import List, Literal, Optional
+from typing import Callable, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Depends, Query, Response, status, Request
 from pydantic import TypeAdapter
@@ -104,6 +105,7 @@ from app.api.sessions_create import CreateSessionResponse, create_empty_session
 from app.api.sessions_permissions import router as permissions_router
 from app.api.sessions_uploads import router as uploads_router
 from app.api.sessions_attach import router as attach_router
+from app.api.sessions_broadcast import router as broadcast_router
 
 # ---------------------------------------------------------------------------
 # Router setup — include sub-routers so all endpoints are served
@@ -115,6 +117,7 @@ router.include_router(worktree_router)
 router.include_router(permissions_router)
 router.include_router(uploads_router)
 router.include_router(attach_router)
+router.include_router(broadcast_router)
 # POST /api/v1/sessions: an empty session from the composer's picks. Added on
 # this router directly because a sub-router cannot own the bare prefix path.
 router.add_api_route(
@@ -1854,12 +1857,23 @@ async def delete_session(
 
 
 async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
-                          unreachable: Optional[dict[str, str]] = None) -> None:
-    """Delete on the execution owner before removing a read-only catalog copy."""
+                          unreachable: Optional[dict[str, str]] = None,
+                          matches: Optional[Callable[[dict], bool]] = None) -> bool:
+    """Delete on the execution owner before removing a read-only catalog copy.
+
+    ``matches`` makes it conditional on the locked row (project removal):
+    then only a chat this worker executes is deleted, and False means it
+    was left alone because it no longer matched.
+    """
     from app.network import control, engine, membership
 
     session_id = existing["id"]
     owner = control.owner_of(existing)
+    if matches is not None:
+        if owner is not None:
+            return False
+        if not await run_sync(functools.partial(database.delete_session, session_id, matches=matches)):
+            return False
     ctx = engine.context()
     member = ctx.member(owner) if ctx is not None and owner else None
     # A removed/unknown owner can no longer authorize control. Preserve the
@@ -1879,7 +1893,8 @@ async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
             raise HTTPException(409, "The owning worker did not confirm deletion")
 
     # Delete DB row first — cheap and authoritative for the UI.
-    await run_sync(database.delete_session, session_id)
+    if matches is None:
+        await run_sync(database.delete_session, session_id)
     from app.core import browser_runtime
     await browser_runtime.close_session(session_id)
 
@@ -1907,6 +1922,7 @@ async def _delete_session(existing: dict, background_tasks: BackgroundTasks, *,
             existing.get("sdk_session_id"),
             existing.get("project_id"),
         )
+    return True
 
 
 async def handle_delete(body: dict, from_device: str) -> Response:

@@ -7,8 +7,9 @@ object has no such gap. Every process the job's member starts joins the job
 too, and with ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` closing the last handle
 terminates all of them, including after a crash of the process holding it.
 
-Everything here is best-effort and never raises; on other platforms every
-function is a no-op that returns None.
+Everything here is best-effort and never raises, except
+:func:`resume_process`, whose failure the caller must act on; on other
+platforms every job function is a no-op that returns None.
 """
 
 from __future__ import annotations
@@ -20,8 +21,10 @@ log = logging.getLogger(__name__)
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_PROCESS_SUSPEND_RESUME = 0x0800
 
 
 def _kernel32():  # pragma: no cover - win32 only
@@ -75,48 +78,11 @@ def assign_kill_on_close_job_handle(process: int | None) -> int | None:
         return None
     job = None
     try:  # pragma: no cover - win32 only
-        ctypes, wintypes, kernel32 = _kernel32()
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                (name, ctypes.c_ulonglong)
-                for name in (
-                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-                )
-            ]
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
+        _ctypes, _wintypes, kernel32 = _kernel32()
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             return None
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel32.SetInformationJobObject(
-            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info),
-        ):
+        if not _set_limit_flags(job, _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE):
             kernel32.CloseHandle(job)
             return None
         if not kernel32.AssignProcessToJobObject(job, process):
@@ -129,6 +95,73 @@ def assign_kill_on_close_job_handle(process: int | None) -> int | None:
         return None
 
 
+def _set_limit_flags(job: int, flags: int) -> bool:  # pragma: no cover - win32 only
+    """Set a job's basic limit flags; True when Windows accepted them."""
+    ctypes, wintypes, kernel32 = _kernel32()
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_ulonglong)
+            for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = flags
+    return bool(kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info),
+    ))
+
+
+def resume_process(pid: int) -> None:  # pragma: no cover - win32 only
+    """Resume every thread of a process started with ``CREATE_SUSPENDED``.
+
+    ``subprocess`` closes the primary thread's handle at spawn, so the
+    process is resumed as a whole through ``NtResumeProcess`` (what psutil's
+    ``Process.resume`` uses). Raises :class:`OSError` when it cannot be
+    resumed; the caller must then kill the process rather than leave it
+    suspended.
+    """
+    ctypes, wintypes, kernel32 = _kernel32()
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    process = kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+    if not process:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        status = ntdll.NtResumeProcess(process)
+    finally:
+        kernel32.CloseHandle(process)
+    if status < 0:
+        raise OSError(f"NtResumeProcess failed for process {pid} (NTSTATUS 0x{status & 0xFFFFFFFF:08X})")
+
+
 def close_job(handle: int | None) -> None:
     """Close a job from :func:`assign_kill_on_close_job`, ending every member."""
     if handle is None or sys.platform != "win32":
@@ -138,3 +171,71 @@ def close_job(handle: int | None) -> None:
         kernel32.CloseHandle(handle)
     except Exception:  # noqa: BLE001
         log.debug("closing job handle failed", exc_info=True)
+
+
+def terminate_job(handle: int | None) -> bool:
+    """End every member of a job, keeping the handle open; True when Windows did."""
+    if handle is None or sys.platform != "win32":
+        return False
+    try:  # pragma: no cover - win32 only
+        _ctypes, wintypes, kernel32 = _kernel32()
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        return bool(kernel32.TerminateJobObject(handle, 1))
+    except Exception:  # noqa: BLE001
+        log.debug("terminating job %s failed", handle, exc_info=True)
+        return False
+
+
+def job_active_processes(handle: int | None) -> int | None:
+    """How many processes the job still holds; None when that cannot be read."""
+    if handle is None or sys.platform != "win32":
+        return None
+    try:  # pragma: no cover - win32 only
+        ctypes, wintypes, kernel32 = _kernel32()
+
+        class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not kernel32.QueryInformationJobObject(
+            handle, _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info), ctypes.sizeof(info), None,
+        ):
+            return None
+        return int(info.ActiveProcesses)
+    except Exception:  # noqa: BLE001
+        log.debug("reading job %s failed", handle, exc_info=True)
+        return None
+
+
+def release_job(handle: int | None) -> None:
+    """Close a job WITHOUT ending its members.
+
+    For a command that finished normally: whatever it left running on
+    purpose keeps running, as it does on POSIX. When the kill-on-close limit
+    cannot be lifted the handle stays open (a small leak) rather than killing
+    processes nobody asked to stop.
+    """
+    if handle is None or sys.platform != "win32":
+        return
+    try:  # pragma: no cover - win32 only
+        _ctypes, _wintypes, kernel32 = _kernel32()
+        if _set_limit_flags(handle, 0):
+            kernel32.CloseHandle(handle)
+        else:
+            log.debug("could not lift kill-on-close from job %s; leaving it open", handle)
+    except Exception:  # noqa: BLE001
+        log.debug("releasing job handle failed", exc_info=True)

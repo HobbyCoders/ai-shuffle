@@ -7,8 +7,11 @@
  *   GET    /projects/overview                    every logical project, with every approved worker's state
  *   GET    /projects/workers?<ref>               one project's per-worker detail (Workers tab)
  *   POST   /projects/setup                       start a setup (202)
+ *   POST   /projects/clone                       create a project by cloning it here (202)
+ *   GET    /projects/setup/{op_id}               one setup on this worker (status, progress, project id)
  *   POST   /projects/setup/{op_id}/cancel        best-effort cancel (409 once finished)
- *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record (files untouched)
+ *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record and its chats there (files untouched)
+ *   GET    /projects/{id}/removal                what DELETE /projects/{id} removes here (chat count, kept worktree folders)
  *   PUT    /projects/catalog/repository?<ref>    point the project at another repository on every worker
  *   POST   /projects/catalog/forget?<ref>        take a project no worker holds off the list (nothing deleted)
  *
@@ -92,6 +95,12 @@ export interface ProjectWorkerDetail extends ProjectWorker {
 	branch: string | null;
 	dirty: boolean | null;
 	changed_files: number | null;
+	/** Chats "Remove project and chats" deletes on that worker; null from an older worker. */
+	removal_chats?: number | null;
+	/** Worktree folders whose records go with the project while the folders stay on disk. */
+	removal_worktree_count?: number | null;
+	/** Their paths; owner/admin only. */
+	removal_worktrees?: string[] | null;
 	last_seen: string | null;
 }
 
@@ -131,6 +140,26 @@ export function refQuery(ref: ProjectRef): string {
 	return 'project_v2_id' in ref
 		? `project_v2_id=${encodeURIComponent(ref.project_v2_id)}`
 		: `project_id=${encodeURIComponent(ref.project_id)}`;
+}
+
+/**
+ * A comparison key for a Git remote in any spelling (HTTPS, SSH `git@host:o/r`,
+ * with or without `.git`, credentials or a trailing slash): `host/owner/repo`
+ * lower-cased. Mirrors the server's `display_remote`, so it also matches an
+ * overview row's `remote`. Empty for a blank URL.
+ */
+export function remoteKey(url: string | null | undefined): string {
+	let text = (url ?? '').trim();
+	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(.*)$/.exec(text);
+	if (scheme) {
+		text = scheme[1].replace(/^[^@/]*@/, '');
+	} else {
+		const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.*)$/.exec(text);
+		if (scp && scp[1].length > 1) text = `${scp[1]}/${scp[2]}`;
+	}
+	text = text.replace(/\/+$/, '');
+	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
+	return text.toLowerCase();
 }
 
 /** True for an answer that means "this worker has no such route" (an older worker). */
@@ -174,8 +203,64 @@ export function startProjectSetup(ref: ProjectRef, request: SetupRequest): Promi
 	return api.post<SetupResponse>('/projects/setup', { ...ref, mode: 'auto', ...request });
 }
 
+export interface CloneNewProjectRequest {
+	id: string;
+	name: string;
+	clone_url: string;
+	/** A folder name or path on this worker; omitted = `<workspace>/<id>`. */
+	folder?: string;
+}
+
+export interface CloneNewProjectResponse {
+	op_id: string;
+	project_v2_id: string;
+	/** The id the project gets once the clone succeeded. */
+	project_id: string;
+	status: string;
+}
+
+/** One setup on this worker; `project_id` is set once it is done. */
+export interface SetupStatus extends ProjectSetupInfo {
+	project_v2_id: string | null;
+	project_id: string | null;
+}
+
+/**
+ * Create a project by cloning a repository on this worker. The clone runs in
+ * the background (poll `getSetupStatus`); the project is registered only once
+ * it succeeded. 409 with `error_code: 'already_added'` (and `project_id`)
+ * when the repository is already a project here; 409 with
+ * `error_code: 'being_set_up'` (and `worker`) while another worker is
+ * cloning it as a new project.
+ */
+export function cloneNewProject(request: CloneNewProjectRequest): Promise<CloneNewProjectResponse> {
+	return api.post<CloneNewProjectResponse>('/projects/clone', request);
+}
+
+export function getSetupStatus(opId: string): Promise<SetupStatus> {
+	return api.get<SetupStatus>(`/projects/setup/${encodeURIComponent(opId)}`);
+}
+
 export function cancelProjectSetup(opId: string): Promise<{ status: string }> {
 	return api.post<{ status: string }>(`/projects/setup/${encodeURIComponent(opId)}/cancel`);
+}
+
+export interface ProjectRemovalPreview {
+	project_id: string;
+	/** Chats `DELETE /projects/{id}` deletes on this worker. */
+	chats: number;
+	/** Worktree folders whose records go with the project; the folders stay on disk. */
+	worktrees: string[];
+}
+
+/** What removing this worker's project row does. `null` when this worker predates the endpoint. */
+export async function getProjectRemovalPreview(projectId: string): Promise<ProjectRemovalPreview | null> {
+	try {
+		return await api.get<ProjectRemovalPreview>(`/projects/${encodeURIComponent(projectId)}/removal`);
+	} catch (error) {
+		if (isUnsupported(error)) return null;
+		throw error;
+	}
 }
 
 export async function removeProjectFromWorker(installId: string, ref: ProjectRef): Promise<void> {

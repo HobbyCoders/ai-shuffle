@@ -23,17 +23,19 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any, TypeVar
 
 import httpx
 
+from fluid.context.screening import credential_values, redact_secrets, redact_text
 from fluid.providers._retry import (
     BILLING_STATUS,
     RETRIABLE_STATUSES,
     billing_error_code,
-    is_usage_limit,
     is_usage_limit_text,
+    parse_retry_after,
+    usage_limit_evidence,
 )
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
@@ -262,21 +264,31 @@ def usage_limit_summary(detail: str | None) -> str | None:
 
 def refusal_payload(
     status: int, text: str, retry_after: str | None = None,
+    *, secrets: Iterable[str] = (),
 ) -> dict[str, Any]:
     """The ``error`` chunk payload for a non-200 response.
+
+    ``text`` is redacted first (``secrets`` are the request's own credential
+    values; see fluid.context.screening.redact_text), before any clip could
+    cut a credential in half and leave a prefix no later pass recognises.
 
     Whether it is retried follows the status, except for a billing refusal:
     an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
     retried, because no wait clears it. Only a billing code in the body is
     called "out of credit"; a bare 402 carries the provider's explanation.
-    A usage limit (see fluid.providers._retry.is_usage_limit; ``retry_after``
-    is the response's Retry-After header) keeps its 429 but is never retried
-    either: the turn stops on it and the user sees the limit.
+    A usage limit (its structured fields say so, see
+    fluid.providers._retry.usage_limit_evidence; ``retry_after`` is the
+    response's Retry-After header) keeps its 429 but is never retried either.
+    Its Retry-After, when the response gave one, rides along as
+    ``retry_after_seconds``: the host must not resume before it. Any other
+    429, whatever its wording, follows the retry policy.
     """
+    text = redact_text(text, secrets)
     summary = provider_error_summary(text)
     code = billing_error_code(text)
-    if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
-        return {
+    if code is None and status != BILLING_STATUS and usage_limit_evidence(status, text):
+        wait = parse_retry_after(retry_after)
+        limited: dict[str, Any] = {
             "status": status,
             "message": (
                 f"the provider refused the request with HTTP {status}: a usage "
@@ -284,8 +296,12 @@ def refusal_payload(
             ),
             "provider_message": usage_limit_summary(summary),
             "retriable": False,
+            # The typed verdict a host reads (``ErrorEvent.usage_limit``).
             "usage_limit": True,
         }
+        if wait is not None and wait > 0:
+            limited["retry_after_seconds"] = wait
+        return limited
     if code is None and status != BILLING_STATUS:
         return {
             "status": status,
@@ -349,6 +365,46 @@ def is_usable_client(client: Any) -> bool:
     """True when an httpx client can still send. Unknown objects count as usable
     (test doubles and wrappers need not implement ``is_closed``)."""
     return client is not None and not getattr(client, "is_closed", False)
+
+
+# Request headers whose values are credentials.
+_CREDENTIAL_HEADER_RE = re.compile(r"auth|key|token|secret|cookie", re.IGNORECASE)
+
+
+def header_secrets(headers: Mapping[str, Any], placeholder: str | None = None) -> list[str]:
+    """The credential values a request carries in ``headers``: each whole
+    value and, for ``Bearer <token>``-style values, the bare token.
+    ``placeholder`` is a key the client chose itself because none was
+    configured (the local provider's ``local``): a header carrying exactly
+    that is no credential and is left out. A configured key is kept
+    whatever its spelling."""
+    out: list[str] = []
+    for name, value in headers.items():
+        if not isinstance(value, str) or not _CREDENTIAL_HEADER_RE.search(str(name)):
+            continue
+        _scheme, _, token = value.partition(" ")
+        token = token.strip()
+        if placeholder and placeholder in (value, token):
+            continue
+        out.extend(credential_values([value, token]))
+    return out
+
+
+async def redact_errors(chunks: AsyncIterator[Any], secrets: list[str]) -> AsyncIterator[Any]:
+    """``chunks`` with every ``error`` chunk's payload redacted.
+
+    An upstream error body, or an exception's text, can echo the request's
+    own credential (a proxy that quotes the Authorization header back). The
+    error becomes an event, a transcript row and CLI output, so the exact
+    values in ``secrets`` and the recognised credential shapes are removed
+    first. ``secrets`` is read at each error, so a caller may add a token it
+    fetched mid-call. The source is closed with this generator.
+    """
+    async with contextlib.aclosing(chunks) as source:
+        async for chunk in source:
+            if chunk.kind == "error":
+                chunk = type(chunk)("error", redact_secrets(chunk.payload, secrets))
+            yield chunk
 
 
 async def with_deadline(

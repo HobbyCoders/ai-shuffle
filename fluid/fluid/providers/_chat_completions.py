@@ -16,11 +16,12 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from typing import Any
 
 import httpx
 
+from fluid.context.screening import redact_text
 from fluid.providers._trace import trace_request
 
 from fluid.messages import (
@@ -39,7 +40,7 @@ from fluid.providers._retry import (
     billing_error_code,
     coerce_status,
     is_retriable_status,
-    is_usage_limit,
+    usage_limit_evidence,
 )
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
@@ -49,11 +50,13 @@ from fluid.providers._transport import (
     StreamDeadlineExceeded,
     deadline_error_payload,
     first_byte_note,
+    header_secrets,
     is_closed_client_error,
     billing_summary,
     is_usable_client,
     open_stream,
     provider_error_summary,
+    redact_errors,
     refusal_payload,
     usage_limit_summary,
 )
@@ -278,7 +281,10 @@ class ChatCompletionsNormalizer:
     """Stateful normalizer: feed parsed chat/completions SSE chunks, get
     StreamChunks. One instance per stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, secrets: Iterable[str] = ()) -> None:
+        # The request's own credential values: an in-stream error is
+        # redacted against them before its message is clipped.
+        self._secrets = secrets
         self.errored = False
         self.finished = False
         # OpenRouter's own verdict on the upstream call, e.g. "network_error"
@@ -387,9 +393,13 @@ class ChatCompletionsNormalizer:
                 self.native_stop_reason = str(choice["native_finish_reason"])
         return out
 
-    @staticmethod
-    def _error_payload(err: Any) -> dict[str, Any]:
-        """The ``error`` chunk for an in-stream error object (or none)."""
+    def _error_payload(self, err: Any) -> dict[str, Any]:
+        """The ``error`` chunk for an in-stream error object (or none).
+
+        The message is redacted before the summary and the clip are taken
+        from it: a cut first could leave half a credential (a URL password
+        without its ``@host``) that the stream's error wrapper no longer
+        recognises."""
         if isinstance(err, dict):
             message = str(err.get("message") or err)
             code = err.get("code")
@@ -399,6 +409,7 @@ class ChatCompletionsNormalizer:
             message, code = str(err), None
         else:
             message, code = "the provider ended the stream with an error", None
+        message = redact_text(message, self._secrets)
         # The embedded code decides retriability, exactly as a non-200 status
         # would: a Cloudflare 520 from the upstream provider is a blip worth
         # another attempt, an auth or validation failure is not. A symbolic
@@ -409,7 +420,11 @@ class ChatCompletionsNormalizer:
             status = SYMBOLIC_CODE_STATUS.get(code)
         summary = provider_error_summary(message)
         billing = billing_error_code(err)
-        usage_limit = billing is None and is_usage_limit(status, err)
+        # A usage limit, and the typed verdict a host reads
+        # (``ErrorEvent.usage_limit``): structured fields only, never the
+        # wording or the wait.
+        usage_limit = billing is None and usage_limit_evidence(
+            status if status is not None else code, err)
         if billing is not None:
             status = 402
             summary = billing_summary(billing, summary)
@@ -424,6 +439,7 @@ class ChatCompletionsNormalizer:
             "provider_message": summary,
             # A usage limit keeps its 429 but is never retried.
             "retriable": is_retriable_status(status) and not usage_limit,
+            **({"usage_limit": True} if usage_limit else {}),
         }
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
@@ -573,11 +589,32 @@ class ChatCompletionsNormalizer:
 FIRST_DATA_TIMEOUT = 30.0
 
 
-async def stream_chat_completions(
+def stream_chat_completions(
     url: str,
     body: dict[str, Any],
     headers: dict[str, str],
     *,
+    placeholder_key: str | None = None,
+    **kwargs: Any,
+) -> AsyncIterator[StreamChunk]:
+    """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks
+    (see :func:`_stream_chat_completions`). Error chunks never carry the
+    credential values in ``headers``, which a proxy can echo back, except
+    ``placeholder_key``: a key the caller substituted because none was
+    configured (see header_secrets).
+    """
+    secrets = header_secrets(headers, placeholder_key)
+    return redact_errors(
+        _stream_chat_completions(url, body, headers, secrets=secrets, **kwargs), secrets,
+    )
+
+
+async def _stream_chat_completions(
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    *,
+    secrets: list[str],
     http_client: httpx.AsyncClient | None,
     timeout: float,
     retry: RetryPolicy,
@@ -684,29 +721,41 @@ async def stream_chat_completions(
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
                         refusal = refusal_payload(
-                            resp.status_code, text, resp.headers.get("retry-after"))
-                        if refusal["retriable"] and attempt < retry.max_retries:
-                            await asyncio.sleep(
-                                retry.delay(attempt, resp.headers.get("retry-after"))
-                            )
+                            resp.status_code, text, resp.headers.get("retry-after"),
+                            secrets=secrets)
+                        wait = retry.refusal_delay(
+                            attempt, refusal, resp.headers.get("retry-after"))
+                        if wait is not None:
+                            await asyncio.sleep(wait)
                             attempt += 1
                             continue
                         yield StreamChunk("error", with_request_evidence(refusal))
                         return
-                    normalizer = ChatCompletionsNormalizer()
+                    normalizer = ChatCompletionsNormalizer(secrets)
                     # ``[DONE]`` is the server's own end-of-stream sentinel.
                     # sse_events drops it (it is not JSON), so it is noted on
                     # the way through: a stream that reached it was not cut.
+                    # Reading stops there. A server that leaves the connection
+                    # open after it (keepalives, a proxy holding the socket)
+                    # would otherwise turn a finished reply into a timeout;
+                    # leaving the response scope closes the connection.
                     done_seen = [False]
 
                     async def _lines(
-                        source: AsyncIterator[str] = diagnostics.lines(),
+                        source: AsyncGenerator[str, None] = diagnostics.lines(),
                         seen: list[bool] = done_seen,
                     ) -> AsyncIterator[str]:
-                        async for line in source:
-                            if line.strip().replace(" ", "") == "data:[DONE]":
-                                seen[0] = True
-                            yield line
+                        try:
+                            async for line in source:
+                                if line.strip().replace(" ", "") == "data:[DONE]":
+                                    seen[0] = True
+                                    # A blank line flushes a frame the server
+                                    # sent without its own terminator.
+                                    yield ""
+                                    return
+                                yield line
+                        finally:
+                            await source.aclose()
 
                     events = sse_events(_lines()).__aiter__()
                     starved = False

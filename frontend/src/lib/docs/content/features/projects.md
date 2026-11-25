@@ -14,10 +14,12 @@ A project is a folder on your worker, usually a code repository. Chats started i
 2. Choose **Add Project**.
 3. Choose where it comes from:
    - **Folder on** this worker: pick the folder, or type its path.
-   - **Clone from GitHub**: pick one of your repositories, or paste a clone URL. It clones into your workspace.
-4. Give it a display name and a project ID (lowercase letters, numbers and hyphens).
-5. If you have other workers, tick them under **Set it up on** to set the project up there as well. Offline workers are set up when they come back.
+   - **Clone from GitHub**: pick one of your repositories, or paste a clone URL. The dialog shows where the clone goes (your workspace, in a folder named after the project ID). Repositories that are already a project are marked **Already added**; open that project instead of adding it twice. If this worker (or another worker that shares its database) is already cloning or setting up the same repository, in any URL spelling, the dialog names that worker; wait for it to finish, or cancel it there. Paired workers that keep their own database aren't checked when you clone, so make sure a repository isn't already a project on one of them before you add it again.
+4. Give it a display name (up to 100 characters). The project ID is made from the name; to change it, open **Advanced** (lowercase letters, numbers and hyphens, up to 50).
+5. If you have other workers, tick them under **Set it up on** to set the project up there as well. Offline workers are set up when they come back. Until you change a tick, a repository starts with every online worker ticked and a plain folder with none.
 6. Choose **Add Project** (or **Clone project**, or **Create on N workers**).
+
+A clone shows its progress in the dialog, and the project is added only once the clone succeeds. If it fails, the dialog says why (for example the repository wasn't found, this worker's GitHub sign-in can't reach it, the folder already has other files, or the network dropped), nothing is added, and **Retry** tries again. You can close the dialog while a clone runs; it keeps going, and a notification tells you when it's done. If a chosen worker can't start its setup, a notification names it; the project's **Workers** tab shows setup progress.
 
 You can also ask an agent to add a project in an owner conversation with app configuration tools enabled. `listProjects` lists projects on the current worker. `createProject` takes a `name` and optional `id`, `path` and `description`. Without a path it creates a folder in the workspace; a supplied path attaches that folder, creating it if needed. Docker paths must stay in the workspace. These tools do not clone Git URLs; use Add Project or the Projects page for that.
 

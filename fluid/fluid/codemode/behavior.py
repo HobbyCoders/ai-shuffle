@@ -250,7 +250,7 @@ def rules_for(entries: Iterable[Any], *, project: str | None = None,
     ``project`` on ``model`` (or ``family``): ``all`` plus that family's,
     user-kept first, then newest."""
     wanted = family or family_for(model)
-    from fluid.codemode.facts import is_superseded
+    from fluid.codemode.facts import is_superseded, open_conflict
 
     def get(entry, name, default=None):
         return entry.get(name, default) if isinstance(entry, dict) else getattr(entry, name, default)
@@ -263,7 +263,7 @@ def rules_for(entries: Iterable[Any], *, project: str | None = None,
         scope = get(entry, "scope", "global")
         if project is not None and scope not in ("global", project):
             continue
-        if get(entry, "conflicted") or is_superseded(entry):
+        if open_conflict(entry) or is_superseded(entry):
             continue
         out.append(entry)
     out.sort(key=lambda e: (not get(e, "protected"), -(get(e, "updated_at") or 0.0)))

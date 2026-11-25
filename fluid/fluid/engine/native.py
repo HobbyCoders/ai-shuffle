@@ -62,7 +62,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -244,6 +244,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    claim_session,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -506,6 +507,12 @@ class _CallResult:
     # The provider's own short explanation of the error (≤300 chars, HTML
     # stripped), for the ErrorEvent; ``error_message`` may be the raw body.
     error_provider_message: str | None = None
+    # The provider's Retry-After when it was too long to wait out, so the
+    # refusal was surfaced instead of retried (``retry_after_seconds``).
+    error_retry_after: float | None = None
+    # The refusal is a spent usage allowance, as the transport classified it
+    # (the error chunk's ``usage_limit``), not a transient rate limit.
+    error_usage_limit: bool = False
     # The stream failed while a tool_use block was still open: the provider
     # cut it mid-arguments. Such a call is retried under its own, lower cap
     # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
@@ -1715,6 +1722,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._session is None:
             resumed = False
             if self._session_id is not None:
+                # Lock before reading the head and the last event seq, so
+                # both include another process's writes (claim_session).
+                claim_session(self.store, self._session_id)
                 session = await self.store.get_session(self._session_id)
                 if session is not None:
                     await self._seed_bus_seq(session.session_id)
@@ -1885,11 +1895,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         return decision
 
     async def _stop_hook_continuation(
-        self, sid: str, turn_id: str, result: _CallResult, continuations: int
+        self, sid: str, turn_id: str, result: _CallResult, continuations: int,
+        *, budget_left: bool = True,
     ) -> str | None:
         """Run the TurnEnd hooks on a finished reply. Returns the reason the
         model should keep going, or None to end the turn. A block past
-        MAX_STOP_HOOK_CONTINUATIONS is reported and ignored; a hook's
+        MAX_STOP_HOOK_CONTINUATIONS, or once the turn has used its model-call
+        budget (``budget_left`` False), is reported and ignored; a hook's
         ``continue: false`` always ends the turn."""
         decision = await self._emit_turn_end_hook(
             sid, turn_id, text=_plain_text(result.message.content),
@@ -1913,6 +1925,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 message=(
                     f"Stop hook asked to continue ({reason}) but the turn already "
                     f"continued {continuations} times; ending it"
+                ),
+                hook_event=TURN_END,
+            ))
+            return None
+        if not budget_left:
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="warning",
+                message=(
+                    f"Stop hook asked to continue ({reason}) but the turn "
+                    "reached its model-call limit; ending it"
                 ),
                 hook_event=TURN_END,
             ))
@@ -2814,6 +2836,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if task is not None and not task.done():
             task.cancel()
 
+    def _model_call_budget_left(self, num_calls: int) -> bool:
+        """Whether this turn may send another model request."""
+        cap = self.max_model_calls_per_turn
+        return cap is None or num_calls < cap
+
     def _human_wait_pending(self) -> bool:
         """A permission or question is out to the user: silence is not a hang."""
         for futures in (self._pending_permissions, self._pending_questions):
@@ -2821,6 +2848,40 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if not fut.done():
                     return True
         return False
+
+    async def _park_on_human(
+        self, fut: asyncio.Future, notify: Awaitable[None], timeout: float | None,
+    ) -> str:
+        """Wait for a registered permission/question ``fut`` while ``notify`` runs.
+
+        The Notification hooks run beside the wait instead of in front of it,
+        so a slow hook neither delays the answer nor holds off a Stop. Returns
+        ``"answered"``, ``"interrupted"`` or ``"timeout"``. Once answered, the
+        notice already under way is let finish, as it always was, unless a
+        Stop lands first: the finish still races the Interrupt, because some
+        callers (a provider-fallback prompt) sit outside the interruptible
+        tool wrapper and nothing else would cut a hung hook short. An
+        interrupt, a timeout or a cancellation ends the notice with the wait.
+        """
+        notifier = asyncio.ensure_future(notify)
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {fut, interrupt_wait}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if fut in done:
+                done, _ = await asyncio.wait(
+                    {notifier, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED,
+                )
+                return "answered" if notifier in done else "interrupted"
+            return "interrupted" if interrupt_wait in done else "timeout"
+        finally:
+            interrupt_wait.cancel()
+            if not notifier.done():
+                notifier.cancel()
+            elif not notifier.cancelled() and notifier.exception() is not None:
+                log.debug("notification hooks failed", exc_info=notifier.exception())
 
     async def _turn_watchdog(self, limit: float) -> None:
         """Cancel the turn after ``limit`` seconds without any emitted event.
@@ -4201,6 +4262,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         drop_retry_effort: str | None = None  # lowered effort for the next call only
 
         while True:
+            if num_calls and not self._model_call_budget_left(num_calls):
+                # The cap holds for every provider dispatch: an empty-response
+                # or dropped-stream retry, a max_tokens or Stop-hook
+                # continuation each count as one call (any of them can bill),
+                # so a turn capped at N never sends request N+1. One
+                # deliberate exception: an Ultrafast request the provider
+                # refused did no model work and is uncounted (see the
+                # ``ultrafast_refused`` branch), so a turn capped at one call
+                # still sends the Standard request that follows it.
+                final_stop = "max_calls"
+                break
             nodes = await self._context_path(sid, parent.node_id)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid, nodes)
@@ -4440,6 +4512,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Set after the dud call's own probe fields: the call
                     # that follows is the first without the key.
                     self._sticky_drop_unreported = True
+                if not self._model_call_budget_left(num_calls):
+                    # A retry is a model call too: at the cap, no backoff
+                    # and no retry notice for a request that never goes out.
+                    final_stop = "max_calls"
+                    break
                 attempt = truncated_retries if truncated else empty_retries
                 delay = _empty_retry_delay(attempt)
                 await self._emit(ProviderRetry(
@@ -4500,6 +4577,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if (
                     arg_stream_retries < _ARG_STREAM_MAX_RETRIES
                     and not self._interrupted.is_set()
+                    # The reissue is a model call: at the cap it takes the
+                    # spent-retry route below instead of announcing one.
+                    and self._model_call_budget_left(num_calls)
                 ):
                     # A degenerate generation is usually a one-off. Re-send the
                     # same history — nothing is
@@ -4558,8 +4638,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     reason="guardrail",
                 ))
+                # A retry on another model is a model call: at the cap the
+                # person is not asked to pick one that could never be sent.
+                budget_left = self._model_call_budget_left(num_calls)
                 if await self._guardrail_pause(
                     sid, turn_id, parent, result, num_calls, projected_prompt, total_usage,
+                    budget_left=budget_left,
                 ):
                     continue  # the same history, on the model the person chose
                 if self._interrupted.is_set():
@@ -4571,7 +4655,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         num_model_calls=num_calls,
                     ))
                     return
-                final_stop = "refusal"
+                final_stop = "refusal" if budget_left else "max_calls"
                 # Partial output a declined call streamed is discarded, never
                 # kept as the turn's reply.
                 result.message = Message(role="assistant", content=[])
@@ -4596,6 +4680,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                         replay_drop = lowered_effort is not None
                     else:
                         replay_drop = True
+                # Every retry below re-sends the request, a model call. At the
+                # cap none goes out, so none is announced, prompted for or
+                # backed off for: the failed call is still recorded and the
+                # turn ends on the cap.
+                budget_left = self._model_call_budget_left(num_calls)
+                retry_capped = False
+                if replay_drop and not budget_left:
+                    replay_drop, lowered_effort, retry_capped = False, None, True
                 # A failed HTTP request can still be billable. Record and
                 # publish it before deciding whether the context-overflow path
                 # is eligible for another escalation retry.
@@ -4691,11 +4783,22 @@ class NativeLoop(BackgroundLifecycleMixin):
                         delay_seconds=0.0, model=self.model,
                     ))
                     continue
-                if (
+                reasoning_retry = bool(
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
                     and "invalid_encrypted_content" in result.error_message
-                ):
+                )
+                if reasoning_retry and not budget_left:
+                    # No retry notice for a request the cap keeps from going out.
+                    retry_capped = True
+                # The two rewrite rungs below run at the cap too: only the
+                # rung itself knows whether it can reclaim anything (an
+                # oversized image the person attached leaves no earlier one
+                # to drop). When it can, the turn ends on the cap without a
+                # retry, and the rewrite (sticky, made at the turn's end) stays
+                # for the next turn. When it cannot, the provider's error
+                # surfaces as it does below the cap.
+                if reasoning_retry and not retry_capped:
                     # The history carries an encrypted reasoning blob the
                     # current model+account cannot decrypt — the session
                     # switched model or account on the same provider dialect
@@ -4718,7 +4821,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
                     continue
                 if (
-                    overflow_retries < 3
+                    not retry_capped
+                    and overflow_retries < 3
                     and _is_payload_rejection(
                         result.error_message or "", result.error_status
                     )
@@ -4747,9 +4851,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 batch_final=index == len(consumed) - 1,
                                 batch_before_tokens=consumed[0].before_tokens,
                             )
-                        continue
+                        if budget_left:
+                            continue
+                        retry_capped = True
                 if (
-                    overflow_retries < 3
+                    not retry_capped
+                    and overflow_retries < 3
                     and _is_context_overflow(
                         result.error_message or "", result.error_status
                     )
@@ -4786,65 +4893,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 batch_final=index == len(escalations) - 1,
                                 batch_before_tokens=escalations[0].before_tokens,
                             )
-                        continue
+                        if budget_left:
+                            continue
+                        retry_capped = True
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
-                #
-                # Whatever the user watched stream is kept, however the stream
-                # ended (a dropped connection, an in-stream error, a body cut
-                # before its terminal event): the visible text and the tool
-                # requests that closed, for a later user-directed continuation.
-                # The node is marked interrupted so no reader takes it for a
-                # finished answer. Incomplete arguments and opaque reasoning
-                # envelopes are not safe provider history and are dropped.
-                transport = bool(result.usage.get("transport_failure"))
-                completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
-                content = [
-                    block for block in result.message.content
-                    if (isinstance(block, Text) and block.text) or (
-                        isinstance(block, ToolUseBlock) and block.id in completed_ids
-                    )
-                ]
-                if content:
-                    node = SessionNode(
-                        node_id=new_id("node"), parent_id=parent.node_id,
-                        message=Message(
-                            role="assistant", content=content,
-                            provider_meta={
-                                INTERRUPTED_META_KEY: (
-                                    "transport_failure" if transport else "provider_error"
-                                ),
-                            },
-                        ),
-                    )
-                    await self._append_node(sid, node)
-                    parent = node
-                # The tool blocks that closed before the failure were already
-                # published as ToolUse events. Answer each one, so a host
-                # rendering the stream never keeps a tool card open for a call
-                # that will never run, and the stored call has its result.
-                text = (
-                    "Tool not executed: the provider connection was interrupted "
-                    "before the response finished."
-                    if transport else _FAILED_CALL_TOOL_TEXT
-                )
-                aborted = []
-                for tu in result.tool_uses:
-                    await self._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id,
-                        tool_use_id=tu["tool_use_id"], name=tu["name"],
-                        output=text, is_error=True,
-                    ))
-                    aborted.append(ToolResultBlock(
-                        tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
-                    ))
-                if aborted and content:
-                    node = SessionNode(
-                        node_id=new_id("node"), parent_id=parent.node_id,
-                        message=Message(role="user", content=aborted),
-                    )
-                    await self._append_node(sid, node)
-                    parent = node
+                parent = await self._keep_failed_call(sid, turn_id, parent, result)
+                if retry_capped:
+                    # A retry above would have followed (a rewrite above found
+                    # something to reclaim, or the reasoning strip or replay
+                    # applies), but the turn has no model call left: end on
+                    # the cap, not on the error, and
+                    # never announce a retry that cannot go out. What the call
+                    # streamed is stored above as an interrupted node, never
+                    # handed on as the turn's reply.
+                    final_stop = "max_calls"
+                    result.message = Message(role="assistant", content=[])
+                    break
                 if (
                     drop_retries
                     and isinstance(result.usage.get("transport_failure"), dict)
@@ -4868,6 +4933,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     num_model_calls=num_calls,
                     status=result.error_status,
                     provider_message=result.error_provider_message,
+                    retry_after_seconds=result.error_retry_after,
+                    usage_limit=result.error_usage_limit,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -4990,7 +5057,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._peer_delivery_sealed = True
                 final_stop = result.stop_reason
                 reason = await self._stop_hook_continuation(
-                    sid, turn_id, result, stop_hook_continuations
+                    sid, turn_id, result, stop_hook_continuations,
+                    budget_left=can_continue,
                 )
                 if reason is not None:
                     # A Stop hook blocked the end of the turn: the reason goes
@@ -5844,6 +5912,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         effort: str | None = None,
     ) -> _CallResult:
         self._stream_usage: dict[str, Any] = {}
+        self._live_chunks: AsyncGenerator[Any, None] | None = None
         try:
             return await self._stream_once_inner(
                 sid, turn_id, history, sticky=sticky, effort=effort
@@ -5868,6 +5937,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
         finally:
             self._stream_usage = {}
+            chunks, self._live_chunks = self._live_chunks, None
+            if chunks is not None:
+                await chunks.aclose()
 
     async def _stream_once_inner(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True,
@@ -5894,7 +5966,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         arg_abort: tuple[int, str] | None = None
         alive_published = False
 
-        async for chunk in self._provider_chunks_interruptible(request):
+        # _stream_once closes it on every exit: a ``break``, an early return
+        # or an exception would otherwise leave the generator (and the
+        # provider's HTTP stream) open until garbage collection, while the
+        # caller may retry at once.
+        chunks = self._live_chunks = self._provider_chunks_interruptible(request)
+        async for chunk in chunks:
             if self._interrupted.is_set():
                 interrupted = True
                 break
@@ -6020,12 +6097,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                     block["done_item"] = payload["block"]
                 if block and block["type"] == "tool_use":
                     raw_args = block["args"]
-                    if not raw_args:
-                        # No deltas streamed — fall back to the done item's
-                        # complete arguments (a JSON string on Responses).
-                        fallback = (block.get("done_item") or {}).get("arguments")
-                        if isinstance(fallback, str):
-                            raw_args = fallback
+                    # The done item's complete arguments (a JSON string on
+                    # Responses) are what the provider settled on, so they are
+                    # what runs. The deltas only fed the live display and the
+                    # stream guards: a dropped or partial fragment must not
+                    # change the call. A present string wins even when empty
+                    # (the call settled with no arguments); only a done item
+                    # without the field falls back to the deltas.
+                    final = (block.get("done_item") or {}).get("arguments")
+                    if isinstance(final, str):
+                        raw_args = final
                     args, arg_error = _parse_tool_args(raw_args)
                     block["input"] = args
                     tool_uses.append({
@@ -6097,6 +6178,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             "Review any completed actions before asking to continue."
                         )
                 provider_message = payload.get("provider_message")
+                retry_after = payload.get("retry_after_seconds")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     tool_uses=tool_uses,
@@ -6111,6 +6193,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_provider_message=(
                         provider_message if isinstance(provider_message, str) else None
                     ),
+                    error_retry_after=(
+                        float(retry_after)
+                        if isinstance(retry_after, (int, float))
+                        and not isinstance(retry_after, bool) and retry_after > 0
+                        else None
+                    ),
+                    error_usage_limit=payload.get("usage_limit") is True,
                     native_stop_reason=native_stop_reason,
                     served_model=served_model,
                     cut_in_tool_args=any(
@@ -6333,7 +6422,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _provider_chunks_interruptible(
         self, request: ProviderRequest
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Race every provider read against Interrupt and close it before return.
 
         This guarantees a corrective/new turn cannot overlap a still-running
@@ -6865,27 +6954,22 @@ class NativeLoop(BackgroundLifecycleMixin):
         for server_req_id, descriptor in (marker.requests or {}).items():
             request_id = new_id("q")
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
-            self._pending_questions[request_id] = fut
             desc = descriptor if isinstance(descriptor, dict) else {}
-            await self._emit(QuestionRequest(
-                session_id=sid, turn_id=turn_id, request_id=request_id,
-                tool_use_id=tool_use_id, name=name,
-                message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
-                schema=desc.get("schema"),
-            ))
-            await self._notify_hooks(
-                sid, turn_id, "elicitation_dialog", f"{name} is waiting for an answer",
-                name=name, tool_use_id=tool_use_id,
-            )
-            interrupt_wait = asyncio.create_task(self._interrupted.wait())
+            # Cleanup starts at registration, as for a permission prompt.
+            self._pending_questions[request_id] = fut
             try:
-                done, _ = await asyncio.wait(
-                    {fut, interrupt_wait},
-                    timeout=self.question_timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if fut not in done:
-                    if interrupt_wait not in done:
+                await self._emit(QuestionRequest(
+                    session_id=sid, turn_id=turn_id, request_id=request_id,
+                    tool_use_id=tool_use_id, name=name,
+                    message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
+                    schema=desc.get("schema"),
+                ))
+                ended = await self._park_on_human(fut, self._notify_hooks(
+                    sid, turn_id, "elicitation_dialog", f"{name} is waiting for an answer",
+                    name=name, tool_use_id=tool_use_id,
+                ), self.question_timeout)
+                if ended != "answered":
+                    if ended == "timeout":
                         log.warning(
                             "no answer to %s's question within the question "
                             "timeout; giving up on it", name,
@@ -6893,7 +6977,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return None
                 resp: RespondQuestion = fut.result()
             finally:
-                interrupt_wait.cancel()
                 self._pending_questions.pop(request_id, None)
             answers[server_req_id] = resp.answer
             user_answered = user_answered or bool(getattr(resp, "user_answered", False))
@@ -6925,16 +7008,82 @@ class NativeLoop(BackgroundLifecycleMixin):
             reason="provider_reroute" if rerouted else None,
         ))
 
+    async def _keep_failed_call(
+        self, sid: str, turn_id: str, parent: SessionNode, result: _CallResult,
+    ) -> SessionNode:
+        """Store what a failed call streamed and answer its published tool calls.
+
+        Whatever the user watched stream is kept, however the stream ended (a
+        dropped connection, an in-stream error, a body cut before its terminal
+        event): the visible text and the tool requests that closed, for a
+        later user-directed continuation. The node is marked interrupted so no
+        reader takes it for a finished answer. Incomplete arguments and opaque
+        reasoning envelopes are not safe provider history and are dropped.
+        Returns the new tip of the branch.
+        """
+        transport = bool(result.usage.get("transport_failure"))
+        completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
+        content = [
+            block for block in result.message.content
+            if (isinstance(block, Text) and block.text) or (
+                isinstance(block, ToolUseBlock) and block.id in completed_ids
+            )
+        ]
+        if content:
+            node = SessionNode(
+                node_id=new_id("node"), parent_id=parent.node_id,
+                message=Message(
+                    role="assistant", content=content,
+                    provider_meta={
+                        INTERRUPTED_META_KEY: (
+                            "transport_failure" if transport else "provider_error"
+                        ),
+                    },
+                ),
+            )
+            await self._append_node(sid, node)
+            parent = node
+        # The tool blocks that closed before the failure were already
+        # published as ToolUse events. Answer each one, so a host rendering
+        # the stream never keeps a tool card open for a call that will never
+        # run, and the stored call has its result.
+        text = (
+            "Tool not executed: the provider connection was interrupted "
+            "before the response finished."
+            if transport else _FAILED_CALL_TOOL_TEXT
+        )
+        aborted = []
+        for tu in result.tool_uses:
+            await self._emit(ToolResult(
+                session_id=sid, turn_id=turn_id,
+                tool_use_id=tu["tool_use_id"], name=tu["name"],
+                output=text, is_error=True,
+            ))
+            aborted.append(ToolResultBlock(
+                tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+            ))
+        if aborted and content:
+            node = SessionNode(
+                node_id=new_id("node"), parent_id=parent.node_id,
+                message=Message(role="user", content=aborted),
+            )
+            await self._append_node(sid, node)
+            parent = node
+        return parent
+
     async def _guardrail_pause(
         self, sid: str, turn_id: str, parent: SessionNode, result: _CallResult,
         num_calls: int, projected_prompt: int, total_usage: dict[str, Any],
+        *, budget_left: bool = True,
     ) -> bool:
         """Ask the person what to do with a call a provider safety check declined.
 
         Returns True when the turn retries the same history on the model they
         approved (``self.model`` is switched for the rest of the turn), False
         when the turn ends here. The declined call is billed and recorded but
-        never appended: its partial output is discarded. See
+        never appended: its partial output is discarded. With no model call
+        left this turn (``budget_left`` False) the person is not asked: a
+        retry on another model could not go out. See
         :mod:`fluid.engine.guardrail`.
         """
         self._fold_call_usage(total_usage, result.usage)
@@ -6987,6 +7136,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
             return False
 
+        if not budget_left:
+            return await stopped("no model calls left this turn")
         if self._turn_guardrail_prompts >= GUARDRAIL_MAX_PROMPTS_PER_TURN:
             return await stopped("blocked again after a retry")
         self._turn_guardrail_prompts += 1
@@ -7034,25 +7185,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         request_id = new_id("perm")
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending_permissions[request_id] = fut
-        await self._emit(PermissionRequest(
-            session_id=sid, turn_id=turn_id, request_id=request_id,
-            tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
-        ))
-        await self._notify_hooks(
-            sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
-            name=name, tool_use_id=tool_use_id,
-        )
         timeout = self.permission_timeout
-        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        # Registered and cleaned up under one try: a Stop that lands while the
+        # card is published or the hooks run must not leave a pending future,
+        # or the watchdog would take every later turn for a human wait.
+        self._pending_permissions[request_id] = fut
         try:
-            done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if fut not in done:
-                if interrupt_wait in done:
-                    return ("deny", "interrupted while awaiting permission", None)
+            await self._emit(PermissionRequest(
+                session_id=sid, turn_id=turn_id, request_id=request_id,
+                tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
+            ))
+            ended = await self._park_on_human(fut, self._notify_hooks(
+                sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
+                name=name, tool_use_id=tool_use_id,
+            ), timeout)
+            if ended == "interrupted":
+                return ("deny", "interrupted while awaiting permission", None)
+            if ended == "timeout":
                 log.warning(
                     "no permission decision for %s within %.0fs; denying", name, timeout,
                 )
@@ -7064,7 +7213,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
             resp: RespondPermission = fut.result()
         finally:
-            interrupt_wait.cancel()
             self._pending_permissions.pop(request_id, None)
         allowed = resp.decision in ("allow", "allow_always")
         if resp.decision == "allow_always" and self.permissions is not None:

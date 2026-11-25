@@ -51,6 +51,7 @@ import * as layoutStore from '$lib/stores/layout.svelte';
 import * as sessionStore from '$lib/stores/active-session';
 import * as notificationStore from '$lib/stores/notifications';
 import * as appData from '$lib/stores/app-data.svelte';
+import { openBroadcastDialog, closeBroadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 
 const activeView = layoutStore.activeView as unknown as Writable<{ type: string } | null>;
 const activeSession = sessionStore.activeSession as unknown as Writable<Record<string, unknown>>;
@@ -219,6 +220,18 @@ describe('AppTopBar drawer', () => {
 		expect(screen.getByTestId('sidebar').getAttribute('data-admin')).toBe('true');
 		const close = drawer.querySelector('.drawer-close');
 		expect(document.activeElement).toBe(close);
+	});
+
+	it('mounts the sidebar, drawer still closed, when the palette opens "Message all active chats"', async () => {
+		// The dialog lives in the sidebar; before the drawer's first use there is none.
+		renderBar();
+		expect(screen.queryByTestId('sidebar')).toBeNull();
+		openBroadcastDialog();
+		flushSync();
+		await tick();
+		expect(screen.getByTestId('sidebar')).toBeTruthy();
+		expect(drawerClosed()).toBe(true);
+		closeBroadcastDialog();
 	});
 
 	it('closes from the close button and returns focus to the menu button', async () => {

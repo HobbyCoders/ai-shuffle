@@ -299,6 +299,129 @@ async def test_a_handle_whose_transcript_is_not_on_this_worker_is_reseeded(monke
 
 
 @pytest.mark.asyncio
+async def test_a_pooled_loop_rechecks_a_handle_the_cli_keeps_exiting_on(monkeypatch, tmp_path):
+    """The loop's ``recover_resume`` runs the connect-time existence check
+    again: a transcript still there is ``present`` (nothing written); one
+    removed after the connect is re-seeded from the history before the turn
+    being replayed."""
+    from fluid.engine.delegated import ResumeRecovery
+
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    transcript = _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user([{"type": "text", "text": "My codename is PELICAN"}]),
+        _assistant("Noted: PELICAN"),
+    ])
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    recover = captured["recover_resume"]
+
+    assert await recover("cli-handle", "n3") == ResumeRecovery("present")
+
+    transcript.unlink()
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+    assert await recover("cli-handle", "n3") == ResumeRecovery("reseeded", "new-uuid")
+    assert len(calls) == 1
+    assert calls[0][1]["before_node"] == "n3" and calls[0][1]["force"] is True
+
+    _fake_reseed(monkeypatch, ReseedResult(status="failed", error="disk full"))
+    assert await recover("cli-handle", "n3") == ResumeRecovery("unknown")
+
+
+@pytest.mark.asyncio
+async def test_a_restore_rewrites_the_history_through_an_owed_prompt(monkeypatch, tmp_path):
+    """``restore=True``: the handle's transcript is there but never recorded
+    the replayed prompt, so no existence check; the history before the new
+    turn is written out with the marker the loop passed."""
+    from fluid.engine.delegated import ResumeRecovery
+
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user([{"type": "text", "text": "My codename is PELICAN"}]),
+        _assistant("Noted: PELICAN"),
+    ])
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    recover = captured["recover_resume"]
+
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+    owed = {"pending": "n5", "prompt": "k5"}
+    assert await recover("cli-handle", "n5", recovery=owed, restore=True) == ResumeRecovery(
+        "reseeded", "new-uuid")
+    assert calls[0][1]["before_node"] == "n5"
+    assert calls[0][1]["recovery"] == owed
+    meta = await store.get_session(SID)
+    assert meta.cli_session_id == "new-uuid"
+    assert meta.cli_resume_recovery == {**owed, "handle": "new-uuid"}
+
+
+@pytest.mark.asyncio
+async def test_a_new_adapter_leaves_an_owed_replay_to_the_loop(monkeypatch, tmp_path):
+    """A recovery re-seed's replay was never recorded, so the transcript ends
+    before fluid's latest prompt. A reconnect must not re-seed it (that would
+    preload the prompt a resubmitted wake sends again): the handle and the
+    marker go to the loop as they are."""
+    store = MemoryStore()
+    await _seed(store, PELICAN + EXTRA_NATIVE_TURN[:1], handle="cli-new")
+    marker = {"handle": "cli-new", "pending": "n3", "prompt": "k3"}
+    await store.set_cli_resume_recovery(SID, marker)
+    _write_cli_jsonl(tmp_path, "cli-new", [
+        _user("My codename is PELICAN"),
+        _assistant("Noted: PELICAN"),
+    ])
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-new"
+    assert (await store.get_session(SID)).cli_resume_recovery == marker
+
+
+@pytest.mark.asyncio
+async def test_an_owed_replay_whose_transcript_is_gone_stays_owed(monkeypatch, tmp_path):
+    """The owed handle's transcript is not on this worker either: connect
+    re-seeds the history before the owed prompt and keeps it owed, so the
+    loop's retry still sends it once."""
+    store = MemoryStore()
+    await _seed(store, PELICAN + EXTRA_NATIVE_TURN[:1], handle="cli-new")
+    await store.set_cli_resume_recovery(SID, {"handle": "cli-new", "pending": "n3", "prompt": "k3"})
+    _projects(tmp_path).mkdir(parents=True)
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "new-uuid"
+    assert calls[0][1]["before_node"] == "n3"
+    assert calls[0][1]["recovery"] == {"pending": "n3", "prompt": "k3"}
+    assert (await store.get_session(SID)).cli_resume_recovery == {
+        "handle": "new-uuid", "pending": "n3", "prompt": "k3"}
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_reseed_stores_its_marker_with_the_handle(mock_db, tmp_path):
+    """Over the DB: the handle and the marker land in the same row update,
+    and a new store (a recreated adapter) reads both back."""
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    store = PgFluidStore()
+    await _seed(store, PELICAN + EXTRA_NATIVE_TURN, handle="cli-handle")
+    result = fluid_transcript.reseed_delegated_cli_session(
+        SID, str(tmp_path), _projects(tmp_path), force=True, before_node="n3",
+        recovery={"pending": "n3", "prompt": "k3"},
+    )
+    assert result.status == "reseeded"
+    meta = await PgFluidStore().get_session(SID)
+    assert meta.cli_session_id == result.cli_session_id
+    assert meta.cli_resume_recovery == {
+        "handle": result.cli_session_id, "pending": "n3", "prompt": "k3"}
+    # An ordinary re-seed owes nothing: its handle carries no marker.
+    plain = fluid_transcript.reseed_delegated_cli_session(
+        SID, str(tmp_path), _projects(tmp_path), force=True,
+    )
+    assert (await PgFluidStore().get_session(SID)).cli_resume_recovery is None
+    assert plain.status == "reseeded"
+
+
+@pytest.mark.asyncio
 async def test_a_current_transcript_is_resumed_as_is(monkeypatch, tmp_path):
     store = MemoryStore()
     await _seed(store, PELICAN, handle="cli-handle")

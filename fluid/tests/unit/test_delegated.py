@@ -930,6 +930,33 @@ async def test_user_steer_accepted_while_cli_result_is_unread_starts_no_cycle() 
         await loop.aclose()
 
 
+async def test_stale_frame_drain_logs_metadata_not_frame_text(caplog) -> None:
+    """A dropped between-turn frame is logged by type and size only: its text
+    is conversation and tool data, and the warning lands in the app log."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("a", store=store, session_id=sid)
+    try:
+        await loop.submit(UserTurn(content="hello"))
+        await loop.wait_turn()
+        private = "private tool output sk-live-0123456789abcdefghij"
+        loop._stdout_backlog.extend([
+            (json.dumps({"type": "system", "subtype": "task_notification",
+                         "uuid": "u-1", "text": private}) + "\n").encode(),
+            (json.dumps({"type": "result", "subtype": "success",
+                         "uuid": "u-2", "result": private}) + "\n").encode(),
+        ])
+        caplog.set_level("WARNING", logger=delegated_mod.logger.name)
+        await loop._discard_stale_stdout()
+        stale = [r.getMessage() for r in caplog.records if "stale between-turn" in r.getMessage()]
+        assert len(stale) == 2
+        assert "type=system" in stale[0] and "uuid=u-1" in stale[0]
+        assert "subtype=success" in stale[1] and "uuid=u-2" in stale[1]
+        assert not any("private tool output" in m or "sk-live" in m for m in stale)
+    finally:
+        await loop.aclose()
+
+
 async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:
     """Without tool-boundary hooks (the fallback), a live turn is steered by
     writing a second ``user`` frame to the CLI's stdin; the write is the

@@ -946,6 +946,7 @@ def test_preview_global_toggle_is_disposable_only():
 @pytest.mark.parametrize("method,path", [
     ("PUT", "/api/v1/projects/catalog/repository"),
     ("POST", "/api/v1/projects/catalog/forget"),
+    ("POST", "/api/v1/projects/clone"),
 ])
 def test_preview_project_repository_changes_are_disposable_only(method, path):
     from starlette.requests import Request

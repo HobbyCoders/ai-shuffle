@@ -6,18 +6,19 @@ import logging
 import shutil
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 from threading import Lock
 
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
 from app.core.project_utils import enclosing_repo_root, get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
+from app.core import project_removal
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
@@ -308,6 +309,55 @@ def remote_link_group(project_path: Path) -> Optional[str]:
         return None
 
 
+def check_new_project(request: ProjectCreate) -> Tuple[ProjectCreate, str, Path]:
+    """The id, path and duplicate checks a new project must pass (409/400).
+
+    Returns ``(payload, db_path, project_path)``; ``payload`` carries the id the
+    project would get (suffixed on a cross-install collision). Creation runs it
+    under the creation lock; cloning a new project (``POST /projects/clone``)
+    runs it first too, so a duplicate is refused before anything is cloned.
+    """
+    payload = request
+
+    # Keep cross-install ID suffixing: another worker may use the same ID.
+    existing = database.get_project(payload.id)
+    if existing:
+        if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+            import hashlib
+            suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+            payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
+            if database.get_project(payload.id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists: {payload.id}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists: {payload.id}"
+            )
+
+    effective_path = normalize_docker_path(payload.path) if payload.path else None
+    db_path = effective_path if effective_path else payload.id
+    project_path = validate_project_path(db_path, allow_create=True)
+    refuse_nested_repository(project_path)
+
+    # Only this worker's projects (including legacy rows) are duplicates.
+    # Resolve paths so relative, absolute and symlink spellings agree.
+    for project in database.get_all_projects():
+        if project["name"].strip().casefold() == payload.name.strip().casefold():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists with name '{payload.name}': {project['id']}"
+            )
+        if get_project_working_dir_as_path(project).resolve() == project_path:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists at path '{project_path}': {project['id']}"
+            )
+    return payload, db_path, project_path
+
+
 def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optional[str] = None,
                                link_locked: bool = False) -> dict:
     """The blocking body of :func:`create_project_record` (run it off the loop).
@@ -322,45 +372,7 @@ def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optiona
     # Serialize local creates so concurrent REST/tool calls cannot both pass
     # the name/path checks. Filesystem and DB work stay off the event loop.
     with _project_creation_lock:
-        payload = request
-
-        # Keep cross-install ID suffixing: another worker may use the same ID.
-        existing = database.get_project(payload.id)
-        if existing:
-            if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
-                import hashlib
-                suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
-                payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
-                if database.get_project(payload.id):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Project already exists: {payload.id}"
-                    )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists: {payload.id}"
-                )
-
-        effective_path = normalize_docker_path(payload.path) if payload.path else None
-        db_path = effective_path if effective_path else payload.id
-        project_path = validate_project_path(db_path, allow_create=True)
-        refuse_nested_repository(project_path)
-
-        # Only this worker's projects (including legacy rows) are duplicates.
-        # Resolve paths so relative, absolute and symlink spellings agree.
-        for project in database.get_all_projects():
-            if project["name"].strip().casefold() == payload.name.strip().casefold():
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists with name '{payload.name}': {project['id']}"
-                )
-            if get_project_working_dir_as_path(project).resolve() == project_path:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists at path '{project_path}': {project['id']}"
-                )
-
+        payload, db_path, project_path = check_new_project(request)
         project_path.mkdir(parents=True, exist_ok=True)
         settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
         if link_group_id and link_locked:
@@ -378,7 +390,22 @@ def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optiona
             link_group_id=link_group_id,
         )
     record_remote_repository(created, project_path)
+    _mark_identity_registered(created)
     return created
+
+
+def _mark_identity_registered(created: Optional[dict]) -> None:
+    """A copy registered here makes its logical project listed again: clear a
+    hidden or first-clone mark left by an earlier removal or failed clone."""
+    if not created:
+        return
+    try:
+        from app.core.project_resolver import origin_for_legacy_project
+        from app.db import projects_v2
+
+        projects_v2.mark_registered(origin_for_legacy_project(created))
+    except Exception:  # noqa: BLE001 - the project exists; the mark only affects listing
+        logger.warning("projects: could not clear the hidden mark of %s", created.get("id"), exc_info=True)
 
 
 def record_remote_repository(created: Optional[dict], project_path: Path) -> None:
@@ -426,22 +453,55 @@ async def update_project(
     return updated
 
 
+def _owned_here(project: dict) -> bool:
+    """Whether this worker may remove the row (as ``update_project`` checks)."""
+    return project.get("instance_id") in (None, settings.effective_instance_id)
+
+
+def _require_own_project(project_id: str) -> dict:
+    existing = database.get_project(project_id)
+    if not existing or not _owned_here(existing):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+    return existing
+
+
+@router.get("/{project_id}/removal")
+async def project_removal_preview(project_id: str, token: str = Depends(require_admin)):
+    """What ``DELETE /projects/{id}`` removes on this worker - Admin only.
+
+    ``chats``: how many chats are deleted. ``worktrees``: worktree folders whose
+    records go with the project while the folders stay on disk.
+    """
+    def _preview():
+        _require_own_project(project_id)
+        return project_removal.preview([project_id])
+
+    return {"project_id": project_id, **await run_sync(_preview)}
+
+
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: str, token: str = Depends(require_admin)):
-    """Delete a project (database record only, not files) - Admin only"""
-    def _delete():
-        # Read-decide-write kept atomic: existence probe + DELETE in one hop.
-        existing = database.get_project(project_id)
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Project not found: {project_id}"
-            )
+async def delete_project(project_id: str, background_tasks: BackgroundTasks,
+                         token: str = Depends(require_admin)):
+    """Delete a project and its chats on this worker (not files) - Admin only.
 
-        database.delete_project(project_id)
-
-    await run_sync(_delete)
+    Ownership is checked before any chat goes, and again on the locked row
+    before it is deleted. A row another worker claimed in between stays, and
+    the reply is a 409. The chats on this worker that were already removed
+    still get their queued teardown.
+    """
+    await run_sync(_require_own_project, project_id)
+    result = await project_removal.remove_projects([project_id], background_tasks, owned=_owned_here)
     _announce_catalog_change()
+    if result.get("kept"):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "This project now belongs to another worker; "
+                               "its chats on this worker were removed."},
+            background=background_tasks,
+        )
 
 
 def _announce_catalog_change() -> None:

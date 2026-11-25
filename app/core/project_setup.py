@@ -62,6 +62,16 @@ ZOMBIE_SECONDS = 90.0
 # Abort a clone whose transfer stalls (bytes/second below the limit for the time).
 LOW_SPEED_LIMIT = "1000"
 LOW_SPEED_TIME = "300"
+# ... a network clone that goes silent (an SSH server that accepts and then
+# never answers is not covered by the HTTP limits above): no output this long ...
+CLONE_IDLE_SECONDS = 300.0
+# ... and, as a backstop for any clone, one still running after this long
+# (generous enough for a big repository on a slow link).
+CLONE_DEADLINE_SECONDS = 3600.0
+# The transports a new project's first clone may use (GIT_ALLOW_PROTOCOL: it
+# overrides every protocol.* setting in any gitconfig, and applies to the URL
+# after insteadOf rewrites). No ``file``: a local folder is added with Folder.
+NEW_PROJECT_PROTOCOLS = "https:http:ssh"
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -72,8 +82,11 @@ OFFLINE = "offline"
 UNSUPPORTED = "unsupported"
 INTERNAL = "internal"
 CANCELLED = "cancelled"
+MOVED = "moved"
 
 _OP_ID_RE = re.compile(r"^psetup-[0-9a-f]{32}$")
+# Same rule as ``ProjectCreate.id``.
+_PROJECT_ID_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _UNKNOWN_ACTION = "Unknown control action"
 
 
@@ -97,6 +110,11 @@ def unsupported_message(worker_name: Optional[str]) -> str:
     return f"Update {worker_name or 'that worker'} to set projects up from here"
 
 
+def moved_message(pinned: str) -> str:
+    return (f"The project for this repository now uses {display_remote(pinned) or 'another repository'}. "
+            "Clone that repository instead.")
+
+
 def new_op_id() -> str:
     return OP_PREFIX + uuid.uuid4().hex
 
@@ -106,7 +124,11 @@ def new_op_id() -> str:
 # ---------------------------------------------------------------------------
 
 def display_remote(url: Optional[str]) -> Optional[str]:
-    """``github.com/owner/repo`` for any remote spelling; never credentials."""
+    """``github.com/owner/repo`` for any remote spelling; never credentials.
+
+    For display and comparison only (never a clone URL): the login of a
+    scheme-form SSH URL (``ssh://git@host/...``) is dropped like the scp form's.
+    """
     from app.core.scrub import strip_url_userinfo
 
     if not url:
@@ -114,7 +136,7 @@ def display_remote(url: Optional[str]) -> Optional[str]:
     text = strip_url_userinfo(url.strip()) or ""
     match = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(.*)$", text)
     if match:
-        text = match.group(1)
+        text = re.sub(r"^[^@/]*@", "", match.group(1))
     else:
         scp = re.match(r"^(?:[^@/]+@)?([^:/]+):(?!/)(.*)$", text)
         if scp and len(scp.group(1)) > 1:
@@ -395,6 +417,9 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     ``spec``: ``project_v2_id``, ``origin``, ``name``, ``kind`` (``git`` or
     ``folder``), ``clone_url`` (git), ``folder``, ``mode`` (``auto``/``adopt``).
+    A new project cloned from the New project dialog (``POST /projects/clone``)
+    also passes ``project_id`` (the id the owner asked for); whether a failure
+    hides the identity again is the persisted ``PROVISIONAL_KEY`` mark on it.
     Raises ``ValueError`` for a request this worker refuses outright.
     """
     from app.db import git_ops as git_ops_db
@@ -413,6 +438,9 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     if mode not in ("auto", "adopt"):
         raise ValueError("Unknown setup mode")
     name = str(spec.get("name") or "").strip()[:100] or "Project"
+    project_id = spec.get("project_id")
+    if project_id is not None and (not isinstance(project_id, str) or not _PROJECT_ID_RE.match(project_id)):
+        raise ValueError("Invalid project ID")
 
     me = _me()
     device = _own_device_id()
@@ -422,6 +450,8 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     params = {"origin": origin, "name": name, "kind": kind, "mode": mode,
               "clone_url": None, "requested_by": requested_by}
+    if project_id is not None:
+        params["project_id"] = project_id
     existing = _registered_row(origin)
     if existing is not None:
         # Already set up here: record a finished op so the caller has an answer.
@@ -491,13 +521,20 @@ def _summarize_op(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def latest_ops(runner_id: str) -> Dict[str, Dict[str, Any]]:
-    """Newest non-cancelled setup op per project on ``runner_id``."""
+    """Newest non-cancelled setup op per project on ``runner_id``.
+
+    A ``running`` op whose heartbeat went stale (its runner stopped; its own
+    restart sweep settles it) reads as no op: it never shows as setting up.
+    """
     from app.db import git_ops as git_ops_db
 
     out: Dict[str, Dict[str, Any]] = {}
     for row in git_ops_db.list_ops_for_runner(runner_id, SETUP_OP):
         pv2 = row.get("project_v2_id")
         if not pv2 or pv2 in out:
+            continue
+        if git_ops_db._is_stale_running(row):
+            out[pv2] = {}
             continue
         summary = _summarize_op(row)
         if summary["error_code"] == CANCELLED:
@@ -568,6 +605,10 @@ def local_status(project_v2_id: Optional[str] = None) -> Dict[str, Any]:
     }
     if project_v2_id:
         out["detail"] = _checkout_detail(project_v2_id, me)
+        # The Workers tab's remove confirmation names these.
+        removal = local_removal_preview(project_v2_id)
+        out["detail"]["removal_chats"] = removal["chats"] if removal else None
+        out["detail"]["removal_worktrees"] = removal["worktrees"] if removal else None
     return out
 
 
@@ -609,6 +650,7 @@ def cancel_local(op_id: str) -> Dict[str, Any]:
     if row is None or row.get("op") != SETUP_OP or row.get("runner_id") != me:
         raise LookupError("Unknown setup")
     if git_ops_db.cancel_queued(op_id, me, "Setup was cancelled."):
+        hide_failed_first_clone(row)
         return {"status": "cancelled"}
     job = _jobs.get(op_id)
     if job is not None:
@@ -626,31 +668,56 @@ def cancel_local(op_id: str) -> Dict[str, Any]:
     raise SetupConflict("This setup already finished")
 
 
-def remove_local(project_v2_id: str) -> Dict[str, Any]:
-    """Delete THIS worker's project record(s) for the logical project (sync).
-
-    Same as deleting the project here: the record (and its chats) go, the
-    files stay. Raises ``LookupError`` when this worker has no record.
-    """
-    from app.db import database, projects_v2
+def _local_removal_ids(project_v2_id: str) -> List[str]:
+    """THIS worker's project record ids for the logical project (sync)."""
+    from app.db import projects_v2
     from app.network import engine
 
     pv2 = projects_v2.get_project_v2(project_v2_id)
     if pv2 is None:
         raise LookupError("Unknown project")
-    me = _me()
-    removed = []
-    for row in _own_project_rows():
-        if _origin_of(row) != pv2.get("origin"):
-            continue
-        # An unowned legacy row is every worker's on a shared database.
-        if row.get("instance_id") != me and engine.context() is None:
-            continue
-        database.delete_project(row["id"])
-        removed.append(row["id"])
-    if not removed:
+    ids = [row["id"] for row in _own_project_rows()
+           if _origin_of(row) == pv2.get("origin") and _removable_here(row, engine.context())]
+    if not ids:
         raise LookupError("This worker has no record of the project")
-    return {"removed": removed}
+    return ids
+
+
+def _removable_here(row: Dict[str, Any], network_context: Any) -> bool:
+    """The Workers tab's rule for removing a project row on this worker.
+
+    The row must belong to this worker; an unowned legacy row counts only
+    while networked (``_local_removal_ids``). The removal checks it again on
+    the locked row before deleting it.
+    """
+    owner = row.get("instance_id")
+    return owner == _me() or (owner is None and network_context is not None)
+
+
+def local_removal_preview(project_v2_id: str) -> Optional[Dict[str, Any]]:
+    """What :func:`remove_local` would remove here, or None without a record (sync)."""
+    from app.core.project_removal import preview
+
+    try:
+        return preview(_local_removal_ids(project_v2_id))
+    except LookupError:
+        return None
+
+
+async def remove_local(project_v2_id: str) -> Dict[str, Any]:
+    """Delete THIS worker's project record(s) for the logical project.
+
+    Same as deleting the project here: the record and its chats on this
+    worker go (``app/core/project_removal.py``), the files stay. Raises
+    ``LookupError`` when this worker has no record.
+    """
+    from app.core.project_removal import remove_projects
+    from app.db.async_database import run_sync
+    from app.network import engine
+
+    ids = await run_sync(_local_removal_ids, project_v2_id)
+    networked = engine.context()
+    return await remove_projects(ids, owned=lambda row: _removable_here(row, networked))
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +782,10 @@ def classify_clone_failure(stderr: str, clone_url: str, *,
 
     text = (stderr or "").lower()
     on_github = "github.com" in (clone_url or "").lower()
+    if re.search(r"transport '[^']*' not allowed", text):
+        # NEW_PROJECT_PROTOCOLS refused what the source became (a folder here).
+        return SetupError(INTERNAL, "This URL leads to a folder on this worker, not a network repository. "
+                                    "To add a folder on this worker, use Folder.")
     if any(hint in text for hint in _AUTH_HINTS):
         return SetupError(GITHUB_AUTH, (
             "This worker isn't signed in to GitHub, or its account can't access this repository."
@@ -764,10 +835,24 @@ def _report_progress(job: _Job, value: int) -> None:
     _notify_threadsafe(job)
 
 
-def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
-    """Clone into a temporary sibling, then rename it to ``final_path``."""
+def _clone_command(clone_url: str, temp: str, *, network_only: bool = False) -> List[str]:
+    # ``--no-local``: a source that names an existing folder (git looks for one
+    # before it reads ``host:path`` as SSH) goes through the file transport,
+    # which GIT_ALLOW_PROTOCOL then refuses, instead of a direct local copy.
+    return ["git", "-c", f"http.lowSpeedLimit={LOW_SPEED_LIMIT}", "-c", f"http.lowSpeedTime={LOW_SPEED_TIME}",
+            "clone", "--progress", *(["--no-local"] if network_only else []), "--", clone_url, temp]
+
+
+def _clone(job: _Job, clone_url: str, final_path: Path, *, network_only: bool = False) -> None:
+    """Clone into a temporary sibling, then rename it to ``final_path``.
+
+    ``network_only`` (a new project's first clone, ``POST /projects/clone``):
+    git may use only :data:`NEW_PROJECT_PROTOCOLS`, whatever the source turns
+    into (an ``insteadOf`` rewrite, a folder named like ``host:path``).
+    Setting up an existing project may copy from a local source as before.
+    """
     from fluid.tools.child_env import scrub_child_env
-    from app.core.git_service import _IS_WINDOWS, _kill_git_tree, _quiet_git_env, git_service
+    from app.core.git_service import _IS_WINDOWS, _kill_git_tree, _quiet_git_env, classify_clone_url, git_service
     from app.db import git_ops as git_ops_db
 
     parent = final_path.parent
@@ -781,11 +866,30 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
         logger.debug("project setup: could not record temp dir for %s", job.op_id, exc_info=True)
     env = {**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"}
     _quiet_git_env(env)
-    command = ["git", "-c", f"http.lowSpeedLimit={LOW_SPEED_LIMIT}", "-c", f"http.lowSpeedTime={LOW_SPEED_TIME}",
-               "clone", "--progress", "--", clone_url, temp]
+    if network_only:
+        env["GIT_ALLOW_PROTOCOL"] = NEW_PROJECT_PROTOCOLS
+    command = _clone_command(clone_url, temp, network_only=network_only)
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
              if _IS_WINDOWS else {"start_new_session": True})
     tail: List[str] = []
+    started = time.monotonic()
+    last_output = [started]
+    # Only a network clone reports steadily (``--progress`` covers receiving
+    # and checkout); a local copy may be quiet while it works.
+    watch_idle = classify_clone_url(clone_url)[0] == "remote"
+    stopped: List[str] = []  # why the watchdog killed the clone: "idle" or "deadline"
+    done = threading.Event()
+
+    def watchdog(proc: subprocess.Popen) -> None:
+        while not done.wait(min(5.0, CLONE_IDLE_SECONDS / 4, CLONE_DEADLINE_SECONDS / 4)):
+            now = time.monotonic()
+            reason = ("deadline" if now - started > CLONE_DEADLINE_SECONDS
+                      else "idle" if watch_idle and now - last_output[0] > CLONE_IDLE_SECONDS else None)
+            if reason:
+                stopped.append(reason)
+                _kill_git_tree(proc)
+                return
+
     try:
         with _clone_slots:
             with job.lock:
@@ -794,6 +898,8 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
                 proc = subprocess.Popen(command, cwd=str(parent), stdin=subprocess.DEVNULL,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, **group)
                 job.proc = proc
+            threading.Thread(target=watchdog, args=(proc,), name=f"clone-watchdog-{job.op_id}",
+                             daemon=True).start()
             try:
                 buffer = ""
                 assert proc.stderr is not None
@@ -801,6 +907,7 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
                     chunk = proc.stderr.read1(4096) if hasattr(proc.stderr, "read1") else proc.stderr.read(4096)
                     if not chunk:
                         break
+                    last_output[0] = time.monotonic()
                     buffer += chunk.decode("utf-8", "replace")
                     *lines, buffer = re.split(r"[\r\n]", buffer)
                     for line in lines:
@@ -816,10 +923,19 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
             except BaseException:
                 _kill_git_tree(proc)
                 raise
+            finally:
+                done.set()
         with job.lock:
             if job.cancelled:
                 raise SetupError(CANCELLED, "Setup was cancelled.")
             job.finalizing = True
+        if stopped == ["idle"]:
+            raise SetupError(NETWORK, "The repository host stopped answering, so the clone was stopped. "
+                                      "Check this worker's network connection and try again.")
+        if stopped == ["deadline"]:
+            raise SetupError(NETWORK, f"The clone was still running after {int(CLONE_DEADLINE_SECONDS // 60)} "
+                                      "minutes, so it was stopped. Check this worker's network connection "
+                                      "and try again.")
         if returncode != 0:
             raise classify_clone_failure("\n".join(tail), clone_url)
         git_service.invalidate_status_cache(temp)
@@ -861,7 +977,77 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     Never deletes or overwrites a folder it did not create. A plain folder
     project uses an existing folder as it is, unless that folder is this
     worker's own other project.
+
+    A new project's first clone (``project_id``) registers nothing until the
+    clone succeeded; when it fails or is cancelled a provisional identity is
+    hidden again (:func:`hide_failed_first_clone`), so no half-made project is
+    left on the Projects page and a retry starts clean.
     """
+    try:
+        result = _execute_setup(op_row)
+    except BaseException:
+        hide_failed_first_clone(op_row)
+        raise
+    params = op_row.get("params") or {}
+    if params.get("origin"):
+        from app.db import projects_v2
+
+        try:
+            # Registered here (or an existing row adopted): listed, whatever an
+            # earlier removal or failed first clone left on the identity.
+            projects_v2.mark_registered(params["origin"])
+        except Exception:  # noqa: BLE001 - the project is registered; the mark only affects listing
+            logger.warning("project setup: could not clear the hidden mark of %s", op_row.get("id"),
+                           exc_info=True)
+    return result
+
+
+def setup_holder(project_v2_ids: List[str]) -> Optional[Dict[str, Any]]:
+    """The runner on this database where an ordinary setup (the Workers tab)
+    of one of these identities is waiting or running, as ``{runner_id}``;
+    else None (sync).
+
+    Only what this database holds: every runner's ops on it (a stale running
+    one is left out). A setup handed to a paired worker with its own
+    database is not known here. A new project's first clone is left out:
+    its provisional mark says which op it is.
+    """
+    from app.db import git_ops as git_ops_db
+
+    for row in git_ops_db.list_inflight_for_projects(SETUP_OP, [pid for pid in project_v2_ids if pid]):
+        if not (row.get("params") or {}).get("project_id"):
+            return {"runner_id": row.get("runner_id")}
+    return None
+
+
+def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
+    """Hide a new project's identity again after its first clone ended without a project.
+
+    Every terminal path of a first-clone op calls this: the executor, a cancel
+    before it ran (on this worker or, on a shared database, another's), the
+    restart sweep, and a request refused while starting. The identity is
+    hidden only while this op's provisional mark is still on it
+    (``projects_v2.settle_provisional``, one locked compare-and-set): never
+    once a later attempt replaced the mark or a copy was registered (which
+    clears it), nor while an ordinary setup of it (the Workers tab) waits or
+    runs on this database (:func:`setup_holder`). Best effort: the op's own
+    failure is what the caller needs.
+    """
+    from app.db import projects_v2
+
+    params = op_row.get("params") or {}
+    origin = params.get("origin")
+    if not params.get("project_id") or not origin or not op_row.get("id"):
+        return
+    try:
+        if setup_holder([projects_v2.project_v2_id_for_origin(origin)]) is not None:
+            return  # wanted on a worker: its setup registers it or shows its failure
+        projects_v2.settle_provisional(origin, op_row.get("runner_id") or _me(), op_row["id"])
+    except Exception:  # noqa: BLE001
+        logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)
+
+
+def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     from app.db import git_ops as git_ops_db
 
     op_id = op_row["id"]
@@ -880,7 +1066,13 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         # A request queued before the project moved to another repository
         # still carries the old URL: a new copy clones the current one.
         pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
-        if pinned:
+        if pinned and params.get("project_id"):
+            # A new project clones exactly the repository the owner entered.
+            from app.core.project_links import normalize_remote_url
+
+            if normalize_remote_url(pinned) != normalize_remote_url(clone_url):
+                raise SetupError(MOVED, moved_message(pinned))
+        elif pinned:
             try:
                 clone_url = _validate_clone_url(pinned, origin)
             except ValueError as exc:
@@ -912,19 +1104,21 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         raise SetupError(FOLDER_EXISTS, f"{path} is already the project {registered.get('name') or registered['id']} "
                                         "on this worker. Choose another folder.")
     adopted = False
+    # Only a new project's first clone carries ``project_id`` (POST /projects/clone).
+    network_only = bool(params.get("project_id"))
     if kind == "git":
         if path.exists() or path.is_symlink():
             if _same_repo(path, clone_url, origin):
                 adopted = True
             elif mode == "auto" and _is_empty_dir(path):
-                _clone(job, clone_url, path)
+                _clone(job, clone_url, path, network_only=network_only)
             else:
                 raise SetupError(FOLDER_EXISTS, f"{path} already exists and isn't a copy of this project. "
                                                 "Choose another folder.")
         elif mode == "adopt":
             raise SetupError(NOT_FOUND, f"There is no folder at {path} to use.")
         else:
-            _clone(job, clone_url, path)
+            _clone(job, clone_url, path, network_only=network_only)
     elif kind == "folder":
         if path.exists() or path.is_symlink():
             if not path.is_dir() or path.is_symlink():
@@ -943,7 +1137,8 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
             raise SetupError(CANCELLED, "Setup was cancelled.")
         job.finalizing = True
     project_id = register_local_project(pv2_id, origin=origin, name=params.get("name") or path.name,
-                                        folder=params["folder"], path=path, kind=kind)
+                                        folder=params["folder"], path=path, kind=kind,
+                                        project_id=params.get("project_id"))
     return {"project_id": project_id, "adopted": adopted, "progress": 100}
 
 
@@ -977,14 +1172,16 @@ def _unique_id(seed: str) -> str:
 
 
 def register_local_project(project_v2_id: str, *, origin: str, name: str, folder: str,
-                           path: Path, kind: str) -> str:
+                           path: Path, kind: str, project_id: Optional[str] = None) -> str:
     """Register the folder as this worker's copy of the logical project (sync).
 
     A normal project row (this worker's ``instance_id``) through the same
     creation path as adding a project here, linked to the logical project's
     origin (auto-linked from the remote for a ``git:`` origin, a locked manual
     link otherwise), the git repository record, and the base checkout the
-    catalog and ``ensure_checkout`` read.
+    catalog and ``ensure_checkout`` read. ``project_id`` is the id and ``name``
+    the exact name the owner chose for a new project (checked before the clone
+    started); otherwise both are made unique here.
     """
     from app.api.git_helpers import ensure_git_repository_record
     from app.api.projects import create_project_record_sync
@@ -1003,9 +1200,10 @@ def register_local_project(project_v2_id: str, *, origin: str, name: str, folder
             # Created under the logical identity from the start: a row first
             # seeded as ``local:<id>`` and then linked left that superseded
             # identity behind as a second, stale project.
-            project = create_project_record_sync(ProjectCreate(
-                id=_unique_id(path.name or name), name=_unique_name(name), path=folder),
-                link_group_id=origin, link_locked=not origin.startswith("git:"))
+            chosen = ProjectCreate(id=project_id, name=name[:100], path=folder) if project_id else ProjectCreate(
+                id=_unique_id(path.name or name), name=_unique_name(name), path=folder)
+            project = create_project_record_sync(chosen, link_group_id=origin,
+                                                 link_locked=not origin.startswith("git:"))
         except HTTPException as exc:
             raise SetupError(INTERNAL, f"Couldn't register the project: {_http_detail(exc)}") from exc
     project_id = project["id"]
@@ -1163,6 +1361,7 @@ def settle_zombies() -> Optional[int]:
                 and Path(temp).name.startswith(f".{Path(path).name}.setup-"):
             shutil.rmtree(temp, ignore_errors=True)
         git_ops_db.fail_op(row["id"], "Setup stopped when the worker restarted. Try again.", code=INTERNAL)
+        hide_failed_first_clone(row)
         settled += 1
     return None if undecided else settled
 
@@ -1212,7 +1411,7 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         emit_changed()
         return result
     if action == "remove":
-        result = await run_sync(remove_local, str(body.get("project_v2_id") or ""))
+        result = await remove_local(str(body.get("project_v2_id") or ""))
         _after_local_registration_change()
         return result
     if action in ("browse-folder", "change-folder"):

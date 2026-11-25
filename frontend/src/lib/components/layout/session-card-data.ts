@@ -953,6 +953,11 @@ export function isRemovedProjectSession(s: Session, liveKeys: Set<string> | null
 	// Remote checkouts stay on their owner. A missing local checkout catalog
 	// entry cannot prove deletion of a named, replicated shared project.
 	if (s.is_remote && s.project_v2_id && s.project_name) return false;
+	// A chat this worker runs that names no project record is one the server
+	// kept on purpose: removing a project keeps chats bound only by a shared
+	// identity, and a record's delete clears project_id on any later chat.
+	// Hidden, it could not be reopened; it stays listed under its identity.
+	if (!s.is_remote && !s.project_id) return false;
 	const key = projectKey(s);
 	if (key === UNGROUPED_PROJECT) return false;
 	if (liveKeys.has(key)) return false;

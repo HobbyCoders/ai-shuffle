@@ -37,6 +37,8 @@ calls.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -50,6 +52,7 @@ from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.truncate import FULL_STDOUT_MAX
 from fluid.codemode.verify import verify_sources, verify_store
+from fluid.context.screening import clip_redacted, redact_text
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
@@ -60,6 +63,24 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 CODE_MODE_SOURCE = "codemode"
 SKILLS_SOURCE = "skills"
+# A saved skill's description in list_tools/search_tools: its docstring's
+# first line, which nothing else bounds. read_tool_docs shows the whole source.
+SKILL_DESCRIPTION_CHARS = 160
+
+
+def _brief(description: str) -> str:
+    if len(description) <= SKILL_DESCRIPTION_CHARS:
+        return description
+    return description[:SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+
+
+def _mount_key(files: dict[str, str]) -> tuple:
+    """Change-detection key for one kernel VFS mount: each file's name and
+    the digest of the exact text mounted."""
+    return tuple(sorted(
+        (name, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
+        for name, text in files.items()
+    ))
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel: names you bind stay "
@@ -281,6 +302,8 @@ _JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
 # multi-kilobyte scripts filled the 1 MiB journal on their own. The
 # synthesizer reads code for its shape, not its bulk.
 _JOURNAL_CODE_CAP = 2000
+# The marker fluid.codemode.truncate.clip_part leaves where it cut a part.
+_KERNEL_CLIP_MARK = re.compile(r" …\[-[\d,]+ chars\]… ")
 
 
 def _cap_code(code: str) -> str:
@@ -442,7 +465,7 @@ class CodeModeSession:
                 lines.append("Saved skills, import via `from skills import <name>`:")
                 for s in saved:
                     flag = f" [BROKEN, not mounted: {s.broken}]" if s.broken else ""
-                    lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{flag}")
+                    lines.append(f"- {s.name}: {_brief(s.description)} [used {s.uses}x]{flag}")
         return "\n".join(lines) if lines else "No tools available."
 
     def render_search(self, query: str) -> str:
@@ -452,19 +475,24 @@ class CodeModeSession:
             for s in self._skills.list():
                 hay = f"skills.{s.name} {s.description}".lower()
                 if any(t in hay for t in tokens) or (not tokens and query.lower() in hay):
-                    hits.append((f"skills.{s.name}", s.description))
+                    hits.append((f"skills.{s.name}", _brief(s.description)))
         if not hits:
             return f"No tools match {query!r}."
         return "\n".join(f"- {leaf}: {one}" for leaf, one in hits)
 
     def render_docs(self, name: str) -> str:
-        if self._skills is not None:
-            skill = self._skills.get(name.removeprefix("skills."))
+        # ``skills.<name>`` names a saved skill. An unqualified name is a tool
+        # first, so a skill that shares a tool's name cannot hide its docs.
+        qualified = name.startswith("skills.")
+        skill = (self._skills.get(name.removeprefix("skills."))
+                 if self._skills is not None else None)
+        src = None if qualified else self._projection().docs(name)
+        if src is None:
             if skill is not None:
                 return skill.source
-        src = self._projection().docs(name)
-        if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
+        if skill is not None:
+            src += f"\n\n(A saved skill is also named {name}; read skills.{name} for its source.)"
         # A repeat fetch returns the docs anyway — a compaction may have taken
         # them — but tells the model it is probably already holding them.
         if name in self._docs_served:
@@ -500,19 +528,16 @@ class CodeModeSession:
             return {}
         self._verification_degraded = None
         self._verification_degraded_reported = False
-        return {
-            s.name: s.source for s in self._skills.list()
-            if s.broken is None and s.source
-            and not self._skills.needs_verification(s.name)
-        }
+        return self._skills.verified_sources()
 
     async def _ensure_kernel(self) -> SubprocessKernel:
         sources = self._projection().sources()
         skills = await self._mountable_skills()
-        signature = (
-            tuple(sorted(sources.items())),
-            self._skills.signature() if self._skills is not None else (),
-        )
+        # Keyed on what set_vfs is given, not the directory: a skill verified
+        # in a later cell (the budget ran out earlier, or a verification pass
+        # failed) changes the mount with no file change. Names and digests
+        # only, so the session does not keep a second copy of every source.
+        signature = (_mount_key(sources), _mount_key(skills))
         if self._kernel is None:
             self._kernel = SubprocessKernel(self._config)
             await self._kernel.start()
@@ -816,16 +841,24 @@ class CodeModeSession:
             self._friction_pending = []
             return
         try:
-            error_lines = (result.error or "").strip().splitlines()
+            # Everything is redacted before it is clipped (see
+            # SkillStore.journal_append), from the cell's whole text where the
+            # kernel already cut what it returned.
+            error_lines = (
+                getattr(result, "error_full", "") or result.error or "").strip().splitlines()
             # The kernel's one-line summary of the exception; a host-authored
-            # error (timeout, kernel death) has none and is short.
-            error = getattr(result, "error_summary", "") or (
-                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
+            # error (timeout, kernel death) has none and is short. A summary
+            # the kernel clipped is cut before any redaction could see it, so
+            # the whole error's last line stands in for it.
+            error = getattr(result, "error_summary", "") or None
+            if (error is None or _KERNEL_CLIP_MARK.search(error)) and error_lines:
+                error = clip_redacted(error_lines[-1], _JOURNAL_VALUE_CAP)
             self._skills.journal_append({
                 "kind": "cell",
-                "code": _cap_code(code),
-                "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
-                "value": result.value_repr[:_JOURNAL_VALUE_CAP],
+                "code": _cap_code(redact_text(code)),
+                "stdout": clip_redacted(
+                    getattr(result, "stdout_full", "") or result.stdout, _JOURNAL_STDOUT_CAP),
+                "value": clip_redacted(result.value_repr, _JOURNAL_VALUE_CAP),
                 "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),
@@ -1116,7 +1149,7 @@ def register_code_mode_tools(
                     "changes."
                 )
             )
-        store.mark_verified(name)
+        store.mark_verified(name, source=source)
         return ToolOutcome(
             text=(
                 f"skill {skill.name!r} saved and verified — import with "

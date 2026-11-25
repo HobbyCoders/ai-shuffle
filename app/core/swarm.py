@@ -133,15 +133,91 @@ async def cancel_worker(task_id):
     if launch:
         launch.finish("cancelled", "Session closed" if reason == "session_closed" else "Swarm cancelled")
 
+def _active_keys(coordinator):
+    """Running workflows plus ones whose start is still being admitted.
+
+    An admission outlives its caller's cancellation and starts its runner
+    when it returns, so a Stop that latched only runners would let it
+    dispatch workers after a newer message cleared the session's Stop latch.
+    """
+    active_ids = getattr(coordinator, "active_ids", None)
+    if active_ids is not None:
+        return sorted(active_ids())
+    return [key for key, job in coordinator.jobs.items() if not job.done()]
+
+
 def latch_all(session_id):
-    """Let no running workflow of ``session_id`` dispatch another worker.
+    """Let no running or admitting workflow of ``session_id`` dispatch a worker.
 
     Stop latches first and then stops each running worker as a task of its
     own; a workflow left unlatched would replace them as they die.
     """
     coordinator = coordinators.get(session_id)
     if coordinator:
-        coordinator.cancelled.update(key for key, job in coordinator.jobs.items() if not job.done())
+        coordinator.cancelled.update(_active_keys(coordinator))
+
+
+# session id -> the newest input a captured Stop ended (inclusive). Kept with
+# the session, not its workflow host: a session's first workflow may still be
+# on its way to creating one. Dropped by ``close`` (session teardown); the
+# cap only bounds sessions that never get a host. Newer input orders above
+# every cutoff, so an entry left behind never holds back a later turn.
+stopped_through = {}
+_STOPPED_THROUGH_MAX = 1024
+
+
+def latch_started_by(session_id, input_cutoff):
+    """End every workflow started at or before ``input_cutoff``, now or later.
+
+    Every captured Stop records its cutoff here, whatever the receipt guard
+    then decides: newer input may keep the Stop off the session, but what the
+    stopped input started is still the Stop's to end, and a workflow still
+    being admitted is in no task list it captured. Each workflow knows the
+    turn it started under (``SwarmCoordinator.origin``); one started by newer
+    input, or one that cannot be placed, is left alone. :func:`stopped_by_scope`
+    reads the same record when a workflow registers after the Stop and when
+    one ends, so a stopped workflow neither dispatches nor wakes the parent.
+    """
+    if input_cutoff is None:
+        return []
+    if session_id not in stopped_through and len(stopped_through) >= _STOPPED_THROUGH_MAX:
+        stopped_through.pop(next(iter(stopped_through)))
+    cutoff = stopped_through[session_id] = max(int(input_cutoff), stopped_through.get(session_id, 0))
+    coordinator = coordinators.get(session_id)
+    origins = getattr(coordinator, "active_origins", None)
+    if origins is None:
+        return []  # a first workflow still on its way registers under the record
+    older = sorted(key for key, order in origins().items()
+                   if order is not None and int(order) <= cutoff)
+    coordinator.cancelled.update(older)
+    return older
+
+
+def _queued_turn_order(session_id):
+    """The input a workflow started now belongs to, or None when none can say.
+
+    Only a queued turn has an input order a Stop's cutoff can place, and only
+    while its runtime is live and still holds the session. A direct-API turn
+    (``/conversation/stream`` or ``/start``) registers no runtime and leaves
+    ``current_input_order`` naming the last queued turn; what it starts gets
+    no origin and is never caught by an older Stop's cutoff.
+    """
+    from app.core.session_runtime import get_live_runtime
+    from app.core.task_registry import task_registry
+
+    runtime = get_live_runtime(session_id)
+    owns = getattr(runtime, "_owns_admission", None)
+    if owns is None or not owns():
+        return None
+    return task_registry.current_input_order(session_id)
+
+
+def stopped_by_scope(session_id, key):
+    """True when a captured Stop's cutoff covers the input ``key`` started under."""
+    cutoff = stopped_through.get(session_id)
+    origin_of = getattr(coordinators.get(session_id), "origin_of", None)
+    order = origin_of(key) if cutoff is not None and origin_of is not None else None
+    return order is not None and int(order) <= cutoff
 
 
 async def cancel_all(session_id):
@@ -149,18 +225,24 @@ async def cancel_all(session_id):
     if coordinator:
         # Latch every workflow before the first await: no successor may slip
         # through while the host is stopping another workflow's worker.
-        active = [key for key, job in coordinator.jobs.items() if not job.done()]
+        active = _active_keys(coordinator)
         coordinator.cancelled.update(active)
         await asyncio.gather(*(coordinator.cancel(key) for key in active))
 
-async def close(session_id):
+async def close(session_id, *, deadline=None):
+    """Close the session's workflows; ``deadline`` is event-loop time (shutdown's)."""
     coordinator = coordinators.get(session_id)
-    if coordinator:
-        await coordinator.aclose()
-        coordinators.pop(session_id, None)
-        for key, launch in list(workers.items()):
-            if launch.coordinator is coordinator:
-                workers.pop(key, None)
+    try:
+        if coordinator:
+            await coordinator.aclose(deadline=deadline)
+            coordinators.pop(session_id, None)
+            for key, launch in list(workers.items()):
+                if launch.coordinator is coordinator:
+                    workers.pop(key, None)
+    finally:
+        # Only now: a Stop-latched workflow drained by the close above must
+        # still end as stopped (reason, suppressed wake, retired receipt).
+        stopped_through.pop(session_id, None)
 
 
 def _owns_recovery_lease(session_id, run_id, fence_token):
@@ -698,6 +780,9 @@ def make_handler(session_id_supplier):
                 from app.core.agent_provider_models import caller_subagents_refusal
                 from app.db import database
 
+                # The input this start came from, read before any await: a
+                # Stop of it, or a newer turn going live, may land meanwhile.
+                origin = _queued_turn_order(session_id)
                 caller = await asyncio.to_thread(database.get_session, session_id)
                 refusal = caller_subagents_refusal((caller or {}).get("profile_id"))
                 if refusal is not None:
@@ -712,15 +797,38 @@ def make_handler(session_id_supplier):
                             key = snapshot["id"]
                             task_registry.start_task(session_id, key, "agent", snapshot["title"], tool_use_id=key)
                             task_registry.mark_background_launch(session_id, key)
+                            if stopped_by_scope(session_id, key):
+                                # Registered after a Stop of the input it came
+                                # from: run it to "cancelled" without a worker.
+                                coordinator.cancelled.add(key)
                     async def finished(key, status, summary):
                         from app.core import turn_scheduler
+                        from app.core.task_registry import USER_STOP_REASON
                         wire_status = "completed" if status == "completed" else "killed" if status == "cancelled" else "error"
-                        task_registry.complete_task(session_id, key, wire_status, summary=summary)
-                        await turn_scheduler.on_task_terminal(session_id, dict(task_id=key,
-                            status=wire_status, tool_use_id=key, summary=summary))
-                    coordinator = SwarmCoordinator(session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished)
+                        stopped = stopped_by_scope(session_id, key)
+                        task_registry.complete_task(session_id, key, wire_status, summary=summary,
+                            reason=USER_STOP_REASON if stopped and wire_status == "killed" else None)
+                        if stopped:
+                            # The Stop ended it; its end must not steer or
+                            # queue the turn that followed the Stop.
+                            task_registry.suppress_wake(session_id, key)
+                        frame = dict(task_id=key, status=wire_status, tool_use_id=key, summary=summary)
+                        await turn_scheduler.on_task_terminal(session_id, frame)
+                        if stopped:
+                            # A suppressed frame neither retires the engine's
+                            # receipt nor ends a park that waited on it. A park
+                            # written after this is settled by its own
+                            # post-park check, which sees the suppression.
+                            from app.core.turn_finalize import settle_stopped_monitor_parks
+                            await turn_scheduler.retire_task_terminals(session_id, [{**frame, "kind": "agent"}])
+                            await settle_stopped_monitor_parks(session_id)
+                    coordinator = SwarmCoordinator(
+                        session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished,
+                        # The turn each workflow starts under, which a Stop's
+                        # ``input_cutoff`` places (``latch_started_by``).
+                        origin=lambda: _queued_turn_order(session_id))
                     coordinators[session_id] = coordinator
-                snapshot, receipt = await coordinator.start(data, ctx)
+                snapshot, receipt = await coordinator.start(data, ctx, origin=origin)
                 return ToolOutcome(text=json.dumps({"swarm": snapshot}), ui={"swarm": snapshot}, background_task=receipt)
             key = data.get("swarm_id")
             if data.get("action") == "cancel":

@@ -89,6 +89,25 @@ describe('groups store', () => {
 		expect(groups.current.subagents).toEqual({ groups: [{ name: 'B', collapsed: true }], assignments: { y: 'B' } });
 	});
 
+	it('deleting a project group saves the cleared assignments through preference sync, as many as the confirmation counts', async () => {
+		const { groupMemberCount } = await import('$lib/components/deck/cards/project-groups');
+		const { groups } = await load();
+		// 'on-peer' is a project only another worker lists; the synced value holds it too.
+		for (const id of ['here', 'on-peer']) groups.assignToGroup('projects', id, 'Work');
+		groups.assignToGroup('projects', 'kept', 'Home');
+		const before = groups.current.projects.assignments;
+		const counted = groupMemberCount(before, 'Work');
+
+		groups.deleteGroup('projects', 'Work');
+
+		const saved = sync.save.mock.lastCall!;
+		expect(saved[0]).toBe('groups');
+		expect(saved[1].projects).toEqual({ groups: [{ name: 'Home', collapsed: true }], assignments: { kept: 'Home' } });
+		expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!).projects.assignments).toEqual({ kept: 'Home' });
+		expect(Object.keys(before).length - Object.keys(saved[1].projects.assignments).length).toBe(counted);
+		expect(counted).toBe(2);
+	});
+
 	it('reload delegates to preference sync', async () => {
 		const { groups } = await load();
 		await groups.reload();

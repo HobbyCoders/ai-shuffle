@@ -78,6 +78,7 @@ loop, so they cannot interleave. Across processes sharing a skills root:
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import keyword
 import logging
@@ -96,6 +97,7 @@ from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 
 from fluid._filelock import file_lock
+from fluid.context.screening import redact_secrets
 
 _log = logging.getLogger(__name__)
 
@@ -384,6 +386,17 @@ LEGACY_SANDBOX_REFUSAL = "code_mode_os_sandbox=required, but"
 
 def _is_legacy_sandbox_refusal(error: object) -> bool:
     return isinstance(error, str) and error.startswith(LEGACY_SANDBOX_REFUSAL)
+
+
+def _source_digest(source: str) -> str:
+    """The identity a skill verdict is bound to: its exact source text, as
+    :meth:`SkillStore.save` writes it and a read gives it back (universal
+    newlines, one final newline), so the text verified and the text later
+    read from the file compare equal on every platform."""
+    text = source.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.endswith("\n"):
+        text += "\n"
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 # Live skills past this many are archived, least useful first (the memory cap
@@ -782,7 +795,11 @@ class MemoryEntry:
     revision: int = 1
     key: str | None = None
     expires_at: float = 0.0
+    # Open conflicts only (facts.open_conflict), for prompts and listings. The
+    # stored flag is ``conflicted or conflict_settled``: anything that
+    # archives, retires or grants authority reads that.
     conflicted: bool = False
+    conflict_settled: bool = False
     # Replica-stable global ID, not a worker-local mN. Explicit facts retain
     # their body and await owner resolution; inferred predecessors archive.
     superseded_by: str | None = None
@@ -1095,9 +1112,9 @@ class SkillStore:
         info = self._load_meta().get("skills", {}).get(name, {})
         broken = info.get("broken")
         # A broken verdict only holds for the exact source it was issued on.
-        # Old host refusals are not skill failures, even with an unchanged mtime.
+        # Old host refusals are not skill failures, even with unchanged source.
         if broken is not None and (
-            info.get("verified_mtime") != self._mtime_ns(name)
+            not self._verdict_holds(info, name, source)
             or _is_legacy_sandbox_refusal(broken)
         ):
             broken = None
@@ -1133,29 +1150,67 @@ class SkillStore:
         return tuple(out)
 
     # ─── verification bookkeeping (see fluid.codemode.verify) ─────────────
+    # A verdict is bound to the digest of the exact source it was issued on,
+    # never to the file's metadata: a file replaced while its old bytes were
+    # being verified (a worker sync, an edit) is a new, unverified source.
     def _mtime_ns(self, name: str) -> int | None:
         try:
             return self._path(name).stat().st_mtime_ns
         except (OSError, ValueError):
             return None
 
+    def _verdict_holds(self, info: dict, name: str, source: str) -> bool:
+        """Whether the stored verdict still describes ``source``, for showing
+        a broken flag. A verdict recorded before digests (by mtime) counts
+        until the file changes; it never mounts anything (see
+        :meth:`_digest_holds`)."""
+        if info.get("verified_digest") is not None:
+            return self._digest_holds(info, source)
+        mtime = info.get("verified_mtime")
+        return mtime is not None and mtime == self._mtime_ns(name)
+
+    @staticmethod
+    def _digest_holds(info: dict, source: str) -> bool:
+        """Whether the stored verdict was issued on exactly ``source``. An
+        mtime-only verdict from before digests does not count: the old code
+        stamped whatever the file held when verification finished, which may
+        not be the bytes that ran, so it is re-verified once."""
+        digest = info.get("verified_digest")
+        return digest is not None and digest == _source_digest(source)
+
     def needs_verification(self, name: str) -> bool:
         """True when the skill was never verified for its current source."""
         info = self._load_meta().get("skills", {}).get(name, {})
-        mtime = self._mtime_ns(name)
-        return (
-            _is_legacy_sandbox_refusal(info.get("broken"))
-            or mtime is None
-            or info.get("verified_mtime") != mtime
-        )
+        if _is_legacy_sandbox_refusal(info.get("broken")):
+            return True
+        try:
+            source = self._path(name).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return True
+        return not self._digest_holds(info, source)
 
-    def mark_verified(self, name: str, error: str | None = None) -> None:
-        """Record a verification verdict for the skill's current source."""
+    def verified_sources(self) -> dict[str, str]:
+        """``{name: source}`` of the skills whose passing verdict was issued
+        on exactly the source returned: each file is read once, and those
+        bytes are both checked and mounted."""
+        meta = self._load_meta().get("skills", {})
+        out = {}
+        for s in self.list():
+            info = meta.get(s.name, {})
+            if s.source and info.get("broken") is None and self._digest_holds(info, s.source):
+                out[s.name] = s.source
+        return out
+
+    def mark_verified(self, name: str, error: str | None = None, *, source: str) -> None:
+        """Record a verification verdict for ``source``, the exact text that
+        was verified. It applies to the skill only while its file holds those
+        bytes."""
         if _is_legacy_sandbox_refusal(error):
             return  # compatibility for callers replaying old verification results
         meta = self._load_meta()
         entry = meta.setdefault("skills", {}).setdefault(name, {"uses": 0})
-        entry["verified_mtime"] = self._mtime_ns(name)
+        entry.pop("verified_mtime", None)
+        entry["verified_digest"] = _source_digest(source)
         if error is None:
             entry.pop("broken", None)
         else:
@@ -1208,8 +1263,12 @@ class SkillStore:
         :class:`OSError` instead, so a Remember-style caller can report the
         loss rather than a receipt. Near the byte cap a reap is attempted
         first, so a full journal with a consumed prefix frees itself.
+
+        Credentials are redacted before the line is written: the journal is
+        learner evidence, sent to a model. Writers that clip a value redact
+        it before the clip too, so a cut cannot leave a partial credential.
         """
-        entry = dict(entry)
+        entry = redact_secrets(dict(entry))
         entry.setdefault("ts", time.time())
         for key, value in self._journal_tag.items():
             entry.setdefault(key, value)
@@ -1811,11 +1870,14 @@ class SkillStore:
         return deleted
 
     def retire_memory(self, memory_id: str, *, reason: str,
-                      expected_revision: int | None = None) -> bool:
+                      expected_revision: int | None = None, automatic: bool = False) -> bool:
         """Archive one unprotected fact for automatic curation. Unlike
         :meth:`delete_memory` it leaves no deletion barrier: Recall still
-        finds the fact and a later save can bring it back."""
-        return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision)
+        finds the fact and a later save can bring it back. ``automatic``
+        (the learner, consolidation, health repairs) also refuses a fact a
+        sync left disputed (see :meth:`FactStore.retire`)."""
+        return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision,
+                                  automatic=automatic)
 
     def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int,
                                     protected_conflict: bool = False) -> bool:

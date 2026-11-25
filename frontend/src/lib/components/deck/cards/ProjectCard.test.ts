@@ -124,6 +124,16 @@ describe('Projects master/detail', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'All workers' }));
   expect(screen.getByRole('button', { name: 'Open Remote (not on Here)' })).toBeTruthy();
  });
+ it('closes the detail of a project with no copy here once it leaves the list (a failed first clone)', async () => {
+  supported.set(true); list.set([]);
+  overview.set([{ project_v2_id: 'cloning', local_project_id: null, name: 'New clone', kind: 'git', remote: 'example/new-clone', workers: [
+   { install_id: 'self', device_name: 'Here', is_self: true, online: true, state: 'setting_up' }
+  ] }]);
+  render(ProjectCard);
+  expect(await screen.findByRole('heading', { level: 2, name: 'New clone' })).toBeTruthy();
+  overview.set([]);
+  await waitFor(() => expect(screen.queryByRole('heading', { level: 2, name: 'New clone' })).toBeNull());
+ });
  it('shows the filled New project action when empty', async () => {
   list.set([]); render(ProjectCard); await tick();
   expect(screen.getByRole('heading', { level: 1, name: 'Projects' })).toBeTruthy();

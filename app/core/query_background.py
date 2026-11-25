@@ -590,6 +590,9 @@ async def _run_background_query_impl(
                     metadata["errors"] = result_errors
                     logger.warning(f"[Background] ResultMessage contains errors: {result_errors}")
                 # Surface HTTP error status code; no WS yield — background loop has no direct consumer
+                # The typed wait of a refusal the client did not retry.
+                from app.core.provider.events import retry_fields
+                metadata.update(retry_fields(message))
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err

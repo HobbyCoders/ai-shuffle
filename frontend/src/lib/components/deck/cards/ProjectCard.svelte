@@ -17,7 +17,8 @@
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
-	import { startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectWorker } from '$lib/api/project-workers';
+	import { getProjectRemovalPreview, startProjectSetup, type ProjectKind, type ProjectOverviewRow, type ProjectRemovalPreview, type ProjectWorker } from '$lib/api/project-workers';
+	import { removalConfirmText } from './project-removal';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
 	import { isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
@@ -199,9 +200,11 @@
 	// ── Selection ─────────────────────────────────────────────────────────────
 
 	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
+	// Only a local project has drafts (its local tabs): a row with no copy here,
+	// such as a first clone that failed and left the list, simply closes.
 	let retainedRow = $state<ListRow | undefined>();
 	const liveRow = $derived(allRows.find((r) => r.key === selectedKey || (!!r.localId && r.localId === selectedKey)));
-	$effect(() => { if (liveRow) retainedRow = liveRow; });
+	$effect(() => { if (liveRow) retainedRow = liveRow.localId ? liveRow : undefined; });
 	const selectedRow = $derived(liveRow ?? (retainedRow && (retainedRow.key === selectedKey || retainedRow.localId === selectedKey) ? retainedRow : undefined));
 	const selectedProject = $derived(selectedRow?.local);
 	/** The selected project is not on this worker (no local tabs). */
@@ -218,14 +221,56 @@
 		selectedKey = row.key;
 		activeTab = tab ?? (row.localId ? 'general' : 'workers');
 		focusInstallId = installId;
+		cancelRemove();
+	}
+
+	/** A project just created from this panel: open its detail (the row arrives with the refresh). */
+	function handleCreated(localId: string) {
+		void loadProjectsOverview();
+		selectedKey = localId;
+		activeTab = 'general';
+		focusInstallId = null;
 		confirmingRemove = false;
 	}
 
 	function handleBack() {
 		selectedKey = null;
 		focusInstallId = null;
-		confirmingRemove = false;
+		cancelRemove();
 	}
+
+	// What removal deletes, asked of this worker when the confirmation opens:
+	// the row's session count spans every worker, the removal does not.
+	let removalPreview = $state<ProjectRemovalPreview | null>(null);
+	let removalPending = $state(false);
+	let removalAsk = 0;
+
+	async function askRemove() {
+		if (!selectedProject) return;
+		const ask = ++removalAsk;
+		confirmingRemove = true;
+		removalPreview = null;
+		removalPending = true;
+		try {
+			const preview = await getProjectRemovalPreview(selectedProject.id);
+			if (ask === removalAsk) removalPreview = preview;
+		} catch {
+			// The confirmation still opens; it names no number.
+		} finally {
+			if (ask === removalAsk) removalPending = false;
+		}
+	}
+
+	function cancelRemove() {
+		removalAsk++;
+		confirmingRemove = false;
+		removalPreview = null;
+		removalPending = false;
+	}
+
+	const removeHint = $derived(!selectedRow ? '' : removalPending ? 'Counting the chats this removes…'
+		: removalConfirmText(selectedRow.name, overviewOn ? selfName : null,
+			{ chats: removalPreview?.chats ?? null, worktrees: removalPreview?.worktrees.length ?? null }));
 
 	/** A dashed chip: set the project up on that worker in its default folder. */
 	async function setUpFromChip(row: ListRow, worker: ProjectWorker) {
@@ -265,7 +310,7 @@
 		deletingId = selectedProject.id;
 		await handleDeleteProject();
 		if (!error) handleBack();
-		confirmingRemove = false;
+		cancelRemove();
 	}
 
 	function rowMeta(row: ListRow): string {
@@ -330,11 +375,18 @@
 		{#if selectedRow}
 				{#snippet projectDangerRows()}
 					{#if selectedProject}
-						<SettingRow wrapHint label="Remove project" hint={confirmingRemove ? `Remove ${selectedRow.name}${overviewOn ? ` from ${selfName}` : ''} and its ${selectedRow.sessionCount} conversations? This cannot be undone.` : 'Removes the project and its conversations from this worker. Files stay on disk.'}>
-							{#if confirmingRemove}<button class="st-btn" disabled={deleteLoading} onclick={() => (confirmingRemove = false)}>Cancel</button>
-								<button class="st-btn danger" disabled={deleteLoading} onclick={handleRemoveFromDetail}>{deleteLoading ? 'Removing…' : 'Remove'}</button>
-							{:else}<button class="st-btn danger" title={`Remove ${selectedRow.name} and its chats from this worker`} onclick={() => (confirmingRemove = true)}>Remove project and chats</button>{/if}
+						<SettingRow wrapHint label="Remove project" hint={confirmingRemove ? removeHint : 'Removes the project and its chats from this worker. Files stay on disk.'}
+							expanded={confirmingRemove && removalPreview?.worktrees.length ? keptWorktrees : undefined}>
+							{#if confirmingRemove}<button class="st-btn" disabled={deleteLoading} onclick={cancelRemove}>Cancel</button>
+								<button class="st-btn danger" disabled={deleteLoading || removalPending} onclick={handleRemoveFromDetail}>{deleteLoading ? 'Removing…' : 'Remove'}</button>
+							{:else}<button class="st-btn danger" title={`Remove ${selectedRow.name} and its chats from this worker`} onclick={askRemove}>Remove project and chats</button>{/if}
 						</SettingRow>
+						{#snippet keptWorktrees()}
+							<details class="kept-worktrees" data-kept-worktrees>
+								<summary>Worktree folders that stay on disk</summary>
+								<ul>{#each removalPreview?.worktrees ?? [] as path (path)}<li class="st-mono">{path}</li>{/each}</ul>
+							</details>
+						{/snippet}
 					{/if}
 				{/snippet}
 			<DetailPane width="reading" name={selectedRow.name} icon={selectedRow.kind === 'git' ? FolderGit2 : FolderOpen} onBack={back} backLabel="Projects"
@@ -372,7 +424,7 @@
 		{/if}
 	{/snippet}
 </ViewShell>
-<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
+<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={handleCreated} />
 
 <style>
 	/* The filter's space, held while the overview may still show it (filterGeometry). */

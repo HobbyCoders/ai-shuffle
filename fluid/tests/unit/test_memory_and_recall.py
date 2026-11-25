@@ -112,6 +112,7 @@ async def test_synthesizer_applies_memory_tags(tmp_path) -> None:
     kept = store.save_memory("stale fact to rewrite")
     doomed = store.save_memory("fact the user contradicted")
     synth = Synthesizer(provider=None, model="m", store=store)
+    synth._memory_lines()  # the pass lists the facts it may rewrite or retire
     changed = await synth._apply(
         "<memory>User deploys from CI only</memory>\n"
         f'<memory id="{kept.id}">User prefers rebase over merge</memory>\n'
@@ -767,6 +768,7 @@ async def test_tool_only_memories_are_held_out_of_the_prompt(tmp_path) -> None:
     assert store.search_memories("prod")
 
     # The user says it: the rewrite carries user provenance and renders.
+    synth._memory_lines()
     await synth._apply(
         f'<memory id="{held[0].id}">Deploys go straight to prod</memory>',
         [{"kind": "remember", "text": "remember: deploys go straight to prod"}],
@@ -774,6 +776,7 @@ async def test_tool_only_memories_are_held_out_of_the_prompt(tmp_path) -> None:
     assert store.held_memories() == [] and synth.last_held == []
     assert "Deploys go straight to prod" in store.render_memory_section()
     # A direct call with no slice leaves provenance alone.
+    synth._memory_lines()
     await synth._apply(f'<memory id="{held[0].id}">Deploys go to prod</memory>')
     assert store.memories()[0].provenance == "user"
 

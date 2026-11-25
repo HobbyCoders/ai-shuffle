@@ -43,7 +43,8 @@
 		GitPullRequest,
 		Settings,
 		BookOpen,
-		SquareTerminal
+		SquareTerminal,
+		Megaphone
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { getPullRequests, type PullRequest } from '$lib/api/github';
@@ -82,6 +83,8 @@
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
 	import SnoozePicker from './sidebar/SnoozePicker.svelte';
+	import BroadcastDialog, { type BroadcastCandidate } from './sidebar/BroadcastDialog.svelte';
+	import { broadcastDialog, hostBroadcastDialog, openBroadcastDialog, closeBroadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 	import type { SheetAnchor } from './sidebar/sheet-anchor';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
 	import {
@@ -495,13 +498,9 @@
 		if (deviceFilter && !deviceOptions.some((d) => d.id === deviceFilter)) deviceFilter = null;
 	});
 
-	const visibleSessions = $derived(
-		sidebarSessions.filter(
-			(s) =>
-				(!projectFilter || groupKey(s) === projectFilter) &&
-				(!deviceFilter || sessionDeviceId(s) === deviceFilter)
-		)
-	);
+	const passesFilters = (s: Session) =>
+		(!projectFilter || groupKey(s) === projectFilter) && (!deviceFilter || sessionDeviceId(s) === deviceFilter);
+	const visibleSessions = $derived(sidebarSessions.filter(passesFilters));
 
 	// --- grouping ----------------------------------------------------------
 	// `ts` is the row's last-activity time, resolved ONCE per row (R2). The
@@ -524,7 +523,7 @@
 	// lands a moment later and changes nothing on screen. Keyed by a string so
 	// the shared ticker only rebuilds the rows when a snooze actually runs out.
 	const snoozeDueKey = $derived(
-		visibleSessions
+		sidebarSessions
 			.filter((s) => {
 				const until = snoozeUntilMs(s);
 				return until !== null && until <= now;
@@ -548,8 +547,10 @@
 		return () => clearTimeout(timer);
 	});
 
-	const rows = $derived.by((): CardRow[] =>
-		visibleSessions
+	// Every chat's row, filters or not: "Message all active chats" reaches the
+	// chats a project or device filter hides too.
+	const allRows = $derived.by((): CardRow[] =>
+		sidebarSessions
 			.map((s) => {
 				const branch = branchLabel(s);
 				const prSet = branch && s.project_id ? openPrBranches.get(s.project_id) : undefined;
@@ -582,6 +583,7 @@
 			})
 			.sort((a, b) => b.ts - a.ts)
 	);
+	const rows = $derived(allRows.filter((r) => passesFilters(r.session)));
 
 	// "Needs you" lifts every ACTIVE row parked on a prompt out of Active, so an
 	// active row moves when it starts or stops waiting on the user — never on
@@ -600,6 +602,27 @@
 			.sort((a, b) => (snoozeUntilMs(a.session) ?? 0) - (snoozeUntilMs(b.session) ?? 0))
 	);
 	const settledRows = $derived(rows.filter((r) => laneOf(r) === 'settled'));
+
+	// "Message all active chats": every chat in Needs you and Active, parked
+	// ones included, on every worker, whatever the filters show. Needs you first,
+	// in the lanes' own order.
+	onMount(hostBroadcastDialog);
+	const broadcastCandidates = $derived.by((): BroadcastCandidate[] => {
+		const lane = (key: 'needs' | 'active') => allRows.filter((r) => laneOf(r) === key).sort(byStart);
+		const state = (r: CardRow, needs: boolean): BroadcastCandidate['state'] =>
+			r.status === 'offline' ? 'offline'
+				: needs ? 'needs'
+				: r.status === 'working' || r.status === 'queued' ? 'working'
+				: r.status === 'parked' ? 'parked'
+				: 'idle';
+		const toCandidate = (needs: boolean) => (r: CardRow): BroadcastCandidate => ({
+			id: r.session.id,
+			title: r.session.title?.trim() || 'Untitled',
+			state: state(r, needs),
+			worker: r.session.is_remote ? r.session.device_name || 'Another worker' : null
+		});
+		return [...lane('needs').map(toCandidate(true)), ...lane('active').map(toCandidate(false))];
+	});
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
@@ -1077,6 +1100,26 @@
 {/snippet}
 
 {#snippet sect(key: 'needs' | 'active' | 'snoozed' | 'settled', label: string, count: number)}
+	{#if key === 'active' && broadcastCandidates.length > 0}
+		<div class="sect-row">
+			{@render sectButton(key, label, count)}
+			<button
+				class="icon-btn sect-act"
+				type="button"
+				aria-label="Message all active chats"
+				title="Message all active chats"
+				aria-haspopup="dialog"
+				onclick={() => openBroadcastDialog()}
+			>
+				<Megaphone size={15} strokeWidth={1.75} />
+			</button>
+		</div>
+	{:else}
+		{@render sectButton(key, label, count)}
+	{/if}
+{/snippet}
+
+{#snippet sectButton(key: 'needs' | 'active' | 'snoozed' | 'settled', label: string, count: number)}
 	<button
 		class="sect"
 		class:needs={key === 'needs'}
@@ -1359,6 +1402,8 @@
 	{#if customizeOpen}
 		<WorkspaceCustomize items={destinations} showSettings={isAdmin} {phone} onClose={() => (customizeOpen = false)} />
 	{/if}
+
+	<BroadcastDialog open={broadcastDialog.open} candidates={broadcastCandidates} onClose={closeBroadcastDialog} />
 </aside>
 
 <style>
@@ -1614,6 +1659,13 @@
 	.sect .chev { margin-left: auto; display: inline-flex; color: var(--subtle-foreground); transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
 	.sect.closed .chev { transform: rotate(-90deg); }
 	.sect.needs .lbl { color: var(--warning); }
+	/* Active's header carries "Message all active chats" beside its chevron. The
+	   row takes the header's sticky place and its rule; the button sits on top. */
+	.sect-row { position: sticky; top: 0; z-index: 6; }
+	.sect-row:not(:first-child) { margin-top: 8px; border-top: 1px solid var(--border); }
+	.sect-row > .sect { position: static; }
+	.sect-row > .sect-act { position: absolute; right: 28px; bottom: 1px; width: 28px; height: 28px; border-radius: var(--radius-control); }
+	.sect-row > .sect-act:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	.sect.settled { color: var(--muted-foreground); }
 
 	.daylabel { padding: 10px 12px 3px; font-size: var(--fs-caption); font-weight: 500; color: var(--subtle-foreground); }
@@ -1694,6 +1746,8 @@
 	.phone .act, .phone .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
 	@media (pointer: coarse), (any-pointer: coarse) {
 		.act, .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
+		/* The lane header is 36px tall: fill it rather than spill past it. */
+		.sect-row > .sect-act { width: 44px; height: 36px; bottom: 0; }
 	}
 	/* A narrow sidebar cannot fit every labelled button (the bar's content box
 	   is about 248px at the desktop default width, 374px on a 390px phone).

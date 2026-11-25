@@ -28,6 +28,7 @@ previous cell's displayed value stays bound to ``_``.
 
 import ast
 import io
+import itertools
 import json
 import os
 import re
@@ -185,11 +186,19 @@ def _make_host_call(send, read_frame):
     return __host_call__
 
 
+_HOST_CALL_IDS = itertools.count(1)
+
+
 def _do_host_call(send, read_frame, tool_name: str, kwargs: dict):
-    send({"kind": "host_call", "name": tool_name, "kwargs": kwargs})
+    call_id = next(_HOST_CALL_IDS)
+    send({"kind": "host_call", "id": call_id, "name": tool_name, "kwargs": kwargs})
     reply = read_frame()
     if reply is None:
         raise vfs.ToolError("host pipe closed during a tool call")
+    if reply.get("kind") != "host_reply" or reply.get("id") != call_id:
+        # Never act on a frame that answers something else: the host restarts
+        # a kernel whose pipe fell out of step, and this cell is not continued.
+        raise vfs.ToolError("host pipe out of step during a tool call")
     if reply.get("denied"):
         raise vfs.HostCallDenied(reply.get("message") or "permission denied")
     if reply.get("error") is not None:
@@ -1446,8 +1455,12 @@ def _main() -> None:
         if kind == "shutdown":
             break
         if isinstance(kind, str) and kind in _FALLBACK_REPLIES:
-            # Any other kind gets no reply, as ever.
-            send(_dispatch(kind, frame))
+            # Any other kind gets no reply, as ever. The request's id comes
+            # back on the reply so the host can tell it from a stale one.
+            reply = _dispatch(kind, frame)
+            if "id" in frame:
+                reply["id"] = frame["id"]
+            send(reply)
 
 
 def _dispatch(kind, frame: dict) -> dict:

@@ -181,7 +181,7 @@ def test_effort_is_captured_before_admission_and_survives_retry(
     latest = {"overrides": {"effort": "xhigh"}}
     monkeypatch.setattr(turns, "get_latest_turn", lambda _: latest)
     monkeypatch.setattr(td, "_credential_gap", lambda _: None)
-    monkeypatch.setattr(td, "_retry_backoff", lambda *args: 0)
+    monkeypatch.setattr(td, "_retry_backoff", lambda *args, **kwargs: 0)
     monkeypatch.setattr(pa, "announce_abandoned_retry", _noop)
     admissions = []
 

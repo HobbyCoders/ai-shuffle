@@ -181,6 +181,42 @@ class ResultMessage(ProviderEvent):
     api_error_status: Optional[int] = None
     uuid: Optional[str] = None
     terminal_reason: Optional[str] = None
+    #: The provider refused with a Retry-After longer than the client waits, so
+    #: the request was surfaced, not retried: the seconds it asked for, and the
+    #: epoch time that wait ends, counted from when the refusal arrived. Nothing
+    #: may send again (or resume) before ``retry_at``. ``None`` otherwise.
+    retry_after_seconds: Optional[float] = None
+    retry_at: Optional[float] = None
+    #: For a 429: whether it is a spent usage or subscription allowance (the
+    #: provider transport's classification, or a rate-limit window the turn
+    #: saw rejected) rather than a transient rate limit. Only a usage limit
+    #: gets the usage-limit banner, a hold and a resume after its reset.
+    #: ``None`` when the refusal was not a 429.
+    usage_limit: Optional[bool] = None
+
+
+#: The typed keys a refused turn's terminal carries (see ``ResultMessage``),
+#: copied unchanged into the pump metadata, the error frame and the durable
+#: terminal event. Consumers read these, never the error text.
+RETRY_FIELDS = ("retry_after_seconds", "retry_at")
+#: The typed usage-limit classification that rides with them.
+USAGE_LIMIT_FIELD = "usage_limit"
+
+
+def retry_fields(source: Any) -> Dict[str, Any]:
+    """The typed refusal fields ``source`` carries (an object or a dict): each
+    of :data:`RETRY_FIELDS` that is a positive number, and
+    :data:`USAGE_LIMIT_FIELD` when it is a bool. Empty when it has none."""
+    out: Dict[str, Any] = {}
+    for key in RETRY_FIELDS:
+        value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            out[key] = float(value)
+    flag = (source.get(USAGE_LIMIT_FIELD) if isinstance(source, dict)
+            else getattr(source, USAGE_LIMIT_FIELD, None))
+    if isinstance(flag, bool):
+        out[USAGE_LIMIT_FIELD] = flag
+    return out
 
 
 @dataclass

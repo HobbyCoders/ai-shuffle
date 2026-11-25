@@ -54,10 +54,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
-import os
 import re
-import signal
-import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -81,6 +78,7 @@ from fluid.context.settings_stack import layered_env
 from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 from fluid.tools.shell import resolve_shell
 
@@ -154,6 +152,9 @@ class Worker:
     swarm_launch: Any = None
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
+    # Windows: the kill-on-close job holding the process tree (owned here;
+    # whoever takes it sets this back to None first).
+    job: int | None = None
     worker_session_id: str | None = None
     status: str = "running"  # running | finished | failed | cancelled
     summary: str | None = None
@@ -453,7 +454,7 @@ class CliHost:
             flags = priority_creationflags()
             if flags:
                 spawn_kwargs["creationflags"] = flags
-        process = await asyncio.create_subprocess_exec(
+        process, job = await spawn_tree(
             *resolve_shell().argv_prefix,
             command,
             cwd=cwd,
@@ -477,6 +478,7 @@ class CliHost:
             kind="monitor",
             description=command,
             process=process,
+            job=job,
             serves=serves,
         )
         self.workers[worker.task_id] = worker
@@ -503,10 +505,15 @@ class CliHost:
                 )
                 worker.feed(strip_ansi(text))
             code = await process.wait()
+            # Ended on its own: what it left running on purpose keeps running.
+            job, worker.job = worker.job, None
+            release_tree(job)
         except asyncio.CancelledError:
             worker.summary = _monitor_summary(worker, None, cancelled=True)
             raise
         except Exception as exc:  # noqa: BLE001
+            job, worker.job = worker.job, None
+            release_tree(job)
             await self._report(worker, "failed", f"monitor failed: {exc}\n{worker.output()}")
             return
         if worker.status == "cancelled":
@@ -1050,40 +1057,16 @@ def _split_trailing_escape(text: str) -> tuple[str, str]:
     return text[: match.start()], text[match.start():]
 
 
-async def _kill_tree(process: asyncio.subprocess.Process) -> None:
-    """Kill a shell-spawned command together with every descendant.
-
-    ``Process.kill`` only reaches the shell; the real command would keep the
-    stdout pipe open and ``wait()`` would never return. Windows uses
-    ``taskkill /T``; POSIX kills the process group the command was started in.
-    """
-    if process.returncode is not None:
-        return
-    if sys.platform == "win32":
-        await asyncio.to_thread(
-            subprocess.run,
-            ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-            capture_output=True, check=False,
-            env=scrub_child_env(),
-        )
-    else:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    try:
-        process.kill()
-    except ProcessLookupError:
-        pass
-
-
 async def _stop_worker(worker: Worker) -> None:
     """Kill a worker's process tree (if any), settle its task, and reap both."""
     process = worker.process
     task = worker.task
     current = asyncio.current_task()
     if process is not None:
-        await _kill_tree(process)
+        # The whole tree, even after the shell exited: a descendant still
+        # holding stdout is what keeps a finished-looking Monitor running.
+        job, worker.job = worker.job, None
+        await kill_tree(process, job)
         # With the tree gone the supervisor reads EOF and finishes on its own;
         # cancelling a pending pipe read on the Windows proactor loop can leave
         # the transport half-closed, so cancel only as a fallback.

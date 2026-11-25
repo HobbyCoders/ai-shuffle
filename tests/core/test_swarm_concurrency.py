@@ -339,7 +339,7 @@ async def test_stopped_nested_swarm_cannot_reenter_admission_for_retry(harness, 
         )
     monkeypatch.setattr(provider_agent, "dispatch_worker", fails_before_first_frame)
     monkeypatch.setattr(provider_agent, "announce_abandoned_retry", AsyncMock())
-    monkeypatch.setattr(task_dispatch, "_retry_backoff", lambda *args: 0)
+    monkeypatch.setattr(task_dispatch, "_retry_backoff", lambda *args, **kwargs: 0)
     coordinator, key = await start(1, caller_session_id="nested-owner")
     await asyncio.wait_for(coordinator.jobs[key], 1)
     assert len(calls) == 1

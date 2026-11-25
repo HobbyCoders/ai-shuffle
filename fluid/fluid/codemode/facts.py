@@ -266,6 +266,18 @@ def is_superseded(entry: "dict | Any") -> bool:
                 or get("supersession_confirmed") or get("retired_reason") == "superseded"))
 
 
+def open_conflict(entry: "dict | Any") -> bool:
+    """Whether a fact is held back as conflicted: a merge flagged it and the
+    contention has not since gone (``conflict_settled``, which
+    :meth:`FactStore._settle_slot_conflicts` derives on every pass). For
+    prompts, listings, review badges and owner edits only. Anything that
+    archives, retires or grants authority reads the raw ``conflicted`` flag,
+    which stays until the owner answers, so a settled contention never lets
+    it do what an unsettled one prevented."""
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return bool(get("conflicted")) and not get("conflict_settled")
+
+
 def always_applies(entry: "dict | Any") -> bool:
     """An ALWAYS memory: owner-saved, flagged always, live and current."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
@@ -755,6 +767,7 @@ class FactStore:
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
             self._note_loss(doc, "expired_archived", [e for e in ended if e["id"] not in arrived], now)
         self._repair_supersession_links(doc)
+        self._settle_slot_conflicts(doc)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
@@ -781,6 +794,69 @@ class FactStore:
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
+
+    @staticmethod
+    def _slot_contenders(doc):
+        """Live facts that contend for one slot: different facts (separate
+        IDs, saved on workers offline from each other) holding one (scope,
+        key, worker) with different texts. A copy capacity trimming moved to
+        the archive still contends (every merge brings it back to compete for
+        room); a retired one does not."""
+        slots = {}
+        now = time.time()
+        for e in doc["entries"] + [a for a in doc["archived"] if not a.get("retired_at")]:
+            # An expired copy is on its way back to the archive (see
+            # _maintain), so it does not contend for its old slot.
+            expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
+            if e.get("key") and not e.get("superseded_by") and not expired:
+                # Each worker's copy of an environment fact is its own slot.
+                slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
+        return [e for group in slots.values() if len({e["text"] for e in group}) > 1 for e in group]
+
+    @classmethod
+    def _disputed(cls, doc, entry, scope=None, key=None):
+        """Whether a sync left ``entry``, or the (scope, key, worker) slot it
+        holds or would hold, in a dispute only the owner settles: copies of
+        one record with different values (``alternatives``, a rule's
+        ``contested`` wordings), or different records that still contend for
+        one slot (:meth:`_slot_contenders`, so an expired, superseded or
+        retired copy, or another worker's slot, does not count; a stale
+        ``conflicted`` flag alone is not a dispute). A merge keeps the higher
+        revision, so a revision check alone does not see the dispute;
+        automatic curation refuses on this instead."""
+        if entry is not None and (entry.get("alternatives") or _contested(entry)):
+            return True
+        contenders = cls._slot_contenders(doc)
+        if entry is not None and any(e is entry for e in contenders):
+            return True
+        slot = key or (entry or {}).get("key")
+        if not slot:
+            return False
+        where = scope or (entry or {}).get("scope", "global")
+        worker = (entry or {}).get("worker") or ""
+        return any(e is not entry and e.get("key") == slot and e.get("scope", "global") == where
+                   and (e.get("worker") or "") == worker for e in contenders)
+
+    @classmethod
+    def _settle_slot_conflicts(cls, doc):
+        """Mark a merge's slot-contention flag settled once the contention is
+        gone (a candidate was forgotten, retired, superseded or expired), so
+        the survivor returns to prompts (:func:`open_conflict`). The flag
+        itself stays until the owner answers: curation and archival keep
+        treating the fact as conflicted, exactly as before settling existed.
+        A conflict between copies of one record (its ``alternatives``, or a
+        rule's ``contested`` wordings) is not slot contention and never
+        settles, and neither does a flag on a fact with no key (it holds no
+        slot, so its flag cannot be slot contention). Derived on every pass,
+        so a replicated marker is recomputed. Contention is flagged only by a
+        merge (see :meth:`merge`)."""
+        contended = {id(e) for e in cls._slot_contenders(doc)}
+        for e in doc["entries"] + doc["archived"]:
+            if (e.get("conflicted") and e.get("key") and id(e) not in contended
+                    and not e.get("alternatives") and not _contested(e)):
+                e["conflict_settled"] = True
+            else:
+                e.pop("conflict_settled", None)
 
     @staticmethod
     def _note_loss(doc, kind, gone, now):
@@ -870,8 +946,15 @@ class FactStore:
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
-             when=None, always=None, require_when=False, triggers=None, _document=None):
+             when=None, always=None, require_when=False, automatic=False, triggers=None,
+             _document=None):
         """Save one fact in a tier.
+
+        ``automatic`` marks background learning (the learner, consolidation).
+        Checked under the store lock, it may rewrite a fact only by
+        ``memory_id`` at ``expected_revision``, never one a sync left
+        disputed (:meth:`_disputed`); a save without an ID may repeat a value
+        already held but never replaces one.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
         is an agent's own save. Neither (the learner, harvests) keeps a
@@ -932,6 +1015,10 @@ class FactStore:
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
             if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
+            if automatic and memory_id and expected_revision is None:
+                raise ValueError("Background learning rewrites a fact only at the revision "
+                                 "it was shown; nothing was saved")
+            addressed = bool(memory_id)
             if not memory_id and key and expected_revision is not None:
                 # Restrict corrections to the authenticated project's/global
                 # slots. A revision of 1 is also sent on genuinely new saves;
@@ -1045,6 +1132,25 @@ class FactStore:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
                                      "rewrite it unless the user asked for the change")
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
+            if automatic and self._disputed(doc, old, scope, key):
+                # A merge records both sides of a sync conflict and keeps the
+                # higher revision, so the revision this pass listed may still
+                # match: only the owner's answer settles which value holds.
+                raise ValueError("Memory is disputed between workers until the owner resolves it; "
+                                 "nothing was saved")
+            reusable_archive = archived_old and not old.get("superseded_by")
+            if (automatic and old is not None and not addressed and not reusable_archive
+                    and (old["text"] != text or rekey)):
+                # A save without an ID found the live slot or text it
+                # matches: it may repeat that value, but replacing it needs
+                # the ID and revision this pass was shown, or a newer value
+                # is lost. An archived value is not listed to the learner and
+                # is no longer current, so a new observation may replace it;
+                # a superseded one is not: rewriting it would keep its link to
+                # the fact that replaced it, so forgetting that fact would
+                # bring back the learner's text as if the owner had said it.
+                raise ValueError(f"[{old['id']}] already holds another value; background learning "
+                                 "replaces it only by its listed ID; nothing was saved")
             # A revision guards a rewrite. A key-addressed correction must have
             # resolved above; an unkeyed new save has no slot to compare.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
@@ -1268,6 +1374,7 @@ class FactStore:
         allowed = {f.name for f in fields(MemoryEntry)}
         data = {k: v for k, v in entry.items() if k in allowed}
         data["when"] = written_when(entry)
+        data["conflicted"] = open_conflict(entry)
         return MemoryEntry(**data)
 
     @staticmethod
@@ -1637,7 +1744,7 @@ class FactStore:
             self._write(doc)
             return True
 
-    def retire(self, memory_id, *, reason, expected_revision=None):
+    def retire(self, memory_id, *, reason, expected_revision=None, automatic=False):
         """Move one unprotected fact into the archive, where Recall still finds it.
 
         Automatic curation (the learner, consolidation, health repairs) uses
@@ -1645,7 +1752,11 @@ class FactStore:
         and a later save of the same fact can bring it back. The clock bump
         makes the retirement win over a replica's older live copy, and
         ``retired_at`` keeps a merge from moving it back into the live list.
-        A fact the user asked to keep is never retired.
+        A fact the user asked to keep is never retired. ``automatic`` also
+        refuses a fact a sync left disputed (:meth:`_disputed`), or one still
+        carrying a merge's ``conflicted`` flag even after the contention
+        settled: archiving one side would hide the dispute the owner has to
+        settle.
         """
         with file_transaction(self.lock):
             doc = self._prepare()
@@ -1654,6 +1765,9 @@ class FactStore:
                 return False
             if expected_revision is not None and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retiring it")
+            if automatic and (old.get("conflicted") or self._disputed(doc, old)):
+                raise ValueError("Memory is disputed between workers until the owner resolves it; "
+                                 "nothing was retired")
             self._retire_entry(doc, old, reason)
             self._maintain(doc)
             self._write(doc)
@@ -1861,20 +1975,9 @@ class FactStore:
             doc["entries"] = [e for e in kept if not e.get("retired_at")]
             doc["archived"] = [e for e in kept if e.get("retired_at")]
             self._repair_supersession_links(doc)
-            slots = {}
-            now = time.time()
-            for e in doc["entries"]:
-                # An expired copy is on its way back to the archive (see
-                # _maintain), so it does not contend for its old slot. A copy
-                # that capacity trimming would archive still does: which value
-                # holds a slot is a conflict, not a question of room.
-                expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
-                if e.get("key") and not e.get("superseded_by") and not expired:
-                    # Each worker's copy of an environment fact is its own slot.
-                    slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
-            for group in slots.values():
-                if len({e["text"] for e in group}) > 1:
-                    for e in group:
-                        e["conflicted"] = True
+            # A copy that capacity trimming would archive still contends:
+            # which value holds a slot is a conflict, not a question of room.
+            for e in self._slot_contenders(doc):
+                e["conflicted"] = True
             self._maintain(doc, arrived={e["id"] for e in kept} - held)
             self._write(doc)

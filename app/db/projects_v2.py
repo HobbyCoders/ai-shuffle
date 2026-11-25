@@ -261,6 +261,89 @@ def set_forgotten(origin: str, forgotten: bool) -> bool:
     return _patch_settings(origin, {}, drop=("forgotten",))
 
 
+#: Set while a project exists only as a new project's first clone (``POST
+#: /projects/clone``) that has not succeeded yet: ``{runner_id, op_id}`` of
+#: the latest attempt. Only that attempt hides it again when it fails
+#: (:func:`settle_provisional`); a registered copy clears it
+#: (:func:`mark_registered`).
+PROVISIONAL_KEY = "provisional_clone"
+
+
+def provisional_token(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The first clone's provisional mark on a projects_v2 row, else None."""
+    settings = (row or {}).get("settings")
+    token = settings.get(PROVISIONAL_KEY) if isinstance(settings, dict) else None
+    return token if isinstance(token, dict) and token.get("runner_id") and token.get("op_id") else None
+
+
+def _same_token(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return a.get("runner_id") == b.get("runner_id") and a.get("op_id") == b.get("op_id")
+
+
+def _swap_settings(origin: str, change, *, name: Optional[str] = None) -> bool:
+    """Compare-and-set on one row: ``change(settings)`` returns the new settings
+    or None to leave the row as it is, decided under the row lock."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT settings FROM projects_v2 WHERE origin = %s FOR UPDATE", (origin,))
+        found = cursor.fetchone()
+        if found is None:
+            return False
+        current = _parse_json(found["settings"])
+        updated = change(dict(current) if isinstance(current, dict) else {})
+        if updated is None:
+            return False
+        if name:
+            cursor.execute("UPDATE projects_v2 SET settings = %s, name = %s, updated_at = NOW() WHERE origin = %s",
+                           (json.dumps(updated), name, origin))
+        else:
+            cursor.execute("UPDATE projects_v2 SET settings = %s, updated_at = NOW() WHERE origin = %s",
+                           (json.dumps(updated), origin))
+        return bool(cursor.rowcount)
+
+
+def claim_provisional(origin: str, token: Dict[str, Any], *, expect: Optional[Dict[str, Any]],
+                      name: Optional[str] = None) -> bool:
+    """Mark ``origin`` as ``token``'s first clone (and show it again), only
+    while the current mark is still ``expect`` (None: no mark). With ``name``
+    the project is renamed in the same write."""
+    def change(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not _same_token(provisional_token({"settings": settings}), expect):
+            return None
+        settings[PROVISIONAL_KEY] = dict(token)
+        settings.pop("forgotten", None)
+        return settings
+
+    return _swap_settings(origin, change, name=name)
+
+
+def settle_provisional(origin: str, runner_id: str, op_id: str) -> bool:
+    """Hide ``origin`` after its first clone failed, only while that clone
+    (``runner_id``/``op_id``) is still its mark: not if a later attempt
+    replaced it or a copy was registered since. The mark stays, so a retry
+    replaces it."""
+    def change(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        owner = provisional_token({"settings": settings})
+        if not _same_token(owner, {"runner_id": runner_id, "op_id": op_id}) or settings.get("forgotten") is True:
+            return None
+        settings["forgotten"] = True
+        return settings
+
+    return _swap_settings(origin, change)
+
+
+def mark_registered(origin: str) -> bool:
+    """A worker registered a copy of ``origin``: it is a listed project again
+    (neither hidden nor a first clone in progress). No write when already so."""
+    row = get_project_v2_by_origin(origin)
+    settings = (row or {}).get("settings") or {}
+    if not row or (settings.get("forgotten") is not True and PROVISIONAL_KEY not in settings):
+        return False
+    return _patch_settings(origin, {}, drop=("forgotten", PROVISIONAL_KEY))
+
+
 def list_projects_v2() -> List[Dict[str, Any]]:
     """Return every project_v2, newest first."""
     with get_db() as conn:
@@ -274,6 +357,7 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'upsert_project record_remote pin_remote mark_merged set_forgotten',
+    'upsert_project record_remote pin_remote mark_merged set_forgotten claim_provisional settle_provisional '
+    'mark_registered',
     scope='shared',
 )
