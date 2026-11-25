@@ -242,6 +242,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    claim_session,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -1703,6 +1704,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._session is None:
             resumed = False
             if self._session_id is not None:
+                # Lock before reading the head and the last event seq, so
+                # both include another process's writes (claim_session).
+                claim_session(self.store, self._session_id)
                 session = await self.store.get_session(self._session_id)
                 if session is not None:
                     await self._seed_bus_seq(session.session_id)
@@ -5989,9 +5993,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Responses) are what the provider settled on, so they are
                     # what runs. The deltas only fed the live display and the
                     # stream guards: a dropped or partial fragment must not
-                    # change the call.
+                    # change the call. A present string wins even when empty
+                    # (the call settled with no arguments); only a done item
+                    # without the field falls back to the deltas.
                     final = (block.get("done_item") or {}).get("arguments")
-                    if isinstance(final, str) and final:
+                    if isinstance(final, str):
                         raw_args = final
                     args, arg_error = _parse_tool_args(raw_args)
                     block["input"] = args
