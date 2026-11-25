@@ -110,6 +110,28 @@ def test_summary_retirement_rehydrate_rolling_and_fork():
     assert fresh.view(path[:4])[0] == path[0].message
 
 
+def test_failed_or_non_shrinking_region_is_not_rebuilt_until_it_changes():
+    c, path = compacted()
+    region = c.summary_region(path)
+    c.reject_summary_region(region)  # the side call failed
+    assert c.summary_region(path) is None
+    # An owner's /compact retries explicitly.
+    assert c.summary_region(path, retry_rejected=True) == region
+    # A checkpoint that would grow the view is rolled back and backed off too.
+    c._rejected_regions.clear()
+    assert c.apply_summary(path, (*region[:2], "s" * 2_000_000)) is None
+    assert c.summary_region(path) is None
+    # More digested turns make a new region, which is built again.
+    longer = nodes(16)
+    c._digest_until(longer, overhead_tokens=0, target=0)
+    grown = c.summary_region(longer)
+    assert grown and grown[1] != region[1]
+    # The memory is bounded.
+    for i in range(20):
+        c.reject_summary_region(("root", f"end{i}", "text"))
+    assert len(c._rejected_regions) <= 8
+
+
 def test_region_tail_due_cap_and_no_recall():
     c, path = compacted()
     assert c.summary_region(path, due_only=True) is None  # unknown window
@@ -270,6 +292,24 @@ async def test_background_single_flight_does_not_block_turn_and_cancel_accounts(
     assert loop._pending_summary is not None
     assert sum(e.raw.get("auxiliary_source") == "checkpoint_summary"
                for e in loop.bus.log(loop.session_id) if isinstance(e, Usage)) == 1
+    await loop.aclose()
+
+
+async def test_failed_background_build_is_not_retried_every_turn(tmp_path):
+    provider = LoopProvider(fail=True)
+    loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="fixture",
+                      context_window=40_000, compaction=config(trigger_tokens=10_000_000))
+
+    def side_calls():
+        return sum(r.system == CHECKPOINT_SYSTEM for r in provider.requests)
+
+    await start_checkpoint(loop, provider)
+    await asyncio.wait_for(loop._summary_task, 3)
+    assert loop._pending_summary is None and side_calls() == 1
+    # The next turn end finds the same unchanged region: no second side call.
+    loop._schedule_checkpoint(loop.session_id, "next-turn")
+    await asyncio.wait_for(loop._summary_task, 3)
+    assert side_calls() == 1
     await loop.aclose()
 
 

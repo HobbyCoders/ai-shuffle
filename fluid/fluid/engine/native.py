@@ -3198,6 +3198,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
                 if region is not None:
                     self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    if self._pending_summary is None:
+                        self._compactor.reject_summary_region(region)
             except Exception as exc:
                 log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
 
@@ -3254,6 +3256,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             region = self._compactor.summary_region(
                 nodes, context_window=self.context_window, scale=scale,
                 for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
+                retry_rejected=manual,
             )
             if region is None or self._interrupted.is_set():
                 return None
@@ -3271,6 +3274,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     self._manual_summary_task = None
             self._pending_summary = None
             if pending is None:
+                self._compactor.reject_summary_region(region)
                 return None
             return self._compactor.apply_summary(
                 nodes, pending, overhead_tokens=overhead,
