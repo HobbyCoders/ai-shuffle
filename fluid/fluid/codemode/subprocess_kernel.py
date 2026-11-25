@@ -164,6 +164,8 @@ class SubprocessKernel:
         # paths that already inline it in their error clear it themselves.
         self._restart_note = ""
         self._ever_started = False
+        # Numbers each exec; the child echoes it on the cell's done frame.
+        self._exec_seq = 0
         # The child's stderr, drained as it arrives (a full pipe would block
         # the child) into a bounded tail kept for the death diagnostic.
         self._stderr_task: asyncio.Task | None = None
@@ -486,7 +488,32 @@ class SubprocessKernel:
                 self._restart_note = _restart_notice(await self._restore())
             else:
                 await self._spawn()
-        await self._send({"kind": "exec", "code": code})
+        self._exec_seq += 1
+        exec_id = self._exec_seq
+        try:
+            return await self._exchange(
+                code, exec_id, timeout, on_host_call, host_wait_credit,
+            )
+        except asyncio.CancelledError:
+            # The turn was cancelled somewhere in the exchange: while the cell
+            # ran, while a host call it made was served (a permission prompt,
+            # an AskUser) or while its reply or checkpoint was on the pipe.
+            # The child is still in that exchange and would answer the NEXT
+            # exec with this cell's frames, so the pipe is only kept in step by
+            # restarting the kernel; the checkpoint restores its state.
+            await self._restart_and_restore()
+            raise
+
+    async def _exchange(
+        self,
+        code: str,
+        exec_id: int,
+        timeout: float,
+        on_host_call: HostCall,
+        host_wait_credit: Any,
+    ) -> KernelResult:
+        """Send one cell and serve it until its ``done`` frame (see ``exec``)."""
+        await self._send({"kind": "exec", "code": code, "id": exec_id})
 
         loop = asyncio.get_running_loop()
         host_calls = 0
@@ -497,11 +524,7 @@ class SubprocessKernel:
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
             except TimeoutError:
-                try:
-                    printed = await self._interrupted_output()
-                except asyncio.CancelledError:
-                    await self._restart_and_restore()
-                    raise
+                printed = await self._interrupted_output()
                 note = await self._restart_and_restore()
                 self._restart_note = ""  # said here; not repeated next cell
                 if printed is None:
@@ -534,13 +557,6 @@ class SubprocessKernel:
                 return KernelResult(
                     error=f"{reason}; restarted{note}", host_calls=host_calls
                 )
-            except asyncio.CancelledError:
-                # The turn was interrupted while the cell ran. The child is
-                # still executing it and would answer the NEXT exec with this
-                # cell's result, so the pipe is only kept in step by
-                # restarting the kernel; the checkpoint restores its state.
-                await self._restart_and_restore()
-                raise
             remaining -= loop.time() - started
             if remaining <= 0:
                 remaining = 0.001
@@ -565,8 +581,10 @@ class SubprocessKernel:
                         "the wait happens outside the turn."
                     ))
                 # Host-service time is not charged against the compute budget.
-                await self._send(_reply_frame(reply))
-            elif kind == "done":
+                out = _reply_frame(reply)
+                out["id"] = frame.get("id")  # the child matches it to its call
+                await self._send(out)
+            elif kind == "done" and frame.get("id") == exec_id:
                 # Read the pending notice BEFORE checkpointing: a checkpoint
                 # that fails restarts the kernel, and that restart belongs to
                 # the NEXT cell's notice, not to this one's.
@@ -584,7 +602,7 @@ class SubprocessKernel:
                     error_full=frame.get("error_full") or "",
                     error_summary=frame.get("error_summary") or "",
                 )
-            else:  # unexpected EOF or malformed frame
+            else:  # unexpected EOF, a malformed frame or another exec's done
                 note = await self._restart_and_restore()
                 self._restart_note = ""
                 return KernelResult(
