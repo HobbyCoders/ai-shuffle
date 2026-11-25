@@ -2246,10 +2246,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # Once Claude Code compacts, it may print rows of the stored path again
         # (#679): their ids are not new activity. It compacts after a valid
         # answer, or with its own summarizer when the mod hands one back
-        # unanswered: an automatic compaction (the mod falls back for a skip
-        # or an error) or the host's emergency one. A manual one Fluid refuses
-        # or skips is left as it is, so the filter stays off for it.
-        summarizer_stands_in = trigger == "auto"
+        # unanswered: an automatic compaction (the mod falls back for a skip,
+        # an error or an answer later than its wait) or the host's emergency
+        # one. An automatic one turns the filter on now, before the slow work:
+        # the mod may give up waiting and Claude Code reprint rows while it
+        # runs. A manual one Fluid refuses or skips is left as it is, so the
+        # filter stays off for it until it is answered in time.
+        if trigger == "auto":
+            self._replay_filter.seed(nodes)
         compaction_id = new_id("cmp")
         try:
             # Pure CPU over the whole path: off the event loop, so the turn's
@@ -2263,7 +2267,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The reason is a fixed phrase, never message content.
             if trigger == "auto":
                 logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
-                self._replay_filter.seed(nodes)
             elif trigger == "manual" and self._turn_emergency_compaction:
                 logger.info("emergency compaction at the context limit: Fluid has nothing "
                             "more to compact; Claude Code's summarizer stands in")
@@ -2275,8 +2278,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                             "left as it is, no summarizer", trigger)
             return {"skip": NOTHING_TO_COMPACT}
         except Exception as exc:
-            if summarizer_stands_in:
-                self._replay_filter.seed(nodes)
             if isinstance(exc, ValueError):
                 # A 400: the mod falls back for an automatic compaction and
                 # leaves a manual one as it is.
@@ -2302,13 +2303,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             except Exception as exc:
                 logger.warning("claude mod compaction: could not archive dropped rows: %s",
                                type(exc).__name__)
-                if summarizer_stands_in:
-                    self._replay_filter.seed(nodes)
                 raise ValueError("could not archive the rows it would drop") from exc
         # The mod stopped waiting before this answer was ready: it fell back
         # (automatic) or skipped (manual), so no boundary will apply it.
         late = time.monotonic() - received > MOD_COMPACT_WAIT_S
-        if not late or summarizer_stands_in:
+        if not late:
             self._replay_filter.seed(nodes)
         self._replay_filter.expect(messages)
         if checkpoint.get("skipped"):

@@ -287,6 +287,48 @@ async def test_a_refused_manual_compaction_does_not_turn_replay_tracking_on():
         await loop.aclose()
 
 
+async def test_rows_reprinted_while_a_slow_automatic_compaction_runs_are_not_stored_again(monkeypatch):
+    """The chat's first automatic compaction: Fluid's work outlasts the mod's
+    wait, so Claude Code's summarizer compacts meanwhile and reprints the tool
+    rows it kept. Replay tracking was on from the request, so none of them is
+    stored again."""
+    import threading
+
+    from fluid.engine import delegated
+
+    chat = Chat()
+    chat.grow(8)
+    loop, sid = await _loop_with(chat)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_compaction(*args: Any, **kwargs: Any) -> list:
+        started.set()
+        release.wait(30)
+        return compact_messages(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, 'compact_messages', slow_compaction)
+    monkeypatch.setattr(delegated, 'MOD_COMPACT_WAIT_S', -1.0)  # the mod gave up
+    monkeypatch.setattr(loop, '_read_compaction_summary', lambda _f: asyncio.sleep(0, 'summary'))
+    try:
+        request = asyncio.create_task(
+            _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli}))
+        assert await asyncio.to_thread(started.wait, 30)
+        stored_before = len(await loop.store.load_path(sid))
+        kept = [row for row in chat.cli[-8:] if row.get('toolUses') or row.get('toolResults')]
+        assert kept, 'the summarizer must keep tool rows for the test to mean anything'
+        uuids = (f'reprint-{n}' for n in itertools.count())
+        await _read(loop, sid, [COMPACTING, _boundary(chat.cli[-1]['handle']),
+                                *(_frame(row, next(uuids)) for row in kept)])
+        path = await loop.store.load_path(sid)
+        assert len(path) == stored_before
+        calls = [b.id for n in path for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert len(calls) == len(set(calls))
+    finally:
+        release.set()
+        await request
+        await loop.aclose()
+
+
 async def test_replay_tracking_goes_with_the_cli_process():
     """A fresh CLI has compacted nothing, so it has nothing to replay: the
     ids the last one could replay are not kept past its process."""
