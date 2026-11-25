@@ -42,6 +42,9 @@ DEFAULT_CONNECT_TIMEOUT_S = 30.0
 # longer sets call_timeout.
 DEFAULT_CALL_TIMEOUT_S = 60.0
 DEFAULT_SHUTDOWN_TIMEOUT_S = 5.0
+# Pages of a paginated tools/list followed before the catalog is reported as
+# incomplete. The whole listing also shares one call_timeout deadline.
+MAX_LIST_PAGES = 50
 
 
 def _timeout_from(config: dict[str, Any], key: str, default: float) -> float:
@@ -81,6 +84,9 @@ class McpClient:
         # that drops them leaves the model with per-tool descriptions only.
         self.instructions: str | None = None
         self.list_fetches: int = 0  # underlying tools/list round-trips (test/obs hook)
+        # Why the last tools/list stopped short of the server's whole catalog
+        # (a page cap, the deadline, a failed page), or None when it was whole.
+        self.catalog_incomplete: str | None = None
         self.connect_timeout = _timeout_from(config, "connect_timeout", DEFAULT_CONNECT_TIMEOUT_S)
         self.call_timeout = _timeout_from(config, "call_timeout", DEFAULT_CALL_TIMEOUT_S)
         self.shutdown_timeout = _timeout_from(
@@ -294,25 +300,48 @@ class McpClient:
         if self._cache is not None and self._cache.expires_at is not None and now < self._cache.expires_at:
             return self._cache.tools
         self.list_fetches += 1
+        # Every page of a paginated catalog, under one deadline and a page
+        # cap. The first page failing fails the listing, as before; a later
+        # page failing (or the deadline or cap) keeps the tools so far, logs
+        # a warning and is not cached, so the next listing tries again.
+        deadline = asyncio.get_running_loop().time() + self.call_timeout
         result = await session.list_tools()
-        tools: list[ToolDescriptor] = []
-        for t in result.tools:
-            annotations = _model_dump(getattr(t, "annotations", None))
-            tools.append(ToolDescriptor(
-                name=t.name,
-                description=t.description or "",
-                # ``inputSchema`` is the only spelling on current mcp releases
-                # (``input_schema`` is the 2.0-SDK alias) — go through _field so
-                # both work instead of raising AttributeError on the camelCase-
-                # only model.
-                input_schema=_field(t, "input_schema", "inputSchema") or {"type": "object"},
-                risk=_risk_from_annotations(annotations),
-                annotations=annotations,
-            ))
+        tools = [_descriptor(t) for t in result.tools]
+        cursor = _field(result, "next_cursor", "nextCursor")
+        seen: set[str] = set()
+        pages = 1
+        incomplete: str | None = None
+        while cursor:
+            if cursor in seen:
+                incomplete = "the server repeated a page cursor"
+            elif pages >= MAX_LIST_PAGES:
+                incomplete = f"stopped at the {MAX_LIST_PAGES}-page cap"
+            if incomplete:
+                break
+            seen.add(cursor)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    page = await _list_page(session, cursor)
+            except TimeoutError:
+                incomplete = f"listing took longer than {self.call_timeout:g} s"
+                break
+            except Exception as exc:  # a later page only: keep what arrived
+                incomplete = f"page {pages + 1} failed: {exc}"
+                break
+            pages += 1
+            tools += [_descriptor(t) for t in page.tools]
+            cursor = _field(page, "next_cursor", "nextCursor")
+        self.catalog_incomplete = incomplete
+        if incomplete:
+            log.warning(
+                "mcp: server %r tool list is incomplete (%s); registered %d tools "
+                "from %d pages",
+                self.name, incomplete, len(tools), pages,
+            )
         # ``ttlMs`` is native on the 2.0 SDK; fall back to the raw dict for
         # older SDKs that don't surface it as an attribute.
         ttl_ms = _field(result, "ttl_ms", "ttlMs")
-        expires = now + ttl_ms / 1000.0 if ttl_ms else None
+        expires = now + ttl_ms / 1000.0 if ttl_ms and not incomplete else None
         self._cache = _ListCache(tools=tools, expires_at=expires)
         return tools
 
@@ -375,6 +404,39 @@ class McpClient:
 
 
 # ─── Transport and SDK-shape helpers ─────────────────────────────────────────
+
+
+def _descriptor(t: Any) -> ToolDescriptor:
+    annotations = _model_dump(getattr(t, "annotations", None))
+    return ToolDescriptor(
+        name=t.name,
+        description=t.description or "",
+        # ``inputSchema`` is the only spelling on current mcp releases
+        # (``input_schema`` is the 2.0-SDK alias) — go through _field so
+        # both work instead of raising AttributeError on the camelCase-
+        # only model.
+        input_schema=_field(t, "input_schema", "inputSchema") or {"type": "object"},
+        risk=_risk_from_annotations(annotations),
+        annotations=annotations,
+    )
+
+
+async def _list_page(session: Any, cursor: str) -> Any:
+    """One follow-up ``tools/list`` page, in the shape this SDK takes a cursor.
+
+    mcp 1.x accepts ``cursor=`` (deprecated) and ``params=``; the 2.0 SDK
+    takes ``params`` only. A session without a ``params`` keyword gets
+    ``cursor=``.
+    """
+    try:
+        takes_params = "params" in inspect.signature(session.list_tools).parameters
+    except (TypeError, ValueError):
+        takes_params = False
+    if takes_params:
+        from mcp import types
+
+        return await session.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
+    return await session.list_tools(cursor=cursor)
 
 
 def _open_http_transport(config: dict[str, Any]) -> tuple[Any, Any]:

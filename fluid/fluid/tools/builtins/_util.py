@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import difflib
+import errno
 import hashlib
 import os
 import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterator
@@ -110,13 +112,17 @@ class WalkState:
         return self.deadline is not None and time.monotonic() >= self.deadline
 
 
-def walk_files(root: Path, state: WalkState | None = None) -> Iterator[Path]:
+def walk_files(
+    root: Path, state: WalkState | None = None, *, hidden: bool = True
+) -> Iterator[Path]:
     """Yield files under ``root``, pruning heavy directories and symlinks.
 
     Uses ``os.walk`` (not ``Path.rglob``) for two reasons: the ``dirnames``
     in-place edit prunes whole subtrees before they are ever listed, and
     ``followlinks=False`` keeps the walk out of symlink/junction cycles —
-    ``rglob`` only grew a ``recurse_symlinks`` switch in 3.13.
+    ``rglob`` only grew a ``recurse_symlinks`` switch in 3.13. With
+    ``hidden=False``, dot-named files and directories below ``root`` are
+    skipped, as ripgrep skips them by default.
     """
     state = state or WalkState()
     if root.is_file():
@@ -124,16 +130,23 @@ def walk_files(root: Path, state: WalkState | None = None) -> Iterator[Path]:
         yield root
         return
     dirpath, base = "", root
-    for parent, name in _walk(root, state):
+    for parent, name in _walk(root, state, hidden=hidden):
         if parent is not dirpath:
             dirpath, base = parent, Path(parent)
         yield base / name
 
 
-def _walk(root: Path, state: WalkState) -> Iterator[tuple[str, str]]:
+def _walk(
+    root: Path, state: WalkState, *, hidden: bool = True
+) -> Iterator[tuple[str, str]]:
     """``(dirpath, filename)`` for every file the pruned walk reaches."""
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in PRUNE_DIRS and (hidden or not d.startswith("."))
+        ]
+        if not hidden:
+            filenames = [f for f in filenames if not f.startswith(".")]
         if state.expired:
             state.deadline_hit = True
             return
@@ -589,11 +602,26 @@ def detect_newline(text: str) -> str:
     return "\r\n" if crlf > lf else "\n"
 
 
-def read_text_preserving(path: Path) -> tuple[str, str]:
-    """Return ``(text normalized to LF, original newline)`` without translation."""
+def read_raw_text(path: Path) -> str:
+    """The file's UTF-8 text exactly as stored: no newline translation."""
     with path.open("r", encoding="utf-8", newline="") as fh:
-        raw = fh.read()
-    return raw.replace("\r\n", "\n"), detect_newline(raw)
+        return fh.read()
+
+
+# Bytes sampled from an existing file to pick a whole-file Write's line ending.
+NEWLINE_SNIFF_BYTES = 64 * 1024
+
+
+def sniff_newline(path: Path) -> str:
+    """The dominant line ending of the head of an existing file.
+
+    Whole-file Write only needs the style, so it reads a bounded sample rather
+    than the whole file (which may be huge, or not UTF-8 at all).
+    """
+    with path.open("rb") as fh:
+        head = fh.read(NEWLINE_SNIFF_BYTES)
+    crlf = head.count(b"\r\n")
+    return "\r\n" if crlf > head.count(b"\n") - crlf else "\n"
 
 
 def write_text_with_newline(path: Path, text: str, newline: str) -> None:
@@ -602,8 +630,83 @@ def write_text_with_newline(path: Path, text: str, newline: str) -> None:
     normalized = text.replace("\r\n", "\n")
     if newline != "\n":
         normalized = normalized.replace("\n", newline)
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        fh.write(normalized)
+    write_text_atomic(path, normalized)
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write ``text`` as UTF-8, exactly as given, without losing the old file.
+
+    The text is encoded before anything on disk is touched, so text that
+    cannot be encoded (a lone surrogate) raises ``UnicodeEncodeError`` with the
+    file unchanged. A symlink is written through: its target gets the bytes.
+    A new file is created exclusively and removed again if the write fails.
+    An existing regular file is replaced by a fully written, fsynced sibling
+    temp file carrying its permission bits (and, where allowed, its owner), so
+    a full disk or a crash leaves the old contents rather than an empty or
+    partial file. A file the user may not write stays refused, as before. Like
+    any editor's atomic save, the replace gives the path a new inode: other
+    hard links keep the old contents.
+
+    Where that replace is impossible (a directory the user cannot create files
+    in, a single-file bind mount, or on Windows a file another process holds
+    open without delete sharing), and for anything that is not a regular file
+    (a device, a FIFO), the bytes are written in place, as before.
+    """
+    data = text.encode("utf-8")
+    target = Path(os.path.realpath(path))
+    try:
+        fh = target.open("xb")
+    except FileExistsError:
+        pass
+    else:
+        try:
+            with fh:
+                fh.write(data)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                target.unlink()
+            raise
+        return
+    st = target.stat()
+    if not stat.S_ISREG(st.st_mode):
+        _write_in_place(target, data)
+        return
+    if not os.access(target, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    try:
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+    except OSError:
+        _write_in_place(target, data)
+        return
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        if hasattr(os, "chown"):
+            # Before chmod: a chown by a non-root user clears setuid/setgid.
+            # Keeping another user's ownership needs privileges, so a refusal
+            # just leaves the file owned by the writer.
+            with contextlib.suppress(OSError):
+                os.chown(tmp, st.st_uid, st.st_gid)
+        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    try:
+        os.replace(tmp, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        _write_in_place(target, data)
+
+
+def _write_in_place(target: Path, data: bytes) -> None:
+    with target.open("wb") as fh:
+        fh.write(data)
 
 
 # ── missing-path diagnostics ─────────────────────────────────────────────────
