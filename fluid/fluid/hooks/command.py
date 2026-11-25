@@ -43,7 +43,7 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.process_tree import kill_tree, release_tree, spawn_job
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 
 log = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ class CommandHook:
 
         argv, cwd, env = agent_runner.wrap(
             [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env())
-        proc = await asyncio.create_subprocess_exec(
+        proc, job = await spawn_tree(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -215,7 +215,6 @@ class CommandHook:
             **spawn_kwargs,
             env=env,
         )
-        job = spawn_job(proc)
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
         except BaseException:

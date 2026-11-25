@@ -7,8 +7,9 @@ object has no such gap. Every process the job's member starts joins the job
 too, and with ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` closing the last handle
 terminates all of them, including after a crash of the process holding it.
 
-Everything here is best-effort and never raises; on other platforms every
-function is a no-op that returns None.
+Everything here is best-effort and never raises, except
+:func:`resume_process`, whose failure the caller must act on; on other
+platforms every job function is a no-op that returns None.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
+_PROCESS_SUSPEND_RESUME = 0x0800
 
 
 def _kernel32():  # pragma: no cover - win32 only
@@ -133,6 +135,30 @@ def _set_limit_flags(job: int, flags: int) -> bool:  # pragma: no cover - win32 
     return bool(kernel32.SetInformationJobObject(
         job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info),
     ))
+
+
+def resume_process(pid: int) -> None:  # pragma: no cover - win32 only
+    """Resume every thread of a process started with ``CREATE_SUSPENDED``.
+
+    ``subprocess`` closes the primary thread's handle at spawn, so the
+    process is resumed as a whole through ``NtResumeProcess`` (what psutil's
+    ``Process.resume`` uses). Raises :class:`OSError` when it cannot be
+    resumed; the caller must then kill the process rather than leave it
+    suspended.
+    """
+    ctypes, wintypes, kernel32 = _kernel32()
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+    process = kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+    if not process:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        status = ntdll.NtResumeProcess(process)
+    finally:
+        kernel32.CloseHandle(process)
+    if status < 0:
+        raise OSError(f"NtResumeProcess failed for process {pid} (NTSTATUS 0x{status & 0xFFFFFFFF:08X})")
 
 
 def close_job(handle: int | None) -> None:

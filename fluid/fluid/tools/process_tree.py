@@ -11,7 +11,7 @@ descendant still holds the pipes and runs on with no owner.
   leader while any member lives, and the kernel never hands out a pid that is
   still in use as a group id, so ``killpg(pid)`` still reaches the leftovers
   after the leader has been reaped.
-- Windows: a kill-on-close Job Object taken at spawn (:func:`spawn_job`) holds
+- Windows: a kill-on-close Job Object taken at spawn (:func:`spawn_tree`) holds
   every descendant, including a grandchild whose parent already exited, which
   ``taskkill /T`` cannot reach (#436). A command that finishes normally has its
   job released (:func:`release_tree`), so nothing it left running on purpose
@@ -30,23 +30,56 @@ import os
 import signal
 import subprocess
 import sys
+from typing import Any
 
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.job_object import assign_kill_on_close_job, close_job, release_job
+from fluid.tools.job_object import (
+    assign_kill_on_close_job,
+    close_job,
+    release_job,
+    resume_process,
+)
 
 log = logging.getLogger(__name__)
 
 #: How long :func:`kill_tree` waits to reap the root after the kill.
 REAP_TIMEOUT_S = 5.0
 
+#: Windows ``CreateProcess`` flag: the primary thread starts suspended.
+_CREATE_SUSPENDED = 0x00000004
 
-def spawn_job(proc: asyncio.subprocess.Process) -> int | None:
-    """Windows: put a just-spawned ``proc`` in a kill-on-close job.
 
-    Returns the handle to pass to :func:`kill_tree` or :func:`release_tree`
-    exactly once, or None (always on POSIX, where the group is the record).
+async def spawn_tree(
+    *argv: str, **kwargs: Any,
+) -> tuple[asyncio.subprocess.Process, int | None]:
+    """``asyncio.create_subprocess_exec`` with the tree recorded from the start.
+
+    Returns ``(proc, job)``: pass ``job`` to :func:`kill_tree` or
+    :func:`release_tree` exactly once. It is None on POSIX, where the caller's
+    ``start_new_session`` makes the process group the record.
+
+    Windows: the shell starts suspended, joins a kill-on-close job, and only
+    then runs, so a child it spawns at once is in the job too. Assigning the
+    job after a running start left that child outside it, alive after Stop
+    and holding the pipes. When no job can be had the process still runs
+    (the kill falls back to ``taskkill /T``); when it cannot be resumed it
+    is killed and the error raised, never left suspended.
     """
-    return assign_kill_on_close_job(proc.pid)
+    if sys.platform != "win32":
+        return await asyncio.create_subprocess_exec(*argv, **kwargs), None
+    kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | _CREATE_SUSPENDED
+    proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
+    job = assign_kill_on_close_job(proc.pid)
+    try:
+        resume_process(proc.pid)
+    except BaseException:
+        close_job(job)  # ends the suspended process when it is in the job
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), REAP_TIMEOUT_S)
+        raise
+    return proc, job
 
 
 def release_tree(job: int | None) -> None:
@@ -83,7 +116,7 @@ async def kill_tree(
     """Kill ``proc`` and every descendant, whether or not ``proc`` has exited.
 
     ``proc`` must have been spawned with ``start_new_session`` on POSIX;
-    ``job`` is the handle :func:`spawn_job` returned (consumed here). The
+    ``job`` is the handle :func:`spawn_tree` returned (consumed here). The
     signals go out before the first await, so a second cancellation cannot
     skip them; reaping the root then waits at most ``reap_timeout`` seconds,
     because a descendant that left the group can hold the pipes that

@@ -23,7 +23,7 @@ from fluid.tools.priority import (
     raise_oom_score_adj,
 )
 # ``kill_tree`` is re-exported: other modules end their trees through it.
-from fluid.tools.process_tree import kill_tree, release_tree, spawn_job
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import (
     ToolCtx,
     ToolOutcome,
@@ -213,8 +213,8 @@ def _spawn_kwargs() -> dict[str, Any]:
 
     POSIX: a fresh session (= fresh process group) lets ``os.killpg`` take out
     the shell *and* everything it spawned. Windows has no equivalent that
-    ``asyncio`` exposes; a Job Object taken right after the spawn holds the
-    tree there instead (see ``fluid.tools.process_tree``).
+    ``asyncio`` exposes; a Job Object taken before the suspended shell runs
+    holds the tree there instead (see ``fluid.tools.process_tree.spawn_tree``).
     On Windows the command also starts below normal priority unless
     ``FLUID_CHILD_NICE=0`` (see ``fluid.tools.priority``); on POSIX the
     handler lowers the new group's priority right after the spawn.
@@ -348,7 +348,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # Under Docker agent isolation the command starts through the spawn
     # runner as the agent account; otherwise all three come back unchanged.
     argv, cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, env)
-    proc = await asyncio.create_subprocess_exec(
+    # Windows: the job that lets a kill reach descendants whose parent
+    # exited, taken before the shell runs so none can start outside it.
+    proc, job = await spawn_tree(
         *argv,
         # No stdin, as the description promises: a command that reads it
         # gets EOF instead of the user's next keystrokes.
@@ -365,8 +367,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     lower_process_group_priority(proc.pid)
     # And the first thing the kernel kills when the host runs out of memory.
     raise_oom_score_adj(proc.pid)
-    # Windows: the job that lets a kill reach descendants whose parent exited.
-    job = spawn_job(proc)
     assert proc.stdout is not None
     capture = _Capture()
     loop = asyncio.get_running_loop()

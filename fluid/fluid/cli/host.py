@@ -78,7 +78,7 @@ from fluid.context.settings_stack import layered_env
 from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
-from fluid.tools.process_tree import kill_tree, release_tree, spawn_job
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 from fluid.tools.shell import resolve_shell
 
@@ -454,7 +454,7 @@ class CliHost:
             flags = priority_creationflags()
             if flags:
                 spawn_kwargs["creationflags"] = flags
-        process = await asyncio.create_subprocess_exec(
+        process, job = await spawn_tree(
             *resolve_shell().argv_prefix,
             command,
             cwd=cwd,
@@ -478,7 +478,7 @@ class CliHost:
             kind="monitor",
             description=command,
             process=process,
-            job=spawn_job(process),
+            job=job,
             serves=serves,
         )
         self.workers[worker.task_id] = worker
