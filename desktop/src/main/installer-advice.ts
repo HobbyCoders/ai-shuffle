@@ -12,22 +12,24 @@
  * launcher itself.
  *
  * The owner is pointed at the installer only when it can help: the hub's
- * installer for this platform is a different build from the one installed and
- * is not an older release than the one running.
+ * installer for this platform packs a newer launcher than the running one.
+ * The hub names the revision each installer was built from, and an installer
+ * packs desktop/launcher.json's "version" at that revision
+ * (desktop/scripts/stamp-desktop-build.mjs), read from the public repository at
+ * that pinned commit. A release number cannot tell: a nightly ahead of the
+ * latest stable installer can pack a newer launcher than that installer does.
  *
  * This file is not in the launcher closure (scripts/ci/update_reach.py): it
  * only runs in the updated app, so installed launchers need no change.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { INSTALLERS_URL, isNewerVersion } from './installer-updates';
+import { INSTALLERS_URL } from './installer-updates';
 
 /** The launcher contract a source carries (desktop/launcher.json). */
 export interface LauncherContract { version: number; minimum: number }
 
 const PLATFORMS: Partial<Record<NodeJS.Platform, string>> = { win32: 'win', linux: 'linux' };
-const RELEASE = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
-const RUNNING = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+].*)?$/;
 const REVISION = /^[a-f0-9]{40}$/;
 
 /**
@@ -67,47 +69,39 @@ export async function runningLauncher(passed: string | undefined, appPath: strin
   catch { return 0; }
 }
 
-/** The revision the installed installer was built from (resources/worker/desktop-build.json), or null. */
-export async function installedRevision(file: string): Promise<string | null> {
-  try {
-    const revision = JSON.parse(await fs.readFile(file, 'utf8'))?.revision;
-    return typeof revision === 'string' && REVISION.test(revision) ? revision : null;
-  } catch { return null; }
-}
+/** desktop/launcher.json at a commit of the public repository. */
+export const launcherFileUrl = (revision: string) => `https://raw.githubusercontent.com/HobbyCoders/ai-shuffle/${revision}/desktop/launcher.json`;
 
 export interface AdviceOptions {
   /** The installed launcher this app runs under; undefined without one. */
   running: number | undefined;
   /** This source's desktop/launcher.json. */
   contract: LauncherContract | null;
-  /** The running release (app.getVersion()). */
-  version: string;
-  /** The installed installer's build revision, when known. */
-  installed: string | null;
   platform?: NodeJS.Platform;
   request?: typeof fetch;
 }
 
 /**
  * Whether to recommend the latest installer: true or false, or null when the
- * hub could not be read. Reads the hub only when the launcher is behind.
+ * hub or the installer's launcher could not be read. Reads them only when the
+ * launcher is behind.
  */
 export async function installerRecommended(options: AdviceOptions): Promise<boolean | null> {
   const platform = options.platform ?? process.platform;
   if (!options.contract || !launcherBehind(options.running, options.contract, platform)) return false;
-  try {
-    const response = await (options.request ?? fetch)(INSTALLERS_URL, { method: 'GET', redirect: 'error', credentials: 'omit',
-      signal: AbortSignal.timeout(15_000), headers: { 'User-Agent': 'AI-Shuffle-Installer-Check' } });
+  const get = async (url: string, user: string) => {
+    const response = await (options.request ?? fetch)(url, { method: 'GET', redirect: 'error', credentials: 'omit',
+      signal: AbortSignal.timeout(15_000), headers: { 'User-Agent': user } });
     if (!response.ok) return null;
     const text = await response.text();
-    if (text.length > 64 * 1024) return null;
-    const entry = JSON.parse(text)?.platforms?.[PLATFORMS[platform]!];
-    const version = entry?.version, revision = entry?.revision;
-    if (typeof version !== 'string' || !RELEASE.test(version) || typeof revision !== 'string' || !REVISION.test(revision)) return null;
-    // The installed build already: running it again changes nothing.
-    if (revision === options.installed) return false;
-    // An older release than the one running may not carry this launcher.
-    // (A nightly's suffix is ignored: 1.4.0-nightly.3 counts as 1.4.0.)
-    return !(RUNNING.test(options.version) && isNewerVersion(options.version, version));
+    return text.length > 64 * 1024 ? null : JSON.parse(text);
+  };
+  try {
+    const revision = (await get(INSTALLERS_URL, 'AI-Shuffle-Installer-Check'))?.platforms?.[PLATFORMS[platform]!]?.revision;
+    if (typeof revision !== 'string' || !REVISION.test(revision)) return null;
+    const packed = (await get(launcherFileUrl(revision), 'AI-Shuffle-Installer-Check'))?.version;
+    if (!Number.isSafeInteger(packed) || packed < 1) return null;
+    // The installer helps only when it carries a newer launcher than the running one.
+    return packed > options.running!;
   } catch { return null; }
 }

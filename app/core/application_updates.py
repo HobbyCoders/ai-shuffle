@@ -448,6 +448,9 @@ def status():
                                                 for queued in (_desktop_request, _desktop_followup))
                 result["install_pending"] = bool(_desktop_request and _desktop_request["action"] == "install"
                                                  and _desktop_request["expires_at"] >= time.time())
+                # The same gate as the worker list: never alongside the "installer" remedy.
+                from app.core.update_workers import installer_recommended  # update_workers imports this module
+                result["installer_recommended"] = installer_recommended(result)
     if result.get("phase") in ("idle", "ready") and IN_PROGRESS.search(str(result.get("message") or "")):
         result["message"] = None
     return safe_update_metadata(result)

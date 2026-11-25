@@ -830,7 +830,7 @@
 				{/if}
 				{#if waiting}<p>Checking that every worker included in this update has the new version. {FIRST_START_NOTE}</p>{/if}
 				{#if recommended.length && !waiting && !celebrating}
-					<p class="tip-installer" data-testid="installer-recommended">{recommended.length > 1 || snapshot?.update_all_workers ? `${recommended.map(row => row.worker.device_name).join(', ')}: ` : ''}{INSTALLER_RECOMMENDED} <a href={INSTALLER_URL} target="_blank" rel="noopener noreferrer">{INSTALLER_ACTION}</a></p>
+					<p class="tip-installer" data-testid="installer-recommended">{recommended.length > 1 || snapshot?.update_all_workers ? `${recommended.map(row => row.worker.device_name).join(', ')}: ` : ''}{INSTALLER_RECOMMENDED} The download link is in Settings → System → Updates.</p>
 				{/if}
 			</div>
 		{/if}
@@ -879,7 +879,6 @@
 	.release-notes strong { margin-bottom: 4px; }
 	.notes-text { white-space: pre-line; color: var(--muted-foreground); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12; line-clamp: 12; overflow: hidden; }
 	.update-tooltip p { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
-	.tip-installer a { color: var(--primary); text-decoration: underline; }
 	.update-panel { width: 100%; max-width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--card-foreground, var(--foreground)); box-shadow: var(--shadow-l); font-size: 13px; line-height: 1.45; overflow-wrap: break-word; }
 	.update-panel strong { display: block; font-size: 14px; }
 	.panel-hint { margin: 2px 0 8px; color: var(--muted-foreground); }

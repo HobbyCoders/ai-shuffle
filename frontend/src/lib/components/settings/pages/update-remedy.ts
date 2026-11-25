@@ -6,8 +6,12 @@
  * sidebar does not pull in settings state.
  */
 
-/** Where every installer is published; the newest release is always at this address. */
-export const INSTALLER_URL = 'https://github.com/HobbyCoders/ai-shuffle/releases/latest';
+/**
+ * The downloads page, which serves the installers the hub offers. Not GitHub's
+ * latest release: a release can skip a platform's installer, and the hub then
+ * keeps serving the previous one (tests/test_public_release_files.py).
+ */
+export const INSTALLER_URL = 'https://hobbycoders.com/ai-shuffle/downloads';
 export const INSTALLER_ACTION = 'Download the latest installer';
 export const INSTALLER_LINK = { label: INSTALLER_ACTION, href: INSTALLER_URL };
 /** Said only when the launcher kept the previous data (`data_kept`). */

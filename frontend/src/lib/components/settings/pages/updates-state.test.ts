@@ -445,7 +445,7 @@ describe('a desktop only the latest installer can update', () => {
 			hint: installerHint(failed({ data_kept: true })),
 			link: { label: 'Download the latest installer', href: INSTALLER_URL }
 		});
-		expect(INSTALLER_URL).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
+		expect(INSTALLER_URL).toBe('https://hobbycoders.com/ai-shuffle/downloads');
 	});
 });
 

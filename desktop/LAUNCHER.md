@@ -413,15 +413,20 @@ and Windows replaces it only below the minimum. The updated app says so
 - the running launcher is older than this source's `launcher.json` version;
 - on Windows, the running launcher is not below the minimum (the swap above
   replaces it instead);
-- the hub's installer for this platform is a different build from the
-  installed one (`desktop-build.json` revision) and not an older release than
-  the running app.
+- the hub's installer for this platform packs a newer launcher than the
+  running one. The hub names the revision the installer was built from; the
+  installer packs `launcher.json` "version" at that revision, read from the
+  public repository at that commit (`raw.githubusercontent.com`). A release
+  number cannot tell: a nightly ahead of the latest stable installer can pack
+  a newer launcher than that installer.
 
-The hub is read only when the launcher is behind; an unreadable hub keeps the
-last answer. Settings > System > Updates shows a notice with the installer
-link, so does the sidebar update tooltip and each worker's Check for updates
-result. In-app updates keep working; nothing is blocked. Running the
-installer clears the notice: its launcher then matches, or its revision is
+The hub and that file are read only when the launcher is behind; an unreadable
+answer keeps the last one. Settings > System > Updates shows a notice with a
+link to the downloads page, and so does each worker's Check for updates
+result; the sidebar update tooltip says the same without a link. The local
+notice and the worker list both drop it when the update needs the installer
+anyway (the "installer" remedy). In-app updates keep working; nothing is
+blocked. Running that installer clears the notice: its launcher then matches
 the hub's.
 
 ## Security

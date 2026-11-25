@@ -261,10 +261,9 @@ it('recommends the latest installer in the update tooltip when the launcher only
  await fireEvent.mouseEnter(button);
  const note=(await screen.findByRole('tooltip')).querySelector('[data-testid="installer-recommended"]');
  expect(note?.textContent).toMatch(/^Updates keep working inside the app/);
- const link=note?.querySelector('a');
- expect(link?.textContent).toBe('Download the latest installer');
- expect(link?.getAttribute('href')).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
- expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+ // Informational only: focus leaving the button closes the tooltip, so a link in it is out of keyboard reach.
+ expect(note?.textContent).toContain('Settings → System → Updates');
+ expect(note?.querySelector('a')).toBeNull();
 });
 
 it('does not appear just to recommend the installer, and says nothing when the flag is off', async()=>{
@@ -727,7 +726,7 @@ it.each([true,false])('offers the latest installer instead of a retry (data kept
   expect(panel.textContent).toContain(NO_BUILD);
   expect(panel.textContent?.includes('Your data is kept as it was before the update.')).toBe(kept);
   const link=screen.getByRole('link',{name:'Download the latest installer'});
-  expect(link.getAttribute('href')).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
+  expect(link.getAttribute('href')).toBe('https://hobbycoders.com/ai-shuffle/downloads');
   expect(link.getAttribute('target')).toBe('_blank');
   expect(api.post).not.toHaveBeenCalled();
   // The desktop's ready notification asks the shared control; it opens the same panel.

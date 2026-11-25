@@ -14,7 +14,7 @@ import { managedContext } from './managed-context';
 import { loginItemControl } from './login-item';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
-import { installedRevision, installerRecommended, readContract, runningLauncher } from './installer-advice';
+import { installerRecommended, readContract, runningLauncher } from './installer-advice';
 import { replaceInstalledLauncher } from './launcher-swap';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
@@ -113,9 +113,7 @@ async function main(): Promise<void> {
 			: path.join(path.dirname(advisedHost.executable), 'resources', 'worker', 'desktop-build.json');
 		const running = runningLauncher(process.env[LAUNCHER_VERSION_ENV], app.getAppPath(), buildFile);
 		const contract = readContract(path.join(managed.application.desktopDir, 'launcher.json'));
-		const installed = installedRevision(buildFile);
-		updater.onInstallerAdvice(async () => installerRecommended({ running: await running, contract: await contract,
-			version: app.getVersion(), installed: await installed }));
+		updater.onInstallerAdvice(async () => installerRecommended({ running: await running, contract: await contract }));
 	}
 	// A separate source Electron process survives this app quitting. Packaged
 	// executables cannot run its entry script, so retain the notification fallback.
