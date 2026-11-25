@@ -119,6 +119,31 @@ async def test_bash_does_not_claim_a_kill_that_missed_a_process_in_its_own_group
             os.kill(pid, 9)
 
 
+@pytest.mark.skipif(not shutil.which("timeout"), reason="needs coreutils timeout")
+async def test_bash_does_not_take_a_closed_pipe_for_a_finished_tree(tmp_path) -> None:
+    """The same escape with its output redirected: the pipe reaches EOF once
+    the shell dies, while ``timeout`` and its child still run. Only a check
+    of the tree itself may say it was terminated."""
+    from fluid.tools.builtins.bash import handler
+
+    pid_file = tmp_path / "pid"
+    out = await handler(
+        {"command": f"timeout 60 sh -c 'echo $$ > {pid_file}; exec sleep 60' "
+                    f"> {tmp_path / 'run.log'} 2>&1; true", "timeout": 1},
+        ToolCtx(cwd=str(tmp_path)),
+    )
+    pid = int(pid_file.read_text())
+    try:
+        assert _alive(pid)  # the survivor the message must not deny
+        assert out.is_error
+        assert "was terminated" not in out.text
+        assert "termination was attempted" in out.text
+        assert "could not be confirmed" in out.text
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)
+
+
 async def test_a_cancelled_hook_kills_its_tree(tmp_path) -> None:
     from fluid.hooks.bus import TURN_START
     from fluid.hooks.command import CommandHook

@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_SUSPEND_RESUME = 0x0800
@@ -170,6 +171,54 @@ def close_job(handle: int | None) -> None:
         kernel32.CloseHandle(handle)
     except Exception:  # noqa: BLE001
         log.debug("closing job handle failed", exc_info=True)
+
+
+def terminate_job(handle: int | None) -> bool:
+    """End every member of a job, keeping the handle open; True when Windows did."""
+    if handle is None or sys.platform != "win32":
+        return False
+    try:  # pragma: no cover - win32 only
+        _ctypes, wintypes, kernel32 = _kernel32()
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        return bool(kernel32.TerminateJobObject(handle, 1))
+    except Exception:  # noqa: BLE001
+        log.debug("terminating job %s failed", handle, exc_info=True)
+        return False
+
+
+def job_active_processes(handle: int | None) -> int | None:
+    """How many processes the job still holds; None when that cannot be read."""
+    if handle is None or sys.platform != "win32":
+        return None
+    try:  # pragma: no cover - win32 only
+        ctypes, wintypes, kernel32 = _kernel32()
+
+        class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not kernel32.QueryInformationJobObject(
+            handle, _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info), ctypes.sizeof(info), None,
+        ):
+            return None
+        return int(info.ActiveProcesses)
+    except Exception:  # noqa: BLE001
+        log.debug("reading job %s failed", handle, exc_info=True)
+        return None
 
 
 def release_job(handle: int | None) -> None:

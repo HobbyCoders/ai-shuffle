@@ -379,24 +379,35 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except TimeoutError:
         # Killed even when the shell already exited and only a descendant is
         # left holding the output pipe (the usual way a run hangs here).
-        await kill_tree(proc, job)
+        # "Terminated" only when the whole tree is known to have exited. A
+        # process that left the command's process group (GNU ``timeout``
+        # without --foreground starts its own) escapes the group kill, and
+        # the output pipe still reaches EOF when it redirected its output.
+        exited = await kill_tree(proc, job, confirm=True)
         job = None
-        # The output pipe reaching EOF is the proof the kill took: every
-        # process still holding it is gone. One that left the command's
-        # process group (GNU ``timeout`` without --foreground starts its own)
-        # escapes the group kill and keeps the pipe open.
         drained = False
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
             await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
             drained = True
-        ended = (
-            " and was terminated." if drained else
-            "; termination was attempted, but a process it started still "
-            "holds its output and may still be running (one that left the "
-            "command's process group, as `timeout` without --foreground "
-            "does). Check for it before re-running."
-        )
+        if exited and drained:
+            ended = " and was terminated."
+        elif not drained:
+            # A pipe still held open is evidence of a survivor.
+            ended = (
+                "; termination was attempted, but a process it started still "
+                "holds its output and may still be running (one that left the "
+                "command's process group, as `timeout` without --foreground "
+                "does). Check for it before re-running."
+            )
+        else:
+            ended = (
+                "; termination was attempted, but whether everything it "
+                "started has exited could not be confirmed (a process that "
+                "left the command's process group, as `timeout` without "
+                "--foreground does, survives the kill even when its output "
+                "goes to a file). Check for it before re-running."
+            )
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
