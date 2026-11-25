@@ -81,6 +81,18 @@ def test_text_with_an_epoch():
     assert info is not None and info.at == 1791172200.0
 
 
+def test_an_unretried_retry_after_resets_once_its_wait_passes():
+    """A 429 the client did not retry because its Retry-After was long: the
+    chat's limit state gets a reset time instead of "reset unknown"."""
+    from app.core.provider_agent import not_retried_note
+
+    text = "provider returned HTTP 429: Too many requests. " + not_retried_note(60)
+    info = lr.reset_from_text(text, now=NOW)
+    assert info is not None and info.at == NOW + 60
+    # A body hint the client already waited out says nothing about now.
+    assert lr.reset_from_text("Rate limit reached. Please try again in 20s.", now=NOW) is None
+
+
 @pytest.mark.parametrize("text", [
     "", "rate limited, try later", "resets 3", "resets 25:00", "resets 13pm",
     # An epoch far in the past or months ahead is not believed.

@@ -179,6 +179,10 @@ class ErrorEvent(Event):
     # response body with HTML stripped), at most ~300 characters. ``message``
     # may carry the raw body; this is what a person should read.
     provider_message: str | None = None
+    # Seconds the provider's Retry-After asked for when that was longer than
+    # the client waits, so the request was surfaced instead of retried. A
+    # host must not send again (or resume) before then. ``None`` otherwise.
+    retry_after_seconds: float | None = None
     # Set when the error ended the turn because its context no longer fits
     # (:data:`NEEDS_COMPACTION`): compacting, then continuing, recovers it.
     outcome: str | None = None

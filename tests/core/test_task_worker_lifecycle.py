@@ -1318,6 +1318,98 @@ class TestRateLimitReschedule:
         assert pa.looks_rate_limited(text) is True
 
 
+class TestALongRetryAfterIsHonoured:
+    """A 429 whose Retry-After was longer than the client waits reaches the
+    dispatcher unretried, with the wait in its text (``not_retried_note``).
+    Re-dispatching on the 5 s fallback spent every reschedule inside the
+    provider's window; the wait is now a floor, or the reason not to try."""
+
+    #: What the adapter hands the app for a 429 + ``Retry-After: 60``.
+    ERROR = "provider returned HTTP 429: Too many requests. " + pa.not_retried_note(60)
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+        yield
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+
+    def _dispatch(self, monkeypatch, *, cap, failures):
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_rate_limit_retries", 3, raising=False)
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_rate_limit_backoff_cap_seconds", cap, raising=False,
+        )
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 0, raising=False)
+        slept, calls = [], []
+        real_sleep = asyncio.sleep
+
+        async def _sleep(delay, *a, **kw):
+            slept.append(delay)
+            return await real_sleep(0)
+
+        monkeypatch.setattr(td.asyncio, "sleep", _sleep)
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= failures:
+                return WorkerOutcome(
+                    ok=False, session_id=kwargs["worker_session_id"],
+                    error=self.ERROR, frames_forwarded=0,
+                )
+            return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(
+                parent_session_id="root-1", profile_id="p1", prompt="go",
+                label="x", worker_session_id="w-1",
+            ),
+            background=True, lane="native", provider_id=None,
+            parent_session_id="root-1", dispatcher=dispatcher,
+        ))
+        return outcome, slept, calls
+
+    def test_a_wait_within_the_budget_is_sat_out_before_each_re_dispatch(self, monkeypatch):
+        outcome, slept, calls = self._dispatch(monkeypatch, cap=60.0, failures=2)
+
+        assert outcome.ok is True
+        assert len(calls) == 3
+        assert slept == [pytest.approx(60.0), pytest.approx(60.0)], (
+            "each re-dispatch waits the provider's 60s, not the 5s fallback"
+        )
+
+    def test_a_wait_beyond_the_budget_is_not_re_dispatched(self, monkeypatch):
+        outcome, slept, calls = self._dispatch(monkeypatch, cap=30.0, failures=5)
+
+        assert len(calls) == 1, "a re-dispatch inside the window meets the same 429"
+        assert slept == []
+        assert outcome.ok is False
+        assert outcome.error.startswith(
+            "Provider rate limit: the provider asked to wait 60s before another "
+            "request (until about "
+        )
+        assert "so the worker was not re-dispatched" in outcome.error
+        assert "Provider capacity" not in outcome.error
+        assert outcome.error.endswith(self.ERROR)
+
+    def test_the_failure_summary_does_not_claim_a_retry(self):
+        summary = pa._failure_summary("error", self.ERROR, 0)
+
+        assert summary.startswith("worker failed to start (provider rate limit):")
+        assert "already retried" not in summary
+
+    def test_a_body_hint_alone_keeps_the_clamped_reschedule(self):
+        # Only the client's own note declines a re-dispatch: a body hint
+        # longer than the cap keeps the old clamp-to-cap reschedule.
+        text = "Rate limit reached. Please try again in 90s."
+        used = {"start": 0, "rate": 0}
+        assert td._retry_kind("error", text, 0, used, start_max=0, rate_max=3,
+                              rate_wait_cap=60.0) == "rate"
+        assert td._retry_backoff("rate", text, 0, 60.0) == pytest.approx(60.0)
+
+
 class TestProviderOrgAdmission:
     """C: session ceilings say nothing about a credential's token budget."""
 

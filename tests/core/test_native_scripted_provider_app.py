@@ -572,7 +572,7 @@ async def _chat_turn_outcome(tmp_path: Path, result: ResultMessage) -> dict:
     notices = AsyncMock()
     with patch("app.services.notification_service.emit_notification", new=notices):
         if account_failover.is_usage_limit_error(metadata):
-            await account_failover.attempt_failover("native-429", "u-1")
+            await account_failover.attempt_failover("native-429", "u-1", metadata)
     return {
         "api_error_frames": frames_of(events, "api_error"),
         "api_error_status": metadata.get("api_error_status"),
@@ -611,6 +611,38 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     assert native_outcome["generic_notifications"] == 0  # the 429 notice owns it
     [notice] = native_outcome["rate_limited_notices"]
     assert notice.startswith("Usage limit reached")
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_too_long_to_wait_reaches_the_app(monkeypatch, tmp_path, provider):
+    """A 429 + ``Retry-After: 60`` is longer than the client waits, so it is
+    surfaced at once. The app kept only the short body text, so the Task
+    re-dispatch fell back to 5 s, the chat had no reset time, and an API-key
+    notice said the request had been retried."""
+    from unittest.mock import patch
+
+    from app.core import account_failover, limit_resume, provider_agent
+
+    provider.script(fps.error_reply(429, "Too many requests.", retry_after="60"))
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        messages = await run.turn("hi")
+
+    native = messages[-1]
+    assert isinstance(native, ResultMessage) and native.api_error_status == 429
+    assert len(provider.requests) == 1, "not re-sent inside the provider's window"
+    [error] = native.errors
+    assert error.startswith("provider returned HTTP 429: Too many requests.")
+    # The wait reaches what reads the error text: the Task re-dispatch, the
+    # chat's reset time and the worker's failure summary.
+    assert provider_agent.not_retried_wait(error) == 60.0
+    assert limit_resume.reset_from_text(error, now=1000.0).at == 1060.0
+    assert "already retried" not in provider_agent._failure_summary("error", error, 0)
+
+    with patch.object(account_failover, "_is_subscription_session", return_value=False):
+        outcome = await _chat_turn_outcome(tmp_path, native)
+    [notice] = outcome["rate_limited_notices"]
+    assert "was retried" not in notice
+    assert "wait 60s" in notice
 
 
 @pytest.mark.asyncio

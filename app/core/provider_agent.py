@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import re
 import uuid
 from collections import OrderedDict
@@ -2182,6 +2183,43 @@ def rate_limit_retry_after(text: Optional[str]) -> Optional[float]:
     return value
 
 
+#: The tail of :func:`not_retried_note`: the client surfaced this refusal
+#: instead of retrying it, because the provider asked for longer.
+_NOT_RETRIED_RE = re.compile(
+    r"\(retry-after: ([0-9]+)\), longer than the client waits, "
+    r"so the request was not retried"
+)
+
+
+def not_retried_note(seconds: float) -> str:
+    """The sentence an error carries when the provider's Retry-After was
+    longer than the client waits, so it surfaced the refusal unretried.
+
+    It names the wait in the ``retry-after: N`` form
+    :func:`rate_limit_retry_after` reads, so the Task re-dispatch, the
+    rate-limit notice and the limit resume all see it in the error text.
+    """
+    wait = max(1, math.ceil(seconds))
+    return (
+        f"The provider asked to wait {wait}s before another request "
+        f"(retry-after: {wait}), longer than the client waits, "
+        "so the request was not retried."
+    )
+
+
+def not_retried_wait(text: Optional[str]) -> Optional[float]:
+    """The wait a :func:`not_retried_note` in ``text`` names, or ``None``.
+
+    Only that note counts: a "try again in 1s" in a provider's own body was
+    waited out and retried by the client, so it says nothing about now.
+    """
+    match = _NOT_RETRIED_RE.search(text or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if value > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Liveness watchdog verdicts
 # ---------------------------------------------------------------------------
@@ -2305,6 +2343,8 @@ def _failure_summary(
         return None
     text = _message_first(" ".join((preview or "").split())) \
         or "no error detail was recorded"
+    # Read before the cap: the note sits at the end of the error.
+    asked_to_wait = not_retried_wait(text) is not None
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
     if not frames_forwarded:
@@ -2317,6 +2357,10 @@ def _failure_summary(
             prefix = "worker stopped before first output"
         elif looks_usage_limited(text):
             prefix = "worker stopped by a usage limit (not retried)"
+        elif asked_to_wait:
+            # The provider asked for a wait the client did not sit out, so
+            # "already retried" would be untrue; the text says how long.
+            prefix = "worker failed to start (provider rate limit)"
         elif looks_rate_limited(text):
             prefix = "worker failed to start (provider at capacity, already retried)"
         else:

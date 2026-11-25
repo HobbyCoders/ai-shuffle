@@ -88,6 +88,24 @@ RATE_LIMIT_MESSAGE = (
     "Rate limited by the provider (HTTP 429). The request was retried and "
     "still refused; try again shortly."
 )
+#: The provider's Retry-After was longer than the client waits, so it was not
+#: retried at all (``provider_agent.not_retried_note`` in the turn's errors).
+RATE_LIMIT_NOT_RETRIED_MESSAGE = (
+    "Rate limited by the provider (HTTP 429). It asked to wait {wait}s, longer "
+    "than the client waits, so the request was not retried; try again after then."
+)
+
+
+def rate_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
+    """The API-key 429 notice: says the request was retried only if it was."""
+    from app.core.provider_agent import not_retried_wait
+
+    errors = (metadata or {}).get("errors")
+    text = " ".join(str(e) for e in errors) if isinstance(errors, list) else str(errors or "")
+    wait = not_retried_wait(text)
+    if wait is None:
+        return RATE_LIMIT_MESSAGE
+    return RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=int(wait))
 
 
 def _is_subscription_session(session_id: Optional[str]) -> bool:
@@ -124,6 +142,7 @@ def _is_subscription_session(session_id: Optional[str]) -> bool:
 async def attempt_failover(
     session_id: Optional[str],
     api_user_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Native automatic account failover was RETIRED (OC-1).
 
@@ -131,7 +150,8 @@ async def attempt_failover(
     clear rate-limited state (OC-4) and let the turn end — the user waits for the
     window to reset or signs into a different account. A 429 on an API key
     (OpenRouter, Groq, xAI, a custom row, the Claude API key) has no usage
-    window: it gets the plain rate-limit notice instead.
+    window: it gets the plain rate-limit notice instead, worded from the turn's
+    ``metadata`` errors (:func:`rate_limit_message`).
     """
     from app.db.async_database import run_sync
 
@@ -139,7 +159,7 @@ async def attempt_failover(
     await _notify(
         api_user_id, session_id,
         severity="warning",
-        message=USAGE_LIMIT_MESSAGE if subscription else RATE_LIMIT_MESSAGE,
+        message=USAGE_LIMIT_MESSAGE if subscription else rate_limit_message(metadata),
     )
     logger.info(
         "Usage limit hit for session %s — automatic account failover retired; "
@@ -165,5 +185,7 @@ async def execute_query_with_failover(**kwargs) -> Dict[str, Any]:
 
     result = await execute_query(**kwargs)
     if is_usage_limit_error(result.get("metadata")):
-        await attempt_failover(result.get("session_id"), kwargs.get("api_user_id"))
+        await attempt_failover(
+            result.get("session_id"), kwargs.get("api_user_id"), result.get("metadata"),
+        )
     return result

@@ -97,7 +97,7 @@ async def _stream_query_with_failover(
                 sid = event.get("session_id") or sid
                 # OC-4: surface the rate-limited notification (native
                 # failover is retired, so nothing is retried).
-                await attempt_failover(sid, api_user_id)
+                await attempt_failover(sid, api_user_id, event.get("metadata"))
             if held_api_error is not None:
                 yield held_api_error
             yield event

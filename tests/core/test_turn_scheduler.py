@@ -547,7 +547,10 @@ async def test_failover_surfaces_then_queue_drains(mock_db):
         await turn_scheduler.on_turn_settled("f1", settled["id"], "completed")
         await _drain_kicks()
 
-    attempt.assert_awaited_once_with("f1", "u1")
+    attempt.assert_awaited_once()
+    assert attempt.await_args.args[:2] == ("f1", "u1")
+    # The settled terminal goes along, so the notice can word itself.
+    assert attempt.await_args.args[2]["api_error_status"] == 429
     assert _by_source("f1", "failover") == []
     execute.assert_awaited_once()
     assert execute.await_args.args[0]["id"] == queued["id"]
@@ -575,7 +578,7 @@ async def test_chained_failover_exhaustion_terminates(mock_db):
         payload={"api_user_id": "u6"},
     )
 
-    async def fake_failover(session_id, api_user_id):
+    async def fake_failover(session_id, api_user_id, metadata=None):
         assert api_user_id == "u6"
 
     with ExitStack() as stack:

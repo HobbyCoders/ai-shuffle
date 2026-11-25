@@ -84,7 +84,7 @@ class TestApiKey429IsNotAUsageWindow:
     Only a subscription login has one."""
 
     @staticmethod
-    async def _notice(session_row, provider_row, claude_mode="subscription"):
+    async def _notice(session_row, provider_row, claude_mode="subscription", metadata=None):
         from app.core import claude_auth_mode
         from app.db import database
 
@@ -92,7 +92,7 @@ class TestApiKey429IsNotAUsageWindow:
              patch.object(database, "get_session", return_value=session_row), \
              patch.object(database, "get_model_provider", return_value=provider_row), \
              patch.object(claude_auth_mode, "current_mode", return_value=claude_mode):
-            await af.attempt_failover("sess-1", "user-1")
+            await af.attempt_failover("sess-1", "user-1", metadata)
         notify.assert_awaited_once()
         assert notify.await_args.kwargs["severity"] == "warning"
         return notify.await_args.kwargs["message"]
@@ -125,6 +125,22 @@ class TestApiKey429IsNotAUsageWindow:
     async def test_a_claude_session_follows_the_claude_auth_mode(self, mode, expected):
         message = await self._notice({"provider_id": None}, None, claude_mode=mode)
         assert message == getattr(af, expected)
+
+    async def test_an_unretried_429_does_not_say_it_was_retried(self):
+        """Fluid surfaced a 429 whose Retry-After was longer than it waits:
+        "The request was retried" would be untrue, so the notice names the
+        wait instead."""
+        from app.core.provider_agent import not_retried_note
+
+        metadata = {"api_error_status": 429, "errors": [
+            "provider returned HTTP 429: Too many requests. " + not_retried_note(60),
+        ]}
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
+        )
+        assert "was retried" not in message
+        assert message == af.RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=60)
+        assert "wait 60s" in message
 
     async def test_a_failed_lookup_keeps_the_usage_window_notice(self):
         from app.db import database
@@ -167,4 +183,4 @@ class TestExecuteQueryWithFailover:
             )
         assert out is result
         eq.assert_awaited_once()  # NO retry — single pass
-        af_mock.assert_awaited_once_with("sess-1", "u1")
+        af_mock.assert_awaited_once_with("sess-1", "u1", {"api_error_status": 429})

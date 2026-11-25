@@ -7991,6 +7991,28 @@ async def test_error_event_status_reaches_api_error_status():
 
 
 @pytest.mark.asyncio
+async def test_a_retry_after_too_long_to_wait_reaches_the_app():
+    """Fluid surfaces a 429 whose Retry-After is longer than it waits, with
+    ``retry_after_seconds``. The short provider message alone dropped that
+    wait, so the Task re-dispatch, the notice and limit resume never saw it."""
+    from app.core import provider_agent
+
+    events = [lm.ErrorEvent(
+        session_id=SID, retriable=True, status=429,
+        message="the provider asked for 60s before a retry ... Too many requests.",
+        provider_message="Too many requests.",
+        retry_after_seconds=60.0,
+    )]
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert result.api_error_status == 429
+    [error] = result.errors
+    assert error.startswith("provider returned HTTP 429: Too many requests. ")
+    assert provider_agent.not_retried_wait(error) == 60.0
+    assert provider_agent.rate_limit_retry_after(error) == 60.0
+
+
+@pytest.mark.asyncio
 async def test_error_event_without_status_keeps_its_message():
     events = [lm.ErrorEvent(session_id=SID, message="stream truncated", retriable=False,
                             provider_message="ignored without a status")]

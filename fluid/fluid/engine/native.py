@@ -505,6 +505,9 @@ class _CallResult:
     # The provider's own short explanation of the error (≤300 chars, HTML
     # stripped), for the ErrorEvent; ``error_message`` may be the raw body.
     error_provider_message: str | None = None
+    # The provider's Retry-After when it was too long to wait out, so the
+    # refusal was surfaced instead of retried (``retry_after_seconds``).
+    error_retry_after: float | None = None
     # The stream failed while a tool_use block was still open: the provider
     # cut it mid-arguments. Such a call is retried under its own, lower cap
     # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
@@ -4843,6 +4846,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     num_model_calls=num_calls,
                     status=result.error_status,
                     provider_message=result.error_provider_message,
+                    retry_after_seconds=result.error_retry_after,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -6070,6 +6074,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             "Review any completed actions before asking to continue."
                         )
                 provider_message = payload.get("provider_message")
+                retry_after = payload.get("retry_after_seconds")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     tool_uses=tool_uses,
@@ -6083,6 +6088,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ),
                     error_provider_message=(
                         provider_message if isinstance(provider_message, str) else None
+                    ),
+                    error_retry_after=(
+                        float(retry_after)
+                        if isinstance(retry_after, (int, float))
+                        and not isinstance(retry_after, bool) and retry_after > 0
+                        else None
                     ),
                     native_stop_reason=native_stop_reason,
                     served_model=served_model,

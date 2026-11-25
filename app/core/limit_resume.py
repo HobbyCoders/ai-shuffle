@@ -362,8 +362,9 @@ def _local_zone() -> tzinfo:
 def reset_from_text(text: Optional[str], *, now: Optional[float] = None) -> Optional[ResetInfo]:
     """The reset time a limit message states, or None.
 
-    Understands ``Claude AI usage limit reached|<epoch>`` and Claude Code's
-    "resets 11:10pm (America/New_York)" / "resets Oct 6, 3pm (Europe/Berlin)".
+    Understands ``Claude AI usage limit reached|<epoch>``, Claude Code's
+    "resets 11:10pm (America/New_York)" / "resets Oct 6, 3pm (Europe/Berlin)",
+    and the note an unretried long Retry-After leaves (``retry-after: N``).
     A time without a date is the next such time after ``now``. With no zone in
     the text the worker's local zone is used.
     """
@@ -379,6 +380,14 @@ def reset_from_text(text: Optional[str], *, now: Optional[float] = None) -> Opti
         info = _clock_reset(match, current)
         if info is not None:
             return info
+    # A rate limit whose Retry-After was too long for the client to wait out
+    # (``provider_agent.not_retried_note``): it resets once that wait passes,
+    # counted from the stop (``now``).
+    from app.core.provider_agent import not_retried_wait
+
+    wait = not_retried_wait(text)
+    if wait is not None:
+        return _believable(ResetInfo(at=current + wait, source="text"), current)
     return None
 
 

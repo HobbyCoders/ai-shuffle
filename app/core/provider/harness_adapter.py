@@ -5354,6 +5354,18 @@ class HarnessAdapter(ProviderAdapter):
             short = getattr(event, "provider_message", None)
             if status is not None and isinstance(short, str) and short:
                 message = f"provider returned HTTP {status}: {short}"
+            # The provider's Retry-After was longer than Fluid waits, so the
+            # request was surfaced, not retried. Name the wait in the text the
+            # Task re-dispatch, the rate-limit notice and the limit resume
+            # read, so none of them sends again before it is over.
+            wait = getattr(event, "retry_after_seconds", None)
+            if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
+                from app.core.provider_agent import not_retried_note
+
+                message = message.rstrip()
+                if not message.endswith((".", "!", "?")):
+                    message += "."
+                message = f"{message} {not_retried_note(wait)}"
             return [
                 ResultMessage(
                     subtype="error_during_execution",

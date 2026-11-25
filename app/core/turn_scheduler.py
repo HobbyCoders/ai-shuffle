@@ -647,7 +647,7 @@ async def _maybe_failover(
         return
 
     payload = settled.get("payload") or {}
-    await account_failover.attempt_failover(session_id, payload.get("api_user_id"))
+    await account_failover.attempt_failover(session_id, payload.get("api_user_id"), terminal)
     logger.info(
         "turn_scheduler: usage limit for %s turn %s — no retry "
         "(account failover retired)",

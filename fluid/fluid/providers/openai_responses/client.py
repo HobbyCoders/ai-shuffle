@@ -557,6 +557,10 @@ class OpenAIResponsesClient:
                                             retry_class = verdict
                                             retry_budget = budget
                                             break
+                                        if verdict.retriable and too_long:
+                                            # Same shape as refusal_delay's
+                                            # surfaced wait, for the host.
+                                            chunk.payload["retry_after_seconds"] = verdict.retry_after
                                     if pending_start is not None:
                                         start_sent = True
                                         yield pending_start
