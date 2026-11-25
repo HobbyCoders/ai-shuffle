@@ -43,7 +43,7 @@ Failure knobs: FAKE_ACP_RESUME_ERROR (JSON ``{"code", "message"}`` that
 ``session/resume``), FAKE_ACP_CONFIG_EXIT=1 (the agent exits on
 ``session/set_config_option``), FAKE_ACP_SILENT_CONFIG=1
 (``session/set_config_option`` is never answered), FAKE_ACP_VERSION (the
-version ``initialize`` reports; default 1.5.6), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
+version ``initialize`` reports; default 1.5.6, ``-`` for none), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
 a turn runs is refused as busy), FAKE_ACP_HOLD_STEER=1 (such a prompt is
 taken into the turn but never answered), FAKE_ACP_SILENT_MODES (mode ids
 ``session/set_mode`` never answers), FAKE_ACP_SILENT_CLOSE=1
@@ -52,7 +52,8 @@ never answered), FAKE_ACP_CHILD_PIDFILE (start a long-sleeping child in the
 agent's process group and write its pid there), FAKE_ACP_IGNORE_EOF=1 (keep
 running after stdin closes, and ignore SIGTERM). Command ``failsteer``
 streams, waits for a steering prompt, then fails the turn's prompt with an
-RPC error. Commands ``huge`` (the
+RPC error. Command ``twosteers`` streams, waits for two steering prompts and
+ends the turn once both are in. Commands ``huge`` (the
 prompt's reply is one line of FAKE_ACP_HUGE_BYTES, default 200000) and
 ``deaf`` (the agent stops reading its input for 30 s).
 
@@ -203,7 +204,9 @@ class Agent:
                 await asyncio.Event().wait()
             caps = params.get("clientCapabilities") or {}
             init = json.loads(json.dumps(INIT))
-            if os.environ.get("FAKE_ACP_VERSION"):
+            if os.environ.get("FAKE_ACP_VERSION") == "-":
+                init["agentInfo"].pop("version", None)
+            elif os.environ.get("FAKE_ACP_VERSION"):
                 init["agentInfo"]["version"] = os.environ["FAKE_ACP_VERSION"]
             if (caps.get("auth") or {}).get("terminal"):
                 init["authMethods"].append(TERMINAL_LOGIN)
@@ -400,6 +403,13 @@ class Agent:
                 return {"stopReason": "cancelled"}
             if steer in done:
                 await self.say(sid, " steered:" + steer.result())
+            return {"stopReason": "end_turn"}
+        if word == "twosteers":
+            await self.say(sid, "working")
+            assert self.turn is not None
+            first = await asyncio.wait_for(self.turn["steers"].get(), timeout=10)
+            second = await asyncio.wait_for(self.turn["steers"].get(), timeout=10)
+            await self.say(sid, f" got:{len(first)},{len(second)}")
             return {"stopReason": "end_turn"}
         if word == "failsteer":
             await self.say(sid, "working")

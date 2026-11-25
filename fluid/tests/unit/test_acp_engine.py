@@ -843,6 +843,30 @@ def test_a_message_naming_the_saved_handle_counts_as_gone() -> None:
     assert _session_gone(AcpError(-32603, message), "chat-alpha")
     assert not _session_gone(AcpError(-32603, message), "chat-beta")
     assert not _session_gone(AcpError(-32603, message))
+    assert _session_gone(AcpError(-32603, "No session with id chat-alpha"), "chat-alpha")
+    assert _session_gone(AcpError(-32603, "Error: No session with id 'chat-alpha'."), "chat-alpha")
+
+
+@pytest.mark.parametrize("handle,message", [
+    ("1f2e3d4c", "Session 42 not found"),  # another session
+    ("1f2e3d4c", "No session with id 42"),
+    ("1f2e3d4c", "unknown session 1f2e3d4c-old"),
+    ("1f2e3d4c", "Session not found: tool x unavailable"),  # more than the session
+    ("1f2e3d4c", "Session 1f2e3d4c not found; MCP server x failed to start"),
+    ("setting", "invalid session settings"),  # the handle inside a longer word
+    ("setting", "Invalid session settings: mcpServers[0].command"),
+    ("1f2e3d4c", "Session 1f2e3d4c is busy"),  # names the handle, but only busy
+    ("1f2e3d4c", "rate limit exceeded for session 1f2e3d4c"),
+    ("1f2e3d4c", "Error: session 1f2e3d4c rate limited, retry later"),
+])
+def test_a_message_about_another_session_or_more_than_the_session_is_not_gone(
+        handle: str, message: str) -> None:
+    """The whole message, wrappers aside, must say the saved session is
+    missing; an id it names must be the saved handle as a whole token."""
+    from fluid.engine.acp.client import AcpError
+    from fluid.engine.acp.loop import _session_gone
+
+    assert not _session_gone(AcpError(-32603, message), handle)
 
 
 async def test_a_resume_that_names_another_missing_resource_keeps_the_session(tmp_path: Path) -> None:
@@ -1011,22 +1035,67 @@ async def test_an_agent_lost_while_setting_up_a_new_session_keeps_the_saved_hand
         await d.close()
 
 
-async def _give_up_resuming(tmp_path: Path, store: MemoryStore, acp_sid: str) -> None:
+async def _failing_launch(tmp_path: Path, store: MemoryStore, acp_sid: str, version: str | None = None) -> None:
+    """One engine whose resume fails as busy and whose new session fails
+    setup: the chat keeps its saved handle."""
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "busy"})
+        d.loop.spec.env["FAKE_ACP_CONFIG_EXIT"] = "1"
+        if version is not None:
+            d.loop.spec.env["FAKE_ACP_VERSION"] = version
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable, end
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+
+
+async def _give_up_resuming(tmp_path: Path, store: MemoryStore, acp_sid: str, version: str | None = None) -> None:
     """Fail every resume try of the saved session; the new session the last
     one falls back to fails setup, so the chat keeps its handle, given up."""
     from fluid.engine.acp import loop as acp_loop
 
     for _ in range(acp_loop.RESUME_ATTEMPTS):
-        d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
-        try:
-            assert d.loop.spec.env is not None
-            d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "busy"})
-            d.loop.spec.env["FAKE_ACP_CONFIG_EXIT"] = "1"
-            end = await d.turn("again")
-            assert isinstance(end, ErrorEvent) and end.retriable, end
-            assert d.loop.cli_session_id == acp_sid
-        finally:
-            await d.close()
+        await _failing_launch(tmp_path, store, acp_sid, version)
+    assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS
+
+
+async def test_a_version_that_changes_on_every_launch_gets_at_most_two_more_resumes(tmp_path: Path) -> None:
+    """A build stamp in the version is new on every launch: the extra tries
+    after giving up are bounded per saved session, not per version."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)
+    for stamp in range(5):
+        await _failing_launch(tmp_path, store, acp_sid, f"1.6.0+build{stamp}")
+    assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS + 2
+
+
+async def test_a_rollback_to_a_version_that_already_tried_gets_no_resume(tmp_path: Path) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)  # under 1.5.6
+    await _failing_launch(tmp_path, store, acp_sid, "1.5.7")  # its one extra try
+    tries = acp_loop.RESUME_ATTEMPTS + 1
+    assert len(_received(tmp_path, "session/resume")) == tries
+    await _failing_launch(tmp_path, store, acp_sid, "1.5.6")  # rolled back
+    assert len(_received(tmp_path, "session/resume")) == tries
+
+
+async def test_an_agent_that_reports_no_version_gets_no_extra_resume(tmp_path: Path) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid, "-")
+    for _ in range(2):
+        await _failing_launch(tmp_path, store, acp_sid, "-")
     assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS
 
 
@@ -1344,6 +1413,44 @@ async def test_a_turn_that_fails_while_a_peer_message_is_being_placed_withdraws_
         store.release.set()
         if sending is not None and not sending.done():
             sending.cancel()
+        await d.close()
+
+
+async def test_peer_messages_reach_the_agent_and_the_transcript_in_the_order_they_came(tmp_path: Path) -> None:
+    """The first message's placement is slow (the block before it is still
+    being written): the second waits for it, so the agent, the receipts and
+    the stored transcript all have them first, second, once each."""
+    store = _BlockStopGate()
+    d = await _driver(tmp_path, store=store)
+    sends: list[asyncio.Task[None]] = []
+    try:
+        await d.loop.submit(UserTurn(content="twosteers"))
+        await d.until(TextDelta)
+        store.armed = True
+        sends.append(asyncio.create_task(
+            d.loop.submit(AgentMessage(text="go first", sender="worker-7", id="row-1", wake=False))))
+        await asyncio.wait_for(store.entered.wait(), 10)
+        sends.append(asyncio.create_task(
+            d.loop.submit(AgentMessage(text="go second", sender="worker-7", id="row-2", wake=False))))
+        await asyncio.sleep(0.3)  # time for the second to overtake, if it could
+        store.release.set()
+        assert isinstance(await d.until(TERMINAL, timeout=10), TurnComplete)
+        await asyncio.wait_for(asyncio.gather(*sends), 5)
+        prompts = ["".join(b.get("text", "") for b in r["params"]["prompt"])
+                   for r in _received(tmp_path, "session/prompt")]
+        steered = [p for p in prompts if "go first" in p or "go second" in p]
+        assert ["go first" in p for p in steered] == [True, False], steered
+        receipts = [s["id"] for e in d.events if isinstance(e, SteerDelivered) for s in e.steers]
+        assert receipts == ["row-1", "row-2"]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        stored = [t for t in texts if "go first" in t or "go second" in t]
+        assert ["go first" in t for t in stored] == [True, False], texts
+    finally:
+        store.release.set()
+        for task in sends:
+            if not task.done():
+                task.cancel()
         await d.close()
 
 

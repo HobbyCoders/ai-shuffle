@@ -312,15 +312,18 @@ class AcpConnection:
             raise AcpConnectionClosed(f"could not write to the agent: {exc!r}") from exc
 
     async def request(self, method: str, params: Mapping[str, Any] | None = None, *,
-                      timeout: float | None = None) -> Any:
+                      timeout: float | None = None, on_sent: Callable[[], None] | None = None) -> Any:
         """Send a request and wait for its reply; ``timeout`` bounds the wait
-        for the reply (None: as long as it takes, for ``session/prompt``)."""
+        for the reply (None: as long as it takes, for ``session/prompt``).
+        ``on_sent`` runs once the request is written, before the reply."""
         self._next_id += 1
         rid = self._next_id
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         try:
             await self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": dict(params or {})})
+            if on_sent is not None:
+                on_sent()
             try:
                 result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
             except asyncio.TimeoutError:

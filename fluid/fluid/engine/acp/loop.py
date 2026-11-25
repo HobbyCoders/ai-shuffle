@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import logging
 import os
@@ -111,6 +112,12 @@ STEER_WAIT = 30.0
 # Consecutive transient ``session/resume`` failures of one saved session before
 # it is taken as lost: a chat is never stuck behind a resume that keeps failing.
 RESUME_ATTEMPTS = 3
+# After that, an agent version that has not tried the saved session yet gets
+# one more try (an upgrade may reopen it), at most this many times per saved
+# session: a version string that changes on every launch cannot undo giving up.
+RESUME_EXTRA_TRIES = 2
+# The agent versions remembered as having tried a saved session.
+RESUME_VERSIONS_KEPT = 4
 BUNDLED_SERVER_NAME = "fluid_bundled"
 # The one row of an ACP agent's context reading: its total, which holds the
 # system prompt and tools as well as the conversation.
@@ -182,41 +189,64 @@ class _SetupFailed(AcpError):
 
 # ACP's "resource not found" error code.
 _RESOURCE_NOT_FOUND = -32002
-# A message alone counts only when one of its clauses (split at ":" and ";")
-# is, whole, a missing-session message: "unknown session abc1", "Session 1f2e
-# not found", "conversation expired", "invalid session id". Any other words in
-# the clause make it something else: "MCP server executable not found",
-# "Invalid session configuration", "MCP server session not found" never replace
-# a handle a later try may still reopen. A session id is quoted or carries a
-# digit; the saved handle itself, however it looks, reads as one.
-_SESSION_REF = r"""(?:['"`][^'"`]+['"`]|[\w.-]*\d[\w.-]*)"""
-_SESSION_NOUN = r"(?:session|conversation)"
-_GONE_CLAUSE = re.compile(
-    rf"(?:the\s+)?{_SESSION_NOUN}(?:\s+(?:with\s+)?(?:id\s+)?{_SESSION_REF})?"
-    r"\s+(?:(?:was|is|has\s+been|has)\s+)?"
-    r"(?:not\s+found|does\s+not\s+exist|doesn't\s+exist|no\s+longer\s+exists|expired|unknown)"
-    rf"|(?:unknown|no\s+such|expired)\s+{_SESSION_NOUN}(?:\s+id)?(?:\s+{_SESSION_REF})?"
-    rf"|invalid\s+{_SESSION_NOUN}\s+(?:id(?:\s+{_SESSION_REF})?|{_SESSION_REF})"
-    rf"|no\s+{_SESSION_NOUN}\s+found(?:\s+(?:with|for)\s+(?:id\s+)?{_SESSION_REF})?",
+# A message alone counts only when all of it, once the wrappers an error
+# arrives in are taken off (a leading "Error:", a JSON-RPC or ACP error prefix
+# such as "Internal error:" or "session/resume failed:", and a trailing note in
+# brackets), is a missing-session message: "unknown session abc1", "Session
+# 1f2e not found", "conversation expired", "No session with id abc1". Anything
+# left over makes it something else ("Invalid session configuration", "Session
+# not found: tool x unavailable", "MCP server session not found"), never a
+# reason to replace a handle a later try may still reopen. A session id it
+# names must be the saved handle, as a whole token: "Session 42 not found" is
+# about another session. An id is quoted, carries a digit, or is the handle.
+_ERROR_WRAPPER = re.compile(
+    r"(?:(?:json-?rpc|acp|rpc)\s+)?(?:internal\s+|server\s+)?error"
+    r"(?:\s*[(\[]?\s*-?\d+\s*[)\]]?)?\s*:\s*"
+    r"|session/[\w-]+\s+failed\s*:\s*",
     re.IGNORECASE,
 )
-_TRAILING_NOTE = re.compile(r"\s*(?:\([^()]*\))?[\s.!]*$")
+_TRAILING_NOTE = re.compile(r"(?:\s*\([^()]*\))?[\s.!]*$")
+_GONE_FORMS = (
+    (r"(?:the\s+)?{noun}(?:\s+(?:with\s+)?(?:id\s+)?{ref})?\s+(?:(?:was|is|has\s+been|has)\s+)?"
+     r"(?:not\s+found|does\s+not\s+exist|doesn't\s+exist|no\s+longer\s+exists|expired|unknown)"),
+    r"(?:unknown|no\s+such|expired)\s+{noun}(?:\s+id)?(?:\s+{ref})?",
+    r"invalid\s+{noun}(?:\s+id)?\s+{ref}",
+    r"invalid\s+{noun}\s+id",
+    r"no\s+{noun}\s+found(?:\s+(?:with|for)\s+(?:id\s+)?{ref})?",
+    r"no\s+{noun}\s+with\s+id\s+{ref}",
+)
+
+
+@functools.lru_cache(maxsize=8)
+def _gone_patterns(handle: str | None) -> tuple[re.Pattern[str], ...]:
+    token = (re.escape(handle) + "|" if handle else "") + r"[\w.-]*\d[\w.-]*"
+    ref = rf"""(?:['"`](?P<quoted>[^'"`]+)['"`]|(?P<token>{token}))"""
+    noun = r"(?:session|conversation)"
+    return tuple(re.compile(form.replace("{noun}", noun).replace("{ref}", ref), re.IGNORECASE)
+                 for form in _GONE_FORMS)
 
 
 def _session_gone(exc: AcpError, handle: str | None = None) -> bool:
     """Whether a failed ``session/resume`` of ``handle`` says the saved
     session no longer exists (or never did), rather than that this try went
     wrong: a dead or silent agent, a timeout, a busy or failing service, a
-    missing MCP server or model, a bad configuration, or anything else."""
+    missing MCP server or model, a bad configuration, another session, or
+    anything else."""
     if isinstance(exc, (AcpConnectionClosed, AcpTimeout)):
         return False
     if exc.code == _RESOURCE_NOT_FOUND:
         return True
-    message = exc.message
-    if handle:
-        message = message.replace(handle, "id0")
-    return any(_GONE_CLAUSE.fullmatch(_TRAILING_NOTE.sub("", clause.strip()))
-               for clause in re.split(r"[:;]", message))
+    message = exc.message.strip()
+    while (bare := _ERROR_WRAPPER.match(message)) is not None and bare.end():
+        message = message[bare.end():]
+    message = _TRAILING_NOTE.sub("", message, count=1)
+    for pattern in _gone_patterns(handle or None):
+        found = pattern.fullmatch(message)
+        if found is not None:
+            groups = found.groupdict()
+            named = groups.get("quoted") or groups.get("token")
+            return not handle or named is None or named == handle
+    return False
 
 
 # The audit-only ``DelegatedDiagnostic`` that keeps a saved session's resume
@@ -224,8 +254,10 @@ def _session_gone(exc: AcpError, handle: str | None = None) -> bool:
 # an idle chat, an app restart) carries on from it. ``data``: ``handle`` (the
 # agent session it is about), ``failures`` (transient resume failures in a
 # row), ``error`` (the last one's message), ``notice`` (a reset warning not
-# yet shown; it counts as shown once an ``agent_context_reset`` follows it) and
-# ``version`` (the agent version it was recorded under, when it reports one).
+# yet shown; it counts as shown once an ``agent_context_reset`` follows it),
+# ``versions`` (the agent versions that tried to resume it, when the agent
+# reports one) and ``extra_tries`` (tries given to a new version after the
+# streak gave up).
 # Hosts skip diagnostic kinds they do not know: nothing reaches the chat.
 RESUME_STATE_KIND = "acp_resume_state"
 CONTEXT_RESET_KIND = "agent_context_reset"
@@ -414,9 +446,11 @@ class AcpLoop:
         # (``RESUME_STATE_KIND``), read back once per engine.
         self._resume_failures = 0
         self._resume_error: str | None = None
-        # The agent version the streak was last recorded under: a different
-        # one gets a single resume try after the streak gave up.
-        self._resume_version: str | None = None
+        # The agent versions that already tried the saved session (the last
+        # ``RESUME_VERSIONS_KEPT``), and the extra tries spent on new versions
+        # after the streak gave up (at most ``RESUME_EXTRA_TRIES``).
+        self._resume_versions: list[str] = []
+        self._resume_extra = 0
         self._resume_state_loaded = False
         # Set when a new agent conversation replaced a saved one: the notice
         # the next turn shows (``_run_turn``).
@@ -443,6 +477,9 @@ class AcpLoop:
         self._pending_permissions: dict[str, asyncio.Future[RespondPermission]] = {}
         self._pending_questions: dict[str, asyncio.Future[RespondQuestion]] = {}
         self._steer_requests: list[asyncio.Task[Any]] = []
+        # Steers are placed and written in the order they came (a FIFO lock,
+        # held from placement until the prompt is written, not its reply).
+        self._steer_order = asyncio.Lock()
         self._socket_server: Any = None
         self._socket_path: str | None = None
         self._tmpdir: tempfile.TemporaryDirectory[str] | None = None
@@ -913,14 +950,20 @@ class AcpLoop:
                 self._session_resumed = False
                 previous = self.cli_session_id
                 lost = "this agent cannot reopen a saved conversation"
-                upgraded = bool(self.cli_version and self._resume_version
-                                and self.cli_version != self._resume_version)
+                untried = bool(self.cli_version and self.cli_version not in self._resume_versions
+                               and self._resume_extra < RESUME_EXTRA_TRIES)
                 if (previous and info.session_capability("resume")
-                        and self._resume_failures >= RESUME_ATTEMPTS and upgraded):
-                    # Given up under another agent version: the new one may
-                    # reopen it, so it gets one try. A failure goes straight to
-                    # a new conversation, without counting again.
+                        and self._resume_failures >= RESUME_ATTEMPTS and untried):
+                    # Given up under other agent versions: this one may reopen
+                    # it, so it gets one try (a bounded number per saved
+                    # session). A failure goes straight to a new conversation,
+                    # without counting again.
                     lost = self._resume_error or f"it failed {self._resume_failures} times in a row"
+                    self._resume_extra += 1
+                    self._note_resume_version()
+                    # Counted before the try: one that never returns (the app
+                    # stops, the agent hangs) still spends it.
+                    await self._save_resume_state(previous)
                     try:
                         result = await conn.request("session/resume", {
                             "sessionId": previous, "cwd": self.cwd, "mcpServers": servers,
@@ -932,9 +975,8 @@ class AcpLoop:
                         lost = exc.message
                         logger.warning("ACP agent %s cannot resume session %s either (%s); "
                                        "starting a new one", self.cli_version, previous, exc.message)
-                        await self._save_resume_state(previous)  # tried under this version
                     if self._session_resumed:
-                        self._resume_failures, self._resume_error = 0, None
+                        self._clear_resume_streak()
                         await self._save_resume_state(previous)
                 elif previous and info.session_capability("resume") and self._resume_failures >= RESUME_ATTEMPTS:
                     # Given up already (a ``session/new`` after it failed, or
@@ -956,6 +998,7 @@ class AcpLoop:
                             # next one. Only repeated failures give it up.
                             self._resume_failures += 1
                             self._resume_error = exc.message[:200]
+                            self._note_resume_version()
                             await self._save_resume_state(previous)
                             if self._resume_failures < RESUME_ATTEMPTS:
                                 logger.warning("ACP agent did not resume session %s (%s); keeping it",
@@ -963,8 +1006,8 @@ class AcpLoop:
                                 raise _ResumeFailed(exc) from exc
                         logger.warning("ACP agent cannot resume session %s (%s); starting a new one",
                                        previous, exc.message)
-                    if self._session_resumed and self._resume_failures:
-                        self._resume_failures, self._resume_error = 0, None
+                    if self._session_resumed and (self._resume_failures or self._resume_versions):
+                        self._clear_resume_streak()
                         await self._save_resume_state(previous)
                 new_sid: str | None = None
                 if not self._session_resumed:
@@ -1048,7 +1091,7 @@ class AcpLoop:
             # say so in the chat, never silently.
             notice = ("The agent could not reopen its earlier conversation, so it starts fresh "
                       f"without the context of earlier messages ({lost[:200]}).")
-        self._resume_failures, self._resume_error = 0, None
+        self._clear_resume_streak()
         self._context_reset = notice
         if previous:
             await self._save_resume_state(new_sid, notice=notice)
@@ -1089,16 +1132,32 @@ class AcpLoop:
             self._resume_failures = failures
             error = state.get("error")
             self._resume_error = str(error)[:200] if error else None
-            version = state.get("version")
-            self._resume_version = str(version) if version else None
+            versions = state.get("versions")
+            if isinstance(versions, list):
+                self._resume_versions = [str(v) for v in versions if v][-RESUME_VERSIONS_KEPT:]
+            extra = state.get("extra_tries")
+            if isinstance(extra, int) and not isinstance(extra, bool):
+                self._resume_extra = max(self._resume_extra, extra)
         notice = state.get("notice")
         if notice and not shown and self._context_reset is None:
             self._context_reset = str(notice)
 
+    def _note_resume_version(self) -> None:
+        """Remember that the running agent version tried the saved session."""
+        version = self.cli_version
+        if not version:
+            return
+        if version in self._resume_versions:
+            self._resume_versions.remove(version)
+        self._resume_versions = [*self._resume_versions, version][-RESUME_VERSIONS_KEPT:]
+
+    def _clear_resume_streak(self) -> None:
+        """A resume worked, or the handle changed: nothing has failed yet."""
+        self._resume_failures, self._resume_error = 0, None
+        self._resume_versions, self._resume_extra = [], 0
+
     async def _save_resume_state(self, handle: str, *, notice: str | None = None) -> None:
-        """Record ``handle``'s resume state with the session's events, under
-        the running agent's version."""
-        self._resume_version = self.cli_version
+        """Record ``handle``'s resume state with the session's events."""
         if self._session is None:
             return
         sid = self._session.session_id
@@ -1108,7 +1167,7 @@ class AcpLoop:
                 message="ACP agent session resume state (audit only)",
                 data={"handle": handle, "failures": self._resume_failures,
                       "error": self._resume_error, "notice": notice,
-                      "version": self.cli_version}))
+                      "versions": list(self._resume_versions), "extra_tries": self._resume_extra}))
             await flush_events(self.store, sid)
         except asyncio.CancelledError:
             raise
@@ -1543,6 +1602,16 @@ class AcpLoop:
         mapper = self._mapper
         assert mapper is not None
         receipt = _steer_receipt(steer_id, text, sender, origin)
+        # The steer before this one: its receipt goes first.
+        before = self._steer_requests[-1] if self._steer_requests else None
+        order = self._steer_order
+        holding = False
+
+        def let_next_send() -> None:
+            nonlocal holding
+            if holding:
+                holding = False
+                order.release()
 
         async def deliver() -> None:
             # The receipt tells the host the message is delivered (it retires
@@ -1550,8 +1619,14 @@ class AcpLoop:
             # prompt. Refused (busy, an error, the connection gone) or never
             # answered, there is none: the host keeps the message and sends it
             # as a turn of its own.
+            nonlocal holding
             placed: tuple[str, list[Any]] | None = None
             try:
+                # In the order the steers came: this task is created (and so
+                # queues for the lock) before any later one. The next steer
+                # may send once this prompt is written, not answered.
+                await order.acquire()
+                holding = True
                 if sender is not None:
                     # Stored where it joined, as native stores a peer's
                     # message; the user's steer and a notice are placed from
@@ -1565,7 +1640,12 @@ class AcpLoop:
                         await self._emit(event)
                 await conn.request("session/prompt", {
                     "sessionId": sid, "prompt": [{"type": "text", "text": prompt}],
-                })
+                }, on_sent=let_next_send)
+                let_next_send()
+                if before is not None:
+                    # Receipts in the same order (an earlier one still
+                    # unanswered holds this one until it settles).
+                    await asyncio.wait({before})
             except AcpError as exc:
                 logger.info("ACP agent did not take a steer (%s); the host keeps it", exc.message)
                 if placed is not None:
@@ -1580,6 +1660,8 @@ class AcpLoop:
                 if placed is not None:
                     mapper.withdraw(placed)
                 return
+            finally:
+                let_next_send()  # refused, failed or cancelled before writing
             # Taken after the turn closed (no place left in it): no receipt,
             # and nothing of it stays in the turn as delivered.
             if self._mapper is mapper and self._steering_open:
