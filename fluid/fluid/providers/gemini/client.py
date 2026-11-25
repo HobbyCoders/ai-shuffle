@@ -47,11 +47,11 @@ from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.gemini.pricing import estimate_cost as _estimate_cost
 from fluid.providers.gemini.serialize import (
     API_REVISION,
-    QUOTA_CODE,
     StreamNormalizer,
     build_request_body,
     error_fields,
     error_payload,
+    is_quota_refusal,
 )
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
@@ -82,7 +82,7 @@ def http_refusal(status: int, text: str, retry_after: str | None) -> dict[str, A
         code, _status, _message = error_fields(body)
         if code is not None:
             payload["code"] = code
-        if code == QUOTA_CODE:
+        if is_quota_refusal(body):
             detailed = error_payload(body)
             payload.update(
                 retriable=False, usage_limit=True,

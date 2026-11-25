@@ -40,6 +40,7 @@ from fluid.providers._retry import (
     coerce_status,
     is_retriable_status,
     is_usage_limit,
+    usage_limit_evidence,
 )
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
@@ -410,10 +411,14 @@ class ChatCompletionsNormalizer:
         summary = provider_error_summary(message)
         billing = billing_error_code(err)
         usage_limit = billing is None and is_usage_limit(status, err)
+        # The typed verdict a host reads (``ErrorEvent.usage_limit``):
+        # structured fields only, never the wording or the wait.
+        typed = usage_limit and usage_limit_evidence(
+            status if status is not None else code, err)
         if billing is not None:
             status = 402
             summary = billing_summary(billing, summary)
-        elif usage_limit:
+        elif typed:
             summary = usage_limit_summary(summary)
         return {
             # A symbolic code ("rate_limit_exceeded") is kept for logs;
@@ -424,8 +429,7 @@ class ChatCompletionsNormalizer:
             "provider_message": summary,
             # A usage limit keeps its 429 but is never retried.
             "retriable": is_retriable_status(status) and not usage_limit,
-            # The typed verdict a host reads (``ErrorEvent.usage_limit``).
-            **({"usage_limit": True} if usage_limit else {}),
+            **({"usage_limit": True} if typed else {}),
         }
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:

@@ -35,6 +35,7 @@ from fluid.providers._retry import (
     is_usage_limit,
     is_usage_limit_text,
     parse_retry_after,
+    usage_limit_evidence,
 )
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
@@ -272,13 +273,26 @@ def refusal_payload(
     called "out of credit"; a bare 402 carries the provider's explanation.
     A usage limit (see fluid.providers._retry.is_usage_limit; ``retry_after``
     is the response's Retry-After header) keeps its 429 but is never retried
-    either: the turn stops on it and the user sees the limit. Its Retry-After,
-    when the response gave one, rides along as ``retry_after_seconds``: the
-    host must not resume before it.
+    either. Its Retry-After, when the response gave one, rides along as
+    ``retry_after_seconds``: the host must not resume before it. Only a
+    refusal whose structured fields say so (``usage_limit_evidence``) is
+    worded and typed as a usage limit; one known only by its wording or its
+    long wait keeps the provider's own words.
     """
     summary = provider_error_summary(text)
     code = billing_error_code(text)
     if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
+        wait = parse_retry_after(retry_after)
+        if not usage_limit_evidence(status, text):
+            plain: dict[str, Any] = {
+                "status": status,
+                "message": text[:2000],
+                "provider_message": summary,
+                "retriable": False,
+            }
+            if wait is not None and wait > 0:
+                plain["retry_after_seconds"] = wait
+            return plain
         limited: dict[str, Any] = {
             "status": status,
             "message": (
@@ -287,9 +301,9 @@ def refusal_payload(
             ),
             "provider_message": usage_limit_summary(summary),
             "retriable": False,
+            # The typed verdict a host reads (``ErrorEvent.usage_limit``).
             "usage_limit": True,
         }
-        wait = parse_retry_after(retry_after)
         if wait is not None and wait > 0:
             limited["retry_after_seconds"] = wait
         return limited

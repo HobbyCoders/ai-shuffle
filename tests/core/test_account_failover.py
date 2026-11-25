@@ -183,6 +183,29 @@ class TestApiKey429IsNotAUsageWindow:
         )
         assert message == (af.USAGE_LIMIT_MESSAGE if expected == "usage" else af.RATE_LIMIT_MESSAGE)
 
+    async def test_a_transient_subscription_429_claims_no_retry(self):
+        """Codex streams content, then ``rate_limit_exceeded``, and is never
+        replayed: no client reports a retry, so the notice claims none."""
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="subscription",
+            metadata={"api_error_status": 429, "usage_limit": False},
+        )
+        assert message == af.RATE_LIMIT_MESSAGE
+        assert "retried" not in message
+
+    async def test_a_usage_limit_notice_names_the_typed_retry_time(self):
+        """A Gemini API key's ``quota_exceeded`` with ``Retry-After: 90``: the
+        usage-limit notice keeps the provider's retry time."""
+        retry_at = 1795651290.0
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key",
+            metadata={"api_error_status": 429, "usage_limit": True,
+                      "retry_after_seconds": 90.0, "retry_at": retry_at},
+        )
+        at = time.strftime("%H:%M:%S UTC", time.gmtime(retry_at))
+        assert message.startswith("Usage limit reached")
+        assert f"retry after {at}" in message
+
     async def test_a_failed_lookup_keeps_the_usage_window_notice(self):
         from app.db import database
 

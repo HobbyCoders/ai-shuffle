@@ -8039,6 +8039,24 @@ async def test_a_429_carries_a_typed_usage_limit_verdict(verdict, window, expect
 
 
 @pytest.mark.asyncio
+async def test_a_replayed_rejected_window_does_not_classify_the_429():
+    """A stale cursor replays an earlier turn's rejected window (seq at or
+    below the turn floor): this turn's plain 429 stays a transient rate
+    limit, not a usage limit."""
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", status="rejected"),
+        lm.ErrorEvent(session_id=SID, retriable=False, status=429, usage_limit=False,
+                      message="Too many requests.", provider_message="Too many requests."),
+    ]
+    adapter = _adapter_with(FakeEngine(events))
+    adapter._turn_floor = 1  # the RateLimit (seq 1) predates this turn
+    [result] = [e for e in await _collect(adapter) if type(e).__name__ == "ResultMessage"]
+
+    assert result.api_error_status == 429
+    assert result.usage_limit is False
+
+
+@pytest.mark.asyncio
 async def test_a_retried_429_that_succeeds_carries_no_limit():
     """A 429 the client retried, after a window it saw rejected, then a
     successful reply: the turn completed, so its terminal carries no status

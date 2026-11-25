@@ -3062,7 +3062,7 @@ async def test_only_a_usage_limit_429_schedules_a_resume(
         stopped = (await limit_resume.state(sid))["limit_stopped"]
         hold = limit_resume.hold_until(sid, now=time.time())
         if usage_limit:
-            assert notice == account_failover.USAGE_LIMIT_MESSAGE
+            assert notice == account_failover.usage_limit_message({"retry_at": retry_at})
             assert len(resumes) == 1 and stopped is not None
         else:
             assert "wait 90s" in notice and "was retried" not in notice

@@ -52,6 +52,7 @@ from fluid.providers._retry import (
     coerce_status,
     is_retriable_status,
     is_usage_limit,
+    usage_limit_evidence,
 )
 from fluid.providers._sse import KEEPALIVE_EVENT
 from fluid.providers._transport import (
@@ -855,9 +856,12 @@ class ResponsesStreamNormalizer:
                 # ``insufficient_quota`` 429: a 402, never a rate limit.
                 status = BILLING_STATUS
                 summary = billing_summary(billing, summary)
-            elif usage_limit:
+            elif usage_limit and usage_limit_evidence(
+                status if status is not None else code, err,
+            ):
+                # The typed verdict a host reads (``ErrorEvent.usage_limit``):
+                # structured fields only, never the wording or the wait.
                 summary = usage_limit_summary(summary)
-                # The typed verdict a host reads (``ErrorEvent.usage_limit``).
                 payload["usage_limit"] = True
             if status is not None:
                 payload["status"] = status

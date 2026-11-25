@@ -109,9 +109,10 @@ USAGE_LIMIT_MESSAGE = (
     "Usage limit reached — wait for the window to reset or sign into a "
     "different account."
 )
+#: No client reports whether it retried (Codex, for one, never replays a
+#: request that already streamed content), so the notice claims no retry.
 RATE_LIMIT_MESSAGE = (
-    "Rate limited by the provider (HTTP 429). The request was retried and "
-    "still refused; try again shortly."
+    "Rate limited by the provider (HTTP 429); try again shortly."
 )
 #: The provider's Retry-After was longer than the client waits, so it was not
 #: retried at all (the turn's typed ``retry_after_seconds``/``retry_at``).
@@ -130,7 +131,6 @@ def rate_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
     provider's text never changes it.
     """
     import math
-    import time
 
     from app.core.provider.events import retry_fields
 
@@ -138,9 +138,27 @@ def rate_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
     seconds = waits.get("retry_after_seconds")
     if seconds is None:
         return RATE_LIMIT_MESSAGE
-    at = waits.get("retry_at")
-    when = time.strftime("%H:%M:%S UTC", time.gmtime(at)) if at else "then"
+    when = _retry_time(metadata) or "then"
     return RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=max(1, math.ceil(seconds)), at=when)
+
+
+def _retry_time(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The turn's typed retry deadline as ``HH:MM:SS UTC``, or None."""
+    import time
+
+    from app.core.provider.events import retry_fields
+
+    at = retry_fields(metadata or {}).get("retry_at")
+    return time.strftime("%H:%M:%S UTC", time.gmtime(at)) if at else None
+
+
+def usage_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
+    """The usage-limit notice, with the provider's retry time when the turn
+    carries a typed one (``retry_at``)."""
+    at = _retry_time(metadata)
+    if at is None:
+        return USAGE_LIMIT_MESSAGE
+    return f"{USAGE_LIMIT_MESSAGE[:-1]}; the provider said to retry after {at}."
 
 
 def _is_subscription_session(session_id: Optional[str]) -> bool:
@@ -198,7 +216,7 @@ async def attempt_failover(
     await _notify(
         api_user_id, session_id,
         severity="warning",
-        message=USAGE_LIMIT_MESSAGE if usage else rate_limit_message(metadata),
+        message=usage_limit_message(metadata) if usage else rate_limit_message(metadata),
     )
     logger.info(
         "Usage limit hit for session %s — automatic account failover retired; "

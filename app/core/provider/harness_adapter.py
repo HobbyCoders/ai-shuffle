@@ -5178,7 +5178,9 @@ class HarnessAdapter(ProviderAdapter):
             })]
 
         if cls == "RateLimit":
-            if getattr(event, "status", None) == "rejected":
+            if getattr(event, "status", None) == "rejected" and self._is_live(event):
+                # Only this turn's own rejected window classifies its
+                # refusal; a replayed one from an earlier turn does not.
                 self._turn_limit_rejected = True
             return [
                 RateLimitEvent(

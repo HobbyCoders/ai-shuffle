@@ -91,6 +91,57 @@ def is_usage_limit_text(text: object) -> bool:
     return isinstance(text, str) and bool(_USAGE_LIMIT_TEXT.search(text))
 
 
+# A google.rpc quota violation naming a per-day quota ("quotaId":
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier"): structured evidence
+# that a daily allowance is spent, unlike a per-minute RESOURCE_EXHAUSTED.
+_PER_DAY_QUOTA = re.compile(r"per[_ -]?day", re.IGNORECASE)
+
+
+def _per_day_quota(obj: dict) -> bool:
+    details = obj.get("details")
+    if not isinstance(details, list):
+        return False
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        fields: list[object] = []
+        for violation in detail.get("violations") or ():
+            if isinstance(violation, dict):
+                fields += [violation.get("quotaId"), violation.get("quotaMetric")]
+        metadata = detail.get("metadata")
+        if isinstance(metadata, dict):
+            fields += [metadata.get("quota_limit"), metadata.get("quota_limit_id")]
+        if any(isinstance(f, str) and _PER_DAY_QUOTA.search(f) for f in fields):
+            return True
+    return False
+
+
+def usage_limit_evidence(status: object, body: object = None) -> bool:
+    """True when a refusal's STRUCTURED fields say an allowance is spent.
+
+    The typed verdict a host acts on (``ErrorEvent.usage_limit``: the usage
+    banner, the resume after the reset, no Task re-dispatch). Only an error
+    code naming a usage limit (:data:`USAGE_LIMIT_ERROR_CODES`) or a per-day
+    quota violation in ``error.details`` counts. The provider's wording and
+    the length of the wait it asks for never do: a "usage limit on requests
+    per minute" or a 15-minute Retry-After is still a rate limit, whose wait
+    the host keeps as a deadline.
+    """
+    code = coerce_status(status)
+    if code is not None and code != 429:
+        return False
+    if isinstance(status, str) and status in USAGE_LIMIT_ERROR_CODES:
+        return True
+    for obj in _error_objects(body):
+        for key in ("code", "type"):
+            value = obj.get(key)
+            if isinstance(value, str) and value in USAGE_LIMIT_ERROR_CODES:
+                return True
+        if _per_day_quota(obj):
+            return True
+    return False
+
+
 def is_usage_limit(
     status: object, body: object = None, retry_after: str | None = None,
 ) -> bool:
@@ -100,18 +151,16 @@ def is_usage_limit(
     none: an in-stream ``usage_limit_reached`` still counts). ``body`` is the
     response body, its text, or an error object; ``retry_after`` the header.
     A status other than 429 is never a usage limit.
+
+    This decides only whether the client retries; the typed verdict a host
+    acts on is :func:`usage_limit_evidence`, which reads no wording or wait.
     """
+    if usage_limit_evidence(status, body):
+        return True
     code = coerce_status(status)
     if code is not None and code != 429:
         return False
     objects = _error_objects(body)
-    for obj in objects:
-        for key in ("code", "type"):
-            value = obj.get(key)
-            if isinstance(value, str) and value in USAGE_LIMIT_ERROR_CODES:
-                return True
-    if isinstance(status, str) and status in USAGE_LIMIT_ERROR_CODES:
-        return True
     if code is None:
         return False
     wait = parse_retry_after(retry_after)
