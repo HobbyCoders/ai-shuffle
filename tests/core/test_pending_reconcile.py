@@ -283,6 +283,28 @@ def test_boot_sweep_visits_this_installs_history_including_legacy_archived(mock_
         ("open", "ses_open"), ("gone", "ses_gone")
     ]
 
+
+async def test_boot_sweep_repairs_sessions_concurrently_and_isolates_failures(monkeypatch):
+    import threading
+
+    # Two repairs must be in flight together to pass this barrier; a
+    # one-at-a-time sweep breaks it on the timeout.
+    together = threading.Barrier(2, timeout=5)
+
+    def repair(app_id, fluid_id):
+        if app_id == "bad":
+            raise RuntimeError("unreadable log")
+        together.wait()
+        return [f"{app_id}-task"]
+
+    monkeypatch.setattr(
+        pending_reconcile, "list_sessions_for_pending_repair",
+        lambda limit: [("a", "ses_a"), ("bad", "ses_bad"), ("b", "ses_b")],
+    )
+    monkeypatch.setattr(pending_reconcile, "repair_fluid_pending_log", repair)
+
+    assert await pending_reconcile.sweep_orphaned_engine_pending() == 2
+
 async def test_terminal_evidence_survives_registry_restart(mock_db):
     from app.core.task_registry import task_registry, TaskRegistry
     from app.core import task_persistence

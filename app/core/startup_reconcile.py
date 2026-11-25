@@ -1090,31 +1090,39 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
     # only ever writes a terminal for an id the durable rows can prove is over.
     # A phantom lives in the fluid event log, so nothing but a write into that
     # log clears it — the session never repairs itself.
-    try:
-        counts["engine_pending_repaired"] = await _repair_orphaned_engine_pending()
-    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
-        logger.exception("Boot reconcile: engine pending-set repair failed")
-        await run_sync(
-            record_error,
-            "backend",
-            f"Boot reconcile failed while repairing engine pending sets: {exc}",
-            detail=traceback.format_exc(),
-            context={"reconcile": "engine_pending"},
-        )
+    async def _engine_pending() -> None:
+        try:
+            counts["engine_pending_repaired"] = await _repair_orphaned_engine_pending()
+        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+            logger.exception("Boot reconcile: engine pending-set repair failed")
+            await run_sync(
+                record_error,
+                "backend",
+                f"Boot reconcile failed while repairing engine pending sets: {exc}",
+                detail=traceback.format_exc(),
+                context={"reconcile": "engine_pending"},
+            )
 
     # Swarm workflows whose coordinator died with the previous process. Runs
     # AFTER the stale-row sweep, whose reap is the proof that each one ended.
-    try:
-        counts["swarms_settled"] = await _settle_orphaned_swarms()
-    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
-        logger.exception("Boot reconcile: orphaned Swarm settlement failed")
-        await run_sync(
-            record_error,
-            "backend",
-            f"Boot reconcile failed while settling orphaned Swarm workflows: {exc}",
-            detail=traceback.format_exc(),
-            context={"reconcile": "swarms"},
-        )
+    async def _swarms() -> None:
+        try:
+            counts["swarms_settled"] = await _settle_orphaned_swarms()
+        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+            logger.exception("Boot reconcile: orphaned Swarm settlement failed")
+            await run_sync(
+                record_error,
+                "backend",
+                f"Boot reconcile failed while settling orphaned Swarm workflows: {exc}",
+                detail=traceback.format_exc(),
+                context={"reconcile": "swarms"},
+            )
+
+    # The two only depend on the sweep above, not on each other (one appends
+    # to the engine's event log, the other to the app transcript under its
+    # own append fence), and each took seconds on a long history: run them
+    # side by side.
+    await asyncio.gather(_engine_pending(), _swarms())
 
     try:
         from app.db.async_database import run_maintenance

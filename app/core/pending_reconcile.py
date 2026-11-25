@@ -65,6 +65,9 @@ _FLUID_TERMINAL_KIND = {
 #: cheap per session but must not turn a boot into a full-history scan.
 MAX_REPAIR_SESSIONS = 200
 MAX_REPAIR_IDS_PER_SESSION = 100
+#: Sessions the boot sweep repairs at once. Each holds one pooled connection
+#: while it reads, well inside the pool's size.
+BOOT_REPAIR_CONCURRENCY = 8
 
 
 # ---------------------------------------------------------------------------
@@ -544,18 +547,26 @@ async def sweep_orphaned_engine_pending(
     the stale-row sweep has settled this install's non-terminal
     ``background_tasks`` rows — that ordering is what lets the repair prove an
     orphan is terminal. Returns the number of task ids repaired; never raises.
+
+    Sessions are independent (each repair reads and appends to its own event
+    log), so a few run at once: one at a time, the per-session reads alone
+    held up boot for several seconds on a worker with a long history.
     """
-    repaired = 0
-    for app_id, fluid_id in list_sessions_for_pending_repair(limit):
-        try:
-            ids = await asyncio.to_thread(
-                repair_fluid_pending_log, app_id, fluid_id
-            )
-        except Exception:  # noqa: BLE001 — one bad session must not stop boot.
-            logger.warning(
-                "pending_reconcile: boot repair failed for %s", app_id,
-                exc_info=True,
-            )
-            continue
-        repaired += len(ids)
-    return repaired
+    gate = asyncio.Semaphore(BOOT_REPAIR_CONCURRENCY)
+
+    async def repair(app_id: str, fluid_id: str) -> int:
+        async with gate:
+            try:
+                ids = await asyncio.to_thread(
+                    repair_fluid_pending_log, app_id, fluid_id
+                )
+            except Exception:  # noqa: BLE001 — one bad session must not stop boot.
+                logger.warning(
+                    "pending_reconcile: boot repair failed for %s", app_id,
+                    exc_info=True,
+                )
+                return 0
+        return len(ids)
+
+    sessions = await asyncio.to_thread(list_sessions_for_pending_repair, limit)
+    return sum(await asyncio.gather(*(repair(a, f) for a, f in sessions)))

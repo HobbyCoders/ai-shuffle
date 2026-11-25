@@ -1695,11 +1695,14 @@ def redact_stored_conflicts() -> int:
     """Redact conflicts stored before losing remote writes were redacted.
 
     Idempotent: a redacted record has no ``_enc`` left. Returns rows rewritten.
+    Runs on every boot, so only rows that still carry ``_enc`` leave the
+    database: reading and parsing every stored conflict cost seconds on a
+    worker with a large conflict history.
     """
     rewritten = 0
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, losing_record FROM sync_conflicts")
+        cursor.execute("SELECT id, losing_record FROM sync_conflicts WHERE losing_record ->> '_enc' IS NOT NULL")
         for row in cursor.fetchall():
             record = _parse_json(row["losing_record"])
             redacted = redact_secrets(record)

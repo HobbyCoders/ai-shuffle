@@ -466,16 +466,26 @@ async def settle_orphans(
 
 
 async def settle_orphans_at_boot(limit: int = 200) -> int:
-    """Boot arm of :func:`settle_orphans` for every session a restart hit."""
+    """Boot arm of :func:`settle_orphans` for every session a restart hit.
+
+    Sessions settle independently under their own lock, so a few run at once:
+    reading a long session's snapshots cold took up to a second and a half,
+    and these sessions are read again on every boot.
+    """
     from app.db.background_tasks import list_sessions_with_killed_swarms
 
-    count = 0
-    for session_id in await asyncio.to_thread(list_sessions_with_killed_swarms, None, limit):
-        try:
-            count += len(await settle_orphans(session_id))
-        except Exception:
-            logger.warning("Swarm: orphan settlement failed for %s", session_id, exc_info=True)
-    return count
+    gate = asyncio.Semaphore(4)
+
+    async def settle(session_id: str) -> int:
+        async with gate:
+            try:
+                return len(await settle_orphans(session_id))
+            except Exception:
+                logger.warning("Swarm: orphan settlement failed for %s", session_id, exc_info=True)
+                return 0
+
+    sessions = await asyncio.to_thread(list_sessions_with_killed_swarms, None, limit)
+    return sum(await asyncio.gather(*(settle(s) for s in sessions)))
 
 
 async def record_worker_completion(session_id: str, worker_id: str) -> list[dict]:

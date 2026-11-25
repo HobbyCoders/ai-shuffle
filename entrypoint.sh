@@ -118,15 +118,24 @@ fi
 if [ -f /home/appuser/.config/gh/hosts.yml ]; then
     echo "GitHub CLI credentials found in volume"
 
-    # Verify GitHub auth status and configure git credential helper for appuser
-    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" gh auth status 2>/dev/null; then
-        echo "GitHub CLI: Authentication verified"
-        # Configure git to use gh as credential helper (as appuser so it goes to appuser's .gitconfig)
-        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
-            git config --global credential.helper '!gh auth git-credential'
-        echo "Git configured to use GitHub CLI for authentication"
+    # Configure the git credential helper for appuser when a token is stored.
+    # `gh auth token` reads it locally; `gh auth status` asked GitHub on every
+    # container start, delaying boot (longest when offline, which then also
+    # skipped this setup). The app checks the token's validity itself.
+    if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" gh auth token >/dev/null 2>&1; then
+        echo "GitHub CLI: stored token found"
+        # A stored token may be revoked, so gh is only the default helper: a
+        # helper already configured in appuser's .gitconfig is left in place.
+        if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
+            git config --global --get credential.helper >/dev/null 2>&1; then
+            echo "Git credential helper already configured; leaving it in place"
+        else
+            setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
+                git config --global credential.helper '!gh auth git-credential'
+            echo "Git configured to use GitHub CLI for authentication"
+        fi
     else
-        echo "GitHub CLI: Credentials exist but may be expired - re-login via web UI recommended"
+        echo "GitHub CLI: credentials file has no usable token - re-login via web UI recommended"
     fi
 else
     echo "GitHub CLI: No credentials found - login via web UI required"
