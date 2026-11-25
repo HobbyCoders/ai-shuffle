@@ -24,7 +24,7 @@ import re
 import time
 from pathlib import Path
 
-from fluid.codemode import behavior, facts
+from fluid.codemode import facts
 from fluid.codemode.continual import MIN_NEW_ENTRIES
 from fluid.codemode.skills import (
     JOURNAL_HIGH_VALUE_KINDS,
@@ -209,14 +209,19 @@ def _snapshot_plans(store, entries) -> dict[str, dict]:
 
 
 def _exact_duplicate_groups(entries: list[dict]) -> list[list[dict]]:
-    groups: dict[tuple[str, str], list[dict]] = {}
+    """Facts repair may fold into one: the same text, character for
+    character, in the same scope, key and worker. Text that differs only in
+    case or spacing can name different things (``Config.toml`` and
+    ``config.toml``), so it is at most a near duplicate, which is only
+    reported. A keyed fact is its own slot (a behaviour rule for another
+    model family, or another key that happens to hold the same value), and a
+    worker-only copy does not serve the workers a shared copy does, so
+    neither is a duplicate of the other."""
+    groups: dict[tuple, list[dict]] = {}
     for e in entries:
         if not e.get("conflicted"):
-            # A behaviour rule is its own slot: the same text as an ordinary
-            # fact, or as the rule for another model family, is no duplicate.
-            rule_key = e.get("key") if behavior.is_rule_key(e.get("key")) else None
-            groups.setdefault((e.get("scope", "global"), facts.fingerprint(e["text"]), rule_key),
-                              []).append(e)
+            groups.setdefault((e.get("scope", "global"), e["text"],
+                               e.get("key") or None, e.get("worker") or None), []).append(e)
     return [g for g in groups.values() if len(g) > 1]
 
 
@@ -274,7 +279,8 @@ def repair(store, *, now: float | None = None) -> list[dict]:
             if e.get("protected"):
                 continue  # two user-saved copies stay; the user decides
             try:
-                if store.retire_memory(e["id"], reason="duplicate", expected_revision=e.get("revision", 1)):
+                if store.retire_memory(e["id"], reason="duplicate", expected_revision=e.get("revision", 1),
+                                       automatic=True):
                     merged.append(e["id"])
             except ValueError:
                 continue  # changed since it was read; the next run looks again
@@ -296,7 +302,8 @@ def repair(store, *, now: float | None = None) -> list[dict]:
                 and now - float(e.get("updated_at") or now) >= STALE_UNCONFIRMED_QUIET
                 and e["id"] not in shown):
             try:
-                if store.retire_memory(e["id"], reason="unconfirmed", expected_revision=e.get("revision", 1)):
+                if store.retire_memory(e["id"], reason="unconfirmed", expected_revision=e.get("revision", 1),
+                                       automatic=True):
                     stale.append(e["id"])
             except ValueError:
                 continue
