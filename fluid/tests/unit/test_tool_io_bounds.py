@@ -535,8 +535,8 @@ async def test_rg_line_reader_holds_a_bounded_amount_across_many_reads() -> None
     stream = _Stream()
     stream.reader = grep_mod._byte_lines(stream, max_bytes=1000)
     lines = [line async for line in stream.reader]
-    assert lines == [b"z" * 1000, b"next"]
     assert len(held) == 22 and max(held) <= 1000
+    assert lines == [b"z" * 1000, b"next"]
 
 
 # ── (e) the Grep fallback skips hidden files unless no_ignore ────────────────
