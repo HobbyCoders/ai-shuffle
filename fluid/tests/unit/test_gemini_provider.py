@@ -346,6 +346,54 @@ async def test_http_429_retries_but_a_daily_quota_does_not(server):
     assert len(server.requests) == 3
 
 
+def _legacy_quota(quota_id: str) -> dict:
+    """The google.rpc shape of a Gemini 429, its quota named in ``details``."""
+    return {"error": {
+        "code": 429, "status": "RESOURCE_EXHAUSTED",
+        "message": "You exceeded your current quota, please check your plan and billing details.",
+        "details": [{
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaMetric": "generativelanguage.googleapis.com/generate_requests",
+                            "quotaId": quota_id}],
+        }],
+    }}
+
+
+_PER_DAY = "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+_PER_MINUTE = "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+
+
+@pytest.mark.parametrize("quota_id,usage_limit", [(_PER_DAY, True), (_PER_MINUTE, False)])
+async def test_a_legacy_daily_quota_over_http_is_a_usage_limit(server, quota_id, usage_limit):
+    """S12: the legacy shape names a per-day quota only in ``details``. That
+    structured evidence types it a usage limit (not retried, with its wait);
+    a per-minute RESOURCE_EXHAUSTED stays a retriable rate limit."""
+    server.script(*[fps.error_reply(429, body=_legacy_quota(quota_id), retry_after="90")
+                    for _ in range(3)])
+    client = GeminiClient(api_key=FAKE_KEY, base_url=server.url + "/v1beta/interactions",
+                          retry=FAST_RETRY)
+    request = ProviderRequest(model="gemini-3.8-flash",
+                              messages=[Message(role="user", content=[Text("hi")])])
+    chunks = [c async for c in client.stream(request)]
+    [error] = [c for c in chunks if c.kind == "error"]
+    assert error.payload.get("usage_limit", False) is usage_limit
+    assert error.payload["retry_after_seconds"] == 90.0
+    # Neither is sent again: a usage limit never is, and 90 s is longer than
+    # the client waits.
+    assert error.payload["retriable"] is (not usage_limit)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("quota_id,usage_limit", [(_PER_DAY, True), (_PER_MINUTE, False)])
+def test_a_legacy_daily_quota_in_stream_is_a_usage_limit(quota_id, usage_limit):
+    """S12, in-stream: the same structured per-day quota types the error."""
+    normalizer = StreamNormalizer()
+    [*_, error] = normalizer.consume("error", _legacy_quota(quota_id))
+    assert error.kind == "error"
+    assert error.payload.get("usage_limit", False) is usage_limit
+    assert error.payload["retriable"] is (not usage_limit)
+
+
 async def test_an_error_after_content_is_surfaced_not_retried(server):
     server.script([Interactions.created(), *Interactions.output(0, "partial"),
                    Interactions.error("service_unavailable", "Overloaded")])

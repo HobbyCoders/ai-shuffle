@@ -61,6 +61,7 @@ from fluid.providers._retry import (
     BILLING_STATUS,
     coerce_status,
     is_retriable_status,
+    usage_limit_evidence,
 )
 from fluid.providers._transport import (
     billing_summary,
@@ -355,6 +356,15 @@ _RETRIABLE_CODES = frozenset((
 QUOTA_CODE = "quota_exceeded"
 
 
+def is_quota_refusal(err: Any) -> bool:
+    """A spent Gemini allowance: the Interactions ``quota_exceeded`` code, or
+    the legacy google.rpc shape (``RESOURCE_EXHAUSTED``) whose ``details``
+    name a per-day quota. A per-minute ``RESOURCE_EXHAUSTED`` is a rate limit
+    and stays retriable. Structured fields only, never the message."""
+    code, status, _message = error_fields(err)
+    return code == QUOTA_CODE or usage_limit_evidence(status, err)
+
+
 def error_fields(err: Any) -> tuple[str | None, int | None, str]:
     """``(code, status, message)`` of an Interactions or legacy Google error."""
     if isinstance(err, dict) and isinstance(err.get("error"), dict):
@@ -376,7 +386,7 @@ def error_fields(err: Any) -> tuple[str | None, int | None, str]:
 
 def classify_error(err: Any) -> ErrorClass:
     code, status, _message = error_fields(err)
-    if code == QUOTA_CODE:
+    if is_quota_refusal(err):
         return ErrorClass(retriable=False, code=code)
     retriable = code in _RETRIABLE_CODES or (
         code not in _CODE_STATUS and is_retriable_status(status)
@@ -395,7 +405,7 @@ def error_payload(err: Any) -> dict[str, Any]:
     }
     if code is not None:
         payload["code"] = code
-    if code == QUOTA_CODE:
+    if is_quota_refusal(err):
         payload["usage_limit"] = True
         summary = usage_limit_summary(summary)
     elif status == BILLING_STATUS:

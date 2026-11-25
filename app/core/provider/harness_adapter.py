@@ -547,6 +547,10 @@ class HarnessAdapter(ProviderAdapter):
         # ``usage_estimated`` so the booking can mark the row.
         self._turn_usage_estimated: bool = False
         self._turn_model_calls: int = 0
+        # True once a rate-limit reading this turn had its window rejected:
+        # the provider's own verdict that a usage allowance is spent, so a
+        # 429 that ends the turn is a usage limit, not a transient blip.
+        self._turn_limit_rejected: bool = False
         # Prompt-cache misses on this adapter's engine, counted by class (see
         # app.core.provider.cache_miss_classes). get_context_usage() reports
         # them; the last class labels the CacheMissAlert that follows a Usage.
@@ -3129,6 +3133,7 @@ class HarnessAdapter(ProviderAdapter):
         self._turn_usage_estimated = False
         self._turn_model_calls = 0
         self._turn_call_indices = set()
+        self._turn_limit_rejected = False
 
     async def steer(
         self, text: str, *, id: Optional[str] = None, origin: str = "user", accepted_at: float | None = None
@@ -5330,6 +5335,10 @@ class HarnessAdapter(ProviderAdapter):
             })]
 
         if cls == "RateLimit":
+            if getattr(event, "status", None) == "rejected" and self._is_live(event):
+                # Only this turn's own rejected window classifies its
+                # refusal; a replayed one from an earlier turn does not.
+                self._turn_limit_rejected = True
             return [
                 RateLimitEvent(
                     rate_limit_info=RateLimitInfo(
@@ -5511,6 +5520,22 @@ class HarnessAdapter(ProviderAdapter):
             short = getattr(event, "provider_message", None)
             if status is not None and isinstance(short, str) and short:
                 message = f"provider returned HTTP {status}: {short}"
+            # The provider's Retry-After was longer than Fluid waits, so the
+            # request was surfaced, not retried. Carried as typed fields (the
+            # message stays the provider's own words): the Task re-dispatch,
+            # the rate-limit notice and the limit resume read them, so none of
+            # them sends again before the wait is over. The deadline counts
+            # from now, when the refusal arrived.
+            wait = getattr(event, "retry_after_seconds", None)
+            if not (isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0):
+                wait = None
+            # A 429 is classified here, once, from what the provider itself
+            # said: Fluid's transport verdict (a usage-limit code, a long
+            # wait, the CLI's own limit message) or a window it rejected this
+            # turn. Consumers read this flag, never the error text.
+            usage_limit: Optional[bool] = None
+            if status == 429:
+                usage_limit = getattr(event, "usage_limit", False) is True or self._turn_limit_rejected
             return [
                 ResultMessage(
                     subtype="error_during_execution",
@@ -5523,6 +5548,9 @@ class HarnessAdapter(ProviderAdapter):
                     usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
                     api_error_status=status,
+                    retry_after_seconds=float(wait) if wait is not None else None,
+                    retry_at=time.time() + float(wait) if wait is not None else None,
+                    usage_limit=usage_limit,
                     # A stop at the context limit: compact, then continue.
                     terminal_reason=(
                         NEEDS_COMPACTION

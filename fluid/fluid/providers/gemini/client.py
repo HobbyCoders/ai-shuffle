@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from fluid.providers._retry import RetryPolicy
+from fluid.providers._retry import RetryPolicy, parse_retry_after
 from fluid.providers._sse import sse_events
 from fluid.providers._trace import trace_request
 from fluid.providers._transport import (
@@ -49,11 +49,11 @@ from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.gemini.pricing import estimate_cost as _estimate_cost
 from fluid.providers.gemini.serialize import (
     API_REVISION,
-    QUOTA_CODE,
     StreamNormalizer,
     build_request_body,
     error_fields,
     error_payload,
+    is_quota_refusal,
 )
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
@@ -75,12 +75,16 @@ def http_refusal(
         code, _status, _message = error_fields(body)
         if code is not None:
             payload["code"] = code
-        if code == QUOTA_CODE:
+        if is_quota_refusal(body):
             detailed = error_payload(body)
             payload.update(
                 retriable=False, usage_limit=True,
                 provider_message=detailed.get("provider_message"),
             )
+            # Like any usage-limit refusal, it keeps the wait it asked for.
+            wait = parse_retry_after(retry_after)
+            if wait is not None and wait > 0:
+                payload["retry_after_seconds"] = wait
     return payload
 
 
@@ -172,8 +176,9 @@ class GeminiClient:
                                 resp.status_code, text, resp.headers.get("retry-after"),
                                 secrets=[self._api_key],
                             )
-                            if refusal["retriable"] and attempt < self._retry.max_retries:
-                                await asyncio.sleep(self._retry.delay(attempt, resp.headers.get("retry-after")))
+                            wait = self._retry.refusal_delay(attempt, refusal, resp.headers.get("retry-after"))
+                            if wait is not None:
+                                await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
                             yield StreamChunk("error", refusal)

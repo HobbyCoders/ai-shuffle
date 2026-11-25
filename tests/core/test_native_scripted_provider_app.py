@@ -571,8 +571,9 @@ async def _chat_turn_outcome(tmp_path: Path, result: ResultMessage) -> dict:
 
     notices = AsyncMock()
     with patch("app.services.notification_service.emit_notification", new=notices):
-        if account_failover.is_usage_limit_error(metadata):
-            await account_failover.attempt_failover("native-429", "u-1")
+        # The settlement hook's 429 notice gate (turn_scheduler._maybe_failover).
+        if account_failover.is_rate_limited(metadata):
+            await account_failover.attempt_failover("native-429", "u-1", metadata)
     return {
         "api_error_frames": frames_of(events, "api_error"),
         "api_error_status": metadata.get("api_error_status"),
@@ -588,6 +589,8 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     """Regression: a native provider's 429 surfaced as body text only; the
     ResultMessage had no ``api_error_status``, so the app's rate-limited
     notice never fired for native sessions."""
+    from app.core import account_failover
+
     provider.script(*[fps.error_reply(429, "Rate limit reached for requests",
                                       retry_after="0") for _ in range(3)])
     async with NativeRun(monkeypatch, tmp_path, provider) as run:
@@ -604,13 +607,57 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     native_outcome = await _chat_turn_outcome(tmp_path, native)
     cli_outcome = await _chat_turn_outcome(tmp_path, cli)
 
+    # Same frames, status and notice count. The wording differs on purpose:
+    # the native terminal carries the typed verdict (a transient 429, retried
+    # three times), the bare CLI result does not and keeps the login's reading.
+    native_notices = native_outcome.pop("rate_limited_notices")
+    cli_notices = cli_outcome.pop("rate_limited_notices")
     assert native_outcome == cli_outcome
+    assert native.usage_limit is False
     assert native_outcome["api_error_status"] == 429
     assert native_outcome["api_error_frames"] == [
         {"type": "api_error", "status": 429, "session_id": "native-429"}]
     assert native_outcome["generic_notifications"] == 0  # the 429 notice owns it
-    [notice] = native_outcome["rate_limited_notices"]
-    assert notice.startswith("Usage limit reached")
+    assert native_notices == [account_failover.RATE_LIMIT_MESSAGE]
+    assert len(cli_notices) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_too_long_to_wait_reaches_the_app(monkeypatch, tmp_path, provider):
+    """A 429 + ``Retry-After: 60`` is longer than the client waits, so it is
+    surfaced at once. The app kept only the short body text, so the Task
+    re-dispatch fell back to 5 s, the chat had no reset time, and an API-key
+    notice said the request had been retried. The wait now arrives as typed
+    fields; the text stays the provider's own."""
+    import time
+    from unittest.mock import patch
+
+    from app.core import account_failover, limit_resume, provider_agent
+
+    provider.script(fps.error_reply(429, "Too many requests.", retry_after="60"))
+    before = time.time()
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        messages = await run.turn("hi")
+
+    native = messages[-1]
+    assert isinstance(native, ResultMessage) and native.api_error_status == 429
+    assert len(provider.requests) == 1, "not re-sent inside the provider's window"
+    assert native.errors == ["provider returned HTTP 429: Too many requests."]
+    # The wait reaches the Task re-dispatch, the chat's reset time and the
+    # worker's failure summary as typed fields, counted from receipt.
+    assert native.retry_after_seconds == 60.0
+    assert before + 60 <= native.retry_at <= time.time() + 60
+    reset = limit_resume.find_reset("", "", retry_at=native.retry_at, now=before)
+    assert reset is not None and reset.at == native.retry_at
+    assert provider_agent._failure_summary(
+        "error", native.errors[0], 0, retry_at=native.retry_at,
+    ).startswith("retry after ")
+
+    with patch.object(account_failover, "_is_subscription_session", return_value=False):
+        outcome = await _chat_turn_outcome(tmp_path, native)
+    [notice] = outcome["rate_limited_notices"]
+    assert "was retried" not in notice
+    assert "wait 60s" in notice
 
 
 @pytest.mark.asyncio

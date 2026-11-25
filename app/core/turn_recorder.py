@@ -1242,6 +1242,11 @@ class TurnRecorder:
             for key in ("is_error", "errors"):
                 if metadata.get(key):
                     api_error = {**(api_error or {}), key: metadata[key]}
+            # A refusal the client did not retry: its typed wait.
+            from app.core.provider.events import retry_fields
+            waits = retry_fields(metadata)
+            if waits:
+                api_error = {**(api_error or {}), **waits}
             completed = self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),
@@ -1265,9 +1270,17 @@ class TurnRecorder:
             self._terminal_recorded = True
         elif etype == "error":
             events.extend(self._flush_pending_usage())
+            # A provider refusal keeps its HTTP status and typed wait on the
+            # aborted terminal, so the rate-limit notice and the limit resume
+            # read a failed chat turn the way they read a completed one.
+            from app.core.provider.events import retry_fields
+            aborted: Dict[str, Any] = {"message": event.get("message")}
+            if event.get("api_error_status") is not None:
+                aborted["api_error_status"] = event["api_error_status"]
+            aborted.update(retry_fields(event))
             events.append(self._event(
                 contract.TurnAborted, reason="error",
-                extra_payload={"message": event.get("message")},
+                extra_payload=aborted,
             ))
             self._terminal_recorded = True
         else:

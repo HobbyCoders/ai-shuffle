@@ -162,11 +162,12 @@ from fluid.hooks.bus import (
 )
 from fluid.messages import Image, Message, Text
 from fluid.messages.content import SteerDelivery, ToolResultBlock
-from fluid.providers._retry import is_usage_limit_text
+from fluid.providers._retry import is_cli_usage_limit_text, is_usage_limit_text
 from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    claim_session,
     discard_events,
     flush_events,
     new_id,
@@ -1399,6 +1400,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
             if self._session_id is not None:
+                # Lock before reading the head and the last event seq, so
+                # both include another process's writes (claim_session).
+                claim_session(self.store, self._session_id)
                 session = await self.store.get_session(self._session_id)
                 if session is not None:
                     await self._seed_bus_seq(session.session_id)
@@ -3164,6 +3168,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # host handles it like the same status from any provider.
                 status=mapper.failed_status,
                 provider_message=mapper.failed_provider_message,
+                # A 429 the CLI's own rate-limit verdict or words call a
+                # spent allowance (session, five-hour, weekly), not a blip.
+                usage_limit=self._is_usage_limit_failure(mapper, failure),
                 # The CLI stopped at the context limit: the host compacts and
                 # continues the work instead of leaving it cut off.
                 outcome=mapper.failed_outcome,
@@ -3179,6 +3186,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._send_control({"subtype": "interrupt"})
         except Exception:  # noqa: BLE001 — the result frame still ends the turn
             logger.debug("interrupt after hook stop failed", exc_info=True)
+
+    @staticmethod
+    def _is_usage_limit_failure(mapper: StreamJsonMapper, failure: str | None) -> bool:
+        """Whether a failed turn's 429 is a spent usage allowance: the CLI
+        rejected a rate-limit window this turn, or its result is one of the
+        CLI's own plan-limit lines ("You've hit your session limit · resets
+        …"). A provider's generic "usage limit on requests per minute" is a
+        rate limit."""
+        if mapper.failed_status != 429:
+            return False
+        return (
+            mapper.limit_rejected
+            or is_cli_usage_limit_text(failure)
+            or is_cli_usage_limit_text(mapper.failed_provider_message)
+        )
 
     async def _resume_handle_rejected(
         self, mapper: StreamJsonMapper, failure: str | None = None, *, crashed: bool = False,

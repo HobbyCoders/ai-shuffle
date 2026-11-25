@@ -14,6 +14,7 @@ execute_query``, and ``emit_notification`` is imported lazily inside ``_notify``
 — both are patched where they are DEFINED so the consumer's binding is reached.
 """
 
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -43,6 +44,20 @@ class TestIsUsageLimitError:
 
     def test_garbage_false(self):
         assert af.is_usage_limit_error({"api_error_status": "nope"}) is False
+
+    def test_a_typed_transient_429_is_rate_limited_not_a_usage_limit(self):
+        """Only the typed verdict splits a 429: a transient one gets the 429
+        notice (``is_rate_limited``) but no usage-limit banner, hold or
+        resume, whatever its words say."""
+        transient = {"api_error_status": 429, "usage_limit": False,
+                     "errors": ["provider returned HTTP 429: Usage limit reached"]}
+        assert af.is_rate_limited(transient) is True
+        assert af.is_usage_limit_error(transient) is False
+        assert af.is_usage_limit_error({"api_error_status": 429, "usage_limit": True}) is True
+
+    def test_a_terminal_without_the_verdict_keeps_the_old_reading(self):
+        # Settled before ``usage_limit`` existed: any 429, as before.
+        assert af.is_usage_limit_error({"api_error_status": 429}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +99,7 @@ class TestApiKey429IsNotAUsageWindow:
     Only a subscription login has one."""
 
     @staticmethod
-    async def _notice(session_row, provider_row, claude_mode="subscription"):
+    async def _notice(session_row, provider_row, claude_mode="subscription", metadata=None):
         from app.core import claude_auth_mode
         from app.db import database
 
@@ -92,7 +107,7 @@ class TestApiKey429IsNotAUsageWindow:
              patch.object(database, "get_session", return_value=session_row), \
              patch.object(database, "get_model_provider", return_value=provider_row), \
              patch.object(claude_auth_mode, "current_mode", return_value=claude_mode):
-            await af.attempt_failover("sess-1", "user-1")
+            await af.attempt_failover("sess-1", "user-1", metadata)
         notify.assert_awaited_once()
         assert notify.await_args.kwargs["severity"] == "warning"
         return notify.await_args.kwargs["message"]
@@ -125,6 +140,83 @@ class TestApiKey429IsNotAUsageWindow:
     async def test_a_claude_session_follows_the_claude_auth_mode(self, mode, expected):
         message = await self._notice({"provider_id": None}, None, claude_mode=mode)
         assert message == getattr(af, expected)
+
+    async def test_an_unretried_429_does_not_say_it_was_retried(self):
+        """Fluid surfaced a 429 whose Retry-After was longer than it waits:
+        "The request was retried" would be untrue, so the notice names the
+        wait and the time instead, read from the typed fields."""
+        metadata = {
+            "api_error_status": 429,
+            "errors": ["provider returned HTTP 429: Too many requests."],
+            "retry_after_seconds": 60.0,
+            "retry_at": 1795651260.0,
+        }
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
+        )
+        assert "was retried" not in message
+        assert message == af.RATE_LIMIT_NOT_RETRIED_MESSAGE.format(
+            wait=60, at=time.strftime("%H:%M:%S UTC", time.gmtime(1795651260.0)))
+        assert "wait 60s" in message
+
+    async def test_a_timed_notice_reports_the_deadline_without_a_reason(self):
+        """S13: a typed ``Retry-After: 1`` is not "longer than the client
+        waits": the notice reports the wait and the time, and no cause."""
+        retry_at = 1795651201.0
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key",
+            metadata={"api_error_status": 429, "retry_after_seconds": 1.0, "retry_at": retry_at},
+        )
+        assert "longer than" not in message and "not retried" not in message
+        assert "wait 1s" in message
+        assert time.strftime("%H:%M:%S UTC", time.gmtime(retry_at)) in message
+
+    async def test_provider_text_never_changes_the_notice(self):
+        """A provider body that reads like a wait note is still provider text:
+        without the typed fields the notice keeps its ordinary wording."""
+        metadata = {"api_error_status": 429, "errors": [
+            "provider returned HTTP 429: The provider asked to wait 60s before "
+            "another request (retry-after: 60), longer than the client waits, "
+            "so the request was not retried.",
+        ]}
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
+        )
+        assert message == af.RATE_LIMIT_MESSAGE
+
+    @pytest.mark.parametrize("usage_limit,claude_mode,expected", [
+        (False, "subscription", "rate"),   # a transient 429 on a subscription
+        (True, "api_key", "usage"),        # a spent allowance on an API key
+    ])
+    async def test_the_typed_verdict_words_the_notice(self, usage_limit, claude_mode, expected):
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode=claude_mode,
+            metadata={"api_error_status": 429, "usage_limit": usage_limit},
+        )
+        assert message == (af.USAGE_LIMIT_MESSAGE if expected == "usage" else af.RATE_LIMIT_MESSAGE)
+
+    async def test_a_transient_subscription_429_claims_no_retry(self):
+        """Codex streams content, then ``rate_limit_exceeded``, and is never
+        replayed: no client reports a retry, so the notice claims none."""
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="subscription",
+            metadata={"api_error_status": 429, "usage_limit": False},
+        )
+        assert message == af.RATE_LIMIT_MESSAGE
+        assert "retried" not in message
+
+    async def test_a_usage_limit_notice_names_the_typed_retry_time(self):
+        """A Gemini API key's ``quota_exceeded`` with ``Retry-After: 90``: the
+        usage-limit notice keeps the provider's retry time."""
+        retry_at = 1795651290.0
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key",
+            metadata={"api_error_status": 429, "usage_limit": True,
+                      "retry_after_seconds": 90.0, "retry_at": retry_at},
+        )
+        at = time.strftime("%H:%M:%S UTC", time.gmtime(retry_at))
+        assert message.startswith("Usage limit reached")
+        assert f"retry after {at}" in message
 
     async def test_a_failed_lookup_keeps_the_usage_window_notice(self):
         from app.db import database
@@ -167,4 +259,4 @@ class TestExecuteQueryWithFailover:
             )
         assert out is result
         eq.assert_awaited_once()  # NO retry — single pass
-        af_mock.assert_awaited_once_with("sess-1", "u1")
+        af_mock.assert_awaited_once_with("sess-1", "u1", {"api_error_status": 429})

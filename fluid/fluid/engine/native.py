@@ -243,6 +243,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    claim_session,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -505,6 +506,12 @@ class _CallResult:
     # The provider's own short explanation of the error (≤300 chars, HTML
     # stripped), for the ErrorEvent; ``error_message`` may be the raw body.
     error_provider_message: str | None = None
+    # The provider's Retry-After when it was too long to wait out, so the
+    # refusal was surfaced instead of retried (``retry_after_seconds``).
+    error_retry_after: float | None = None
+    # The refusal is a spent usage allowance, as the transport classified it
+    # (the error chunk's ``usage_limit``), not a transient rate limit.
+    error_usage_limit: bool = False
     # The stream failed while a tool_use block was still open: the provider
     # cut it mid-arguments. Such a call is retried under its own, lower cap
     # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
@@ -1714,6 +1721,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._session is None:
             resumed = False
             if self._session_id is not None:
+                # Lock before reading the head and the last event seq, so
+                # both include another process's writes (claim_session).
+                claim_session(self.store, self._session_id)
                 session = await self.store.get_session(self._session_id)
                 if session is not None:
                     await self._seed_bus_seq(session.session_id)
@@ -4922,6 +4932,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     num_model_calls=num_calls,
                     status=result.error_status,
                     provider_message=result.error_provider_message,
+                    retry_after_seconds=result.error_retry_after,
+                    usage_limit=result.error_usage_limit,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -6084,12 +6096,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                     block["done_item"] = payload["block"]
                 if block and block["type"] == "tool_use":
                     raw_args = block["args"]
-                    if not raw_args:
-                        # No deltas streamed — fall back to the done item's
-                        # complete arguments (a JSON string on Responses).
-                        fallback = (block.get("done_item") or {}).get("arguments")
-                        if isinstance(fallback, str):
-                            raw_args = fallback
+                    # The done item's complete arguments (a JSON string on
+                    # Responses) are what the provider settled on, so they are
+                    # what runs. The deltas only fed the live display and the
+                    # stream guards: a dropped or partial fragment must not
+                    # change the call. A present string wins even when empty
+                    # (the call settled with no arguments); only a done item
+                    # without the field falls back to the deltas.
+                    final = (block.get("done_item") or {}).get("arguments")
+                    if isinstance(final, str):
+                        raw_args = final
                     args, arg_error = _parse_tool_args(raw_args)
                     block["input"] = args
                     tool_uses.append({
@@ -6161,6 +6177,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             "Review any completed actions before asking to continue."
                         )
                 provider_message = payload.get("provider_message")
+                retry_after = payload.get("retry_after_seconds")
                 return _CallResult(
                     message=self._assemble_message(blocks, request.model),
                     tool_uses=tool_uses,
@@ -6175,6 +6192,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                     error_provider_message=(
                         provider_message if isinstance(provider_message, str) else None
                     ),
+                    error_retry_after=(
+                        float(retry_after)
+                        if isinstance(retry_after, (int, float))
+                        and not isinstance(retry_after, bool) and retry_after > 0
+                        else None
+                    ),
+                    error_usage_limit=payload.get("usage_limit") is True,
                     native_stop_reason=native_stop_reason,
                     served_model=served_model,
                     cut_in_tool_args=any(

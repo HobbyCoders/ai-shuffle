@@ -2287,6 +2287,37 @@ class TestWorkerWakesItsCaller:
         assert frame["summary"].startswith("worker failed")
         assert "provider blew up" in frame["summary"]
 
+    def test_an_unretried_429_publishes_its_retry_time_first(
+        self, dispatch_env, monkeypatch
+    ):
+        """S6: the registry summary a registered background Task publishes is
+        clipped at 240 chars. The retry time of a refusal the client did not
+        wait out leads it, and is the deadline counted from when the refusal
+        arrived (the terminal's ``retry_at``), not from when it is reported."""
+        import time
+
+        retry_at = 1_790_000_000.0  # fixed: a reporting-time clock would differ
+        error = "provider returned HTTP 429: Too many requests. " + "detail " * 80
+        monkeypatch.setattr(
+            pa, "final_turn_outcome",
+            lambda sid: {
+                "usage": {}, "error": error, "interrupted": False,
+                "terminal_found": True,
+                "limit": {"api_error_status": 429, "retry_after_seconds": 600.0,
+                          "retry_at": retry_at},
+            },
+        )
+
+        outcome = _dispatch_bg()
+
+        assert outcome.api_error_status == 429
+        assert outcome.retry_at == retry_at
+        (_, frame), = dispatch_env.wakes
+        assert frame["summary"].startswith(
+            "retry after " + time.strftime("%H:%M:%S UTC", time.gmtime(retry_at)) + ": "
+        )
+        assert "already retried" not in frame["summary"]
+
     def test_torn_down_worker_does_not_wake_the_caller(
         self, dispatch_env, monkeypatch
     ):

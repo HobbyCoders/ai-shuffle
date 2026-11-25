@@ -605,6 +605,22 @@ async def test_first_event_in_time_disarms_the_watchdog(monkeypatch) -> None:
     assert any(c.kind == "text_delta" for c in chunks)
 
 
+async def test_done_sentinel_finishes_the_reply_on_a_connection_left_open(monkeypatch) -> None:
+    """A server (or proxy) that keeps the socket open after ``[DONE]`` must
+    not turn a finished reply into a timeout: reading stops at the sentinel."""
+    body = (
+        'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode()
+    chunks = await asyncio.wait_for(
+        _stream_bytes([body, 30.0], monkeypatch, 5.0), timeout=5.0,
+    )
+    kinds = [c.kind for c in chunks]
+    assert "error" not in kinds
+    assert kinds[-1] == "message_stop"
+
+
 @pytest.mark.parametrize(("model", "efforts"), [
     ("openai/gpt-6-astra", ["low", "medium", "high", "xhigh", "max"]),
     ("openai/gpt-5.6-sol", ["none", "low", "medium", "high", "xhigh", "max"]),
@@ -682,6 +698,41 @@ async def test_rate_limit_status_is_retried() -> None:
     assert chunks[-1].kind == "message_stop"
 
 
+async def test_retry_after_longer_than_the_wait_budget_surfaces_instead_of_retrying(
+    monkeypatch,
+) -> None:
+    """A Retry-After past ``max_delay`` is not shortened to it: re-sending
+    early only meets the same refusal, so the error surfaces with the wait."""
+    sleeps: list[float] = []
+
+    async def no_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(_chat_completions.asyncio, "sleep", no_sleep)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            503, json={"error": {"message": "busy"}}, headers={"retry-after": "120"}
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    retry = RetryPolicy(max_retries=3, max_transport_retries=0, base_delay=0,
+                        max_delay=30.0, jitter=0)
+    client = OpenRouterClient(api_key="or-test", http_client=http, retry=retry)
+    chunks = [c async for c in client.stream(_request())]
+    await http.aclose()
+
+    assert calls == 1
+    assert sleeps == []
+    error = chunks[-1]
+    assert error.kind == "error"
+    assert error.payload["retry_after_seconds"] == 120.0
+    assert "120s" in error.payload["message"]
+
+
 async def test_in_stream_retriable_error_before_content_is_retried() -> None:
     calls = 0
 
@@ -752,6 +803,8 @@ def test_delay_honors_retry_after_and_adds_bounded_jitter() -> None:
         assert 4.0 <= policy.delay(0, "4") <= 6.0
     assert RetryPolicy(base_delay=0, jitter=0.5).delay(3) == 0.0
     assert RetryPolicy(base_delay=1.0, jitter=0).delay(2) == 4.0
+    # Retry-After is a minimum, never cut down to max_delay.
+    assert RetryPolicy(base_delay=1.0, max_delay=30.0, jitter=0).delay(0, "45") == 45.0
 
 
 # ─── tool calls without an index, content filters ────────────────────────────

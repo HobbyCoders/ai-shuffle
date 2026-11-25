@@ -8104,6 +8104,93 @@ async def test_error_event_status_reaches_api_error_status():
 
 
 @pytest.mark.asyncio
+async def test_a_retry_after_too_long_to_wait_reaches_the_app():
+    """Fluid surfaces a 429 whose Retry-After is longer than it waits, with
+    ``retry_after_seconds``. The adapter carries it as typed fields (the wait
+    and the deadline counted from when the refusal arrived) and leaves the
+    message as the provider's own words: no machine marker in the text."""
+    import time as _time
+
+    events = [lm.ErrorEvent(
+        session_id=SID, retriable=True, status=429,
+        message="the provider asked for 60s before a retry ... Too many requests.",
+        provider_message="Too many requests.",
+        retry_after_seconds=60.0,
+    )]
+    before = _time.time()
+    [result] = await _collect(_adapter_with(FakeEngine(events)))
+
+    assert result.api_error_status == 429
+    assert result.errors == ["provider returned HTTP 429: Too many requests."]
+    assert result.retry_after_seconds == 60.0
+    assert before + 60.0 <= result.retry_at <= _time.time() + 60.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,window,expected", [
+    (False, None, False),         # a plain 429: a transient rate limit
+    (True, None, True),           # the transport called it a usage limit
+    (False, "rejected", True),    # a window the provider rejected this turn
+    (False, "allowed_warning", False),
+])
+async def test_a_429_carries_a_typed_usage_limit_verdict(verdict, window, expected):
+    """S8: only a refusal Fluid (or the turn's rate-limit windows) already
+    knows to be a spent allowance is typed ``usage_limit=True``. The text
+    plays no part: "usage limit" in a transient refusal's words changes
+    nothing."""
+    events = ([lm.RateLimit(session_id=SID, kind="five_hour", status=window)] if window else [])
+    events.append(lm.ErrorEvent(
+        session_id=SID, retriable=False, status=429, usage_limit=verdict,
+        message="Temporary usage limit on requests per minute.",
+        provider_message="Temporary usage limit on requests per minute.",
+    ))
+    [result] = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+                if type(e).__name__ == "ResultMessage"]
+
+    assert result.api_error_status == 429
+    assert result.usage_limit is expected
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_rejected_window_does_not_classify_the_429():
+    """A stale cursor replays an earlier turn's rejected window (seq at or
+    below the turn floor): this turn's plain 429 stays a transient rate
+    limit, not a usage limit."""
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", status="rejected"),
+        lm.ErrorEvent(session_id=SID, retriable=False, status=429, usage_limit=False,
+                      message="Too many requests.", provider_message="Too many requests."),
+    ]
+    adapter = _adapter_with(FakeEngine(events))
+    adapter._turn_floor = 1  # the RateLimit (seq 1) predates this turn
+    [result] = [e for e in await _collect(adapter) if type(e).__name__ == "ResultMessage"]
+
+    assert result.api_error_status == 429
+    assert result.usage_limit is False
+
+
+@pytest.mark.asyncio
+async def test_a_retried_429_that_succeeds_carries_no_limit():
+    """A 429 the client retried, after a window it saw rejected, then a
+    successful reply: the turn completed, so its terminal carries no status
+    and no usage-limit verdict for the scheduler to act on."""
+    from app.core import account_failover
+
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", status="rejected"),
+        lm.ProviderRetry(session_id=SID, attempt=1, max_attempts=3,
+                         reason="HTTP 429", delay_seconds=1.0),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    [result] = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+                if type(e).__name__ == "ResultMessage"]
+
+    assert not result.is_error
+    assert result.api_error_status is None and result.usage_limit is None
+    assert account_failover.is_rate_limited({"api_error_status": result.api_error_status}) is False
+
+
+@pytest.mark.asyncio
 async def test_error_event_without_status_keeps_its_message():
     events = [lm.ErrorEvent(session_id=SID, message="stream truncated", retriable=False,
                             provider_message="ignored without a status")]

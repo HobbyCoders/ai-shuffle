@@ -33,8 +33,9 @@ from fluid.providers._retry import (
     BILLING_STATUS,
     RETRIABLE_STATUSES,
     billing_error_code,
-    is_usage_limit,
     is_usage_limit_text,
+    parse_retry_after,
+    usage_limit_evidence,
 )
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
@@ -275,15 +276,19 @@ def refusal_payload(
     an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
     retried, because no wait clears it. Only a billing code in the body is
     called "out of credit"; a bare 402 carries the provider's explanation.
-    A usage limit (see fluid.providers._retry.is_usage_limit; ``retry_after``
-    is the response's Retry-After header) keeps its 429 but is never retried
-    either: the turn stops on it and the user sees the limit.
+    A usage limit (its structured fields say so, see
+    fluid.providers._retry.usage_limit_evidence; ``retry_after`` is the
+    response's Retry-After header) keeps its 429 but is never retried either.
+    Its Retry-After, when the response gave one, rides along as
+    ``retry_after_seconds``: the host must not resume before it. Any other
+    429, whatever its wording, follows the retry policy.
     """
     text = redact_text(text, secrets)
     summary = provider_error_summary(text)
     code = billing_error_code(text)
-    if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
-        return {
+    if code is None and status != BILLING_STATUS and usage_limit_evidence(status, text):
+        wait = parse_retry_after(retry_after)
+        limited: dict[str, Any] = {
             "status": status,
             "message": (
                 f"the provider refused the request with HTTP {status}: a usage "
@@ -291,8 +296,12 @@ def refusal_payload(
             ),
             "provider_message": usage_limit_summary(summary),
             "retriable": False,
+            # The typed verdict a host reads (``ErrorEvent.usage_limit``).
             "usage_limit": True,
         }
+        if wait is not None and wait > 0:
+            limited["retry_after_seconds"] = wait
+        return limited
     if code is None and status != BILLING_STATUS:
         return {
             "status": status,

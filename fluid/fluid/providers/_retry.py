@@ -9,6 +9,7 @@ retried — the engine has already seen (and emitted) part of the message.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -36,23 +37,16 @@ BILLING_ERROR_CODES = frozenset((
     "billing_error",               # Anthropic error type
 ))
 
-# A usage limit, not a rate limit: a subscription's session, 5-hour, weekly or
-# plan allowance is spent ("You've hit your session limit · resets 11:10pm",
-# Codex's ``usage_limit_reached``). It arrives as HTTP 429 like a per-minute
-# rate limit, but no backoff clears it, so it is never retried: the turn stops
-# and the user sees the limit. A per-minute 429 ("Rate limit reached ... try
-# again in 1.8s", a Retry-After of seconds) is still a blip and retried.
-#
-# Told apart by, in order: an error code naming a usage limit; a wait the
-# provider asks for (Retry-After header or ``resets_in_seconds``) longer than
-# USAGE_LIMIT_MIN_WAIT_SECONDS; the provider's own words.
+# A usage limit, not a rate limit: a subscription's or plan's allowance is
+# spent (Codex's ``usage_limit_reached``, a Gemini per-day quota). It arrives
+# as HTTP 429 like a per-minute rate limit, but no backoff clears it, so it is
+# never retried: the turn stops and the user sees the limit. Only structured
+# fields tell it apart (:func:`usage_limit_evidence`); any other 429 follows
+# the retry policy, its Retry-After honoured.
 USAGE_LIMIT_ERROR_CODES = frozenset((
     "usage_limit_reached",  # ChatGPT/Codex backend
     "usage_not_included",   # ChatGPT/Codex: the plan has no allowance at all
 ))
-#: A 429 that asks for a longer wait than this is a spent allowance, not a
-#: blip. Matches the ceiling task re-dispatch already treats as "not a retry".
-USAGE_LIMIT_MIN_WAIT_SECONDS = 600.0
 _USAGE_LIMIT_TEXT = re.compile(
     r"usage[ _-]limit"
     r"|session limit"
@@ -90,43 +84,75 @@ def is_usage_limit_text(text: object) -> bool:
     return isinstance(text, str) and bool(_USAGE_LIMIT_TEXT.search(text))
 
 
-def is_usage_limit(
-    status: object, body: object = None, retry_after: str | None = None,
-) -> bool:
-    """True when a provider refusal is a usage limit (never retried).
+# The result lines the Claude Code CLI itself writes at a plan limit: "You've
+# hit your session limit · resets 11:10pm (America/New_York)", the weekly,
+# 5-hour and model variants, and the older "Claude AI usage limit
+# reached|<reset epoch>". Each names a reset; a provider's generic "usage
+# limit on requests per minute" names none and is a rate limit.
+_CLI_USAGE_LIMIT = re.compile(
+    r"\b(?:session|weekly|(?:5|five)[ -]hour) limit\b[^\n]*?\bresets?\b"
+    r"|hit your (?!(?:rate|request|requests|token|tokens)[ -])(?:[a-z0-9-]+ )?limit\b[^\n]*?\bresets?\b"
+    r"|usage limit reached\s*\|\s*\d{9,13}",
+    re.IGNORECASE,
+)
 
-    ``status`` is the HTTP status or in-stream code (None when the error gave
-    none: an in-stream ``usage_limit_reached`` still counts). ``body`` is the
-    response body, its text, or an error object; ``retry_after`` the header.
-    A status other than 429 is never a usage limit.
+
+def is_cli_usage_limit_text(text: object) -> bool:
+    """True when ``text`` is one of the Claude Code CLI's plan-limit lines."""
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    return isinstance(text, str) and bool(_CLI_USAGE_LIMIT.search(text))
+
+
+# A google.rpc quota violation naming a per-day quota ("quotaId":
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier"): structured evidence
+# that a daily allowance is spent, unlike a per-minute RESOURCE_EXHAUSTED.
+_PER_DAY_QUOTA = re.compile(r"per[_ -]?day", re.IGNORECASE)
+
+
+def _per_day_quota(obj: dict) -> bool:
+    details = obj.get("details")
+    if not isinstance(details, list):
+        return False
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        fields: list[object] = []
+        for violation in detail.get("violations") or ():
+            if isinstance(violation, dict):
+                fields += [violation.get("quotaId"), violation.get("quotaMetric")]
+        metadata = detail.get("metadata")
+        if isinstance(metadata, dict):
+            fields += [metadata.get("quota_limit"), metadata.get("quota_limit_id")]
+        if any(isinstance(f, str) and _PER_DAY_QUOTA.search(f) for f in fields):
+            return True
+    return False
+
+
+def usage_limit_evidence(status: object, body: object = None) -> bool:
+    """True when a refusal's STRUCTURED fields say an allowance is spent.
+
+    Decides both whether the client resends the request (never, for a usage
+    limit) and the typed verdict a host acts on (``ErrorEvent.usage_limit``:
+    the usage banner, the resume after the reset, no Task re-dispatch). Only an error
+    code naming a usage limit (:data:`USAGE_LIMIT_ERROR_CODES`) or a per-day
+    quota violation in ``error.details`` counts. The provider's wording and
+    the length of the wait it asks for never do: a "usage limit on requests
+    per minute" or a 15-minute Retry-After is still a rate limit, whose wait
+    the host keeps as a deadline.
     """
     code = coerce_status(status)
     if code is not None and code != 429:
         return False
-    objects = _error_objects(body)
-    for obj in objects:
+    if isinstance(status, str) and status in USAGE_LIMIT_ERROR_CODES:
+        return True
+    for obj in _error_objects(body):
         for key in ("code", "type"):
             value = obj.get(key)
             if isinstance(value, str) and value in USAGE_LIMIT_ERROR_CODES:
                 return True
-    if isinstance(status, str) and status in USAGE_LIMIT_ERROR_CODES:
-        return True
-    if code is None:
-        return False
-    wait = parse_retry_after(retry_after)
-    if wait is not None and wait > USAGE_LIMIT_MIN_WAIT_SECONDS:
-        return True
-    for obj in objects:
-        resets_in = obj.get("resets_in_seconds")
-        if (
-            isinstance(resets_in, (int, float)) and not isinstance(resets_in, bool)
-            and resets_in > USAGE_LIMIT_MIN_WAIT_SECONDS
-        ):
+        if _per_day_quota(obj):
             return True
-        if is_usage_limit_text(obj.get("message")) or is_usage_limit_text(obj.get("detail")):
-            return True
-    if isinstance(body, (str, bytes)) and not objects:
-        return is_usage_limit_text(body)
     return False
 
 
@@ -241,12 +267,41 @@ class RetryPolicy:
         return self.max_transport_retries
 
     def delay(self, attempt: int, retry_after: str | None = None) -> float:
-        """Backoff for the given 0-based attempt, honoring a Retry-After
-        header when the server sent a parseable one."""
+        """Backoff for the given 0-based attempt. A parseable Retry-After
+        header is a minimum: the delay is never shorter than the server
+        asked for (callers check :meth:`refusal_delay` first, which refuses
+        to wait longer than ``max_delay``)."""
         delay = min(self.base_delay * (2 ** attempt), self.max_delay)
         wait = parse_retry_after(retry_after)
         if wait is not None:
-            delay = max(delay, min(wait, self.max_delay))
+            delay = max(delay, wait)
         if self.jitter > 0 and delay > 0:
             delay += random.uniform(0.0, delay * self.jitter)
         return delay
+
+    def refusal_delay(
+        self, attempt: int, refusal: dict, retry_after: str | None = None,
+    ) -> float | None:
+        """Seconds to wait before re-sending a refused request, or None to
+        surface ``refusal`` now.
+
+        None when the refusal is not retriable, the attempts are spent, or
+        the server's Retry-After asks for longer than ``max_delay``: sending
+        again before the server's time only meets the same refusal, so the
+        error goes to the caller instead, with the wait it asked for
+        (``retry_after_seconds``, and a note in ``message``).
+        """
+        if not refusal.get("retriable"):
+            return None
+        wait = parse_retry_after(retry_after)
+        if wait is not None and wait > self.max_delay:
+            refusal["retry_after_seconds"] = wait
+            refusal["message"] = (
+                f"the provider asked for {math.ceil(wait)}s before a retry, longer than "
+                f"the {self.max_delay:g}s this client waits, so it was not "
+                f"retried. {refusal.get('message', '')}"
+            )
+            return None
+        if attempt >= self.max_retries:
+            return None
+        return self.delay(attempt, retry_after)

@@ -899,6 +899,9 @@ async def _execute_query_turn(
                     metadata["errors"] = result_errors
                     logger.warning(f"ResultMessage contains errors: {result_errors}")
                 # Surface HTTP error status code
+                # The typed wait of a refusal the client did not retry.
+                from app.core.provider.events import retry_fields
+                metadata.update(retry_fields(message))
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
@@ -1770,6 +1773,9 @@ async def _stream_query_turn(
                     metadata["errors"] = result_errors
                     logger.warning(f"ResultMessage contains errors: {result_errors}")
                 # Surface HTTP error status code; emit before result frame
+                # The typed wait of a refusal the client did not retry.
+                from app.core.provider.events import retry_fields
+                metadata.update(retry_fields(message))
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
@@ -4333,6 +4339,9 @@ async def _stream_to_websocket_turn(
                     metadata["errors"] = result_errors
                     logger.warning(f"[WS] ResultMessage contains errors: {result_errors}")
                 # Surface HTTP error status code; emit before result frame
+                # The typed wait of a refusal the client did not retry.
+                from app.core.provider.events import retry_fields
+                metadata.update(retry_fields(message))
                 api_err = getattr(message, "api_error_status", None)
                 if api_err is not None:
                     metadata["api_error_status"] = api_err
@@ -4541,7 +4550,15 @@ async def _stream_to_websocket_turn(
             if isinstance(_errs, list) and _errs
             else "The provider returned an error before producing any output."
         )
-        yield {"type": "error", "message": _msg, "session_id": session_id}
+        # The refusal's HTTP status and typed wait ride the frame, so the
+        # recorder keeps them on the aborted terminal: the rate-limit notice,
+        # the limit resume and a Task re-dispatch read them from there.
+        _frame: Dict[str, Any] = {"type": "error", "message": _msg, "session_id": session_id}
+        if metadata.get("api_error_status") is not None:
+            _frame["api_error_status"] = metadata["api_error_status"]
+        from app.core.provider.events import retry_fields
+        _frame.update(retry_fields(metadata))
+        yield _frame
     else:
         yield {
             "type": "done",

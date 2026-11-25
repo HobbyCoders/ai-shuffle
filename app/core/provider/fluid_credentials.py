@@ -252,12 +252,16 @@ class GrokSubscriptionAuth:
         self._last_access_token = access
         return access
 
-    async def on_401(self) -> None:
-        """Refresh once after an upstream 401 (serialized per provider)."""
+    async def on_401(self, rejected_token: Optional[str] = None) -> None:
+        """Refresh once after an upstream 401 (serialized per provider).
+
+        ``rejected_token`` is the token the refused request carried; another
+        request on this object may have read a newer one since.
+        """
         from app.core import xai_token_refresh
 
         refreshed = await xai_token_refresh.refresh_on_401_once(
-            self.provider_id, stale_access_token=self._last_access_token
+            self.provider_id, stale_access_token=rejected_token or self._last_access_token
         )
         if not refreshed:
             logger.warning(
@@ -290,12 +294,16 @@ class CodexSubscriptionAuth:
         self._last_access_token = access
         return access
 
-    async def on_401(self) -> None:
-        """Refresh once after an upstream 401 (serialized per provider)."""
+    async def on_401(self, rejected_token: Optional[str] = None) -> None:
+        """Refresh once after an upstream 401 (serialized per provider).
+
+        ``rejected_token`` is the token the refused request carried; another
+        request on this object may have read a newer one since.
+        """
         from app.core import codex_token_refresh
 
         refreshed = await codex_token_refresh.refresh_on_401_once(
-            self.provider_id, stale_access_token=self._last_access_token
+            self.provider_id, stale_access_token=rejected_token or self._last_access_token
         )
         if not refreshed:
             logger.warning(

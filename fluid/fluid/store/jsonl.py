@@ -255,6 +255,15 @@ def _load_json_line(raw: bytes) -> dict:
 _UNSET = object()
 
 
+def _stamp(path: Path) -> tuple[int, int, int] | None:
+    """Identity, size and change time of a file, or None when it is absent."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 class JsonlStore:
     def __init__(
         self,
@@ -284,6 +293,9 @@ class JsonlStore:
         self._recent: list[str] = []
         # Torn trailing lines seen while parsing, cut off at the next write.
         self._torn: dict[Path, tuple[int, bytes]] = {}
+        # What each cached file looked like when it was read, so taking the
+        # write lock can tell whether another process wrote since.
+        self._stamps: dict[Path, tuple[int, int, int] | None] = {}
         self._finalizer = weakref.finalize(self, _release_store_locks, self._dir, self._held)
 
     # ─── Paths ───────────────────────────────────────────────────────────
@@ -310,6 +322,38 @@ class JsonlStore:
             return
         _acquire_lock(self._lock_path(session_id), session_id)
         self._held.add(session_id)
+        self._refresh_if_changed(session_id)
+
+    def _refresh_if_changed(self, session_id: str) -> None:
+        """Re-read a cached session another process wrote before we locked it.
+
+        Reads never take the lock, so a snapshot cached earlier (a listing, a
+        search, the resume lookup) can predate another process's last turn.
+        Writing on top of it would hang the next node off the old head and
+        leave that turn off the active path. Once the lock is held nobody
+        else writes, so checking at the moment it is taken is enough.
+        """
+        log_path = self._log_path(session_id)
+        if session_id in self._loaded and self._stamps.get(log_path) != _stamp(log_path):
+            parsed = self._parse_log(session_id, log_path)
+            if parsed is None:
+                # No longer a readable session: forget it, as a first read would.
+                self._loaded.discard(session_id)
+                self._nodes.pop(session_id, None)
+            else:
+                meta, nodes = parsed
+                cached = self._sessions.get(session_id)
+                if cached is None:
+                    self._sessions[session_id] = meta
+                else:
+                    # Update in place: callers hold the object get_session gave them.
+                    cached.__dict__.update(meta.__dict__)
+                self._nodes[session_id] = nodes
+        events_path = self._events_path(session_id)
+        if (session_id in self._events_loaded
+                and self._stamps.get(events_path) != _stamp(events_path)):
+            self._events_loaded.discard(session_id)
+            self._ensure_events_loaded(session_id)
 
     def _writable(self, session_id: str) -> None:
         self.lock_session(session_id)
@@ -386,10 +430,15 @@ class JsonlStore:
             self._events_loaded.discard(victim)
             self._nodes.pop(victim, None)
             self._events.pop(victim, None)
+            self._stamps.pop(self._log_path(victim), None)
+            self._stamps.pop(self._events_path(victim), None)
 
     def _parse_log(
         self, session_id: str, path: Path
     ) -> tuple[SessionMeta, dict[str, SessionNode]] | None:
+        # Stamp before reading: a write in between leaves an older stamp,
+        # which only costs a re-read later, never a missed change.
+        self._stamps[path] = _stamp(path)
         data = path.read_bytes()
         meta: SessionMeta | None = None
         nodes: dict[str, SessionNode] = {}
@@ -474,6 +523,7 @@ class JsonlStore:
             return
         events: list[Event] = []
         path = self._events_path(session_id)
+        self._stamps[path] = _stamp(path)
         if path.exists():
             data = path.read_bytes()
             bad: list[int] = []
@@ -555,9 +605,14 @@ class JsonlStore:
     async def set_head(self, session_id: str, node_id: str | None) -> None:
         if not self._ensure_loaded(session_id):
             raise KeyError(session_id)
-        if node_id is not None and node_id not in self._nodes[session_id]:
-            raise ValueError(f"session {session_id} has no node {node_id}")
+        # Lock first: taking it re-reads nodes another process wrote since the
+        # cached read, and the target is checked against those.
         self._writable(session_id)
+        nodes = self._nodes.get(session_id)
+        if nodes is None:
+            raise KeyError(session_id)
+        if node_id is not None and node_id not in nodes:
+            raise ValueError(f"session {session_id} has no node {node_id}")
         self._sessions[session_id].head_node_id = node_id
         self._append_line(
             self._log_path(session_id),

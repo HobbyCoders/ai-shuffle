@@ -281,6 +281,72 @@ def test_a_wrapped_socket_error_is_still_transient() -> None:
 # ─── runaway tool-argument streams ───────────────────────────────────────────
 
 
+async def _run_with_done_item(
+    fragments: list[str], done_item: dict,
+) -> tuple[list[dict], list[Any]]:
+    """Stream a Write call from ``fragments`` and close it with ``done_item``;
+    return what the tool was called with and the run's events."""
+    script = _tool_call(fragments)
+    stop = next(i for i, c in enumerate(script) if c.kind == "block_stop")
+    script[stop] = StreamChunk("block_stop", {"index": 0, "block": {
+        "type": "function_call", "call_id": "call_1", "name": "Write", **done_item,
+    }})
+    seen: list[dict] = []
+
+    async def _wrote(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        seen.append(input)
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="Write", description="Write a file.",
+                 input_schema={"type": "object", "properties": {}}, source="builtin"),
+        _wrote,
+    )
+    loop = NativeLoop(
+        provider=_Scripted([script, _text_call()]), store=MemoryStore(), model=MODEL,
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    try:
+        events = await _run(loop)
+    finally:
+        await loop.aclose()
+    return seen, events
+
+
+async def test_the_done_items_final_arguments_are_what_runs() -> None:
+    """Responses closes a function call with the authoritative arguments.
+    When the streamed deltas disagree (a fragment lost on the way), the
+    final arguments are dispatched, not the deltas' concatenation."""
+    final = '{"file_path":"/a.txt","content":"hello world"}'
+    seen, events = await _run_with_done_item(
+        ['{"file_path":"/a.txt","content":"hel'], {"arguments": final})
+
+    assert seen == [{"file_path": "/a.txt", "content": "hello world"}]
+    use = next(e for e in events if isinstance(e, ToolUse))
+    assert use.input == {"file_path": "/a.txt", "content": "hello world"}
+
+
+async def test_an_empty_final_arguments_string_overrides_the_deltas() -> None:
+    """A done item that settles on ``arguments: ""`` did not authorise the
+    streamed payload: the call runs with no arguments, never the deltas'."""
+    seen, events = await _run_with_done_item(
+        ['{"file_path":"/a.txt","content":"streamed"}'], {"arguments": ""})
+
+    assert seen == [{}]
+    use = next(e for e in events if isinstance(e, ToolUse))
+    assert use.input == {}
+
+
+async def test_a_done_item_without_arguments_falls_back_to_the_deltas() -> None:
+    """Only a done item that lacks the field entirely leaves the streamed
+    arguments in charge."""
+    seen, _events = await _run_with_done_item(
+        ['{"file_path":"/a.txt",', '"content":"streamed"}'], {})
+
+    assert seen == [{"file_path": "/a.txt", "content": "streamed"}]
+
+
 async def test_a_whitespace_runaway_is_abandoned_and_the_call_retried() -> None:
     provider = _Scripted([_runaway_call(), _text_call("recovered")])
     loop = NativeLoop(

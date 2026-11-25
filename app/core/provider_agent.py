@@ -29,6 +29,7 @@ import contextlib
 import json
 import logging
 import re
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -496,6 +497,17 @@ class WorkerOutcome:
     #: circuit breaker) rather than failing on its own. Never retried: the
     #: teardown is the answer, not a transport hiccup.
     killed: bool = False
+    #: The typed refusal the worker's terminal turn carried
+    #: (:func:`terminal_limit_signal`): the provider's HTTP status, and when its
+    #: Retry-After was longer than the client waits, the seconds it asked for
+    #: and the epoch time that wait ends (counted from when the refusal
+    #: arrived). :mod:`app.core.task_dispatch` reads these before any text.
+    api_error_status: Optional[int] = None
+    retry_after_seconds: Optional[float] = None
+    retry_at: Optional[float] = None
+    #: For a 429: True when it is a spent usage allowance, False when it is a
+    #: transient rate limit (the terminal's typed ``usage_limit``).
+    usage_limit: Optional[bool] = None
 
 
 #: Shapes a tool call takes when a model emits it as PROSE instead of a
@@ -611,11 +623,15 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
         "error": None,
         "interrupted": False,
         "terminal_found": terminal is not None,
+        "limit": {},
     }
     if terminal is None:
         return result
     etype = terminal.get("event_type")
     payload = terminal.get("payload") or {}
+    # The typed refusal (status, unretried wait) a failed turn carries on
+    # either terminal kind: the Task re-dispatch reads it, not the text.
+    result["limit"] = terminal_limit_signal(payload)
     if etype == "turn.completed":
         usage = payload.get("usage")
         result["usage"] = usage if isinstance(usage, dict) else {}
@@ -2182,6 +2198,56 @@ def rate_limit_retry_after(text: Optional[str]) -> Optional[float]:
     return value
 
 
+def terminal_limit_signal(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The typed refusal fields a terminal turn payload carries.
+
+    ``api_error_status`` (the HTTP status the provider refused with) plus
+    ``retry_after_seconds``/``retry_at`` when its Retry-After was longer than
+    the client waits (``app.core.provider.events.RETRY_FIELDS``), and for a 429
+    ``usage_limit``, whether it is a spent allowance. These, never the error
+    text, decide whether a refused worker may be re-dispatched and when: a
+    provider body that merely mentions a wait or a limit changes nothing.
+    """
+    from app.core.provider.events import retry_fields
+
+    payload = payload if isinstance(payload, dict) else {}
+    out: Dict[str, Any] = dict(retry_fields(payload))
+    status = payload.get("api_error_status")
+    if isinstance(status, int) and not isinstance(status, bool):
+        out["api_error_status"] = status
+    elif isinstance(status, str) and status.strip().isdigit():
+        out["api_error_status"] = int(status.strip())
+    return out
+
+
+def typed_limit_kind(
+    limit: Optional[Dict[str, Any]], text: Optional[str] = None,
+) -> Optional[str]:
+    """How a typed refusal (:func:`terminal_limit_signal`) classifies itself:
+    ``"usage"`` (a 429 that is a spent allowance), ``"rate"`` (any other 429)
+    or ``"other"`` (another status); None when it carries no status, the only
+    case in which a caller may fall back to reading the provider's text.
+
+    The typed ``usage_limit`` alone splits a 429. ``text`` is read only for a
+    429 recorded before that field existed (no bool): it keeps the old
+    reading, a usage limit when its words say so and a rate limit otherwise.
+    """
+    status = (limit or {}).get("api_error_status")
+    if not isinstance(status, int) or isinstance(status, bool):
+        return None
+    if status != 429:
+        return "other"
+    flag = (limit or {}).get("usage_limit")
+    if isinstance(flag, bool):
+        return "usage" if flag else "rate"
+    return "usage" if looks_usage_limited(text) else "rate"
+
+
+def retry_time_utc(retry_at: float) -> str:
+    """``retry_at`` (epoch seconds) as the ``HH:MM:SS UTC`` a summary names."""
+    return time.strftime("%H:%M:%S UTC", time.gmtime(retry_at))
+
+
 # ---------------------------------------------------------------------------
 # Liveness watchdog verdicts
 # ---------------------------------------------------------------------------
@@ -2284,7 +2350,12 @@ def _persist_worker_report(
 
 
 def _failure_summary(
-    status: str, preview: Optional[str], frames_forwarded: int
+    status: str,
+    preview: Optional[str],
+    frames_forwarded: int,
+    *,
+    retry_at: Optional[float] = None,
+    limit: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """The registry ``summary`` for a terminal worker, or None to keep it as-is.
 
@@ -2300,11 +2371,24 @@ def _failure_summary(
 
     The text is re-ordered MESSAGE-FIRST (:func:`_message_first`) before the cap
     so the sentence that explains the failure survives it.
+
+    ``retry_at`` is the typed deadline of a refusal whose Retry-After the client
+    did not wait out (:func:`terminal_limit_signal`). It leads the summary
+    ("retry after HH:MM:SS UTC"), ahead of the capped text, so the clip never
+    cuts the one fact a parent needs to re-dispatch at the right time. It is
+    the time the wait ends counted from when the refusal arrived, not from
+    when this summary is written.
+
+    ``limit`` is the whole typed refusal: its classification (usage limit or
+    rate limit) words the summary. Only a refusal with no typed status falls
+    back to reading the provider's text.
     """
     if status not in _REGISTRY_FAILURE_STATUSES:
         return None
     text = _message_first(" ".join((preview or "").split())) \
         or "no error detail was recorded"
+    kind = typed_limit_kind(limit, text)
+    asked_to_wait = retry_at is not None
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
     if not frames_forwarded:
@@ -2313,14 +2397,33 @@ def _failure_summary(
         # only the raw provider string ("Rate limit reached for gpt-5.6-luna in
         # organization org-…") learns to work around the harness instead, for
         # example by capping its own workers' tool calls.
+        usage = kind == "usage" or (kind is None and looks_usage_limited(text))
         if "forwarded no output within" in text:
             prefix = "worker stopped before first output"
-        elif looks_usage_limited(text):
+        elif asked_to_wait and usage:
+            prefix = (
+                f"retry after {retry_time_utc(retry_at)}: worker stopped by a "
+                "usage limit (not retried)"
+            )
+        elif asked_to_wait:
+            # The provider asked for a wait the client did not sit out, so
+            # "already retried" would be untrue. The time goes first.
+            prefix = (
+                f"retry after {retry_time_utc(retry_at)}: worker failed to start "
+                "(provider rate limit, not retried)"
+            )
+        elif usage:
             prefix = "worker stopped by a usage limit (not retried)"
-        elif looks_rate_limited(text):
+        elif kind == "rate" or (kind is None and looks_rate_limited(text)):
             prefix = "worker failed to start (provider at capacity, already retried)"
         else:
             prefix = "worker failed to start"
+    elif asked_to_wait:
+        reason = "usage limit" if kind == "usage" else "provider rate limit"
+        prefix = (
+            f"retry after {retry_time_utc(retry_at)}: worker failed "
+            f"({reason}, not retried)"
+        )
     else:
         prefix = "worker failed"
     return f"{prefix}: {text}"
@@ -2539,7 +2642,7 @@ async def _dispatch_worker(
     worker_session_id: Optional[str] = None,
     first_frame_seconds: Optional[float] = None,
     max_wall_seconds: Optional[float] = None,
-    suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
+    suppress_caller_wake: Optional[Callable[..., bool]] = None,
     model_note: Optional[str] = None,
     base_commit: Optional[str] = None,
     project_override: Optional[str] = None,
@@ -2588,8 +2691,9 @@ async def _dispatch_worker(
     never retried). :mod:`app.core.task_dispatch` decides retry safety.
 
     ``suppress_caller_wake`` lets a RETRYING caller keep a doomed attempt off
-    the parent's wake lane: it is handed ``(status, preview, frames_forwarded)``
-    in the ``finally`` and returns True to skip the caller wake and terminal
+    the parent's wake lane: it is handed ``(status, preview, frames_forwarded,
+    limit=<typed refusal>)`` (:func:`terminal_limit_signal`) in the ``finally``
+    and returns True to skip the caller wake and terminal
     chip. The card, registry row and report are unaffected. See
     :func:`app.core.task_dispatch._dispatch_worker_with_retries`.
 
@@ -3036,6 +3140,9 @@ async def _dispatch_worker(
     #: line, so a listing says what came back rather than which model ran.
     completion_summary: Optional[str] = None
     stop_summary: Optional[str] = None  # a start cancelled while Queued (#583)
+    #: The typed refusal of a failed worker turn (:func:`terminal_limit_signal`):
+    #: the registry summary and the re-dispatch predicate read it.
+    limit_signal: Dict[str, Any] = {}
     #: Background work the worker left running; a checkout still in use by it
     #: is never reclaimed from under it.
     outstanding: List[Dict[str, Any]] = []
@@ -3320,12 +3427,14 @@ async def _dispatch_worker(
                 )
         if outcome["error"]:
             preview = str(outcome["error"])
+            limit_signal = dict(outcome.get("limit") or {})
             return WorkerOutcome(
                 ok=False,
                 session_id=worker_session_id,
                 error=str(outcome["error"]),
                 usage=outcome["usage"],
                 frames_forwarded=feed.frames_forwarded,
+                **limit_signal,
             )
         if outcome["interrupted"]:
             preview = "The worker session was interrupted before it finished."
@@ -3587,7 +3696,8 @@ async def _dispatch_worker(
                 usage=usage_seen,
             ))
             terminal_summary = stop_summary or _failure_summary(
-                status, preview, feed.frames_forwarded
+                status, preview, feed.frames_forwarded,
+                retry_at=limit_signal.get("retry_at"), limit=limit_signal,
             ) or completion_summary
             # A caller that is about to RE-DISPATCH this brief takes the chip
             # and the wake off this attempt: the parent should hear once, about
@@ -3599,7 +3709,8 @@ async def _dispatch_worker(
                 try:
                     retry_pending = bool(
                         suppress_caller_wake(
-                            status, preview, feed.frames_forwarded
+                            status, preview, feed.frames_forwarded,
+                            limit=limit_signal,
                         )
                     )
                 except Exception:  # noqa: BLE001 — a predicate must not lose a wake
