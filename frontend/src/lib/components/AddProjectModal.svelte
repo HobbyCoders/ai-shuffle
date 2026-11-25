@@ -323,7 +323,10 @@
 	}
 
 	function cloneFailure(status: SetupStatus): RunError {
-		if (status.status === 'cancelled') return new RunError(CANCELLED, 'retry');
+		// The server settles a cancelled clone as an error with code 'cancelled'.
+		if (status.status === 'cancelled' || status.error_code === 'cancelled') {
+			return new RunError(CANCELLED, 'retry');
+		}
 		const message = status.error || 'The clone failed.';
 		switch (status.error_code) {
 			case 'github_auth': return new RunError(message, 'github');

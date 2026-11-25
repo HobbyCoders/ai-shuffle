@@ -265,7 +265,8 @@ def set_forgotten(origin: str, forgotten: bool) -> bool:
 #: /projects/clone``) that has not succeeded yet: the token of the attempt
 #: that owns it, ``{runner_id, device_id, op_id, started_at}``. Only that
 #: attempt hides it again when it fails (:func:`settle_provisional`); a
-#: registered copy on any worker clears it (:func:`mark_registered`).
+#: registered copy on any worker, or a setup the owner asks for on a worker,
+#: clears it (:func:`mark_registered`).
 PROVISIONAL_KEY = "provisional_clone"
 
 
@@ -335,8 +336,9 @@ def settle_provisional(origin: str, runner_id: str, op_id: str) -> bool:
 
 
 def mark_registered(origin: str) -> bool:
-    """A worker registered a copy of ``origin``: it is a listed project again
-    (neither hidden nor a first clone in progress). No write when already so."""
+    """A worker registered a copy of ``origin``, or the owner asked for one on a
+    worker (``POST /projects/setup``): it is a listed project again (neither
+    hidden nor a first clone in progress). No write when already so."""
     row = get_project_v2_by_origin(origin)
     settings = (row or {}).get("settings") or {}
     if not row or (settings.get("forgotten") is not True and PROVISIONAL_KEY not in settings):

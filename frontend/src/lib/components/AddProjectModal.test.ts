@@ -239,6 +239,25 @@ describe('AddProjectModal create flow', () => {
 		expect(m.cloneNew).toHaveBeenCalledTimes(2);
 	});
 
+	it('a clone the server settled as cancelled reads as cancelled, never as a failure', async () => {
+		const { notify } = await import('$lib/stores/notifications');
+		const error = vi.spyOn(notify, 'error').mockReturnValue('n1');
+		m.overview.mockResolvedValue([]);
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
+		m.cloneNew.mockResolvedValue({ op_id: 'psetup-1', project_v2_id: 'pv2', project_id: 'repo-c', status: 'queued' });
+		// Cancelled elsewhere (say, from the Workers tab): an error row with code 'cancelled'.
+		m.setupStatus.mockResolvedValue({ op_id: 'psetup-1', status: 'error', progress: null, error_code: 'cancelled',
+			error: 'Setup was cancelled.', project_id: null, project_v2_id: 'pv2' });
+		await openClone();
+		await fireEvent.input(urlInput(), { target: { value: 'https://github.com/acme/repo-c.git' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Clone project' }));
+
+		expect(await screen.findByText('Clone cancelled. Nothing was added.')).toBeTruthy();
+		expect(screen.queryByText('Setup was cancelled.')).toBeNull();
+		expect(error).not.toHaveBeenCalled();
+		error.mockRestore();
+	});
+
 	it('drops the last failure once another repository is entered', async () => {
 		m.overview.mockResolvedValue([]);
 		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });

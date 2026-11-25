@@ -330,8 +330,8 @@ def _shown(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]], workers: List[D
     return not (_retired(pv2, pv2s) and not any(w["state"] in _MAYBE_HELD_STATES for w in workers))
 
 
-def _stale_catalog(pv2: Dict[str, Any], installs: List[Dict[str, Any]], me: str, networked: bool) -> bool:
-    """Whether a peer's cached catalog was read before ``pv2`` last changed
+def _stale_catalogs(pv2: Dict[str, Any], installs: List[Dict[str, Any]], me: str, networked: bool) -> List[str]:
+    """The peers whose cached catalog was read before ``pv2`` last changed
     (say, a peer registered it and that cleared its marks): such a catalog
     cannot show the peer lacks it."""
     from app.db import git_ops as git_ops_db
@@ -339,20 +339,27 @@ def _stale_catalog(pv2: Dict[str, Any], installs: List[Dict[str, Any]], me: str,
 
     changed = git_ops_db._as_aware_utc(pv2.get("updated_at"))
     if not networked or changed is None:
-        return False
+        return []
     reads = setup_db.peer_catalog_reads()
+    stale = []
     for install in installs:
         if install["id"] == me or install["id"] not in reads:
             continue
         read_at = git_ops_db._as_aware_utc(reads[install["id"]])
         if read_at is None or read_at < changed:
-            return True
-    return False
+            stale.append(install["id"])
+    return stale
 
 
 def would_list(origin: str) -> bool:
+    """Whether the Projects overview would list ``origin`` now (:func:`_listing`)."""
+    return _listing(origin) is not None
+
+
+def _listing(origin: str) -> Optional[List[str]]:
     """Whether the Projects overview would list ``origin`` now (:func:`_shown`),
-    judged without waiting on a peer (sync).
+    judged without waiting on a peer (sync): None if not; else the names of
+    the peers it could not check (empty when it has a card).
 
     Each worker's state comes from what this worker already has: its own
     status; on a shared database, the peer's rows and setup ops; in a network,
@@ -371,7 +378,7 @@ def would_list(origin: str) -> bool:
 
     pv2 = projects_v2.get_project_v2_by_origin(origin)
     if not pv2:
-        return False
+        return None
     provisional = projects_v2.provisional_token(pv2) is not None
     installs = _approved_workers()
     me = _self_install_id()
@@ -400,13 +407,17 @@ def would_list(origin: str) -> bool:
         # Only a copy counts: judged as hidden, a worker must hold it.
         pv2 = {**pv2, "settings": {**marks, "forgotten": True}}
         workers = [w for w in workers if w["state"] != "unknown"]
-    elif marks.get("forgotten") is not True and (
-            any(w["state"] == "unknown" for w in workers) or _stale_catalog(pv2, installs, me, networked)
-            or (networked and any(i["id"] != me and i["id"] not in catalogs for i in installs))):
-        # A peer whose catalog this worker never read (online or not) may hold it.
-        return True
+    elif marks.get("forgotten") is not True:
+        # A peer whose catalog this worker never read (online or not), or read
+        # before the identity last changed, may hold it.
+        unchecked = {w["install_id"] for w in workers if w["state"] == "unknown"}
+        unchecked.update(_stale_catalogs(pv2, installs, me, networked))
+        if networked:
+            unchecked.update(i["id"] for i in installs if i["id"] != me and i["id"] not in catalogs)
+        if unchecked:
+            return [i.get("device_name") or "another worker" for i in installs if i["id"] in unchecked]
     pv2s = {row["id"]: row for row in projects_v2.list_projects_v2()}
-    return _shown(pv2, {**pv2s, pv2["id"]: pv2}, workers, offline_has)
+    return [] if _shown(pv2, {**pv2s, pv2["id"]: pv2}, workers, offline_has) else None
 
 
 async def _gather(project_v2_id: Optional[str] = None) -> tuple:
@@ -593,7 +604,10 @@ async def setup_project(request: Request, body: SetupRequest,
             "Can't find this project's Git remote. Bring a worker that has the project online and try again."))
     from app.db import projects_v2
 
-    await run_sync(projects_v2.set_forgotten, access["project_v2"]["origin"], False)  # wanted again
+    # Wanted on a worker: shown again, and no longer a first clone in progress,
+    # so that clone failing can't hide what this setup is making (replicated,
+    # so a paired worker's own settle sees it too).
+    await run_sync(projects_v2.mark_registered, access["project_v2"]["origin"])
     op_id = setup.new_op_id()
 
     if target_id == me:
@@ -672,17 +686,9 @@ def _owner_install(owner: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _revoked(owner: Dict[str, Any]) -> bool:
-    """Whether a token's worker is known to be removed from the network (a
-    revoked member is no approved worker any more, but stays a known member;
-    a worker this one has no record of is unknown, not removed)."""
-    from app.network import engine, membership
-
-    ctx = engine.context()
-    device_id = owner.get("device_id")
-    if ctx is None or not device_id or device_id == setup._own_device_id():
-        return False
-    member = ctx.member(device_id)
-    return member is not None and member.status == membership.STATUS_REVOKED
+    """Whether a token's worker is known to be removed from the network
+    (:func:`setup.device_revoked`)."""
+    return setup.device_revoked(owner.get("device_id"))
 
 
 def _first_clone_alive(pv2: Dict[str, Any], owner: Dict[str, Any]) -> bool:
@@ -866,12 +872,20 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
 
 
 def _listed_elsewhere(origin: str) -> Optional[Dict[str, Any]]:
-    """The already-added answer for an identity the overview lists (:func:`would_list`)."""
+    """The already-added answer for an identity the overview lists (:func:`_listing`),
+    or may list once the workers it could not check are back."""
     from app.db import projects_v2
 
-    if not would_list(origin):
+    unchecked = _listing(origin)
+    if unchecked is None:
         return None
     name = (projects_v2.get_project_v2_by_origin(origin) or {}).get("name") or "another project"
+    if unchecked:
+        # No card to point at: one of these workers may hold it.
+        workers = unchecked[0] if len(unchecked) == 1 else ", ".join(unchecked[:-1]) + " or " + unchecked[-1]
+        return {"id": None, "name": name,
+                "message": f"This repository may already be the project {name} on {workers}, which this "
+                           "worker hasn't checked yet. Bring it online and open Projects, then try again."}
     return {"id": None, "name": name,
             "message": f"This repository is already the project {name} on another worker. "
                        "Set it up here from its page in Projects."}
@@ -933,6 +947,7 @@ async def cancel_setup(op_id: str, token: str = Depends(require_admin)) -> Dict[
             return result
         # Shared database: a queued op can be withdrawn; a running clone is the target's.
         if await run_sync(git_ops_db.cancel_queued, op_id, row["runner_id"], "Setup was cancelled."):
+            await run_sync(setup.hide_failed_first_clone, row)
             setup.emit_changed()
             return {"status": "cancelled"}
         raise HTTPException(status_code=409, detail="This setup is already running or finished on its worker")
@@ -954,6 +969,9 @@ async def cancel_setup(op_id: str, token: str = Depends(require_admin)) -> Dict[
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except control.RunnerUnreachable as exc:
         raise HTTPException(status_code=409, detail=f"Can't reach that worker to cancel: {exc}") from exc
+    # Withdrawn there: it no longer holds the repository here either.
+    await run_sync(setup_db.set_request_status, op_id, setup_db.REQUEST_CANCELLED,
+                   expect=setup_db.REQUEST_DISPATCHED)
     setup.emit_changed()
     return {"status": "cancelled"}
 
