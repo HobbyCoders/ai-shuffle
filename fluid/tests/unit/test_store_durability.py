@@ -13,16 +13,22 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
 from fluid.cli.config import list_sessions
+from fluid.engine.native import NativeLoop
+from fluid.events import UserTurn
 from fluid.events.model import TurnStarted, event_to_dict
 from fluid.messages import Message
 from fluid.messages.content import Text
+from fluid.permissions.engine import PermissionEngine
+from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import CorruptSession, MemoryStore, SessionNode
 from fluid.store.jsonl import JsonlStore
+from fluid.tools.registry import ToolRegistry
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -377,6 +383,91 @@ async def test_taking_the_lock_reloads_a_snapshot_another_writer_moved_on(tmp_pa
     assert [n.node_id for n in await reader.load_path(sid)] == ["u1", "a1", "u2"]
     assert [e.seq for e in await reader.events_since(sid, 0)] == [1]
     reader.close()
+
+
+class _OneReply:
+    """A provider that answers every call with one short text block."""
+
+    name = "anthropic"
+    caps = ProviderCaps()
+
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        for chunk in (
+            StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+            StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+            StreamChunk("text_delta", {"index": 0, "text": "ok"}),
+            StreamChunk("block_stop", {"index": 0}),
+            StreamChunk("usage", {"usage": {"input_tokens": 10, "output_tokens": 1},
+                                  "stop_reason": "end_turn"}),
+            StreamChunk("message_stop", {}),
+        ):
+            yield chunk
+
+
+async def test_an_engine_resumes_from_what_another_process_wrote(tmp_path) -> None:
+    """A store that cached a session, then opens an engine on it after another
+    process added a turn and events 11-20, numbers its first event 21 and
+    continues from that turn's head: the engine locks (and so re-reads)
+    before it reads the head and the last event seq."""
+    sid = "ses_shared"
+    first = JsonlStore(tmp_path)
+    await first.create_session(sid)
+    await first.append(sid, SessionNode("u1", None, _msg("user", "q")))
+    for seq in range(1, 11):
+        await first.append_event(sid, TurnStarted(session_id=sid, seq=seq, model="m", provider="p"))
+    first.close()
+
+    a = JsonlStore(tmp_path)
+    assert (await a.get_session(sid)).head_node_id == "u1"
+    assert len(await a.events_since(sid, 0)) == 10  # cached at seq 10
+
+    b = JsonlStore(tmp_path)
+    await b.append(sid, SessionNode("a1", "u1", _msg("assistant", "r")))
+    for seq in range(11, 21):
+        await b.append_event(sid, TurnStarted(session_id=sid, seq=seq, model="m", provider="p"))
+    b.close()
+
+    loop = NativeLoop(provider=_OneReply(), store=a, model="claude-sonnet-5",
+                      registry=ToolRegistry(), permissions=PermissionEngine("never_ask"),
+                      session_id=sid)
+    try:
+        await loop.submit(UserTurn(content="next"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    finally:
+        await loop.aclose()
+    a.close()
+
+    reread = JsonlStore(tmp_path)
+    seqs = [e.seq for e in await reread.events_since(sid, 0)]
+    assert seqs[:20] == list(range(1, 21))
+    assert seqs[20] == 21
+    assert len(seqs) == len(set(seqs))  # no seq issued twice
+    path = [n.node_id for n in await reread.load_path(sid)]
+    assert path[:2] == ["u1", "a1"]  # the new turn hangs off the other writer's head
+    reread.close()
+
+
+async def test_set_head_accepts_a_node_another_process_added(tmp_path) -> None:
+    """set_head checks its target against the nodes re-read under the lock,
+    not the snapshot cached before another process appended it."""
+    sid = "ses_head"
+    first = JsonlStore(tmp_path)
+    await first.create_session(sid)
+    await first.append(sid, SessionNode("u1", None, _msg("user", "q")))
+    first.close()
+
+    a = JsonlStore(tmp_path)
+    assert (await a.get_session(sid)).head_node_id == "u1"
+
+    b = JsonlStore(tmp_path)
+    await b.append(sid, SessionNode("a1", "u1", _msg("assistant", "r")))
+    b.close()
+
+    await a.set_head(sid, "a1")
+    assert [n.node_id for n in await a.load_path(sid)] == ["u1", "a1"]
+    with pytest.raises(ValueError):
+        await a.set_head(sid, "missing")
+    a.close()
 
 
 # ─── events stay lazy and tolerant ───────────────────────────────────────────

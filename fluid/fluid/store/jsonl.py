@@ -605,9 +605,14 @@ class JsonlStore:
     async def set_head(self, session_id: str, node_id: str | None) -> None:
         if not self._ensure_loaded(session_id):
             raise KeyError(session_id)
-        if node_id is not None and node_id not in self._nodes[session_id]:
-            raise ValueError(f"session {session_id} has no node {node_id}")
+        # Lock first: taking it re-reads nodes another process wrote since the
+        # cached read, and the target is checked against those.
         self._writable(session_id)
+        nodes = self._nodes.get(session_id)
+        if nodes is None:
+            raise KeyError(session_id)
+        if node_id is not None and node_id not in nodes:
+            raise ValueError(f"session {session_id} has no node {node_id}")
         self._sessions[session_id].head_node_id = node_id
         self._append_line(
             self._log_path(session_id),

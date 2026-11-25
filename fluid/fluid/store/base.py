@@ -111,6 +111,22 @@ async def flush_events(store: SessionStore, session_id: str) -> None:
         await flush(session_id)
 
 
+def claim_session(store: SessionStore, session_id: str) -> None:
+    """Take the store's write lock for a session an engine is about to resume;
+    a no-op for stores without one.
+
+    An engine reads the head and the last event seq before its first write.
+    Taking the lock first means those reads see whatever another process
+    wrote before it let go (the JSONL store re-reads a changed file when the
+    lock is taken), so the engine neither branches off a stale head nor
+    re-issues an event seq. Raises :class:`SessionLocked` when another
+    process holds the session.
+    """
+    lock = getattr(store, "lock_session", None)
+    if callable(lock):
+        lock(session_id)
+
+
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 

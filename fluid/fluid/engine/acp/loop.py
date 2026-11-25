@@ -77,7 +77,15 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.messages.content import Image, Message, Text
-from fluid.store.base import SessionMeta, SessionNode, SessionStore, flush_events, new_id, persist_event
+from fluid.store.base import (
+    SessionMeta,
+    SessionNode,
+    SessionStore,
+    claim_session,
+    flush_events,
+    new_id,
+    persist_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +368,9 @@ class AcpLoop:
     async def _ensure_session(self) -> SessionMeta:
         if self._session is None:
             if self._session_id is not None:
+                # Lock before reading the head and the last event seq, so
+                # both include another process's writes (claim_session).
+                claim_session(self.store, self._session_id)
                 session = await self.store.get_session(self._session_id)
                 if session is not None:
                     await self._seed_bus_seq(session.session_id)
