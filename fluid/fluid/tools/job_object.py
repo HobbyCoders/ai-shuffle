@@ -75,48 +75,11 @@ def assign_kill_on_close_job_handle(process: int | None) -> int | None:
         return None
     job = None
     try:  # pragma: no cover - win32 only
-        ctypes, wintypes, kernel32 = _kernel32()
-
-        class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [
-                (name, ctypes.c_ulonglong)
-                for name in (
-                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-                )
-            ]
-
-        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                ("IoInfo", IO_COUNTERS),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
+        _ctypes, _wintypes, kernel32 = _kernel32()
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             return None
-        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel32.SetInformationJobObject(
-            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info),
-        ):
+        if not _set_limit_flags(job, _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE):
             kernel32.CloseHandle(job)
             return None
         if not kernel32.AssignProcessToJobObject(job, process):
@@ -129,6 +92,49 @@ def assign_kill_on_close_job_handle(process: int | None) -> int | None:
         return None
 
 
+def _set_limit_flags(job: int, flags: int) -> bool:  # pragma: no cover - win32 only
+    """Set a job's basic limit flags; True when Windows accepted them."""
+    ctypes, wintypes, kernel32 = _kernel32()
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            (name, ctypes.c_ulonglong)
+            for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = flags
+    return bool(kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info),
+    ))
+
+
 def close_job(handle: int | None) -> None:
     """Close a job from :func:`assign_kill_on_close_job`, ending every member."""
     if handle is None or sys.platform != "win32":
@@ -138,3 +144,23 @@ def close_job(handle: int | None) -> None:
         kernel32.CloseHandle(handle)
     except Exception:  # noqa: BLE001
         log.debug("closing job handle failed", exc_info=True)
+
+
+def release_job(handle: int | None) -> None:
+    """Close a job WITHOUT ending its members.
+
+    For a command that finished normally: whatever it left running on
+    purpose keeps running, as it does on POSIX. When the kill-on-close limit
+    cannot be lifted the handle stays open (a small leak) rather than killing
+    processes nobody asked to stop.
+    """
+    if handle is None or sys.platform != "win32":
+        return
+    try:  # pragma: no cover - win32 only
+        _ctypes, _wintypes, kernel32 = _kernel32()
+        if _set_limit_flags(handle, 0):
+            kernel32.CloseHandle(handle)
+        else:
+            log.debug("could not lift kill-on-close from job %s; leaving it open", handle)
+    except Exception:  # noqa: BLE001
+        log.debug("releasing job handle failed", exc_info=True)
