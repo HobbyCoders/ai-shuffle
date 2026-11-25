@@ -640,12 +640,21 @@ _TEMP_PREFIX = ".fluid-"
 # only these fall back to writing in place. Creating the temp file: a
 # directory the user cannot create files in. Replacing: on Windows a file
 # another process holds open without delete sharing (PermissionError), and a
-# single-file bind mount (EBUSY, or EXDEV). Anything else (a full disk, a
-# quota, a read-only filesystem, a name too long) is raised with the original
-# untouched: falling back would truncate it and then fail the same way.
+# single-file bind mount (EBUSY). Anything else (a full disk, a quota, a
+# read-only filesystem, a name too long) is raised with the original
+# untouched. The temp sits in the target's own directory, so a rename across
+# filesystems (EXDEV) is not expected and is raised too.
 _TEMP_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
-_REPLACE_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY, errno.EXDEV})
+_REPLACE_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
 _POSIX_ACL_XATTR = "system.posix_acl_access"
+_SELINUX_XATTR = "security.selinux"
+# posix_fallocate errors meaning "this filesystem cannot preallocate".
+_NO_FALLOCATE_ERRNOS = frozenset({
+    errno.EOPNOTSUPP,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    errno.EINVAL,
+    errno.ENOSYS,
+})
 
 
 def write_text_atomic(path: Path, text: str) -> None:
@@ -662,11 +671,13 @@ def write_text_atomic(path: Path, text: str) -> None:
     before: that is checked with a real (non-truncating) open, since on
     Windows ``os.access`` ignores NTFS ACLs.
 
-    Written in place, as before, are: anything that is not a regular file (a
-    device, a FIFO); a file with other hard links, so every name keeps seeing
-    the same contents; a file carrying a POSIX ACL, which a new inode would
-    not inherit faithfully; and a file where the replace is impossible (see
-    ``_TEMP_FALLBACK_ERRNOS`` and ``_REPLACE_FALLBACK_ERRNOS``).
+    Written in place, without truncating first (see ``_write_in_place``),
+    are: a file with other hard links, so every name keeps seeing the same
+    contents; a file carrying a POSIX ACL, which a new inode would not inherit
+    faithfully; a file whose temp could not be given the same ACL state or
+    SELinux label; and a file where the replace is impossible (see
+    ``_TEMP_FALLBACK_ERRNOS`` and ``_REPLACE_FALLBACK_ERRNOS``). Anything that
+    is not a regular file (a device, a FIFO) is simply written to.
     """
     data = text.encode("utf-8")
     target = Path(os.path.realpath(path))
@@ -685,7 +696,8 @@ def write_text_atomic(path: Path, text: str) -> None:
         return
     st = target.stat()
     if not stat.S_ISREG(st.st_mode):
-        _write_in_place(target, data)
+        with target.open("wb") as out:
+            out.write(data)
         return
     # Raises what the old truncating open raised for a file the user may not
     # write, without truncating or touching its contents.
@@ -705,17 +717,24 @@ def write_text_atomic(path: Path, text: str) -> None:
             out.write(data)
             out.flush()
             os.fsync(out.fileno())
-        if hasattr(os, "chown"):
-            # Before chmod: a chown by a non-root user clears setuid/setgid.
-            # Keeping another user's ownership needs privileges, so a refusal
-            # just leaves the file owned by the writer.
-            with contextlib.suppress(OSError):
-                os.chown(tmp, st.st_uid, st.st_gid)
-        os.chmod(tmp, stat.S_IMODE(st.st_mode))
+        matched = _match_security_xattrs(tmp, target)
+        if matched:
+            if hasattr(os, "chown"):
+                # Before chmod: a chown by a non-root user clears setuid/setgid.
+                # Keeping another user's ownership needs privileges, so a
+                # refusal just leaves the file owned by the writer.
+                with contextlib.suppress(OSError):
+                    os.chown(tmp, st.st_uid, st.st_gid)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+    if not matched:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        _write_in_place(target, data)
+        return
     try:
         os.replace(tmp, target)
     except OSError as exc:
@@ -726,8 +745,8 @@ def write_text_atomic(path: Path, text: str) -> None:
         _write_in_place(target, data)
 
 
-def _has_posix_acl(target: Path) -> bool:
-    """Whether ``target`` carries a POSIX access ACL (Linux xattr).
+def _has_posix_acl(path: Path | str) -> bool:
+    """Whether ``path`` carries a POSIX access ACL (Linux xattr).
 
     Platforms without ``os.listxattr`` and filesystems without xattrs count
     as no ACL. macOS and NTFS ACLs are not xattrs and survive differently;
@@ -737,14 +756,101 @@ def _has_posix_acl(target: Path) -> bool:
     if listxattr is None:
         return False
     try:
-        return _POSIX_ACL_XATTR in listxattr(target)
+        return _POSIX_ACL_XATTR in listxattr(path)
     except OSError:
         return False
 
 
+def _get_xattr(path: Path | str, name: str) -> bytes | None:
+    """``name``'s value on ``path``; None when absent or xattrs are unsupported."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return None
+    try:
+        return getxattr(path, name)
+    except OSError:
+        return None
+
+
+def _match_security_xattrs(tmp: str, target: Path) -> bool:
+    """Give the temp the target's ACL state and SELinux label before it replaces it.
+
+    Called only when the target has no POSIX access ACL. The temp may still
+    have inherited one from the directory's default ACL; masked by mkstemp's
+    0600 it grants nothing, but the chmod to the target's mode would enable
+    it, so it is removed first. A differing SELinux label is copied from the
+    target. False means the temp could not be made to match: the caller then
+    writes the target in place instead of replacing it with the wrong access.
+    """
+    if _has_posix_acl(tmp):
+        try:
+            os.removexattr(tmp, _POSIX_ACL_XATTR)
+        except OSError:
+            return False
+    label = _get_xattr(target, _SELINUX_XATTR)
+    if label is not None and _get_xattr(tmp, _SELINUX_XATTR) != label:
+        try:
+            os.setxattr(tmp, _SELINUX_XATTR, label)
+        except OSError:
+            return False
+    return True
+
+
+def _write_at(fd: int, data: bytes | memoryview, offset: int) -> None:
+    """Write all of ``data`` at ``offset`` (no ``os.pwrite`` on Windows)."""
+    view = memoryview(data)
+    os.lseek(fd, offset, os.SEEK_SET)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 def _write_in_place(target: Path, data: bytes) -> None:
-    with target.open("wb") as fh:
-        fh.write(data)
+    """Overwrite a regular file's contents with ``data`` on the same inode.
+
+    For files that must not be replaced (see ``write_text_atomic``). The file
+    is never truncated first: the space the new contents need is reserved
+    before any existing byte is overwritten, so a full disk or quota raises
+    with the original intact. ``posix_fallocate`` reserves it where it works;
+    elsewhere (Windows, macOS, filesystems that cannot preallocate) the part
+    of ``data`` past the old end is written first, which allocates it. If the
+    reservation fails, any growth is truncated away and the error raised.
+    Only then is ``data`` written from offset 0, fsynced, and the file cut to
+    its new length.
+
+    Remaining risk: an I/O error part-way through the overwrite, or a
+    copy-on-write filesystem (btrfs, ZFS) that needs new blocks to overwrite
+    reserved ones and runs out, can still leave a mix of new and old bytes.
+    """
+    fd = os.open(target, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+    try:
+        old_len = os.fstat(fd).st_size
+        new_len = len(data)
+        head_len = new_len  # bytes still to write from offset 0
+        try:
+            reserved = False
+            fallocate = getattr(os, "posix_fallocate", None)
+            if fallocate is not None and max(old_len, new_len) > 0:
+                try:
+                    fallocate(fd, 0, max(old_len, new_len))
+                    reserved = True
+                except OSError as exc:
+                    if exc.errno not in _NO_FALLOCATE_ERRNOS:
+                        raise
+            if not reserved and new_len > old_len:
+                _write_at(fd, memoryview(data)[old_len:], old_len)
+                head_len = old_len
+        except BaseException:
+            with contextlib.suppress(OSError):
+                if os.fstat(fd).st_size != old_len:
+                    os.ftruncate(fd, old_len)
+            raise
+        _write_at(fd, memoryview(data)[:head_len], 0)
+        os.fsync(fd)
+        if new_len < old_len:
+            os.ftruncate(fd, new_len)
+            os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 # ── missing-path diagnostics ─────────────────────────────────────────────────

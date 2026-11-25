@@ -1,7 +1,7 @@
 """File-tool I/O safety and result-size bounds.
 
 Edit and Write never truncate a file before its new bytes are known to be
-writable; Edit leaves the line endings of untouched lines alone; Read and Grep
+writable (an in-place save reserves the space first); Edit leaves the line endings of untouched lines alone; Read and Grep
 hold a bounded amount of a file however long its lines are; the Grep fallback
 skips hidden files as ripgrep does; an MCP server's paginated tools/list is
 followed to the end (within bounds); and MCP tool aliases stay within the
@@ -218,6 +218,202 @@ def test_file_with_a_posix_acl_is_written_in_place(tmp_path: Path, monkeypatch) 
     assert target.stat().st_ino == before  # same inode: the ACL stays as it was
 
 
+def _busy(_src, _dst) -> None:
+    """A single-file bind mount: Linux refuses the rename onto it."""
+    raise OSError(errno.EBUSY, "Device or resource busy")
+
+
+async def test_in_place_save_that_cannot_reserve_space_leaves_the_original(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "mounted.txt"
+    target.write_bytes(b"original\r\nbytes\n")
+
+    def full(fd: int, _offset: int, length: int) -> None:
+        os.ftruncate(fd, length)  # a partial preallocation that grew the file
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", full, raising=False)
+    outcome = await _write(target, "a much longer replacement than before\n")
+    assert outcome.is_error
+    assert target.read_bytes() == b"original\r\nbytes\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mounted.txt"]
+
+
+@pytest.mark.parametrize("new", ["short\n", "a good deal longer than the old text\n"])
+def test_busy_replace_overwrites_in_place_without_truncating(
+    tmp_path: Path, monkeypatch, new: str
+) -> None:
+    old = b"the old contents here\n"
+    target = tmp_path / "mounted.txt"
+    target.write_bytes(old)
+    before = target.stat().st_ino
+    reserved: list[tuple[int, int]] = []
+
+    def fallocate(_fd: int, offset: int, length: int) -> None:
+        reserved.append((offset, length))
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", fallocate, raising=False)
+    _util.write_text_atomic(target, new)
+    assert target.read_bytes() == new.encode()
+    assert target.stat().st_ino == before
+    assert reserved == [(0, max(len(old), len(new)))]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["mounted.txt"]
+
+
+@pytest.mark.parametrize("new", ["tiny\n", "x" * 50 + "\n"])
+def test_in_place_save_without_fallocate_writes_the_growth_first(
+    tmp_path: Path, monkeypatch, new: str
+) -> None:
+    old = b"0123456789abcdef\n"
+    target = tmp_path / "held.txt"
+    target.write_bytes(old)
+    writes: list[tuple[int, bytes]] = []
+    real_write_at = _util._write_at
+
+    def unsupported(*_a) -> None:
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    def spy(fd: int, data, offset: int) -> None:
+        writes.append((offset, bytes(data)))
+        real_write_at(fd, data, offset)
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", unsupported, raising=False)
+    monkeypatch.setattr(_util, "_write_at", spy)
+    _util.write_text_atomic(target, new)
+    data = new.encode()
+    assert target.read_bytes() == data
+    if len(data) > len(old):
+        assert writes == [(len(old), data[len(old):]), (0, data[: len(old)])]
+    else:
+        assert writes == [(0, data)]
+
+
+def test_in_place_growth_that_hits_a_full_disk_restores_the_length(
+    tmp_path: Path, monkeypatch
+) -> None:
+    old = b"0123456789\n"
+    target = tmp_path / "held.txt"
+    target.write_bytes(old)
+    real_write_at = _util._write_at
+
+    def unsupported(*_a) -> None:
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    def fills_up(fd: int, data, offset: int) -> None:
+        real_write_at(fd, bytes(data)[:3], offset)  # some of the tail lands
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", unsupported, raising=False)
+    monkeypatch.setattr(_util, "_write_at", fills_up)
+    with pytest.raises(OSError):
+        _util.write_text_atomic(target, "y" * 40)
+    assert target.read_bytes() == old
+
+
+def test_cross_device_replace_raises_instead_of_writing_in_place(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The temp is a sibling, so EXDEV is unexpected: keep the original."""
+    target = tmp_path / "a.txt"
+    target.write_bytes(b"original\n")
+
+    def cross(_src, _dst) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(_util.os, "replace", cross)
+    with pytest.raises(OSError):
+        _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"original\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.txt"]
+
+
+def _is_temp(path) -> bool:
+    return Path(path).name.startswith(_util._TEMP_PREFIX)
+
+
+@posix_only
+@pytest.mark.parametrize("strip_fails", [False, True], ids=["stripped", "in-place"])
+def test_acl_inherited_by_the_temp_is_stripped_before_chmod(
+    tmp_path: Path, monkeypatch, strip_fails: bool
+) -> None:
+    """A directory default ACL must not reach a target that had no ACL."""
+    target = tmp_path / "plain.txt"
+    target.write_bytes(b"old\n")
+    target.chmod(0o660)
+    before = target.stat().st_ino
+    removed: list[tuple[str, str]] = []
+    real_chmod = _util.os.chmod
+
+    def listxattr(path) -> list[str]:
+        acl_left = _is_temp(path) and not removed
+        return ["system.posix_acl_access"] if acl_left else []
+
+    def removexattr(path, name) -> None:
+        if strip_fails:
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        removed.append((Path(path).name, name))
+
+    def chmod(path, mode, **kw) -> None:
+        assert removed or not _is_temp(path), "chmod before the ACL was removed"
+        real_chmod(path, mode, **kw)
+
+    monkeypatch.setattr(_util.os, "listxattr", listxattr, raising=False)
+    monkeypatch.setattr(_util.os, "removexattr", removexattr, raising=False)
+    monkeypatch.setattr(_util.os, "getxattr", lambda *_a, **_k: b"", raising=False)
+    monkeypatch.setattr(_util.os, "chmod", chmod)
+    _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"new\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o660
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["plain.txt"]
+    if strip_fails:
+        assert target.stat().st_ino == before  # written in place, never replaced
+    else:
+        assert target.stat().st_ino != before
+        assert [name for _, name in removed] == ["system.posix_acl_access"]
+        assert all(_is_temp(path) for path, _ in removed)
+
+
+@posix_only
+@pytest.mark.parametrize("relabel_fails", [False, True], ids=["copied", "in-place"])
+def test_selinux_label_of_the_target_is_copied_to_the_temp(
+    tmp_path: Path, monkeypatch, relabel_fails: bool
+) -> None:
+    target = tmp_path / "labelled.txt"
+    target.write_bytes(b"old\n")
+    before = target.stat().st_ino
+    target_label = b"system_u:object_r:httpd_sys_content_t:s0\x00"
+    labels: dict[str, bytes] = {}
+
+    def getxattr(path, name, **_kw) -> bytes:
+        assert name == "security.selinux"
+        if not _is_temp(path):
+            return target_label
+        return labels.get(os.fspath(path), b"unconfined_u:object_r:user_tmp_t:s0\x00")
+
+    def setxattr(path, name, value, *_a, **_kw) -> None:
+        if relabel_fails:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        assert _is_temp(path) and name == "security.selinux"
+        labels[os.fspath(path)] = value
+
+    monkeypatch.setattr(_util.os, "listxattr", lambda *_a, **_k: [], raising=False)
+    monkeypatch.setattr(_util.os, "getxattr", getxattr, raising=False)
+    monkeypatch.setattr(_util.os, "setxattr", setxattr, raising=False)
+    _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["labelled.txt"]
+    if relabel_fails:
+        assert target.stat().st_ino == before
+    else:
+        assert target.stat().st_ino != before
+        assert list(labels.values()) == [target_label]
+
+
 # ── (b) Edit leaves untouched line endings alone ─────────────────────────────
 
 
@@ -320,6 +516,27 @@ async def test_rg_line_reader_keeps_at_most_max_bytes_per_line() -> None:
     stream.feed_eof()
     lines = [line async for line in grep_mod._byte_lines(stream, max_bytes=10)]
     assert lines == [b"abcdefghij", b"short", b"x" * 10, b"tail"]
+
+
+async def test_rg_line_reader_holds_a_bounded_amount_across_many_reads() -> None:
+    """One endless line arriving in many chunks: what is held stays under the cap."""
+    held: list[int] = []
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.chunks = [b"z" * 65536] * 20 + [b"z\nnext\n"]
+            self.reader = None
+
+        async def read(self, _n: int) -> bytes:
+            pending = self.reader.ag_frame.f_locals["pending"]
+            held.append(sum(len(part) for part in pending))
+            return self.chunks.pop(0) if self.chunks else b""
+
+    stream = _Stream()
+    stream.reader = grep_mod._byte_lines(stream, max_bytes=1000)
+    lines = [line async for line in stream.reader]
+    assert lines == [b"z" * 1000, b"next"]
+    assert len(held) == 22 and max(held) <= 1000
 
 
 # ── (e) the Grep fallback skips hidden files unless no_ignore ────────────────
