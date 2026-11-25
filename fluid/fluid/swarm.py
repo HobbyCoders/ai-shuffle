@@ -247,7 +247,11 @@ class SwarmCoordinator:
 
     def active_origins(self):
         """Each id of :meth:`active_ids` with the ``origin()`` it started under."""
-        return {key: self._origins.get(key) for key in self.active_ids()}
+        return {key: self.origin_of(key) for key in self.active_ids()}
+
+    def origin_of(self, key):
+        """The ``origin()`` swarm ``key`` started under; None when unknown."""
+        return self._origins.get(key)
 
     async def _settle_abandoned(self, key, write):
         try:

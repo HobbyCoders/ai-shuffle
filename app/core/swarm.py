@@ -157,23 +157,41 @@ def latch_all(session_id):
         coordinator.cancelled.update(_active_keys(coordinator))
 
 
-def latch_started_by(session_id, input_cutoff):
-    """Latch the running or admitting workflows started at or before ``input_cutoff``.
+# session id -> the newest input a captured Stop ended (inclusive)
+stopped_through = {}
 
-    For a Stop that newer input overtook, so it may not latch the session.
-    A workflow started under the input it stopped is still its to end, and
-    one still being admitted is in no task list it captured. Each workflow
-    knows the turn it started under (``SwarmCoordinator.origin``); one
-    started by the newer input, or one that cannot be placed, is left alone.
+
+def latch_started_by(session_id, input_cutoff):
+    """End every workflow started at or before ``input_cutoff``, now or later.
+
+    Every captured Stop records its cutoff here, whatever the receipt guard
+    then decides: newer input may keep the Stop off the session, but what the
+    stopped input started is still the Stop's to end, and a workflow still
+    being admitted is in no task list it captured. Each workflow knows the
+    turn it started under (``SwarmCoordinator.origin``); one started by newer
+    input, or one that cannot be placed, is left alone. :func:`stopped_by_scope`
+    reads the same record when a workflow registers after the Stop and when
+    one ends, so a stopped workflow neither dispatches nor wakes the parent.
     """
     coordinator = coordinators.get(session_id)
     origins = getattr(coordinator, "active_origins", None)
     if origins is None or input_cutoff is None:
+        # No workflow host yet: a start still on its way there is cancelled
+        # with the turn, and nothing here outlives the session (``close``).
         return []
+    cutoff = stopped_through[session_id] = max(int(input_cutoff), stopped_through.get(session_id, 0))
     older = sorted(key for key, order in origins().items()
-                   if order is not None and int(order) <= int(input_cutoff))
+                   if order is not None and int(order) <= cutoff)
     coordinator.cancelled.update(older)
     return older
+
+
+def stopped_by_scope(session_id, key):
+    """True when a captured Stop's cutoff covers the input ``key`` started under."""
+    cutoff = stopped_through.get(session_id)
+    origin_of = getattr(coordinators.get(session_id), "origin_of", None)
+    order = origin_of(key) if cutoff is not None and origin_of is not None else None
+    return order is not None and int(order) <= cutoff
 
 
 async def cancel_all(session_id):
@@ -191,6 +209,7 @@ async def close(session_id, *, deadline=None):
     if coordinator:
         await coordinator.aclose(deadline=deadline)
         coordinators.pop(session_id, None)
+        stopped_through.pop(session_id, None)
         for key, launch in list(workers.items()):
             if launch.coordinator is coordinator:
                 workers.pop(key, None)
@@ -745,10 +764,18 @@ def make_handler(session_id_supplier):
                             key = snapshot["id"]
                             task_registry.start_task(session_id, key, "agent", snapshot["title"], tool_use_id=key)
                             task_registry.mark_background_launch(session_id, key)
+                            if stopped_by_scope(session_id, key):
+                                # Registered after a Stop of the input it came
+                                # from: run it to "cancelled" without a worker.
+                                coordinator.cancelled.add(key)
                     async def finished(key, status, summary):
                         from app.core import turn_scheduler
                         wire_status = "completed" if status == "completed" else "killed" if status == "cancelled" else "error"
                         task_registry.complete_task(session_id, key, wire_status, summary=summary)
+                        if stopped_by_scope(session_id, key):
+                            # The Stop ended it; its end must not steer or
+                            # queue the turn that followed the Stop.
+                            task_registry.suppress_wake(session_id, key)
                         await turn_scheduler.on_task_terminal(session_id, dict(task_id=key,
                             status=wire_status, tool_use_id=key, summary=summary))
                     coordinator = SwarmCoordinator(

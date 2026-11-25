@@ -19,7 +19,9 @@ def clean_runtime():
     swarm._locks.clear()
     swarm._orphan_free.clear()
     swarm._killed_swarms.clear()
+    swarm.stopped_through.clear()
     yield
+    swarm.stopped_through.clear()
     swarm.coordinators.clear()
     swarm.workers.clear()
     swarm.worker_jobs.clear()
@@ -1006,61 +1008,146 @@ async def test_stop_latches_a_swarm_whose_admission_is_still_pending(stop):
     assert coordinator.snapshot(key)["status"] == "cancelled"
 
 
-@pytest.mark.asyncio
-async def test_an_overtaken_stop_still_latches_the_older_admitting_swarm(monkeypatch):
-    """The first write of a swarm is blocked; one client presses Stop and
-    another sends a follow-up before the receipt applies. The follow-up keeps
-    the session-wide latch off, and the blocked swarm is in no task list the
-    Stop captured: it must still be latched, while the follow-up's own swarm
-    is spared."""
+def _swarm_stop_harness(agents, monkeypatch, sid):
+    """A parent whose Swarm runs through the app's own handler, with its first
+    write held on request, a stub dispatch, and every terminal wake recorded
+    with whether the scheduler would drop it as suppressed."""
     from fluid.tools.registry import ToolOutcome
-    from app.core import query_session_lifecycle as lifecycle
-    from app.db import turns
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
 
-    entered = {"old": asyncio.Event(), "new": asyncio.Event()}
-    release = asyncio.Event()
+    _mk_session(agents, sid, "root-agent")
+    held, release, prompts, wakes = {}, asyncio.Event(), [], []
 
-    async def publish(snapshot):
-        if snapshot["status"] == "queued":
-            entered[snapshot["title"]].set()
+    async def persist(snapshot):
+        if snapshot["status"] == "queued" and snapshot["title"] in held:
+            held[snapshot["title"]].set()
             await release.wait()
-
-    prompts = []
 
     async def dispatch(data, ctx):
         prompts.append(data.get("prompt"))
         return ToolOutcome(text="done")
 
-    turn = {"order": 5}
-    coordinator = SwarmCoordinator("parent", dispatch, AsyncMock(), publish, AsyncMock(),
-                                   origin=lambda: turn["order"])
-    swarm.coordinators["parent"] = coordinator
-    try:
-        old = asyncio.create_task(coordinator.start(
-            {"title": "old", "tasks": [dict(id="a", agent="helper", prompt="do old")]}, ToolCtx()))
-        await asyncio.wait_for(entered["old"].wait(), 5)
-        turn["order"] = 7  # the follow-up's turn is live now
-        new = asyncio.create_task(coordinator.start(
-            {"title": "new", "tasks": [dict(id="a", agent="helper", prompt="do new")]}, ToolCtx()))
-        # Its write queues behind the blocked one; it is admitting either way.
-        for _ in range(100):
-            if len(coordinator.active_ids()) == 2:
+    async def wake(session_id, frame):
+        wakes.append((frame["task_id"], task_registry.is_wake_suppressed(session_id, frame["task_id"])))
+
+    monkeypatch.setattr(swarm, "persist", persist)
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", wake)
+    handler = swarm.make_handler(lambda: sid)
+
+    def start(title, hold=False):
+        if hold:
+            held[title] = asyncio.Event()
+        return asyncio.create_task(handler({"action": "start", "title": title, "tasks": [
+            dict(id="a", agent="helper", prompt="do " + title)]},
+            ToolCtx(extra={"task_dispatch": dispatch})))
+
+    return SimpleNamespace(held=held, release=release, prompts=prompts, wakes=wakes, start=start)
+
+
+async def _settled(sid):
+    coordinator = swarm.coordinators[sid]
+    for _ in range(200):
+        if coordinator.swarms and not coordinator.active_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert not coordinator.active_ids()
+    return {s["title"]: s for s in coordinator.swarms.values()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successor", ["live", "queued"])
+async def test_a_stop_the_receipt_guard_overrules_still_ends_the_stopped_inputs_swarm(
+        agents, monkeypatch, successor):
+    """The stopped turn's swarm is blocked in its first write when Stop
+    captures its receipt, so it is in no captured task list. Then the next
+    turn either goes live (the real guard sees a new owner and returns None)
+    or is queued (the guard refuses only the session latch). Either way the
+    old swarm runs to "cancelled" without a worker and its end wakes nobody,
+    while the successor's own swarm runs and wakes the parent; a second,
+    stale Stop changes neither."""
+    from app.core import query_session_lifecycle as lifecycle
+    from app.core.task_registry import task_registry
+    from app.db import runs, turns
+
+    sid = "swarm-stop-" + successor
+    h = _swarm_stop_harness(agents, monkeypatch, sid)
+    lease = runs.claim_run(sid, "original-runner", 60)
+    stopped = turns.enqueue_turn(sid, "user", prompt="start a swarm")
+    assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
+    task_registry.note_turn_live(sid, stopped["insert_order"])
+    old = h.start("old", hold=True)
+    await asyncio.wait_for(h.held["old"].wait(), 5)
+
+    receipt = turns.read_stop_receipt(sid)
+    assert receipt["input_cutoff"] == stopped["insert_order"]
+    if successor == "live":
+        assert turns.settle_turn(stopped["id"], "aborted", "user_stop", run_id=lease["id"])
+        assert runs.release_run(lease["id"], lease["fence_token"])
+        owner = runs.claim_run(sid, "replacement-runner", 60)
+        nxt = turns.enqueue_turn(sid, "user", prompt="next words")
+        assert turns.start_turn(nxt["id"], owner["id"], "replacement-runner")
+        task_registry.note_turn_live(sid, nxt["insert_order"])
+        new = h.start("new")
+        for _ in range(100):  # its write queues behind the held one
+            if len(swarm.coordinators[sid].active_ids()) == 2:
                 break
             await asyncio.sleep(0.01)
-        assert len(coordinator.active_ids()) == 2
+        assert len(swarm.coordinators[sid].active_ids()) == 2
+        # The real guard rejects the receipt outright: it never calls back.
+        assert turns.apply_stop_receipt(sid, receipt, lambda latch: pytest.fail("guard accepted")) is None
+    else:
+        turns.enqueue_turn(sid, "queue", prompt="next words")
+        assert turns.apply_stop_receipt(sid, receipt, lambda latch: latch) is False
 
-        # The follow-up overtook the Stop: its receipt refuses the session latch.
-        monkeypatch.setattr(turns, "apply_stop_receipt", lambda sid, receipt, begin: begin(False))
-        stop = await lifecycle._begin_captured_user_stop(
-            "parent", {"input_cutoff": 6, "stop_seq": 1})
-        assert stop.generation == -1  # no session-wide latch was installed
-
-        release.set()
-        await asyncio.wait_for(asyncio.gather(old, new), 5)
-        await asyncio.wait_for(asyncio.gather(*coordinator.jobs.values()), 5)
-        by_title = {s["title"]: s for s in coordinator.swarms.values()}
-        assert by_title["old"]["status"] == "cancelled"
+    stop = await lifecycle._begin_captured_user_stop(sid, receipt)
+    assert stop.generation == -1 and not task_registry.is_user_stopped(sid)
+    # A second Stop with an older (stale) cutoff narrows nothing.
+    await lifecycle._begin_captured_user_stop(sid, {**receipt, "input_cutoff": receipt["input_cutoff"] - 1})
+    h.release.set()
+    await asyncio.wait_for(old, 5)
+    if successor == "live":
+        await asyncio.wait_for(new, 5)
+    by_title = await _settled(sid)
+    assert by_title["old"]["status"] == "cancelled"
+    assert (by_title["old"]["id"], True) in h.wakes  # reaches the scheduler only as suppressed
+    if successor == "live":
         assert by_title["new"]["status"] == "completed"
-        assert prompts == ["do new"]
-    finally:
-        swarm.coordinators.pop("parent", None)
+        assert (by_title["new"]["id"], False) in h.wakes
+        assert h.prompts == ["do new"]
+    else:
+        assert h.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_a_swarm_the_stopped_input_registers_after_the_stop_is_ended_too(agents, monkeypatch):
+    """The stopped turn starts another workflow after its Stop was applied
+    (the receipt reached no running swarm). It registers under the stopped
+    input, so it is latched as it registers and its end wakes nobody."""
+    from app.core import query_session_lifecycle as lifecycle
+    from app.core.task_registry import task_registry
+    from app.db import runs, turns
+
+    sid = "swarm-stop-late"
+    h = _swarm_stop_harness(agents, monkeypatch, sid)
+    lease = runs.claim_run(sid, "original-runner", 60)
+    stopped = turns.enqueue_turn(sid, "user", prompt="start swarms")
+    assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
+    task_registry.note_turn_live(sid, stopped["insert_order"])
+    first = await asyncio.wait_for(h.start("first"), 5)
+    first_key = first.background_task.task_id
+    await asyncio.wait_for(swarm.coordinators[sid].jobs[first_key], 5)
+    assert h.prompts == ["do first"]
+
+    receipt = turns.read_stop_receipt(sid)
+    turns.enqueue_turn(sid, "queue", prompt="next words")  # keeps the session latch off
+    await lifecycle._begin_captured_user_stop(sid, receipt)
+    assert not task_registry.is_user_stopped(sid)
+    await asyncio.wait_for(h.start("late"), 5)
+    by_title = await _settled(sid)
+    assert by_title["late"]["status"] == "cancelled"
+    assert h.prompts == ["do first"]
+    assert (by_title["late"]["id"], True) in h.wakes and (first_key, False) in h.wakes
+
+    await swarm.close(sid)  # the record lives no longer than the session's host
+    assert sid not in swarm.stopped_through

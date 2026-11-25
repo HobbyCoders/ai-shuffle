@@ -116,63 +116,20 @@ def _kill_group(pid: int, *, leader_reaped: bool) -> None:
         pass  # no such group (nothing left) or not ours to signal
 
 
-def _tree_alive(pid: int) -> bool | None:
-    """Whether a process of the tree rooted at ``pid`` still runs (POSIX).
+async def _confirm_exit(job: int) -> bool:
+    """True once the job reports no active process, within ``EXIT_CONFIRM_S``.
 
-    None when that cannot be told. On Linux a process counts when it is in
-    the group ``pid`` leads or in the session it leads: ``start_new_session``
-    made the root a session leader, and a descendant that left the group with
-    ``setpgid`` (GNU ``timeout`` without --foreground does) stays in the
-    session. Zombies have exited and only wait to be reaped, so they do not
-    count. One that called ``setsid`` itself is out of reach of both checks.
-    Elsewhere only the group can be checked, and a zombie member counts.
+    Windows only. On POSIX nothing can prove a tree exited: a descendant that
+    called ``setsid``, or one a restricted ``/proc`` hides, is out of sight of
+    any group or session check, so a kill there is only ever "attempted".
     """
-    if sys.platform.startswith("linux"):
-        try:
-            entries = os.listdir("/proc")
-        except OSError:
-            return None
-        for name in entries:
-            if not name.isdigit():
-                continue
-            try:
-                with open(f"/proc/{name}/stat", "rb") as stat_file:
-                    stat = stat_file.read()
-                # The command name may hold spaces and parentheses; the
-                # fields after it are state, ppid, pgrp, session.
-                fields = stat[stat.rindex(b")") + 2:].split()
-                state, pgrp, session = fields[0], int(fields[2]), int(fields[3])
-            except (OSError, ValueError, IndexError):
-                continue  # exited meanwhile, or unreadable
-            if state not in (b"Z", b"X") and pid in (pgrp, session):
-                return True
-        return False
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # a member exists, though not one this process may signal
-    except OSError:
-        return None
-    return True
-
-
-async def _confirm_exit(proc: asyncio.subprocess.Process, job: int | None) -> bool:
-    """True once the whole tree is known to have exited, within ``EXIT_CONFIRM_S``."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + EXIT_CONFIRM_S
     while True:
-        if sys.platform == "win32":
-            if job is None:
-                return False  # ``taskkill /T`` leaves no record to check
-            active = job_active_processes(job)
-            alive = None if active is None else active > 0
-        else:
-            alive = await asyncio.to_thread(_tree_alive, proc.pid)
-        if alive is None:
+        active = job_active_processes(job)
+        if active is None:
             return False
-        if not alive:
+        if active == 0:
             return True
         if loop.time() >= deadline:
             return False
@@ -196,17 +153,18 @@ async def kill_tree(
     ``proc.wait()`` also waits for.
 
     With ``confirm`` it returns True only when the whole tree is then known
-    to have exited (see :func:`_tree_alive`; on Windows the job reports no
-    active process), waiting up to ``EXIT_CONFIRM_S`` for that. A closed
-    output pipe is no such proof: a survivor may have redirected its output.
-    Without ``confirm`` it returns False and checks nothing.
+    to have exited: on Windows, the job reports no active process within
+    ``EXIT_CONFIRM_S``. On POSIX it always returns False (see
+    :func:`_confirm_exit`). A closed output pipe is no proof either: a
+    survivor may have redirected its output. Without ``confirm`` it returns
+    False and checks nothing.
     """
     confirmed = False
     if sys.platform == "win32":
         if job is not None and confirm and terminate_job(job):
             # Ended, but the handle stays open until the job reports empty.
             try:
-                confirmed = await _confirm_exit(proc, job)
+                confirmed = await _confirm_exit(job)
             finally:
                 close_job(job)
         elif job is not None:
@@ -228,6 +186,4 @@ async def kill_tree(
         await asyncio.wait_for(proc.wait(), reap_timeout)
     except TimeoutError:
         log.warning("process %s did not exit after kill", proc.pid)
-    if confirm and sys.platform != "win32":
-        confirmed = await _confirm_exit(proc, None)
     return confirmed

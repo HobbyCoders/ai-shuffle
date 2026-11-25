@@ -88,8 +88,13 @@ async def test_bash_timeout_kills_a_descendant_of_an_exited_shell(tmp_path) -> N
     )
     pid = int(pid_file.read_text())
     try:
-        assert out.is_error and "was terminated" in out.text
-        assert await _gone(pid), "Bash said it was terminated but the command still runs"
+        assert out.is_error
+        # An empty group or session proves nothing on POSIX (a process that
+        # called setsid, or one /proc hides, is out of sight), so only the
+        # attempt is claimed; the kill itself must still reach the descendant.
+        assert "was terminated" not in out.text
+        assert "termination was attempted" in out.text
+        assert await _gone(pid), "the timeout kill missed a descendant of the exited shell"
     finally:
         if _alive(pid):
             os.kill(pid, 9)
@@ -138,7 +143,7 @@ async def test_bash_does_not_take_a_closed_pipe_for_a_finished_tree(tmp_path) ->
         assert out.is_error
         assert "was terminated" not in out.text
         assert "termination was attempted" in out.text
-        assert "could not be confirmed" in out.text
+        assert "cannot be confirmed" in out.text
     finally:
         if _alive(pid):
             os.kill(pid, 9)

@@ -379,10 +379,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     except TimeoutError:
         # Killed even when the shell already exited and only a descendant is
         # left holding the output pipe (the usual way a run hangs here).
-        # "Terminated" only when the whole tree is known to have exited. A
-        # process that left the command's process group (GNU ``timeout``
-        # without --foreground starts its own) escapes the group kill, and
-        # the output pipe still reaches EOF when it redirected its output.
+        # "Terminated" only when the whole tree is known to have exited, which
+        # only a Windows job can show. A process that left the command's
+        # process group or session escapes the kill, and the output pipe still
+        # reaches EOF when it redirected its output.
         exited = await kill_tree(proc, job, confirm=True)
         job = None
         drained = False
@@ -403,10 +403,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         else:
             ended = (
                 "; termination was attempted, but whether everything it "
-                "started has exited could not be confirmed (a process that "
-                "left the command's process group, as `timeout` without "
-                "--foreground does, survives the kill even when its output "
-                "goes to a file). Check for it before re-running."
+                "started has exited cannot be confirmed (a process that left "
+                "the command's process group or session, as `timeout` without "
+                "--foreground or a daemon does, survives the kill even when "
+                "its output goes to a file). Check for it before re-running."
             )
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
