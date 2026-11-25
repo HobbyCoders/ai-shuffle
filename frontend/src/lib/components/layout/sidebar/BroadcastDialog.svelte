@@ -26,6 +26,7 @@
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { broadcastMessage, MAX_BROADCAST_CHATS, type BroadcastResult } from '$lib/api/broadcast';
 	import type { ApiError } from '$lib/api/client';
+	import { broadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 
 	interface Props {
 		open: boolean;
@@ -35,20 +36,17 @@
 
 	let { open, candidates, onClose }: Props = $props();
 
-	// Only the chips the user changed; everything else follows its default, so a
-	// chat that joins Active while the dialog is open is ticked as usual.
-	let picked = $state<Record<string, boolean>>({});
-	let message = $state('');
-	let sending = $state(false);
-	let error = $state<string | null>(null);
-	let receipts = $state<{ chat: BroadcastCandidate; result: BroadcastResult }[] | null>(null);
+	// The draft is kept in the store so it outlives this component: see there.
+	// `picked` holds only the chips the user changed; everything else follows its
+	// default, so a chat that joins Active while the dialog is open is ticked.
+	const draft = broadcastDialog.draft;
 	let doneButton = $state<HTMLButtonElement | null>(null);
 
-	const included = (c: BroadcastCandidate) => picked[c.id] ?? tickedByDefault(c);
+	const included = (c: BroadcastCandidate) => draft.picked[c.id] ?? tickedByDefault(c);
 	const recipients = $derived(candidates.filter(included));
 	// The server takes a bounded list; say so here rather than have it refuse.
 	const tooMany = $derived(recipients.length > MAX_BROADCAST_CHATS);
-	const canSend = $derived(!sending && recipients.length > 0 && !tooMany && message.trim().length > 0);
+	const canSend = $derived(!draft.sending && recipients.length > 0 && !tooMany && draft.message.trim().length > 0);
 
 	const summary = $derived.by(() => {
 		const count = (state: BroadcastCandidate['state']) => candidates.filter((c) => c.state === state).length;
@@ -66,40 +64,31 @@
 		return parts.join(' · ');
 	});
 
-	// A fresh dialog every time it opens.
-	$effect(() => {
-		if (open) {
-			picked = {};
-			message = '';
-			error = null;
-			receipts = null;
-			sending = false;
-		}
-	});
-
 	// The Send button is gone once receipts show: keep focus inside the dialog.
 	$effect(() => {
-		if (receipts && doneButton) doneButton.focus();
+		if (draft.receipts && doneButton) doneButton.focus();
 	});
 
 	function toggle(c: BroadcastCandidate) {
-		picked = { ...picked, [c.id]: !included(c) };
+		draft.picked = { ...draft.picked, [c.id]: !included(c) };
 	}
 
 	function close() {
-		if (sending) return;
+		if (draft.sending) return;
 		onClose();
 	}
 
+	// Writes land in the store, so a send still on its way when this dialog
+	// unmounts shows its receipts in the one that replaces it.
 	async function send() {
 		if (!canSend) return;
 		const chats = recipients.map((c) => ({ ...c }));
-		sending = true;
-		error = null;
+		draft.sending = true;
+		draft.error = null;
 		try {
-			const answer = await broadcastMessage(chats.map((c) => c.id), message.trim());
+			const answer = await broadcastMessage(chats.map((c) => c.id), draft.message.trim());
 			const byId = new Map(answer.results.map((r) => [r.session_id, r]));
-			receipts = chats.map((chat) => ({
+			draft.receipts = chats.map((chat) => ({
 				chat,
 				result: byId.get(chat.id) ?? { session_id: chat.id, status: 'failed', detail: 'No answer for this chat' }
 			}));
@@ -108,11 +97,11 @@
 			// A 4xx refused the whole request before any chat got it. Anything else
 			// (no connection, a lost answer, a server error) may have come after
 			// some chats took the message, and a resend would give them a second copy.
-			error = typeof status === 'number' && status >= 400 && status < 500
+			draft.error = typeof status === 'number' && status >= 400 && status < 500
 				? detail || 'Could not send. Nothing was sent.'
 				: 'Could not confirm the send. Some chats may already have it: check them before sending again.';
 		} finally {
-			sending = false;
+			draft.sending = false;
 		}
 	}
 
@@ -122,7 +111,7 @@
 			e.preventDefault();
 			e.stopPropagation();
 			close();
-		} else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !receipts) {
+		} else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !draft.receipts) {
 			e.preventDefault();
 			void send();
 		}
@@ -145,7 +134,7 @@
 		return 'Sent';
 	}
 
-	const sentCount = $derived(receipts?.filter((r) => r.result.status === 'sent' || r.result.status === 'held').length ?? 0);
+	const sentCount = $derived(draft.receipts?.filter((r) => r.result.status === 'sent' || r.result.status === 'held').length ?? 0);
 
 	function portal(node: HTMLElement) {
 		document.body.appendChild(node);
@@ -171,22 +160,22 @@
 				<div class="head">
 					<h2 id="broadcast-title" class="ui-dialog-title"><Megaphone size={16} strokeWidth={2} />Message all active chats</h2>
 					<p class="ui-dialog-subtitle">
-						{#if receipts}
-							Sent to {sentCount} of {receipts.length} {receipts.length === 1 ? 'chat' : 'chats'}
+						{#if draft.receipts}
+							Sent to {sentCount} of {draft.receipts.length} {draft.receipts.length === 1 ? 'chat' : 'chats'}
 						{:else}
 							{summary}
 						{/if}
 					</p>
 				</div>
-				<button class="ui-button icon ghost" type="button" aria-label="Close" onclick={close} disabled={sending}>
+				<button class="ui-button icon ghost" type="button" aria-label="Close" onclick={close} disabled={draft.sending}>
 					<X size={16} strokeWidth={2} />
 				</button>
 			</header>
 
 			<div class="ui-dialog-body">
-				{#if receipts}
+				{#if draft.receipts}
 					<ul class="receipts" aria-label="What each chat did">
-						{#each receipts as { chat, result } (chat.id)}
+						{#each draft.receipts as { chat, result } (chat.id)}
 							<li class="receipt" data-status={result.status}>
 								<span class="mark" aria-hidden="true">
 									{#if result.status === 'failed' || result.status === 'maybe_sent'}
@@ -227,28 +216,28 @@
 						{/each}
 					</div>
 					<textarea
-						bind:value={message}
+						bind:value={draft.message}
 						class="ui-input msg"
 						rows="4"
 						placeholder="One message for every ticked chat"
 						aria-label="Message"
-						disabled={sending}
+						disabled={draft.sending}
 					></textarea>
 					<p class="hint">
 						A working chat gets it mid-turn, or after its turn when it can't take it sooner. Chats waiting on you or on an offline worker start unticked; click a chip to add or remove it.
 					</p>
 					{#if tooMany}<p class="err">One message can go to {MAX_BROADCAST_CHATS} chats at most. Untick {recipients.length - MAX_BROADCAST_CHATS}.</p>{/if}
-					{#if error}<p class="err" role="alert">{error}</p>{/if}
+					{#if draft.error}<p class="err" role="alert">{draft.error}</p>{/if}
 				{/if}
 			</div>
 
 			<div class="ui-dialog-footer">
-				{#if receipts}
+				{#if draft.receipts}
 					<button class="ui-button primary" type="button" data-broadcast-done bind:this={doneButton} onclick={close}>Done</button>
 				{:else}
-					<button class="ui-button" type="button" onclick={close} disabled={sending}>Cancel</button>
+					<button class="ui-button" type="button" onclick={close} disabled={draft.sending}>Cancel</button>
 					<button class="ui-button primary" type="button" onclick={send} disabled={!canSend}>
-						{#if sending}<Loader2 size={14} class="spin" />{/if}
+						{#if draft.sending}<Loader2 size={14} class="spin" />{/if}
 						Send to {recipients.length} {recipients.length === 1 ? 'chat' : 'chats'}
 					</button>
 				{/if}

@@ -10,6 +10,7 @@ const broadcastMessage = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/broadcast', () => ({ broadcastMessage, MAX_BROADCAST_CHATS: 100 }));
 
 import BroadcastDialog, { type BroadcastCandidate } from './BroadcastDialog.svelte';
+import { resetBroadcastDraft } from '$lib/stores/broadcast-dialog.svelte';
 
 const chats: BroadcastCandidate[] = [
 	{ id: 'needs', title: 'Fix flaky emulator job', state: 'needs', worker: null },
@@ -29,6 +30,7 @@ const chip = (title: string) => screen.getByRole('button', { name: new RegExp(`^
 
 beforeEach(() => {
 	broadcastMessage.mockReset();
+	resetBroadcastDraft();
 });
 afterEach(() => {
 	cleanup();
@@ -125,6 +127,34 @@ describe('BroadcastDialog', () => {
 		await fireEvent.click(chip('Chat 101'));
 		await settle();
 		expect((screen.getByRole('button', { name: 'Send to 100 chats' }) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('keeps the draft and a send on its way when the sidebar hosting it is replaced', async () => {
+		// Resizing across the phone breakpoint unmounts one sidebar (and its
+		// dialog) and mounts another while the dialog stays open.
+		let answer!: (value: unknown) => void;
+		broadcastMessage.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+		const first = render(BroadcastDialog, { props: { open: true, candidates: chats, onClose: vi.fn() } });
+		await settle();
+		await fireEvent.click(chip('Memory system'));
+		await fireEvent.input(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'Wrap up.' } });
+		await settle();
+
+		first.unmount();
+		render(BroadcastDialog, { props: { open: true, candidates: chats, onClose: vi.fn() } });
+		await settle();
+		expect((screen.getByRole('textbox', { name: 'Message' }) as HTMLTextAreaElement).value).toBe('Wrap up.');
+		expect(chip('Memory system').getAttribute('aria-pressed')).toBe('false');
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Send to 2 chats' }));
+		await settle();
+		cleanup();
+		answer({ sent: 2, results: [{ session_id: 'work', status: 'sent' }, { session_id: 'park', status: 'sent' }] });
+		await settle();
+
+		render(BroadcastDialog, { props: { open: true, candidates: chats, onClose: vi.fn() } });
+		await settle();
+		expect(screen.getByText('Sent to 2 of 2 chats')).toBeTruthy();
 	});
 
 	it('Escape closes it', async () => {
