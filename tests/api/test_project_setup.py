@@ -8,7 +8,9 @@ setup itself always runs through the real git-ops claim pass.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+import sys
 from pathlib import Path, PurePath, PureWindowsPath
 from types import SimpleNamespace
 
@@ -2030,13 +2032,14 @@ def test_an_ssh_only_worker_sets_up_over_ssh_when_https_is_refused(client, ws, t
     assert database.get_project(op["result"]["project_id"])["link_group_id"] == pv2["origin"]
 
 
-def test_an_https_only_runner_seeds_over_https_when_the_stored_ssh_is_refused(ws, test_db, monkeypatch):
+def test_an_https_only_runner_seeds_over_https_when_the_row_stores_ssh(ws, test_db, monkeypatch):
     pv2 = _both_spellings_recorded(test_db, stored=_SSH)  # a git@ add made the row
     info = project_setup._repo_info_by_origin()[pv2["origin"]]
-    assert (info["clone_url"], info["alternate_urls"]) == (_SSH, [_HTTPS])  # what setup sends
+    # The id's own spelling (HTTPS) first, though the row stores SSH.
+    assert (info["clone_url"], info["alternate_urls"]) == (_HTTPS, [_SSH])  # what setup sends
     calls = _seed_clones(monkeypatch, refused={_SSH})
     assert _seed(pv2) is not None
-    assert calls == [_SSH, _HTTPS]
+    assert calls == [_HTTPS]
 
 
 def test_a_pinned_project_clones_only_its_pin(client, ws, test_db, monkeypatch):
@@ -2072,8 +2075,9 @@ def test_a_fork_linked_into_a_git_group_is_never_a_clone_candidate(ws, test_db):
     row = projects_v2.get_project_v2_by_origin(canonical)
     assert checkout_manager._resolve_clone_url(canonical, row) == _SSH
     assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _SSH
-    assert checkout_manager._clone_candidates(canonical, row) == [_SSH]
-    assert project_setup._repo_info_by_origin()[canonical]["alternate_urls"] == []
+    # Then SSH's other spelling, never the fork.
+    assert checkout_manager._clone_candidates(canonical, row) == [_SSH, _HTTPS]
+    assert project_setup._repo_info_by_origin()[canonical]["alternate_urls"] == [_HTTPS]
 
 
 def test_the_setup_destination_tries_other_spellings_and_drops_another_repository(ws, test_db, monkeypatch,
@@ -2113,3 +2117,161 @@ def test_changing_a_repository_never_merges_on_another_projects_record(client, w
     project_remote.reconcile_local()
     assert _remote_of(ws / "demo") == _SSH  # never pointed at S
     assert database.get_project("demo")["link_group_id"] == mine["origin"]
+
+
+# ---------------------------------------------------------------------------
+# One list for every worker: the id's own spelling, the other one, then each
+# one's derived other spelling; alternates never carry a credential, and
+# local:/manual: projects keep their single URL
+# ---------------------------------------------------------------------------
+
+_SSH_REFUSED_PORT = ("ssh: connect to host git.example.com port 22: Connection refused\n"
+                     "fatal: Could not read from remote repository.")
+_LFS_MISSING = ("git-lfs filter-process: git-lfs: not found\nfatal: the remote end hung up unexpectedly\n"
+                "warning: Clone succeeded, but checkout failed.")
+
+
+def _git_fails_for(monkeypatch, url: str, stderr: str) -> None:
+    """Workers setup's ``git clone`` of ``url`` fails with ``stderr``, as git
+    prints it; every other URL clones for real."""
+    real = project_setup._clone_command
+
+    def fake(clone_url, temp, *, network_only=False):
+        if clone_url == url:
+            return [sys.executable, "-c", "import sys; sys.stderr.write(sys.argv[1]); sys.exit(128)", stderr]
+        return real(clone_url, temp, network_only=network_only)
+
+    monkeypatch.setattr(project_setup, "_clone_command", fake)
+
+
+def _setup_leftovers(ws: Path) -> list:
+    return [p.name for p in ws.iterdir() if ".setup-" in p.name]
+
+
+def test_setup_sends_the_projects_own_spelling_first_whoever_asks(client, ws, test_db):
+    canonical = auto_link_group_id(_HTTPS)
+    # The requesting worker (this one) holds the SSH copy; another holds HTTPS.
+    _legacy_project_here(ws, remote=_SSH, project_id="mine", origin=canonical)
+    _peer_project(test_db, "theirs", "Demo", remote=_HTTPS, origin=canonical, instance="peer-install-2")
+    pv2 = projects_v2.get_project_v2_by_origin(canonical)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = git_ops_db.get_op(resp.json()["op_id"])["params"]  # shared database: queued for Studio
+    assert (params["clone_url"], params["alternate_urls"]) == (_HTTPS, [_SSH])
+    from app.core import checkout_manager
+
+    assert checkout_manager._clone_candidates(canonical, pv2) == [_HTTPS, _SSH]  # the seed's list too
+
+
+def test_a_manual_project_queues_one_url_and_no_password(client, ws, test_db):
+    with_password = "https://user:pa'ss@git.example.com/example-org/demo-mirror.git"
+    group = "manual:demo-group"
+    _peer_project(test_db, "first", "Demo", remote=_HTTPS, origin=group, instance="peer-install-2")
+    pv2 = _peer_project(test_db, "second", "Demo", remote=with_password, origin=group, instance="peer-install-3")
+    info = project_setup._repo_info_by_origin()[group]
+    assert (info["clone_url"], info["alternate_urls"]) == (_HTTPS, [])
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = git_ops_db.get_op(resp.json()["op_id"])["params"]
+    assert (params["clone_url"], params["alternate_urls"]) == (_HTTPS, [])
+    assert "pa'ss" not in json.dumps(params)
+
+
+def test_a_git_alternate_never_carries_a_password(ws, test_db):
+    # Alternates are stripped by the remote_key rule (the scrub regex keeps ``pa'ss``).
+    keyed_by = "https://user:pa'ss@git.example.com/example-org/demo"
+    origin = _legacy_id(keyed_by)
+    _record_only("first", keyed_by, origin)
+    _record_only("second", "https://user:pa'ss@git.example.com/example-org/demo.git", origin)
+    alternates = project_setup._repo_info_by_origin()[origin]["alternate_urls"]
+    assert alternates == ["git@git.example.com:example-org/demo"]
+    # And the destination queues a received one without its password.
+    canonical = auto_link_group_id(_HTTPS)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo", "kind": "git",
+                               "clone_url": _SSH, "folder": "demo",
+                               "alternate_urls": ["https://user:pa'ss@git.example.com/example-org/demo.git"]},
+                              op_id="psetup-" + "3" * 32, requested_by=PEER)
+    params = git_ops_db.get_op("psetup-" + "3" * 32)["params"]
+    assert params["alternate_urls"] == [_HTTPS]
+    assert "pa'ss" not in json.dumps(params)
+
+
+def test_a_manual_project_whose_record_moved_clones_the_record(client, ws, test_db, monkeypatch):
+    old, moved = _HTTPS, _MOVED_TO
+    group = "manual:demo-group"
+    pv2 = _peer_project(test_db, "theirs", "Demo", remote=moved, origin=group, instance="peer-install-2")
+    projects_v2.record_remote(group, old, "main")  # stored before the checkout moved
+    assert projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(group))[0] == old
+    info = project_setup._repo_info_by_origin()[group]
+    assert (info["clone_url"], info["alternate_urls"]) == (moved, [])
+    _https(monkeypatch, _bare_remote(ws, name="old"), url=old)  # both answer: only the order decides
+    _https(monkeypatch, _bare_remote(ws, name="other"), url=moved)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert _remote_of(ws / op["params"]["folder"]) == moved
+
+
+@pytest.mark.parametrize("refusal", [_REFUSED["ssh"], _SSH_REFUSED_PORT], ids=["sign-in", "port"])
+def test_a_worker_that_knows_only_ssh_tries_https_too(client, ws, test_db, monkeypatch, refusal):
+    pv2 = _replicated(_SSH)  # the catalog row stores only git@; no record here
+    info = project_setup._repo_info_by_origin()[pv2["origin"]]
+    assert (info["clone_url"], info["alternate_urls"]) == (_SSH, [_HTTPS])
+    _git_fails_for(monkeypatch, _SSH, refusal)
+    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert _remote_of(ws / "demo") == _HTTPS
+    assert _setup_leftovers(ws) == []  # the refused try left nothing behind
+    # The self-seed gets the same list.
+    calls = _seed_clones(monkeypatch, refused={_SSH})
+    assert _seed(pv2) is not None
+    assert calls == [_SSH, _HTTPS]
+
+
+def test_a_failure_on_this_worker_never_tries_another_spelling(ws, test_db, monkeypatch):
+    canonical = auto_link_group_id(_HTTPS)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    _git_fails_for(monkeypatch, _SSH, _LFS_MISSING)
+    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo", "kind": "git",
+                               "clone_url": _SSH, "alternate_urls": [_HTTPS], "folder": "demo"},
+                              op_id="psetup-" + "4" * 32, requested_by=PEER)
+    _run_setups()
+    assert git_ops_db.get_op("psetup-" + "4" * 32)["status"] == "error"
+    assert not (ws / "demo" / ".git").exists() and _setup_leftovers(ws) == []
+    # The self-seed doesn't either.
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def lfs_missing(working_dir, clone_url, timeout=120):
+        calls.append(clone_url)
+        return False, _LFS_MISSING
+
+    monkeypatch.setattr(git_service, "clone_repo", lfs_missing)
+    projects_v2.record_remote(canonical, _HTTPS, "main")
+    assert _seed(pv2) is None
+    assert calls == [_HTTPS]
+
+
+@pytest.mark.parametrize("stderr, retries", [
+    (_REFUSED["https"], True), (_REFUSED["ssh"], True), (_SSH_REFUSED_PORT, True),
+    ("remote: Repository not found.\nfatal: repository 'https://git.example.com/o/r/' not found", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': The requested URL returned error: 404", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Could not resolve host: git.example.com", True),
+    ("ssh: connect to host git.example.com port 22: Connection timed out", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Failed to connect to git.example.com port 443", True),
+    (_LFS_MISSING, False),
+    ("error: RPC failed; curl 28 Operation timed out\nfatal: early EOF", False),
+    ("fatal: could not create work tree dir 'demo': No space left on device", False),
+    ("Clone timed out after 120s", False),
+])
+def test_only_a_refusal_another_spelling_can_answer_tries_the_next_url(stderr, retries):
+    assert project_setup.clone_failure_retries(stderr) is retries

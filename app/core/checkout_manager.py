@@ -568,17 +568,19 @@ def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = No
 
     Consumed by ``_seed_base_checkout`` to clone a base checkout on demand when a
     pinned runner has no local materialization: it tries them in order and moves
-    on only when a clone is refused (sign-in or not found).
+    on only when a clone is refused (``project_setup.clone_failure_retries``).
 
-    The order is ``project_setup.clone_candidates``: a pinned project clones its
-    pin only; otherwise this runner's own records that name ``origin``, then the
-    replicated ``projects_v2`` row's stored remote (``settings.remote_url``,
-    which survives the last local record of the project going away), then other
-    records that name it, the origin's own spelling before the other one (git@
-    vs https). A URL names ``origin`` when ``origin`` is one of its
-    ``remote_link_ids``: the same deterministic, install-independent hash the
-    v60 collapse used to assign origins, so a match is a true identity, not a
-    heuristic, and a fork linked into the group is never cloned for it.
+    The list is ``project_setup.clone_candidates``, the same one Workers setup
+    sends: a pinned project clones its pin only; otherwise the URLs that name
+    ``origin`` (the replicated ``projects_v2`` row's stored remote first, which
+    survives the last local record of the project going away, then legacy
+    records), the origin's own spelling before the other one (git@ vs https),
+    then the other spelling of each. A URL names ``origin`` when ``origin`` is
+    one of its ``remote_link_ids``: the same deterministic, install-independent
+    hash the v60 collapse used to assign origins, so a match is a true
+    identity, not a heuristic, and a fork linked into the group is never cloned
+    for it. The first URL is as stored, as before; the others carry no
+    credentials.
 
     Only a ``git:…`` origin can ever name a remote, so ``local:`` / ``manual:``
     origins are hard-fail excluded up front with no DB lookup. Every no-match
@@ -594,15 +596,15 @@ def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = No
 
     stored = None
     if (project_v2_row or {}).get("origin") == origin:
-        stored = project_setup.stored_candidate(project_v2_row, clean=False)
+        stored = project_setup.stored_candidate(project_v2_row)
     try:
-        records = project_setup.clone_records(clean=False)
+        records = project_setup.clone_records()
     except Exception as e:  # pragma: no cover - defensive; resolution is best-effort
         logger.warning(
             "checkout_manager: clone-url lookup failed for origin %r: %s", origin, e
         )
         records = []
-    return [c["url"] for c in project_setup.clone_candidates(origin, records, stored)]
+    return [c["url"] for c in project_setup.clone_candidates(origin, records, stored, clean_first=False)]
 
 
 def _remote_kind(url: str) -> str:
@@ -611,12 +613,11 @@ def _remote_kind(url: str) -> str:
     return remote_kind(url)
 
 
-def _retry_with_next_url(err: Optional[str], clone_url: str) -> bool:
-    """Whether a refused clone may try the project's next URL (sign-in or not found)."""
+def _retry_with_next_url(err: Optional[str]) -> bool:
+    """Whether a refused clone may try the project's next URL."""
     from app.core import project_setup
 
-    return project_setup.retries_next_url(
-        project_setup.classify_clone_failure(err or "", clone_url, github_signed_in=lambda: True))
+    return project_setup.clone_failure_retries(err or "")
 
 
 def _project_self_seed_enabled(project_v2_row: Dict[str, Any]) -> bool:
@@ -709,8 +710,9 @@ def _seed_base_checkout(
         return None
 
     # Each URL is one spelling of the project's repository (git@ vs https):
-    # this runner may hold the credentials for only one of them, so a refused
-    # clone (sign-in or not found) tries the next. A pin is the only URL.
+    # this runner may hold the credentials for, or reach, only one of them, so
+    # a refused clone tries the next. A pin is the only URL. A failed try's
+    # temp dir is removed before the next.
     for index, clone_url in enumerate(clone_urls):
         try:
             temp_dir = tempfile.mkdtemp(prefix=f"{_BASE_DIR_NAME}.seed-", dir=str(slug_dir))
@@ -731,7 +733,7 @@ def _seed_base_checkout(
                 )
             break
         _rmtree_quiet(temp_dir)
-        retry = index + 1 < len(clone_urls) and _retry_with_next_url(err, clone_url)
+        retry = index + 1 < len(clone_urls) and _retry_with_next_url(err)
         logger.warning(
             "checkout_manager: self-seed clone failed for project %s over %s: %s%s",
             project_id,

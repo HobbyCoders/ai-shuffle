@@ -79,19 +79,19 @@ _HOST_PORT_RE = re.compile(r"(?:\[[0-9A-Fa-f:.%]+\]|[^\s@:/\[\]]+)(?::\d*)?")
 _SSH_LOGIN_RE = re.compile(r"[^\s@:/\[\]]+")
 
 
-def remote_key(url: Optional[str]) -> str:
-    """A comparison key for a remote that never holds a credential, or ``""``
-    when one can't be made safely; the New project dialog's ``remoteKey``.
+def strip_remote_userinfo(url: Optional[str]) -> Optional[str]:
+    """``url`` with no credential in it, or ``None`` when that can't be done safely.
 
     In a ``scheme://`` URL everything in the authority up to its last ``@`` is
     dropped, except an SSH login with no ``:`` (a login is not a secret, and two
     logins are two identities). What is left of the authority must be a host
-    and port, and the rest may hold no ``@``, else there is no key. The scp
-    form (``login@host:path``) can't carry a password and is kept, unless what
-    precedes its ``@`` holds a ``:``. Then :func:`canonical_remote`, so two
-    remotes with one key are one identity.
+    and port, and the rest may hold no ``@``, else ``None``. The scp form
+    (``login@host:path``) can't carry a password and is kept, unless what
+    precedes its ``@`` holds a ``:``.
     """
     text = (url or "").strip()
+    if not text:
+        return None
     match = _SCHEME_AUTHORITY_RE.match(text)
     if match:
         scheme, authority, rest = match.groups()
@@ -101,11 +101,42 @@ def remote_key(url: Optional[str]) -> str:
             if scheme.lower() in _SSH_SCHEMES and _SSH_LOGIN_RE.fullmatch(userinfo):
                 login = f"{userinfo}@"
         if (authority and not _HOST_PORT_RE.fullmatch(authority)) or "@" in rest:
-            return ""
-        text = f"{scheme}{login}{authority}{rest}"
-    elif ":" in text.partition("@")[0] and "@" in text:
-        return ""
-    return canonical_remote(text)
+            return None
+        return f"{scheme}{login}{authority}{rest}"
+    if ":" in text.partition("@")[0] and "@" in text:
+        return None
+    return text
+
+
+def remote_key(url: Optional[str]) -> str:
+    """A comparison key for a remote that never holds a credential, or ``""``
+    when one can't be made safely; the New project dialog's ``remoteKey``.
+
+    :func:`strip_remote_userinfo`, then :func:`canonical_remote`, so two
+    remotes with one key are one identity.
+    """
+    return canonical_remote(strip_remote_userinfo(url))
+
+
+# ``https://host/path``, the path relative: the other spelling of ``git@host:path``.
+_FORGE_HTTPS_RE = re.compile(r"^https://([^\s/:@\[\]\\]+)/(?![/~])(\S+)$")
+
+
+def joined_counterpart(url: Optional[str]) -> Optional[str]:
+    """The other spelling of a joined remote (``git@host:path`` <->
+    ``https://host/path``), else ``None``. The two name one repository by
+    construction (:func:`canonical_remote`), so a worker that can sign in over
+    only one of them can still clone it."""
+    text = (url or "").strip()
+    forge = _FORGE_SCP_RE.match(text)
+    if forge:
+        other = f"https://{forge.group(1)}/{forge.group(2)}"
+    else:
+        https = _FORGE_HTTPS_RE.match(text)
+        if not https:
+            return None
+        other = f"git@{https.group(1)}:{https.group(2)}"
+    return other if same_remote(other, text) else None
 
 
 def _link_id(normalized: str) -> Optional[str]:

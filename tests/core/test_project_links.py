@@ -335,3 +335,35 @@ class TestResolveRunnableLocalProject:
         stored, local = resolve_runnable_local_project("proj-A")
         assert stored == mine
         assert local is None
+
+
+@pytest.mark.parametrize("url, other", [
+    ("git@git.example.com:example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("https://git.example.com/Example-Org/demo", "git@git.example.com:Example-Org/demo"),
+    ("https://git.example.com:8443/example-org/demo", None),  # a port: not a joined form
+    ("https://user@git.example.com/example-org/demo", None),  # userinfo: strip it first
+    ("git@git.example.com:/srv/demo.git", None),
+    ("git@git.example.com:~/demo.git", None),
+    ("ssh://git@git.example.com/example-org/demo.git", None),
+    ("deploy@git.example.com:example-org/demo.git", None),
+    ("http://git.example.com/example-org/demo", None),
+    (None, None),
+])
+def test_only_a_joined_remote_has_another_spelling(url, other):
+    assert project_links.joined_counterpart(url) == other
+
+
+@pytest.mark.parametrize("url, safe", [
+    ("https://user:pa'ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("https://user:pa[ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("https://tok@en@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("ssh://git@git.example.com/example-org/demo.git", "ssh://git@git.example.com/example-org/demo.git"),
+    ("ssh://git:secret@git.example.com/example-org/demo.git", "ssh://git.example.com/example-org/demo.git"),
+    ("git@git.example.com:example-org/demo.git", "git@git.example.com:example-org/demo.git"),
+    ("user:secret@git.example.com:example-org/demo.git", None),
+    ("https://git.example.com/example-org/demo@main", None),
+    ("", None),
+])
+def test_a_remote_is_sent_without_credentials_or_not_at_all(url, safe):
+    assert project_links.strip_remote_userinfo(url) == safe
+
