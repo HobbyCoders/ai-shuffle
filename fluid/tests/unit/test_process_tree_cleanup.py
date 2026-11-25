@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -87,8 +88,32 @@ async def test_bash_timeout_kills_a_descendant_of_an_exited_shell(tmp_path) -> N
     )
     pid = int(pid_file.read_text())
     try:
-        assert out.is_error and "was killed" in out.text
-        assert await _gone(pid), "Bash said 'was killed' but the command still runs"
+        assert out.is_error and "was terminated" in out.text
+        assert await _gone(pid), "Bash said it was terminated but the command still runs"
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)
+
+
+@pytest.mark.skipif(not shutil.which("timeout"), reason="needs coreutils timeout")
+async def test_bash_does_not_claim_a_kill_that_missed_a_process_in_its_own_group(tmp_path) -> None:
+    """GNU ``timeout`` (no --foreground) moves itself and its child to a new
+    process group, so the group kill misses them and they keep the pipe."""
+    from fluid.tools.builtins.bash import handler
+
+    pid_file = tmp_path / "pid"
+    out = await handler(
+        # "; true" keeps the shell from exec-ing timeout as the group leader.
+        {"command": f"timeout 60 sh -c 'echo $$ > {pid_file}; exec sleep 60'; true", "timeout": 1},
+        ToolCtx(cwd=str(tmp_path)),
+    )
+    pid = int(pid_file.read_text())
+    try:
+        assert _alive(pid)  # the survivor the message must not deny
+        assert out.is_error
+        assert "was terminated" not in out.text
+        assert "termination was attempted" in out.text
+        assert "may still be running" in out.text
     finally:
         if _alive(pid):
             os.kill(pid, 9)

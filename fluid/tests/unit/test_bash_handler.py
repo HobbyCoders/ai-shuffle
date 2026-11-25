@@ -75,7 +75,7 @@ async def test_timeout_points_to_monitor_not_detached_polling(tmp_path) -> None:
         ToolCtx(cwd=str(tmp_path)),
     )
     assert out.is_error and not out.soft_error
-    assert "was killed" in out.text
+    assert "was terminated" in out.text
     assert "use Monitor" in out.text
     assert "Do not append & or poll" in out.text
     assert "Inspect any partial effects" in out.text

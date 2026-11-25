@@ -381,14 +381,27 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # left holding the output pipe (the usual way a run hangs here).
         await kill_tree(proc, job)
         job = None
+        # The output pipe reaching EOF is the proof the kill took: every
+        # process still holding it is gone. One that left the command's
+        # process group (GNU ``timeout`` without --foreground starts its own)
+        # escapes the group kill and keeps the pipe open.
+        drained = False
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
             await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
+            drained = True
+        ended = (
+            " and was terminated." if drained else
+            "; termination was attempted, but a process it started still "
+            "holds its output and may still be running (one that left the "
+            "command's process group, as `timeout` without --foreground "
+            "does). Check for it before re-running."
+        )
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
         text = (
-            f"command timed out after {timeout:g}s{held} and was killed. Raise "
+            f"command timed out after {timeout:g}s{held}{ended} Raise "
             "the timeout parameter for a genuinely long command, narrow "
             "the command's scope, or use Monitor for a long-running job "
             "(serves=true only for a service meant to stay up). Do not "
