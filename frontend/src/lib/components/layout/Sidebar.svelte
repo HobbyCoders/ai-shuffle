@@ -685,7 +685,7 @@
 			? [{ id: 'terminal' as const, label: 'Terminal', icon: SquareTerminal, on: currentType === 'terminal' }]
 			: [])
 	]);
-	/** Settings is pinned at the rail's foot, never under More. */
+	/** Settings is pinned at the desktop rail's foot, never under More; the phone row seats it in rail order. */
 	const settingsItem = $derived<WorkspaceNavItem | null>(
 		isAdmin
 			? { id: 'settings', label: 'Settings', icon: Settings, on: currentType === 'settings' || SETTINGS_MEMBERS.includes(currentType as ViewType) }
