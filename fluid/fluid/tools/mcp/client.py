@@ -258,13 +258,26 @@ class McpClient:
             if cmd is None:
                 return
             fut, method, args, kwargs = cmd
-            if fut.cancelled():
-                continue
+            if fut.done():
+                continue  # the caller gave up while this was queued
+            # The work runs as its own task so a caller that gives up (Stop, a
+            # timeout) cancels it here too: an abandoned call must not go on
+            # to finish later, where a retry would repeat its side effects.
+            work = asyncio.ensure_future(self._handle(session, method, args, kwargs))
+            fut.add_done_callback(lambda f, w=work: w.cancel() if f.cancelled() else None)
             try:
-                fut.set_result(await self._handle(session, method, args, kwargs))
+                result = await work
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if fut.cancelled() and not (current is not None and current.cancelling()):
+                    continue  # only the caller's command was cancelled
+                raise
             except Exception as exc:  # noqa: BLE001
-                if not fut.cancelled():
+                if not fut.done():
                     fut.set_exception(exc)
+            else:
+                if not fut.done():
+                    fut.set_result(result)
 
     async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         assert self._cmd_q is not None, "client not started"
@@ -273,13 +286,19 @@ class McpClient:
             raise RuntimeError(f"MCP server {self.name!r}: connection closed")
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        await self._cmd_q.put((fut, method, args, kwargs))
-        # Race the reply against the actor itself: if the transport dies while
-        # a command is queued, the caller gets an error instead of a hang.
-        await asyncio.wait({fut, task}, return_when=asyncio.FIRST_COMPLETED)
-        if fut.done():
-            return fut.result()
-        fut.cancel()
+        try:
+            await self._cmd_q.put((fut, method, args, kwargs))
+            # Race the reply against the actor itself: if the transport dies
+            # while a command is queued, the caller gets an error, not a hang.
+            await asyncio.wait({fut, task}, return_when=asyncio.FIRST_COMPLETED)
+            if fut.done():
+                return fut.result()
+        finally:
+            # ``asyncio.wait`` never cancels what it waits on. A caller that is
+            # cancelled or timed out cancels its command: a queued one is
+            # skipped and one in flight is cancelled on the actor.
+            if not fut.done():
+                fut.cancel()
         raise RuntimeError(f"MCP server {self.name!r}: connection closed")
 
     # ─── Session handlers (run on the actor task) ────────────────────────
@@ -384,11 +403,16 @@ class McpClient:
         return _map_call_result(result)
 
     def _timed_out(self, tool: str) -> dict[str, Any]:
+        # This client deadline (60 s by default) fires before the registry's,
+        # so it carries the same warning: the server got the request and may
+        # still act on it.
         return {
             "kind": "result",
             "text": (
                 f"MCP server {self.name!r} did not respond to {tool} within "
-                f"{self.call_timeout:g} s"
+                f"{self.call_timeout:g} s; whether it took effect is unknown. "
+                "The tool may have completed; retrying may repeat it. Check "
+                "its effect before any retry."
             ),
             "images": [],
             "is_error": True,

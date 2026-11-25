@@ -782,9 +782,10 @@ class ToolRegistry:
             return ToolOutcome(
                 text=(
                     f"{name} did not return within {limit:g} s and was "
-                    "cancelled. The tool is hung or its target is not "
-                    "responding: do not simply re-issue the same call; try a "
-                    "different route or report it."
+                    "cancelled; whether it took effect is unknown. The tool "
+                    "is hung or its target is not responding: check its "
+                    "effect before any retry, do not simply re-issue the "
+                    "same call; try a different route or report it."
                 ),
                 is_error=True,
                 error_code="tool_timeout",

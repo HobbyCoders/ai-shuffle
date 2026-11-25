@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
 FIXTURE = str(Path(__file__).parent.parent / "fixtures" / "fake_mcp_server.py")
@@ -214,6 +216,8 @@ async def test_sdk_read_timeout_is_reported_as_a_tool_timeout_result() -> None:
     out = await client._do_call(_FakeSession(_SdkTimeout(408)), "slow", {})
     assert out["is_error"] and out["error_code"] == "tool_timeout"
     assert "did not respond to slow within 7 s" in out["text"]
+    # Fires before the registry's deadline, so it carries the same warning.
+    assert "may have completed; retrying may repeat it" in out["text"]
 
 
 async def test_other_session_errors_propagate_rather_than_masquerading_as_timeouts() -> None:
@@ -308,3 +312,65 @@ async def test_command_loop_survives_a_failing_command_and_skips_cancelled_ones(
     assert "unknown mcp command: bogus" in str(unknown.exception())
     assert ok.result()["text"] == "ran echo"
     assert [c[0] for c in session.calls] == ["echo"]
+
+
+class _BlockingSession(_FakeSession):
+    """``call_tool`` parks until cancelled; records how each call ended."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.cancelled: list[str] = []
+        self.finished: list[str] = []
+
+    async def call_tool(self, tool, input, **kwargs):
+        self.calls.append((tool, input, kwargs))
+        self.entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled.append(tool)
+            raise
+        self.finished.append(tool)
+        return {"content": [], "isError": False}
+
+
+async def test_a_caller_that_gives_up_cancels_its_queued_and_in_flight_mcp_work() -> None:
+    """tools.md #4: a cancelled or timed-out caller left its Future queued, so
+    the call still ran later and a retry repeated its side effects. Now a
+    queued command is skipped and one in flight is cancelled on the actor,
+    which keeps serving later commands."""
+    from fluid.tools.mcp.client import McpClient
+
+    client = McpClient("srv", {})
+    client._cmd_q = asyncio.Queue()
+    session = _BlockingSession()
+    client._task = asyncio.create_task(client._command_loop(session))
+    try:
+        in_flight = asyncio.create_task(client.call_tool("slow_write", {}))
+        await asyncio.wait_for(session.entered.wait(), 5)
+        queued = asyncio.create_task(client.call_tool("queued_write", {}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # A timeout (the registry's wait_for) cancels the queued caller first.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(queued, 0.01)
+        in_flight.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await in_flight
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert session.cancelled == ["slow_write"]
+        assert session.finished == []
+        # The queued command never reached the server, and the actor lives on.
+        session.entered.clear()
+        later = asyncio.create_task(client.call_tool("later", {}))
+        await asyncio.wait_for(session.entered.wait(), 5)
+        assert [c[0] for c in session.calls] == ["slow_write", "later"]
+        later.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await later
+        assert not client._task.done()
+    finally:
+        await client._cmd_q.put(None)
+        await asyncio.wait_for(client._task, 5)

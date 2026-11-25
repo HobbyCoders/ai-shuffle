@@ -772,3 +772,182 @@ async def test_cancel_during_launch_intent_never_spawns():
     await c.jobs[receipt.task_id]
     dispatch.assert_not_called()
     assert c.snapshot(receipt.task_id)["status"] == "cancelled"
+
+
+async def test_a_stop_during_the_start_handshake_still_runs_and_settles_the_swarm():
+    """native.md Medium #6: a Stop while ``start`` awaited the background
+    acknowledgement, after the queued row was persisted, left that row with
+    no runner: nothing would ever run or settle it."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    published = []
+
+    async def started(receipt):
+        entered.set()
+        await release.wait()
+
+    async def dispatch(data, ctx):
+        return ToolOutcome(text="done")
+
+    async def publish(snapshot):
+        published.append(snapshot["status"])
+
+    finished = AsyncMock()
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), publish, finished)
+    ctx = ToolCtx(extra={"background_task_started": started})
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ctx))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert published == ["queued"]
+
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    release.set()
+    for _ in range(100):
+        if c.jobs:
+            break
+        await asyncio.sleep(0.01)
+    (key, job), = c.jobs.items()
+    await asyncio.wait_for(job, 5)
+    assert c.snapshot(key)["status"] == "completed"
+    assert published[-1] == "completed"
+    finished.assert_awaited_once()
+    assert not c._admissions
+
+
+async def test_a_stop_latched_during_admission_settles_the_swarm_without_dispatching():
+    """A Stop while the first publication is pending latches the admitting
+    swarm too: the runner it starts later persists cancellation and never
+    dispatches a worker, even though the caller's start() was cancelled."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def publish(snapshot):
+        if snapshot["status"] == "queued":
+            entered.set()
+            await release.wait()
+
+    dispatch = AsyncMock(return_value=ToolOutcome(text="done"))
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), publish, AsyncMock())
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert c.active_ids() == set(c.swarms)  # not yet running, still admitting
+
+    start.cancel()
+    c.cancelled.update(c.active_ids())  # what the host's Stop latch does
+    release.set()
+    for _ in range(100):
+        if c.jobs:
+            break
+        await asyncio.sleep(0.01)
+    (key, job), = c.jobs.items()
+    await asyncio.wait_for(job, 5)
+    dispatch.assert_not_called()
+    assert c.snapshot(key)["status"] == "cancelled"
+    assert not c.active_ids()
+
+
+async def test_close_gives_up_on_an_admission_that_never_returns(monkeypatch, caplog):
+    import fluid.swarm as swarm_mod
+
+    monkeypatch.setattr(swarm_mod, "ADMISSION_DRAIN_S", 0.05)
+    entered = asyncio.Event()
+
+    async def publish(snapshot):
+        entered.set()
+        await asyncio.sleep(3600)  # the first publication never returns
+
+    c = SwarmCoordinator("main", AsyncMock(), AsyncMock(), publish, AsyncMock())
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    await asyncio.wait_for(c.aclose(), 5)  # used to wait for ever
+    assert "did not finish" in caplog.text
+    assert not c._admissions and not c.jobs
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    for settle in list(c._settlements):  # the write never returns here
+        settle.cancel()
+
+
+async def test_a_queued_row_written_after_close_gave_up_is_settled_as_cancelled(monkeypatch):
+    """Close cancels an admission whose first write runs in a thread. The
+    write still commits, so the swarm must not stay queued with no runner:
+    once the write returns it is settled as cancelled, and nothing runs."""
+    import threading
+
+    import fluid.swarm as swarm_mod
+
+    monkeypatch.setattr(swarm_mod, "ADMISSION_DRAIN_S", 0.05)
+    entered, gate = asyncio.Event(), threading.Event()
+    rows = []  # what the host's store holds
+
+    def write(snapshot):
+        gate.wait(5)
+        rows.append(snapshot["status"])
+
+    async def publish(snapshot):
+        if snapshot["status"] == "queued":
+            entered.set()
+        await asyncio.to_thread(write, snapshot)
+
+    dispatch, finished = AsyncMock(), AsyncMock()
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), publish, finished)
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    await asyncio.wait_for(c.aclose(), 5)  # gives up on the admission
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    gate.set()  # the write was issued; it commits after all
+    for _ in range(500):
+        if finished.await_count:
+            break
+        await asyncio.sleep(0.01)
+    assert rows == ["queued", "cancelled"]
+    (key,) = c.swarms
+    finished.assert_awaited_once()
+    assert finished.await_args.args[:2] == (key, "cancelled")
+    dispatch.assert_not_called()
+    assert not c.jobs
+
+
+async def test_close_waits_for_an_admission_only_until_the_callers_deadline():
+    """App shutdown passes its absolute deadline. A stuck admission must not
+    get a fresh ``ADMISSION_DRAIN_S`` wait after session settlement used it."""
+    entered, hang = asyncio.Event(), asyncio.Event()
+
+    async def publish(snapshot):
+        entered.set()
+        await hang.wait()
+
+    c = SwarmCoordinator("main", AsyncMock(), AsyncMock(), publish, AsyncMock())
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
+        assert loop.time() - began < 1.0
+    finally:
+        hang.set()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+
+async def test_close_joins_running_swarms_only_until_the_callers_deadline():
+    """The post-cancel join is bounded by the same deadline: a swarm whose
+    publication never returns cannot hold shutdown past it."""
+    hang = asyncio.Event()
+
+    async def publish(snapshot):
+        if snapshot["status"] != "queued":
+            await hang.wait()  # every later publication hangs
+
+    c = SwarmCoordinator("main", AsyncMock(), AsyncMock(), publish, AsyncMock())
+    _, receipt = await c.start({"tasks": [spec("a")]}, ToolCtx())
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
+        assert loop.time() - began < 1.0
+    finally:
+        hang.set()  # let the stuck runner finish, latched, so nothing leaks
+    await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    assert c.snapshot(receipt.task_id)["status"] == "cancelled"

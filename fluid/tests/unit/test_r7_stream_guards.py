@@ -436,6 +436,56 @@ async def test_a_slow_whitespace_runaway_trips_the_clock_not_the_byte_cap() -> N
     assert next(e for e in events if isinstance(e, TurnComplete))
 
 
+class _RunawayThenCheck:
+    """An endless runaway first, then a call that records whether the first
+    stream (standing in for its HTTP response) had been closed by then."""
+
+    name = "anthropic"
+    caps = ProviderCaps()
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_closed = False
+        self.closed_before_retry: bool | None = None
+
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        self.calls += 1
+        if self.calls > 1:
+            self.closed_before_retry = self.first_closed
+            for chunk in _text_call("recovered"):
+                yield chunk
+            return
+        try:
+            for chunk in _tool_call(['{"file_path":"/a.txt","content":"'])[:3]:
+                yield chunk
+            while True:
+                yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": "x" * 500})
+        finally:
+            # Closing an HTTP response awaits the transport.
+            await asyncio.sleep(0.05)
+            self.first_closed = True
+
+
+async def test_an_abandoned_stream_is_closed_before_the_retry_starts() -> None:
+    """native.md Low: breaking out of the provider stream left its closing
+    to the event loop's async-generator finalizer (or garbage collection), so
+    the retry could open a second HTTP stream before the first had closed."""
+    provider = _RunawayThenCheck()
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model=MODEL,
+        registry=_write_registry(), permissions=PermissionEngine("never_ask"),
+        tool_arg_guard=ToolArgStreamGuard(max_bytes=2_000),
+    )
+    try:
+        events = await _run(loop)
+    finally:
+        await loop.aclose()
+
+    assert [e for e in events if isinstance(e, ProviderRetry)]
+    assert provider.calls == 2
+    assert provider.closed_before_retry is True
+
+
 async def test_the_shipped_defaults_catch_the_audited_shape() -> None:
     """bb10c865 streamed ~10.9 KB of tabs and spaces after a complete call and
     ran for 224 s; the default 8 KB whitespace budget ends it."""

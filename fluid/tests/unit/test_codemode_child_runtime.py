@@ -689,3 +689,56 @@ async def test_input_fast_fail_bite(tmp_path, monkeypatch) -> None:
         assert elapsed >= 0.9
     finally:
         await k.stop()
+
+
+# REGRESSION (codemode.md #2): a cancel while the host serves a call
+async def test_cancel_during_a_host_call_does_not_leak_into_the_next_cell() -> None:
+    """A turn stopped while a cell's tool call was being served (a parked
+    permission prompt, an AskUser) restarted nothing, so the child still waited
+    for that call's reply: the next cell's exec frame was taken as the reply and
+    the stopped cell's result came back as the next cell's."""
+    import asyncio
+
+    parked = asyncio.Event()
+
+    async def park(name: str, kwargs: dict) -> HostReply:
+        parked.set()
+        await asyncio.sleep(3600)  # waiting on a person
+        raise AssertionError("unreachable")
+
+    k = SubprocessKernel()
+    await k.start()
+    try:
+        await k.set_vfs(_echo_stub("Ask"))
+        ok = await k.exec("kept = 7", timeout=8, on_host_call=_no_tools)
+        assert ok.error is None, ok.error
+        cell = asyncio.create_task(k.exec(
+            "from tools import Ask\nanswer = Ask()\n'stopped cell: ' + repr(answer)",
+            timeout=30, on_host_call=park,
+        ))
+        await asyncio.wait_for(parked.wait(), 10)
+        cell.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cell
+
+        nxt = await k.exec("('next cell', kept)", timeout=8, on_host_call=_no_tools)
+        assert nxt.error is None, nxt.error
+        assert nxt.value_repr == "('next cell', 7)"  # checkpointed state survives
+    finally:
+        await k.stop()
+
+
+async def test_a_host_reply_for_another_call_is_refused_in_the_cell() -> None:
+    """The child only acts on the reply to the call it made."""
+    from fluid.codemode import _runner
+
+    sent: list[dict] = []
+    with pytest.raises(_runner.vfs.ToolError, match="out of step"):
+        _runner._do_host_call(
+            sent.append, lambda: {"kind": "exec", "code": "x"}, "Ask", {},
+        )
+    call_id = sent[0]["id"]
+    with pytest.raises(_runner.vfs.ToolError, match="out of step"):
+        _runner._do_host_call(
+            sent.append, lambda: {"kind": "host_reply", "id": call_id, "result": "late"}, "Ask", {},
+        )

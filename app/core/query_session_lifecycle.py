@@ -557,6 +557,16 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
         return begin()  # Legacy direct caller: this call is its admission.
     if not receipt:
         return _UserStop(session_id, -1, False, {})  # Captured empty, not uncaptured.
+    # Whatever the guard below decides (session latch, newer input, another
+    # turn already live, failure), a Swarm workflow the stopped input started
+    # is this Stop's to end, and one still admitting is in no captured task
+    # list. Scoped to the receipt's cutoff, so newer input keeps its own.
+    try:
+        from app.core.swarm import latch_started_by
+        latch_started_by(session_id, receipt.get("input_cutoff"))
+    except Exception:  # noqa: BLE001 — per-task Stops must still run.
+        logger.warning("Stop: latching the stopped input's Swarm workflows failed for %s",
+                       session_id, exc_info=True)
     try:
         stop = await asyncio.to_thread(turns_db.apply_stop_receipt, session_id, receipt, begin)
     except Exception:  # noqa: BLE001 — failed validation cannot abandon captured kills.
