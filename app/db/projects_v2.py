@@ -277,6 +277,16 @@ def set_provisional(origin: str, provisional: bool) -> bool:
     return _patch_settings(origin, {}, drop=(PROVISIONAL_KEY,))
 
 
+def mark_registered(origin: str) -> bool:
+    """A worker registered a copy of ``origin``: it is a listed project again
+    (neither hidden nor a first clone in progress). No write when already so."""
+    row = get_project_v2_by_origin(origin)
+    settings = (row or {}).get("settings") or {}
+    if not row or (settings.get("forgotten") is not True and settings.get(PROVISIONAL_KEY) is not True):
+        return False
+    return _patch_settings(origin, {}, drop=("forgotten", PROVISIONAL_KEY))
+
+
 def list_projects_v2() -> List[Dict[str, Any]]:
     """Return every project_v2, newest first."""
     with get_db() as conn:
@@ -290,6 +300,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'upsert_project record_remote pin_remote mark_merged set_forgotten set_provisional',
+    'upsert_project record_remote pin_remote mark_merged set_forgotten set_provisional mark_registered',
     scope='shared',
 )

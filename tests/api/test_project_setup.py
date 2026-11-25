@@ -571,6 +571,7 @@ def test_parse_progress_and_display_remote():
     assert project_setup.parse_progress("remote: Counting objects: 10% (1/10)") is None
     assert project_setup.display_remote("https://tok:x@github.com/Acme/Repo.git") == "github.com/Acme/Repo"
     assert project_setup.display_remote("git@github.com:acme/repo.git") == "github.com/acme/repo"
+    assert project_setup.display_remote("ssh://git@github.com/acme/repo.git") == "github.com/acme/repo"
     assert project_setup.display_remote(None) is None
 
 
@@ -1046,6 +1047,19 @@ def test_importing_a_git_folder_from_provider_settings_leaves_no_local_twin(ws, 
 # A new project cloned from the New project dialog (POST /projects/clone)
 # ---------------------------------------------------------------------------
 
+def _https(monkeypatch, local: str, name: str = "demo") -> str:
+    """An https:// URL that git reaches as the local repository ``local``
+    (``POST /projects/clone`` takes network remotes only)."""
+    import os
+
+    url = f"https://git.example.com/example-org/{name}.git"
+    count = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", f"url.{local}.insteadOf")
+    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", url)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
+    return url
+
+
 def _clone_new(client, clone_url: str, **extra):
     return client.post("/api/v1/projects/clone", json={"id": "demo", "name": "Demo", "clone_url": clone_url, **extra})
 
@@ -1054,8 +1068,8 @@ def _listed(client, project_v2_id: str) -> bool:
     return any(p["project_v2_id"] == project_v2_id for p in client.get("/api/v1/projects/overview").json()["projects"])
 
 
-def test_clone_new_registers_the_project_only_after_the_clone(client, ws, test_db):
-    remote = _bare_remote(ws)
+def test_clone_new_registers_the_project_only_after_the_clone(client, ws, test_db, monkeypatch):
+    remote = _https(monkeypatch, _bare_remote(ws))
     resp = _clone_new(client, remote)
     assert resp.status_code == 202, resp.text
     body = resp.json()
@@ -1074,8 +1088,9 @@ def test_clone_new_registers_the_project_only_after_the_clone(client, ws, test_d
     assert _listed(client, body["project_v2_id"])
 
 
-def test_a_failed_clone_leaves_no_project_and_a_retry_works(client, ws, test_db):
-    remote = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+def test_a_failed_clone_leaves_no_project_and_a_retry_works(client, ws, test_db, monkeypatch):
+    local = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+    remote = _https(monkeypatch, local)
     first = _clone_new(client, remote)
     assert first.status_code == 202, first.text
     _run_setups()
@@ -1087,7 +1102,7 @@ def test_a_failed_clone_leaves_no_project_and_a_retry_works(client, ws, test_db)
     assert not (ws / "demo").exists()
     assert not _listed(client, first.json()["project_v2_id"])  # no half-made project on the Projects page
 
-    assert _bare_remote(ws) == remote  # the repository now exists: the same request succeeds
+    assert _bare_remote(ws) == local  # the repository now exists: the same request succeeds
     retry = _clone_new(client, remote)
     assert retry.status_code == 202, retry.text
     _run_setups()
@@ -1096,8 +1111,8 @@ def test_a_failed_clone_leaves_no_project_and_a_retry_works(client, ws, test_db)
     assert _listed(client, retry.json()["project_v2_id"])
 
 
-def test_clone_new_refuses_a_repository_that_is_already_a_project(client, ws, test_db):
-    remote = _bare_remote(ws)
+def test_clone_new_refuses_a_repository_that_is_already_a_project(client, ws, test_db, monkeypatch):
+    remote = _https(monkeypatch, _bare_remote(ws))
     _clone_new(client, remote)
     _run_setups()
     again = client.post("/api/v1/projects/clone", json={"id": "demo-2", "name": "Demo 2", "clone_url": remote + "/"})
@@ -1106,8 +1121,8 @@ def test_clone_new_refuses_a_repository_that_is_already_a_project(client, ws, te
     assert again.json()["detail"]["project_id"] == "demo"
 
 
-def test_clone_new_refuses_a_taken_id_or_a_folder_with_files_before_cloning(client, ws, test_db):
-    remote = _bare_remote(ws)
+def test_clone_new_refuses_a_taken_id_or_a_folder_with_files_before_cloning(client, ws, test_db, monkeypatch):
+    remote = _https(monkeypatch, _bare_remote(ws))
     database.create_project(project_id="demo", name="Other", description=None, path="other")
     taken = _clone_new(client, remote)
     assert taken.status_code == 409 and "already exists" in taken.json()["detail"]
@@ -1120,19 +1135,21 @@ def test_clone_new_refuses_a_taken_id_or_a_folder_with_files_before_cloning(clie
     assert (ws / "demo2" / "notes.txt").read_text() == "mine"
 
 
-def test_clone_new_refuses_a_repository_whose_project_moved(client, ws, test_db):
-    old, new = _bare_remote(ws, "demo"), _bare_remote(ws, "moved")
+def test_clone_new_refuses_a_repository_whose_project_moved(client, ws, test_db, monkeypatch):
+    old = _https(monkeypatch, _bare_remote(ws, "demo"), "demo")
+    new = _https(monkeypatch, _bare_remote(ws, "moved"), "moved")
     pv2 = _peer_project(test_db, "elsewhere", "Demo", remote=old)
     projects_v2.pin_remote(pv2["origin"], new, default_branch="main", generation=1,
                            keep_upstream=False, previous=old)
     refused = _clone_new(client, old)
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["error_code"] == "moved"
-    assert "_remotes/moved" in refused.json()["detail"]["error"]
+    assert "example-org/moved" in refused.json()["detail"]["error"]
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
 
     # A pin that lands while the first clone waits: refused, never swapped in.
-    other_old, other_new = _bare_remote(ws, "tool"), _bare_remote(ws, "tool-next")
+    other_old = _https(monkeypatch, _bare_remote(ws, "tool"), "tool")
+    other_new = _https(monkeypatch, _bare_remote(ws, "tool-next"), "tool-next")
     queued = client.post("/api/v1/projects/clone", json={"id": "tool", "name": "Tool", "clone_url": other_old})
     assert queued.status_code == 202, queued.text
     projects_v2.pin_remote(auto_link_group_id(other_old), other_new, default_branch="main", generation=1,
@@ -1144,14 +1161,28 @@ def test_clone_new_refuses_a_repository_whose_project_moved(client, ws, test_db)
     assert not _listed(client, queued.json()["project_v2_id"])
 
 
-def test_clone_new_refuses_a_local_source_outside_the_served_folders(client, ws, test_db):
-    resp = _clone_new(client, _outside_remote(ws))
-    assert resp.status_code == 400 and "inside the workspace" in resp.json()["detail"]
+def test_clone_new_takes_network_remotes_only(client, ws, test_db):
+    inside = ws / "_remotes" / "demo.git"
+    _bare_remote(ws)
+    sources = [_outside_remote(ws, "other"), inside.as_uri(), str(inside)]
+    try:  # a link inside the workspace to a repository outside it
+        (ws / "linked").symlink_to(ws.parent / "remotes" / "other.git")
+        sources.append(str(ws / "linked"))
+    except OSError:
+        pass  # no symlinks for this user (Windows without developer mode)
+    for source in sources:
+        resp = _clone_new(client, source)
+        assert resp.status_code == 400, (source, resp.text)
+        assert resp.json()["detail"] == "To add a folder on this worker, use Folder."
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+    for remote in ("https://github.com/example-org/demo.git", "ssh://git@github.com/example-org/demo.git",
+                   "git@github.com:example-org/demo.git"):
+        assert project_workers._clone_new_spec(project_workers.CloneNewRequest(
+            id="demo", name="Demo", clone_url=remote))["clone_url"] == remote
 
 
 def test_a_first_clone_ended_outside_the_executor_is_hidden_again(client, ws, test_db, monkeypatch):
-    missing = _local_remote(ws / "_remotes" / "demo.git")
+    missing = _https(monkeypatch, _local_remote(ws / "_remotes" / "demo.git"))
     # The worker restarted mid-clone: the restart sweep settles the op.
     first = _clone_new(client, missing).json()
     assert git_ops_db.claim_op(first["op_id"], ME)
@@ -1170,6 +1201,42 @@ def test_a_first_clone_ended_outside_the_executor_is_hidden_again(client, ws, te
     assert not _listed(client, third["project_v2_id"])
 
 
+def test_a_failed_first_clone_never_hides_a_project_another_worker_holds(client, ws, test_db, monkeypatch):
+    missing = _https(monkeypatch, _local_remote(ws / "_remotes" / "demo.git"))
+    origin = auto_link_group_id(missing)
+    # Another worker has a setup under way for the same identity (a peer's runner).
+    first = _clone_new(client, missing).json()
+    git_ops_db.insert_op(PEER, project_setup.SETUP_OP, project_v2_id=first["project_v2_id"],
+                         params={"origin": origin}, op_id=project_setup.new_op_id())
+    _run_setups()
+    assert git_ops_db.get_op(first["op_id"])["status"] == "error"
+    assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
+
+    # Another worker registered a copy while this one's clone failed.
+    projects_v2.set_provisional(origin, True)
+    _peer_project(test_db, "demo-there", "Demo", remote=missing)
+    op = {"id": "psetup-" + "0" * 32, "params": {"origin": origin, "project_id": "demo"}}
+    project_setup.hide_failed_first_clone(op)
+    assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
+
+
+def test_any_local_registration_makes_a_hidden_or_provisional_identity_listed(ws, test_db):
+    from app.api.projects import create_project_record_sync
+    from app.core.models import ProjectCreate
+
+    remote = "https://github.com/example-org/folder.git"
+    init_repo(ws / "folder", files={"README.md": "x\n"})
+    git(ws / "folder", "remote", "add", "origin", remote)
+    origin = auto_link_group_id(remote)
+    projects_v2.upsert_project(origin, name="Folder")
+    projects_v2.set_provisional(origin, True)
+    projects_v2.set_forgotten(origin, True)
+    create_project_record_sync(ProjectCreate(id="folder", name="Folder", path="folder"))  # the Folder flow
+    settings_after = projects_v2.get_project_v2_by_origin(origin)["settings"]
+    assert settings_after.get("forgotten") is not True
+    assert projects_v2.PROVISIONAL_KEY not in settings_after
+
+
 def test_a_clone_that_goes_silent_is_stopped_as_a_network_failure(ws, monkeypatch):
     import sys
     import time
@@ -1186,10 +1253,35 @@ def test_a_clone_that_goes_silent_is_stopped_as_a_network_failure(ws, monkeypatc
     assert list(ws.iterdir()) == []
 
 
-def test_clone_new_accepts_a_full_length_id_another_install_uses(client, ws, test_db):
+def test_a_quiet_local_copy_is_not_stopped_but_every_clone_has_a_deadline(ws, monkeypatch):
+    import sys
+
+    monkeypatch.setattr(project_setup, "CLONE_IDLE_SECONDS", 0.3)
+    # A local source that works quietly for longer than the idle limit: kept.
+    monkeypatch.setattr(project_setup, "_clone_command",
+                        lambda url, temp: [sys.executable, "-c", "import time; time.sleep(1.2)"])
+    project_setup._clone(project_setup._Job(project_setup.new_op_id(), None, None),
+                         (ws.parent / "src.git").as_uri(), ws / "quiet")
+    assert (ws / "quiet").is_dir()
+
+    # A clone that keeps talking but never ends: stopped at the overall deadline.
+    monkeypatch.setattr(project_setup, "CLONE_IDLE_SECONDS", 300.0)
+    monkeypatch.setattr(project_setup, "CLONE_DEADLINE_SECONDS", 0.6)
+    chatty = ("import sys, time\n"
+              "for i in range(80):\n"
+              "    sys.stderr.write('Receiving objects: 1%\\r'); sys.stderr.flush(); time.sleep(0.1)\n")
+    monkeypatch.setattr(project_setup, "_clone_command", lambda url, temp: [sys.executable, "-c", chatty])
+    with pytest.raises(project_setup.SetupError) as raised:
+        project_setup._clone(project_setup._Job(project_setup.new_op_id(), None, None),
+                             "https://git.example.com/example-org/big.git", ws / "big")
+    assert raised.value.error_code == "network" and "still running after" in str(raised.value)
+    assert not (ws / "big").exists()
+
+
+def test_clone_new_accepts_a_full_length_id_another_install_uses(client, ws, test_db, monkeypatch):
     long_id = "demo-" + "x" * 45
     _peer_project(test_db, long_id, "Peer demo")
-    resp = _clone_new(client, _bare_remote(ws), id=long_id)
+    resp = _clone_new(client, _https(monkeypatch, _bare_remote(ws)), id=long_id)
     assert resp.status_code == 202, resp.text
     _run_setups()
     status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
@@ -1215,25 +1307,48 @@ def test_clone_new_refuses_the_same_repository_by_another_spelling(client, ws, t
     assert elsewhere.json()["detail"]["error_code"] == "already_added"
     assert elsewhere.json()["detail"]["project_id"] is None
     assert "Tool on another worker" in elsewhere.json()["detail"]["error"]
+
+    # The scheme form of SSH (with its login) is the same repository too.
+    _peer_project(test_db, "kit", "Kit", remote="ssh://git@github.com/example-org/kit.git")
+    scheme = client.post("/api/v1/projects/clone", json={
+        "id": "kit", "name": "Kit here", "clone_url": "https://github.com/example-org/kit"})
+    assert scheme.status_code == 409 and scheme.json()["detail"]["error_code"] == "already_added", scheme.text
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
 
 
-def test_a_retry_renames_a_first_clone_but_never_a_listed_project(client, ws, test_db):
-    remote = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+def test_a_remembered_identity_with_no_copy_does_not_block_a_new_clone(client, ws, test_db):
+    # The project's last copy was removed: its identity (and remote) is remembered
+    # but it has no Projects card, so cloning the repository again goes ahead.
+    ssh = "git@github.com:example-org/old.git"
+    origin = auto_link_group_id(ssh)
+    projects_v2.upsert_project(origin, name="Old")
+    projects_v2.record_remote(origin, ssh)
+    resp = client.post("/api/v1/projects/clone", json={
+        "id": "old", "name": "Old", "clone_url": "https://github.com/example-org/old.git"})
+    assert resp.status_code == 202, resp.text
+
+
+def test_a_retry_renames_a_first_clone_but_never_a_listed_project(client, ws, test_db, monkeypatch):
+    local = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+    remote = _https(monkeypatch, local)
     first = _clone_new(client, remote, name="Demo").json()
     _run_setups()
-    assert _bare_remote(ws) == remote
+    assert _bare_remote(ws) == local
     retry = _clone_new(client, remote, name="Demo API").json()
     _run_setups()
     assert database.get_project("demo")["name"] == "Demo API"
     assert projects_v2.get_project_v2(first["project_v2_id"])["name"] == "Demo API"
     assert "provisional_clone" not in projects_v2.get_project_v2(retry["project_v2_id"])["settings"]
 
-    # A listed project another worker has keeps its name.
-    other = _bare_remote(ws, "other")
+    # A listed project another worker has keeps its name, even when an earlier
+    # failed first clone left its identity marked provisional.
+    other = _https(monkeypatch, _bare_remote(ws, "other"), "other")
     listed = _peer_project(test_db, "other-there", "Other", origin=auto_link_group_id(other))
+    projects_v2.set_provisional(listed["origin"], True)
     assert _clone_new(client, other, id="other", name="Mine").status_code == 202
     assert projects_v2.get_project_v2(listed["id"])["name"] == "Other"
+    _run_setups()  # registering this worker's copy clears the stale mark
+    assert projects_v2.PROVISIONAL_KEY not in projects_v2.get_project_v2(listed["id"])["settings"]
 
 
 def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test_db):

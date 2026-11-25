@@ -62,9 +62,12 @@ ZOMBIE_SECONDS = 90.0
 # Abort a clone whose transfer stalls (bytes/second below the limit for the time).
 LOW_SPEED_LIMIT = "1000"
 LOW_SPEED_TIME = "300"
-# ... and one that goes silent (an SSH server that accepts and then never
-# answers is not covered by the HTTP limits above): no output for this long.
+# ... a network clone that goes silent (an SSH server that accepts and then
+# never answers is not covered by the HTTP limits above): no output this long ...
 CLONE_IDLE_SECONDS = 300.0
+# ... and, as a backstop for any clone, one still running after this long
+# (generous enough for a big repository on a slow link).
+CLONE_DEADLINE_SECONDS = 3600.0
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -117,7 +120,11 @@ def new_op_id() -> str:
 # ---------------------------------------------------------------------------
 
 def display_remote(url: Optional[str]) -> Optional[str]:
-    """``github.com/owner/repo`` for any remote spelling; never credentials."""
+    """``github.com/owner/repo`` for any remote spelling; never credentials.
+
+    For display and comparison only (never a clone URL): the login of a
+    scheme-form SSH URL (``ssh://git@host/...``) is dropped like the scp form's.
+    """
     from app.core.scrub import strip_url_userinfo
 
     if not url:
@@ -125,7 +132,7 @@ def display_remote(url: Optional[str]) -> Optional[str]:
     text = strip_url_userinfo(url.strip()) or ""
     match = re.match(r"^[A-Za-z][A-Za-z0-9+.\-]*://(.*)$", text)
     if match:
-        text = match.group(1)
+        text = re.sub(r"^[^@/]*@", "", match.group(1))
     else:
         scp = re.match(r"^(?:[^@/]+@)?([^:/]+):(?!/)(.*)$", text)
         if scp and len(scp.group(1)) > 1:
@@ -792,7 +799,7 @@ def _clone_command(clone_url: str, temp: str) -> List[str]:
 def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
     """Clone into a temporary sibling, then rename it to ``final_path``."""
     from fluid.tools.child_env import scrub_child_env
-    from app.core.git_service import _IS_WINDOWS, _kill_git_tree, _quiet_git_env, git_service
+    from app.core.git_service import _IS_WINDOWS, _kill_git_tree, _quiet_git_env, classify_clone_url, git_service
     from app.db import git_ops as git_ops_db
 
     parent = final_path.parent
@@ -810,14 +817,21 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
              if _IS_WINDOWS else {"start_new_session": True})
     tail: List[str] = []
-    last_output = [time.monotonic()]
-    idle = threading.Event()  # set when the watchdog killed a silent clone
+    started = time.monotonic()
+    last_output = [started]
+    # Only a network clone reports steadily (``--progress`` covers receiving
+    # and checkout); a local copy may be quiet while it works.
+    watch_idle = classify_clone_url(clone_url)[0] == "remote"
+    stopped: List[str] = []  # why the watchdog killed the clone: "idle" or "deadline"
     done = threading.Event()
 
     def watchdog(proc: subprocess.Popen) -> None:
-        while not done.wait(min(5.0, CLONE_IDLE_SECONDS / 4)):
-            if time.monotonic() - last_output[0] > CLONE_IDLE_SECONDS:
-                idle.set()
+        while not done.wait(min(5.0, CLONE_IDLE_SECONDS / 4, CLONE_DEADLINE_SECONDS / 4)):
+            now = time.monotonic()
+            reason = ("deadline" if now - started > CLONE_DEADLINE_SECONDS
+                      else "idle" if watch_idle and now - last_output[0] > CLONE_IDLE_SECONDS else None)
+            if reason:
+                stopped.append(reason)
                 _kill_git_tree(proc)
                 return
 
@@ -860,9 +874,13 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
             if job.cancelled:
                 raise SetupError(CANCELLED, "Setup was cancelled.")
             job.finalizing = True
-        if idle.is_set():
+        if stopped == ["idle"]:
             raise SetupError(NETWORK, "The repository host stopped answering, so the clone was stopped. "
                                       "Check this worker's network connection and try again.")
+        if stopped == ["deadline"]:
+            raise SetupError(NETWORK, f"The clone was still running after {int(CLONE_DEADLINE_SECONDS // 60)} "
+                                      "minutes, so it was stopped. Check this worker's network connection "
+                                      "and try again.")
         if returncode != 0:
             raise classify_clone_failure("\n".join(tail), clone_url)
         git_service.invalidate_status_cache(temp)
@@ -916,15 +934,37 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         hide_failed_first_clone(op_row)
         raise
     params = op_row.get("params") or {}
-    if params.get("project_id") and params.get("origin"):
+    if params.get("origin"):
         from app.db import projects_v2
 
         try:
-            projects_v2.set_provisional(params["origin"], False)
-        except Exception:  # noqa: BLE001 - the project is registered; the marker only matters on failure
-            logger.warning("project setup: could not clear the provisional mark of %s", op_row.get("id"),
+            # Registered here (or an existing row adopted): listed, whatever an
+            # earlier removal or failed first clone left on the identity.
+            projects_v2.mark_registered(params["origin"])
+        except Exception:  # noqa: BLE001 - the project is registered; the mark only affects listing
+            logger.warning("project setup: could not clear the hidden mark of %s", op_row.get("id"),
                            exc_info=True)
     return result
+
+
+def identity_in_use(origin: str, project_v2_id: Optional[str], *, exclude_op_id: Optional[str] = None) -> bool:
+    """Whether any worker has a registered copy of ``origin`` or a live setup op for it.
+
+    Reads the shared tables (every worker's ``projects`` rows and ``git_ops``),
+    not only this runner's. A ``running`` op whose heartbeat went stale does
+    not count: its runner is gone and its own restart sweep settles it.
+    """
+    from app.db import git_ops as git_ops_db
+    from app.db import projects as projects_db
+
+    if origin and projects_db.get_projects_in_link_group(origin):
+        return True
+    if not project_v2_id:
+        return False
+    return any(row.get("id") != exclude_op_id and row.get("op") == SETUP_OP
+               and (row.get("status") == "queued"
+                    or (row.get("status") == "running" and not git_ops_db._is_stale_running(row)))
+               for row in git_ops_db.list_recent_for_project(project_v2_id, limit=50))
 
 
 def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
@@ -934,10 +974,10 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     before it ran, the restart sweep, and a request refused while starting.
     Only an identity still marked provisional (``projects_v2.PROVISIONAL_KEY``,
     set by ``POST /projects/clone`` for one that was not a listed project) is
-    hidden, and only while this worker has no copy and no other setup for it
-    is under way. Best effort: the op's own failure is what the caller needs.
+    hidden, and only while no worker has a copy of it and no other setup for
+    it is under way anywhere (:func:`identity_in_use`). Best effort: the op's
+    own failure is what the caller needs.
     """
-    from app.db import git_ops as git_ops_db
     from app.db import projects_v2
 
     params = op_row.get("params") or {}
@@ -948,12 +988,8 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
         pv2 = projects_v2.get_project_v2_by_origin(origin)
         if not pv2 or (pv2.get("settings") or {}).get(projects_v2.PROVISIONAL_KEY) is not True:
             return
-        if _registered_row(origin) is not None:
-            return
-        if any(row["id"] != op_row.get("id") and row.get("project_v2_id") == pv2["id"]
-               and row["status"] in ("queued", "running")
-               for row in git_ops_db.list_ops_for_runner(_me(), SETUP_OP, limit=50)):
-            return  # a newer attempt is under way; it settles the identity itself
+        if identity_in_use(origin, pv2["id"], exclude_op_id=op_row.get("id")):
+            return  # a copy exists or another attempt is under way; that settles it
         projects_v2.set_forgotten(origin, True)
     except Exception:  # noqa: BLE001
         logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)

@@ -585,9 +585,7 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
     """
     from pathlib import Path
 
-    from app.api.git import _local_clone_source_served
     from app.api.projects import check_new_project
-    from app.core.config import settings
     from app.core.git_service import classify_clone_url
     from app.core.models import ProjectCreate
     from app.core.project_links import normalize_remote_url
@@ -601,11 +599,11 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
     kind, detail = classify_clone_url(clean)
     if kind == "invalid":
         raise HTTPException(status_code=400, detail=detail or "Enter the repository's clone URL")
-    if kind == "local" and not _local_clone_source_served(detail or "", str(settings.effective_workspace_dir)):
-        # A typed local source is checked as ``/git/clone`` checks it, before an
-        # identity derived from that same URL could pass for its recorded remote.
-        raise HTTPException(status_code=400,
-                            detail="A local clone source must be inside the workspace or a project folder")
+    if kind != "remote":
+        # Network remotes only (https://, ssh://, git@host:path). A path or
+        # file:// URL is a folder on this worker: the Folder tab adds it, and
+        # Git's own discovery could open a repository outside what was checked.
+        raise HTTPException(status_code=400, detail="To add a folder on this worker, use Folder.")
     found = identity_for_remote(clean)
     if not found:
         raise HTTPException(status_code=400, detail="Enter the repository's clone URL")
@@ -630,9 +628,10 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail={
             "error_code": setup.FOLDER_EXISTS,
             "error": f"{path} already exists and has other files in it. Choose another project ID."})
-    if not _is_listed(pv2):
-        # Only a first clone makes this identity: name it after this attempt,
-        # and hide it again if no attempt succeeds (``hide_failed_first_clone``).
+    if not setup.identity_in_use(origin, projects_v2.project_v2_id_for_origin(origin)):
+        # No worker has a copy or a setup under way: this first clone makes the
+        # identity. Name it after this attempt, and hide it again if no attempt
+        # succeeds (``hide_failed_first_clone``); a listed project is never renamed.
         projects_v2.upsert_project(origin, name=payload.name)
         projects_v2.set_provisional(origin, True)
     projects_v2.set_forgotten(origin, False)
@@ -642,16 +641,6 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
         "folder": (body.folder or "").strip() or payload.id, "mode": "auto",
         "project_id": body.id, "expected_id": payload.id,
     }
-
-
-def _is_listed(pv2: Optional[Dict[str, Any]]) -> bool:
-    """Whether an identity is a project of its own (not hidden, merged or a first clone in progress)."""
-    from app.core.project_remote import merged_into
-    from app.db import projects_v2
-
-    project_settings = (pv2 or {}).get("settings") or {}
-    return (pv2 is not None and project_settings.get("forgotten") is not True
-            and project_settings.get(projects_v2.PROVISIONAL_KEY) is not True and not merged_into(pv2))
 
 
 def _remote_key(url: Optional[str]) -> str:
@@ -666,6 +655,9 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
 
     Identities are hashes of one spelling, so the same repository added from its
     SSH URL is a different origin than its HTTPS URL; the hashes stay as they are.
+    Listed elsewhere means a worker has a copy or a setup under way (what gives
+    it a Projects card); an identity only remembered from a removed project
+    does not block a new clone.
     """
     from app.db import projects_v2
 
@@ -683,8 +675,8 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     identities = projects_v2.get_projects_v2_by_origins(matches)
     for origin in matches:
         pv2 = identities.get(origin)
-        if _is_listed(pv2):
-            name = pv2.get("name") or "another project"
+        if setup.identity_in_use(origin, projects_v2.project_v2_id_for_origin(origin)):
+            name = (pv2 or {}).get("name") or "another project"
             return {"id": None, "name": name,
                     "message": f"This repository is already the project {name} on another worker. "
                                "Set it up here from its page in Projects."}

@@ -389,7 +389,22 @@ def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optiona
             link_group_id=link_group_id,
         )
     record_remote_repository(created, project_path)
+    _mark_identity_registered(created)
     return created
+
+
+def _mark_identity_registered(created: Optional[dict]) -> None:
+    """A copy registered here makes its logical project listed again: clear a
+    hidden or first-clone mark left by an earlier removal or failed clone."""
+    if not created:
+        return
+    try:
+        from app.core.project_resolver import origin_for_legacy_project
+        from app.db import projects_v2
+
+        projects_v2.mark_registered(origin_for_legacy_project(created))
+    except Exception:  # noqa: BLE001 - the project exists; the mark only affects listing
+        logger.warning("projects: could not clear the hidden mark of %s", created.get("id"), exc_info=True)
 
 
 def record_remote_repository(created: Optional[dict], project_path: Path) -> None:
