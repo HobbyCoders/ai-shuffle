@@ -14,7 +14,9 @@ The classifier is deliberately conservative. It parses the command with
 only when:
 
 - every simple command's program is in :data:`READ_ONLY_PROGRAMS` and passes
-  that program's extra check (if any);
+  that program's extra check (if any), and is named bare: a program written
+  as a path (``./ls``, ``scripts/cat``, ``/usr/bin/grep``, ``C:\\bin\\git.exe``)
+  runs whatever file is there, so it is ``write``;
 - there is no output redirection (``>``, ``>>``, ``2>``, ``>&``, ``<(``);
   ``2>&1`` alone is tolerated because it merges streams without touching a file;
 - there is no command substitution (``$(`` or backticks), no background ``&``,
@@ -815,6 +817,10 @@ def _simple_command_ok(tokens: list[str]) -> bool:
         tokens = tokens[1:]
     if not tokens:
         return False
+    # A program named by path (./ls, scripts/cat, /tmp/x/grep, C:\bin\git.exe)
+    # runs whatever file sits there, not the utility its basename suggests.
+    if re.search(r"[\\/]", tokens[0]):
+        return False
     program = _program_name(tokens[0])
     if program not in READ_ONLY_PROGRAMS:
         return False
@@ -914,11 +920,15 @@ def _scope_label(tokens: list[str]) -> str | None:
     subcommand program as ``program subcommand``; anything else as the
     program alone. None when a wrapper carries options (``sudo -u root``):
     which token is the wrapped program is then not knowable from the text,
-    and a guess would scope the approval wrongly.
+    and a guess would scope the approval wrongly. None too for a program
+    named by path (``/usr/bin/git``, ``scripts/git``, ``./build.sh``), at any
+    depth of wrapping: that runs whatever file sits there, so approving it
+    must not cover the bare name or another path (and a relative path names
+    a different file once the working directory changes); it stays one-shot.
     """
     while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
         tokens = tokens[1:]
-    if not tokens:
+    if not tokens or re.search(r"[\\/]", tokens[0]):
         return None
     program = _program_name(tokens[0])
     rest = tokens[1:]
@@ -927,6 +937,11 @@ def _scope_label(tokens: list[str]) -> str | None:
             return program
         if rest[0].startswith("-"):
             return None
+        if program == "timeout":
+            # ``timeout DURATION COMMAND``: the duration is not the program.
+            rest = rest[1:]
+            if not rest:
+                return None
         inner = _scope_label(rest)
         return None if inner is None else f"{program} {inner}"
     if program in SUBCOMMAND_PROGRAMS:

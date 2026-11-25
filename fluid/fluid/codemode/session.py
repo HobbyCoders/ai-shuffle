@@ -765,6 +765,10 @@ class CodeModeSession:
         for call in called_tools:
             if call.get("shell_exit_code") is not None:
                 text += f"\nShell call {call['name']}: [exit code {call['shell_exit_code']}]"
+        # A hook stop is told here whether or not the cell caught the refusals.
+        stop_notice = bridge.stop_notice()
+        if stop_notice:
+            text += f"\n{stop_notice}"
         if result.notes:
             text = f"{result.notes}\n{text}"
         if result.error:

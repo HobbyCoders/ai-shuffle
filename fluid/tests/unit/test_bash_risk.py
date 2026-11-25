@@ -40,8 +40,6 @@ SAFE_COMMANDS = [
     "cat file.txt",
     'cat "a b.txt"',
     r"cat C:\Users\dev\notes.txt",  # Windows path as an argument
-    r'"C:\Program Files\Git\bin\git.exe" status',  # quoted Windows program path
-    "/usr/bin/grep -r pattern src",
     "git status --short",
     "git status",
     "git log --oneline -10",
@@ -207,6 +205,26 @@ WRITE_COMMANDS = [
 def test_read_only_commands_are_safe(command: str) -> None:
     assert is_read_only(command), command
     assert classify({"command": command}) == "safe"
+
+
+@pytest.mark.parametrize("command", [
+    "./ls",
+    "./cat notes.txt",
+    "scripts/cat notes.txt",
+    "bin/git status",
+    "/tmp/x/grep -r pattern src",
+    "/usr/bin/grep -r pattern src",
+    "git status && ./ls",
+    r"tools\grep.exe pattern",
+    r"C:\tools\cat.exe notes.txt",
+    r'"C:\Program Files\Git\bin\git.exe" status',
+    "FOO=1 ./ls",
+])
+def test_a_program_named_by_path_is_never_read_only(command: str) -> None:
+    """``./ls`` runs whatever file is there, not the ls utility: a program
+    named by a relative, absolute or Windows path is not provably read-only."""
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
 
 
 @pytest.mark.parametrize("command", WRITE_COMMANDS)
@@ -734,6 +752,10 @@ def test_scope_labels_name_the_wrapped_program() -> None:
     )
     assert scope_labels("make") == frozenset({"make"})
     assert scope_labels("make clean") == frozenset({"make clean"})
+    # timeout's first argument is its duration, not the program it runs.
+    assert scope_labels("timeout 30 pytest") == frozenset({"timeout pytest"})
+    assert scope_labels("timeout 30 rm -rf /") == frozenset({"timeout rm"})
+    assert scope_labels("timeout 30") is None
     # Plain programs keep their program-wide label.
     assert scope_labels("git status && git push") == frozenset({"git"})
 
@@ -757,6 +779,35 @@ def test_allow_always_on_sudo_covers_that_program_only() -> None:
     assert engine.decide(bash_spec, {"command": "sudo apt update"}).source == "session"
     assert engine.decide(bash_spec, {"command": "sudo rm -rf /"}).decision == "ask"
     assert engine.decide(bash_spec, {"command": "sudo -u root apt list"}).decision == "ask"
+
+
+@pytest.mark.parametrize("command", [
+    "/usr/bin/git push",
+    "scripts/git push",
+    "./git push",
+    r'"C:\tools\git.exe" push',
+    "FOO=1 /usr/bin/git push",
+    "sudo /usr/bin/git push",
+    "env FOO=1 ./git push",
+    "timeout 5 scripts/git push",
+    "ls | xargs ./git push",
+    "git push && /usr/bin/git push",
+])
+def test_a_program_named_by_path_is_never_remembered(command: str) -> None:
+    """``/usr/bin/git`` and ``scripts/git`` are different files from each
+    other and from whatever ``git`` resolves to, at any depth of wrapping:
+    their "Always allow" stays one-shot, and a bare ``git`` approval does not
+    cover them."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(command) is None
+    engine = PermissionEngine("on_write")
+    for bare in ("git push", "sudo git push", "env git push", "timeout 5 git push", "xargs git push"):
+        engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": bare}))
+    assert engine.decide(bash_spec, {"command": "git push"}).source == "session"
+    assert engine.decide(bash_spec, {"command": command}).decision == "ask"
 
 
 def test_allow_always_on_npm_run_does_not_cover_npm_install() -> None:
