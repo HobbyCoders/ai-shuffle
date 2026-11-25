@@ -257,6 +257,27 @@ def test_short_known_key_masked_as_a_token_but_kept_inside_words():
     assert redact_text("invalid API key local.", ["local"]) == "invalid API key [redacted]."
     assert redact_text("Bearer local", ["Bearer local", "local"]) == "[redacted]"
     assert redact_text('{"apiKey": "k"} key=k', ["k"]) == '{"apiKey": "[redacted]"} key=[redacted]'
+    # Serialized text: an escape next to the key is a boundary, not a word.
+    for text in ('"Invalid API key:\\nlocal"', '"key\\tlocal\\n"', '"key \\"local\\""',
+                 '"key:\\u000alocal"', '"local\\r\\n"', "'path\\/local'"):
+        assert "local" not in redact_text(text, ["local"]), text
+    assert redact_text('"see \\nlocalhost"', ["local"]) == '"see \\nlocalhost"'
+
+
+async def test_json_refusal_with_an_escaped_newline_before_a_short_key():
+    """The serialized body and the decoded provider message both lose a
+    short configured key that follows ``\\n`` in the JSON."""
+    from fluid.providers.local.client import LocalClient
+
+    body = json.dumps({"error": {"message": "Invalid API key:\nlocal"}})
+    async with _refusing(401, body) as http:
+        client = LocalClient("local", base_url=URL, http_client=http, retry=NO_RETRY)
+        errors = [c.payload for c in [c async for c in client.stream(REQUEST)] if c.kind == "error"]
+    assert errors
+    for payload in errors:
+        for field in ("message", "provider_message"):
+            assert field in payload, field
+            assert "local" not in str(payload[field]), (field, payload[field])
 
 
 async def test_chat_refusal_echoing_a_short_key_is_redacted():

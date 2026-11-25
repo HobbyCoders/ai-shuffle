@@ -282,7 +282,10 @@ def _sanitized_refresh_error(
     the description is redacted against the token.
     """
     known = (refresh_token,)
+    # An exact substring check: redact_text keeps a short token found inside
+    # a word (``invalid_token_<token>``), and a code is never worth the risk.
     plain = (isinstance(code, str) and _SAFE_ERROR_CODE.fullmatch(code) is not None
+             and not (refresh_token and refresh_token in code)
              and redact_text(code, known) == code)
     safe_code = code if code in PERMANENT_FAILURE_CODES or plain else f"http_{status}"
     safe_message = None if message is None else redact_text(str(message), known)

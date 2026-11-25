@@ -387,6 +387,17 @@ class TestRefresh:
         assert refresh not in str(ei.value)
         assert ei.value.is_permanent is False
 
+    async def test_code_embedding_a_short_token_falls_back_to_the_status(self):
+        # Whole-token redaction keeps a short token inside a word; the code
+        # check matches the exact substring.
+        def handler(request):
+            return httpx.Response(400, json={"error": "invalid_token_old-rt"})
+
+        async with mock_transport_client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.refresh_tokens("old-rt", client=c)
+        assert ei.value.code == "http_400"
+
     async def test_permanent_code_kept_when_the_description_echoes_the_token(self):
         refresh = "rt-opaque-refresh-0001"
 

@@ -329,6 +329,13 @@ def _redact_assignments(text: str) -> str:
     return "".join(out)
 
 
+# Where a short known value may start: not inside a word, except right after
+# a serialized escape (``\n``, ``\t``, ``\u000a``; JSON or repr text), whose
+# last character is a letter or digit but which stands for a separator.
+_SHORT_KEY_START = (
+    r"(?:(?<![A-Za-z0-9_\-.])|(?<=\\[nrtbf])|(?<=\\u[0-9A-Fa-f]{4}))"
+)
+
 # A known value shorter than this never has its clipped prefix guessed at:
 # a short prefix matches ordinary text.
 _MIN_KNOWN_PREFIX = 8
@@ -353,9 +360,10 @@ def redact_text(text: str, known: Iterable[str] = ()) -> str:
         if len(value) < _MIN_GUESSED:
             # A short key (``k``, ``local``) goes only as a whole token: a
             # plain replace would mask it inside every word that holds it
-            # (``check``, ``localhost``).
+            # (``check``, ``localhost``). A serialized escape before it
+            # (``\nlocal`` in a JSON body) is a boundary, not a word.
             text = re.sub(
-                rf"(?<![A-Za-z0-9_\-.]){re.escape(value)}(?![A-Za-z0-9_\-]|\.[A-Za-z0-9_\-])",
+                rf"{_SHORT_KEY_START}{re.escape(value)}(?![A-Za-z0-9_\-]|\.[A-Za-z0-9_\-])",
                 REDACTED, text)
         else:
             text = text.replace(value, REDACTED)
