@@ -585,39 +585,106 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
     """
     from pathlib import Path
 
+    from app.api.git import _local_clone_source_served
     from app.api.projects import check_new_project
+    from app.core.config import settings
+    from app.core.git_service import classify_clone_url
     from app.core.models import ProjectCreate
-    from app.core.project_remote import identity_for_remote
+    from app.core.project_links import normalize_remote_url
+    from app.core.project_remote import identity_for_remote, pinned_remote
     from app.core.scrub import strip_url_userinfo
     from app.db import projects_v2
 
     # Each worker clones with its own sign-in: credentials in a pasted URL are
     # never used or stored.
     clean = strip_url_userinfo(body.clone_url.strip()) or ""
+    kind, detail = classify_clone_url(clean)
+    if kind == "invalid":
+        raise HTTPException(status_code=400, detail=detail or "Enter the repository's clone URL")
+    if kind == "local" and not _local_clone_source_served(detail or "", str(settings.effective_workspace_dir)):
+        # A typed local source is checked as ``/git/clone`` checks it, before an
+        # identity derived from that same URL could pass for its recorded remote.
+        raise HTTPException(status_code=400,
+                            detail="A local clone source must be inside the workspace or a project folder")
     found = identity_for_remote(clean)
     if not found:
         raise HTTPException(status_code=400, detail="Enter the repository's clone URL")
     origin = found[0]
-    existing = setup._own_rows_by_origin().get(origin)
+    existing = setup._own_rows_by_origin().get(origin) or _project_with_remote(clean)
     if existing is not None:
         raise HTTPException(status_code=409, detail={
-            "error_code": ALREADY_ADDED, "project_id": existing["id"],
-            "error": f"This repository is already the project {existing.get('name') or existing['id']}."})
+            "error_code": ALREADY_ADDED, "project_id": existing.get("id"),
+            "error": f"This repository is already the project {existing.get('name') or existing.get('id')}."})
+    pv2 = projects_v2.get_project_v2_by_origin(origin)
+    pinned = pinned_remote(pv2)
+    if pinned and normalize_remote_url(pinned) != normalize_remote_url(clean):
+        # The project this repository was first seen as now uses another one.
+        raise HTTPException(status_code=409, detail={
+            "error_code": setup.MOVED, "error": setup.moved_message(pinned)})
+    # The id asked for: on a cross-install collision the locked creation path
+    # adds the suffix itself (``payload.id`` only names the folder it would get).
     payload, _db_path, path = check_new_project(
         ProjectCreate(id=body.id, name=body.name.strip(), path=(body.folder or "").strip() or None))
     if path.exists() and not setup._is_empty_dir(Path(path)) and not setup._same_repo(path, clean, origin):
         raise HTTPException(status_code=409, detail={
             "error_code": setup.FOLDER_EXISTS,
             "error": f"{path} already exists and has other files in it. Choose another project ID."})
-    pv2 = projects_v2.get_project_v2_by_origin(origin)
-    listed = pv2 is not None and (pv2.get("settings") or {}).get("forgotten") is not True
-    projects_v2.set_forgotten(origin, False)  # wanted again; hidden again if the clone fails
+    if not _is_listed(pv2):
+        # Only a first clone makes this identity: name it after this attempt,
+        # and hide it again if no attempt succeeds (``hide_failed_first_clone``).
+        projects_v2.upsert_project(origin, name=payload.name)
+        projects_v2.set_provisional(origin, True)
+    projects_v2.set_forgotten(origin, False)
     return {
         "project_v2_id": projects_v2.project_v2_id_for_origin(origin), "origin": origin,
         "name": payload.name, "kind": "git", "clone_url": clean,
         "folder": (body.folder or "").strip() or payload.id, "mode": "auto",
-        "project_id": payload.id, "hide_on_failure": not listed,
+        "project_id": body.id, "expected_id": payload.id,
     }
+
+
+def _is_listed(pv2: Optional[Dict[str, Any]]) -> bool:
+    """Whether an identity is a project of its own (not hidden, merged or a first clone in progress)."""
+    from app.core.project_remote import merged_into
+    from app.db import projects_v2
+
+    project_settings = (pv2 or {}).get("settings") or {}
+    return (pv2 is not None and project_settings.get("forgotten") is not True
+            and project_settings.get(projects_v2.PROVISIONAL_KEY) is not True and not merged_into(pv2))
+
+
+def _remote_key(url: Optional[str]) -> str:
+    """``github.com/owner/repo`` for any spelling (HTTPS, SSH, ``.git``), case-folded;
+    the New project dialog's ``remoteKey``."""
+    return (setup.display_remote(url) or "").casefold()
+
+
+def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
+    """The project (this worker's row, else a listed one elsewhere) whose remote is
+    ``clean`` in any spelling, as the repository picker marks "Already added".
+
+    Identities are hashes of one spelling, so the same repository added from its
+    SSH URL is a different origin than its HTTPS URL; the hashes stay as they are.
+    """
+    from app.db import projects_v2
+
+    key = _remote_key(clean)
+    if not key:
+        return None
+    matches = [origin for origin, info in setup._repo_info_by_origin().items()
+               if _remote_key(info.get("clone_url")) == key]
+    if not matches:
+        return None
+    own = setup._own_rows_by_origin()
+    for origin in matches:
+        if origin in own:
+            return own[origin]
+    identities = projects_v2.get_projects_v2_by_origins(matches)
+    for origin in matches:
+        pv2 = identities.get(origin)
+        if _is_listed(pv2):
+            return {"id": None, "name": pv2.get("name")}
+    return None
 
 
 @router.post("/clone", status_code=status.HTTP_202_ACCEPTED)
@@ -630,17 +697,15 @@ async def clone_new_project(body: CloneNewRequest, token: str = Depends(require_
     behind, so retrying with the same id works. Poll ``GET /projects/setup/{op_id}``.
     """
     spec = await run_sync(_clone_new_spec, body)
+    op_id = setup.new_op_id()
     try:
-        result = await setup.start_local_now(spec, op_id=setup.new_op_id(), requested_by=setup._own_device_id())
+        result = await setup.start_local_now(spec, op_id=op_id, requested_by=setup._own_device_id())
     except ValueError as exc:
-        if spec["hide_on_failure"]:
-            from app.db import projects_v2
-
-            await run_sync(projects_v2.set_forgotten, spec["origin"], True)
+        await run_sync(setup.hide_failed_first_clone, {"id": op_id, "params": spec})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     setup.emit_changed()
     return {"op_id": result["id"], "project_v2_id": spec["project_v2_id"],
-            "project_id": spec["project_id"], "status": result["status"]}
+            "project_id": spec["expected_id"], "status": result["status"]}
 
 
 @router.get("/setup/{op_id}")

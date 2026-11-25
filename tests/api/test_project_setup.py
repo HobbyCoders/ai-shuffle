@@ -1120,6 +1120,121 @@ def test_clone_new_refuses_a_taken_id_or_a_folder_with_files_before_cloning(clie
     assert (ws / "demo2" / "notes.txt").read_text() == "mine"
 
 
+def test_clone_new_refuses_a_repository_whose_project_moved(client, ws, test_db):
+    old, new = _bare_remote(ws, "demo"), _bare_remote(ws, "moved")
+    pv2 = _peer_project(test_db, "elsewhere", "Demo", remote=old)
+    projects_v2.pin_remote(pv2["origin"], new, default_branch="main", generation=1,
+                           keep_upstream=False, previous=old)
+    refused = _clone_new(client, old)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error_code"] == "moved"
+    assert "_remotes/moved" in refused.json()["detail"]["error"]
+    assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+    # A pin that lands while the first clone waits: refused, never swapped in.
+    other_old, other_new = _bare_remote(ws, "tool"), _bare_remote(ws, "tool-next")
+    queued = client.post("/api/v1/projects/clone", json={"id": "tool", "name": "Tool", "clone_url": other_old})
+    assert queued.status_code == 202, queued.text
+    projects_v2.pin_remote(auto_link_group_id(other_old), other_new, default_branch="main", generation=1,
+                           keep_upstream=False, previous=other_old)
+    _run_setups()
+    status = client.get(f"/api/v1/projects/setup/{queued.json()['op_id']}").json()
+    assert status["status"] == "error" and status["error_code"] == "moved", status
+    assert database.get_project("tool") is None and not (ws / "tool").exists()
+    assert not _listed(client, queued.json()["project_v2_id"])
+
+
+def test_clone_new_refuses_a_local_source_outside_the_served_folders(client, ws, test_db):
+    resp = _clone_new(client, _outside_remote(ws))
+    assert resp.status_code == 400 and "inside the workspace" in resp.json()["detail"]
+    assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+
+def test_a_first_clone_ended_outside_the_executor_is_hidden_again(client, ws, test_db, monkeypatch):
+    missing = _local_remote(ws / "_remotes" / "demo.git")
+    # The worker restarted mid-clone: the restart sweep settles the op.
+    first = _clone_new(client, missing).json()
+    assert git_ops_db.claim_op(first["op_id"], ME)
+    monkeypatch.setattr(project_setup, "ZOMBIE_SECONDS", -1.0)
+    assert project_setup.settle_zombies() == 1
+    assert git_ops_db.get_op(first["op_id"])["status"] == "error"
+    assert not _listed(client, first["project_v2_id"])
+
+    # Cancelled before it ran, then a retry that fails: hidden both times.
+    second = _clone_new(client, missing).json()
+    assert client.post(f"/api/v1/projects/setup/{second['op_id']}/cancel").json() == {"status": "cancelled"}
+    assert not _listed(client, second["project_v2_id"])
+    third = _clone_new(client, missing).json()
+    _run_setups()
+    assert git_ops_db.get_op(third["op_id"])["status"] == "error"
+    assert not _listed(client, third["project_v2_id"])
+
+
+def test_a_clone_that_goes_silent_is_stopped_as_a_network_failure(ws, monkeypatch):
+    import sys
+    import time
+
+    monkeypatch.setattr(project_setup, "CLONE_IDLE_SECONDS", 0.4)
+    monkeypatch.setattr(project_setup, "_clone_command",
+                        lambda url, temp: [sys.executable, "-c", "import time; time.sleep(30)"])
+    job = project_setup._Job(project_setup.new_op_id(), None, None)
+    started = time.monotonic()
+    with pytest.raises(project_setup.SetupError) as raised:
+        project_setup._clone(job, "ssh://git@example.com/stalls.git", ws / "demo")
+    assert raised.value.error_code == "network"
+    assert time.monotonic() - started < 10
+    assert list(ws.iterdir()) == []
+
+
+def test_clone_new_accepts_a_full_length_id_another_install_uses(client, ws, test_db):
+    long_id = "demo-" + "x" * 45
+    _peer_project(test_db, long_id, "Peer demo")
+    resp = _clone_new(client, _bare_remote(ws), id=long_id)
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
+    assert status["status"] == "done", status
+    created = status["project_id"]
+    assert created == resp.json()["project_id"] and created.startswith(long_id + "-") and len(created) == 57
+    assert database.get_project(created)["instance_id"] == ME
+
+
+def test_clone_new_refuses_the_same_repository_by_another_spelling(client, ws, test_db):
+    database.create_project(project_id="demo", name="Demo", description=None, path="demo")
+    database.create_git_repository("repo-demo", "demo", remote_url="git@github.com:example-org/demo.git")
+    here = client.post("/api/v1/projects/clone", json={
+        "id": "demo-2", "name": "Demo 2", "clone_url": "https://github.com/Example-Org/demo"})
+    assert here.status_code == 409, here.text
+    assert here.json()["detail"]["error_code"] == "already_added"
+    assert here.json()["detail"]["project_id"] == "demo"
+
+    _peer_project(test_db, "tool", "Tool", remote="git@github.com:example-org/tool.git")
+    elsewhere = client.post("/api/v1/projects/clone", json={
+        "id": "tool", "name": "Tool here", "clone_url": "https://github.com/example-org/tool.git"})
+    assert elsewhere.status_code == 409, elsewhere.text
+    assert elsewhere.json()["detail"]["error_code"] == "already_added"
+    assert elsewhere.json()["detail"]["project_id"] is None
+    assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+
+def test_a_retry_renames_a_first_clone_but_never_a_listed_project(client, ws, test_db):
+    remote = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+    first = _clone_new(client, remote, name="Demo").json()
+    _run_setups()
+    assert _bare_remote(ws) == remote
+    retry = _clone_new(client, remote, name="Demo API").json()
+    _run_setups()
+    assert database.get_project("demo")["name"] == "Demo API"
+    assert projects_v2.get_project_v2(first["project_v2_id"])["name"] == "Demo API"
+    assert "provisional_clone" not in projects_v2.get_project_v2(retry["project_v2_id"])["settings"]
+
+    # A listed project another worker has keeps its name.
+    other = _bare_remote(ws, "other")
+    listed = _peer_project(test_db, "other-there", "Other", origin=auto_link_group_id(other))
+    assert _clone_new(client, other, id="other", name="Mine").status_code == 202
+    assert projects_v2.get_project_v2(listed["id"])["name"] == "Other"
+
+
 def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test_db):
     with auth_required_http_remote() as url:
         resp = client.post("/api/v1/projects/clone", json={

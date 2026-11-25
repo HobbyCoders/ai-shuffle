@@ -62,6 +62,9 @@ ZOMBIE_SECONDS = 90.0
 # Abort a clone whose transfer stalls (bytes/second below the limit for the time).
 LOW_SPEED_LIMIT = "1000"
 LOW_SPEED_TIME = "300"
+# ... and one that goes silent (an SSH server that accepts and then never
+# answers is not covered by the HTTP limits above): no output for this long.
+CLONE_IDLE_SECONDS = 300.0
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -72,6 +75,7 @@ OFFLINE = "offline"
 UNSUPPORTED = "unsupported"
 INTERNAL = "internal"
 CANCELLED = "cancelled"
+MOVED = "moved"
 
 _OP_ID_RE = re.compile(r"^psetup-[0-9a-f]{32}$")
 # Same rule as ``ProjectCreate.id``.
@@ -97,6 +101,11 @@ class Unsupported(RuntimeError):
 
 def unsupported_message(worker_name: Optional[str]) -> str:
     return f"Update {worker_name or 'that worker'} to set projects up from here"
+
+
+def moved_message(pinned: str) -> str:
+    return (f"The project for this repository now uses {display_remote(pinned) or 'another repository'}. "
+            "Clone that repository instead.")
 
 
 def new_op_id() -> str:
@@ -398,9 +407,8 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     ``spec``: ``project_v2_id``, ``origin``, ``name``, ``kind`` (``git`` or
     ``folder``), ``clone_url`` (git), ``folder``, ``mode`` (``auto``/``adopt``).
     A new project cloned from the New project dialog (``POST /projects/clone``)
-    also passes ``project_id`` (the id the owner chose) and ``hide_on_failure``
-    (the identity was not a listed project before, so a failed or cancelled
-    clone must not leave it on the Projects page).
+    also passes ``project_id`` (the id the owner asked for); whether a failure
+    hides the identity again is the persisted ``PROVISIONAL_KEY`` on it.
     Raises ``ValueError`` for a request this worker refuses outright.
     """
     from app.db import git_ops as git_ops_db
@@ -432,7 +440,7 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     params = {"origin": origin, "name": name, "kind": kind, "mode": mode,
               "clone_url": None, "requested_by": requested_by}
     if project_id is not None:
-        params.update(project_id=project_id, hide_on_failure=bool(spec.get("hide_on_failure")))
+        params["project_id"] = project_id
     existing = _registered_row(origin)
     if existing is not None:
         # Already set up here: record a finished op so the caller has an answer.
@@ -620,6 +628,7 @@ def cancel_local(op_id: str) -> Dict[str, Any]:
     if row is None or row.get("op") != SETUP_OP or row.get("runner_id") != me:
         raise LookupError("Unknown setup")
     if git_ops_db.cancel_queued(op_id, me, "Setup was cancelled."):
+        hide_failed_first_clone(row)
         return {"status": "cancelled"}
     job = _jobs.get(op_id)
     if job is not None:
@@ -775,6 +784,11 @@ def _report_progress(job: _Job, value: int) -> None:
     _notify_threadsafe(job)
 
 
+def _clone_command(clone_url: str, temp: str) -> List[str]:
+    return ["git", "-c", f"http.lowSpeedLimit={LOW_SPEED_LIMIT}", "-c", f"http.lowSpeedTime={LOW_SPEED_TIME}",
+            "clone", "--progress", "--", clone_url, temp]
+
+
 def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
     """Clone into a temporary sibling, then rename it to ``final_path``."""
     from fluid.tools.child_env import scrub_child_env
@@ -792,11 +806,21 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
         logger.debug("project setup: could not record temp dir for %s", job.op_id, exc_info=True)
     env = {**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"}
     _quiet_git_env(env)
-    command = ["git", "-c", f"http.lowSpeedLimit={LOW_SPEED_LIMIT}", "-c", f"http.lowSpeedTime={LOW_SPEED_TIME}",
-               "clone", "--progress", "--", clone_url, temp]
+    command = _clone_command(clone_url, temp)
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
              if _IS_WINDOWS else {"start_new_session": True})
     tail: List[str] = []
+    last_output = [time.monotonic()]
+    idle = threading.Event()  # set when the watchdog killed a silent clone
+    done = threading.Event()
+
+    def watchdog(proc: subprocess.Popen) -> None:
+        while not done.wait(min(5.0, CLONE_IDLE_SECONDS / 4)):
+            if time.monotonic() - last_output[0] > CLONE_IDLE_SECONDS:
+                idle.set()
+                _kill_git_tree(proc)
+                return
+
     try:
         with _clone_slots:
             with job.lock:
@@ -805,6 +829,8 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
                 proc = subprocess.Popen(command, cwd=str(parent), stdin=subprocess.DEVNULL,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, **group)
                 job.proc = proc
+            threading.Thread(target=watchdog, args=(proc,), name=f"clone-watchdog-{job.op_id}",
+                             daemon=True).start()
             try:
                 buffer = ""
                 assert proc.stderr is not None
@@ -812,6 +838,7 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
                     chunk = proc.stderr.read1(4096) if hasattr(proc.stderr, "read1") else proc.stderr.read(4096)
                     if not chunk:
                         break
+                    last_output[0] = time.monotonic()
                     buffer += chunk.decode("utf-8", "replace")
                     *lines, buffer = re.split(r"[\r\n]", buffer)
                     for line in lines:
@@ -827,10 +854,15 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
             except BaseException:
                 _kill_git_tree(proc)
                 raise
+            finally:
+                done.set()
         with job.lock:
             if job.cancelled:
                 raise SetupError(CANCELLED, "Setup was cancelled.")
             job.finalizing = True
+        if idle.is_set():
+            raise SetupError(NETWORK, "The repository host stopped answering, so the clone was stopped. "
+                                      "Check this worker's network connection and try again.")
         if returncode != 0:
             raise classify_clone_failure("\n".join(tail), clone_url)
         git_service.invalidate_status_cache(temp)
@@ -873,25 +905,58 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     project uses an existing folder as it is, unless that folder is this
     worker's own other project.
 
-    A new project's first clone (``hide_on_failure``) registers nothing until
-    the clone succeeded; when it fails or is cancelled its identity is hidden
-    again, so no half-made project is left on the Projects page and a retry
-    starts clean.
+    A new project's first clone (``project_id``) registers nothing until the
+    clone succeeded; when it fails or is cancelled a provisional identity is
+    hidden again (:func:`hide_failed_first_clone`), so no half-made project is
+    left on the Projects page and a retry starts clean.
     """
-    params = op_row.get("params") or {}
     try:
-        return _execute_setup(op_row)
+        result = _execute_setup(op_row)
     except BaseException:
-        if params.get("hide_on_failure") and params.get("origin"):
-            from app.db import projects_v2
-
-            try:
-                if _registered_row(params["origin"]) is None:
-                    projects_v2.set_forgotten(params["origin"], True)
-            except Exception:  # noqa: BLE001 - the failure itself is what the caller needs
-                logger.warning("project setup: could not hide failed new project %s", op_row.get("id"),
-                               exc_info=True)
+        hide_failed_first_clone(op_row)
         raise
+    params = op_row.get("params") or {}
+    if params.get("project_id") and params.get("origin"):
+        from app.db import projects_v2
+
+        try:
+            projects_v2.set_provisional(params["origin"], False)
+        except Exception:  # noqa: BLE001 - the project is registered; the marker only matters on failure
+            logger.warning("project setup: could not clear the provisional mark of %s", op_row.get("id"),
+                           exc_info=True)
+    return result
+
+
+def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
+    """Hide a new project's identity again after its first clone ended without a project.
+
+    Every terminal path of a first-clone op calls this: the executor, a cancel
+    before it ran, the restart sweep, and a request refused while starting.
+    Only an identity still marked provisional (``projects_v2.PROVISIONAL_KEY``,
+    set by ``POST /projects/clone`` for one that was not a listed project) is
+    hidden, and only while this worker has no copy and no other setup for it
+    is under way. Best effort: the op's own failure is what the caller needs.
+    """
+    from app.db import git_ops as git_ops_db
+    from app.db import projects_v2
+
+    params = op_row.get("params") or {}
+    origin = params.get("origin")
+    if not params.get("project_id") or not origin:
+        return
+    try:
+        pv2 = projects_v2.get_project_v2_by_origin(origin)
+        if not pv2 or (pv2.get("settings") or {}).get(projects_v2.PROVISIONAL_KEY) is not True:
+            return
+        if _registered_row(origin) is not None:
+            return
+        if any(row["id"] != op_row.get("id") and row.get("project_v2_id") == pv2["id"]
+               and row["status"] in ("queued", "running")
+               for row in git_ops_db.list_ops_for_runner(_me(), SETUP_OP, limit=50)):
+            return  # a newer attempt is under way; it settles the identity itself
+        projects_v2.set_forgotten(origin, True)
+    except Exception:  # noqa: BLE001
+        logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)
 
 
 def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -913,7 +978,13 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         # A request queued before the project moved to another repository
         # still carries the old URL: a new copy clones the current one.
         pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
-        if pinned:
+        if pinned and params.get("project_id"):
+            # A new project clones exactly the repository the owner entered.
+            from app.core.project_links import normalize_remote_url
+
+            if normalize_remote_url(pinned) != normalize_remote_url(clone_url):
+                raise SetupError(MOVED, moved_message(pinned))
+        elif pinned:
             try:
                 clone_url = _validate_clone_url(pinned, origin)
             except ValueError as exc:
@@ -1200,6 +1271,7 @@ def settle_zombies() -> Optional[int]:
                 and Path(temp).name.startswith(f".{Path(path).name}.setup-"):
             shutil.rmtree(temp, ignore_errors=True)
         git_ops_db.fail_op(row["id"], "Setup stopped when the worker restarted. Try again.", code=INTERNAL)
+        hide_failed_first_clone(row)
         settled += 1
     return None if undecided else settled
 

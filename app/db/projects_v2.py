@@ -261,6 +261,22 @@ def set_forgotten(origin: str, forgotten: bool) -> bool:
     return _patch_settings(origin, {}, drop=("forgotten",))
 
 
+#: Set while a project exists only as a new project's first clone (``POST
+#: /projects/clone``) that has not succeeded yet: a failed or abandoned clone
+#: hides it again; a successful one clears it.
+PROVISIONAL_KEY = "provisional_clone"
+
+
+def set_provisional(origin: str, provisional: bool) -> bool:
+    """Mark (or clear) ``origin`` as a first clone that has not succeeded yet."""
+    if provisional:
+        return _patch_settings(origin, {PROVISIONAL_KEY: True})
+    row = get_project_v2_by_origin(origin)
+    if not row or (row.get("settings") or {}).get(PROVISIONAL_KEY) is not True:
+        return False
+    return _patch_settings(origin, {}, drop=(PROVISIONAL_KEY,))
+
+
 def list_projects_v2() -> List[Dict[str, Any]]:
     """Return every project_v2, newest first."""
     with get_db() as conn:
@@ -274,6 +290,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'projects',
-    'upsert_project record_remote pin_remote mark_merged set_forgotten',
+    'upsert_project record_remote pin_remote mark_merged set_forgotten set_provisional',
     scope='shared',
 )

@@ -325,6 +325,8 @@
 		switch (status.error_code) {
 			case 'github_auth': return new RunError(message, 'github');
 			case 'folder_exists': return new RunError(message, 'advanced');
+			// The repository's project moved to another one: the message names it.
+			case 'moved': return new RunError(message, null);
 			default: return new RunError(message, 'retry');
 		}
 	}
