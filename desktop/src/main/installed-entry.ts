@@ -103,7 +103,9 @@ async function startWith(root: string, userData: string, baseline: { revision: s
     // newer than every build that may have migrated this database. Otherwise a
     // blocked first boot must fail closed, never downgrade to bundled code.
     if (updates.blocked && !await retryBlocked(updates, database)) { app.quit(); return; }
-    await updates.prepareRollback(database);
+    // This launcher (12 and newer) understands a compatible journal: an update at the same
+    // database level needs no copy (source-updates.ts prepareRollback).
+    await updates.prepareRollback(database, true);
     const notice = await updates.rollbackNotice();
     if (notice) {
       await app.whenReady();

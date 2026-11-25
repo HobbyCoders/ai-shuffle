@@ -30,7 +30,7 @@ import { installTray } from './tray';
 import { timedPhase } from './timed-phase';
 import { Updater } from './updater';
 import { installerNewer, isFirstStart, releaseStarts, retryableStarts } from './failed-start';
-import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError } from './update-restore-point';
+import { checkRestorePointStructure, launcherValidatedRestorePoint, RESTORE_POINT_VALIDATING_LAUNCHERS, COMPATIBLE_POINT_LAUNCHERS, HELD_POINT_MESSAGE, pointHeldFor, RestorePointCopyError } from './update-restore-point';
 import { IncrementalClusterCopy } from './incremental-restore-point';
 import { pruneDependencies } from './dependency-cleanup';
 import { launcherImage, launchUpdateSplash } from './update-splash';
@@ -486,6 +486,9 @@ async function main(): Promise<void> {
 	// launcher; the bundled app uses this build's own audited installed-entry factory.
 	const launcherKeepsPoint = !!applications && !!postgres && !isolation && process.platform === 'win32' &&
 		(managed ? !!managed.host && !managed.profile && RESTORE_POINT_VALIDATING_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV])) : !!installation);
+	// An update at the same database level needs no copy, but only a launcher that knows
+	// that (12 and newer) accepts it. The bundled app's launcher is this build's own code.
+	const launcherSkipsCopy = managed ? COMPATIBLE_POINT_LAUNCHERS.has(launcherVersion(process.env[LAUNCHER_VERSION_ENV])) : !!installation;
 	if (launcherKeepsPoint) {
 		const restorePoint = async () => new IncrementalClusterCopy(path.join(userData, 'postgres'), async (snapshot) => {
 			await quiesceRecordedWorker(path.join(userData, 'worker'));
@@ -497,7 +500,7 @@ async function main(): Promise<void> {
 			try {
 				await window.showPage('status');
 				window.send('desktop:worker-state', desktopState());
-				await applications!.prepareRollback(restorePoint);
+				await applications!.prepareRollback(restorePoint, launcherSkipsCopy);
 			} finally {
 				preparingRestorePoint = false;
 				window.send('desktop:worker-state', desktopState());

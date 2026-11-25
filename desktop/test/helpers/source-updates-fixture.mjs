@@ -44,8 +44,9 @@ async function fixture(t) {
   for(const name of [electron,path.join(root,'runtimes',KEY,process.platform==='win32'?'worker/python/python.exe':'worker/python/bin/python3')]){await fs.mkdir(path.dirname(name),{recursive:true});await fs.writeFile(name,'runtime');}
   return {revision,pythonKey:null,electron,runtimeKey:KEY};
  }};
- async function release(revision,hostile,fields={}) {
+ async function release(revision,hostile,fields={},files={}) {
   const source=path.join(root,'input',revision,`ai-shuffle-${revision}`);await fs.mkdir(path.join(source,'app'),{recursive:true});await fs.writeFile(path.join(source,'source.txt'),'real archive content');await fs.writeFile(path.join(source,'app','main.py'),'print("ok")');
+  for(const [name,body] of Object.entries(files)){await fs.mkdir(path.dirname(path.join(source,name)),{recursive:true});await fs.writeFile(path.join(source,name),body);}
   const archive=path.join(root,revision+'.zip');await fs.rm(archive,{force:true});execFileSync(process.env.PYTHON||'python',[extractor,'pack',path.dirname(source),archive]);
   const tree=publishedTree(archive);
   if(hostile)execFileSync(process.env.PYTHON||'python',['-c','import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"a"); i=zipfile.ZipInfo("placeholder"); i.filename=sys.argv[2]; z.writestr(i,"unsafe"); z.close()',archive,hostile]);

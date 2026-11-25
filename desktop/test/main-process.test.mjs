@@ -213,7 +213,7 @@ test('direct source relaunch clears the previous launcher handoff proof', async 
   assert.equal(f.app.quits, 1);
 });
 
-for (const migrationRisk of [false, true, undefined]) test(`installed launcher 11 skips the second hash only with no migration risk (${migrationRisk})`, async t => {
+for (const migrationRisk of [false, true, undefined]) test(`installed launcher 12 skips the second hash only with no migration risk (${migrationRisk})`, async t => {
   const { promises: fs } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const userData = await fs.mkdtemp(path.join(tmpdir(), 'shuffle-launcher-handoff-'));
@@ -233,7 +233,7 @@ for (const migrationRisk of [false, true, undefined]) test(`installed launcher 1
     async requireRestorePoint(database) { checks++; await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
     application: { resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' } };
-  const f = await launch({ platform: 'win32', managed, userData, env: { SHUFFLE_LAUNCHER_VERSION: '11' } });
+  const f = await launch({ platform: 'win32', managed, userData, env: { SHUFFLE_LAUNCHER_VERSION: '12' } });
   assert.deepEqual(f.errors, []);
   assert.equal(checks, 1, 'the restore point is still checked before starting');
   assert.equal(f.postgres.validations, migrationRisk === false ? undefined : 1);
@@ -241,7 +241,7 @@ for (const migrationRisk of [false, true, undefined]) test(`installed launcher 1
   assert.equal(typeof f.updater.prepared?.prepare, 'function');
 });
 
-for (const launcher of ['12', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
+for (const launcher of ['13', '999']) test(`installed launcher ${launcher} keeps the full hash and does not pre-create a point`, async () => {
   const updates = { options: { root: '/isolated/no-root' }, hasMigrationRisk: false,
     async requireRestorePoint(database) { await database.validate(); }, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, host: { executable: 'C:/AI Shuffle.exe' },
