@@ -6,7 +6,7 @@
 // simulated in the page (`simulateWorkers`): the installs list gains three
 // peers (Studio, Desktop, an offline Laptop) and /projects/overview,
 // /projects/workers, /projects/setup and its cancel answer from an in-page
-// model that moves a setup forward on every read. In the page, not
+// model that moves a setup forward on reads, at most one step per 0.7 s. In the page, not
 // page.route: the built app's service worker makes the requests page.route
 // would see (see withoutSavedAgentPick in lib/app.mjs).
 //
@@ -103,11 +103,17 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 			const overviewGate = new Promise((resolve) => { window.__releaseOverview = resolve; });
 			const installsGate = new Promise((resolve) => { window.__releaseInstalls = resolve; });
 			const key = (id) => (id === selfId ? 'self' : id);
+			// A running setup moves at most one step per STEP_MS, however often the
+			// page reads (one action can read the overview and the list several times).
+			const STEP_MS = 700;
 			const advance = () => {
+				const now = Date.now();
 				for (const p of P) for (const id of Object.keys(p.st)) {
 					const s = setup[`${p.id}:${id}`];
 					if (!s || p.st[id] !== 'setting_up') continue;
-					if (s.status === 'queued') { s.status = 'running'; s.progress = 0; continue; }
+					if (s.status === 'queued') { s.status = 'running'; s.progress = 0; s.at = now; continue; }
+					if (now - (s.at ?? 0) < STEP_MS) continue;
+					s.at = now;
 					const fail = failOn[`${p.id}:${id === 'self' ? 'self' : id}`];
 					if (fail) { p.st[id] = 'failed'; Object.assign(s, { status: 'error', progress: null, error_code: fail[0], error: fail[1] }); continue; }
 					s.progress = Math.min(100, s.progress + 50);
@@ -166,6 +172,9 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 					const id = url.searchParams.get('project_v2_id');
 					const lid = url.searchParams.get('project_id');
 					const p = P.find((x) => x.id === id || (lid && x.local === lid));
+					// A local project the simulated overview leaves out (the seed's other
+					// project): this worker answers by its local id, as a real one does.
+					if (!p && lid) return original(input, init);
 					if (!p) return json({ detail: 'Project not found' }, 404);
 					return json({ project_v2_id: p.id, name: p.name, kind: p.kind, remote: p.remote, default_folder: p.name, workers: workers().map((w) => row(p, w, true)) });
 				}

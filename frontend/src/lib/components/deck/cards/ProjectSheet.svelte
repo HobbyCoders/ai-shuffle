@@ -18,6 +18,9 @@
 		title: string;
 		subtitle?: string;
 		side?: boolean;
+		/** Live content (a worker's setup progress): on a phone the sheet keeps
+		 *  one height, so a status change does not move its top edge. */
+		steady?: boolean;
 		/** Focused when it opens; defaults to the first control. */
 		initial?: string;
 		onClose: () => void;
@@ -25,7 +28,7 @@
 		footer?: Snippet;
 	}
 
-	let { title, subtitle, side = false, initial, onClose, children, footer }: Props = $props();
+	let { title, subtitle, side = false, steady = false, initial, onClose, children, footer }: Props = $props();
 	const uid = $props.id();
 
 	function portal(node: HTMLElement) {
@@ -46,7 +49,7 @@
 </script>
 
 <div class="settings-shell project-sheet-host" use:portal>
-	<div class="ui-overlay ui-surface project-sheet" class:side role="dialog" aria-modal="true" aria-labelledby="{uid}-title" tabindex="-1"
+	<div class="ui-overlay ui-surface project-sheet" class:side class:steady role="dialog" aria-modal="true" aria-labelledby="{uid}-title" tabindex="-1"
 		use:focusTrap={initial ? { initial } : {}} onkeydown={onKeydown}>
 		<button class="ui-scrim" tabindex="-1" aria-label="Close" onclick={onClose}></button>
 		<div class="ui-dialog project-sheet-panel">
@@ -73,5 +76,6 @@
 	.project-sheet.side .project-sheet-panel { --ui-dialog-width: 460px; height: 100%; max-height: 100%; border-radius: 0; }
 	@media (max-width: 600px) {
 		.project-sheet.side .project-sheet-panel { height: 100dvh; max-height: 100dvh; border-radius: 0; }
+		.project-sheet.steady .project-sheet-panel { height: 92dvh; }
 	}
 </style>

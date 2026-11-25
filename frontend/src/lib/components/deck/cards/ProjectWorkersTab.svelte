@@ -615,7 +615,7 @@
 				{/each}
 			</ul>
 			{#if selected}
-				<ProjectSheet title={selected.device_name} subtitle={presence(selected)} initial=".pw-card" onClose={() => select(null)}>
+				<ProjectSheet steady title={selected.device_name} subtitle={presence(selected)} initial=".pw-card" onClose={() => select(null)}>
 					{@render inspector(selected)}
 				</ProjectSheet>
 			{/if}
