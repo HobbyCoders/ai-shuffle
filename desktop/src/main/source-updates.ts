@@ -894,14 +894,17 @@ export class SourceUpdates {
       const file = path.join(this.directory(revision), DATABASE_LEVEL_FILE);
       const stat = await fs.lstat(file);
       if (!stat.isFile() || stat.size > 4096) return null;
-      const text = await fs.readFile(file, 'utf8');
       // Docker's Python parser keeps 1.0 or 1e0 a float and refuses it; JSON.parse turns it
-      // into 1. Accept only plain integer tokens, and no escaped key that could hide another.
-      const tokens = [...text.matchAll(/"level"\s*:\s*([^,}\s]+)/g)].map(match => match[1]);
-      if (text.includes('\\u') || !tokens.length || tokens.some(token => !/^[1-9]\d*$/.test(token))) return null;
-      const data = JSON.parse(text);
-      const level = data && typeof data === 'object' && data.format === 1 ? data.level : null;
-      return Number.isSafeInteger(level) && level > 0 && level < 2 ** 31 ? level : null;
+      // into 1. Keep the source text of each level the parser settles on, and accept only a
+      // plain integer token.
+      const sources = new WeakMap<object, string>();
+      const data = JSON.parse(await fs.readFile(file, 'utf8'), function (this: object, key: string, value: unknown, context?: { source?: string }) {
+        if (key === 'level' && typeof context?.source === 'string') sources.set(this, context.source);
+        return value;
+      });
+      if (!data || typeof data !== 'object' || data.format !== 1 || !/^[1-9]\d*$/.test(sources.get(data) ?? '')) return null;
+      const level = data.level;
+      return Number.isSafeInteger(level) && level < 2 ** 31 ? level : null;
     } catch { return null; }
   }
   /** True when the update itself understands a compatible journal: its own launcher contract
