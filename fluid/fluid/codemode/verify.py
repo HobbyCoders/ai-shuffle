@@ -72,8 +72,8 @@ async def verify_sources(
     can import each other; only ``names`` are actually imported/self-tested.
     With a ``budget`` (seconds for the whole call) each skill gets the
     smaller of ``timeout`` and what is left, and skills the budget never
-    reaches, or that time out on a slice shorter than ``timeout``, are absent
-    from the result rather than failed.
+    reaches, or that time out on a slice earlier skills cut short of
+    ``timeout``, are absent from the result rather than failed.
     """
     targets = list(sources) if names is None else [n for n in names if n in sources]
     if not targets:
@@ -99,11 +99,14 @@ async def verify_sources(
             )
             started = time.monotonic()
             result = await kernel.exec(code, timeout=slice_timeout, on_host_call=_no_tools)
-            if (result.error and slice_timeout < timeout
+            if (result.error and results and slice_timeout < timeout
                     and time.monotonic() - started >= slice_timeout):
-                # It ran out of what was left of the budget, not of its own
-                # allowance: no verdict, so the next mount retries it in full
-                # rather than recording a timeout the source never earned.
+                # Skills before it spent the budget, so it ran out of what was
+                # left, not of its own allowance: no verdict, and the next
+                # mount retries it in full rather than recording a timeout the
+                # source never earned. The first skill of a call keeps its
+                # verdict (its slice is the whole budget), so every mount
+                # settles at least one skill and the queue always advances.
                 break
             # The kernel's bounded "Type: message" line for the exception,
             # not the traceback's last line (a long note or message).
