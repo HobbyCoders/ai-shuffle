@@ -31,7 +31,7 @@ import {
 } from './update-check';
 import { waitingSummary, waitingView, type WaitingFields } from './update-waiting';
 
-export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_URL, installerHint } from './update-remedy';
+export { DATA_KEPT, INSTALLER_ACTION, INSTALLER_LINK, INSTALLER_RECOMMENDED, INSTALLER_URL, installerHint } from './update-remedy';
 
 /** One worker in GET /settings/application-updates/workers; restart waiting fields from update-waiting.ts. */
 export interface UpdateWorker extends WaitingFields, UpdateRuntimeStatus {
@@ -159,6 +159,8 @@ export interface UpdateRuntimeStatus extends Partial<UpdatePolicy> {
 		stages: { stage: string; elapsed_ms: number; outcome: 'completed' | 'failed' | 'hit' | 'miss' | 'fallback' | 'disabled' }[];
 		total_elapsed_ms: number;
 	} | null;
+	/** A desktop whose in-app updates work but whose launcher only the latest installer updates (update-remedy.ts). */
+	installer_recommended?: boolean;
 }
 
 /** Fixed producer vocabulary, shared with the defensive renderer. */
@@ -232,6 +234,7 @@ export function normalizeUpdateRuntimeStatus(value: unknown): UpdateRuntimeStatu
 		// Malformed pending values stay pending rather than masquerading as false.
 		request_pending: source.request_pending !== undefined && source.request_pending !== false,
 		install_pending: source.install_pending !== undefined && source.install_pending !== false,
+		installer_recommended: source.installer_recommended === true,
 		updater,
 		diagnostics
 	};

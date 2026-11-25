@@ -10,6 +10,7 @@ import {
 	CHECK_POLL_MS,
 	CHECK_TIMEOUT_MS,
 	IMAGE_HINT,
+	INSTALLER_RECOMMENDED,
 	INSTALLER_URL,
 	UpdatesState,
 	describeWorker,
@@ -445,6 +446,34 @@ describe('a desktop only the latest installer can update', () => {
 			link: { label: 'Download the latest installer', href: INSTALLER_URL }
 		});
 		expect(INSTALLER_URL).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
+	});
+});
+
+describe('a desktop whose launcher only the latest installer updates (installer_recommended)', () => {
+	it('recommends the installer while in-app updates keep working, and only for a true flag', () => {
+		expect(installerHint(self('idle', { installer_recommended: true }))).toBe(INSTALLER_RECOMMENDED);
+		expect(INSTALLER_RECOMMENDED).toMatch(/^Updates keep working inside the app/);
+		expect(installerHint(self('idle', { installer_recommended: false }))).toBeUndefined();
+		expect(installerHint(self('idle', { installer_recommended: 'yes' as unknown as boolean }))).toBeUndefined();
+	});
+
+	it('keeps the stronger words when only the installer can finish the update', () => {
+		const hint = installerHint(self('unsupported', { remedy: 'installer', installer_recommended: true }));
+		expect(hint).toMatch(/^This app cannot update itself\. /);
+	});
+
+	it('links the latest installer under the results of a check', async () => {
+		await ready();
+		snapshots = [[self('available', { version: 'abc123', installer_recommended: true })]];
+		await state.check();
+		expect(state.checking).toBe(false);
+		expect(state.rows?.[0]).toMatchObject({ hint: INSTALLER_RECOMMENDED, link: { label: 'Download the latest installer', href: INSTALLER_URL } });
+	});
+
+	it('reads the flag from the connected worker\'s status, failing closed', () => {
+		expect(normalizeUpdateRuntimeStatus({ phase: 'idle', installer_recommended: true }).installer_recommended).toBe(true);
+		expect(normalizeUpdateRuntimeStatus({ phase: 'idle', installer_recommended: 'true' }).installer_recommended).toBe(false);
+		expect(normalizeUpdateRuntimeStatus({ phase: 'idle' }).installer_recommended).toBe(false);
 	});
 });
 

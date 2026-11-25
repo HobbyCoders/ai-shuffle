@@ -6,7 +6,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
-	import { DATA_KEPT, INSTALLER_ACTION, INSTALLER_URL } from '$lib/components/settings/pages/update-remedy';
+	import { DATA_KEPT, INSTALLER_ACTION, INSTALLER_RECOMMENDED, INSTALLER_URL } from '$lib/components/settings/pages/update-remedy';
 	import {
 		STOP_STOPS_IT, blockerView, notSent, offerDescribesStaged, operationOutcome, outcomeView, receiptRows, receiptText, refusedWorkers, waitingSummary, waitingView,
 		type ActionResult, type Blocker, type BlockerView, type UpdateOperation, type WaitingFields
@@ -14,7 +14,7 @@
 	import { CHECK_IDLE_SETTLE_MS, CHECK_TIMEOUT_MS, OUTCOME_PHASES } from '$lib/components/settings/pages/update-check';
 
 	// Waiting fields (install_state, blocked_by...) come from update-waiting.ts; older peers omit them.
-	type Worker = WaitingFields & { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string | null; running_version?: string | null; percent?: number | null; message?: string | null; error?: string | null; reason?: string | null; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null; remedy?: 'installer' | null; data_kept?: boolean };
+	type Worker = WaitingFields & { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string | null; running_version?: string | null; percent?: number | null; message?: string | null; error?: string | null; reason?: string | null; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null; remedy?: 'installer' | null; data_kept?: boolean; installer_recommended?: boolean };
 	/** The server's next step (app/core/update_workers.py plan()). Older servers omit it. */
 	type Plan = { action?: 'install' | 'download' | 'check'; ready?: boolean; held?: string | null };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: UpdateOperation | null; plan?: Plan | null };
@@ -158,6 +158,9 @@
 	// (app/core/update_workers.py remedy()). Clicking opens the download panel.
 	const installer = $derived(targets.filter(row => row.worker.remedy === 'installer'));
 	const dataKept = $derived(installer.length > 0 && installer.every(row => row.worker.data_kept));
+	// Included desktops whose in-app updates work but whose launcher only the latest installer
+	// updates (installer_recommended). Said in the tooltip; never makes the button appear by itself.
+	const recommended = $derived(targets.filter(row => row.worker.installer_recommended === true && row.worker.remedy !== 'installer'));
 	const installerMessage = $derived(installer.length
 		? `${installer.length > 1 || snapshot?.update_all_workers ? `${installer.map(row => row.worker.device_name).join(', ')}: ` : ''}This update cannot finish inside the app. ${INSTALLER_ACTION} to finish it.${dataKept ? ` ${DATA_KEPT}` : ''}` : '');
 	// Restart is offered only once EVERY included worker is staged, never on the first one.
@@ -826,6 +829,9 @@
 					</div>
 				{/if}
 				{#if waiting}<p>Checking that every worker included in this update has the new version. {FIRST_START_NOTE}</p>{/if}
+				{#if recommended.length && !waiting && !celebrating}
+					<p class="tip-installer" data-testid="installer-recommended">{recommended.length > 1 || snapshot?.update_all_workers ? `${recommended.map(row => row.worker.device_name).join(', ')}: ` : ''}{INSTALLER_RECOMMENDED} <a href={INSTALLER_URL} target="_blank" rel="noopener noreferrer">{INSTALLER_ACTION}</a></p>
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -873,6 +879,7 @@
 	.release-notes strong { margin-bottom: 4px; }
 	.notes-text { white-space: pre-line; color: var(--muted-foreground); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12; line-clamp: 12; overflow: hidden; }
 	.update-tooltip p { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
+	.tip-installer a { color: var(--primary); text-decoration: underline; }
 	.update-panel { width: 100%; max-width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--card-foreground, var(--foreground)); box-shadow: var(--shadow-l); font-size: 13px; line-height: 1.45; overflow-wrap: break-word; }
 	.update-panel strong { display: block; font-size: 14px; }
 	.panel-hint { margin: 2px 0 8px; color: var(--muted-foreground); }

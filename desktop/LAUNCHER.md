@@ -401,6 +401,29 @@ The restore needs the new launcher to reach its first lines of
 `installed-entry`. A launcher that cannot load at all is repaired by running
 the installer again, which also replaces `app.asar`.
 
+## Telling an install it needs a newer installer
+
+Raising `launcher.json` "version" without raising "minimum" ships launcher
+code that in-app updates never install: Linux never replaces its launcher,
+and Windows replaces it only below the minimum. The updated app says so
+(`installer-advice.ts`) with every source update check. It reports
+`installer_recommended` over the update bridge when all of these hold:
+
+- there is an installed host and no profile build, on Windows or Linux;
+- the running launcher is older than this source's `launcher.json` version;
+- on Windows, the running launcher is not below the minimum (the swap above
+  replaces it instead);
+- the hub's installer for this platform is a different build from the
+  installed one (`desktop-build.json` revision) and not an older release than
+  the running app.
+
+The hub is read only when the launcher is behind; an unreadable hub keeps the
+last answer. Settings > System > Updates shows a notice with the installer
+link, so does the sidebar update tooltip and each worker's Check for updates
+result. In-app updates keep working; nothing is blocked. Running the
+installer clears the notice: its launcher then matches, or its revision is
+the hub's.
+
 ## Security
 
 - The install is per-user (`nsis.perMachine: false`). Anything that can write

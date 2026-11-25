@@ -255,6 +255,29 @@ it('shows the offered release name and its signed notes in the update tooltip', 
  expect(tip.querySelector('.notes-text')?.textContent).toBe('- Faster startup\n- Fixes the sidebar');
 });
 
+it('recommends the latest installer in the update tooltip when the launcher only it updates is behind', async()=>{
+ api.get.mockResolvedValue({...state,workers:[{...worker,kind:'desktop',installer_recommended:true}]});
+ render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
+ await fireEvent.mouseEnter(button);
+ const note=(await screen.findByRole('tooltip')).querySelector('[data-testid="installer-recommended"]');
+ expect(note?.textContent).toMatch(/^Updates keep working inside the app/);
+ const link=note?.querySelector('a');
+ expect(link?.textContent).toBe('Download the latest installer');
+ expect(link?.getAttribute('href')).toBe('https://github.com/HobbyCoders/ai-shuffle/releases/latest');
+ expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+});
+
+it('does not appear just to recommend the installer, and says nothing when the flag is off', async()=>{
+ api.get.mockResolvedValue({...state,workers:[{...worker,phase:'idle',version:null,kind:'desktop',installer_recommended:true}]});
+ render(DesktopUpdateButton);
+ await waitFor(()=>expect(api.get).toHaveBeenCalled());
+ expect(screen.queryByRole('button',{name:/update/i})).toBeNull();
+ cleanup();api.get.mockResolvedValue({...state,workers:[{...worker,kind:'desktop',installer_recommended:false}]});
+ render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
+ await fireEvent.mouseEnter(button);
+ expect((await screen.findByRole('tooltip')).querySelector('[data-testid="installer-recommended"]')).toBeNull();
+});
+
 it('shows no notes section when the offered update has none', async()=>{
  render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
  await fireEvent.mouseEnter(button);

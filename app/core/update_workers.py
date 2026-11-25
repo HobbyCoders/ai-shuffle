@@ -505,7 +505,7 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind", "updater", "diagnostics",
-                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start",
+                  "revision", "app_version", "busy", "deferred", "notice", "installer_newer", "retry_start", "installer_recommended",
                   "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")
         return updates.safe_update_metadata({key: result[key] for key in fields if key in result})
     except control.ControlRefused:
@@ -684,6 +684,14 @@ def remedy(row):
     return {"remedy": "installer" if needed else None, "data_kept": needed and bool(_KEPT.search(text))}
 
 
+def installer_recommended(row):
+    """True when a desktop's in-app updates work but the installed launcher
+    stays older than its version's, so the latest installer is recommended
+    (desktop/src/main/installer-advice.ts). Never alongside the "installer" remedy."""
+    return (row.get("kind") == "desktop" and row.get("online", True) and row.get("installer_recommended") is True
+            and row.get("phase") != "unsupported" and remedy(row)["remedy"] is None)
+
+
 def plan(rows, operation=None):
     """What one click does next, from rows already carrying ``role`` and ``label``."""
     targets = [row for row in rows if row["role"] != "excluded"]
@@ -769,13 +777,13 @@ async def snapshot(*, fresh=False):
     all_workers = local["update_all_workers"]
     offers = _offers(rows, all_workers)
     for row in rows:
-        row.update(classify(row, all_workers, offers, _refusals), **remedy(row))
+        row.update(classify(row, all_workers, offers, _refusals), **remedy(row), installer_recommended=installer_recommended(row))
     if all_workers:
         _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
               "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice", "updater", "diagnostics",
-              "remedy", "data_kept", "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")
+              "remedy", "data_kept", "installer_recommended", "staged_version", "install_state", "blocked_by", "wait_reason", "restart_expires_at", "monitor_serving_idle_seconds", "stop_result")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,

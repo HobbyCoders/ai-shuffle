@@ -32,6 +32,7 @@
 	import Segmented from '../rows/Segmented.svelte';
 	import NightlyConfirm from './editors/NightlyConfirm.svelte';
 	import { UpdatesState } from './updates-state.svelte';
+	import { INSTALLER_ACTION, INSTALLER_RECOMMENDED, INSTALLER_URL } from './update-remedy';
 	import { lockedReason, UpdateChannelState, type Channel } from './update-channel.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import ReportProblemForm, { type ReportFormResult } from './editors/ReportProblemForm.svelte';
@@ -369,6 +370,14 @@
 		</SettingRow>
 		<UpdateRuntimeDetails {updates} />
 	</RowGroup>
+	{#if updates.runtime?.installer_recommended}
+		<InlineBanner tone="info">
+			<span data-testid="installer-recommended">{INSTALLER_RECOMMENDED}</span>
+			{#snippet actions()}
+				<a class="st-btn sm" href={INSTALLER_URL} target="_blank" rel="noopener noreferrer">{INSTALLER_ACTION}</a>
+			{/snippet}
+		</InlineBanner>
+	{/if}
 	{#if updates.error}<p class="st-msg err" role="alert">{updates.error}</p>{/if}
 	{#if updates.status === 'forbidden'}<p class="st-msg">Update settings: {FORBIDDEN_TEXT.toLowerCase()}</p>{/if}
 	{#if channel.load === 'ok'}

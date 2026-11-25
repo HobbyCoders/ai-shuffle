@@ -83,6 +83,14 @@ class DesktopUpdateState(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
     # When the shell last checked its feed (an ISO time; the shell's own field name).
     checkedAt: str | None = Field(default=None, max_length=64)
+    # The hub's installer is a newer release than this one, after a first start
+    # failed (desktop/src/main/failed-start.ts); remedy() offers the installer.
+    installer_newer: bool | None = None
+    # The offered update is a first start the launcher put back.
+    retry_start: bool | None = None
+    # In-app updates work, but the installed launcher stays older than this
+    # version's and the latest installer replaces it (installer-advice.ts).
+    installer_recommended: bool | None = None
     # No policy fields: the native heartbeat cannot overwrite account preferences.
 
 

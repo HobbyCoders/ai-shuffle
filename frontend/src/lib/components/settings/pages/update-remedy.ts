@@ -13,9 +13,17 @@ export const INSTALLER_LINK = { label: INSTALLER_ACTION, href: INSTALLER_URL };
 /** Said only when the launcher kept the previous data (`data_kept`). */
 export const DATA_KEPT = 'Your data is kept as it was before the update.';
 
-/** Plain words for a worker only the latest installer can update, or undefined. */
-export function installerHint(worker: { remedy?: 'installer' | null; data_kept?: boolean; phase: string }): string | undefined {
-	if (worker.remedy !== 'installer') return undefined;
+/**
+ * In-app updates keep working, but part of this version (the launcher that
+ * starts the app) arrives only with the installer (`installer_recommended`,
+ * desktop/src/main/installer-advice.ts).
+ */
+export const INSTALLER_RECOMMENDED =
+	'Updates keep working inside the app, but some improvements in this version (to how the app starts and updates) arrive only with the installer. Run the latest installer when convenient; your chats and settings are kept.';
+
+/** Plain words for a worker that needs or would benefit from the latest installer, or undefined. */
+export function installerHint(worker: { remedy?: 'installer' | null; data_kept?: boolean; installer_recommended?: boolean; phase: string }): string | undefined {
+	if (worker.remedy !== 'installer') return worker.installer_recommended === true ? INSTALLER_RECOMMENDED : undefined;
 	const why = worker.phase === 'unsupported' ? 'This app cannot update itself.' : 'This update cannot finish inside the app.';
 	return `${why} Run the latest installer to finish it.${worker.data_kept ? ` ${DATA_KEPT}` : ''}`;
 }
