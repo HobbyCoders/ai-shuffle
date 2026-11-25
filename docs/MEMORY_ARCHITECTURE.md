@@ -107,10 +107,17 @@ each other's records, and no write waits on an fsync. It holds the fact ID,
 the trigger kind (command, path, tool or words), the session, the time, and
 whether it was on time or late; compaction re-arms are logged too. Past
 256 KB the log rotates to `jit_deliveries.1.jsonl`, so at most two files are
-kept. Totals, per-fact counts (the 200 most recently delivered facts) and
+kept; the size check and rename run under a short cross-process lock while
+appends stay lock-free, and a reader keeps a good record appended onto a torn
+one. Totals, per-fact counts (the 200 most recently delivered facts) and
 the last 200 deliveries are computed on read. Memory health reads the totals as its
 `delivery` signal, which is a count and never an attention. Set
 `FLUID_MEMORY_JIT=false` to turn delivery off; the index is unaffected.
+
+Two accepted limits: a stop that lands while a gate places the attachment can
+mark a fact delivered unseen until the next compaction (the index and Recall
+still have it), and a session idle across two log rotations can get a fact
+once more after resuming.
 
 ## Learning from Claude Code sessions
 

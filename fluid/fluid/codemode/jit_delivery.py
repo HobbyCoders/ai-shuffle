@@ -62,6 +62,8 @@ MAX_FACTS = 3
 MAX_CHARS = 1500
 DELIVERY_LOG = "jit_deliveries.jsonl"
 ROTATED_LOG = "jit_deliveries.1.jsonl"
+ROTATE_LOCK = ".jit_deliveries.lock"
+_RECORD_START = '{"at":'
 # The log is rotated past this size; two files bound what a read parses.
 MAX_LOG_BYTES = 256 * 1024
 MAX_RECENT = 200
@@ -322,8 +324,9 @@ def _size(lines: list[str]) -> int:
 def _fit(head: list[str], fresh: list[str], prepared: _Prepared) -> tuple[list[str], list[str], list[str]]:
     """Fact lines that fit the block, their ids, and the ids left over.
 
-    While more matches than fit remain, room is kept for the overflow line
-    (an id and a count). The first fact is cut to fit rather than dropped."""
+    Once a match is left over, or more follow, room is kept for the
+    overflow line (an id and a count). The first fact is cut to fit rather
+    than dropped."""
     lines: list[str] = []
     chosen: list[str] = []
     rest: list[str] = []
@@ -333,7 +336,8 @@ def _fit(head: list[str], fresh: list[str], prepared: _Prepared) -> tuple[list[s
             break
         line = _line(prepared.by_id[fact_id])
         left = len(fresh) - n - 1
-        reserve = (len(_OVERFLOW) + len(fact_id) + 24) if left else 0
+        longest = max([len(fact_id), *(len(i) for i in rest)])
+        reserve = (len(_OVERFLOW) + longest + 24) if (left or rest) else 0
         room = MAX_CHARS - _size(head + lines) - 1 - reserve
         if len(line) > room:
             if chosen or room < 80:
@@ -381,22 +385,22 @@ def _paths(store: Any) -> tuple[Path, Path]:
 def _append(store: Any, rows: list[dict]) -> None:
     """Append ``rows`` to the local log as JSON lines: one ``write`` on an
     ``O_APPEND`` descriptor, so concurrent processes interleave whole
-    records, and no fsync. Best-effort: a failure is logged, never raised."""
+    records, and no fsync. Rotation alone (size check and rename) runs
+    under a short cross-process lock, so two writers past the cap rotate
+    once and never replace the retained segment with a fresh one.
+    Best-effort: a failure is logged, never raised."""
     if not rows:
         return
     try:
         current, rotated = _paths(store)
         data = "".join(json.dumps(r, separators=(",", ":"), sort_keys=True) + "\n"
                        for r in rows).encode("utf-8")
-        try:
-            size = current.stat().st_size
-        except FileNotFoundError:
-            size = 0
-        if size and size + len(data) > MAX_LOG_BYTES:
-            try:
-                os.replace(current, rotated)
-            except FileNotFoundError:
-                pass  # another process rotated it first
+        if _size_of(current) + len(data) > MAX_LOG_BYTES:
+            from fluid.codemode.transactions import file_transaction
+            with file_transaction(Path(store.root) / ROTATE_LOCK):
+                size = _size_of(current)  # another writer may have rotated
+                if size and size + len(data) > MAX_LOG_BYTES:
+                    os.replace(current, rotated)
         fd = os.open(current, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, data)
@@ -404,6 +408,30 @@ def _append(store: Any, rows: list[dict]) -> None:
             os.close(fd)
     except Exception:  # noqa: BLE001 — counting never fails a tool call
         _log.debug("could not record a just-in-time delivery", exc_info=True)
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _parse(line: str) -> list[dict]:
+    """The records on one log line. A torn record (a writer died mid-write)
+    has the next good record appended onto it: resync at that record's
+    start (each record begins with its sorted first key) and keep it."""
+    try:
+        return [json.loads(line)]
+    except ValueError:
+        pass
+    start = line.find(_RECORD_START, 1)
+    while start != -1:
+        try:
+            return [json.loads(line[start:])]
+        except ValueError:
+            start = line.find(_RECORD_START, start + 1)
+    return []
 
 
 def record(store: Any, session_id: str, delivered, timing: str) -> None:
@@ -421,12 +449,9 @@ def _rows(store: Any) -> list[dict]:
         except FileNotFoundError:
             continue
         for line in raw.decode("utf-8", "replace").splitlines():
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue  # a torn line: skipped
-            if isinstance(row, dict) and isinstance(row.get("session"), str):
-                rows.append(row)
+            for row in _parse(line):
+                if isinstance(row, dict) and isinstance(row.get("session"), str):
+                    rows.append(row)
     return rows
 
 

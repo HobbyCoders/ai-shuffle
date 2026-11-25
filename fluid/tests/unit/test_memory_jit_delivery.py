@@ -423,6 +423,22 @@ def test_the_whole_block_fits_the_budget_with_many_matches(tmp_path):
         assert fact_id in delivery.text
 
 
+@pytest.mark.parametrize("third", [*range(800, 880, 8), 940])
+def test_a_skipped_match_keeps_room_for_the_overflow_line(tmp_path, third):
+    # 420 fits, 1,200 is skipped, and the last fact must not take the room
+    # the overflow line needs: the skipped middle fact is named or counted.
+    store = SkillStore(tmp_path)
+    ids = [store.save_memory(f"Push rule {i}: " + "r" * size, durable=True,
+                             when=f"When pushing step {i}", triggers={"command": ["git push"]}).id
+           for i, size in enumerate((420, 1200, third))]
+    delivery = SessionDelivery(store, None, "s").on_tool(*bash("git push"))
+    assert len(delivery.text) <= MAX_CHARS
+    delivered = [i for i, _ in delivery.delivered]
+    assert ids[0] in delivered and ids[1] not in delivered
+    assert ids[1] in delivery.overflow or delivery.more
+    assert len(delivered) + len(delivery.overflow) + delivery.more == 3
+
+
 def test_setup_receipts_for_another_checkout_are_left_out(tmp_path):
     from fluid.codemode.skills import checkout_identity
 
@@ -455,6 +471,53 @@ def _log_writer(root, session, n):
     store = SimpleNamespace(root=root)
     for i in range(n):
         jit_delivery.record(store, session, [(f"{session}-m{i}", "command")], LATE)
+
+
+def test_two_writers_past_the_cap_rotate_once_and_keep_the_old_segment(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(jit_delivery, "MAX_LOG_BYTES", 2048)
+    store = SimpleNamespace(root=tmp_path)
+    log = tmp_path / jit_delivery.DELIVERY_LOG
+    n = 0
+    while not log.exists() or log.stat().st_size < 1900:
+        jit_delivery.record(store, "old", [(f"old{n}", "command")], LATE)
+        n += 1
+    old_ids = {f"old{i}" for i in range(n)}
+    # Both writers pass the unlocked size check before either rotates.
+    gate = threading.Barrier(2, timeout=10)
+    seen = threading.local()
+    real = jit_delivery._size_of
+
+    def size_of(path):
+        size = real(path)
+        if not getattr(seen, "once", False):
+            seen.once = True
+            gate.wait()
+        return size
+
+    monkeypatch.setattr(jit_delivery, "_size_of", size_of)
+    writers = [threading.Thread(target=jit_delivery.record,
+                                args=(store, w, [(f"{w}-new", "command")], LATE)) for w in ("a", "b")]
+    for t in writers:
+        t.start()
+    for t in writers:
+        t.join(10)
+    rows = jit_delivery._rows(store)
+    facts = {r["fact"] for r in rows}
+    assert old_ids <= facts  # the retained segment survived
+    assert {"a-new", "b-new"} <= facts
+
+
+def test_a_torn_line_keeps_the_good_record_appended_onto_it(tmp_path):
+    store = SimpleNamespace(root=tmp_path)
+    jit_delivery.record(store, "s", [("m1", "command")], LATE)
+    with open(tmp_path / jit_delivery.DELIVERY_LOG, "ab") as stream:
+        stream.write(b'{"at":1.0,"fact":"m2","ki')  # a writer died mid-record
+    jit_delivery.record(store, "s", [("m3", "path")], LATE)
+    jit_delivery.record(store, "s", [("m4", "tool")], LATE)
+    assert [r["fact"] for r in jit_delivery._rows(store)] == ["m1", "m3", "m4"]
+    assert jit_delivery.session_delivered(store, "s") >= {"m1", "m3", "m4"}
 
 
 def test_the_log_is_capped_and_per_fact_rows_are_bounded(tmp_path, monkeypatch):
