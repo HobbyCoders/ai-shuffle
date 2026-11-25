@@ -189,6 +189,12 @@
 	}
 
 	function setCloneUrl(url: string) {
+		if (url.trim() !== cloneUrl.trim()) {
+			// The last failure was about another repository.
+			addError = null;
+			errorAction = null;
+			existingId = null;
+		}
 		cloneUrl = url;
 		const name = repoNameFromUrl(url);
 		if (!nameManuallyEdited) projectName = name;
@@ -197,7 +203,6 @@
 
 	function pickRepo(repo: GitHubRepo) {
 		setCloneUrl(repo.clone_url);
-		addError = null;
 	}
 
 	/** Projects that already exist (on any worker), by repository. */

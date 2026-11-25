@@ -239,6 +239,23 @@ describe('AddProjectModal create flow', () => {
 		expect(m.cloneNew).toHaveBeenCalledTimes(2);
 	});
 
+	it('drops the last failure once another repository is entered', async () => {
+		m.overview.mockResolvedValue([]);
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
+		m.cloneNew.mockResolvedValue({ op_id: 'psetup-1', project_v2_id: 'pv2', project_id: 'missing', status: 'queued' });
+		m.setupStatus.mockResolvedValue({ op_id: 'psetup-1', status: 'error', progress: null, error_code: 'not_found',
+			error: "The repository wasn't found.", project_id: null, project_v2_id: 'pv2' });
+		await openClone();
+		await fireEvent.input(urlInput(), { target: { value: 'https://github.com/acme/missing.git' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Clone project' }));
+		expect(await screen.findByText(/repository wasn't found/)).toBeTruthy();
+		await fireEvent.input(urlInput(), { target: { value: 'https://github.com/acme/missing.git ' } });
+		expect(screen.getByText(/repository wasn't found/)).toBeTruthy();
+		await fireEvent.input(urlInput(), { target: { value: 'https://github.com/acme/other.git' } });
+		expect(screen.queryByText(/repository wasn't found/)).toBeNull();
+		expect(screen.getByRole('button', { name: 'Clone project' })).toBeTruthy();
+	});
+
 	it('names a worker that refused to start its setup', async () => {
 		const { notify } = await import('$lib/stores/notifications');
 		const warning = vi.spyOn(notify, 'warning').mockReturnValue('n1');
