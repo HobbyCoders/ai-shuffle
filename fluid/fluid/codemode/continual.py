@@ -1607,8 +1607,9 @@ class Synthesizer:
         now = time.time()
         # Behaviour rules are curated by the synthesis pass that sees the
         # user's words behind them (their quote check), not here.
+        # A settled conflict stays out too: this pass can archive what it lists.
         everything = [m for m in self._store.memories()
-                      if not m.conflicted and not is_rule_key(m.key)]
+                      if not (m.conflicted or m.conflict_settled) and not is_rule_key(m.key)]
         # Grouped by scope and key/topic so a fact sits beside the facts that
         # could supersede it, and read from a rotating offset so a store too
         # large for one pass is reviewed in full over successive passes
@@ -1933,7 +1934,7 @@ class Synthesizer:
         family = family_for(self._session_model)
         project = self._project
         rules = [m for m in self._store.memories()
-                 if is_rule_key(m.key) and not m.conflicted
+                 if is_rule_key(m.key) and not (m.conflicted or m.conflict_settled)
                  and (m.scope == "global" or (project is not None and m.scope == project))]
         rules.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
         self._rule_revisions = {}

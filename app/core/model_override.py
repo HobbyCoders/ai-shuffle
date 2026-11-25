@@ -769,7 +769,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.api_user_scope import session_api_user_id
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
-        from fluid.codemode.facts import is_superseded, open_conflict, usefulness, visible_on
+        from fluid.codemode.facts import is_superseded, usefulness, visible_on
         from fluid.codemode.conflict_review import COEXIST_KEY_PREFIX
         from fluid.context.screening import screen_findings
 
@@ -789,7 +789,7 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
                 # Lifecycle/control answers are Recall-only, never routing authority.
                 and not str(entry.get("key") or "").startswith(COEXIST_KEY_PREFIX)
                 and entry.get("provenance", "session") != "tool"
-                and not is_superseded(entry) and not open_conflict(entry)
+                and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
                 and visible_on(entry, local)
                 and entry.get("scope", "global") in scopes

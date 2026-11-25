@@ -371,6 +371,26 @@ async def test_a_memory_that_is_not_live_and_clean_does_not_count(world, change)
     assert not result["ok"] and len(prompts) == 1
 
 
+async def test_a_keyed_memory_a_sync_contested_stays_out_after_the_contender_expires(world, tmp_path):
+    from fluid.codemode.skills import SkillStore
+
+    _, prompts = world
+    store = store_for_owner("local")
+    kept = store.save_memory("Bounded backend work runs on GPT 6.1 Sol", provenance="user",
+                             protected=True, key="routing.backend")
+    peer = SkillStore(tmp_path / "peer")
+    peer.save_memory("Bounded backend work runs on Opus", provenance="session", key="routing.backend")
+    store._facts.merge(peer._facts.export())
+    doc = store._load_memories()
+    next(e for e in doc["entries"] if "Opus" in e["text"])["expires_at"] = 1.0
+    store._save_memories(doc)
+    _save("The deploy window is Friday.")  # any write runs maintenance: the copy expires
+    assert [m.text for m in store.memories() if m.key == "routing.backend"] == [kept.text]
+    assert kept.id not in {e.id for e in mo.owner_memories("parent")}
+    result = await _task("gpt 6.1 sol")
+    assert not result["ok"] and len(prompts) == 1
+
+
 async def test_a_corrected_memory_stops_authorizing_at_the_next_start(world):
     _, prompts = world
     memory = _save("Bounded backend work runs on GPT 6.1 Sol")

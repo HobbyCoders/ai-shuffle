@@ -193,81 +193,17 @@ async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path
     assert store.memories()[0].scope == "global"
 
 
-
-def test_a_scope_only_save_moves_the_fact_with_a_new_revision(tmp_path):
+def test_a_scope_only_save_with_unchanged_wording_writes_no_revision(tmp_path):
+    # As before: a move does not replicate, so a peer that would read it as
+    # replacement or duplicate evidence never receives it.
     store = SkillStore(tmp_path / "source")
-    first = store.save_memory("Fixture runner is alpha.")
-    moved = store.save_memory("Fixture runner is alpha.", memory_id=first.id, scope="project:alpha",
+    store.save_memory("Use yarn for frontend installs.", scope="project:beta")
+    first = store.save_memory("Use pnpm for frontend installs; it replaces yarn.", scope="project:alpha")
+    before = store._facts.export()
+    moved = store.save_memory(first.text, memory_id=first.id, scope="project:beta",
                               expected_revision=first.revision)
-    assert moved.scope == "project:alpha" and moved.revision == first.revision + 1
-    # Replicas see the move: the new revision wins over their global copy.
-    replica = SkillStore(tmp_path / "replica")
-    replica._facts.merge(SkillStore(tmp_path / "source")._facts.export())
-    entry, = replica.memories()
-    assert entry.scope == "project:alpha" and not entry.conflicted
-
-
-def test_a_scope_only_move_is_no_new_replacement_evidence(tmp_path):
-    store = SkillStore(tmp_path)
-    pnpm = store.save_memory("Use pnpm for frontend installs; it replaces yarn.")
-    yarn = store.save_memory("Use yarn for frontend installs.", scope="project:alpha")
-    moved = store.save_memory("Use pnpm for frontend installs; it replaces yarn.", memory_id=pnpm.id,
-                              scope="project:alpha", expected_revision=pnpm.revision)
-    assert moved.scope == "project:alpha" and moved.revision == pnpm.revision + 1
+    assert moved.revision == first.revision and moved.scope == "project:alpha"
+    assert store._facts.export() == before  # nothing new for sync to publish
     store._facts.reconcile_supersessions()
-    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
-    assert not store.archived_memories()
+    assert len(store.memories()) == 2 and not store.archived_memories()
 
-
-PNPM = "Use pnpm for frontend installs; it replaces yarn."
-YARN = "Use yarn for frontend installs."
-
-
-def _move(store, fact, scope):
-    return store.save_memory(fact.text, memory_id=fact.id, scope=scope, expected_revision=fact.revision)
-
-
-def test_a_move_beside_an_older_fact_gives_curation_no_replacement_evidence(tmp_path):
-    # Reverse order: the destination's fact exists before the replacement wording.
-    store = SkillStore(tmp_path)
-    yarn = store.save_memory(YARN, scope="project:beta")
-    pnpm = store.save_memory(PNPM, scope="project:alpha")
-    moved = _move(store, pnpm, "project:beta")
-    assert moved.scope == "project:beta" and moved.revision == pnpm.revision + 1
-    store._facts.reconcile_supersessions()
-    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
-    assert not store.archived_memories()
-
-
-def test_moving_the_older_fact_beside_its_replacement_archives_nothing(tmp_path):
-    store = SkillStore(tmp_path)
-    yarn = store.save_memory(YARN, scope="project:beta")
-    pnpm = store.save_memory(PNPM, scope="project:alpha")
-    _move(store, yarn, "project:alpha")
-    store._facts.reconcile_supersessions()
-    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
-    assert not store.archived_memories()
-
-
-def test_rewording_a_moved_fact_still_replaces_what_it_names(tmp_path):
-    store = SkillStore(tmp_path)
-    yarn = store.save_memory(YARN, scope="project:beta")
-    moved = _move(store, store.save_memory(PNPM, scope="project:alpha"), "project:beta")
-    store.save_memory("Use pnpm for every frontend install; it replaces yarn.", memory_id=moved.id,
-                      expected_revision=moved.revision)
-    store._facts.reconcile_supersessions()
-    assert [m.id for m in store.memories()] == [moved.id]
-    assert yarn.id in {m.id for m in store.archived_memories()}
-
-
-def test_an_explicit_replacement_after_a_move_still_applies(tmp_path):
-    store = SkillStore(tmp_path)
-    yarn = store.save_memory(YARN, scope="project:beta", provenance="user", protected=True)
-    pnpm = store.save_memory(PNPM, scope="project:alpha", provenance="user", protected=True)
-    moved = store.save_memory(PNPM, memory_id=pnpm.id, scope="project:beta", provenance="user",
-                              protected=True, expected_revision=pnpm.revision)
-    store.save_memory(PNPM, memory_id=moved.id, provenance="user", protected=True,
-                      expected_revision=moved.revision, replaces=[yarn.id])
-    old = next(m for m in store.memories() + store.archived_memories() if m.id == yarn.id)
-    assert old.superseded_by and old.supersession_confirmed
-    assert [m.id for m in store.memories() if not m.superseded_by] == [pnpm.id]

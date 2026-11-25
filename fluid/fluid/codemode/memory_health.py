@@ -216,13 +216,10 @@ def _exact_duplicate_groups(entries: list[dict]) -> list[list[dict]]:
     reported. A keyed fact is its own slot (a behaviour rule for another
     model family, or another key that happens to hold the same value), and a
     worker-only copy does not serve the workers a shared copy does, so
-    neither is a duplicate of the other. A fact moved into a scope with its
-    wording unchanged is not a duplicate of what already held that text
-    there: only the move put them side by side."""
+    neither is a duplicate of the other."""
     groups: dict[tuple, list[dict]] = {}
     for e in entries:
-        moved = float(e.get("scope_since") or 0) > float(e.get("updated_at") or 0)
-        if not e.get("conflicted") and not moved:
+        if not e.get("conflicted"):
             groups.setdefault((e.get("scope", "global"), e["text"],
                                e.get("key") or None, e.get("worker") or None), []).append(e)
     return [g for g in groups.values() if len(g) > 1]

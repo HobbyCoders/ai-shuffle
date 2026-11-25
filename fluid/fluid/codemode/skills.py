@@ -794,7 +794,11 @@ class MemoryEntry:
     revision: int = 1
     key: str | None = None
     expires_at: float = 0.0
+    # Open conflicts only (facts.open_conflict), for prompts and listings. The
+    # stored flag is ``conflicted or conflict_settled``: anything that
+    # archives, retires or grants authority reads that.
     conflicted: bool = False
+    conflict_settled: bool = False
     # Replica-stable global ID, not a worker-local mN. Explicit facts retain
     # their body and await owner resolution; inferred predecessors archive.
     superseded_by: str | None = None

@@ -586,3 +586,24 @@ def test_a_settled_contention_still_shields_older_facts_from_curation(tmp_path, 
     a._facts.reconcile_supersessions()
     assert {m.text for m in a.memories()} == {pnpm.text, yarn.text}
     assert yarn.text not in {m.text for m in a.archived_memories()}
+
+
+@pytest.mark.asyncio
+async def test_consolidation_never_retires_a_fact_whose_contention_settled(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    avery = a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name",
+                          durable=True)
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    a._facts.merge(b._facts.export())
+    real = time_mod.time
+    # Blair expires; Avery keeps the merge's flag until the owner answers.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    synth = Synthesizer(Scripted(f'<delete-memory id="{avery.id}"/>'), "m", a)
+    assert await synth.consolidate() == []
+    assert avery.id in {m.id for m in a.memories()}
+    with pytest.raises(ValueError, match="disputed"):
+        a.retire_memory(avery.id, reason="consolidation", automatic=True)
+    assert avery.id not in archived_ids(a)
