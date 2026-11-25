@@ -38,6 +38,15 @@ low/high; a session keeps the model and level it was set to),
 FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
 ``config_option_update`` before answering it).
 
+Failure knobs: FAKE_ACP_RESUME_ERROR (JSON ``{"code", "message"}`` that
+``session/resume`` fails with), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
+a turn runs is refused as busy), FAKE_ACP_SILENT_INIT=1 (``initialize`` is
+never answered), FAKE_ACP_CHILD_PIDFILE (start a long-sleeping child in the
+agent's process group and write its pid there), FAKE_ACP_IGNORE_EOF=1 (keep
+running after stdin closes, and ignore SIGTERM). Commands ``huge`` (the
+prompt's reply is one line of FAKE_ACP_HUGE_BYTES, default 200000) and
+``deaf`` (the agent stops reading its input for 30 s).
+
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
 in the agent's own HOME); ``-p /usage --output-format json`` prints
@@ -181,6 +190,8 @@ class Agent:
 
     async def dispatch(self, method: str, params: dict):
         if method == "initialize":
+            if os.environ.get("FAKE_ACP_SILENT_INIT") == "1":
+                await asyncio.Event().wait()
             caps = params.get("clientCapabilities") or {}
             init = json.loads(json.dumps(INIT))
             if (caps.get("auth") or {}).get("terminal"):
@@ -206,6 +217,9 @@ class Agent:
         if method == "session/resume":
             self.need_auth()
             sid = params.get("sessionId")
+            if os.environ.get("FAKE_ACP_RESUME_ERROR"):
+                error = json.loads(os.environ["FAKE_ACP_RESUME_ERROR"])
+                raise RpcError(int(error["code"]), str(error["message"]))
             if not self.known(sid):
                 raise RpcError(-32602, f"unknown session {sid}")
             config = default_config()
@@ -251,6 +265,8 @@ class Agent:
         text = "".join(b.get("text", "") for b in params.get("prompt") or [] if b.get("type") == "text")
         images = [b for b in params.get("prompt") or [] if b.get("type") == "image"]
         if self.turn is not None:  # steering: fold into the running turn
+            if os.environ.get("FAKE_ACP_REJECT_STEER") == "1":
+                raise RpcError(-32603, "the agent is busy")
             self.turn["steers"].put_nowait(text)
             return {"stopReason": "end_turn"}
         self.turn = {"cancel": asyncio.Event(), "steers": asyncio.Queue()}
@@ -381,6 +397,13 @@ class Agent:
         if word == "die":
             await self.say(sid, "bye")
             os._exit(3)
+        if word == "huge":
+            return {"stopReason": "end_turn", "pad": "x" * int(os.environ.get("FAKE_ACP_HUGE_BYTES") or 200000)}
+        if word == "deaf":
+            import time
+            await self.say(sid, "not listening")
+            time.sleep(30)  # blocks the loop: stdin is not read
+            return {"stopReason": "end_turn"}
         await self.say(sid, f"echo: {text}" + (f" images={len(images)}" if images else ""))
         return {"stopReason": "end_turn"}
 
@@ -438,12 +461,26 @@ class RpcError(Exception):
 async def main() -> None:
     agent = Agent()
     loop = asyncio.get_running_loop()
+    pidfile = os.environ.get("FAKE_ACP_CHILD_PIDFILE")
+    if pidfile:
+        # Like an MCP server or a shell command the agent started: it stays in
+        # the agent's process group, and outlives the agent unless ended.
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(600)", stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        with open(pidfile, "w", encoding="utf-8") as fh:
+            fh.write(str(child.pid))
+    if os.environ.get("FAKE_ACP_IGNORE_EOF") == "1" and sys.platform != "win32":
+        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     reader = asyncio.StreamReader(limit=16 * 1024 * 1024)
     await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
     tasks = set()
     while True:
         line = await reader.readline()
         if not line:
+            if os.environ.get("FAKE_ACP_IGNORE_EOF") == "1":
+                await asyncio.Event().wait()
             break
         try:
             msg = json.loads(line)

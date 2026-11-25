@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from fluid.engine.acp.antigravity import AntigravitySpec, offered_models, split_
 from fluid.engine.acp.loop import AcpLoop
 from fluid.engine.acp.mapping import TurnMapper
 from fluid.events.model import (
+    DelegatedDiagnostic,
     ErrorEvent,
     Interrupted,
     ModelServed,
@@ -699,6 +702,235 @@ async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
         assert second.loop.cli_session_id == acp_sid
     finally:
         await second.close()
+
+
+async def _saved_session(tmp_path: Path, store: MemoryStore) -> str:
+    """A chat whose agent conversation was saved by an earlier process."""
+    first = await _driver(tmp_path, store=store, session_id="s-1")
+    assert isinstance(await first.turn("hello"), TurnComplete)
+    acp_sid = first.loop.cli_session_id
+    await first.close()
+    assert acp_sid
+    return acp_sid
+
+
+async def test_a_resume_that_fails_this_time_keeps_the_saved_session(tmp_path: Path) -> None:
+    """A busy or failing agent is not a lost conversation: the turn fails,
+    to be sent again, and the next try resumes the same session."""
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable
+        assert "backend unavailable" in end.message and "send the message again" in end.message
+        assert d.loop.cli_session_id == acp_sid
+        assert (await store.get_session("s-1")).cli_session_id == acp_sid
+        assert len(_received(tmp_path, "session/new")) == 1
+        assert d.loop.pid is None
+
+        del d.loop.spec.env["FAKE_ACP_RESUME_ERROR"]
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert [r["params"]["sessionId"] for r in _received(tmp_path, "session/resume")] == [acp_sid, acp_sid]
+        assert d.loop.cli_session_id == acp_sid
+        assert not [e for e in d.events if isinstance(e, DelegatedDiagnostic)]
+    finally:
+        await d.close()
+
+
+async def test_a_gone_session_starts_fresh_and_says_so(tmp_path: Path) -> None:
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32002, "message": "Resource not found"})
+        assert isinstance(await d.turn("again"), TurnComplete)
+        notices = [e for e in d.events if isinstance(e, DelegatedDiagnostic)]
+        assert [n.kind for n in notices] == ["agent_context_reset"]
+        assert "starts fresh" in notices[0].message
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        assert (await store.get_session("s-1")).cli_session_id == d.loop.cli_session_id
+        # Said once, not on every later turn.
+        assert isinstance(await d.turn("more"), TurnComplete)
+        assert len([e for e in d.events if isinstance(e, DelegatedDiagnostic)]) == 1
+    finally:
+        await d.close()
+
+
+async def test_a_resume_that_keeps_failing_gives_the_session_up(tmp_path: Path) -> None:
+    """The chat is never stuck behind a resume that fails every time."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+        for _ in range(acp_loop.RESUME_ATTEMPTS - 1):
+            assert isinstance(await d.turn("again"), ErrorEvent)
+            assert d.loop.cli_session_id == acp_sid
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        notices = [e for e in d.events if isinstance(e, DelegatedDiagnostic)]
+        assert [n.kind for n in notices] == ["agent_context_reset"]
+    finally:
+        await d.close()
+
+
+def _ended(pid: int) -> bool:
+    """Whether ``pid`` is gone (a zombie waiting for its reaper counts)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] in ("Z", "X")
+
+
+async def _wait_ended(pid: int, timeout: float = 5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _ended(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return _ended(pid)
+
+
+async def _child_pid(pidfile: Path, timeout: float = 10) -> int:
+    deadline = time.monotonic() + timeout
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        assert time.monotonic() < deadline, "the agent never started its child"
+        await asyncio.sleep(0.05)
+    return int(pidfile.read_text())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX; Windows uses a job object")
+async def test_an_agent_that_exits_leaves_nothing_it_started_running(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_CHILD_PIDFILE"] = str(pidfile)
+        assert isinstance(await d.turn("die"), ErrorEvent)
+        child = await _child_pid(pidfile)
+        assert await _wait_ended(child), "the agent's child outlived it"
+    finally:
+        await d.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and process groups are POSIX")
+async def test_close_ends_a_stuck_agent_inside_the_hosts_deadline(tmp_path: Path) -> None:
+    """An agent that neither reads its input, answers, nor exits on EOF or
+    SIGTERM is ended, with what it started, well inside the app's 5 s."""
+    pidfile = tmp_path / "child.pid"
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env.update({"FAKE_ACP_CHILD_PIDFILE": str(pidfile), "FAKE_ACP_IGNORE_EOF": "1"})
+        await d.loop.submit(UserTurn(content="deaf"))
+        await d.until(TextDelta)
+        child, pid = await _child_pid(pidfile), d.loop.pid
+        assert pid is not None
+        started = time.monotonic()
+        await d.loop.aclose()
+        assert time.monotonic() - started < 4.5
+        assert await _wait_ended(pid, timeout=1) and await _wait_ended(child, timeout=1)
+    finally:
+        await d.close()
+
+
+async def test_a_silent_initialize_fails_the_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.engine.acp import client as acp_client
+
+    monkeypatch.setattr(acp_client, "INITIALIZE_TIMEOUT", 0.5)
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_SILENT_INIT"] = "1"
+        end = await d.turn("hello", timeout=10)
+        assert isinstance(end, ErrorEvent) and "did not answer" in end.message
+        assert d.loop.pid is None
+    finally:
+        await d.close()
+
+
+async def test_stop_is_not_held_by_an_agent_that_stopped_reading(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    monkeypatch.setattr(acp_loop, "CANCEL_WRITE_TIMEOUT", 0.5)
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        await d.loop.submit(UserTurn(content="deaf"))
+        await d.until(TextDelta)
+        acp_sid = d.loop.cli_session_id
+        # Far more than a pipe holds: its write blocks, and holds the writer.
+        await d.loop.submit(Steer(text="x" * (2 * 1024 * 1024), id="s-big"))
+        await asyncio.sleep(0.2)
+        await asyncio.wait_for(d.loop.submit(Interrupt()), 5)
+        assert isinstance(await d.until(TERMINAL, timeout=5), Interrupted)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        # The next turn runs on a new process, on the same conversation.
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+
+
+@pytest.mark.parametrize("kind", ["user", "agent"])
+async def test_a_steer_the_agent_refuses_gets_no_receipt(tmp_path: Path, kind: str) -> None:
+    """No receipt, so the host keeps the message and sends it as its own turn;
+    a refused peer message is not left in the chat either."""
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_REJECT_STEER"] = "1"
+        await d.loop.submit(UserTurn(content="slow"))
+        await d.until(TextDelta)
+        await d.loop.submit(Steer(text="go left", id="s1") if kind == "user"
+                            else AgentMessage(text="go left", sender="worker-7", id="row-1", wake=False))
+        deadline = time.monotonic() + 10
+        while not all(t.done() for t in d.loop._steer_requests):
+            assert time.monotonic() < deadline, "the steer was never answered"
+            await asyncio.sleep(0.05)
+        assert len(_received(tmp_path, "session/prompt")) == 2
+        await d.loop.submit(Interrupt())
+        assert isinstance(await d.until(TERMINAL), Interrupted)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        assert [n.message.role for n in nodes].count("user") == 1
+        assert not any("go left" in t for t in texts)
+    finally:
+        await d.close()
+
+
+async def test_an_oversized_reply_ends_the_connection_and_the_next_turn_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fluid.engine.acp import client as acp_client
+
+    monkeypatch.setattr(acp_client, "STREAM_LINE_LIMIT", 100_000)
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        acp_sid = d.loop.cli_session_id
+        end = await d.turn("huge", timeout=15)
+        assert isinstance(end, ErrorEvent)
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert d.loop.cli_session_id == acp_sid
+        assert [r["params"]["sessionId"] for r in _received(tmp_path, "session/resume")] == [acp_sid]
+    finally:
+        await d.close()
 
 
 async def test_a_resumed_session_still_takes_mode_changes(tmp_path: Path) -> None:
