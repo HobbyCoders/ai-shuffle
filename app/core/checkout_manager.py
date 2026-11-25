@@ -570,12 +570,13 @@ def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = No
     pinned runner has no local materialization: it tries them in order and moves
     on only when a clone is refused (``project_setup.clone_failure_retries``).
 
-    The list is ``project_setup.clone_candidates``, the same one Workers setup
-    sends: a pinned project clones its pin only; otherwise the URLs that name
+    The list is ``project_setup.clone_candidates``, as Workers setup builds
+    it: a pinned project clones its pin only; otherwise the URLs that name
     ``origin`` (the replicated ``projects_v2`` row's stored remote first, which
     survives the last local record of the project going away, then legacy
-    records), the origin's own spelling before the other one (git@ vs https),
-    then the other spelling of each. A URL names ``origin`` when ``origin`` is
+    records, as the seed picked before), the origin's own spelling before the
+    other one (git@ vs https), then the other spelling of each on a public
+    forge. A URL names ``origin`` when ``origin`` is
     one of its ``remote_link_ids``: the same deterministic, install-independent
     hash the v60 collapse used to assign origins, so a match is a true
     identity, not a heuristic, and a fork linked into the group is never cloned
@@ -604,7 +605,8 @@ def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = No
             "checkout_manager: clone-url lookup failed for origin %r: %s", origin, e
         )
         records = []
-    return [c["url"] for c in project_setup.clone_candidates(origin, records, stored, clean_first=False)]
+    return [c["url"] for c in project_setup.clone_candidates(
+        origin, records, stored, clean_first=False, stored_first=True)]
 
 
 def _remote_kind(url: str) -> str:

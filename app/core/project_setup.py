@@ -245,28 +245,39 @@ def stored_candidate(pv2: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def clone_candidates(origin: str, records: List[Dict[str, Any]],
-                     stored: Optional[Dict[str, Any]], *, clean_first: bool) -> List[Dict[str, Any]]:
+                     stored: Optional[Dict[str, Any]], *, clean_first: bool,
+                     stored_first: bool) -> List[Dict[str, Any]]:
     """The URLs to clone a ``git:`` ``origin`` from, in the order to try them.
 
     Each is ``{url, default_branch}``. A project the owner pointed at a
-    repository clones exactly that one (``[pin]``). Otherwise, with no
-    repeats: the known URLs (the catalog row's stored remote first, then the
-    records) in the origin's own spelling, then those that name it only
-    through the other spelling (git@ vs https), then the other spelling
-    (:func:`joined_counterpart`) of each of those, so a worker that can sign
-    in over only one of them still clones it. A URL that does not name the
-    origin (a fork linked into the group) is never one. Which worker asks
-    plays no part: every worker gets the same list.
+    repository clones exactly that one (``[pin]``). Otherwise, with no exact
+    repeats:
+
+    1. the known URLs in the origin's own spelling (``legacy_link_group_id``
+       is the origin), in the order an install without alternates picks from:
+       the records in database order then the catalog row's stored remote for
+       Workers setup, the stored remote first for this worker's own seed
+       (``stored_first``). So the first URL and its branch are exactly what it
+       picked, and a same-id URL that differs (``Demo.git`` / ``demo.git``)
+       is kept after it, never folded in;
+    2. those that name the origin only through the other spelling (git@ vs
+       https), in the same order;
+    3. the other spelling (:func:`joined_counterpart`, public forges only) of
+       each of those, so a worker that can sign in over only one of them
+       still clones it.
+
+    A URL that does not name the origin (a fork linked into the group) is
+    never one, and which worker asks plays no part.
 
     The first keeps the form a clone took before alternates existed (as
-    stored for this worker's own seed, ``strip_url_userinfo`` when sent with
+    stored for the seed, ``strip_url_userinfo`` when sent with
     ``clean_first``). Every other is :func:`strip_remote_userinfo`'d, and
     dropped when that can't be done, so no credential is ever sent or queued
     with it. ``local:`` and ``manual:`` origins have no candidates: they keep
     their single URL (:func:`_repo_info_by_origin`).
     """
     from app.core.project_links import (
-        joined_counterpart, legacy_link_group_id, normalize_remote_url, remote_link_ids, strip_remote_userinfo,
+        joined_counterpart, legacy_link_group_id, remote_link_ids, strip_remote_userinfo,
     )
     from app.core.scrub import strip_url_userinfo
 
@@ -275,7 +286,8 @@ def clone_candidates(origin: str, records: List[Dict[str, Any]],
     if stored and stored.get("pinned"):
         url = strip_url_userinfo(stored["url"]) if clean_first else stored["url"]
         return [{"url": url, "default_branch": stored.get("default_branch")}] if url else []
-    known = ([stored] if stored else []) + list(records)
+    stored_list = [stored] if stored else []
+    known = stored_list + list(records) if stored_first else list(records) + stored_list
     naming = [entry for entry in known if origin in remote_link_ids(entry["url"])]
     ordered = ([entry for entry in naming if legacy_link_group_id(entry["url"]) == origin]
                + [entry for entry in naming if legacy_link_group_id(entry["url"]) != origin])
@@ -293,7 +305,7 @@ def clone_candidates(origin: str, records: List[Dict[str, Any]],
             url = strip_url_userinfo(entry["url"]) if clean_first else entry["url"]
         if not url:
             continue
-        key = normalize_remote_url(strip_remote_userinfo(url) or url)
+        key = strip_remote_userinfo(url) or url
         if key in seen:
             continue
         seen.add(key)
@@ -344,7 +356,8 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         else:
             out.setdefault(origin, info)
     for origin in git_origins:
-        candidates = clone_candidates(origin, records, stored.get(origin), clean_first=True)
+        candidates = clone_candidates(origin, records, stored.get(origin), clean_first=True,
+                                      stored_first=False)
         if candidates:
             out[origin] = {"clone_url": candidates[0]["url"],
                            "default_branch": candidates[0]["default_branch"],
@@ -1094,13 +1107,17 @@ def remote_kind(url: Optional[str]) -> str:
 
 
 # A refusal another spelling of the remote (git@ vs https) can answer
-# differently: sign-in, a remote saying there is no such repository, or a
-# connection the network refused (an SSH port blocked where HTTPS is open).
+# differently: sign-in, a remote saying there is no such repository (or none
+# this key may see), or a connection the network refused or the remote cut
+# (an SSH port blocked where HTTPS is open, a TLS handshake the remote ended).
+# Never a bare "not found": a missing tool on this worker says that too.
 _RETRY_HINTS = _AUTH_HINTS + (
     "repository not found", "does not appear to be a git repository", "returned error: 404",
+    "could not be found or you don't have permission", "please make sure you have the correct access rights",
     "could not resolve host", "could not resolve hostname", "connection refused", "connection reset",
     "no route to host", "network is unreachable", "failed to connect", "couldn't connect to server",
-    "connection closed by remote host")
+    "connection closed by remote host", "gnutls_handshake() failed", "ssl_connect",
+    "tls connection was non-properly terminated")
 # ``ssh: connect to host <host> port 22: ...`` (whatever follows, the port was
 # not reachable) and ``Connection closed by <host> port 22``.
 _SSH_CONNECT_RE = re.compile(r"\b(?:connect to host|connection closed by) \S+ port \d+")
@@ -1108,13 +1125,19 @@ _SSH_CONNECT_RE = re.compile(r"\b(?:connect to host|connection closed by) \S+ po
 # (a missing ``git-lfs``, the disk, the checkout): no spelling fixes that.
 _LOCAL_FAILURE_HINTS = ("checkout failed", "no space left on device", "disk quota exceeded",
                         "read-only file system", "git-lfs: not found", "command not found")
+# A slow or silent network: the other spelling would wait the same way.
+_TIMEOUT_HINTS = ("timed out", "timeout was reached", "operation timed out")
 
 
 def clone_failure_retries(stderr: str) -> bool:
     """Whether a failed ``git clone`` (its stderr) may try the project's next
-    URL. A timeout, a cancel and a failure on this worker never do."""
+    URL. A timeout, a cancel and a failure on this worker never do; those are
+    checked first, since git follows any failure to reach an SSH remote with
+    "Please make sure you have the correct access rights"."""
     text = (stderr or "").lower()
     if any(hint in text for hint in _LOCAL_FAILURE_HINTS):
+        return False
+    if any(hint in text for hint in _TIMEOUT_HINTS):
         return False
     return any(hint in text for hint in _RETRY_HINTS) or bool(_SSH_CONNECT_RE.search(text))
 

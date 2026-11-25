@@ -338,15 +338,28 @@ class TestResolveRunnableLocalProject:
 
 
 @pytest.mark.parametrize("url, other", [
-    ("git@git.example.com:example-org/demo.git", "https://git.example.com/example-org/demo.git"),
-    ("https://git.example.com/Example-Org/demo", "git@git.example.com:Example-Org/demo"),
-    ("https://git.example.com:8443/example-org/demo", None),  # a port: not a joined form
-    ("https://user@git.example.com/example-org/demo", None),  # userinfo: strip it first
-    ("git@git.example.com:/srv/demo.git", None),
-    ("git@git.example.com:~/demo.git", None),
-    ("ssh://git@git.example.com/example-org/demo.git", None),
-    ("deploy@git.example.com:example-org/demo.git", None),
-    ("http://git.example.com/example-org/demo", None),
+    ("git@github.com:example-org/demo.git", "https://github.com/example-org/demo.git"),
+    ("https://github.com/example-org/demo", "git@github.com:example-org/demo"),
+    ("https://github.com/Example-Org/demo", "git@github.com:Example-Org/demo"),
+    ("git@codeberg.org:example-org/demo", "https://codeberg.org/example-org/demo"),
+    ("https://bitbucket.org/example-org/demo.git", "git@bitbucket.org:example-org/demo.git"),
+    ("git@gitlab.com:example-org/sub-group/demo.git", "https://gitlab.com/example-org/sub-group/demo.git"),
+    # Only a public forge: a self-hosted one may serve HTTPS under a prefix.
+    ("https://forge.example/code/team/demo.git", None),
+    ("git@git.example.com:example-org/demo.git", None),
+    ("https://GitHub.com/example-org/demo", None),  # the host exactly
+    ("https://github.com/example-org/sub/demo", None),  # nesting is GitLab's only
+    ("https://github.com/demo", None),
+    ("https://github.com/example-org/%64emo.git", None),  # HTTP decodes it, scp doesn't
+    ("https://github.com/example-org//demo", None),
+    ("https://github.com/example-org/../demo", None),
+    ("https://github.com:8443/example-org/demo", None),  # a port: not a joined form
+    ("https://user@github.com/example-org/demo", None),  # userinfo: strip it first
+    ("git@github.com:/srv/demo.git", None),
+    ("git@github.com:~/demo.git", None),
+    ("ssh://git@github.com/example-org/demo.git", None),
+    ("deploy@github.com:example-org/demo.git", None),
+    ("http://github.com/example-org/demo", None),
     (None, None),
 ])
 def test_only_a_joined_remote_has_another_spelling(url, other):

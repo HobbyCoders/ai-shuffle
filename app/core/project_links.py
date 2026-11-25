@@ -122,20 +122,43 @@ def remote_key(url: Optional[str]) -> str:
 _FORGE_HTTPS_RE = re.compile(r"^https://([^\s/:@\[\]\\]+)/(?![/~])(\S+)$")
 
 
+# Public forges that serve one repository at ``git@host:owner/repo`` and
+# ``https://host/owner/repo`` alike, with how many path segments a repository
+# has there (GitLab nests groups). A self-hosted forge may serve HTTPS under a
+# prefix (``/code/``), so its other spelling is never guessed.
+_PUBLIC_FORGE_DEPTH = {"github.com": (2, 2), "gitlab.com": (2, None), "bitbucket.org": (2, 2),
+                       "codeberg.org": (2, 2)}
+# A segment the two transports read the same way: no escapes (HTTP decodes
+# ``%64`` and scp does not), no ``~``, nothing empty, not ``.`` or ``..``.
+_PLAIN_SEGMENT_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
 def joined_counterpart(url: Optional[str]) -> Optional[str]:
-    """The other spelling of a joined remote (``git@host:path`` <->
-    ``https://host/path``), else ``None``. The two name one repository by
-    construction (:func:`canonical_remote`), so a worker that can sign in over
-    only one of them can still clone it."""
+    """The other spelling of a joined remote on a public forge
+    (``git@github.com:owner/repo`` <-> ``https://github.com/owner/repo``),
+    else ``None``. There both name one repository, so a worker that can sign
+    in over only one of them can still clone it. Any other host, or a path
+    the two transports could read differently, has none."""
     text = (url or "").strip()
     forge = _FORGE_SCP_RE.match(text)
     if forge:
-        other = f"https://{forge.group(1)}/{forge.group(2)}"
+        host, path = forge.group(1), forge.group(2)
+        other = f"https://{host}/{path}"
     else:
         https = _FORGE_HTTPS_RE.match(text)
         if not https:
             return None
-        other = f"git@{https.group(1)}:{https.group(2)}"
+        host, path = https.group(1), https.group(2)
+        other = f"git@{host}:{path}"
+    depth = _PUBLIC_FORGE_DEPTH.get(host)
+    if depth is None:
+        return None
+    segments = path.split("/")
+    least, most = depth
+    if len(segments) < least or (most is not None and len(segments) > most):
+        return None
+    if not all(_PLAIN_SEGMENT_RE.fullmatch(s) and s not in (".", "..") for s in segments):
+        return None
     return other if same_remote(other, text) else None
 
 

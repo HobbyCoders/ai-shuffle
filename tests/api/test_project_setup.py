@@ -2075,9 +2075,9 @@ def test_a_fork_linked_into_a_git_group_is_never_a_clone_candidate(ws, test_db):
     row = projects_v2.get_project_v2_by_origin(canonical)
     assert checkout_manager._resolve_clone_url(canonical, row) == _SSH
     assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _SSH
-    # Then SSH's other spelling, never the fork.
-    assert checkout_manager._clone_candidates(canonical, row) == [_SSH, _HTTPS]
-    assert project_setup._repo_info_by_origin()[canonical]["alternate_urls"] == [_HTTPS]
+    # Never the fork (and no other spelling guessed on a self-hosted forge).
+    assert checkout_manager._clone_candidates(canonical, row) == [_SSH]
+    assert project_setup._repo_info_by_origin()[canonical]["alternate_urls"] == []
 
 
 def test_the_setup_destination_tries_other_spellings_and_drops_another_repository(ws, test_db, monkeypatch,
@@ -2179,12 +2179,13 @@ def test_a_manual_project_queues_one_url_and_no_password(client, ws, test_db):
 
 def test_a_git_alternate_never_carries_a_password(ws, test_db):
     # Alternates are stripped by the remote_key rule (the scrub regex keeps ``pa'ss``).
-    keyed_by = "https://user:pa'ss@git.example.com/example-org/demo"
+    keyed_by = "https://user:pa'ss@github.com/example-org/demo"
     origin = _legacy_id(keyed_by)
     _record_only("first", keyed_by, origin)
-    _record_only("second", "https://user:pa'ss@git.example.com/example-org/demo.git", origin)
+    _record_only("second", "https://user:pa'ss@github.com/example-org/demo.git", origin)
     alternates = project_setup._repo_info_by_origin()[origin]["alternate_urls"]
-    assert alternates == ["git@git.example.com:example-org/demo"]
+    assert alternates == ["https://github.com/example-org/demo.git", "git@github.com:example-org/demo",
+                          "git@github.com:example-org/demo.git"]
     # And the destination queues a received one without its password.
     canonical = auto_link_group_id(_HTTPS)
     pv2 = projects_v2.upsert_project(canonical, name="Demo")
@@ -2215,24 +2216,78 @@ def test_a_manual_project_whose_record_moved_clones_the_record(client, ws, test_
     assert _remote_of(ws / op["params"]["folder"]) == moved
 
 
-@pytest.mark.parametrize("refusal", [_REFUSED["ssh"], _SSH_REFUSED_PORT], ids=["sign-in", "port"])
+_FORGE_SSH = "git@github.com:example-org/demo.git"  # a public forge: one repository either way
+_FORGE_HTTPS = "https://github.com/example-org/demo.git"
+_GITLAB_REFUSED = ("remote: ERROR: The project you were looking for could not be found or you don't have "
+                   "permission to view it.\nfatal: Could not read from remote repository.\n\nPlease make sure "
+                   "you have the correct access rights\nand the repository exists.")
+
+
+@pytest.mark.parametrize("refusal", [_REFUSED["ssh"], _SSH_REFUSED_PORT, _GITLAB_REFUSED],
+                         ids=["sign-in", "port", "no-access"])
 def test_a_worker_that_knows_only_ssh_tries_https_too(client, ws, test_db, monkeypatch, refusal):
-    pv2 = _replicated(_SSH)  # the catalog row stores only git@; no record here
+    pv2 = _replicated(_FORGE_SSH)  # the catalog row stores only git@; no record here
     info = project_setup._repo_info_by_origin()[pv2["origin"]]
-    assert (info["clone_url"], info["alternate_urls"]) == (_SSH, [_HTTPS])
-    _git_fails_for(monkeypatch, _SSH, refusal)
-    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    assert (info["clone_url"], info["alternate_urls"]) == (_FORGE_SSH, [_FORGE_HTTPS])
+    _git_fails_for(monkeypatch, _FORGE_SSH, refusal)
+    _https(monkeypatch, _bare_remote(ws), url=_FORGE_HTTPS)
     resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
     assert resp.status_code == 202, resp.text
     _run_setups()
     op = git_ops_db.get_op(resp.json()["op_id"])
     assert op["status"] == "done", op
-    assert _remote_of(ws / "demo") == _HTTPS
+    assert _remote_of(ws / "demo") == _FORGE_HTTPS
     assert _setup_leftovers(ws) == []  # the refused try left nothing behind
     # The self-seed gets the same list.
-    calls = _seed_clones(monkeypatch, refused={_SSH})
+    calls = _seed_clones(monkeypatch, refused={_FORGE_SSH})
     assert _seed(pv2) is not None
-    assert calls == [_SSH, _HTTPS]
+    assert calls == [_FORGE_SSH, _FORGE_HTTPS]
+
+
+@pytest.mark.parametrize("known", ["https://forge.example/code/team/demo.git",
+                                   "git@forge.example:team/demo.git",
+                                   "https://github.com/example-org/%64emo.git"])
+def test_another_spelling_is_never_guessed_off_a_public_forge(ws, test_db, monkeypatch, known):
+    # A self-hosted forge may serve HTTPS under /code/ and SSH without it, and
+    # HTTP decodes %64 where scp doesn't: only the known URL is ever cloned.
+    from app.core import checkout_manager
+
+    pv2 = _replicated(known)
+    assert checkout_manager._clone_candidates(pv2["origin"], pv2) == [known]
+    assert project_setup._repo_info_by_origin()[pv2["origin"]]["alternate_urls"] == []
+    calls = _seed_clones(monkeypatch, refused={known})
+    assert _seed(pv2) is None
+    assert calls == [known]
+
+
+def test_setup_clones_the_record_a_moved_checkout_confirmed_as_before(client, ws, test_db, monkeypatch):
+    # The checkout moved from team/Demo.git to team/demo.git on a case-sensitive
+    # server (one id, as on main): the catalog still stores the old URL and
+    # branch, the record the new ones. Setup clones what main cloned, with its
+    # branch, and keeps the other as a later try.
+    old, moved = "https://git.example.com/team/Demo.git", "https://git.example.com/team/demo.git"
+    canonical = auto_link_group_id(moved)
+    assert auto_link_group_id(old) == canonical
+    _peer_project(test_db, "theirs", "Demo", origin=canonical, instance="peer-install-2")
+    database.create_git_repository("repo-theirs", "theirs", remote_url=moved, default_branch="develop")
+    projects_v2.record_remote(canonical, old, "main")
+    pv2 = _held_by_peer(projects_v2.get_project_v2_by_origin(canonical))
+    info = project_setup._repo_info_by_origin()[canonical]
+    assert (info["clone_url"], info["default_branch"], info["alternate_urls"]) == (moved, "develop", [old])
+    listed = {p["project_v2_id"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert listed[pv2["id"]]["default_branch"] == "develop"  # the card shows the confirmed branch
+    _https(monkeypatch, _bare_remote(ws, name="old"), url=old)  # both answer: only the order decides
+    _https(monkeypatch, _bare_remote(ws, name="other"), url=moved)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert _remote_of(ws / op["params"]["folder"]) == moved
+    # The self-seed keeps its own order from before: the stored remote first.
+    from app.core import checkout_manager
+
+    assert checkout_manager._clone_candidates(canonical, pv2) == [old, moved]
 
 
 def test_a_failure_on_this_worker_never_tries_another_spelling(ws, test_db, monkeypatch):
@@ -2261,13 +2316,35 @@ def test_a_failure_on_this_worker_never_tries_another_spelling(ws, test_db, monk
     assert calls == [_HTTPS]
 
 
+# How git ends any failure to read an SSH remote.
+_SSH_NOTICE = "{}\n\nPlease make sure you have the correct access rights\nand the repository exists."
+
+
 @pytest.mark.parametrize("stderr, retries", [
     (_REFUSED["https"], True), (_REFUSED["ssh"], True), (_SSH_REFUSED_PORT, True),
     ("remote: Repository not found.\nfatal: repository 'https://git.example.com/o/r/' not found", True),
     ("fatal: unable to access 'https://git.example.com/o/r/': The requested URL returned error: 404", True),
     ("fatal: unable to access 'https://git.example.com/o/r/': Could not resolve host: git.example.com", True),
-    ("ssh: connect to host git.example.com port 22: Connection timed out", True),
     ("fatal: unable to access 'https://git.example.com/o/r/': Failed to connect to git.example.com port 443", True),
+    # A remote refusing what this key or account may see (GitLab, then GitHub over SSH).
+    (_SSH_NOTICE.format("remote: ERROR: The project you were looking for could not be found or you don't have "
+                        "permission to view it.\nfatal: Could not read from remote repository."), True),
+    (_SSH_NOTICE.format("ERROR: Repository not found.\nfatal: Could not read from remote repository."), True),
+    (_SSH_NOTICE.format("fatal: Could not read from remote repository."), True),
+    ("git@git.example.com: Permission denied (publickey).", True),
+    # A TLS handshake the remote ended.
+    ("fatal: unable to access 'https://git.example.com/o/r/': gnutls_handshake() failed: an unexpected TLS "
+     "packet was received.", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': OpenSSL SSL_connect: SSL_ERROR_SYSCALL in "
+     "connection to git.example.com:443", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': TLS connection was non-properly terminated.", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Recv failure: Connection reset by peer", True),
+    # A timeout never moves on, though git adds its access-rights notice to it.
+    (_SSH_NOTICE.format("ssh: connect to host git.example.com port 22: Connection timed out\n"
+                        "fatal: Could not read from remote repository."), False),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Failed to connect to git.example.com port 443 "
+     "after 130000 ms: Timeout was reached", False),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Operation timed out after 300000 milliseconds", False),
     (_LFS_MISSING, False),
     ("error: RPC failed; curl 28 Operation timed out\nfatal: early EOF", False),
     ("fatal: could not create work tree dir 'demo': No space left on device", False),
