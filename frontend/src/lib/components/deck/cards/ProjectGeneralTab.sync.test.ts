@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 import { appData, projects } from '$lib/stores/app-data.svelte';
@@ -11,11 +11,11 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 });
 vi.mock('$lib/stores/groups.svelte', async () => {
 	const { writable } = await import('svelte/store');
-	return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn() }) };
+	return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn(), deleteGroup: vi.fn(), removeFromGroup: vi.fn() }) };
 });
 vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_git_repo: true }) }));
 vi.mock('$lib/stores/git.svelte', () => ({ git: { refreshStatus: vi.fn() } }));
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
 const list = projects as unknown as Writable<any[]>;
 describe('project general remote fields', () => {
 	it('focuses the New group field and preserves Escape and Enter', async () => {
@@ -60,5 +60,22 @@ describe('project general remote fields', () => {
 		await tick();
 		expect(screen.getByDisplayValue('Unsaved name')).toBeTruthy();
 		expect(screen.getByRole('status').textContent).toContain('deleted elsewhere');
+	});
+	it('asks before deleting a group, naming it and how many projects become ungrouped', async () => {
+		list.set([{id:'project',name:'One',path:'/one'},{id:'other',name:'Two',path:'/two'},{id:'third',name:'Three',path:'/three'}]);
+		(groupsStore as unknown as Writable<any>).set({ projects: { groups: [{name:'Work',collapsed:true}], assignments: { project: 'Work', other: 'Work', third: 'Home' } } });
+		render(ProjectGeneralTab, {projectId:'project'});
+		await fireEvent.click(screen.getByRole('button', {name:'Delete group'}));
+		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
+		const dialog = await screen.findByRole('dialog');
+		expect(dialog.textContent).toContain('Delete the group "Work"? 2 projects become ungrouped.');
+		await fireEvent.click(within(dialog).getAllByRole('button', {name:'Cancel'}).at(-1)!);
+		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
+
+		await fireEvent.click(screen.getByRole('button', {name:'Delete group'}));
+		await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', {name:'Delete group'}));
+		expect(groupsStore.deleteGroup).toHaveBeenCalledWith('projects', 'Work');
+		expect(groupsStore.removeFromGroup).not.toHaveBeenCalled();
 	});
 });

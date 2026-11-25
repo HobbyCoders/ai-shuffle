@@ -8,6 +8,11 @@
 	 * In local mode: browses the full filesystem.
 	 * In Docker mode: browses within the workspace directory.
 	 * Fetches directory listings from the backend filesystem browse API.
+	 *
+	 * Each row is two sibling buttons: the chevron expands (named, with
+	 * aria-expanded, reachable by Tab) and the name selects. ArrowRight expands
+	 * and ArrowLeft collapses from either. A failed folder load shows its error
+	 * with a Retry instead of passing for an empty folder.
 	 */
 	import { Folder, FolderOpen, ChevronRight, Loader2 } from 'lucide-svelte';
 	import { browseFilesystem, type DirectoryEntry } from '$lib/api/filesystem';
@@ -28,6 +33,8 @@
 		children: TreeNode[] | null; // null = not loaded, [] = empty
 		expanded: boolean;
 		loading: boolean;
+		/** The last child load failed (children stay unloaded so Retry asks again). */
+		error: string | null;
 	}
 
 	let roots = $state<TreeNode[]>([]);
@@ -41,7 +48,7 @@
 
 	function directoryNodes(entries: DirectoryEntry[]): TreeNode[] {
 		return entries.filter(entry => entry.is_dir).map(entry => ({
-			entry, children: null, expanded: false, loading: false, pageStart: 0
+			entry, children: null, expanded: false, loading: false, error: null, pageStart: 0
 		}));
 	}
 
@@ -69,17 +76,31 @@
 		if (node.children === null) {
 			if (node.loading) return;
 			node.loading = true;
+			node.error = null;
 			try {
 				const response = await browse(node.entry.path);
 				node.children = directoryNodes(response.entries);
-			} catch {
-				node.children = [];
+			} catch (e: unknown) {
+				const err = e as { detail?: string; message?: string };
+				node.error = err.detail || err.message || 'Failed to open this folder';
+				return;
 			} finally {
 				node.loading = false;
 			}
 		}
 
 		node.expanded = true;
+	}
+
+	/** ArrowRight opens a closed folder, ArrowLeft closes an open one. */
+	function treeKeys(e: KeyboardEvent, node: TreeNode) {
+		if (e.key === 'ArrowRight' && node.entry.has_children && !node.expanded) {
+			e.preventDefault();
+			void toggleNode(node);
+		} else if (e.key === 'ArrowLeft' && node.expanded) {
+			e.preventDefault();
+			void toggleNode(node);
+		}
 	}
 
 	function selectNode(node: TreeNode) {
@@ -104,28 +125,36 @@
 
 {#snippet treeItem(node: TreeNode, depth: number)}
 	<div class="tree-item" style="--depth: {depth}">
-		<button
-			type="button"
-			class="tree-row"
-			class:selected={selectedPath === node.entry.path}
-			onclick={() => selectNode(node)}
-			ondblclick={() => toggleNode(node)}
-		>
-			<span
-				role="button"
+		{#if node.entry.has_children}
+			<button
+				type="button"
 				class="expand-btn"
-				class:hidden={!node.entry.has_children}
 				class:expanded={node.expanded}
-				onclick={(e) => { e.stopPropagation(); toggleNode(node); }}
-				onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleNode(node); } }}
-				tabindex={-1}
+				aria-label={`Show folders in ${node.entry.name}`}
+				aria-expanded={node.expanded}
+				title={node.expanded ? `Hide folders in ${node.entry.name}` : `Show folders in ${node.entry.name}`}
+				disabled={node.loading}
+				onclick={() => toggleNode(node)}
+				onkeydown={(e) => treeKeys(e, node)}
 			>
 				{#if node.loading}
 					<Loader2 size={12} strokeWidth={2} class="spin" />
 				{:else}
 					<ChevronRight size={12} strokeWidth={2} />
 				{/if}
-			</span>
+			</button>
+		{:else}
+			<span class="expand-spacer" aria-hidden="true"></span>
+		{/if}
+		<button
+			type="button"
+			class="tree-row"
+			class:selected={selectedPath === node.entry.path}
+			aria-pressed={selectedPath === node.entry.path}
+			onclick={() => selectNode(node)}
+			ondblclick={() => toggleNode(node)}
+			onkeydown={(e) => treeKeys(e, node)}
+		>
 			{#if node.expanded}
 				<FolderOpen size={14} strokeWidth={1.5} />
 			{:else}
@@ -134,6 +163,12 @@
 			<span class="tree-name">{node.entry.name}</span>
 		</button>
 	</div>
+	{#if node.error}
+		<div class="tree-error" style="--depth: {depth + 1}" role="alert">
+			<span>Couldn't open {node.entry.name}: {node.error}</span>
+			<button type="button" class="st-btn" disabled={node.loading} onclick={() => toggleNode(node)} aria-label={`Retry opening ${node.entry.name}`}>Retry</button>
+		</div>
+	{/if}
 	{#if node.expanded && node.children}
 		{@render pageOf(node.children, depth + 1, node.pageStart, (start) => (node.pageStart = start))}
 	{/if}
@@ -179,7 +214,21 @@
 	}
 
 	.tree-item {
-		padding-left: calc(var(--depth) * 16px);
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		padding-left: calc(4px + var(--depth) * 16px);
+	}
+
+	.tree-error {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px 8px;
+		padding: 2px 8px 4px min(calc(26px + var(--depth) * 16px), 20%);
+		font-size: 0.8125rem;
+		color: var(--destructive);
+		overflow-wrap: anywhere;
 	}
 
 	.tree-page {
@@ -196,7 +245,8 @@
 		display: flex;
 		align-items: center;
 		gap: 4px;
-		width: 100%;
+		flex: 1;
+		min-width: 0;
 		padding: 4px 8px;
 		background: transparent;
 		border: none;
@@ -225,26 +275,39 @@
 		color: var(--primary);
 	}
 
+	.expand-btn, .expand-spacer {
+		flex-shrink: 0;
+		width: 22px;
+		height: 22px;
+	}
+
 	.expand-btn {
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		width: 16px;
-		height: 16px;
 		padding: 0;
 		background: transparent;
 		border: none;
+		border-radius: 4px;
 		cursor: pointer;
 		color: var(--muted-foreground);
+	}
+
+	.expand-btn:hover {
+		background: var(--hover-overlay);
+	}
+
+	.expand-btn:focus-visible, .tree-row:focus-visible {
+		outline: 2px solid var(--primary);
+		outline-offset: -2px;
+	}
+
+	.expand-btn :global(svg) {
 		transition: transform 150ms ease;
 	}
 
-	.expand-btn.expanded {
+	.expand-btn.expanded :global(svg:not(.spin)) {
 		transform: rotate(90deg);
-	}
-
-	.expand-btn.hidden {
-		visibility: hidden;
 	}
 
 	.tree-name {

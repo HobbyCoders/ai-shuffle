@@ -404,6 +404,10 @@ async def project_workers(
         payload = view.get("status") or {}
         detail = payload.get("detail") or {}
         has_copy = entry["state"] in ("ready", "offline_has")
+        # Worktree folders that stay on disk when the copy is removed. None from
+        # a worker too old to report them: its confirmation names no number.
+        kept = detail.get("removal_worktrees") if has_copy else None
+        kept = kept if isinstance(kept, list) else None
         entry.update({
             "folder": detail.get("folder") if sees_paths and has_copy else None,
             "folder_revision": detail.get("folder_revision") if sees_paths and entry["state"] == "ready" else None,
@@ -412,6 +416,9 @@ async def project_workers(
             "branch": detail.get("branch") if has_copy else None,
             "dirty": detail.get("dirty") if has_copy else None,
             "changed_files": detail.get("changed_files") if has_copy else None,
+            "removal_chats": detail.get("removal_chats") if has_copy else None,
+            "removal_worktree_count": len(kept) if kept is not None else None,
+            "removal_worktrees": kept if sees_paths else None,
             "last_seen": setup._iso(view["install"].get("last_seen")),
         })
         workers.append(entry)
@@ -761,7 +768,7 @@ async def remove_from_worker(
     target_id = target["id"]
     if target_id == _self_install_id():
         try:
-            result = await run_sync(setup.remove_local, pv2["id"])
+            result = await setup.remove_local(pv2["id"])
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         setup._after_local_registration_change()

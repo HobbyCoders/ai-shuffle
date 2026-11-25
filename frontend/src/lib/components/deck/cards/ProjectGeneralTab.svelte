@@ -9,6 +9,8 @@
 	import { FolderGit2, Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
 	import { RowGroup, SettingRow, SelectField, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+	import { groupDeleteMessage, groupMemberCount } from './project-groups';
 	import './project-tabs.css';
 
 	interface Props {
@@ -134,14 +136,24 @@
 		newGroupName = '';
 	}
 
-	function deleteCurrentGroup() {
-		const g = groups?.projects?.assignments?.[projectId];
-		if (g) {
-			groupsStore.removeFromGroup('projects', projectId);
-			groupsStore.deleteGroup('projects', g);
-		}
+	// Deleting the group ungroups every project in it, so it asks first. "No group"
+	// in the dropdown takes just this project out.
+	let pendingGroupDelete = $state<{ name: string; members: number } | null>(null);
+
+	function askDeleteCurrentGroup() {
+		const name = groups?.projects?.assignments?.[projectId];
+		if (!name) return;
+		pendingGroupDelete = { name, members: groupMemberCount(groups.projects.assignments, name, $projects.map(p => p.id)) };
+	}
+
+	function confirmGroupDelete() {
+		const pending = pendingGroupDelete;
+		pendingGroupDelete = null;
+		if (pending) groupsStore.deleteGroup('projects', pending.name);
 	}
 </script>
+<ConfirmDialog open={!!pendingGroupDelete} title="Delete group" message={pendingGroupDelete ? groupDeleteMessage(pendingGroupDelete.name, pendingGroupDelete.members) : ''}
+	confirmLabel="Delete group" danger onConfirm={confirmGroupDelete} onCancel={() => (pendingGroupDelete = null)} />
 {#if showInitRepoModal}
 	<InitRepoModal open={showInitRepoModal} {projectId} projectName={project?.name ?? ''} onClose={() => (showInitRepoModal = false)} onInitialized={repositoryInitialized} />
 {/if}
@@ -179,7 +191,7 @@
 					</form>
 				{:else}
 					<button class="st-btn icon" onclick={startGroupCreate} title="New group" aria-label="New group"><Plus /></button>
-					{#if groups?.projects?.assignments?.[projectId]}<button class="st-btn icon danger" onclick={deleteCurrentGroup} title="Delete group" aria-label="Delete group"><Trash2 /></button>{/if}
+					{#if groups?.projects?.assignments?.[projectId]}<button class="st-btn icon danger" onclick={askDeleteCurrentGroup} title={`Delete the group "${groups.projects.assignments[projectId]}"`} aria-label="Delete group"><Trash2 /></button>{/if}
 				{/if}
 			</SettingRow>
 		{/if}

@@ -28,6 +28,7 @@
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
+	import { removalConfirmText } from './project-removal';
 	import {
 		browseWorkerFolder,
 		cancelProjectSetup,
@@ -458,6 +459,12 @@
 						{:else if w.state === 'unknown'}<p class="project-muted">{w.device_name} is online but didn't answer. It may still have this project.</p>
 						{:else if failed}<p class="project-error">{failureReason(w)}</p>{/if}
 					{/snippet}
+					{#snippet keptWorktrees()}
+						<details class="kept-worktrees" data-kept-worktrees>
+							<summary>Worktree folders that stay on disk on {w.device_name}</summary>
+							<ul>{#each w.removal_worktrees ?? [] as path (path)}<li class="st-mono">{path}</li>{/each}</ul>
+						</details>
+					{/snippet}
 					<RowGroup title={w.device_name}>
 						<SettingRow label="Status" hint={[w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')} expanded={w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
 							<span class:project-error={failed} class="project-muted">{running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}</span>
@@ -506,7 +513,9 @@
 								{/snippet}
 							</SettingRow>
 						{/if}
-						<SettingRow label="Actions" hint={confirmingRemove === w.install_id ? `Remove from ${w.device_name}? Its files stay.` : undefined}>
+						<SettingRow label="Actions" wrapHint={confirmingRemove === w.install_id}
+							hint={confirmingRemove === w.install_id ? removalConfirmText(projectName, w.device_name, { chats: w.removal_chats ?? null, worktrees: w.removal_worktree_count ?? null }) : undefined}
+							expanded={confirmingRemove === w.install_id && w.removal_worktrees?.length ? keptWorktrees : undefined}>
 							{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
 							{:else if has}
 								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)} disabled={busy[w.install_id]}><MessageSquarePlus />New chat here</button>{/if}
@@ -515,7 +524,7 @@
 								{/if}
 								{#if $isAdmin && !w.is_self && w.online && editing?.installId !== w.install_id}
 									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
-									{:else}<button class="st-btn danger" onclick={() => (confirmingRemove = w.install_id)}>Remove project and chats from {w.device_name}</button>{/if}
+									{:else}<button class="st-btn danger" onclick={() => { confirmingRemove = w.install_id; void load(); }}>Remove project and chats from {w.device_name}</button>{/if}
 								{/if}
 							{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
 							{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>

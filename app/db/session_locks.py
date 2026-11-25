@@ -26,12 +26,13 @@ Who takes what (keep this table and the code in step):
     committing between the scan and the cascade. The owner's deletion fact
     (``network_session_deletions``, #1308) is written last, under S; its
     tombstone is published after commit in its own N transaction.
-  - project delete (``projects.delete_project``): each chat of the project
-    through ``delete_session(expected_project_id=...)``, one transaction per
-    chat, then the project row alone (its ``ON DELETE SET NULL`` touches only
-    S of a chat created meanwhile, holding nothing else). Membership is
-    re-checked under S: a chat moved to another project is skipped, and no
-    cleanup outside the transaction runs before that check.
+  - project delete (``project_removal.remove_projects``, then
+    ``projects.delete_project``): each chat of the project through
+    ``delete_session(matches=...)``, one transaction per chat, then the
+    project row alone (its ``ON DELETE SET NULL`` touches only S of a chat
+    created meanwhile, holding nothing else). Membership is re-checked under
+    S: a chat moved to another project or worker is skipped, and no cleanup
+    outside the transaction runs before that check.
   - header creation (``handoff.install_history``): X, then the INSERT, in its
     own short transaction (one statement: the lock is a materialized CTE). Behind a delete it waits, then fails on the
     session FK: a deleted chat gets no staging.
