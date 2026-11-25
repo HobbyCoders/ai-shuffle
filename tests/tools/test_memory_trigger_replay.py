@@ -98,6 +98,22 @@ def test_outputs_never_overwrite_inputs(corpus, tmp_path):
     assert json.loads(facts.read_text(encoding="utf-8")) == FACTS
 
 
+def test_outputs_never_overwrite_a_transcript_linked_from_outside(corpus, tmp_path):
+    facts, transcripts = corpus
+    outside = tmp_path / "outside.jsonl"
+    original = (transcripts / "svc" / "session.jsonl").read_text(encoding="utf-8")
+    outside.write_text(original, encoding="utf-8")
+    try:
+        (transcripts / "svc" / "linked.jsonl").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    base = ["--facts", str(facts), "--transcripts", str(transcripts)]
+    for extra in (["--json", str(outside)], ["--sample", "5", "--out", str(outside)]):
+        with pytest.raises(SystemExit):
+            replay_tool.main(base + extra)
+    assert outside.read_text(encoding="utf-8") == original
+
+
 def test_project_map_scopes_a_directory(corpus):
     facts, transcripts = corpus
     document = json.loads(facts.read_text(encoding="utf-8"))

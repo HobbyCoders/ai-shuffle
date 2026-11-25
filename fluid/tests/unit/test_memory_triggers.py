@@ -7,6 +7,9 @@ carries, or a place the session is not in.
 import time
 
 from fluid.codemode.triggers import (
+    LITERAL,
+    PATTERN,
+    CommandTrigger,
     TriggerFact,
     command_text,
     derive_triggers,
@@ -31,15 +34,15 @@ def fired(matches):
 
 def test_open_pr_when_line_derives_a_command_and_words():
     t = derive_triggers("When opening a pull request for the example service")
-    assert r"re:^gh pr create\b" in t.command
+    assert CommandTrigger(PATTERN, r"^gh pr create\b") in t.command
     assert "exampl servic" in t.words
     assert not t.tools and not t.paths
 
 
 def test_backticked_command_and_identifier_become_command_triggers():
     t = derive_triggers("When CI fails on test_widget_cache_expires or after `make lint` errors")
-    assert "test_widget_cache_expires" in t.command
-    assert "make lint" in t.command
+    assert CommandTrigger(LITERAL, "test_widget_cache_expires") in t.command
+    assert CommandTrigger(LITERAL, "make lint") in t.command
 
 
 def test_known_tool_and_paths_are_recognised():
@@ -178,6 +181,9 @@ def test_heredoc_bodies_end_only_at_the_exact_delimiter_line():
     assert command_text({"command": tabbed}) == "cat > notes.md ; git push origin topic"
     quoted = 'cat <<"EOF" > a.md && echo done\ngit push here\nEOF'
     assert command_text({"command": quoted}) == "cat > a.md ; echo done"
+    for attached in ("cat<<EOF>notes.md\ngit push origin topic\nEOF", "cat<<-EOF\n\tgit push origin topic\n\tEOF"):
+        assert match_tool("Bash", {"command": attached}, every) == [], attached
+    assert command_text({"command": "cat<<EOF>notes.md\nbody\nEOF"}) == "cat > notes.md"
 
 
 def test_built_in_rules_match_the_program_not_its_arguments():
@@ -198,11 +204,15 @@ def test_split_commands_reads_heads_after_launchers():
 
 def test_prose_command_triggers_are_literals_never_patterns():
     t = derive_triggers("When a check prints `re:[` or `(a+)+$` in the widget log")
-    assert "re:[" in t.command and "(a+)+$" in t.command
+    assert CommandTrigger(LITERAL, "re:[") in t.command and CommandTrigger(LITERAL, "(a+)+$") in t.command
     f = [TriggerFact("f1", "x", t)]
     assert match_tool("Bash", {"command": "ls -la"}, f) == []
     assert fired(match_tool("Bash", {"command": "echo re:["}, f)) == [("f1", "command")]
     assert match_tool("Bash", {"command": "echo " + "a" * 40 + "!"}, f) == []
+    # A literal that looks like an internal form is still the literal.
+    build = [fact("When the widget bundle needs `run:build` again")]
+    assert match_tool("Bash", {"command": "build"}, build) == []
+    assert fired(match_tool("Bash", {"command": "npm run run:build"}, build)) == [("f1", "command")]
 
 
 def test_command_scan_is_linear_and_bounded():
@@ -226,8 +236,9 @@ def test_program_names_fire_only_where_they_run():
 def test_mutating_curl_needs_a_method_or_body():
     f = [fact("When calling the example API with mutating requests from curl")]
     assert match_tool("Bash", {"command": "curl -s http://host/api/items"}, f) == []
-    assert fired(match_tool("Bash", {"command": "curl -s -X POST http://host/api/items"}, f)) == [
-        ("f1", "command")]
+    for mutating in ("curl -s -X POST http://host/api/items", "curl -X POST http://host/api/items",
+                     "curl --data a=1 http://host/api/items"):
+        assert fired(match_tool("Bash", {"command": mutating}, f)) == [("f1", "command")], mutating
 
 
 def test_path_trigger_fires_on_edits_when_the_situation_is_changing_files():

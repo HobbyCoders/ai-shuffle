@@ -69,6 +69,7 @@ sys.path.insert(0, str(ROOT / "fluid"))
 
 from fluid.codemode.facts import visible_on  # noqa: E402
 from fluid.codemode.triggers import (  # noqa: E402
+    CommandTrigger,
     TriggerFact,
     command_text,
     find_command,
@@ -244,7 +245,8 @@ def load_session(path: Path) -> Session:
     return session
 
 
-def _snippet(event: tuple[str, object], terms: tuple[str, ...]) -> str:
+def _snippet(event: tuple[str, object], terms: tuple[str, ...],
+             triggers: tuple[CommandTrigger, ...] = ()) -> str:
     """At most SNIPPET_CHARS of the event, around the first matched term."""
     if event[0] == "turn":
         prefix, text = "", str(event[1])
@@ -252,7 +254,8 @@ def _snippet(event: tuple[str, object], terms: tuple[str, ...]) -> str:
         name, tool_input = event[1]  # type: ignore[misc]
         prefix = name.rsplit("__", 1)[-1] + ": "
         commands = split_commands(tool_input)
-        hit = next((found for term in terms if (found := find_command(term, commands))), None)
+        matched = [t for t in triggers if t.value in terms]
+        hit = next((found for t in matched if (found := find_command(t, commands))), None)
         if hit is not None:  # the simple command the trigger matched
             return (prefix + hit.text)[:SNIPPET_CHARS]
         # The text the matcher saw: the commands without the text they
@@ -283,6 +286,12 @@ def _word_source(event: tuple[str, object]) -> str:
     return "short_turn" if len(str(event[1])) <= SHORT_TURN_CHARS else "long_turn"
 
 
+def transcript_files(transcripts: Path, days: int) -> list[Path]:
+    """The transcripts a run reads: ``<dir>/*.jsonl`` changed in the last ``days``."""
+    cutoff = time.time() - days * 86400
+    return sorted(p for p in transcripts.glob("*/*.jsonl") if p.stat().st_mtime >= cutoff)
+
+
 def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "global",
            per_event: int = 3, cap_chars: int = 1500, sample: int = 0, seed: int = 7,
            sample_kinds: frozenset[str] = frozenset(),
@@ -297,8 +306,7 @@ def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "g
     candidates = prepare(entries)
     by_id = {f.id: f for f in candidates}
     command_facts = {f.id for f in candidates if f.triggers.command}
-    cutoff = time.time() - days * 86400
-    files = sorted(p for p in transcripts.glob("*/*.jsonl") if p.stat().st_mtime >= cutoff)
+    files = transcript_files(transcripts, days)
 
     cache: dict[str, str | None] = {}
     per_session_deliveries: list[int] = []
@@ -357,7 +365,7 @@ def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "g
                     word_sources[source] = word_sources.get(source, 0) + 1
                 deliveries.append({"fact_id": m.fact_id, "when": by_id[m.fact_id].when,
                                    "kind": m.kind, "source": source, "terms": list(m.terms),
-                                   "snippet": _snippet(event, m.terms)})
+                                   "snippet": _snippet(event, m.terms, by_id[m.fact_id].triggers.command)})
             chars += min(event_chars, cap_chars)
         for fact_id, at in first_command.items():
             if fact_id not in command_facts:
@@ -446,20 +454,32 @@ def _table(result: dict) -> str:
 
 
 def _overwrites_input(output: Path, inputs: list[Path], transcripts: Path) -> bool:
-    """Whether writing ``output`` would replace an input file (the same file
-    through any link) or land inside the transcript directory."""
+    """Whether writing ``output`` would replace an input file or land inside
+    the transcript directory. ``inputs`` is every file the run reads (the
+    facts, the project map and each transcript), compared by resolved path
+    and by file identity, so a transcript that is a link to a file outside
+    the directory is caught too."""
     target = output.expanduser().resolve()
+    root = transcripts.resolve()
+    if target == root or root in target.parents:
+        return True
+    try:
+        identity = os.stat(target)
+    except OSError:
+        identity = None  # not there yet: only a path can name it
     for source in inputs:
         source = source.expanduser()
         if target == source.resolve():
             return True
+        if identity is None:
+            continue
         try:
-            if target.exists() and os.path.samefile(target, source):
-                return True
+            other = os.stat(source)
         except OSError:
-            pass
-    root = transcripts.resolve()
-    return target == root or root in target.parents
+            continue
+        if (identity.st_dev, identity.st_ino) == (other.st_dev, other.st_ino):
+            return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -487,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample and not args.out:
         parser.error("--sample needs --out")
     args.transcripts = args.transcripts.expanduser()
-    inputs = [p for p in (args.facts, args.project_map) if p]
+    inputs = [p for p in (args.facts, args.project_map) if p] + transcript_files(args.transcripts, args.days)
     for output in (args.json, args.out):
         if output and _overwrites_input(output, inputs, args.transcripts):
             parser.error(f"refusing to write {output}: it is an input")
