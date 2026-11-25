@@ -36,7 +36,7 @@ from typing import Any
 
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
-from fluid.context.screening import redact_text
+from fluid.context.screening import clip_redacted, redact_secrets
 from fluid.tools.view import POINTER_MARK
 
 _EVENT_CAP = 1_500
@@ -122,16 +122,24 @@ def _pointer_subject(name: str, input: Any) -> str | None:
 
 
 def _clip(text: str, cap: int) -> str:
-    text = " ".join((text or "").split())
-    return text if len(text) <= cap else text[:cap] + "…"
+    """``text`` whitespace-collapsed, redacted, then clipped: friction
+    evidence is journaled, and a cut before redaction could leave half a
+    credential no later pass recognises."""
+    return clip_redacted(" ".join((text or "").split()), cap, mark="…")
+
+
+def _redacted_json(input: Any, **kwargs: Any) -> str:
+    """Tool arguments as JSON, credential-named fields masked first (a
+    ``{"password": …}`` value has no shape a text pass could recognise)."""
+    input = redact_secrets(input)
+    try:
+        return json.dumps(input, ensure_ascii=False, default=str, **kwargs)
+    except Exception:
+        return str(input)
 
 
 def _compact_args(input: Any) -> str:
-    try:
-        compact = json.dumps(input, ensure_ascii=False, default=str, sort_keys=True)
-    except Exception:
-        compact = str(input)
-    return _clip(compact, _FRICTION_ARGS_CAP)
+    return _clip(_redacted_json(input, sort_keys=True), _FRICTION_ARGS_CAP)
 
 
 def _looks_empty(text: str) -> bool:
@@ -312,7 +320,7 @@ def conversation_entry(kind: str, text: str, cap: int,
     if not (text or "").strip():
         return None
     # Redacted before the clip (see SkillStore.journal_append).
-    entry: dict[str, Any] = {"kind": kind, "text": redact_text(text)[:cap]}
+    entry: dict[str, Any] = {"kind": kind, "text": clip_redacted(text, cap)}
     if kind == "user" and model:
         entry["model"] = str(model)[:80]
     if kind == "user":
@@ -405,15 +413,11 @@ class ToolJournal:
 
         Arguments and output are redacted before they are clipped (see
         SkillStore.journal_append)."""
-        try:
-            compact = json.dumps(input, ensure_ascii=False, default=str)
-        except Exception:
-            compact = str(input)
         entry: dict[str, Any] = {
             "kind": "tool",
             "name": name,
-            "input": redact_text(compact)[:_INPUT_CAP],
-            "output": redact_text(" ".join((output or "").split()))[:_OUTPUT_CAP],
+            "input": clip_redacted(_redacted_json(input), _INPUT_CAP),
+            "output": clip_redacted(" ".join((output or "").split()), _OUTPUT_CAP),
         }
         if is_error:
             entry["error"] = True

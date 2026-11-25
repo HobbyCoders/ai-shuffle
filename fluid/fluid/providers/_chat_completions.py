@@ -16,11 +16,12 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 import httpx
 
+from fluid.context.screening import redact_text
 from fluid.providers._trace import trace_request
 
 from fluid.messages import (
@@ -280,7 +281,10 @@ class ChatCompletionsNormalizer:
     """Stateful normalizer: feed parsed chat/completions SSE chunks, get
     StreamChunks. One instance per stream."""
 
-    def __init__(self) -> None:
+    def __init__(self, secrets: Iterable[str] = ()) -> None:
+        # The request's own credential values: an in-stream error is
+        # redacted against them before its message is clipped.
+        self._secrets = secrets
         self.errored = False
         self.finished = False
         # OpenRouter's own verdict on the upstream call, e.g. "network_error"
@@ -389,9 +393,13 @@ class ChatCompletionsNormalizer:
                 self.native_stop_reason = str(choice["native_finish_reason"])
         return out
 
-    @staticmethod
-    def _error_payload(err: Any) -> dict[str, Any]:
-        """The ``error`` chunk for an in-stream error object (or none)."""
+    def _error_payload(self, err: Any) -> dict[str, Any]:
+        """The ``error`` chunk for an in-stream error object (or none).
+
+        The message is redacted before the summary and the clip are taken
+        from it: a cut first could leave half a credential (a URL password
+        without its ``@host``) that the stream's error wrapper no longer
+        recognises."""
         if isinstance(err, dict):
             message = str(err.get("message") or err)
             code = err.get("code")
@@ -401,6 +409,7 @@ class ChatCompletionsNormalizer:
             message, code = str(err), None
         else:
             message, code = "the provider ended the stream with an error", None
+        message = redact_text(message, self._secrets)
         # The embedded code decides retriability, exactly as a non-200 status
         # would: a Cloudflare 520 from the upstream provider is a blip worth
         # another attempt, an auth or validation failure is not. A symbolic
@@ -713,7 +722,7 @@ async def _stream_chat_completions(
                             continue
                         yield StreamChunk("error", with_request_evidence(refusal))
                         return
-                    normalizer = ChatCompletionsNormalizer()
+                    normalizer = ChatCompletionsNormalizer(secrets)
                     # ``[DONE]`` is the server's own end-of-stream sentinel.
                     # sse_events drops it (it is not JSON), so it is noted on
                     # the way through: a stream that reached it was not cut.
