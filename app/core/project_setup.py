@@ -445,7 +445,10 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     me = _me()
     device = _own_device_id()
     for row in git_ops_db.list_ops_for_runner(me, SETUP_OP, limit=50):
-        if row.get("project_v2_id") == pv2_id and row["status"] in ("queued", "running"):
+        # A stale running row is an orphan the restart sweep will fail: answering
+        # with it would leave the new request (and its provisional mark) unserved.
+        if (row.get("project_v2_id") == pv2_id and row["status"] in ("queued", "running")
+                and not git_ops_db._is_stale_running(row)):
             return {"id": row["id"], "status": row["status"], "runner_id": device}
 
     params = {"origin": origin, "name": name, "kind": kind, "mode": mode,

@@ -1346,6 +1346,32 @@ def test_a_dead_runners_first_clone_neither_blocks_nor_keeps_a_card(client, ws, 
     assert _listed(client, pv2["id"])
 
 
+def test_a_retry_after_a_restart_never_reuses_this_workers_dead_first_clone(client, ws, test_db, monkeypatch):
+    # The worker came back after a long time offline with its own first clone
+    # still marked running, and the owner retried before the restart sweep ran.
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    remote = _https(monkeypatch, _bare_remote(ws))
+    origin = auto_link_group_id(remote)
+    first = _clone_new(client, remote).json()
+    assert git_ops_db.claim_op(first["op_id"], ME)
+    test_db.execute("UPDATE git_ops SET updated_at = '2026-01-01 00:00:00+00:00' WHERE id = ?", (first["op_id"],))
+    test_db.commit()
+
+    retry = _clone_new(client, remote)
+    assert retry.status_code == 202, retry.text
+    assert retry.json()["op_id"] != first["op_id"]  # a fresh op, never the dead one
+    assert projects_v2.provisional_token(projects_v2.get_project_v2_by_origin(origin))["op_id"] \
+        == retry.json()["op_id"]
+
+    # The sweep fails the dead op; the retry still runs and lists the project.
+    monkeypatch.setattr(project_setup, "ZOMBIE_SECONDS", -1.0)
+    assert project_setup.settle_zombies() == 1
+    assert git_ops_db.get_op(first["op_id"])["status"] == "error"
+    _run_setups()
+    assert client.get(f"/api/v1/projects/setup/{retry.json()['op_id']}").json()["status"] == "done"
+    assert _listed(client, first["project_v2_id"])
+
+
 def test_a_workers_tab_setup_keeps_a_first_clone_from_being_hidden_or_duplicated(client, ws, test_db,
                                                                                  monkeypatch):
     # Shared database: this worker re-clones a remembered project, and the
