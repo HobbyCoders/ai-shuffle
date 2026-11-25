@@ -11,6 +11,7 @@ provider's 64-character limit without two tools sharing one name.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import stat
 import sys
@@ -111,6 +112,112 @@ def test_replace_refused_falls_back_to_writing_in_place(tmp_path: Path, monkeypa
     assert sorted(p.name for p in tmp_path.iterdir()) == ["held.txt"]
 
 
+@posix_only
+def test_long_basename_still_saves_atomically(tmp_path: Path, monkeypatch) -> None:
+    """A 250-byte name fits the 255-byte limit; its temp name must too."""
+    target = tmp_path / ("n" * 246 + ".txt")
+    target.write_bytes(b"old\n")
+    before = target.stat().st_ino
+    prefixes: list[str] = []
+    real_mkstemp = _util.tempfile.mkstemp
+
+    def spy(*a, **kw):
+        prefixes.append(kw.get("prefix", ""))
+        return real_mkstemp(*a, **kw)
+
+    monkeypatch.setattr(_util.tempfile, "mkstemp", spy)
+    _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"new\n"
+    assert target.stat().st_ino != before  # replaced, not written in place
+    assert prefixes and len(prefixes[0]) < 16
+    assert sorted(p.name for p in tmp_path.iterdir()) == [target.name]
+
+
+@pytest.mark.parametrize(
+    "code", [errno.ENOSPC, errno.EROFS, errno.ENAMETOOLONG], ids=errno.errorcode.get
+)
+async def test_temp_create_failure_leaves_the_original_intact(
+    tmp_path: Path, monkeypatch, code: int
+) -> None:
+    """A full disk (or read-only fs) must not fall back to truncating the file."""
+    target = tmp_path / "a.txt"
+    target.write_bytes(b"original\r\nbytes\n")
+
+    def full(*_a, **_kw):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(_util.tempfile, "mkstemp", full)
+    outcome = await _write(target, "replacement\n")
+    assert outcome.is_error
+    assert target.read_bytes() == b"original\r\nbytes\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.txt"]
+
+
+def test_unexpected_replace_failure_raises_and_removes_the_temp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = tmp_path / "a.txt"
+    target.write_bytes(b"original\n")
+
+    def broken(_src, _dst) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(_util.os, "replace", broken)
+    with pytest.raises(OSError):
+        _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"original\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.txt"]
+
+
+async def test_file_that_cannot_be_opened_for_writing_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """os.access is not trusted (it ignores NTFS ACLs): a real open decides."""
+    target = tmp_path / "locked.txt"
+    target.write_bytes(b"locked\n")
+    real_open = _util.os.open
+    locked = os.path.realpath(target)
+
+    def guarded(path, flags, *a, **kw):
+        if os.fspath(path) == locked and flags & (os.O_WRONLY | os.O_RDWR):
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        return real_open(path, flags, *a, **kw)
+
+    monkeypatch.setattr(_util.os, "open", guarded)
+    monkeypatch.setattr(_util.os, "access", lambda *_a, **_kw: True)
+    outcome = await _write(target, "new\n")
+    assert outcome.is_error
+    assert target.read_bytes() == b"locked\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["locked.txt"]
+
+
+async def test_edit_of_a_hard_linked_file_updates_every_name(tmp_path: Path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_bytes(b"value = 1\n")
+    other = tmp_path / "b.txt"
+    try:
+        os.link(target, other)
+    except OSError as exc:  # a filesystem without hard links
+        pytest.skip(f"no hard links here: {exc}")
+    outcome = await _edit(target, old_string="1", new_string="2")
+    assert not outcome.is_error, outcome.text
+    assert target.read_bytes() == other.read_bytes() == b"value = 2\n"
+    assert os.path.samefile(target, other)
+
+
+@posix_only
+def test_file_with_a_posix_acl_is_written_in_place(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "shared.txt"
+    target.write_bytes(b"old\n")
+    before = target.stat().st_ino
+    monkeypatch.setattr(
+        _util.os, "listxattr", lambda _p: ["system.posix_acl_access"], raising=False
+    )
+    _util.write_text_atomic(target, "new\n")
+    assert target.read_bytes() == b"new\n"
+    assert target.stat().st_ino == before  # same inode: the ACL stays as it was
+
+
 # ── (b) Edit leaves untouched line endings alone ─────────────────────────────
 
 
@@ -206,6 +313,15 @@ def test_fallback_clips_lines_and_stops_at_the_budget(tmp_path: Path, monkeypatc
     assert out.text.count("[line truncated]") == 2
 
 
+async def test_rg_line_reader_keeps_at_most_max_bytes_per_line() -> None:
+    stream = asyncio.StreamReader()
+    stream.feed_data(b"abcdefghijklmnop\nshort\n" + b"x" * 30)
+    stream.feed_data(b"yyyy\ntail")
+    stream.feed_eof()
+    lines = [line async for line in grep_mod._byte_lines(stream, max_bytes=10)]
+    assert lines == [b"abcdefghij", b"short", b"x" * 10, b"tail"]
+
+
 # ── (e) the Grep fallback skips hidden files unless no_ignore ────────────────
 
 
@@ -278,6 +394,17 @@ async def test_mcp_list_stops_at_the_page_cap_and_on_a_repeated_cursor(monkeypat
     looping = _PagedSession({None: (["a"], "x"), "x": (["b"], "x")})
     tools = await McpClient("srv", {})._do_list(looping)
     assert [t.name for t in tools] == ["a", "b"] and looping.cursors == [None, "x"]
+
+
+async def test_mcp_list_first_page_stall_fails_at_the_deadline() -> None:
+    class _Stalled:
+        async def list_tools(self, *a, **kw):
+            await asyncio.Event().wait()
+
+    client = McpClient("srv", {"call_timeout": 0.05})
+    with pytest.raises(TimeoutError, match="tools/list within 0.05 s"):
+        await asyncio.wait_for(client._do_list(_Stalled()), 5)
+    assert client._cache is None
 
 
 # ── (g) MCP aliases: at most 64 characters, one name per tool ────────────────

@@ -633,6 +633,21 @@ def write_text_with_newline(path: Path, text: str, newline: str) -> None:
     write_text_atomic(path, normalized)
 
 
+# Sibling temp files are ``.fluid-XXXXXXXX.tmp`` whatever the target is
+# called, so a basename near the filesystem's 255-byte limit still fits.
+_TEMP_PREFIX = ".fluid-"
+# Errors that mean "no atomic replace here", not "the save cannot succeed":
+# only these fall back to writing in place. Creating the temp file: a
+# directory the user cannot create files in. Replacing: on Windows a file
+# another process holds open without delete sharing (PermissionError), and a
+# single-file bind mount (EBUSY, or EXDEV). Anything else (a full disk, a
+# quota, a read-only filesystem, a name too long) is raised with the original
+# untouched: falling back would truncate it and then fail the same way.
+_TEMP_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
+_REPLACE_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY, errno.EXDEV})
+_POSIX_ACL_XATTR = "system.posix_acl_access"
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     """Write ``text`` as UTF-8, exactly as given, without losing the old file.
 
@@ -643,14 +658,15 @@ def write_text_atomic(path: Path, text: str) -> None:
     An existing regular file is replaced by a fully written, fsynced sibling
     temp file carrying its permission bits (and, where allowed, its owner), so
     a full disk or a crash leaves the old contents rather than an empty or
-    partial file. A file the user may not write stays refused, as before. Like
-    any editor's atomic save, the replace gives the path a new inode: other
-    hard links keep the old contents.
+    partial file. A file the user may not open for writing stays refused, as
+    before: that is checked with a real (non-truncating) open, since on
+    Windows ``os.access`` ignores NTFS ACLs.
 
-    Where that replace is impossible (a directory the user cannot create files
-    in, a single-file bind mount, or on Windows a file another process holds
-    open without delete sharing), and for anything that is not a regular file
-    (a device, a FIFO), the bytes are written in place, as before.
+    Written in place, as before, are: anything that is not a regular file (a
+    device, a FIFO); a file with other hard links, so every name keeps seeing
+    the same contents; a file carrying a POSIX ACL, which a new inode would
+    not inherit faithfully; and a file where the replace is impossible (see
+    ``_TEMP_FALLBACK_ERRNOS`` and ``_REPLACE_FALLBACK_ERRNOS``).
     """
     data = text.encode("utf-8")
     target = Path(os.path.realpath(path))
@@ -671,13 +687,17 @@ def write_text_atomic(path: Path, text: str) -> None:
     if not stat.S_ISREG(st.st_mode):
         _write_in_place(target, data)
         return
-    if not os.access(target, os.W_OK):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    # Raises what the old truncating open raised for a file the user may not
+    # write, without truncating or touching its contents.
+    os.close(os.open(target, os.O_WRONLY))
+    if st.st_nlink > 1 or _has_posix_acl(target):
+        _write_in_place(target, data)
+        return
     try:
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
-        )
-    except OSError:
+        fd, tmp = tempfile.mkstemp(prefix=_TEMP_PREFIX, suffix=".tmp", dir=target.parent)
+    except OSError as exc:
+        if exc.errno not in _TEMP_FALLBACK_ERRNOS:
+            raise
         _write_in_place(target, data)
         return
     try:
@@ -698,10 +718,28 @@ def write_text_atomic(path: Path, text: str) -> None:
         raise
     try:
         os.replace(tmp, target)
-    except OSError:
+    except OSError as exc:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
+        if exc.errno not in _REPLACE_FALLBACK_ERRNOS:
+            raise
         _write_in_place(target, data)
+
+
+def _has_posix_acl(target: Path) -> bool:
+    """Whether ``target`` carries a POSIX access ACL (Linux xattr).
+
+    Platforms without ``os.listxattr`` and filesystems without xattrs count
+    as no ACL. macOS and NTFS ACLs are not xattrs and survive differently;
+    they are not detected here.
+    """
+    listxattr = getattr(os, "listxattr", None)
+    if listxattr is None:
+        return False
+    try:
+        return _POSIX_ACL_XATTR in listxattr(target)
+    except OSError:
+        return False
 
 
 def _write_in_place(target: Path, data: bytes) -> None:

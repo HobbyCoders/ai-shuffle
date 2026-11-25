@@ -301,11 +301,19 @@ class McpClient:
             return self._cache.tools
         self.list_fetches += 1
         # Every page of a paginated catalog, under one deadline and a page
-        # cap. The first page failing fails the listing, as before; a later
-        # page failing (or the deadline or cap) keeps the tools so far, logs
-        # a warning and is not cached, so the next listing tries again.
+        # cap. The first page failing (or not arriving by the deadline) fails
+        # the listing, as before; a later page failing (or the deadline or
+        # cap) keeps the tools so far, logs a warning and is not cached, so
+        # the next listing tries again.
         deadline = asyncio.get_running_loop().time() + self.call_timeout
-        result = await session.list_tools()
+        try:
+            async with asyncio.timeout_at(deadline):
+                result = await session.list_tools()
+        except TimeoutError:
+            raise TimeoutError(
+                f"MCP server {self.name!r} did not respond to tools/list within "
+                f"{self.call_timeout:g} s"
+            ) from None
         tools = [_descriptor(t) for t in result.tools]
         cursor = _field(result, "next_cursor", "nextCursor")
         seen: set[str] = set()

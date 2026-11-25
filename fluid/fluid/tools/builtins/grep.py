@@ -316,19 +316,19 @@ async def _byte_lines(
     longer one is read and dropped rather than held.
     """
     pending: list[bytes] = []
-    kept = 0
+    room = max_bytes  # bytes the current line may still keep
     while chunk := await stream.read(65536):
         *done, rest = chunk.split(b"\n")
         for line in done:
-            pending.append(line)
-            yield b"".join(pending)[:max_bytes]
+            pending.append(line[:room])
+            yield b"".join(pending)
             pending.clear()
-            kept = 0
-        if rest and kept < max_bytes:
-            pending.append(rest)
-            kept += len(rest)
+            room = max_bytes
+        if rest and room > 0:
+            pending.append(rest[:room])
+            room -= len(pending[-1])
     if pending:
-        yield b"".join(pending)[:max_bytes]
+        yield b"".join(pending)
 
 
 async def _rg_records(
