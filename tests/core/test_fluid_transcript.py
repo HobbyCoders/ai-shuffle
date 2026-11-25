@@ -1356,6 +1356,25 @@ def test_reseed_starts_from_a_mechanical_compaction_checkpoint(mock_db, tmp_path
     assert "first prompt" not in text and "file body" not in text
 
 
+def test_a_checkpoint_result_row_with_text_puts_its_results_first(mock_db, tmp_path):
+    """Claude Code sends a ToolSearch result as the tool_result, then the
+    text "Tool loaded." in the same message, and its compaction rows keep
+    that text beside the result. The API refuses a message whose text comes
+    ahead of the tool_result answering the call before it, so a re-seed that
+    wrote them text first failed every turn after it with "API Error: 400
+    due to tool use concurrency issues"."""
+    session_id = _seed()
+    event = _checkpoint(ts=1004.5)
+    event["rows"][2] = {"role": "user", "text": "Tool loaded.", "toolUses": [],
+                        "toolResults": [{"tool_use_id": "t1", "text": "", "isError": False}]}
+    _insert_events(session_id, [_cli_compaction(node_id="n5", summary=""), event])
+    lines = _reseeded_with_repeated_brief(session_id, tmp_path)
+    assert lines[2]["message"]["content"] == [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "", "is_error": False},
+        {"type": "text", "text": "Tool loaded."},
+    ]
+
+
 def test_a_newer_summary_wins_over_an_older_checkpoint_and_back(mock_db, tmp_path):
     session_id = _seed()
     _insert_events(session_id, [
