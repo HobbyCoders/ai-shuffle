@@ -70,13 +70,42 @@ def canonical_remote(url: Optional[str]) -> str:
     return normalize_remote_url(url)
 
 
-def remote_key(url: Optional[str]) -> str:
-    """A comparison key for a remote that never holds a credential: the
-    :func:`canonical_remote` of its stored form (``strip_url_userinfo``). Two
-    remotes with one key are one identity; the New project dialog's ``remoteKey``."""
-    from app.core.scrub import strip_url_userinfo
+# ``scheme://`` then the authority, which runs to the first ``/``.
+_SCHEME_AUTHORITY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)(.*)$", re.DOTALL)
+_SSH_SCHEMES = {"ssh://", "git+ssh://", "ssh+git://"}
+# What may be left of an authority once its userinfo is gone: a host (or a
+# bracketed IPv6 address) and an optional port.
+_HOST_PORT_RE = re.compile(r"(?:\[[0-9A-Fa-f:.%]+\]|[^\s@:/\[\]]+)(?::\d*)?")
+_SSH_LOGIN_RE = re.compile(r"[^\s@:/\[\]]+")
 
-    return canonical_remote(strip_url_userinfo(url or ""))
+
+def remote_key(url: Optional[str]) -> str:
+    """A comparison key for a remote that never holds a credential, or ``""``
+    when one can't be made safely; the New project dialog's ``remoteKey``.
+
+    In a ``scheme://`` URL everything in the authority up to its last ``@`` is
+    dropped, except an SSH login with no ``:`` (a login is not a secret, and two
+    logins are two identities). What is left of the authority must be a host
+    and port, and the rest may hold no ``@``, else there is no key. The scp
+    form (``login@host:path``) can't carry a password and is kept, unless what
+    precedes its ``@`` holds a ``:``. Then :func:`canonical_remote`, so two
+    remotes with one key are one identity.
+    """
+    text = (url or "").strip()
+    match = _SCHEME_AUTHORITY_RE.match(text)
+    if match:
+        scheme, authority, rest = match.groups()
+        login = ""
+        if "@" in authority:
+            userinfo, _, authority = authority.rpartition("@")
+            if scheme.lower() in _SSH_SCHEMES and _SSH_LOGIN_RE.fullmatch(userinfo):
+                login = f"{userinfo}@"
+        if (authority and not _HOST_PORT_RE.fullmatch(authority)) or "@" in rest:
+            return ""
+        text = f"{scheme}{login}{authority}{rest}"
+    elif ":" in text.partition("@")[0] and "@" in text:
+        return ""
+    return canonical_remote(text)
 
 
 def _link_id(normalized: str) -> Optional[str]:

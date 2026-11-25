@@ -146,16 +146,32 @@ export function refQuery(ref: ProjectRef): string {
 
 /**
  * A Git remote's comparison key, equal to an overview row's `remote_key` for the
- * same repository (the server's `remote_key`): credentials dropped (an SSH login
- * stays), `git@host:owner/repo` read as `https://host/owner/repo`, then a trailing
- * slash and `.git` removed and lower-cased. Every other spelling is compared as
- * written, so two SSH logins on one host stay apart. Empty for a blank URL.
+ * same repository (the server's `remote_key`). In a `scheme://` URL the authority
+ * (up to the first `/`) loses everything up to its last `@`, except an SSH login
+ * with no `:`; what is left must be a host and port, with no `@` after it, else
+ * the key is empty (no marker; the server still refuses a duplicate). Then
+ * `git@host:owner/repo` is read as `https://host/owner/repo`, a trailing slash
+ * and `.git` are removed, and it is lower-cased. Every other spelling is compared
+ * as written, so two SSH logins on one host stay apart. Empty for a blank URL.
  */
 export function remoteKey(url: string | null | undefined): string {
 	let text = (url ?? '').trim();
-	text = text.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^\s/?#"'<>[\]{}\\^|]+)@/, (whole, scheme: string, info: string) =>
-		/^(?:git\+)?ssh(?:\+git)?:\/\/$/i.test(scheme) && !info.includes(':') ? whole : scheme
-	);
+	const scheme = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/]*)([\s\S]*)$/.exec(text);
+	if (scheme) {
+		const [, prefix, whole, rest] = scheme;
+		let authority = whole;
+		let login = '';
+		const at = authority.lastIndexOf('@');
+		if (at >= 0) {
+			const info = authority.slice(0, at);
+			authority = authority.slice(at + 1);
+			if (/^(?:git\+)?ssh(?:\+git)?:\/\/$/i.test(prefix) && /^[^\s@:/[\]]+$/.test(info)) login = `${info}@`;
+		}
+		if ((authority && !/^(?:\[[0-9A-Fa-f:.%]+\]|[^\s@:/[\]]+)(?::\d*)?$/.test(authority)) || rest.includes('@')) return '';
+		text = `${prefix}${login}${authority}${rest}`;
+	} else if (text.includes('@') && text.split('@', 1)[0].includes(':')) {
+		return '';
+	}
 	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(text);
 	if (forge) text = `https://${forge[1]}/${forge[2]}`;
 	text = text.replace(/\/+$/, '');

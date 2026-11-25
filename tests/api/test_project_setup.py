@@ -1709,6 +1709,41 @@ def test_an_ssh_checkout_stays_put_when_the_https_project_moved_to_another_repos
     assert project_remote.identity_for_remote(_SSH) == (legacy["origin"], False)
 
 
+def test_a_checkout_never_follows_a_stale_merge_of_the_other_spelling(client, ws, test_db):
+    from app.core import project_remote
+
+    # T used repository S. Changing T to R (HTTPS) merged R's HTTPS project into T.
+    t = _replicated(_MOVED_TO, name="T")
+    r = _replicated(_HTTPS, name="R")
+    projects_v2.pin_remote(t["origin"], _HTTPS, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_MOVED_TO)
+    projects_v2.mark_merged(r["origin"], t["origin"])
+    assert project_remote.identity_for_remote(_SSH) == (t["origin"], True)  # T uses R: join it
+    # Then T was changed back to S.
+    projects_v2.pin_remote(t["origin"], _MOVED_TO, default_branch="main", generation=2,
+                           keep_upstream=False, previous=_HTTPS)
+    # An unrelated, unlocked checkout is pointed at R's git@ URL.
+    tool = "https://git.example.com/example-org/tool.git"
+    _legacy_project_here(ws, remote=tool, project_id="tool", origin=auto_link_group_id(tool))
+    git(ws / "tool", "remote", "set-url", "origin", _SSH)
+    _refresh_git_record("tool", ws / "tool")
+    # It takes the git@ URL's own id (as before the spellings were joined), never T.
+    assert database.get_project("tool")["link_group_id"] == _legacy_id(_SSH)
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "tool") == _SSH  # never pointed at S
+    assert database.get_project("tool")["link_group_id"] == _legacy_id(_SSH)
+
+
+def test_the_overview_never_returns_a_password_git_reads_but_a_url_parser_does_not(client, ws, test_db):
+    secret = "https://user:pa[ss-example@git.example.com/example-org/demo.git"
+    _legacy_project_here(ws, remote=secret, project_id="demo", origin=auto_link_group_id(secret))
+    resp = client.get("/api/v1/projects/overview")
+    assert resp.status_code == 200, resp.text
+    assert "pa[ss" not in resp.text and "ss-example" not in resp.text
+    [row] = resp.json()["projects"]
+    assert row["remote_key"] == "https://git.example.com/example-org/demo"
+
+
 def test_a_respelled_checkout_never_joins_a_project_that_moved_to_another_repository(client, ws, test_db):
     from app.core import project_remote
 

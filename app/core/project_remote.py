@@ -192,9 +192,14 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
         if exact is not None and not _forgotten(exact):
             return legacy, False  # the identity this spelling already has
         canonical = exact if legacy == derived else projects_v2.get_project_v2_by_origin(derived)
-        target = merged_into(canonical)
-        if target:
-            return target, True
+        if merged_into(canonical):
+            # Reached through the other spelling's id: follow it only while the
+            # project it leads to still uses this repository, else this
+            # spelling keeps its own id (as before the two were joined).
+            target = merge_target(derived)
+            if target and _uses_repository(target, url):
+                return target, True
+            return legacy, False
         for row in pinned:  # pointed at this repository in another spelling
             if row["origin"] not in own and same_remote(pinned_remote(row), url):
                 return row["origin"], True
@@ -204,6 +209,17 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     except Exception:  # noqa: BLE001 - fall back to the remote's own identity
         logger.debug("identity_for_remote: lookup failed", exc_info=True)
     return derived, False
+
+
+def _uses_repository(origin: str, url: Optional[str]) -> bool:
+    """Whether project ``origin``'s remote (pinned, else stored) is one identity
+    with ``url`` (``remote_link_ids`` overlap)."""
+    from app.core.project_links import remote_link_ids
+    from app.db import projects_v2
+
+    row = projects_v2.get_project_v2_by_origin(origin)
+    remote = pinned_remote(row) or projects_v2.stored_remote(row)[0]
+    return bool(remote) and bool(remote_link_ids(remote) & remote_link_ids(url))
 
 
 def _forgotten(pv2: Optional[Dict[str, Any]]) -> bool:

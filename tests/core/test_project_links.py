@@ -145,6 +145,22 @@ def test_a_remote_key_never_holds_a_credential():
     assert project_links.remote_key(None) == ""
 
 
+@pytest.mark.parametrize("url, key", [
+    # Git reads a password with a literal ``[`` that a URL parser rejects.
+    ("https://user:pa[ss-example@git.example.com/o/r.git", "https://git.example.com/o/r"),
+    ("https://user:pa[ss@example@git.example.com/o/r", "https://git.example.com/o/r"),
+    ("ssh://alice:pa[ss-example@code.example.test/repos/app", "ssh://code.example.test/repos/app"),
+    ("https://user:pw-example@[2001:db8::1]:8443/o/r", "https://[2001:db8::1]:8443/o/r"),
+    # No safe key: no marker in the dialog (the server's own check still refuses).
+    ("https://user:pa/ss-example@git.example.com/o/r", ""),
+    ("https://user:12/ss-example@git.example.com/o/r", ""),
+    ("user:pa[ss-example@git.example.com:o/r", ""),
+])
+def test_a_remote_key_drops_any_password_or_has_no_key(url, key):
+    assert project_links.remote_key(url) == key
+    assert "pa[ss" not in project_links.remote_key(url) and "ss-example" not in project_links.remote_key(url)
+
+
 def test_an_https_identity_is_the_one_it_always_had():
     # Plain HTTPS rows keep their origin (and projects_v2 id): only other
     # spellings move. sha256("https://github.com/example-org/demo")[:16].

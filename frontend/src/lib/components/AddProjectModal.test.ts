@@ -371,4 +371,16 @@ describe('remoteKey', () => {
 		expect(remoteKey('git@github.com:/srv/site')).toBe('git@github.com:/srv/site');
 		expect(remoteKey('ssh://alice:pw-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
 	});
+
+	it('drops a password a URL parser would reject, or gives no key', async () => {
+		const { remoteKey } = await import('$lib/api/project-workers');
+		expect(remoteKey('https://user:pa[ss-example@git.example.com/o/r.git')).toBe('https://git.example.com/o/r');
+		expect(remoteKey('https://user:pa[ss@example@git.example.com/o/r')).toBe('https://git.example.com/o/r');
+		expect(remoteKey('ssh://alice:pa[ss-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
+		expect(remoteKey('https://user:pw-example@[2001:db8::1]:8443/o/r')).toBe('https://[2001:db8::1]:8443/o/r');
+		for (const unsafe of ['https://user:pa/ss-example@git.example.com/o/r', 'https://user:12/ss-example@git.example.com/o/r',
+			'user:pa[ss-example@git.example.com:o/r']) {
+			expect(remoteKey(unsafe)).toBe('');
+		}
+	});
 });
