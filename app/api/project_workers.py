@@ -318,6 +318,78 @@ def _retired(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]]) -> bool:
     return project_settings.get("forgotten") is True or _folded(pv2, pv2s)
 
 
+def _shown(pv2: Dict[str, Any], pv2s: Dict[str, Dict[str, Any]], workers: List[Dict[str, Any]],
+           offline_has: Dict[str, set]) -> bool:
+    """Whether the Projects overview gives ``pv2`` a card, from each worker's entry."""
+    listed = any(w["state"] in _LISTED_STATES for w in workers) or any(
+        w["state"] == "unknown" and pv2["id"] in offline_has.get(w["install_id"], set()) for w in workers)
+    if not listed:
+        return False
+    # Nothing left of a retired one anywhere: a failed old setup must not keep it stuck here.
+    return not (_retired(pv2, pv2s) and not any(w["state"] in _MAYBE_HELD_STATES for w in workers))
+
+
+def would_list(origin: str, *, exclude_op_id: Optional[str] = None, settling: bool = False) -> bool:
+    """Whether the Projects overview would list ``origin`` now (:func:`_shown`),
+    judged without waiting on a peer (sync).
+
+    Each worker's state comes from what this worker already has: its own
+    status; on a shared database, the peer's rows and setup ops; in a network,
+    the peer's catalog cached by the last overview read (a paired worker's
+    project rows are not replicated here, only the identity). A peer that is
+    online with no cached catalog is unknown, and counts as holding the
+    project: a duplicate is refused, unless the identity is hidden or a first
+    clone in progress (so its own retry is not). With ``settling`` (deciding
+    whether to hide a failed first clone) the question is whether it would
+    still be listed once hidden, and an unknown worker always counts, so
+    nothing is hidden on an unknown. An identity still marked provisional is
+    judged as hidden too (no worker has registered it: registering clears the
+    mark), so a failed first clone that could not be hidden can be retried.
+    ``exclude_op_id`` leaves out that op.
+    """
+    from app.db import project_setup as setup_db
+    from app.db import projects_v2
+    from app.network import engine
+
+    pv2 = projects_v2.get_project_v2_by_origin(origin)
+    if not pv2:
+        return False
+    installs = _approved_workers()
+    me = _self_install_id()
+    networked = engine.context() is not None
+    offline_has = _offline_has(installs, networked)
+    catalogs = setup_db.peer_catalogs() if networked else {}
+    snapshot = {"superseded": setup._superseded_local_origins(setup._own_project_rows())}
+    latest = _latest_requests(setup_db.list_requests())
+    workers = []
+    for install in installs:
+        install_id = install["id"]
+        is_self = install_id == me
+        view = {"install": install, "is_self": is_self, "online": bool(is_self or install.get("online")),
+                "status": None, "unsupported": False}
+        if is_self:
+            view["status"] = setup.local_status()
+        elif not networked:
+            view["status"] = _shared_db_status(install_id, None)
+        elif install_id in catalogs:
+            view["status"] = {"project_ids": catalogs[install_id], "workspace": None, "ops": [], "projects": {}}
+        if view["status"] is not None and exclude_op_id:
+            view["status"] = {**view["status"], "ops": [op for op in view["status"].get("ops") or []
+                                                        if op.get("op_id") != exclude_op_id]}
+        workers.append(_worker_entry(pv2["id"], view, snapshot, offline_has, latest, origin))
+    marks = pv2.get("settings") if isinstance(pv2.get("settings"), dict) else {}
+    if any(w["state"] == "unknown" for w in workers) and (
+            settling or (marks.get("forgotten") is not True and marks.get(projects_v2.PROVISIONAL_KEY) is not True)):
+        return True
+    if settling or marks.get(projects_v2.PROVISIONAL_KEY) is True:
+        # Judged as hidden: a first clone's own failed attempts are no project
+        # (a hidden identity keeps no card for them); a copy or a live setup
+        # anywhere still is one.
+        pv2 = {**pv2, "settings": {**marks, "forgotten": True}}
+    pv2s = {row["id"]: row for row in projects_v2.list_projects_v2()}
+    return _shown(pv2, {**pv2s, pv2["id"]: pv2}, workers, offline_has)
+
+
 async def _gather(project_v2_id: Optional[str] = None) -> tuple:
     from app.network import engine
 
@@ -349,14 +421,10 @@ async def projects_overview(request: Request, token: str = Depends(require_auth)
         if scoped_origin and origin != scoped_origin:
             continue
         workers = [_worker_entry(pv2["id"], view, snapshot, offline_has, latest, origin) for view in ordered]
-        listed = any(w["state"] in _LISTED_STATES for w in workers) or any(
-            w["state"] == "unknown" and pv2["id"] in offline_has.get(w["install_id"], set()) for w in workers)
-        if not listed:
-            continue
         if not scoped_origin and _folded(pv2, snapshot["pv2s"]):
             continue  # its copies are listed under the project it was folded into
-        if _retired(pv2, snapshot["pv2s"]) and not any(w["state"] in _MAYBE_HELD_STATES for w in workers):
-            continue  # nothing left of it anywhere: a failed old setup must not keep it stuck here
+        if not _shown(pv2, snapshot["pv2s"], workers, offline_has):
+            continue
         info = _project_info(pv2, snapshot, views)
         projects.append({
             "project_v2_id": pv2["id"],
@@ -608,7 +676,8 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
     if not found:
         raise HTTPException(status_code=400, detail="Enter the repository's clone URL")
     origin = found[0]
-    existing = setup._own_rows_by_origin().get(origin) or _project_with_remote(clean)
+    existing = (setup._own_rows_by_origin().get(origin) or _listed_elsewhere(origin)
+                or _project_with_remote(clean))
     if existing is not None:
         raise HTTPException(status_code=409, detail={
             "error_code": ALREADY_ADDED, "project_id": existing.get("id"),
@@ -628,12 +697,11 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail={
             "error_code": setup.FOLDER_EXISTS,
             "error": f"{path} already exists and has other files in it. Choose another project ID."})
-    if not setup.identity_in_use(origin, projects_v2.project_v2_id_for_origin(origin)):
-        # No worker has a copy or a setup under way: this first clone makes the
-        # identity. Name it after this attempt, and hide it again if no attempt
-        # succeeds (``hide_failed_first_clone``); a listed project is never renamed.
-        projects_v2.upsert_project(origin, name=payload.name)
-        projects_v2.set_provisional(origin, True)
+    # Not listed anywhere (a listed one was refused above): this first clone
+    # makes the identity. Name it after this attempt, and hide it again if no
+    # attempt succeeds (``hide_failed_first_clone``).
+    projects_v2.upsert_project(origin, name=payload.name)
+    projects_v2.set_provisional(origin, True)
     projects_v2.set_forgotten(origin, False)
     return {
         "project_v2_id": projects_v2.project_v2_id_for_origin(origin), "origin": origin,
@@ -655,12 +723,10 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
 
     Identities are hashes of one spelling, so the same repository added from its
     SSH URL is a different origin than its HTTPS URL; the hashes stay as they are.
-    Listed elsewhere means a worker has a copy or a setup under way (what gives
-    it a Projects card); an identity only remembered from a removed project
+    Listed elsewhere means the Projects overview would give it a card
+    (:func:`would_list`); an identity only remembered from a removed project
     does not block a new clone.
     """
-    from app.db import projects_v2
-
     key = _remote_key(clean)
     if not key:
         return None
@@ -672,15 +738,23 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     for origin in matches:
         if origin in own:
             return own[origin]
-    identities = projects_v2.get_projects_v2_by_origins(matches)
     for origin in matches:
-        pv2 = identities.get(origin)
-        if setup.identity_in_use(origin, projects_v2.project_v2_id_for_origin(origin)):
-            name = (pv2 or {}).get("name") or "another project"
-            return {"id": None, "name": name,
-                    "message": f"This repository is already the project {name} on another worker. "
-                               "Set it up here from its page in Projects."}
+        found = _listed_elsewhere(origin)
+        if found:
+            return found
     return None
+
+
+def _listed_elsewhere(origin: str) -> Optional[Dict[str, Any]]:
+    """The already-added answer for an identity the overview lists (:func:`would_list`)."""
+    from app.db import projects_v2
+
+    if not would_list(origin):
+        return None
+    name = (projects_v2.get_project_v2_by_origin(origin) or {}).get("name") or "another project"
+    return {"id": None, "name": name,
+            "message": f"This repository is already the project {name} on another worker. "
+                       "Set it up here from its page in Projects."}
 
 
 @router.post("/clone", status_code=status.HTTP_202_ACCEPTED)

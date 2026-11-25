@@ -68,6 +68,10 @@ CLONE_IDLE_SECONDS = 300.0
 # ... and, as a backstop for any clone, one still running after this long
 # (generous enough for a big repository on a slow link).
 CLONE_DEADLINE_SECONDS = 3600.0
+# The transports a new project's first clone may use (GIT_ALLOW_PROTOCOL: it
+# overrides every protocol.* setting in any gitconfig, and applies to the URL
+# after insteadOf rewrites). No ``file``: a local folder is added with Folder.
+NEW_PROJECT_PROTOCOLS = "https:http:ssh"
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -742,6 +746,10 @@ def classify_clone_failure(stderr: str, clone_url: str, *,
 
     text = (stderr or "").lower()
     on_github = "github.com" in (clone_url or "").lower()
+    if re.search(r"transport '[^']*' not allowed", text):
+        # NEW_PROJECT_PROTOCOLS refused what the source became (a folder here).
+        return SetupError(INTERNAL, "This URL leads to a folder on this worker, not a network repository. "
+                                    "To add a folder on this worker, use Folder.")
     if any(hint in text for hint in _AUTH_HINTS):
         return SetupError(GITHUB_AUTH, (
             "This worker isn't signed in to GitHub, or its account can't access this repository."
@@ -791,13 +799,22 @@ def _report_progress(job: _Job, value: int) -> None:
     _notify_threadsafe(job)
 
 
-def _clone_command(clone_url: str, temp: str) -> List[str]:
+def _clone_command(clone_url: str, temp: str, *, network_only: bool = False) -> List[str]:
+    # ``--no-local``: a source that names an existing folder (git looks for one
+    # before it reads ``host:path`` as SSH) goes through the file transport,
+    # which GIT_ALLOW_PROTOCOL then refuses, instead of a direct local copy.
     return ["git", "-c", f"http.lowSpeedLimit={LOW_SPEED_LIMIT}", "-c", f"http.lowSpeedTime={LOW_SPEED_TIME}",
-            "clone", "--progress", "--", clone_url, temp]
+            "clone", "--progress", *(["--no-local"] if network_only else []), "--", clone_url, temp]
 
 
-def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
-    """Clone into a temporary sibling, then rename it to ``final_path``."""
+def _clone(job: _Job, clone_url: str, final_path: Path, *, network_only: bool = False) -> None:
+    """Clone into a temporary sibling, then rename it to ``final_path``.
+
+    ``network_only`` (a new project's first clone, ``POST /projects/clone``):
+    git may use only :data:`NEW_PROJECT_PROTOCOLS`, whatever the source turns
+    into (an ``insteadOf`` rewrite, a folder named like ``host:path``).
+    Setting up an existing project may copy from a local source as before.
+    """
     from fluid.tools.child_env import scrub_child_env
     from app.core.git_service import _IS_WINDOWS, _kill_git_tree, _quiet_git_env, classify_clone_url, git_service
     from app.db import git_ops as git_ops_db
@@ -813,7 +830,9 @@ def _clone(job: _Job, clone_url: str, final_path: Path) -> None:
         logger.debug("project setup: could not record temp dir for %s", job.op_id, exc_info=True)
     env = {**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"}
     _quiet_git_env(env)
-    command = _clone_command(clone_url, temp)
+    if network_only:
+        env["GIT_ALLOW_PROTOCOL"] = NEW_PROJECT_PROTOCOLS
+    command = _clone_command(clone_url, temp, network_only=network_only)
     group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
              if _IS_WINDOWS else {"start_new_session": True})
     tail: List[str] = []
@@ -947,26 +966,6 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def identity_in_use(origin: str, project_v2_id: Optional[str], *, exclude_op_id: Optional[str] = None) -> bool:
-    """Whether any worker has a registered copy of ``origin`` or a live setup op for it.
-
-    Reads the shared tables (every worker's ``projects`` rows and ``git_ops``),
-    not only this runner's. A ``running`` op whose heartbeat went stale does
-    not count: its runner is gone and its own restart sweep settles it.
-    """
-    from app.db import git_ops as git_ops_db
-    from app.db import projects as projects_db
-
-    if origin and projects_db.get_projects_in_link_group(origin):
-        return True
-    if not project_v2_id:
-        return False
-    return any(row.get("id") != exclude_op_id and row.get("op") == SETUP_OP
-               and (row.get("status") == "queued"
-                    or (row.get("status") == "running" and not git_ops_db._is_stale_running(row)))
-               for row in git_ops_db.list_recent_for_project(project_v2_id, limit=50))
-
-
 def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     """Hide a new project's identity again after its first clone ended without a project.
 
@@ -974,10 +973,12 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     before it ran, the restart sweep, and a request refused while starting.
     Only an identity still marked provisional (``projects_v2.PROVISIONAL_KEY``,
     set by ``POST /projects/clone`` for one that was not a listed project) is
-    hidden, and only while no worker has a copy of it and no other setup for
-    it is under way anywhere (:func:`identity_in_use`). Best effort: the op's
-    own failure is what the caller needs.
+    hidden, and only while nothing apart from this op would give it a card in
+    the Projects overview (``project_workers.would_list``: a copy or a setup on
+    any worker, peers included; a peer it cannot judge keeps it). Best effort:
+    the op's own failure is what the caller needs.
     """
+    from app.api.project_workers import would_list
     from app.db import projects_v2
 
     params = op_row.get("params") or {}
@@ -988,7 +989,7 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
         pv2 = projects_v2.get_project_v2_by_origin(origin)
         if not pv2 or (pv2.get("settings") or {}).get(projects_v2.PROVISIONAL_KEY) is not True:
             return
-        if identity_in_use(origin, pv2["id"], exclude_op_id=op_row.get("id")):
+        if would_list(origin, exclude_op_id=op_row.get("id"), settling=True):
             return  # a copy exists or another attempt is under way; that settles it
         projects_v2.set_forgotten(origin, True)
     except Exception:  # noqa: BLE001
@@ -1052,19 +1053,21 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         raise SetupError(FOLDER_EXISTS, f"{path} is already the project {registered.get('name') or registered['id']} "
                                         "on this worker. Choose another folder.")
     adopted = False
+    # Only a new project's first clone carries ``project_id`` (POST /projects/clone).
+    network_only = bool(params.get("project_id"))
     if kind == "git":
         if path.exists() or path.is_symlink():
             if _same_repo(path, clone_url, origin):
                 adopted = True
             elif mode == "auto" and _is_empty_dir(path):
-                _clone(job, clone_url, path)
+                _clone(job, clone_url, path, network_only=network_only)
             else:
                 raise SetupError(FOLDER_EXISTS, f"{path} already exists and isn't a copy of this project. "
                                                 "Choose another folder.")
         elif mode == "adopt":
             raise SetupError(NOT_FOUND, f"There is no folder at {path} to use.")
         else:
-            _clone(job, clone_url, path)
+            _clone(job, clone_url, path, network_only=network_only)
     elif kind == "folder":
         if path.exists() or path.is_symlink():
             if not path.is_dir() or path.is_symlink():
