@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { runJourney } from './runner.mjs';
-import { expect, showSidebar } from './lib/app.mjs';
+import { expect, openRailPlace, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const UPDATE_PATH = '/api/v1/settings/application-updates';
@@ -72,7 +72,7 @@ async function openSystem(page, status) {
       .or(page.getByRole('button', { name: /^(Show sidebar|Chats)\b/ })).filter({ visible: true }).first().waitFor();
     await showSidebar(page);
   }
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await openRailPlace(page, 'Settings');
   await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'System', exact: true }).click();
 }
 

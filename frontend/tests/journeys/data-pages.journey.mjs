@@ -1,7 +1,7 @@
 // Content-first data destinations must expose the real content and every moved
 // control without taking a panel/detail history step on responsive and native phone.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, holdBootLoad } from './lib/app.mjs';
+import { expect, gotoApp, holdBootLoad, openRailPlace } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const native = process.argv.includes('--mobile-shell');
 await runJourney({
@@ -203,7 +203,7 @@ await runJourney({
    const workspace=page.getByRole('navigation',{name:'Workspace',exact:true});
    if(!await workspace.isVisible())await page.getByRole('button',{name:native&&variant.viewport==='phone'?/^Open menu/:/^Chats(?: \(|$)|Show sidebar/}).first().click();
    await mark('open Providers before its first registry snapshot arrives');
-   await workspace.getByRole('button',{name:'Settings',exact:true}).click();
+   await openRailPlace(page,'Settings');
    const providers=page.getByRole('navigation',{name:'Settings',exact:true}).getByRole('button',{name:'Providers',exact:true});
    await providers.click();
    await page.waitForFunction(() => window.__journeyBootHold?.startedAt !== null);

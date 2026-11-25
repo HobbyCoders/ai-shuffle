@@ -8,8 +8,10 @@
 	 * on desktop and a bottom sheet on the phone.
 	 *
 	 * On the phone this is the drawer's bottom row: labelled tabs (Chats, the
-	 * destinations the sidebar picked, Settings, More). New moves to the drawer's
-	 * header there, because a tab row is for going places.
+	 * first few places of the rail in its order, More). The sidebar passes
+	 * Settings inside `items` there, at its rail-foot place, so it gets a seat
+	 * only when the rail has room. New moves to the drawer's header, because a
+	 * tab row is for going places.
 	 *
 	 * A touch long-press on any destination jumps straight to Customize, so
 	 * rearranging the rail never needs a trip through More.

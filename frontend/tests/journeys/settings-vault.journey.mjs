@@ -6,7 +6,7 @@
 // as the disposable dev instance's loopback owner (as settings-learned-behaviour
 // does). Adding a sign-in contacts nothing and grants nothing.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
+import { expect, gotoApp, openRailPlace, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobileShell = process.argv.includes('--mobile-shell');
@@ -67,7 +67,7 @@ await runJourney({
 			await mark('open Settings > Vault');
 			const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
 			if (!await nav.isVisible()) await page.getByRole('button', { name: /^(Open menu|Chats)( \(|$)/ }).first().click();
-			await nav.getByRole('button', { name: 'Settings', exact: true }).click();
+			await openRailPlace(page, 'Settings');
 			await page.getByRole('navigation', { name: 'Settings', exact: true })
 				.getByRole('button', { name: /^Vault\b/ }).filter({ visible: true }).first().click();
 			await button('Add sign-in').first().waitFor();

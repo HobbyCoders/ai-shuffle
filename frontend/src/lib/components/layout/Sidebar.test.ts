@@ -2396,6 +2396,35 @@ describe('Sidebar rail customization', () => {
 		expect(dialog.textContent).toContain('Always last');
 	});
 
+	it('fills the phone tab row from the rail, in its order, after Chats', async () => {
+		platform.set('mobile');
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+
+		// Settings has no seat of its own: it sits at the rail's foot, behind
+		// the five destinations, so it waits under More with Pull requests.
+		expect(railItem('Chats')).toBeTruthy();
+		expect(railLabels()).toEqual(['Files', 'Notes', 'Agents']);
+		expect(within(screen.getByRole('navigation', { name: 'Workspace' })).queryByRole('button', { name: 'Settings' })).toBeNull();
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).toEqual(['Projects', 'Pull requests', 'Settings', 'Automations', 'Stats', 'Docs', 'Customize the rail']);
+	});
+
+	it('follows a reordered rail on the phone, and gives Settings a seat when the rail is short', async () => {
+		platform.set('mobile');
+		const onOpenFeature = vi.fn();
+		sidebarWorkspace.arrange(['project', 'prs', 'file-browser', 'notes', 'build']);
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
+		expect(railLabels()).toEqual(['Projects', 'Pull requests', 'Files']);
+
+		sidebarWorkspace.setShown('prs', false);
+		sidebarWorkspace.setShown('file-browser', false);
+		sidebarWorkspace.setShown('notes', false);
+		await tick();
+		expect(railLabels()).toEqual(['Projects', 'Agents', 'Settings']);
+		await fireEvent.click(railItem('Settings'));
+		expect(onOpenFeature).toHaveBeenCalledWith('settings');
+	});
+
 	it('closes Customize on Escape before anything else', async () => {
 		render(Sidebar, { props: sidebarProps });
 

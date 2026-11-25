@@ -72,7 +72,7 @@
 	import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { splitWorkspaceItems, WORKSPACE_ITEM_IDS, workspacePrefs, type WorkspaceItemId } from '$lib/stores/sidebar-prefs.svelte';
+	import { splitWorkspaceItems, workspacePrefs } from '$lib/stores/sidebar-prefs.svelte';
 	import NotificationCenter from '$lib/components/NotificationCenter.svelte';
 	import AwayAllChatsSwitch from './AwayAllChatsSwitch.svelte';
 	import DesktopUpdateButton from './sidebar/DesktopUpdateButton.svelte';
@@ -150,8 +150,8 @@
 	const ownsPanel = $derived(panelHost && !platform.isMobile && viewOwnsPanel($activeView?.type));
 	const panelTitle = $derived(ownsPanel ? viewPanelTitles[$activeView!.type as keyof typeof viewPanelTitles] : 'Chats');
 
-	/** Who gets the phone's few tab seats on a list nobody has reordered. */
-	const PHONE_TAB_ORDER: readonly WorkspaceItemId[] = ['project', 'build', 'file-browser', 'notes', 'prs'];
+	/** Tabs between Chats and More in the phone's bottom row. */
+	const PHONE_TAB_SEATS = 3;
 
 	// Statuses whose elapsed timer ticks live (1s) rather than showing a coarse age.
 	// A parked session's total keeps counting while its background work runs.
@@ -685,31 +685,21 @@
 			? [{ id: 'terminal' as const, label: 'Terminal', icon: SquareTerminal, on: currentType === 'terminal' }]
 			: [])
 	]);
-	/** Settings is pinned at the rail's foot, never under More. */
+	/** Settings is pinned at the desktop rail's foot, never under More; the phone row seats it in rail order. */
 	const settingsItem = $derived<WorkspaceNavItem | null>(
 		isAdmin
 			? { id: 'settings', label: 'Settings', icon: Settings, on: currentType === 'settings' || SETTINGS_MEMBERS.includes(currentType as ViewType) }
 			: null
 	);
 	const split = $derived(splitWorkspaceItems(destinations, $workspacePrefs));
-	// The phone's tab row holds four places plus More, so it has fewer seats than
-	// the rail. Until someone reorders their list, the seats go by real use: the
-	// chat list comes first in the rail itself, then Projects and Agents. A list
-	// the user has reordered keeps their order; nothing but seats change.
-	const phoneTabs = $derived.by<WorkspaceNavItem[]>(() => {
-		const seats = settingsItem ? 2 : 3;
-		const reordered = $workspacePrefs.order.join() !== WORKSPACE_ITEM_IDS.join();
-		const rank = (item: WorkspaceNavItem) => {
-			const at = PHONE_TAB_ORDER.indexOf(item.id);
-			return at < 0 ? PHONE_TAB_ORDER.length : at;
-		};
-		const pool = reordered ? split.shown : [...split.shown].sort((a, b) => rank(a) - rank(b));
-		return pool.slice(0, seats);
-	});
+	// The phone's tab row is the rail laid flat, with fewer seats: Chats is
+	// always first, then the rail's own destinations in the user's order, with
+	// Settings where the rail keeps it, at the foot. Whatever has no seat waits
+	// under More in that same order, ahead of what the user folded away.
+	const phoneRail = $derived(settingsItem ? [...split.shown, settingsItem] : split.shown);
+	const phoneTabs = $derived(phoneRail.slice(0, PHONE_TAB_SEATS));
 	const railItems = $derived(phone ? phoneTabs : split.shown);
-	const moreItems = $derived(
-		phone ? destinations.filter((item) => !phoneTabs.some((tab) => tab.id === item.id)) : split.hidden
-	);
+	const moreItems = $derived(phone ? [...phoneRail.slice(PHONE_TAB_SEATS), ...split.hidden] : split.hidden);
 	const moreOn = $derived(moreItems.some((item) => item.on));
 	/** The chat list, and the chat or board it leads to, are what is on screen. */
 	const chatsOn = $derived(currentType === null || currentType === 'session' || currentType === 'board');
@@ -1142,7 +1132,7 @@
 <aside class="sidebar" class:phone aria-label="Chats">
 	<SidebarRail
 		items={railItems}
-		settings={settingsItem}
+		settings={phone ? null : settingsItem}
 		{newLabel}
 		moreOpen={sheet === 'more'}
 		{moreOn}

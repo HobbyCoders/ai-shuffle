@@ -20,6 +20,7 @@ import {
 	countText,
 	expect,
 	gotoApp,
+	openRailPlace,
 	pick,
 	scriptTag,
 	showSidebar,
@@ -438,8 +439,8 @@ await runJourney({
 				const reply = page.getByText(`You said: “${state.retained}`).first();
 				const top = () => reply.evaluate(el => el.getBoundingClientRect().top);
 				const before = await top();
-				await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace', exact: true })
-					.getByRole('button', { name: 'Settings', exact: true }).click();
+				await showSidebar(page);
+				await openRailPlace(page, 'Settings');
 				const settings = page.getByRole('button', { name: 'Back to chats', exact: true });
 				await settings.waitFor();
 				await reply.waitFor({ state: 'detached' });

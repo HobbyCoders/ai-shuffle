@@ -2,7 +2,7 @@
 // exercised on the preview cookie: filter, search, save, a stale save keeps the
 // draft, a refused write stays readable, delete asks first, phone Back is clean.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, showSidebar } from './lib/app.mjs';
+import { expect, gotoApp, openRailPlace, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 const STALE = 'This memory changed since you opened it. Refresh it and try again.';
@@ -52,7 +52,7 @@ await runJourney({ name: 'settings-memory', browser: async () => ({ context: { s
    await gotoApp(page, status);
    if (variant.viewport === 'phone') await showSidebar(page);
   }
-  await workspace(page).getByRole('button', { name: 'Settings', exact: true }).click();
+  await openRailPlace(page, 'Settings');
   await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Memory', exact: true }).filter({ visible: true }).first().click();
   await rows(page).first().waitFor({ timeout: 15000 });
  },
