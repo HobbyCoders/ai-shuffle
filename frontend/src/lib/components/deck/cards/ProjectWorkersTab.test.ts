@@ -19,10 +19,13 @@ vi.mock('$lib/api/project-workers', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/api/project-workers')>()),
 	getProjectWorkers: vi.fn(),
 	startProjectSetup: vi.fn(),
+	cancelProjectSetup: vi.fn(),
+	changeWorkerFolder: vi.fn(),
 	getProjectRemovalPreview: vi.fn()
 }));
 import ProjectWorkersTab from './ProjectWorkersTab.svelte';
-import { getProjectWorkers, startProjectSetup } from '$lib/api/project-workers';
+import { cancelProjectSetup, changeWorkerFolder, getProjectWorkers, startProjectSetup } from '$lib/api/project-workers';
+import { watchResources } from '$lib/services/watch-resources';
 
 const worker = (install_id: string, device_name: string, state: string, extra: Record<string, unknown> = {}) => ({
 	install_id, device_name, is_self: install_id === 'self', online: true, approved: true, state, setup: null,
@@ -133,6 +136,37 @@ describe('Worker table', () => {
 		inspector = screen.getByRole('complementary', { name: 'Storage box details' });
 		expect(inspector.textContent).toContain('It sets up when Storage box comes back online.');
 		expect(within(inspector).getByRole('button', { name: 'Withdraw' })).toBeTruthy();
+	});
+
+	it('cancels a running setup from its inspector', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
+		vi.mocked(cancelProjectSetup).mockResolvedValue(undefined as never);
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Desktop');
+		await fireEvent.click(within(screen.getByRole('complementary', { name: 'Desktop details' })).getByRole('button', { name: 'Cancel setup' }));
+		expect(cancelProjectSetup).toHaveBeenCalledWith('op-1');
+	});
+
+	it('refuses to save a folder change once the registered folder has changed underneath it', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Home server');
+		const inspector = screen.getByRole('complementary', { name: 'Home server details' });
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Change folder' }));
+		await fireEvent.input(within(inspector).getByRole('textbox', { name: 'New folder on Home server' }), { target: { value: '/workspace/example/other' } });
+
+		// Another device moved it meanwhile: the next read brings a new revision.
+		const moved = { ...mixed, workers: mixed.workers.map((w) => (w.install_id === 'self' ? { ...w, folder: '/workspace/example/moved', folder_revision: 'rev-2' } : w)) };
+		vi.mocked(getProjectWorkers).mockResolvedValue(moved);
+		await vi.mocked(watchResources).mock.calls[0][1]();
+
+		expect(await within(inspector).findByRole('alert')).toHaveProperty('textContent', 'The registered folder changed. Cancel and reopen to edit the current folder.');
+		const save = within(inspector).getByRole('button', { name: 'Save folder' }) as HTMLButtonElement;
+		expect(save.disabled).toBe(true);
+		await fireEvent.submit(save.closest('form')!);
+		expect(changeWorkerFolder).not.toHaveBeenCalled();
 	});
 
 	it('sets a missing worker up from its row', async () => {
