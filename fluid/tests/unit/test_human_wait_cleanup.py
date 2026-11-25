@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from fluid.engine.native import NativeLoop
-from fluid.events import RespondPermission
+from fluid.events import RespondPermission, RespondQuestion
 from fluid.hooks.bus import NOTIFICATION, HookBus
 from fluid.store.base import MemoryStore
 
@@ -98,4 +98,26 @@ async def test_an_answered_prompt_still_lets_its_notification_finish() -> None:
     release.set()
     verdict, _msg, _updated = await asyncio.wait_for(task, 5)
     assert verdict == "allow" and seen == ["permission_prompt"]
+    assert not loop._human_wait_pending()
+
+
+@pytest.mark.parametrize("ask", [_ask_permission, _ask_question])
+async def test_a_stop_after_the_answer_still_cuts_a_hung_notification_short(ask) -> None:
+    """A provider-fallback prompt runs outside the interruptible tool wrapper:
+    once answered, a hung Notification hook must not hold off a Stop."""
+    loop, entered = _loop_with_hung_notification()
+    task = asyncio.create_task(ask(loop))
+    await asyncio.wait_for(entered.wait(), 5)
+    pending = loop._pending_permissions or loop._pending_questions
+    (request_id, fut), = pending.items()
+    if loop._pending_permissions:
+        fut.set_result(RespondPermission(request_id=request_id, decision="allow"))
+    else:
+        fut.set_result(RespondQuestion(request_id=request_id, answer="a"))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the answered prompt waits on its notice
+
+    loop._interrupted.set()
+    result = await asyncio.wait_for(task, 5)  # was stuck behind the hook
+    assert result is None or result[0] == "deny"
     assert not loop._human_wait_pending()

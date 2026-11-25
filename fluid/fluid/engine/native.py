@@ -2835,8 +2835,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         The Notification hooks run beside the wait instead of in front of it,
         so a slow hook neither delays the answer nor holds off a Stop. Returns
         ``"answered"``, ``"interrupted"`` or ``"timeout"``. Once answered, the
-        notice already under way is let finish, as it always was; an interrupt,
-        a timeout or a cancellation ends it with the wait.
+        notice already under way is let finish, as it always was, unless a
+        Stop lands first: the finish still races the Interrupt, because some
+        callers (a provider-fallback prompt) sit outside the interruptible
+        tool wrapper and nothing else would cut a hung hook short. An
+        interrupt, a timeout or a cancellation ends the notice with the wait.
         """
         notifier = asyncio.ensure_future(notify)
         interrupt_wait = asyncio.create_task(self._interrupted.wait())
@@ -2846,8 +2849,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if fut in done:
-                await notifier
-                return "answered"
+                done, _ = await asyncio.wait(
+                    {notifier, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED,
+                )
+                return "answered" if notifier in done else "interrupted"
             return "interrupted" if interrupt_wait in done else "timeout"
         finally:
             interrupt_wait.cancel()
