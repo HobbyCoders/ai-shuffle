@@ -157,6 +157,25 @@ def latch_all(session_id):
         coordinator.cancelled.update(_active_keys(coordinator))
 
 
+def latch_started_by(session_id, input_cutoff):
+    """Latch the running or admitting workflows started at or before ``input_cutoff``.
+
+    For a Stop that newer input overtook, so it may not latch the session.
+    A workflow started under the input it stopped is still its to end, and
+    one still being admitted is in no task list it captured. Each workflow
+    knows the turn it started under (``SwarmCoordinator.origin``); one
+    started by the newer input, or one that cannot be placed, is left alone.
+    """
+    coordinator = coordinators.get(session_id)
+    origins = getattr(coordinator, "active_origins", None)
+    if origins is None or input_cutoff is None:
+        return []
+    older = sorted(key for key, order in origins().items()
+                   if order is not None and int(order) <= int(input_cutoff))
+    coordinator.cancelled.update(older)
+    return older
+
+
 async def cancel_all(session_id):
     coordinator = coordinators.get(session_id)
     if coordinator:
@@ -166,10 +185,11 @@ async def cancel_all(session_id):
         coordinator.cancelled.update(active)
         await asyncio.gather(*(coordinator.cancel(key) for key in active))
 
-async def close(session_id):
+async def close(session_id, *, deadline=None):
+    """Close the session's workflows; ``deadline`` is event-loop time (shutdown's)."""
     coordinator = coordinators.get(session_id)
     if coordinator:
-        await coordinator.aclose()
+        await coordinator.aclose(deadline=deadline)
         coordinators.pop(session_id, None)
         for key, launch in list(workers.items()):
             if launch.coordinator is coordinator:
@@ -731,7 +751,11 @@ def make_handler(session_id_supplier):
                         task_registry.complete_task(session_id, key, wire_status, summary=summary)
                         await turn_scheduler.on_task_terminal(session_id, dict(task_id=key,
                             status=wire_status, tool_use_id=key, summary=summary))
-                    coordinator = SwarmCoordinator(session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished)
+                    coordinator = SwarmCoordinator(
+                        session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished,
+                        # The turn each workflow starts under, which a Stop's
+                        # ``input_cutoff`` places (``latch_started_by``).
+                        origin=lambda: task_registry.current_input_order(session_id))
                     coordinators[session_id] = coordinator
                 snapshot, receipt = await coordinator.start(data, ctx)
                 return ToolOutcome(text=json.dumps({"swarm": snapshot}), ui={"swarm": snapshot}, background_task=receipt)

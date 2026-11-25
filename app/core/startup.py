@@ -912,20 +912,23 @@ async def shutdown_services() -> bool:
     # Settle turns and release their leases before disconnecting clients or DB,
     # within the one absolute stop deadline of the first stop signal (#1305).
     sessions_settled = False
+    stop_deadline = None
     try:
         from app.core import query_shutdown
         from app.core.desktop_lifecycle import stop_running_sessions
-        sessions_settled = await stop_running_sessions(deadline=query_shutdown.begin_shutdown())
+        stop_deadline = query_shutdown.begin_shutdown()
+        sessions_settled = await stop_running_sessions(deadline=stop_deadline)
     except Exception:
         logger.exception("Failed to stop sessions during shutdown")
     if not sessions_settled:
         logger.warning("Shutdown: sessions were still saving at the stop deadline; "
                        "startup recovery completes them")
 
-    # Shutdown the session pool (disconnect all live adapters)
+    # Shutdown the session pool (disconnect all live adapters). Its Swarm
+    # closes share the same deadline rather than starting waits of their own.
     try:
         from app.core.session_pool import get_session_pool
-        await get_session_pool().shutdown()
+        await get_session_pool().shutdown(deadline=stop_deadline)
         logger.info("SDK session pool shut down")
     except Exception:
         pass

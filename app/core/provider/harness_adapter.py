@@ -1552,12 +1552,17 @@ class HarnessAdapter(ProviderAdapter):
         grace_period: float = _ENGINE_CLOSE_GRACE_SECONDS,
         *,
         session_id: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> None:
-        """End the session's workflows and close its transport."""
+        """End the session's workflows and close its transport.
+
+        ``deadline`` (event-loop time) bounds the workflows' close, so app
+        shutdown never starts a fresh wait past its own stop deadline.
+        """
         from app.core.swarm import close
 
         try:
-            await close(session_id or self._resolve_app_session_id())
+            await close(session_id or self._resolve_app_session_id(), deadline=deadline)
         finally:
             await self.disconnect_transport(session_id=session_id, grace_period=grace_period)
 

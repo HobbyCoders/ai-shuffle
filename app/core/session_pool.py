@@ -409,11 +409,13 @@ def mark_subprocess_oom_killable(state: SessionState) -> None:
 
 async def graceful_disconnect(
     adapter: ProviderAdapter, session_id: str, *, preserve_session: bool = False,
+    deadline: Optional[float] = None,
 ) -> None:
     """Disconnect the provider adapter, giving the subprocess time to flush JSONL writes.
 
     The adapter's disconnect() handles the full grace period logic:
-    waiting for natural exit, SIGTERM, then SIGKILL if needed.
+    waiting for natural exit, SIGTERM, then SIGKILL if needed. ``deadline``
+    (event-loop time, app shutdown's) bounds the session's workflow close.
     """
     try:
         # Pass the session id so the adapter can flag an intentional teardown:
@@ -422,6 +424,8 @@ async def graceful_disconnect(
         # a durable error_log ERROR (see app/core/expected_shutdown.py).
         if preserve_session:
             await adapter.disconnect_transport(session_id=session_id)
+        elif deadline is not None:
+            await adapter.disconnect(session_id=session_id, deadline=deadline)
         else:
             await adapter.disconnect(session_id=session_id)
         logger.debug(f"[Pool] Disconnected adapter for session {session_id}")
@@ -1336,10 +1340,12 @@ class SessionPool:
 
     async def remove(
         self, session_id: str, *, preserve_session: bool = False,
+        deadline: Optional[float] = None,
     ) -> Optional[SessionState]:
         """Remove a client; options replacement preserves session-owned jobs.
 
         Explicit close, clear and delete retain destructive teardown by default.
+        ``deadline`` (event-loop time) bounds the session's workflow close.
         """
         state = self._pop_session(session_id)
         if state is None:
@@ -1354,6 +1360,7 @@ class SessionPool:
             try:
                 await graceful_disconnect(
                     state.adapter, session_id, preserve_session=preserve_session,
+                    deadline=deadline,
                 )
             except Exception as e:
                 logger.warning(f"[Pool] Error disconnecting session {session_id}: {e}")
@@ -1906,13 +1913,18 @@ class SessionPool:
             logger.info("[Pool] Evicted %d idle Claude session(s) after a sign-in change", len(evicted))
         return evicted
 
-    async def shutdown(self) -> None:
-        """Disconnect all sessions. Called during server shutdown."""
+    async def shutdown(self, *, deadline: Optional[float] = None) -> None:
+        """Disconnect all sessions. Called during server shutdown.
+
+        ``deadline`` is the app's absolute stop deadline (event-loop time):
+        session settlement may have used most of it, and the workflows each
+        session closes get only what is left.
+        """
         await self.stop_idle_watchdog()
         session_ids = list(self._pool.keys())
         for session_id in session_ids:
             try:
-                await self.remove(session_id)
+                await self.remove(session_id, deadline=deadline)
             except Exception as e:
                 logger.warning(f"[Pool] Error during shutdown for session {session_id}: {e}")
         logger.info("[Pool] Shutdown complete")

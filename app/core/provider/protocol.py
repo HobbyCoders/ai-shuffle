@@ -42,9 +42,13 @@ class ProviderAdapter(ABC):
 
     @abstractmethod
     async def disconnect(
-        self, grace_period: float = 5.0, *, session_id: Optional[str] = None
+        self, grace_period: float = 5.0, *, session_id: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> None:
         """Disconnect from the provider backend.
+
+        ``deadline`` (event-loop time, app shutdown's) bounds the close of
+        the session's workflows; the pool passes it only during shutdown.
 
         Should allow the backend time to flush any pending writes (e.g., JSONL)
         before forcefully terminating. The grace_period (seconds) controls how

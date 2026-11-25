@@ -1004,3 +1004,63 @@ async def test_stop_latches_a_swarm_whose_admission_is_still_pending(stop):
         await asyncio.wait_for(stopping, 5)
     dispatch.assert_not_called()
     assert coordinator.snapshot(key)["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_an_overtaken_stop_still_latches_the_older_admitting_swarm(monkeypatch):
+    """The first write of a swarm is blocked; one client presses Stop and
+    another sends a follow-up before the receipt applies. The follow-up keeps
+    the session-wide latch off, and the blocked swarm is in no task list the
+    Stop captured: it must still be latched, while the follow-up's own swarm
+    is spared."""
+    from fluid.tools.registry import ToolOutcome
+    from app.core import query_session_lifecycle as lifecycle
+    from app.db import turns
+
+    entered = {"old": asyncio.Event(), "new": asyncio.Event()}
+    release = asyncio.Event()
+
+    async def publish(snapshot):
+        if snapshot["status"] == "queued":
+            entered[snapshot["title"]].set()
+            await release.wait()
+
+    prompts = []
+
+    async def dispatch(data, ctx):
+        prompts.append(data.get("prompt"))
+        return ToolOutcome(text="done")
+
+    turn = {"order": 5}
+    coordinator = SwarmCoordinator("parent", dispatch, AsyncMock(), publish, AsyncMock(),
+                                   origin=lambda: turn["order"])
+    swarm.coordinators["parent"] = coordinator
+    try:
+        old = asyncio.create_task(coordinator.start(
+            {"title": "old", "tasks": [dict(id="a", agent="helper", prompt="do old")]}, ToolCtx()))
+        await asyncio.wait_for(entered["old"].wait(), 5)
+        turn["order"] = 7  # the follow-up's turn is live now
+        new = asyncio.create_task(coordinator.start(
+            {"title": "new", "tasks": [dict(id="a", agent="helper", prompt="do new")]}, ToolCtx()))
+        # Its write queues behind the blocked one; it is admitting either way.
+        for _ in range(100):
+            if len(coordinator.active_ids()) == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert len(coordinator.active_ids()) == 2
+
+        # The follow-up overtook the Stop: its receipt refuses the session latch.
+        monkeypatch.setattr(turns, "apply_stop_receipt", lambda sid, receipt, begin: begin(False))
+        stop = await lifecycle._begin_captured_user_stop(
+            "parent", {"input_cutoff": 6, "stop_seq": 1})
+        assert stop.generation == -1  # no session-wide latch was installed
+
+        release.set()
+        await asyncio.wait_for(asyncio.gather(old, new), 5)
+        await asyncio.wait_for(asyncio.gather(*coordinator.jobs.values()), 5)
+        by_title = {s["title"]: s for s in coordinator.swarms.values()}
+        assert by_title["old"]["status"] == "cancelled"
+        assert by_title["new"]["status"] == "completed"
+        assert prompts == ["do new"]
+    finally:
+        swarm.coordinators.pop("parent", None)

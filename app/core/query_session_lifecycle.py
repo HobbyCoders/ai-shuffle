@@ -543,6 +543,16 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
         nonlocal validated
         if not latch:
             validated = _UserStop(session_id, -1, False, receipt)
+            # Newer input keeps the session-wide latch off, but a workflow the
+            # stopped input started is still this Stop's to end. One whose
+            # first write has not returned is in no task list captured above,
+            # and would dispatch workers once it does.
+            try:
+                from app.core.swarm import latch_started_by
+                latch_started_by(session_id, receipt.get("input_cutoff"))
+            except Exception:  # noqa: BLE001 — per-task Stops must still run.
+                logger.warning("Stop: latching older Swarm workflows failed for %s",
+                               session_id, exc_info=True)
             return validated
         stop = validated = _begin_user_stop(session_id, receipt)
         # This too is session-wide, so it shares the latch's guarded instant.

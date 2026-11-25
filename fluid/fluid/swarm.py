@@ -140,12 +140,16 @@ def recover(snapshot):
 
 
 class SwarmCoordinator:
-    def __init__(self, session_id, dispatch, cancel_worker, publish, finished):
+    def __init__(self, session_id, dispatch, cancel_worker, publish, finished, *, origin=None):
         self.session_id = session_id
         self.dispatch = dispatch
         self.cancel_worker = cancel_worker
         self.publish = publish
         self.finished = finished
+        # ``origin()`` names the input a start came from, in the host's own
+        # order (AI Shuffle: the turn's insert order). A Stop that newer input
+        # overtook ends only what started before it (``active_origins``).
+        self.origin = origin
         self.swarms = {}
         self.jobs = {}
         self.cancelled = set()
@@ -153,6 +157,10 @@ class SwarmCoordinator:
         self._publish_lock = asyncio.Lock()
         self._worker_stops = {}
         self._admissions = {}  # swarm id -> start handshake still under way
+        self._origins = {}  # swarm id -> origin() when it started
+        # Swarms whose admission was cancelled after their queued row was
+        # written; each settles as cancelled once that write returns.
+        self._settlements = set()
 
     async def _stop_worker(self, task_id):
         # Receipt publication, cancel(), and interrupted-spawn cleanup can all
@@ -190,14 +198,28 @@ class SwarmCoordinator:
                 depends_on=t.get("depends_on", []), status="queued", task_id=None,
                 worker_session_id=None, result=None, error=None, started_at=None,
                 finished_at=None) for t in tasks])
+        self._origins[key] = self.origin() if self.origin is not None else None
         receipt = BackgroundTaskReceipt(task_id=key, description=self.swarms[key]["title"])
         started = ctx.extra.get("background_task_started")
         dispatch_ctx = replace(ctx, extra=dict(ctx.extra))
 
         async def admit():
-            await self.emit(key)  # persist intent BEFORE any launch
-            if started is not None:
-                await started(receipt)
+            # Persist intent BEFORE any launch. The host's write may run where
+            # cancellation cannot stop it (a thread), so it is its own task.
+            write = asyncio.create_task(self.emit(key))
+            try:
+                await asyncio.shield(write)
+                if started is not None:
+                    await started(receipt)
+            except asyncio.CancelledError:
+                # Close gave up on this start. The queued row may still land,
+                # so settle it as cancelled once the write returns: no row is
+                # left queued with no runner, and nothing is dispatched.
+                self.cancelled.add(key)
+                settle = asyncio.create_task(self._settle_abandoned(key, write))
+                self._settlements.add(settle)
+                settle.add_done_callback(self._settlements.discard)
+                raise
             if self.closed:
                 self.cancelled.add(key)
             self.jobs[key] = asyncio.create_task(self._run(key, tasks, cap, dispatch_ctx), name=key)
@@ -222,6 +244,25 @@ class SwarmCoordinator:
         and settles the swarm as cancelled without dispatching.
         """
         return {key for key, job in self.jobs.items() if not job.done()} | set(self._admissions)
+
+    def active_origins(self):
+        """Each id of :meth:`active_ids` with the ``origin()`` it started under."""
+        return {key: self._origins.get(key) for key in self.active_ids()}
+
+    async def _settle_abandoned(self, key, write):
+        try:
+            await write
+        except (asyncio.CancelledError, Exception):
+            return  # the queued row was not written: nothing to settle
+        stamp = now()
+        for task in self.swarms[key]["tasks"]:
+            if task["status"] not in TERMINAL:
+                task.update(status="cancelled", error="Cancelled before dispatch", finished_at=stamp)
+        self.swarms[key]["status"] = "cancelled"
+        try:
+            await self.emit(key)
+        finally:
+            await self.finished(key, "cancelled", json.dumps({"swarm": self.snapshot(key)}))
 
     async def _run(self, key, specs, cap, ctx):
         swarm = self.swarms[key]
@@ -371,23 +412,62 @@ class SwarmCoordinator:
         await self.emit(key)
         return self.snapshot(key)
 
-    async def aclose(self):
+    async def aclose(self, *, deadline=None):
+        """Stop every swarm, by ``deadline`` (event-loop time) at the latest.
+
+        Without one an admission and a settlement each get up to
+        ``ADMISSION_DRAIN_S`` and running swarms are joined however long they
+        take. A caller with a deadline of its own (app shutdown) passes it, so
+        none of those waits runs past it.
+        """
         self.closed = True
+        loop = asyncio.get_running_loop()
+
+        def left():
+            if deadline is None:
+                return ADMISSION_DRAIN_S
+            return max(0.0, deadline - loop.time())
+
         # An admission still in flight adds its job (already latched as
         # cancelled by ``closed``); let it, so that job is stopped below too.
         # A publication or acknowledgement that never returns must not hold
         # the close forever: past the deadline the admission is cancelled.
         admissions = dict(self._admissions)
         if admissions:
-            _, pending = await asyncio.wait(admissions.values(), timeout=ADMISSION_DRAIN_S)
+            _, pending = await asyncio.wait(admissions.values(), timeout=left())
             if pending:
                 stuck = sorted(key for key, job in admissions.items() if job in pending)
-                log.warning("swarm admission did not finish within %.0fs at close; "
-                            "cancelling %s", ADMISSION_DRAIN_S, ", ".join(stuck))
+                log.warning("swarm admission did not finish by the close deadline; "
+                            "cancelling %s", ", ".join(stuck))
                 for job in pending:
                     job.cancel()
+                # A cancelled admission only hands its write to a settlement
+                # (``_settle_abandoned``), so this returns at once.
                 await asyncio.gather(*pending, return_exceptions=True)
-        for key in list(self.jobs):
-            if not self.jobs[key].done():
-                await self.cancel(key)
-        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+
+        async def stop_all():
+            for key in list(self.jobs):
+                if not self.jobs[key].done():
+                    await self.cancel(key)
+            await asyncio.gather(*self.jobs.values(), return_exceptions=True)
+
+        if deadline is None:
+            await stop_all()
+        else:
+            stopping = asyncio.create_task(stop_all())
+            stopping.add_done_callback(lambda job: None if job.cancelled() else job.exception())
+            # Within the caller's deadline too: shutdown must not wait past it
+            # for a worker stop. What has not ended by then ends on its own,
+            # latched, or is finished by startup recovery.
+            done, _ = await asyncio.wait({stopping}, timeout=left())
+            if done:
+                stopping.result()
+            else:
+                running = sorted(key for key, job in self.jobs.items() if not job.done())
+                log.warning("swarm close deadline passed with %s still stopping",
+                            ", ".join(running) or "nothing")
+        # A cancelled admission's queued row is settled once its write returns;
+        # give that the time left, so shutdown's next steps see it settled.
+        settlements = set(self._settlements)
+        if settlements:
+            await asyncio.wait(settlements, timeout=left())
