@@ -83,8 +83,13 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
  * ColdClusterCopy.validate in prepareRollback before select. source-updates-09.test
  * drives the Windows entry with real single-pass and incremental ready points (including
  * reused cache files), and rejects same-size content corruption before selection.
+ * Launcher 11 changes the Node dependency cache check in source-build.ts (parallel reads,
+ * a digest without change time) and hashes database files 8 at a time in database-restore.ts
+ * inventory. ColdClusterCopy.validate still hashes every file in full and compares the
+ * whole manifest, key order included (database-restore.test covers same-size changes in
+ * any file); installed-entry.ts and source-updates.ts, the ready-journal path, are unchanged.
  * A new version is NOT trusted automatically: review its factory and ready-journal path. */
-export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9, 10]);
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9, 10, 11]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {

@@ -30,6 +30,38 @@ test('cold copy is validated, durable, private and restores files and empty dire
   await copy.discard();
   assert.deepEqual(await fs.readdir(root), ['data']);
 });
+test('a parallel check keeps the manifest in walk order and finds a same-size change in any file', async t => {
+  const { root, copy } = await fixture(t);
+  const names = [];
+  for (let i = 0; i < 30; i++) {
+    const name = path.join('base', String(i % 3 + 2), `segment-${String(i).padStart(2, '0')}`);
+    await fs.mkdir(path.dirname(path.join(root, 'data', name)), { recursive: true });
+    await fs.writeFile(path.join(root, 'data', name), `segment ${i} `.repeat(500 + i * 37));
+    names.push(name);
+  }
+  await copy.snapshot();
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'update-snapshot/manifest.json'), 'utf8'));
+  // The order a sequential walk produces: each directory, then its sorted children.
+  const expected = [];
+  const walk = async relative => {
+    const file = path.join(root, 'data', relative);
+    if ((await fs.lstat(file)).isDirectory()) {
+      expected.push(relative + '/');
+      for (const name of (await fs.readdir(file)).sort()) await walk(path.join(relative, name));
+    } else expected.push(relative);
+  };
+  await walk('');
+  assert.deepEqual(Object.keys(manifest), expected);
+  assert.ok(names.every(name => /^[a-f0-9]{64}$/.test(manifest[name])));
+  await copy.validate();
+  for (const name of [names[0], names[17], names[29]]) {
+    const file = path.join(root, 'update-snapshot/data', name), original = await fs.readFile(file);
+    await fs.writeFile(file, Buffer.from(original.toString().replace('segment', 'SEGMENT')));
+    await assert.rejects(copy.validate(), /validation/);
+    await fs.writeFile(file, original);
+  }
+  await copy.validate();
+});
 test('missing/corrupt copy and a live pid never overwrite the database', async t => {
   const { root, copy } = await fixture(t);
   await fs.writeFile(path.join(root, 'data/postmaster.pid'), '123');

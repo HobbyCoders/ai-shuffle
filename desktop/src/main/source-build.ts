@@ -293,36 +293,62 @@ async function publishNodeOutput(root: string, key: string, output: string): Pro
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
 
+/** Source files read and hashed at once. One at a time, a cache check took up to 40s per package on Windows. */
+const DEPENDENCY_HASH_CONCURRENCY = 16;
+interface DependencyIntegrity {
+  /** `node-installed-1`: includes each file's change time. Markers record it for builds before `stable` existed. */
+  legacy: string;
+  /** `node-installed-2`: the same check without change time. Windows changes a file's
+   * change time without changing the file: electron.exe's moved when the app restarted
+   * into an update, so every update threw away the intact desktop install and reinstalled it. */
+  stable: string;
+}
 /** Local damage detection, not a signature: check every installed path/stat and
  * hash executable JS/TS/JSON sources. Ignore only npm's root build-cache dirs;
  * they are not installed dependencies. A retained entry is never repaired. */
-async function nodeDependencyTree(directory: string): Promise<string> {
+async function nodeDependencyTree(directory: string): Promise<DependencyIntegrity> {
   const root = await fs.lstat(directory);
   if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('Invalid dependency directory');
-  const hash = createHash('sha256').update('node-installed-1\0');
+  // Records keep walk order; only the file reads run in parallel.
+  const records: { legacy: string[]; stable: string[] }[] = [], contents: { record: { legacy: string[]; stable: string[] }; file: string }[] = [];
   async function visit(relative: string): Promise<void> {
     for (const entry of (await fs.readdir(path.join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       if (!relative && ['.cache', '.vite', '.vite-temp'].includes(entry.name)) continue;
       const name = relative ? relative + '/' + entry.name : entry.name;
       const file = path.join(directory, name), stat = await fs.lstat(file, { bigint: true });
       if (stat.isDirectory()) {
-        hash.update(JSON.stringify([name, 'directory', stat.mode.toString()]) + '\n');
+        const record = [name, 'directory', stat.mode.toString()];
+        records.push({ legacy: record, stable: record });
         await visit(name);
       } else {
-        const record = [name, stat.mode.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString(), stat.ino.toString(), stat.dev.toString()];
+        const stable = [name, stat.mode.toString(), stat.size.toString(), stat.mtimeNs.toString(), stat.ino.toString(), stat.dev.toString()];
+        const record = { legacy: [...stable.slice(0, 4), stat.ctimeNs.toString(), ...stable.slice(4)], stable };
+        records.push(record);
         if (stat.isSymbolicLink()) {
           const target = await fs.readlink(file), resolved = path.relative(directory, path.resolve(path.dirname(file), target));
           if (path.isAbsolute(resolved) || resolved === '..' || resolved.startsWith('..' + path.sep)) throw new Error('Dependency link leaves its cache');
-          record.push(target);
+          record.legacy.push(target); record.stable.push(target);
         } else if (stat.isFile()) {
-          if (/\.(?:[cm]?[jt]sx?|json)$/i.test(name)) record.push(createHash('sha256').update(await fs.readFile(file)).digest('hex'));
+          if (/\.(?:[cm]?[jt]sx?|json)$/i.test(name)) contents.push({ record, file });
         } else throw new Error('Non-regular installed dependency');
-        hash.update(JSON.stringify(record) + '\n');
       }
     }
   }
   await visit('');
-  return hash.digest('hex');
+  let next = 0, failure: unknown;
+  await Promise.all(Array.from({ length: DEPENDENCY_HASH_CONCURRENCY }, async () => {
+    while (failure === undefined && next < contents.length) {
+      const { record, file } = contents[next++];
+      try {
+        const digest = createHash('sha256').update(await fs.readFile(file)).digest('hex');
+        record.legacy.push(digest); record.stable.push(digest);
+      } catch (error) { if (failure === undefined) failure = error; }
+    }
+  }));
+  if (failure !== undefined) throw failure;
+  const legacy = createHash('sha256').update('node-installed-1\0'), stable = createHash('sha256').update('node-installed-2\0');
+  for (const record of records) { legacy.update(JSON.stringify(record.legacy) + '\n'); stable.update(JSON.stringify(record.stable) + '\n'); }
+  return { legacy: legacy.digest('hex'), stable: stable.digest('hex') };
 }
 // Portable, cache-root-relative IDs cover shared and legacy runtime namespaces.
 const NODE_GENERATION_ID = /^(?:[a-f0-9]{24}(?:[a-f0-9]{40})?\/)?node\/(?:frontend|tools|browser-mcp|desktop)\/[a-f0-9]{24}(?:-[a-z0-9]+-[a-f0-9]{8})?$/;
@@ -343,7 +369,9 @@ async function cachedNodeDependencies(root: string, key: string): Promise<string
     try {
       const marker = JSON.parse(await fs.readFile(path.join(cache, '.complete'), 'utf8'));
       if (marker.key !== key || typeof marker.integrity !== 'string') continue;
-      if (marker.integrity === await nodeDependencyTree(path.join(cache, 'node_modules'))) return cache;
+      const integrity = await nodeDependencyTree(path.join(cache, 'node_modules'));
+      // Markers from earlier builds have only the legacy digest.
+      if (typeof marker.stableIntegrity === 'string' ? marker.stableIntegrity === integrity.stable : marker.integrity === integrity.legacy) return cache;
     } catch { continue; } // Inconclusive (possibly transient I/O): skip only this lookup.
     // Only a completed integrity mismatch may permanently reject a generation.
     // Sibling tombstones leave retained entries/markers untouched and prevent a
@@ -399,7 +427,9 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
           if (!(await exists(electron))) throw new Error('Electron installation did not produce its runtime');
         }
       }
-      await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, integrity: await nodeDependencyTree(path.join(temporary, 'node_modules')) }));
+      // `integrity` stays the legacy digest so an earlier build (after a rollback) still reuses this install.
+      const integrity = await nodeDependencyTree(path.join(temporary, 'node_modules'));
+      await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, integrity: integrity.legacy, stableIntegrity: integrity.stable }));
       await fs.unlink(path.join(temporary, '.install.lock'));
       await fs.mkdir(path.dirname(cache), { recursive: true });
       await fs.rename(temporary, cache);

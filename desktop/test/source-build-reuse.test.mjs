@@ -30,6 +30,7 @@ async function fixture(t, { electron = false } = {}) {
       put('node_modules/.installed');
       put('node_modules/locked/package.json', '{"name":"locked","main":"index.js"}');
       put('node_modules/locked/index.js', 'module.exports = "runtime dependency";');
+      for (let i = 0; i < (clock.extraFiles ?? 0); i++) put(`node_modules/locked/extra-${i}.js`, `module.exports = ${i};`);
       if (!clock.omitElectron) put(`node_modules/electron/dist/${process.platform === 'win32' ? 'electron.exe' : 'electron'}`);
     }
     if (args[0]?.endsWith(path.join('electron', 'install.js'))) {
@@ -180,6 +181,47 @@ test('same-size dependency source edits with restored mtime are replaced, not re
   assert.equal(await fs.readFile(file, 'utf8'), 'module.exports = "runtime dependencY";');
   const runtime = path.join(second.opts.server, 'browser-mcp/dist/index.js');
   assert.equal(execFileSync(process.execPath, ['-p', `require(${JSON.stringify(runtime)})`], { encoding: 'utf8' }).trim(), 'runtime dependency');
+});
+
+test('a change-time-only change keeps the install; a marker from an earlier build is still checked with its own digest', async t => {
+  const f = await fixture(t), first = await f.build();
+  const retained = await fs.realpath(path.join(first.opts.source, 'desktop/node_modules'));
+  const marker = path.join(path.dirname(retained), '.complete'), recorded = JSON.parse(await fs.readFile(marker, 'utf8'));
+  assert.match(recorded.stableIntegrity, /^[a-f0-9]{64}$/); assert.match(recorded.integrity, /^[a-f0-9]{64}$/);
+  // Adding and removing a hard link changes only the change time, as Windows does to electron.exe when it first runs.
+  const binary = path.join(retained, 'electron/dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+  const before = await fs.stat(binary, { bigint: true });
+  await fs.link(binary, binary + '.link'); await fs.unlink(binary + '.link');
+  const after = await fs.stat(binary, { bigint: true });
+  assert.equal(after.mtimeNs, before.mtimeNs); assert.notEqual(after.ctimeNs, before.ctimeNs);
+  const second = await f.build();
+  assert.deepEqual(installed(second), []); assert.deepEqual(built(second), []);
+  assert.equal(await fs.realpath(path.join(second.opts.source, 'desktop/node_modules')), retained);
+  // Without stableIntegrity the legacy digest, which includes change time, decides.
+  const { stableIntegrity, ...legacy } = recorded;
+  await fs.writeFile(marker, JSON.stringify(legacy));
+  assert.deepEqual(installed(await f.build()), ['desktop']);
+});
+
+test('dependency checks read source files in parallel and still find a same-size edit in any of them', async t => {
+  const f = await fixture(t); f.clock.fixedTime = true; f.clock.extraFiles = 40;
+  const first = await f.build();
+  let active = 0, most = 0;
+  f.clock.onIo = async (method, file) => {
+    if (method !== 'readFile' || !file.includes('node_modules')) return;
+    most = Math.max(most, ++active);
+    await new Promise(resolve => setTimeout(resolve, 2));
+    active--;
+  };
+  const second = await f.build();
+  assert.deepEqual(installed(second), []); assert.deepEqual(built(second), []);
+  assert.ok(most > 1, `source files were read one at a time (${most})`);
+  f.clock.onIo = null;
+  const retained = await fs.realpath(path.join(first.opts.source, 'browser-mcp/node_modules'));
+  const file = path.join(retained, 'locked/extra-39.js');
+  await fs.writeFile(file, 'module.exports = 93;');
+  await fs.utimes(file, 1_000_000_000, 1_000_000_000);
+  assert.deepEqual(installed(await f.build()), ['browser-mcp']);
 });
 
 test('only root npm build-scratch directories are excluded from dependency integrity', async t => {
@@ -354,7 +396,7 @@ test('inside Electron, the Electron download is hashed and published with the un
   assert.deepEqual(installed(await f.build()), [], 'the recorded integrity matches on the next build');
   // A marker hashed by the asar-aware fs records a different tree: replace it once.
   const marker = path.join(path.dirname(retained), '.complete');
-  await fs.writeFile(marker, JSON.stringify({ ...JSON.parse(await fs.readFile(marker, 'utf8')), integrity: 'f'.repeat(64) }));
+  await fs.writeFile(marker, JSON.stringify({ ...JSON.parse(await fs.readFile(marker, 'utf8')), integrity: 'f'.repeat(64), stableIntegrity: 'f'.repeat(64) }));
   assert.deepEqual(installed(await f.build()), ['desktop']);
   assert.deepEqual(installed(await f.build()), []);
   assert.deepEqual(f.asarReads, []);
