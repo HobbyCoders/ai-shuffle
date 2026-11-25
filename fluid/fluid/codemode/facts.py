@@ -808,11 +808,13 @@ class FactStore:
         treating the fact as conflicted, exactly as before settling existed.
         A conflict between copies of one record (its ``alternatives``, or a
         rule's ``contested`` wordings) is not slot contention and never
-        settles. Derived on every pass, so a replicated marker is recomputed.
-        Contention is flagged only by a merge (see :meth:`merge`)."""
+        settles, and neither does a flag on a fact with no key (it holds no
+        slot, so its flag cannot be slot contention). Derived on every pass,
+        so a replicated marker is recomputed. Contention is flagged only by a
+        merge (see :meth:`merge`)."""
         contended = {id(e) for e in cls._slot_contenders(doc)}
         for e in doc["entries"] + doc["archived"]:
-            if (e.get("conflicted") and id(e) not in contended
+            if (e.get("conflicted") and e.get("key") and id(e) not in contended
                     and not e.get("alternatives") and not _contested(e)):
                 e["conflict_settled"] = True
             else:
