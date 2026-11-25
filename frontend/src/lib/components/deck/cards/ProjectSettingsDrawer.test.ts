@@ -93,5 +93,20 @@ describe('Project settings drawer', () => {
 			expect((within(drawer).getByRole('button', { name: 'Save folder' }) as HTMLButtonElement).disabled).toBe(true);
 			expect(appData.updateProject).not.toHaveBeenCalled();
 		});
+
+		it('puts the keyboard back on the folder field after a rejected save', async () => {
+			vi.mocked(appData.updateProject).mockRejectedValue({ detail: 'Folder not found.' });
+			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
+			const field = within(drawer).getByLabelText('New folder on Home server') as HTMLInputElement;
+			await fireEvent.input(field, { target: { value: '/workspace/example/missing' } });
+			const save = within(drawer).getByRole('button', { name: 'Save folder' });
+			save.focus();
+			await fireEvent.click(save);
+			expect(await within(drawer).findByText('Folder not found.')).toBeTruthy();
+			await waitFor(() => expect(document.activeElement).toBe(within(drawer).getByLabelText('New folder on Home server')));
+			expect(drawer.contains(document.activeElement)).toBe(true);
+		});
 	});
 });

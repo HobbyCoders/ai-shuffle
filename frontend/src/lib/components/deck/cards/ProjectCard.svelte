@@ -193,7 +193,8 @@
 	 * The worker table's project: its logical id, or (a project of this worker
 	 * the overview has not listed) its local id, so its folder still changes in
 	 * the one safe editor. When the Workers API has no answer for that local id
-	 * (an older worker), Project settings changes the folder instead.
+	 * (an older worker), or answers for another checkout of the same origin,
+	 * Project settings changes the folder instead.
 	 */
 	const workersRef = $derived.by((): ProjectRef | null => {
 		if (!overviewOn || !selectedRow) return null;
@@ -354,7 +355,7 @@
 					{@const key = row.key}
 					<ProjectWorkersTab projectRef={workersRef} projectName={row.name} localProjectId={row.localId} {stacked} bind:selectedInstallId
 						onChanged={() => void loadProjectsOverview()} onLoaded={(res) => tableLoaded(key, res)}
-						onUnavailable={row.projectV2Id ? undefined : () => { noWorkersFor = key; }}
+						onUnavailable={row.projectV2Id ? undefined : () => { noWorkersFor = key; }} expectLocalId={row.projectV2Id ? null : row.localId}
 						{askSelfRemoval} onSelfRemovalAsked={() => { askSelfRemoval = false; }} />
 				{:else}
 					<ProjectResourcesTab projectId={selectedProject?.id ?? null} projectName={row.name} {selfName} {stacked} bind:section={resourceSection} onSetUpHere={showWorkersTab && selfInstallId ? openSelf : undefined} />

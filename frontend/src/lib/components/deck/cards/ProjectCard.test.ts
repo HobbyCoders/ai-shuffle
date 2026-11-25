@@ -186,6 +186,35 @@ describe('Projects master/detail', () => {
   await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
   expect(appData.updateProject).toHaveBeenCalledWith('one', { path: '/workspace/example/one-moved' });
  });
+ it('changes a second local checkout of one origin in Project settings, never through the first one’s workers', async () => {
+  supported.set(true);
+  // One and Two are both clones of github.com/example/one on this worker; the
+  // overview lists the logical project once, under One.
+  overview.set([{ project_v2_id: 'pv2-one', local_project_id: 'one', name: 'One', kind: 'git', remote: 'github.com/example/one', workers: [
+   { install_id: 'self', device_name: 'Here', is_self: true, online: true, state: 'ready' }
+  ] }]);
+  vi.mocked(appData.updateProject).mockClear().mockResolvedValue(undefined as never);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect((workersTab.mock.calls.at(-1)![1] as { expectLocalId?: string | null }).expectLocalId).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
+  const props = workersTab.mock.calls.at(-1)![1] as { projectRef: unknown; expectLocalId?: string | null; onUnavailable?: () => void };
+  expect(props.projectRef).toEqual({ project_id: 'two' });
+  // The worker list must name Two; the stub answers as the real tab does for One's list.
+  expect(props.expectLocalId).toBe('two');
+  props.onUnavailable?.();
+  await tick();
+  expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
+  await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/two-moved' } });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
+  expect(appData.updateProject).toHaveBeenCalledWith('two', { path: '/workspace/example/two-moved' });
+  expect(appData.updateProject).not.toHaveBeenCalledWith('one', expect.anything());
+ });
  it('changes the folder in Project settings when the overview is unavailable', async () => {
   render(ProjectCard);
   await screen.findByRole('heading', { level: 2, name: 'One' });

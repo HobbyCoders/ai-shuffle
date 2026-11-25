@@ -19,12 +19,15 @@
 		projectName: string;
 		/** The worker's name, for the question; null names no worker. */
 		where: string | null;
-		/** Open the confirmation as soon as this mounts (Project settings sent the owner here). */
-		ask?: boolean;
+		/**
+		 * Project settings sent the owner here: each new non-zero request id opens
+		 * the confirmation with a fresh count (a second request after Cancel asks again).
+		 */
+		ask?: number;
 		onRemoved?: () => void;
 	}
 
-	let { projectId, projectName, where, ask = false, onRemoved }: Props = $props();
+	let { projectId, projectName, where, ask = 0, onRemoved }: Props = $props();
 
 	let confirming = $state(false);
 	let preview = $state<ProjectRemovalPreview | null>(null);
@@ -74,9 +77,9 @@
 		}
 	}
 
-	let asked = false;
+	let asked = 0;
 	$effect(() => {
-		if (ask && !asked) { asked = true; void askRemove(); }
+		if (ask && ask !== asked) { asked = ask; void askRemove(); }
 	});
 
 	const hint = $derived(!confirming

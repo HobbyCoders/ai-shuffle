@@ -75,15 +75,26 @@
 		onChanged?: () => void;
 		/** Each answer of the worker list (the parent learns this worker's row from it). */
 		onLoaded?: (res: ProjectWorkersResponse) => void;
-		/** The first read found no worker list for this project (an older worker, or no shared identity yet). */
+		/**
+		 * The first read found no worker list for this project (an older worker, or
+		 * no shared identity yet), or a list that belongs to another checkout (see
+		 * `expectLocalId`).
+		 */
 		onUnavailable?: () => void;
+		/**
+		 * Read by local id (`{project_id}`): the list must name this local project.
+		 * Two checkouts of one origin share a logical project, and the answer then
+		 * describes the other one; its folder controls would change the wrong
+		 * registration, so such an answer shows nothing and `onUnavailable` runs.
+		 */
+		expectLocalId?: string | null;
 		/** Project settings sent the owner here: open this worker's removal confirmation in its inspector. */
 		askSelfRemoval?: boolean;
 		/** The request above was taken (so a later remount does not ask again). */
 		onSelfRemovalAsked?: () => void;
 	}
 
-	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), stacked = false, onChanged, onLoaded, onUnavailable, askSelfRemoval = false, onSelfRemovalAsked }: Props = $props();
+	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), stacked = false, onChanged, onLoaded, onUnavailable, expectLocalId = null, askSelfRemoval = false, onSelfRemovalAsked }: Props = $props();
 
 	let data = $state<ProjectWorkersResponse | null>(null);
 	let loading = $state(true);
@@ -94,8 +105,12 @@
 	 * one started from the page (Set up on all missing) has no worker and shows on the page.
 	 */
 	let actionError = $state<{ installId: string | null; message: string } | null>(null);
-	/** Project settings sent the owner to this worker's removal: its confirmation opens at once. */
-	let askLocal = $state(false);
+	/**
+	 * Project settings sent the owner to this worker's removal: its confirmation
+	 * opens at once. A new id per request, so asking again after Cancel asks again.
+	 */
+	let askLocal = $state(0);
+	let askLocalSeq = 0;
 	/** Folder field per worker (seeded from the suggestion, then the owner's edits). */
 	let folders = $state<Record<string, string>>({});
 	/** Workers whose inspector is in "use a folder already there" mode. */
@@ -137,6 +152,12 @@
 		try {
 			const res = await getProjectWorkers(projectRef);
 			if (mine !== seq || destroyed) return;
+			// `local_project_id` is in the answer but not in its client type (read-only here).
+			if (expectLocalId && (res as ProjectWorkersResponse & { local_project_id?: string | null }).local_project_id !== expectLocalId) {
+				data = null;
+				onUnavailable?.();
+				return;
+			}
 			// A setup on this worker just finished: reload its catalog so the
 			// project's local tabs unlock without waiting for the live-sync push.
 			const selfWas = data?.workers.find((w) => w.is_self)?.state;
@@ -232,7 +253,7 @@
 			editing = null;
 			cancelRemove();
 			selectedInstallId = self.install_id;
-			askLocal = true;
+			askLocal = ++askLocalSeq;
 		});
 	});
 
@@ -240,7 +261,7 @@
 		if (id === selectedInstallId) return;
 		const previous = selectedInstallId;
 		editing = null;
-		askLocal = false;
+		askLocal = 0;
 		cancelRemove();
 		selectedInstallId = id;
 		// Closing the inspector hands focus back to the row that opened it.

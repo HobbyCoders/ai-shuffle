@@ -4,7 +4,7 @@
 	 * its folders are. Each worker has its own folder, changed from that
 	 * worker's row; the group is the chip beside the project's name.
 	 */
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { getGitStatus } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
@@ -92,6 +92,7 @@
 	// elsewhere meanwhile blocks the save instead of being overwritten.
 	let folderDraft = $state<{ opened: string; folder: string; browsing: boolean; saving: boolean; error: string | null } | null>(null);
 	const folderStale = $derived(!!folderDraft && !!project && project.path !== folderDraft.opened);
+	let folderForm = $state<HTMLFormElement | null>(null);
 	function openFolderDraft() {
 		if (!project) return;
 		folderDraft = { opened: project.path, folder: project.path, browsing: false, saving: false, error: null };
@@ -109,6 +110,11 @@
 		} catch (e: unknown) {
 			const err = e as { detail?: unknown; message?: string };
 			draft.error = typeof err.detail === 'string' ? err.detail : err.message || "Couldn't change the folder. Check the current folder before retrying.";
+			// Saving disabled the focused control; put the keyboard back on the field
+			// (inside Settings, so Escape still closes it) to correct the folder.
+			draft.saving = false;
+			await tick();
+			if (folderDraft === draft) folderForm?.querySelector<HTMLInputElement>('input')?.focus();
 		} finally {
 			draft.saving = false;
 		}
@@ -158,7 +164,7 @@
 					{@const draft = folderDraft}
 					<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${selfName}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
 						{#snippet expanded()}
-							<form class="flex flex-col gap-2" data-local-folder-editor onsubmit={(e) => { e.preventDefault(); void saveFolderDraft(); }}>
+							<form class="flex flex-col gap-2" data-local-folder-editor bind:this={folderForm} onsubmit={(e) => { e.preventDefault(); void saveFolderDraft(); }}>
 								<div class="project-controls">
 									<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${selfName}`} disabled={draft.saving || folderStale} />
 									<button type="button" class="st-btn" disabled={draft.saving || folderStale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>

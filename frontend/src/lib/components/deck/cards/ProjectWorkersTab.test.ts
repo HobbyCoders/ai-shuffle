@@ -5,7 +5,7 @@
  * removed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { loadProjectCatalog: vi.fn(), deleteProject: vi.fn() } }));
 vi.mock('$lib/stores/projects-overview', async (importOriginal) => ({
@@ -232,6 +232,53 @@ describe('Project settings asks for this worker’s removal', () => {
 		expect(await within(inspector).findByRole('button', { name: 'Remove' })).toBeTruthy();
 		expect(getProjectRemovalPreview).toHaveBeenCalledWith('demo');
 		expect(onSelfRemovalAsked).toHaveBeenCalledOnce();
+	});
+
+	it('asks again with a fresh count when Settings sends the owner back after Cancel', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]));
+		vi.mocked(getProjectRemovalPreview)
+			.mockResolvedValueOnce({ project_id: 'demo', chats: 2, worktrees: [] })
+			.mockResolvedValueOnce({ project_id: 'demo', chats: 3, worktrees: [] });
+		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true });
+
+		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
+		expect(within(inspector).queryByRole('button', { name: 'Remove' })).toBeNull();
+
+		// The parent clears its request once taken; the owner asks from Settings again.
+		await rerender({ askSelfRemoval: false });
+		await rerender({ askSelfRemoval: true });
+		expect(await within(inspector).findByText(/its 3 chats\?/)).toBeTruthy();
+		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('Another local checkout of the same origin', () => {
+	// Two folders on this worker cloned from one origin share a logical project:
+	// read by the second one's local id, the answer describes the first one.
+	const firstCheckout = { ...response([worker('self', 'Home server', 'ready'), worker('desk', 'Desktop', 'ready')]), local_project_id: 'demo' };
+
+	it('shows no worker controls for the other checkout and hands its folder to Settings', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(firstCheckout as never);
+		const onUnavailable = vi.fn();
+		const onLoaded = vi.fn();
+		render(ProjectWorkersTab, { projectRef: { project_id: 'demo-copy' }, projectName: 'Demo copy', localProjectId: 'demo-copy', expectLocalId: 'demo-copy', onUnavailable, onLoaded });
+
+		await waitFor(() => expect(onUnavailable).toHaveBeenCalledOnce());
+		expect(onLoaded).not.toHaveBeenCalled();
+		expect(screen.queryByRole('button', { name: 'Home server: open its details' })).toBeNull();
+		expect(screen.queryByText('/workspace/example/self/demo')).toBeNull();
+		expect(changeWorkerFolder).not.toHaveBeenCalled();
+	});
+
+	it('shows the worker table when the answer names the checkout it was read for', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(firstCheckout as never);
+		const onUnavailable = vi.fn();
+		render(ProjectWorkersTab, { projectRef: { project_id: 'demo' }, projectName: 'Demo', localProjectId: 'demo', expectLocalId: 'demo', onUnavailable });
+
+		expect(await screen.findByRole('button', { name: 'Home server: open its details' })).toBeTruthy();
+		expect(onUnavailable).not.toHaveBeenCalled();
 	});
 });
 
