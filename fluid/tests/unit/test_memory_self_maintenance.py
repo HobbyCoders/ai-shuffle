@@ -30,6 +30,7 @@ async def test_learner_delete_archives_without_a_deletion_barrier(tmp_path):
     store = SkillStore(tmp_path)
     fact = store.save_memory("The staging box is called Atlas.")
     synth = Synthesizer(provider=None, model="m", store=store)
+    synth._memory_lines()  # the pass lists the facts it may retire
     assert await synth._apply(f'<delete-memory id="{fact.id}"/>') == [f"-memory:{fact.id}"]
     assert fact.id not in {m.id for m in store.memories()}
     assert fact.id in archived_ids(store)
@@ -42,6 +43,33 @@ async def test_learner_delete_archives_without_a_deletion_barrier(tmp_path):
     assert fact.id in {m.id for m in store.memories()}
     raw = next(e for e in store._facts.snapshot()["entries"] if e["id"] == fact.id)
     assert "retired_at" not in raw
+
+
+@pytest.mark.asyncio
+async def test_learner_edits_apply_only_to_the_revision_it_listed(tmp_path):
+    store = SkillStore(tmp_path)
+    renamed = store.save_memory("The staging box is called Atlas.", durable=True)
+    moved = store.save_memory("The deploy window is Friday.", durable=True)
+    synth = Synthesizer(provider=None, model="m", store=store)
+    synth._memory_lines()
+    # A foreground save (or a sync) lands while the learner's model is answering.
+    store.save_memory("The staging box is called Borealis.", memory_id=renamed.id,
+                      expected_revision=renamed.revision, durable=True)
+    store.save_memory("The deploy window is Thursday.", memory_id=moved.id,
+                      expected_revision=moved.revision, durable=True)
+    late = store.save_memory("The release notes live in CHANGES.md.", durable=True)
+    changed = await synth._apply(
+        f'<memory id="{renamed.id}">The staging box is called Atlas-2.</memory>\n'
+        f'<delete-memory id="{moved.id}"/>\n'
+        f'<delete-memory id="{late.id}"/>'  # never listed to this pass
+    )
+    assert changed == []
+    assert {m.id: m.text for m in store.memories()} == {
+        renamed.id: "The staging box is called Borealis.",
+        moved.id: "The deploy window is Thursday.",
+        late.id: "The release notes live in CHANGES.md.",
+    }
+    assert not archived_ids(store)
 
 
 @pytest.mark.asyncio
@@ -427,3 +455,155 @@ def test_snapshot_note_with_only_archived_facts(tmp_path, monkeypatch):
     section = store.render_memory_section("project:x")
     assert "(1 archived fact not shown; Recall finds it by keyword.)" in section
     assert "no saved facts yet" not in section
+
+
+def _disputed_pair(tmp_path):
+    """Workers a and b each edit the same r1 fact to r2 while apart."""
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    first = a.save_memory("Deploys go to staging.", provenance="session")
+    b._facts.merge(a._facts.export())
+    peer = next(m.id for m in b.memories() if m.text == "Deploys go to staging.")
+    mine = a.save_memory("Deploys go to prod.", memory_id=first.id,
+                         expected_revision=first.revision, provenance="session")
+    b.save_memory("Deploys go to canary.", memory_id=peer, expected_revision=first.revision,
+                  provenance="session")
+    return a, b, mine
+
+
+@pytest.mark.asyncio
+async def test_learner_edits_skip_a_fact_a_sync_left_disputed(tmp_path):
+    a, b, mine = _disputed_pair(tmp_path)
+    synth = Synthesizer(provider=None, model="m", store=a)
+    synth._memory_lines()  # lists a's r2
+    a._facts.merge(b._facts.export())  # b's edit arrives during inference
+    [entry] = [e for e in a._facts.snapshot()["entries"] if e["id"] == mine.id]
+    assert entry["revision"] == mine.revision and entry["conflicted"]
+    changed = await synth._apply(
+        f'<memory id="{mine.id}">Deploys go to production.</memory>\n'
+        f'<delete-memory id="{mine.id}"/>'
+    )
+    assert changed == []
+    assert "disputed" in (synth.last_error or "")
+    [entry] = [e for e in a._facts.snapshot()["entries"] if e["id"] == mine.id]
+    # Both edits stay recorded for the owner to choose between.
+    assert entry["conflicted"] and entry["text"] == "Deploys go to prod."
+    assert set(entry["alternatives"]) == {"Deploys go to prod.", "Deploys go to canary."}
+    assert not archived_ids(a)
+
+
+@pytest.mark.asyncio
+async def test_learner_cannot_retire_a_slot_contender_a_sync_brought(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    avery = a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name")
+    synth = Synthesizer(provider=None, model="m", store=a)
+    synth._memory_lines()
+    a._facts.merge(b._facts.export())  # a contender with another ID; Avery's revision is unchanged
+    assert await synth._apply(f'<delete-memory id="{avery.id}"/>') == []
+    assert "disputed" in (synth.last_error or "")
+    assert sorted(m.text for m in a.memories() if m.key == "profile.name") == [
+        "The owner's name is Avery.", "The owner's name is Blair."]
+    assert not archived_ids(a)
+
+
+@pytest.mark.asyncio
+async def test_learner_insert_without_an_id_never_overwrites_a_keyed_value(tmp_path):
+    store = SkillStore(tmp_path)
+    newer = store.save_memory("The user's preferred name is Blair.", provenance="session")
+    assert newer.key == "profile.name"
+    synth = Synthesizer(provider=None, model="m", store=store)
+    assert await synth._apply("<memory>The user's preferred name is Avery.</memory>") == []
+    assert "listed ID" in (synth.last_error or "")
+    [kept] = [m for m in store.memories() if m.key == "profile.name"]
+    assert kept.text == "The user's preferred name is Blair." and kept.revision == newer.revision
+    # Repeating the value already held is still a no-op merge.
+    assert await synth._apply("<memory>The user's preferred name is Blair.</memory>") == [
+        f"memory:{newer.id}"]
+    assert [m.revision for m in store.memories()] == [newer.revision]
+    # An archived value is no longer current: a new observation may take the slot.
+    assert store.retire_memory(newer.id, reason="test")
+    assert await synth._apply("<memory>The user's preferred name is Avery.</memory>") == [
+        f"memory:{newer.id}"]
+    assert [m.text for m in store.memories()] == ["The user's preferred name is Avery."]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_slot_contender_does_not_block_the_survivor(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    avery = a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name",
+                          durable=True)
+    a._facts.merge(b._facts.export())
+    assert all(m.conflicted for m in a.memories() if m.key == "profile.name")
+    real = time_mod.time
+    # Past the inferred lifetime, inside the durable one: Blair expires into the archive.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    [survivor] = [m for m in a.memories() if m.key == "profile.name"]
+    assert survivor.id == avery.id
+    synth = Synthesizer(provider=None, model="m", store=a)
+    synth._memory_lines()
+    changed = await synth._apply(f'<memory id="{avery.id}">The owner\'s name is Avery Lee.</memory>')
+    assert changed == [f"memory:{avery.id}"], synth.last_error
+    assert [m.text for m in a.memories() if m.key == "profile.name"] == ["The owner's name is Avery Lee."]
+
+
+@pytest.mark.asyncio
+async def test_learner_insert_without_an_id_cannot_rewrite_a_superseded_value(tmp_path):
+    store = SkillStore(tmp_path)
+    avery = store.save_memory("The user's preferred name is Avery.", provenance="session")
+    assert avery.key == "profile.name"
+    blair = store.save_memory("Address the user as Blair.", provenance="user", protected=True,
+                              replaces=[avery.id])
+    [superseded] = [m for m in store.archived_memories() if m.id == avery.id]
+    synth = Synthesizer(provider=None, model="m", store=store)
+    assert await synth._apply("<memory>The user's preferred name is Casey.</memory>") == []
+    [kept] = [m for m in store.archived_memories() if m.id == avery.id]
+    assert kept.text == "The user's preferred name is Avery." and kept.revision == superseded.revision
+    # Forgetting the owner's replacement cannot bring back the learner's text.
+    assert store.delete_memory(blair.id, explicit=True, expected_revision=blair.revision)
+    assert "Casey" not in json.dumps([m.text for m in store.memories() + store.archived_memories()])
+
+
+def test_a_settled_contention_still_shields_older_facts_from_curation(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b, c = (SkillStore(tmp_path / n) for n in "abc")
+    yarn = c.save_memory("Use yarn for frontend installs.", provenance="session", durable=True)
+    pnpm = a.save_memory("Use pnpm for frontend installs; it replaces yarn.", provenance="session",
+                         durable=True, key="frontend.installer")
+    b.save_memory("Use bun for frontend installs.", provenance="session", key="frontend.installer")
+    a._facts.merge(b._facts.export())  # the contention flags the survivor
+    a._facts.merge(c._facts.export())  # an older matching fact arrives meanwhile
+    real = time_mod.time
+    # The contender expires; the survivor and the older fact live on.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    survivor = next(m for m in a.memories() if m.id == pnpm.id)
+    assert not survivor.conflicted  # back in prompts
+    a._facts.reconcile_supersessions()
+    assert {m.text for m in a.memories()} == {pnpm.text, yarn.text}
+    assert yarn.text not in {m.text for m in a.archived_memories()}
+
+
+@pytest.mark.asyncio
+async def test_consolidation_never_retires_a_fact_whose_contention_settled(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    avery = a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name",
+                          durable=True)
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    a._facts.merge(b._facts.export())
+    real = time_mod.time
+    # Blair expires; Avery keeps the merge's flag until the owner answers.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    synth = Synthesizer(Scripted(f'<delete-memory id="{avery.id}"/>'), "m", a)
+    assert await synth.consolidate() == []
+    assert avery.id in {m.id for m in a.memories()}
+    with pytest.raises(ValueError, match="disputed"):
+        a.retire_memory(avery.id, reason="consolidation", automatic=True)
+    assert avery.id not in archived_ids(a)

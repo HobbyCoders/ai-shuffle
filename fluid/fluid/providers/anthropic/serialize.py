@@ -22,7 +22,7 @@ from fluid.messages import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from fluid.providers._retry import is_usage_limit
+from fluid.providers._retry import usage_limit_evidence
 from fluid.providers._transport import (
     billing_summary,
     provider_error_summary,
@@ -275,15 +275,15 @@ def sse_to_chunk(event_name: str, data: dict[str, Any]) -> StreamChunk | None:
         status = _STREAM_ERROR_STATUS.get(str(err.get("type") or ""))
         if status is not None:
             err.setdefault("status", status)
-        if is_usage_limit(err.get("status"), err):
-            # A spent usage allowance, not a blip: never retried.
+        summary = provider_error_summary(err.get("message"))
+        if usage_limit_evidence(err.get("status"), err):
+            # A spent usage allowance, not a blip: never retried. The typed
+            # verdict a host reads: structured fields only.
             err["retriable"] = False
             err["usage_limit"] = True
-        summary = provider_error_summary(err.get("message"))
+            summary = usage_limit_summary(summary)
         if err.get("type") == "billing_error":
             summary = billing_summary("billing_error", summary)
-        elif err.get("usage_limit"):
-            summary = usage_limit_summary(summary)
         err.setdefault("provider_message", summary)
         return StreamChunk("error", err)
     return None

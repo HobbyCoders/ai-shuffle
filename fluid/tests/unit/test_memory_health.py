@@ -182,6 +182,21 @@ def test_duplicate_repair_never_retires_a_user_saved_copy(tmp_path):
     assert len(both.memories()) == 2
 
 
+def test_duplicate_repair_keeps_a_shared_fact_beside_a_worker_only_copy(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    text = "The build cache lives in the cache folder."
+    local = b.save_memory(text, per_worker=True)
+    shared = a.save_memory(text)
+    b._facts.merge(a._facts.export())
+    ids = {m.id for m in b.memories()}
+    assert local.id in ids and len(ids) == 2
+    memory_health.repair(b)
+    # Neither is a duplicate: retiring the shared copy would take the fact
+    # from every other worker, retiring the local one changes nothing here.
+    assert {m.id for m in b.memories()} == ids
+    assert not b.archived_memories()
+
+
 def test_near_duplicate_groups_are_reported_not_merged(tmp_path):
     store = SkillStore(tmp_path)
     for i in range(memory_health.NEAR_DUPLICATE_GROUPS):
@@ -441,3 +456,19 @@ def test_run_records_repairs_in_plain_words(tmp_path):
     assert view["repairs"][0]["summary"] == "Archived 1 exact duplicate."
     assert "ids" not in json.dumps(memory_health.load_state(a)["repairs"])
     assert view["signals"][0]["state"] in ("healthy", "attention")
+
+
+def test_texts_that_differ_only_in_case_are_not_exact_duplicates(tmp_path):
+    # Saved on two workers (one store folds a case variant into the fact it
+    # already holds), then synced.
+    store, other = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    store.save_memory("Settings are read from Config.toml.")
+    other.save_memory("Settings are read from config.toml.")
+    store._facts.merge(other._facts.export())
+    live = store._facts.snapshot()["entries"]
+    assert len(live) == 2
+    assert not memory_health._exact_duplicate_groups(live)
+    memory_health.repair(store)
+    assert {m.text for m in store.memories()} == {"Settings are read from Config.toml.",
+                                                   "Settings are read from config.toml."}
+    assert not store.archived_memories()

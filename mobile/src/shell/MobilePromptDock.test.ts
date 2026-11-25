@@ -260,6 +260,64 @@ describe('agent question', () => {
 		expect(view.onQuestion).toHaveBeenCalledOnce();
 	});
 
+	describe('folding', () => {
+		const fold = () => screen.getByRole('button', { name: /the question$/ });
+
+		it('folds to its header and opens again with the typed answer kept', async () => {
+			renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(screen.getByRole('button', { name: 'Type an answer' }));
+			const input = screen.getByRole('textbox', { name: 'Your answer' }) as HTMLInputElement;
+			await fireEvent.input(input, { target: { value: 'Both' } });
+
+			expect(fold().getAttribute('aria-expanded')).toBe('true');
+			await fireEvent.click(fold());
+			expect(fold().getAttribute('aria-expanded')).toBe('false');
+			expect(fold().getAttribute('aria-label')).toBe('Show the question');
+			expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull();
+			// The header keeps one line of the question; the body is hidden.
+			expect(within(fold().closest('.p-head') as HTMLElement).getByText(question.questions[0].question)).toBeTruthy();
+			expect(screen.queryByRole('button', { name: 'Skip this question' })).toBeNull();
+
+			await fireEvent.click(fold());
+			const after = screen.getByRole('textbox', { name: 'Your answer' }) as HTMLInputElement;
+			expect(after).toBe(input);
+			expect(after.value).toBe('Both');
+		});
+
+		it('stays folded while the session updates, and a new question arrives open', async () => {
+			const view = renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(fold());
+			await view.rerender({ permissions: [], questions: [{ ...question }] });
+			expect(fold().getAttribute('aria-expanded')).toBe('false');
+
+			await view.rerender({ permissions: [], questions: [{ ...question, request_id: 'q2', tool_use_id: 'tu2' }] });
+			expect(fold().getAttribute('aria-expanded')).toBe('true');
+			expect(screen.getByRole('button', { name: /AppImage/ })).toBeTruthy();
+		});
+
+		it('keeps the shared form\'s answers across a fold', async () => {
+			renderDock({ permissions: [], questions: [{ ...question, questions: [question.questions[0], { ...question.questions[0], question: 'Second?' }] }] });
+			const form = screen.getByRole('form', { name: 'Answer questions' });
+			await fold().click();
+			await waitFor(() => expect(form.closest('[hidden]')).toBeTruthy());
+			await fold().click();
+			await waitFor(() => expect(form.closest('[hidden]')).toBeNull());
+			expect(screen.getByRole('form', { name: 'Answer questions' })).toBe(form);
+		});
+
+		it('still says to reconnect while folded and offline', async () => {
+			const view = renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(fold());
+			const head = () => fold().closest('.p-head') as HTMLElement;
+			expect(within(head()).getByText(question.questions[0].question)).toBeTruthy();
+
+			await view.rerender({ permissions: [], questions: [question], connected: false });
+			expect(fold().getAttribute('aria-expanded')).toBe('false');
+			expect(within(head()).getByText('Reconnect to answer')).toBeTruthy();
+			expect(within(head()).queryByText(question.questions[0].question)).toBeNull();
+		});
+	});
+
 	it('uses the shared question form for a multi-part request', () => {
 		renderDock({ permissions: [], questions: [{ ...question, questions: [question.questions[0], { ...question.questions[0], question: 'Second?' }] }] });
 		expect(screen.getByRole('form', { name: 'Answer questions' })).toBeTruthy();

@@ -19,9 +19,11 @@
 		onSelect: (repo: GitHubRepo) => void;
 		/** Open the place where GitHub is connected (Settings > Integrations > GitHub). */
 		onConnect?: () => void;
+		/** A repository that is already a project: marked "Already added" and not selectable. */
+		isAdded?: (repo: GitHubRepo) => boolean;
 	}
 
-	let { selectedUrl = '', disabled = false, onSelect, onConnect }: Props = $props();
+	let { selectedUrl = '', disabled = false, onSelect, onConnect, isAdded }: Props = $props();
 
 	const PER_PAGE = 30;
 	const SEARCH_DEBOUNCE_MS = 250;
@@ -181,16 +183,18 @@
 			<ul class="repo-list" aria-labelledby="gh-repo-picker-label" aria-busy={busy}>
 				{#each repos as repo (repo.full_name)}
 					{@const isSelected = selected === repo.clone_url}
+					{@const added = isAdded?.(repo) ?? false}
 					<li>
 						<button
 							type="button"
 							class="repo"
 							class:selected={isSelected}
+							class:added
 							aria-pressed={isSelected}
-							aria-label={`${repo.full_name}, ${repo.private ? 'private' : 'public'}${repo.updated_at ? `, ${updatedLabel(repo.updated_at).toLowerCase()}` : ''}`}
-							title={repo.description || repo.full_name}
-							onclick={() => !disabled && onSelect(repo)}
-							{disabled}
+							aria-label={`${repo.full_name}, ${repo.private ? 'private' : 'public'}${added ? ', already added' : ''}${repo.updated_at ? `, ${updatedLabel(repo.updated_at).toLowerCase()}` : ''}`}
+							title={added ? `${repo.full_name} is already a project` : repo.description || repo.full_name}
+							onclick={() => !disabled && !added && onSelect(repo)}
+							disabled={disabled || added}
 						>
 							<span class="repo-name">
 								<span class="repo-owner">{repo.owner}/</span>{repo.name}
@@ -205,6 +209,7 @@
 										Public
 									{/if}
 								</span>
+								{#if added}<span class="badge badge-added" data-testid="repo-added">Already added</span>{/if}
 								{#if repo.fork}<span class="badge">Fork</span>{/if}
 								{#if repo.archived}<span class="badge">Archived</span>{/if}
 								{#if repo.updated_at}<span class="updated">{updatedLabel(repo.updated_at)}</span>{/if}
@@ -371,6 +376,11 @@
 		cursor: not-allowed;
 	}
 
+	/* Readable, not faded: the marker is the point. */
+	.repo.added:disabled {
+		opacity: 0.75;
+	}
+
 	.repo-name {
 		max-width: 100%;
 		overflow: hidden;
@@ -404,7 +414,8 @@
 		line-height: 1.4;
 	}
 
-	.badge-private {
+	.badge-private,
+	.badge-added {
 		color: var(--foreground);
 	}
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { page } from '$app/state';
 import { writable, type Writable } from 'svelte/store';
@@ -229,6 +229,16 @@ describe('Projects master/detail', () => {
   render(ProjectCard);
   await fireEvent.click(await screen.findByRole('button', { name: /^Repository github.com\/example\/remote/ }));
   expect(screen.getByRole('dialog', { name: 'Change repository on all workers' })).toBeTruthy();
+ });
+ it('closes the detail of a project with no copy here once it leaves the list (a failed first clone)', async () => {
+  supported.set(true); list.set([]);
+  overview.set([{ project_v2_id: 'cloning', local_project_id: null, name: 'New clone', kind: 'git', remote: 'example/new-clone', workers: [
+   { install_id: 'self', device_name: 'Here', is_self: true, online: true, state: 'setting_up' }
+  ] }]);
+  render(ProjectCard);
+  expect(await screen.findByRole('heading', { level: 2, name: 'New clone' })).toBeTruthy();
+  overview.set([]);
+  await waitFor(() => expect(screen.queryByRole('heading', { level: 2, name: 'New clone' })).toBeNull());
  });
  it('shows the filled New project action when empty', async () => {
   list.set([]); render(ProjectCard); await tick();

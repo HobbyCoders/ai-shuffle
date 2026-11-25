@@ -244,7 +244,7 @@ async def test_zero_output_retry_cannot_reclaim_a_queued_followup(repo, monkeypa
     checkout = bind_worker(repo)
     await turn_manager.submit_async("followup", "user", prompt="continue", profile_id="coder", no_kick=True)
     monkeypatch.setattr(settings, "task_worker_start_retries", 1)
-    monkeypatch.setattr(td, "_retry_backoff", lambda *a: 0)
+    monkeypatch.setattr(td, "_retry_backoff", lambda *a, **kw: 0)
     monkeypatch.setattr(td, "_reserve_admission", AsyncMock(return_value=("stop after cleanup probe", False)))
     monkeypatch.setattr(td, "_release_admission", lambda *a: None)
     monkeypatch.setattr(swarm, "bind_worker", AsyncMock())

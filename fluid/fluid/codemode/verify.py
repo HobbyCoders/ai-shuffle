@@ -15,9 +15,11 @@ Verification runs at two moments:
   changed since last verdict, e.g. edited on disk) are re-verified; broken
   ones are excluded from the kernel mount and flagged in ``list_tools``.
 
-Verdicts are cached in the store's meta by file mtime, so an unchanged skill
-is verified once, not per session. Failure to start the kernel propagates
-without recording a verdict; skills stay stale until a pass whose kernel starts.
+Verdicts are cached in the store's meta by the digest of the exact source
+verified, so an unchanged skill is verified once, not per session, and a file
+replaced during verification is not covered by the old bytes' verdict.
+Failure to start the kernel propagates without recording a verdict; skills
+stay stale until a pass whose kernel starts.
 
 A mount pays at most ``MOUNT_VERIFY_BUDGET`` seconds of verification: skills
 not reached inside it stay unverified (and unmounted) until the next mount,
@@ -70,7 +72,8 @@ async def verify_sources(
     can import each other; only ``names`` are actually imported/self-tested.
     With a ``budget`` (seconds for the whole call) each skill gets the
     smaller of ``timeout`` and what is left, and skills the budget never
-    reaches are absent from the result rather than failed.
+    reaches, or that time out on a slice earlier skills cut short of
+    ``timeout``, are absent from the result rather than failed.
     """
     targets = list(sources) if names is None else [n for n in names if n in sources]
     if not targets:
@@ -94,7 +97,17 @@ async def verify_sources(
                 "if callable(_st):\n"
                 "    _st()\n"
             )
+            started = time.monotonic()
             result = await kernel.exec(code, timeout=slice_timeout, on_host_call=_no_tools)
+            if (result.error and results and slice_timeout < timeout
+                    and time.monotonic() - started >= slice_timeout):
+                # Skills before it spent the budget, so it ran out of what was
+                # left, not of its own allowance: no verdict, and the next
+                # mount retries it in full rather than recording a timeout the
+                # source never earned. The first skill of a call keeps its
+                # verdict (its slice is the whole budget), so every mount
+                # settles at least one skill and the queue always advances.
+                break
             # The kernel's bounded "Type: message" line for the exception,
             # not the traceback's last line (a long note or message).
             results[name] = (result.error_summary if result.error else "") or _summarize(
@@ -125,5 +138,6 @@ async def verify_store(
         sources, stale, config=config, timeout=timeout, budget=budget,
     )
     for name, error in verdicts.items():
-        store.mark_verified(name, error)
+        # Bound to the bytes that ran, not to whatever the file holds now.
+        store.mark_verified(name, error, source=sources[name])
     return verdicts

@@ -23,6 +23,8 @@ the real one — its ownership predicates are the thing under test.
 """
 
 import asyncio
+import re
+import time
 from unittest.mock import patch
 
 import pytest
@@ -1316,6 +1318,239 @@ class TestRateLimitReschedule:
         text = "Rate limit reached for gpt-5.6-luna. Please try again in 3s."
         assert pa.looks_usage_limited(text) is False
         assert pa.looks_rate_limited(text) is True
+
+
+class TestALongRetryAfterIsHonoured:
+    """A 429 whose Retry-After was longer than the client waits reaches the
+    dispatcher unretried, with the wait as TYPED fields on the worker outcome
+    (``api_error_status``, ``retry_after_seconds``, ``retry_at``). Re-dispatching
+    on the 5 s fallback spent every reschedule inside the provider's window; the
+    typed wait is now a floor, or the reason not to try. Provider text never
+    sets, stretches or vetoes it."""
+
+    #: The provider's own words: the adapter adds nothing to them.
+    ERROR = "provider returned HTTP 429: Too many requests."
+    #: The sentence the round-1 branch appended as its machine signal.
+    OLD_NOTE = (
+        "The provider asked to wait 600s before another request "
+        "(retry-after: 600), longer than the client waits, so the request "
+        "was not retried."
+    )
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+        yield
+        td._PENDING_ADMISSIONS.clear()
+        td._ADMISSION_LOCK = None
+
+    def _dispatch(self, monkeypatch, *, cap, failures, failure, start_retries=0):
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_rate_limit_retries", 3, raising=False)
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_rate_limit_backoff_cap_seconds", cap, raising=False,
+        )
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_start_retries", start_retries, raising=False,
+        )
+        slept, calls = [], []
+        real_sleep = asyncio.sleep
+
+        async def _sleep(delay, *a, **kw):
+            slept.append(delay)
+            return await real_sleep(0)
+
+        monkeypatch.setattr(td.asyncio, "sleep", _sleep)
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= failures:
+                return WorkerOutcome(
+                    ok=False, session_id=kwargs["worker_session_id"],
+                    frames_forwarded=0, **failure(),
+                )
+            return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(
+                parent_session_id="root-1", profile_id="p1", prompt="go",
+                label="x", worker_session_id="w-1",
+            ),
+            background=True, lane="native", provider_id=None,
+            parent_session_id="root-1", dispatcher=dispatcher,
+        ))
+        return outcome, slept, calls
+
+    def _refused(self, wait, error=None):
+        """A refusal as the adapter hands it over, its deadline counted from
+        when it arrived."""
+        return lambda: dict(
+            error=self.ERROR if error is None else error,
+            api_error_status=429,
+            retry_after_seconds=float(wait),
+            retry_at=time.time() + wait,
+        )
+
+    def test_a_wait_within_the_budget_is_sat_out_before_each_re_dispatch(self, monkeypatch):
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=60.0, failures=2, failure=self._refused(60),
+        )
+
+        assert outcome.ok is True
+        assert len(calls) == 3
+        assert slept == [pytest.approx(60.0, abs=0.5), pytest.approx(60.0, abs=0.5)], (
+            "each re-dispatch waits the provider's 60s, not the 5s fallback"
+        )
+
+    def test_a_wait_beyond_the_budget_is_not_re_dispatched(self, monkeypatch):
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=30.0, failures=5, failure=self._refused(60),
+        )
+
+        assert len(calls) == 1, "a re-dispatch inside the window meets the same 429"
+        assert slept == []
+        assert outcome.ok is False
+        # The retry time leads, so a reader that clips the text keeps it.
+        assert re.match(r"Retry after \d\d:\d\d:\d\d UTC\. ", outcome.error)
+        assert "the provider asked to wait 60s before another request" in outcome.error
+        assert "so the worker was not re-dispatched" in outcome.error
+        assert "Provider capacity" not in outcome.error
+        assert outcome.error.endswith(self.ERROR)
+
+    def test_provider_text_with_the_old_note_wording_is_still_re_dispatched(
+        self, monkeypatch,
+    ):
+        """S4: a body that happens to say the client did not retry is the
+        provider's text, not a trusted wait: the worker is re-dispatched on
+        the ordinary capacity backoff."""
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=0.01, failures=1,
+            failure=lambda: dict(error=self.ERROR + " " + self.OLD_NOTE),
+        )
+
+        assert outcome.ok is True
+        assert len(calls) == 2, "the note wording in a body must not veto a re-dispatch"
+        assert slept == [pytest.approx(0.01)]
+
+    def test_an_empty_body_429_with_a_long_wait_is_a_rate_limit(self, monkeypatch):
+        """S5: no "429" anywhere in the text, but the typed status and wait
+        say rate limit. The startup-retry lane must not fire inside the
+        provider's 90 s window."""
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=60.0, failures=5, start_retries=2,
+            failure=self._refused(90, error=""),
+        )
+
+        assert len(calls) == 1, "a 90s wait is past the 60s budget: no re-dispatch"
+        assert slept == []
+        assert outcome.error.startswith("Retry after ")
+        assert "asked to wait 90s" in outcome.error
+
+    def test_an_empty_body_429_takes_the_rate_lane(self):
+        used = {"start": 0, "rate": 0}
+        assert td._retry_kind(
+            "error", "", 0, used, start_max=2, rate_max=3, rate_wait_cap=60.0,
+            limit={"api_error_status": 429},
+        ) == "rate"
+
+    def test_the_failure_summary_leads_with_the_retry_time(self):
+        """S6: the registry summary is clipped at 240 chars; the retry time
+        goes first so the clip cannot cut it."""
+        retry_at = 1_790_000_000.0  # fixed: counted from receipt, not now
+        long_error = self.ERROR + " " + "detail " * 80
+        summary = pa._failure_summary("error", long_error, 0, retry_at=retry_at)
+
+        assert summary.startswith(
+            "retry after " + time.strftime("%H:%M:%S UTC", time.gmtime(retry_at))
+            + ": worker failed to start (provider rate limit, not retried):"
+        )
+        assert "already retried" not in summary
+        assert summary.endswith("…")
+
+    @pytest.mark.parametrize("error", [
+        "provider returned HTTP 429: Too many requests.",
+        "provider returned HTTP 429: Temporary usage limit on requests per minute.",
+    ])
+    def test_a_typed_transient_429_takes_the_rate_lane_whatever_it_says(
+        self, monkeypatch, error,
+    ):
+        """S4: a 429 the adapter typed as transient (``usage_limit=False``)
+        is classified from that field. Wording that mentions a "usage limit"
+        must not make it a spent allowance that is never re-dispatched."""
+        typed = {"api_error_status": 429, "usage_limit": False}
+        used = {"start": 0, "rate": 0}
+        assert td._retry_kind("error", error, 0, used, start_max=2, rate_max=3,
+                              rate_wait_cap=60.0, limit=typed) == "rate"
+
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=0.01, failures=1,
+            failure=lambda: dict(error=error, **typed),
+        )
+        assert outcome.ok is True
+        assert len(calls) == 2, "both wordings are re-dispatched on the rate lane"
+        assert slept == [pytest.approx(0.01)]
+
+    def test_a_typed_usage_limit_is_not_re_dispatched_whatever_it_says(self, monkeypatch):
+        """The reverse: a typed usage limit is never re-dispatched, even when
+        its body reads like an ordinary rate limit."""
+        outcome, slept, calls = self._dispatch(
+            monkeypatch, cap=60.0, failures=5,
+            failure=lambda: dict(error=self.ERROR, api_error_status=429, usage_limit=True),
+        )
+        assert len(calls) == 1 and slept == []
+        assert "Provider capacity" not in outcome.error
+
+    @pytest.mark.parametrize("case", ["not_qualified", "retries_spent"])
+    def test_a_final_sync_refusal_with_a_deadline_names_the_retry_time(
+        self, monkeypatch, case,
+    ):
+        """S11: a synchronous Task's final refusal that carries a typed
+        deadline leads with "Retry after HH:MM:SS UTC", whether it never
+        qualified for a re-dispatch (a usage limit) or used every one."""
+        from app.core import config as cfg
+
+        monkeypatch.setattr(cfg.settings, "task_worker_rate_limit_retries", 2, raising=False)
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_rate_limit_backoff_cap_seconds", 60.0, raising=False,
+        )
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 0, raising=False)
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(td.asyncio, "sleep", lambda *a, **kw: real_sleep(0))
+        retry_at = time.time() + 20
+        refusal = dict(
+            error=self.ERROR, api_error_status=429, retry_after_seconds=20.0,
+            retry_at=retry_at, usage_limit=case == "not_qualified",
+        )
+        calls = []
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            return WorkerOutcome(ok=False, session_id=kwargs["worker_session_id"],
+                                 frames_forwarded=0, **refusal)
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(parent_session_id="root-1", profile_id="p1", prompt="go",
+                        label="x", worker_session_id="w-1"),
+            background=False, lane="native", provider_id=None,
+            parent_session_id="root-1", dispatcher=dispatcher,
+        ))
+
+        assert len(calls) == (1 if case == "not_qualified" else 3)
+        assert outcome.ok is False
+        assert outcome.error.startswith(
+            "Retry after " + time.strftime("%H:%M:%S UTC", time.gmtime(retry_at))
+        ), outcome.error
+
+    def test_a_body_hint_alone_keeps_the_clamped_reschedule(self):
+        # Only the typed wait declines a re-dispatch: a body hint longer than
+        # the cap keeps the old clamp-to-cap reschedule.
+        text = "Rate limit reached. Please try again in 90s."
+        used = {"start": 0, "rate": 0}
+        assert td._retry_kind("error", text, 0, used, start_max=0, rate_max=3,
+                              rate_wait_cap=60.0) == "rate"
+        assert td._retry_backoff("rate", text, 0, 60.0) == pytest.approx(60.0)
 
 
 class TestProviderOrgAdmission:

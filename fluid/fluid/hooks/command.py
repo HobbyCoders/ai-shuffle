@@ -25,8 +25,6 @@ import json
 import logging
 import os
 import re
-import signal
-import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
@@ -45,6 +43,7 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 
 log = logging.getLogger(__name__)
 
@@ -207,7 +206,7 @@ class CommandHook:
 
         argv, cwd, env = agent_runner.wrap(
             [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env())
-        proc = await asyncio.create_subprocess_exec(
+        proc, job = await spawn_tree(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -218,9 +217,13 @@ class CommandHook:
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
-        except TimeoutError:
-            await _kill_tree(proc)
+        except BaseException:
+            # A timeout, or the turn being stopped while the hook runs: kill
+            # the whole tree and reap it, even if the shell already exited
+            # and only a descendant still holds the pipes.
+            await kill_tree(proc, job)
             raise
+        release_tree(job)
         return (
             proc.returncode or 0,
             out.decode("utf-8", errors="replace"),
@@ -311,38 +314,6 @@ class CommandHook:
                 warnings=(f"{self.label} asked to block ({reason}) but {event} cannot be blocked",)
             )
         return HookDecision(action="deny", note=reason)
-
-
-async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill a timed-out hook and everything it spawned.
-
-    The shell wrapper is the direct child; the user's command is usually its
-    grandchild, and it holds our stdout/stderr pipes. asyncio only reports the
-    process as finished once those pipes close, so killing the shell alone
-    would leave ``wait()`` blocked until the grandchild exits on its own.
-    """
-    if proc.returncode is not None:
-        return
-    try:
-        if os.name == "nt":
-            await asyncio.to_thread(
-                subprocess.run,
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                env=scrub_child_env(),
-            )
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        pass
-    try:
-        await asyncio.wait_for(proc.wait(), 5)
-    except TimeoutError:
-        log.warning("hook process %s did not exit after kill", proc.pid)
 
 
 def _text_or_none(value: Any) -> str | None:

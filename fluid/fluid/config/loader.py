@@ -200,32 +200,13 @@ def _user_mcp_path() -> Path:
     return Path.home() / ".fluid" / "mcp.json"
 
 
-def project_config_paths(cwd: Path, name: str) -> list[Path]:
-    """Every existing ``<dir>/.fluid/<name>`` for the project walk, outer first.
-
-    The walk is the settings stack's (git root → ``cwd`` inside a checkout,
-    the cwd alone outside one, the home directory excluded), so a session
-    started in a subdirectory sees the same project ``mcp.json`` /
-    ``hooks.json`` / ``config.toml`` as one started at the root. Later entries
-    are nearer the cwd and merge over earlier ones.
-    """
-    from fluid.context.settings_stack import project_dirs
-
-    return [p for d in project_dirs(cwd) if (p := d / ".fluid" / name).is_file()]
-
-
-def _project_config_paths(cwd: Path) -> list[Path]:
-    """Project TOML files, outer first: ``.fluid/config.toml`` per directory,
-    or ``fluid.toml`` where the former is absent."""
-    from fluid.context.settings_stack import project_dirs
-
-    found: list[Path] = []
-    for directory in project_dirs(cwd):
-        for candidate in (directory / ".fluid" / "config.toml", directory / "fluid.toml"):
-            if candidate.is_file():
-                found.append(candidate)
-                break
-    return found
+def _project_toml(directory: Path) -> dict[str, Any]:
+    """One project directory's TOML: ``.fluid/config.toml``, or ``fluid.toml``
+    where the former is absent; empty when it has neither."""
+    for candidate in (directory / ".fluid" / "config.toml", directory / "fluid.toml"):
+        if candidate.is_file():
+            return _load_toml(candidate)
+    return {}
 
 
 def _user_hooks_path() -> Path:
@@ -497,7 +478,12 @@ def load_config(
     )
     user_path = _user_config_path()
     user_toml = _load_toml(user_path) if include_user and user_path.is_file() else {}
-    project_tomls = [_load_toml(p) for p in _project_config_paths(cwd_path)]
+    from fluid.context.settings_stack import project_dirs
+
+    # The project walk (git root → cwd inside a checkout, the cwd alone
+    # outside one, home excluded), outer first, with each directory's TOML.
+    project_layers = [(d, _project_toml(d)) for d in project_dirs(cwd_path)]
+    project_tomls = [toml for _d, toml in project_layers]
     env_layer = env_overrides(env)
 
     from fluid.config.model import _setting_sources_from
@@ -542,17 +528,22 @@ def load_config(
             if user_hooks_path.is_file():
                 merged = deep_merge(merged, _load_hooks_json(user_hooks_path))
         merged = deep_merge(merged, user_toml)
-    if "project" in sources:
-        for project_mcp_path in project_config_paths(cwd_path, "mcp.json"):
-            merged = deep_merge(
-                merged,
-                _load_mcp_json(
-                    project_mcp_path, cwd=cwd_path, env=expansion_env, only=project_gate
-                ),
-            )
-        for project_hooks_path in project_config_paths(cwd_path, "hooks.json"):
-            merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
-    for project_toml in project_tomls:
+    # Per directory, outer first: mcp.json, hooks.json, then that directory's
+    # TOML, so a nearer directory's JSON still wins an outer directory's TOML.
+    for directory, project_toml in project_layers:
+        if "project" in sources:
+            project_mcp_path = directory / ".fluid" / "mcp.json"
+            if project_mcp_path.is_file():
+                merged = deep_merge(
+                    merged,
+                    _load_mcp_json(
+                        project_mcp_path, cwd=cwd_path, env=expansion_env,
+                        only=project_gate,
+                    ),
+                )
+            project_hooks_path = directory / ".fluid" / "hooks.json"
+            if project_hooks_path.is_file():
+                merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
         merged = deep_merge(merged, project_toml)
 
     merged = deep_merge(merged, env_layer)

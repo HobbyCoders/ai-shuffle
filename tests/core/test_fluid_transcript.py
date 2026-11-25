@@ -1141,6 +1141,26 @@ def test_rewind_then_reseed_writes_the_post_rewind_transcript(mock_db, tmp_path)
     assert {line["sessionId"] for line in lines} == {new_handle}
 
 
+def test_reseed_before_a_node_leaves_that_turn_out(mock_db, tmp_path):
+    """A turn replayed on the re-seeded transcript is cut from it, or the CLI
+    would read its prompt twice (DelegatedLoop's silent-resume recovery)."""
+    from app.core.jsonl_parser import get_project_dir_name
+    from app.core.provider.fluid_transcript import reseed_delegated_cli_session
+
+    session_id = _seed()
+    _set_cli(session_id, "stale-cli-uuid")
+
+    result = reseed_delegated_cli_session(
+        session_id, "/workspace", tmp_path, before_node="n6",
+    )
+
+    assert result.status == "reseeded"
+    path = tmp_path / get_project_dir_name("/workspace") / f"{result.cli_session_id}.jsonl"
+    body = path.read_text(encoding="utf-8")
+    assert "after tool" in body
+    assert "second prompt" not in body and "second reply" not in body
+
+
 def test_reseed_is_skipped_without_a_delegated_cli_conversation(mock_db, tmp_path):
     from app.core.provider.fluid_transcript import reseed_delegated_cli_session
 

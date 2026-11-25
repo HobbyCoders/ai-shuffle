@@ -157,6 +157,8 @@ async def test_lifespan_stop_shares_the_deadline_and_reports_unfinished(monkeypa
         assert loop.time() - started < BUDGET + SLACK
         assert desktop_lifecycle.unfinished_saving(sessions=settled, queries=True) == ["session turns"]
         assert "stop deadline" in caplog.text
+        # The pool's Swarm closes share that deadline, not fresh waits of their own.
+        pool.shutdown.assert_awaited_once_with(deadline=query_shutdown._stop_deadline)
     finally:
         await slow.finish()
 

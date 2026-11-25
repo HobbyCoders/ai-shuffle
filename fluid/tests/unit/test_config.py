@@ -438,6 +438,25 @@ def test_project_layers_walk_up_from_the_git_root(tmp_path, monkeypatch) -> None
     assert load_config(cwd=deeper, include_system=False, env={}).default_model == "leaf"
 
 
+def test_nearer_directory_json_beats_outer_directory_toml(tmp_path, monkeypatch) -> None:
+    """Project layers merge per directory (mcp.json, hooks.json, then TOML),
+    outer first: a subdirectory's mcp.json entry wins the root's [mcp.x]
+    table, and a subdirectory's TOML still wins its own mcp.json."""
+    _home(monkeypatch, tmp_path / "home")
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    _write(root / ".fluid" / "config.toml",
+           '[mcp.shared]\ncommand = "root-toml"\n\n[mcp.leaf]\ncommand = "root-toml"\n')
+    sub = root / "pkg"
+    _write(sub / ".fluid" / "mcp.json", json.dumps({"mcpServers": {
+        "shared": {"command": "pkg-json"}, "leaf": {"command": "pkg-json"}}}))
+    _write(sub / ".fluid" / "config.toml", '[mcp.leaf]\ncommand = "pkg-toml"\n')
+
+    config = load_config(cwd=sub, include_system=False, env={})
+    assert config.mcp["shared"]["command"] == "pkg-json"
+    assert config.mcp["leaf"]["command"] == "pkg-toml"
+
+
 def test_outside_a_git_checkout_only_the_cwd_is_project(tmp_path, monkeypatch) -> None:
     _home(monkeypatch, tmp_path / "home")
     outer = tmp_path / "outer"

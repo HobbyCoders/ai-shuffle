@@ -281,6 +281,72 @@ def test_a_wrapped_socket_error_is_still_transient() -> None:
 # ─── runaway tool-argument streams ───────────────────────────────────────────
 
 
+async def _run_with_done_item(
+    fragments: list[str], done_item: dict,
+) -> tuple[list[dict], list[Any]]:
+    """Stream a Write call from ``fragments`` and close it with ``done_item``;
+    return what the tool was called with and the run's events."""
+    script = _tool_call(fragments)
+    stop = next(i for i, c in enumerate(script) if c.kind == "block_stop")
+    script[stop] = StreamChunk("block_stop", {"index": 0, "block": {
+        "type": "function_call", "call_id": "call_1", "name": "Write", **done_item,
+    }})
+    seen: list[dict] = []
+
+    async def _wrote(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        seen.append(input)
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="Write", description="Write a file.",
+                 input_schema={"type": "object", "properties": {}}, source="builtin"),
+        _wrote,
+    )
+    loop = NativeLoop(
+        provider=_Scripted([script, _text_call()]), store=MemoryStore(), model=MODEL,
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    try:
+        events = await _run(loop)
+    finally:
+        await loop.aclose()
+    return seen, events
+
+
+async def test_the_done_items_final_arguments_are_what_runs() -> None:
+    """Responses closes a function call with the authoritative arguments.
+    When the streamed deltas disagree (a fragment lost on the way), the
+    final arguments are dispatched, not the deltas' concatenation."""
+    final = '{"file_path":"/a.txt","content":"hello world"}'
+    seen, events = await _run_with_done_item(
+        ['{"file_path":"/a.txt","content":"hel'], {"arguments": final})
+
+    assert seen == [{"file_path": "/a.txt", "content": "hello world"}]
+    use = next(e for e in events if isinstance(e, ToolUse))
+    assert use.input == {"file_path": "/a.txt", "content": "hello world"}
+
+
+async def test_an_empty_final_arguments_string_overrides_the_deltas() -> None:
+    """A done item that settles on ``arguments: ""`` did not authorise the
+    streamed payload: the call runs with no arguments, never the deltas'."""
+    seen, events = await _run_with_done_item(
+        ['{"file_path":"/a.txt","content":"streamed"}'], {"arguments": ""})
+
+    assert seen == [{}]
+    use = next(e for e in events if isinstance(e, ToolUse))
+    assert use.input == {}
+
+
+async def test_a_done_item_without_arguments_falls_back_to_the_deltas() -> None:
+    """Only a done item that lacks the field entirely leaves the streamed
+    arguments in charge."""
+    seen, _events = await _run_with_done_item(
+        ['{"file_path":"/a.txt",', '"content":"streamed"}'], {})
+
+    assert seen == [{"file_path": "/a.txt", "content": "streamed"}]
+
+
 async def test_a_whitespace_runaway_is_abandoned_and_the_call_retried() -> None:
     provider = _Scripted([_runaway_call(), _text_call("recovered")])
     loop = NativeLoop(
@@ -434,6 +500,56 @@ async def test_a_slow_whitespace_runaway_trips_the_clock_not_the_byte_cap() -> N
     )
     assert provider.calls == 2
     assert next(e for e in events if isinstance(e, TurnComplete))
+
+
+class _RunawayThenCheck:
+    """An endless runaway first, then a call that records whether the first
+    stream (standing in for its HTTP response) had been closed by then."""
+
+    name = "anthropic"
+    caps = ProviderCaps()
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_closed = False
+        self.closed_before_retry: bool | None = None
+
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        self.calls += 1
+        if self.calls > 1:
+            self.closed_before_retry = self.first_closed
+            for chunk in _text_call("recovered"):
+                yield chunk
+            return
+        try:
+            for chunk in _tool_call(['{"file_path":"/a.txt","content":"'])[:3]:
+                yield chunk
+            while True:
+                yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": "x" * 500})
+        finally:
+            # Closing an HTTP response awaits the transport.
+            await asyncio.sleep(0.05)
+            self.first_closed = True
+
+
+async def test_an_abandoned_stream_is_closed_before_the_retry_starts() -> None:
+    """native.md Low: breaking out of the provider stream left its closing
+    to the event loop's async-generator finalizer (or garbage collection), so
+    the retry could open a second HTTP stream before the first had closed."""
+    provider = _RunawayThenCheck()
+    loop = NativeLoop(
+        provider=provider, store=MemoryStore(), model=MODEL,
+        registry=_write_registry(), permissions=PermissionEngine("never_ask"),
+        tool_arg_guard=ToolArgStreamGuard(max_bytes=2_000),
+    )
+    try:
+        events = await _run(loop)
+    finally:
+        await loop.aclose()
+
+    assert [e for e in events if isinstance(e, ProviderRetry)]
+    assert provider.calls == 2
+    assert provider.closed_before_retry is True
 
 
 async def test_the_shipped_defaults_catch_the_audited_shape() -> None:

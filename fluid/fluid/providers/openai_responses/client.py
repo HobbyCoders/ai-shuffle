@@ -5,7 +5,7 @@ httpx streaming POST, same shape as ``AnthropicClient``. Two auth modes:
   * ``api_key`` (arg or ``OPENAI_API_KEY``) → ``Authorization: Bearer`` against
     ``https://api.openai.com/v1/responses`` (the default ``base_url``).
   * an ``auth`` object (the Codex OAuth hook, :class:`codex_oauth.CodexAuth`)
-    implementing ``async get_access_token()`` + ``async on_401()`` and optionally
+    implementing ``async get_access_token()`` + ``async on_401(rejected_token)`` and optionally
     exposing ``account_id`` — used instead of ``api_key``, with a single retry on
     401 (``on_401`` refreshes the rotated token) and the ``chatgpt-account-id``
     header attached. Point ``base_url`` at the Codex backend
@@ -72,9 +72,11 @@ from fluid.providers._transport import (
     StreamDeadlineExceeded,
     deadline_error_payload,
     first_byte_note,
+    header_secrets,
     is_closed_client_error,
     is_usable_client,
     open_stream,
+    redact_errors,
     refusal_payload,
     truncated_stream_payload,
     with_deadline,
@@ -148,7 +150,9 @@ class ResponsesAuth(Protocol):
     account_id: str | None
 
     async def get_access_token(self) -> str: ...
-    async def on_401(self) -> None: ...
+    # ``rejected_token`` is the access token the refused request carried, so
+    # a late 401 for a token that was already renewed does not renew again.
+    async def on_401(self, rejected_token: str | None = None) -> None: ...
 
 
 class OpenAIResponsesClient:
@@ -415,7 +419,15 @@ class OpenAIResponsesClient:
         assert owned is not None
         return owned, owned
 
-    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+    def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        # Error chunks lose the request's own credential: an OAuth token is
+        # added to ``secrets`` as each attempt fetches it.
+        secrets = [self._api_key]
+        return redact_errors(self._stream(request, secrets), secrets)
+
+    async def _stream(
+        self, request: ProviderRequest, secrets: list[str]
+    ) -> AsyncIterator[StreamChunk]:
         # A resumed history (or an LRU eviction) can require image encoding.
         body = await asyncio.to_thread(build_request_body, request)
         if self._is_codex_backend():
@@ -450,6 +462,7 @@ class OpenAIResponsesClient:
                 )
                 try:
                     headers = await self._headers(body, wire, request_id, request.model)
+                    secrets.extend(header_secrets(headers))
                     trace_request("openai_responses", body)
                     first_byte = self._first_byte_timeout
                     sent_at = time.monotonic()
@@ -543,10 +556,22 @@ class OpenAIResponsesClient:
                                         budget = self._retry.max_retries
                                         if verdict.max_retries is not None:
                                             budget = min(budget, verdict.max_retries)
-                                        if verdict.retriable and attempt < budget:
+                                        # A "try again in Xs" past the long
+                                        # floor is longer than this client
+                                        # waits: retrying sooner only meets
+                                        # the same refusal, so it surfaces.
+                                        too_long = (
+                                            verdict.retry_after is not None
+                                            and verdict.retry_after > LONG_BACKOFF_FLOOR_S
+                                        )
+                                        if verdict.retriable and attempt < budget and not too_long:
                                             retry_class = verdict
                                             retry_budget = budget
                                             break
+                                        if verdict.retriable and too_long:
+                                            # Same shape as refusal_delay's
+                                            # surfaced wait, for the host.
+                                            chunk.payload["retry_after_seconds"] = verdict.retry_after
                                     if pending_start is not None:
                                         start_sent = True
                                         yield pending_start
@@ -567,11 +592,9 @@ class OpenAIResponsesClient:
                                 elapsed = time.monotonic() - sent_at
                                 if retry_class is not None:
                                     if retry_class.retry_after is not None:
-                                        # The provider said when; never
-                                        # longer than the long floor.
-                                        wait = min(
-                                            retry_class.retry_after, LONG_BACKOFF_FLOOR_S,
-                                        )
+                                        # The provider said when (never past
+                                        # the long floor: longer surfaces).
+                                        wait = retry_class.retry_after
                                     else:
                                         wait = max(
                                             self._retry.delay(attempt),
@@ -640,17 +663,20 @@ class OpenAIResponsesClient:
                             and self._auth is not None
                             and not refreshed_401
                         ):
-                            await self._auth.on_401()
+                            # Name the token this send used: by the time a
+                            # late 401 lands, another call may already have
+                            # renewed it, and the hook must not rotate again.
+                            await self._auth.on_401(
+                                headers["Authorization"].removeprefix("Bearer "))
                             refreshed_401 = True
                             continue
                         refusal = refusal_payload(
-                            resp.status_code, text, resp.headers.get("retry-after"))
-                        if (
-                            refusal["retriable"] and not native_image
-                            and attempt < self._retry.max_retries
-                        ):
-                            await asyncio.sleep(self._retry.delay(
-                                attempt, resp.headers.get("retry-after")))
+                            resp.status_code, text, resp.headers.get("retry-after"),
+                            secrets=secrets)
+                        wait = None if native_image else self._retry.refusal_delay(
+                            attempt, refusal, resp.headers.get("retry-after"))
+                        if wait is not None:
+                            await asyncio.sleep(wait)
                             attempt += 1
                             continue
                         yield StreamChunk("error", refusal)

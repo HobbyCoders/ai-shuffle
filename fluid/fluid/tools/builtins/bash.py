@@ -5,10 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
-import os
 import re
-import signal
-import subprocess
 import sys
 from typing import Any
 
@@ -25,6 +22,8 @@ from fluid.tools.priority import (
     priority_creationflags,
     raise_oom_score_adj,
 )
+# ``kill_tree`` is re-exported: other modules end their trees through it.
+from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import (
     ToolCtx,
     ToolOutcome,
@@ -214,7 +213,8 @@ def _spawn_kwargs() -> dict[str, Any]:
 
     POSIX: a fresh session (= fresh process group) lets ``os.killpg`` take out
     the shell *and* everything it spawned. Windows has no equivalent that
-    ``asyncio`` exposes; ``kill_tree`` uses ``taskkill /T`` there instead.
+    ``asyncio`` exposes; a Job Object taken before the suspended shell runs
+    holds the tree there instead (see ``fluid.tools.process_tree.spawn_tree``).
     On Windows the command also starts below normal priority unless
     ``FLUID_CHILD_NICE=0`` (see ``fluid.tools.priority``); on POSIX the
     handler lowers the new group's priority right after the spawn.
@@ -223,40 +223,6 @@ def _spawn_kwargs() -> dict[str, Any]:
         return {"start_new_session": True}
     flags = priority_creationflags()
     return {"creationflags": flags} if flags else {}
-
-
-async def kill_tree(proc: asyncio.subprocess.Process) -> None:
-    """Kill ``proc`` and every descendant, then reap it.
-
-    ``proc.kill()`` alone is not enough: the shell is just the root of a tree
-    (Git Bash on Windows even nests a second bash), and killing the root
-    orphans the grandchildren, which run to completion. So kill the whole
-    group (POSIX) or tree (Windows), falling back to ``proc.kill()`` when the
-    group is already gone.
-    """
-    if proc.returncode is not None:
-        return
-    if sys.platform == "win32":
-        try:
-            await asyncio.to_thread(
-                subprocess.run,
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True,
-                env=scrub_child_env(),
-            )
-        except OSError:
-            pass
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    if proc.returncode is None:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-    await proc.wait()
 
 
 def clamp_timeout(value: Any) -> float:
@@ -382,7 +348,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # Under Docker agent isolation the command starts through the spawn
     # runner as the agent account; otherwise all three come back unchanged.
     argv, cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, env)
-    proc = await asyncio.create_subprocess_exec(
+    # Windows: the job that lets a kill reach descendants whose parent
+    # exited, taken before the shell runs so none can start outside it.
+    proc, job = await spawn_tree(
         *argv,
         # No stdin, as the description promises: a command that reads it
         # gets EOF instead of the user's next keystrokes.
@@ -409,15 +377,42 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # and then hangs gets the time left, not a second full timeout.
         await asyncio.wait_for(proc.wait(), timeout=max(0.0, deadline - loop.time()))
     except TimeoutError:
-        await kill_tree(proc)
+        # Killed even when the shell already exited and only a descendant is
+        # left holding the output pipe (the usual way a run hangs here).
+        # "Terminated" only when the whole tree is known to have exited, which
+        # only a Windows job can show. A process that left the command's
+        # process group or session escapes the kill, and the output pipe still
+        # reaches EOF when it redirected its output.
+        exited = await kill_tree(proc, job, confirm=True)
+        job = None
+        drained = False
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
             await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
+            drained = True
+        if exited and drained:
+            ended = " and was terminated."
+        elif not drained:
+            # A pipe still held open is evidence of a survivor.
+            ended = (
+                "; termination was attempted, but a process it started still "
+                "holds its output and may still be running (one that left the "
+                "command's process group, as `timeout` without --foreground "
+                "does). Check for it before re-running."
+            )
+        else:
+            ended = (
+                "; termination was attempted, but whether everything it "
+                "started has exited cannot be confirmed (a process that left "
+                "the command's process group or session, as `timeout` without "
+                "--foreground or a daemon does, survives the kill even when "
+                "its output goes to a file). Check for it before re-running."
+            )
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
         text = (
-            f"command timed out after {timeout:g}s{held} and was killed. Raise "
+            f"command timed out after {timeout:g}s{held}{ended} Raise "
             "the timeout parameter for a genuinely long command, narrow "
             "the command's scope, or use Monitor for a long-running job "
             "(serves=true only for a service meant to stay up). Do not "
@@ -436,13 +431,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # reap the process, so kill the tree here and let the cancellation
         # keep propagating. Nothing is spilled and nothing is claimed: the
         # file is written only for a finished result.
-        await kill_tree(proc)
+        await kill_tree(proc, job)
+        job = None
         raise
-    finally:
-        # Any other abnormal exit (an exception out of the reader, a second
-        # cancellation) must not orphan a live process either.
-        if proc.returncode is None:
-            await kill_tree(proc)
+    except BaseException:
+        # Any other abnormal exit (an exception out of the reader) must not
+        # orphan the tree either, whether or not the shell is still alive.
+        await kill_tree(proc, job)
+        job = None
+        raise
+    # A command that finished on its own keeps whatever it left running.
+    release_tree(job)
     text = _render(capture, ctx)
     code = proc.returncode or 0
     if not text.strip():

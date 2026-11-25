@@ -110,7 +110,11 @@ async def test_ultrafast_is_sent_and_reported(server):
     assert _of(events, TurnComplete)
 
 
-async def test_a_refused_ultrafast_runs_the_turn_on_standard(server):
+async def test_a_refused_ultrafast_runs_the_turn_on_standard_outside_the_call_cap(server):
+    """The one deliberate exception to the per-turn model-call cap: an
+    Ultrafast request the provider refused did no model work, so it is not
+    counted and the Standard request that follows may go out even on a turn
+    capped at one call."""
     server.script(_refused(), _reply("still answered", "default"))
     # A budget of one call: the refused attempt ran nothing and is not counted.
     events, _ = await _turn(server, "ultrafast", max_model_calls_per_turn=1)

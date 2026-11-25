@@ -24,9 +24,11 @@
   onOpenSetting?: (target: SettingsTarget) => void;
   onImportSession?: () => void;
   onManageTags?: () => void;
+  /** Open "Message all active chats". */
+  onMessageAllActive?: () => void;
  }
  let { visible, currentProjectId, onClose, onSelectSession, onSelectAgent, onOpenFeature,
-  onNewChat, onOpenSettings, onOpenSetting, onImportSession, onManageTags }: Props = $props();
+  onNewChat, onOpenSettings, onOpenSetting, onImportSession, onManageTags, onMessageAllActive }: Props = $props();
  let query = $state('');
  let selectedIndex = $state(0);
  let input = $state<HTMLInputElement>();
@@ -44,6 +46,7 @@
  const actions = $derived<SearchItem[]>([
   { id: 'new', label: 'New conversation', action: onNewChat },
   { id: 'settings', label: 'Open settings', action: onOpenSettings },
+  ...(onMessageAllActive ? [{ id: 'message-all', label: 'Message all active chats', action: onMessageAllActive }] : []),
   ...(onImportSession ? [{ id: 'import', label: 'Import session', action: onImportSession }] : []),
   ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : [])
  ]);

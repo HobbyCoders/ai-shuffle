@@ -44,6 +44,7 @@ from urllib.parse import urlencode
 import httpx
 
 from fluid._filelock import file_lock
+from fluid.context.screening import redact_text
 from fluid.tools.child_env import scrub_child_env
 
 logger = logging.getLogger(__name__)
@@ -385,9 +386,17 @@ async def poll_device_code(
 
 
 async def refresh_tokens(
-    refresh_token: str, *, client: httpx.AsyncClient | None = None
+    refresh_token: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+    access_token: str | None = None,
 ) -> TokenBundle:
-    """Refresh the access token; returns the ROTATED bundle."""
+    """Refresh the access token; returns the ROTATED bundle.
+
+    A refusal's code and description are redacted against the refresh token
+    and the expiring ``access_token`` before they are raised: the server may
+    echo the token it rejected, and the error is logged and becomes the
+    turn's terminal error, outside any stream's error redaction."""
     resp = await _post(
         client,
         TOKEN_URL,
@@ -399,6 +408,11 @@ async def refresh_tokens(
     )
     if resp.status_code >= 400:
         code, message = _error_code(_safe_json(resp))
+        known = (refresh_token, access_token or "")
+        if code:
+            code = redact_text(code, known)
+        if message is not None:
+            message = redact_text(str(message), known)
         raise CodexAuthError(code or f"http_{resp.status_code}", message)
     return _bundle_from_token_response(_safe_json(resp), prior_refresh_token=refresh_token)
 
@@ -599,7 +613,8 @@ class CodexAuth:
             if disk is not None and disk.refresh_token != prior.refresh_token:
                 self._bundle = disk
                 return
-            new = await refresh_tokens(prior.refresh_token, client=self._client)
+            new = await refresh_tokens(
+                prior.refresh_token, client=self._client, access_token=prior.access_token)
             bundle = StoredBundle(
                 access_token=new.access_token,
                 refresh_token=new.refresh_token,
@@ -621,15 +636,22 @@ class CodexAuth:
             assert self._bundle is not None
             return self._bundle.access_token
 
-    async def on_401(self) -> None:
+    async def on_401(self, rejected_token: str | None = None) -> None:
         """Refresh once after an upstream 401.
 
-        If a peer already rotated the token on disk while we waited on the lock
-        (the stored access token differs from our in-memory one), adopt it and
-        skip the redundant POST — a wasted refresh could trip reuse detection.
+        ``rejected_token`` is the access token the refused request carried
+        (the in-memory one when the caller does not say). If this process
+        already moved past it — a late 401 from a request sent before another
+        call's refresh — the current token is kept. If a peer already rotated
+        the token on disk while we waited on the lock (the stored access token
+        differs from the rejected one), adopt it. Either way the redundant
+        POST is skipped — a wasted refresh could trip reuse detection.
         """
         async with self._lock:
-            stale = self._bundle.access_token if self._bundle else None
+            current = self._bundle.access_token if self._bundle else None
+            stale = rejected_token or current
+            if current is not None and current != stale:
+                return
             disk = load_bundle(self.token_path)
             if disk is not None and stale is not None and disk.access_token != stale:
                 self._bundle = disk

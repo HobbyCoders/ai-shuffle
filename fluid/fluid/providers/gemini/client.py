@@ -21,12 +21,12 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 import httpx
 
-from fluid.providers._retry import RetryPolicy
+from fluid.providers._retry import RetryPolicy, parse_retry_after
 from fluid.providers._sse import sse_events
 from fluid.providers._trace import trace_request
 from fluid.providers._transport import (
@@ -39,19 +39,21 @@ from fluid.providers._transport import (
     is_closed_client_error,
     is_usable_client,
     open_stream,
+    redact_errors,
     refusal_payload,
     truncated_stream_payload,
     with_deadline,
 )
+from fluid.context.screening import redact_text
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.providers.gemini.pricing import estimate_cost as _estimate_cost
 from fluid.providers.gemini.serialize import (
     API_REVISION,
-    QUOTA_CODE,
     StreamNormalizer,
     build_request_body,
     error_fields,
     error_payload,
+    is_quota_refusal,
 )
 
 API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
@@ -59,20 +61,11 @@ API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 log = logging.getLogger(__name__)
 
 
-def _redact(value: Any, key: str) -> Any:
-    if not key:
-        return value
-    if isinstance(value, str):
-        return value.replace(key, "[redacted]")
-    if isinstance(value, dict):
-        return {k: _redact(v, key) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v, key) for v in value]
-    return value
-
-
-def http_refusal(status: int, text: str, retry_after: str | None) -> dict[str, Any]:
+def http_refusal(
+    status: int, text: str, retry_after: str | None, *, secrets: Iterable[str] = (),
+) -> dict[str, Any]:
     """The error chunk for a non-200 Interactions response."""
+    text = redact_text(text, secrets)
     payload = refusal_payload(status, text, retry_after)
     try:
         body = json.loads(text)
@@ -82,12 +75,16 @@ def http_refusal(status: int, text: str, retry_after: str | None) -> dict[str, A
         code, _status, _message = error_fields(body)
         if code is not None:
             payload["code"] = code
-        if code == QUOTA_CODE:
+        if is_quota_refusal(body):
             detailed = error_payload(body)
             payload.update(
                 retriable=False, usage_limit=True,
                 provider_message=detailed.get("provider_message"),
             )
+            # Like any usage-limit refusal, it keeps the wait it asked for.
+            wait = parse_retry_after(retry_after)
+            if wait is not None and wait > 0:
+                payload["retry_after_seconds"] = wait
     return payload
 
 
@@ -148,7 +145,11 @@ class GeminiClient:
             headers["User-Agent"] = self._user_agent
         return headers
 
-    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+    def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        # Error bodies can echo the key back; no error chunk carries it.
+        return redact_errors(self._stream(request), [self._api_key])
+
+    async def _stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         headers = self._headers()
         body = await asyncio.to_thread(build_request_body, request)
         owned: httpx.AsyncClient | None = None
@@ -171,10 +172,13 @@ class GeminiClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
-                            text = _redact(text, self._api_key)
-                            refusal = http_refusal(resp.status_code, text, resp.headers.get("retry-after"))
-                            if refusal["retriable"] and attempt < self._retry.max_retries:
-                                await asyncio.sleep(self._retry.delay(attempt, resp.headers.get("retry-after")))
+                            refusal = http_refusal(
+                                resp.status_code, text, resp.headers.get("retry-after"),
+                                secrets=[self._api_key],
+                            )
+                            wait = self._retry.refusal_delay(attempt, refusal, resp.headers.get("retry-after"))
+                            if wait is not None:
+                                await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
                             yield StreamChunk("error", refusal)
@@ -196,8 +200,6 @@ class GeminiClient:
                         )
                         async for event_name, data in events:
                             for chunk in normalizer.consume(event_name, data):
-                                if chunk.kind == "error":
-                                    chunk = StreamChunk("error", _redact(chunk.payload, self._api_key))
                                 if chunk.kind == "message_start" and not yielded:
                                     pending_start = chunk
                                     continue

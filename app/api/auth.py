@@ -266,6 +266,7 @@ def _preview_may_read(request: Request) -> bool:
 # The owner-only changes a throwaway instance's preview cookie may make.
 _PREVIEW_DEV_CHANGE = re.compile(
     r"(POST /api/v1/projects"
+    r"|POST /api/v1/projects/clone"
     r"|POST /api/v1/projects/setup"
     r"|POST /api/v1/projects/setup/[^/]+/cancel"
     r"|DELETE /api/v1/projects/workers/[^/]+"
@@ -291,7 +292,7 @@ def _preview_may_change_dev_data(request: Request) -> bool:
     owner routes. The mutation ceiling (``preview_access.mutation_allowed``)
     and same-origin rule still apply.
 
-    Only these changes: add a project, set one up on a worker, cancel that
+    Only these changes: add (or clone) a project, set one up on a worker, cancel that
     setup, remove or retarget a worker's copy, point a project at another
     repository or take an unheld one off the list, create or update an agent, and
     toggle global Away. Every other owner-only change (deleting or relinking a project;

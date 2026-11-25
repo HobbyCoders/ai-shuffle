@@ -56,6 +56,9 @@ class LocalClient:
         extra: dict[str, Any] | None = None,
     ) -> None:
         self._api_key = api_key or "local"
+        # The default is ours, not a credential: errors may repeat it. A
+        # configured key is redacted from errors whatever its spelling.
+        self._placeholder_key = None if api_key else self._api_key
         self._url = normalize_base_url(base_url)
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.
@@ -88,6 +91,7 @@ class LocalClient:
             self._url,
             body,
             headers,
+            placeholder_key=self._placeholder_key,
             http_client=self._http,
             timeout=self._timeout,
             retry=self._retry,

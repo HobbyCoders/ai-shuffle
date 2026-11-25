@@ -63,7 +63,7 @@ import random
 import re
 import time
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -324,7 +324,7 @@ class ResetInfo:
     """When a limit resets, and how that was learned."""
 
     at: float
-    source: str  # "structured" | "text"
+    source: str  # "structured" | "text" | "retry_after"
     windows: Tuple[str, ...] = field(default_factory=tuple)
     tz: Optional[str] = None
 
@@ -506,10 +506,43 @@ def structured_reset(provider_key: Optional[str], *, now: Optional[float] = None
 
 
 def find_reset(
-    provider_key: Optional[str], error_text: Optional[str], *, now: Optional[float] = None,
+    provider_key: Optional[str],
+    error_text: Optional[str],
+    *,
+    retry_at: Optional[float] = None,
+    now: Optional[float] = None,
 ) -> Optional[ResetInfo]:
-    """Structured reset time first, the error text only as the fallback."""
-    return structured_reset(provider_key, now=now) or reset_from_text(error_text, now=now)
+    """When the limit resets: the structured reset time first, the error text
+    only as the fallback, and never before ``retry_at``.
+
+    ``retry_at`` is the typed deadline of a refusal whose Retry-After the client
+    did not wait out (:func:`retry_deadline`). It is a minimum, not a fallback:
+    when another estimate is earlier the reset moves to ``retry_at`` (keeping
+    that estimate's windows), so neither the banner nor the resume or the hold
+    on automatic turns sends again while the provider still refuses.
+    """
+    current = time.time() if now is None else now
+    estimate = structured_reset(provider_key, now=current) or reset_from_text(error_text, now=current)
+    if retry_at is None:
+        return estimate
+    trusted = _believable(ResetInfo(at=float(retry_at), source="retry_after"), current)
+    if trusted is None:
+        return estimate
+    if estimate is None:
+        return trusted
+    if trusted.at > estimate.at:
+        return replace(estimate, at=trusted.at)
+    return estimate
+
+
+def retry_deadline(terminal: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The typed ``retry_at`` a settled turn's terminal payload carries, or None.
+
+    Only the typed field counts: provider text never sets a deadline.
+    """
+    from app.core.provider.events import retry_fields
+
+    return retry_fields(terminal or {}).get("retry_at")
 
 
 def still_blocked_until(
@@ -765,7 +798,8 @@ async def _on_limit_stop(
         # ordinary failure/report path alone instead of advertising an arm.
         return None
     current = (_epoch(turn.get("ended_at")) or time.time()) if now is None else now
-    reset = await run_sync(lambda: find_reset(provider_key, _errors_text(terminal), now=current))
+    reset = await run_sync(lambda: find_reset(
+        provider_key, _errors_text(terminal), retry_at=retry_deadline(terminal), now=current))
     note_sessions = [session_id] + ([worker_owner] if worker_owner else [])
     if reset is None:
         for sid in note_sessions:
@@ -911,7 +945,7 @@ async def _once_refused(session_id: str, session: Any, meta: Dict[str, Any]) -> 
 async def state(session_id: str) -> Dict[str, Any]:
     """Reloadable state, including the last limit stop even with auto-resume off."""
     from app.core import account_failover
-    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.core.turn_scheduler import _turn_limit_payload
     from app.db import database, turns
     from app.db.async_database import run_sync
 
@@ -922,12 +956,13 @@ async def state(session_id: str) -> Dict[str, Any]:
     last = await run_sync(_last_settled_turn, session_id)
     stopped = None
     if last:
-        terminal = await run_sync(_turn_terminal_payload, session_id, last["id"])
+        terminal = await run_sync(_turn_limit_payload, session_id, last["id"])
         if account_failover.is_usage_limit_error(terminal):
             turn = await run_sync(turns.get_turn, last["id"])
             provider = await run_sync(lambda: session_provider_key(session, session_leg(session)))
             reset = await run_sync(lambda: find_reset(
-                provider, _errors_text(terminal), now=_epoch(last.get("ended_at")) or time.time()))
+                provider, _errors_text(terminal), retry_at=retry_deadline(terminal),
+                now=_epoch(last.get("ended_at")) or time.time()))
             reason = await _once_refused(session_id, session, {"turn_id": last["id"]})
             if not reason and await run_sync(turns.session_has_unsettled_turns, session_id):
                 reason = "busy"
@@ -952,7 +987,7 @@ async def state(session_id: str) -> Dict[str, Any]:
 
 async def arm(session_id: str, turn_id: str) -> Dict[str, Any]:
     """Opt in once without changing settings. A stale UI cannot arm a newer stop."""
-    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.core.turn_scheduler import _turn_limit_payload
     from app.db import turns
     from app.db.async_database import run_sync
 
@@ -970,7 +1005,7 @@ async def arm(session_id: str, turn_id: str) -> Dict[str, Any]:
             raise ValueError(reasons.get(stopped["reason"],
                                         "This chat cannot resume: " + str(stopped["reason"])))
         turn = await run_sync(turns.get_turn, turn_id)
-        terminal = await run_sync(_turn_terminal_payload, session_id, turn_id)
+        terminal = await run_sync(_turn_limit_payload, session_id, turn_id)
         result = await _on_limit_stop(session_id, turn, terminal, None, None, once=True)
         if not result:
             raise ValueError("The resume could not be armed. Refresh the chat or retry manually.")
@@ -1025,28 +1060,38 @@ def hold_until(session_id: str, *, now: Optional[float] = None) -> Optional[floa
     an automation or any other turn nobody typed would only ask the provider
     again before the reset, so it waits (``turn_scheduler`` does not start it)
     until the reset, or :data:`HOLD_FALLBACK_SECONDS` after the stop when the
-    reset time is unknown. A 429 that is not a usage limit (a per-minute rate
-    limit the client already retried) holds nothing. Sync (DB).
+    reset time is unknown. A 429 that is not a usage limit (its typed
+    ``usage_limit`` is False: a per-minute rate limit) holds only until its
+    own typed ``retry_at``, the wait the provider asked for and the client did
+    not sit out, and nothing at all without one: a usage snapshot never holds
+    it. Sync (DB).
     """
     from app.core import account_failover
-    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.core.turn_scheduler import _turn_limit_payload
     from app.db import database
     from fluid.providers._retry import is_usage_limit_text
 
     last = _last_settled_turn(session_id)
     if not last:
         return None
-    terminal = _turn_terminal_payload(session_id, last["id"])
-    if not account_failover.is_usage_limit_error(terminal):
+    terminal = _turn_limit_payload(session_id, last["id"])
+    if not account_failover.is_rate_limited(terminal):
         return None
     current = time.time() if now is None else now
+    if not account_failover.is_usage_limit_error(terminal):
+        deadline = retry_deadline(terminal)
+        return deadline if deadline is not None and current < deadline else None
     ended = _epoch(last.get("ended_at")) or current
     text = _errors_text(terminal)
     session = database.get_session(session_id)
-    reset = find_reset(session_provider_key(session, session_leg(session)), text, now=ended)
+    reset = find_reset(session_provider_key(session, session_leg(session)), text,
+                       retry_at=retry_deadline(terminal), now=ended)
+    typed = account_failover.typed_usage_limit(terminal)
     if reset is not None:
         until = reset.at
-    elif is_usage_limit_text(text):
+    elif typed or (typed is None and is_usage_limit_text(text)):
+        # A usage limit with no known reset: hold for the common window. Only
+        # a terminal without the typed field falls back to reading its text.
         until = ended + HOLD_FALLBACK_SECONDS
     else:
         return None

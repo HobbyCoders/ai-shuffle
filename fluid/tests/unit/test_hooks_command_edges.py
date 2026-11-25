@@ -8,9 +8,10 @@ import sys
 
 import pytest
 
-from fluid.hooks import command as command_mod
 from fluid.hooks.bus import PRE_COMPACT, PRE_TOOL_USE, SESSION_START, TURN_START
-from fluid.hooks.command import CommandHook, _kill_tree, _parse_json_object
+from fluid.hooks.command import CommandHook, _parse_json_object
+from fluid.tools import process_tree as tree_mod
+from fluid.tools.process_tree import kill_tree as _kill_tree
 
 
 def _hook(tmp_path, event=PRE_TOOL_USE, **kw) -> CommandHook:
@@ -115,14 +116,8 @@ async def test_kill_tree_tolerates_vanished_process_and_stuck_wait(monkeypatch, 
     def gone(pid, sig):
         raise ProcessLookupError
 
-    monkeypatch.setattr(command_mod.os, "killpg", gone)
+    monkeypatch.setattr(tree_mod.os, "killpg", gone)
     await _kill_tree(_FakeProc(kill_error=True))  # both kills fail quietly
 
-    real_wait_for = asyncio.wait_for
-
-    async def short_wait_for(aw, timeout):
-        return await real_wait_for(aw, 0.01)
-
-    monkeypatch.setattr(command_mod.asyncio, "wait_for", short_wait_for)
-    await _kill_tree(_FakeProc(never_exits=True))
+    await _kill_tree(_FakeProc(never_exits=True), reap_timeout=0.01)
     assert "did not exit after kill" in caplog.text

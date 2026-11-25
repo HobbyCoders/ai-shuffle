@@ -248,6 +248,30 @@ async def test_codex_on_401_triggers_refresh(monkeypatch):
     assert seen == {"provider_id": PID, "stale": "access-1"}
 
 
+@pytest.mark.asyncio
+async def test_codex_late_401_names_the_token_that_was_refused(monkeypatch):
+    """A late 401 for an older token passes that token, not whatever this
+    object read last, so the refresh worker sees the rotation already done."""
+    tokens = dict(CODEX_TOKENS)
+    fake_provider_rows(monkeypatch, CODEX_ROW, codex=tokens)
+    seen = {}
+
+    async def fake_refresh(provider_id, *, stale_access_token=None, client=None):
+        seen["stale"] = stale_access_token
+        return True
+
+    from app.core import codex_token_refresh
+
+    monkeypatch.setattr(codex_token_refresh, "refresh_on_401_once", fake_refresh)
+
+    auth = CodexSubscriptionAuth(PID, "acct_42")
+    refused = await auth.get_access_token()
+    tokens["codex_access_token"] = "enc:access-2"
+    assert await auth.get_access_token() == "access-2"  # a later request
+    await auth.on_401(refused)
+    assert seen == {"stale": "access-1"}
+
+
 # ─── 2b. xAI API key + Grok subscription ─────────────────────────────────────
 
 

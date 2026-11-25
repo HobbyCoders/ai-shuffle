@@ -49,6 +49,7 @@ from fluid.codemode.skills import (
     validate_skill,
 )
 from fluid.codemode.verify import verify_sources
+from fluid.context.screening import redact_secrets
 from fluid.messages.content import Message, Text
 from fluid.providers.base import ProviderRequest, WireState
 from fluid.providers.windows import context_window_for
@@ -1607,8 +1608,9 @@ class Synthesizer:
         now = time.time()
         # Behaviour rules are curated by the synthesis pass that sees the
         # user's words behind them (their quote check), not here.
+        # A settled conflict stays out too: this pass can archive what it lists.
         everything = [m for m in self._store.memories()
-                      if not m.conflicted and not is_rule_key(m.key)]
+                      if not (m.conflicted or m.conflict_settled) and not is_rule_key(m.key)]
         # Grouped by scope and key/topic so a fact sits beside the facts that
         # could supersede it, and read from a rotating offset so a store too
         # large for one pass is reviewed in full over successive passes
@@ -1673,6 +1675,7 @@ class Synthesizer:
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
                     expected_revision=revisions[memory_id],
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"memory {memory_id}: {exc}")
@@ -1684,7 +1687,9 @@ class Synthesizer:
             if match.group(1) not in revisions:
                 continue
             try:
-                if self._store.retire_memory(match.group(1), reason="consolidation"):
+                if self._store.retire_memory(match.group(1), reason="consolidation",
+                                             expected_revision=revisions[match.group(1)],
+                                             automatic=True):
                     changed.append(f"-memory:{match.group(1)}")
             except ValueError as exc:
                 errors.append(f"memory {match.group(1)}: {exc}")
@@ -1806,6 +1811,9 @@ class Synthesizer:
     @staticmethod
     def _render_entry(e: dict, cell_no: int) -> list[str]:
         """One journal entry as prompt lines (no session divider)."""
+        # Entries are redacted when written; a journal written before that
+        # still holds raw tool data, and it goes to the learner model.
+        e = redact_secrets(e)
         kind = e.get("kind", "cell")
         if kind in ("user", "assistant", "remember", "friction"):
             scope_hint = (
@@ -1930,7 +1938,7 @@ class Synthesizer:
         family = family_for(self._session_model)
         project = self._project
         rules = [m for m in self._store.memories()
-                 if is_rule_key(m.key) and not m.conflicted
+                 if is_rule_key(m.key) and not (m.conflicted or m.conflict_settled)
                  and (m.scope == "global" or (project is not None and m.scope == project))]
         rules.sort(key=lambda m: -(m.updated_at or m.created_at or 0.0))
         self._rule_revisions = {}
@@ -2173,11 +2181,15 @@ Never claim a workflow is installed because it was proposed."""
                 digest = str(old.key).rsplit(".", 1)[-1]
                 key = f"{behavior.KEY_PREFIX}{applies_to}.{digest}"
             try:
+                # A rewrite applies only to the revision this pass listed: a
+                # newer save or sync during inference wins over this proposal.
                 saved = self._store.save_memory(
                     body, memory_id=rule_id if old is not None else None,
                     scope=self._resolve_scope(attrs.get("scope")), provenance="user",
                     durable=True, key=key, source_session=session,
                     when="When working with the owner (learned behaviour rule)",
+                    expected_revision=old.revision if old is not None else None,
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"{label}: {exc}")
@@ -2228,18 +2240,25 @@ Never claim a workflow is installed because it was proposed."""
                     errors.append(f"{name}: verification failed: {verdict}")
                     continue
                 self._store.save(name, source)
-                self._store.mark_verified(name)
+                self._store.mark_verified(name, source=source)
                 changed.append(name)
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
         rule_ids = {m.id for m in self._store.memories() if is_rule_key(m.key)}
+        # Revisions of the facts this pass listed (_memory_lines). A rewrite or
+        # retirement applies only to the revision the model was shown, so a
+        # save or sync that lands during inference is never overwritten.
+        listed = getattr(self, "_supersession_revisions", {})
         for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
             if problem:
                 errors.append(problem)
                 continue
             if memory_id in rule_ids:
                 errors.append(f"memory {memory_id}: a behaviour rule is rewritten with <rule id=...>")
+                continue
+            if memory_id and memory_id not in listed:
+                errors.append(f"memory {memory_id}: not a fact listed this pass")
                 continue
             provenance = (
                 memory_provenance(memory_text, entries) if entries is not None else None
@@ -2250,6 +2269,8 @@ Never claim a workflow is installed because it was proposed."""
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
                     provenance=provenance,
+                    expected_revision=listed[memory_id] if memory_id else None,
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"memory: {exc}")
@@ -2258,15 +2279,28 @@ Never claim a workflow is installed because it was proposed."""
             if saved.provenance == "tool":
                 held.append(f"{saved.id}: {saved.text}")
         self.last_held = held
+        # The prompt also lists behaviour rules (_rule_lines), and a rule is
+        # removed with <delete-memory> too; one the owner kept is not.
+        rules = getattr(self, "_rule_revisions", {})
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
             # The learner retires into the archive. A deletion barrier here
             # used to stop every later save of the same text, agent saves
             # included, and Recall could no longer find the fact.
+            target = match.group(1)
+            rule = rules.get(target)
+            if rule is not None and rule.protected:
+                errors.append(f"memory {target}: kept by the owner")
+                continue
+            revision = listed.get(target, rule.revision if rule is not None else None)
+            if revision is None:
+                errors.append(f"memory {target}: not a fact listed this pass")
+                continue
             try:
-                if self._store.retire_memory(match.group(1), reason="learner"):
-                    changed.append(f"-memory:{match.group(1)}")
+                if self._store.retire_memory(target, reason="learner",
+                                             expected_revision=revision, automatic=True):
+                    changed.append(f"-memory:{target}")
             except ValueError as exc:
-                errors.append(f"memory {match.group(1)}: {exc}")
+                errors.append(f"memory {target}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
         changed.extend(self._apply_rules(text, entries, errors))

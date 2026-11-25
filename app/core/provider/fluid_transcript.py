@@ -1191,8 +1191,13 @@ def _require_owner(cursor: Any, session_id: str, generation: Optional[int]) -> N
 
 def _set_cli_session_id(
     sdk_session_id: str, cli_session_id: Optional[str], *, generation: Optional[int] = None,
+    recovery: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Store the handle the next turn will ``--resume``.
+
+    With it, in the same row update, ``fluid_sessions.cli_resume_recovery``:
+    ``recovery`` with ``"handle"`` set to this handle when given (a delegated
+    recovery re-seed), else NULL, as a new handle owes nothing.
 
     Plain SQL for the same reason every other write here is (module docstring):
     this runs on a synchronous request path that must work without ``fluid``
@@ -1206,10 +1211,14 @@ def _set_cli_session_id(
     with get_db() as conn:
         cursor = get_cursor(conn)
         _require_owner(cursor, sdk_session_id, generation)
+        marker = (
+            json.dumps({**recovery, "handle": cli_session_id})
+            if recovery is not None and cli_session_id else None
+        )
         cursor.execute(
-            f"UPDATE fluid_sessions SET cli_session_id = {ph()} "
-            f"WHERE session_id = {ph()}",
-            (cli_session_id, sdk_session_id),
+            f"UPDATE fluid_sessions SET cli_session_id = {ph()}, "
+            f"cli_resume_recovery = {ph()} WHERE session_id = {ph()}",
+            (cli_session_id, marker, sdk_session_id),
         )
 
 
@@ -2430,6 +2439,8 @@ def reseed_delegated_cli_session(
     force: bool = False,
     context_window: Optional[int] = None,
     generation: Optional[int] = None,
+    before_node: Optional[str] = None,
+    recovery: Optional[Dict[str, Any]] = None,
 ) -> ReseedResult:
     """Re-seed the delegated CLI from fluid's (already rewound) context.
 
@@ -2454,6 +2465,11 @@ def reseed_delegated_cli_session(
     the caller, so with it every store write here is refused once a newer claim
     exists. Only a fork omits it: nothing else can reach its brand-new session.
 
+    ``before_node`` cuts the path just before that node: a delegated turn that
+    replays its own prompt on the new transcript must not find it there too.
+    ``recovery`` (a delegated recovery re-seed) is stored with the new handle
+    as its ``cli_resume_recovery`` (:func:`_set_cli_session_id`).
+
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
     to the user rather than failing an operation the user explicitly asked for.
@@ -2477,6 +2493,10 @@ def reseed_delegated_cli_session(
 
     try:
         path = load_fluid_path(sdk_session_id)
+        if before_node is not None:
+            cut = next((i for i, node in enumerate(path) if node.get("node_id") == before_node), None)
+            if cut is not None:
+                path = path[:cut]
         entries = [_node_to_entry(node, sdk_session_id) for node in path]
         try:
             nodes: Optional[List[Any]] = _session_nodes(path)
@@ -2533,7 +2553,9 @@ def reseed_delegated_cli_session(
         return ReseedResult(status="failed", error=str(exc))
 
     try:
-        _set_cli_session_id(sdk_session_id, new_cli_session_id, generation=generation)
+        _set_cli_session_id(
+            sdk_session_id, new_cli_session_id, generation=generation, recovery=recovery,
+        )
     except SessionSuperseded:
         logger.info("fluid re-seed for %s stopped: the session has a newer writer", sdk_session_id)
         return ReseedResult(status="superseded")

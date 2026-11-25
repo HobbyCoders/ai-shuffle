@@ -38,8 +38,11 @@ logger = logging.getLogger(__name__)
 # Error classification
 # ---------------------------------------------------------------------------
 
-def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
-    """True iff this turn's metadata carries a 429 usage-limit API error.
+def is_rate_limited(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True iff this turn's metadata carries an HTTP 429, of any kind: a spent
+    usage allowance or a transient rate limit. Each gets the 429 notice
+    (:func:`attempt_failover`); only a usage limit gets more
+    (:func:`is_usage_limit_error`).
 
     Handles ``api_error_status`` arriving as an int or a numeric string. Never
     raises — a malformed metadata blob simply yields ``False``.
@@ -50,6 +53,28 @@ def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
         return int(metadata.get("api_error_status")) == 429
     except (TypeError, ValueError):
         return False
+
+
+def typed_usage_limit(metadata: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """The turn's typed usage-limit classification (``usage_limit``, see
+    ``app.core.provider.events.ResultMessage``), or None when the terminal
+    predates it and carries none."""
+    flag = (metadata or {}).get("usage_limit")
+    return flag if isinstance(flag, bool) else None
+
+
+def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True iff this turn stopped on a 429 that is a spent usage allowance.
+
+    Only such a stop gets the usage-limit banner, a hold on automatic turns
+    and a resume after the reset. The typed ``usage_limit`` decides; the
+    provider's text never does. A terminal recorded before the field existed
+    keeps the old reading (any 429), so an upgrade changes nothing already
+    settled.
+    """
+    if not is_rate_limited(metadata):
+        return False
+    return typed_usage_limit(metadata) is not False
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +109,56 @@ USAGE_LIMIT_MESSAGE = (
     "Usage limit reached — wait for the window to reset or sign into a "
     "different account."
 )
+#: No client reports whether it retried (Codex, for one, never replays a
+#: request that already streamed content), so the notice claims no retry.
 RATE_LIMIT_MESSAGE = (
-    "Rate limited by the provider (HTTP 429). The request was retried and "
-    "still refused; try again shortly."
+    "Rate limited by the provider (HTTP 429); try again shortly."
 )
+#: The turn carries the provider's typed wait (``retry_after_seconds`` /
+#: ``retry_at``): the notice reports it, without claiming why the client
+#: stopped.
+RATE_LIMIT_NOT_RETRIED_MESSAGE = (
+    "Rate limited by the provider (HTTP 429). It asked to wait {wait}s; try "
+    "again after {at}."
+)
+
+
+def rate_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
+    """The API-key 429 notice: says the request was retried only if it was.
+
+    Worded from the turn's typed wait alone (``retry_after_seconds`` and
+    ``retry_at``, see ``app.core.provider.events.RETRY_FIELDS``); the
+    provider's text never changes it.
+    """
+    import math
+
+    from app.core.provider.events import retry_fields
+
+    waits = retry_fields(metadata or {})
+    seconds = waits.get("retry_after_seconds")
+    if seconds is None:
+        return RATE_LIMIT_MESSAGE
+    when = _retry_time(metadata) or "then"
+    return RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=max(1, math.ceil(seconds)), at=when)
+
+
+def _retry_time(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The turn's typed retry deadline as ``HH:MM:SS UTC``, or None."""
+    import time
+
+    from app.core.provider.events import retry_fields
+
+    at = retry_fields(metadata or {}).get("retry_at")
+    return time.strftime("%H:%M:%S UTC", time.gmtime(at)) if at else None
+
+
+def usage_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
+    """The usage-limit notice, with the provider's retry time when the turn
+    carries a typed one (``retry_at``)."""
+    at = _retry_time(metadata)
+    if at is None:
+        return USAGE_LIMIT_MESSAGE
+    return f"{USAGE_LIMIT_MESSAGE[:-1]}; the provider said to retry after {at}."
 
 
 def _is_subscription_session(session_id: Optional[str]) -> bool:
@@ -124,6 +195,7 @@ def _is_subscription_session(session_id: Optional[str]) -> bool:
 async def attempt_failover(
     session_id: Optional[str],
     api_user_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Native automatic account failover was RETIRED (OC-1).
 
@@ -131,15 +203,20 @@ async def attempt_failover(
     clear rate-limited state (OC-4) and let the turn end — the user waits for the
     window to reset or signs into a different account. A 429 on an API key
     (OpenRouter, Groq, xAI, a custom row, the Claude API key) has no usage
-    window: it gets the plain rate-limit notice instead.
+    window: it gets the plain rate-limit notice instead, worded from the turn's
+    typed wait in ``metadata`` (:func:`rate_limit_message`).
     """
     from app.db.async_database import run_sync
 
-    subscription = await run_sync(_is_subscription_session, session_id)
+    # The typed classification words it; a terminal without one falls back
+    # to the session's login (a subscription's 429 was a usage window).
+    usage = typed_usage_limit(metadata)
+    if usage is None:
+        usage = await run_sync(_is_subscription_session, session_id)
     await _notify(
         api_user_id, session_id,
         severity="warning",
-        message=USAGE_LIMIT_MESSAGE if subscription else RATE_LIMIT_MESSAGE,
+        message=usage_limit_message(metadata) if usage else rate_limit_message(metadata),
     )
     logger.info(
         "Usage limit hit for session %s — automatic account failover retired; "
@@ -164,6 +241,8 @@ async def execute_query_with_failover(**kwargs) -> Dict[str, Any]:
     from app.core.query_engine import execute_query
 
     result = await execute_query(**kwargs)
-    if is_usage_limit_error(result.get("metadata")):
-        await attempt_failover(result.get("session_id"), kwargs.get("api_user_id"))
+    if is_rate_limited(result.get("metadata")):
+        await attempt_failover(
+            result.get("session_id"), kwargs.get("api_user_id"), result.get("metadata"),
+        )
     return result
