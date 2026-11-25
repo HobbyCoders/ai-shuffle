@@ -123,6 +123,31 @@ describe('Remove project and chats from a worker', () => {
 		expect(screen.queryByText(/It has no chats/)).toBeNull();
 		expect(removeButton().disabled).toBe(true);
 	});
+
+	// Review round 2 S3: a 200 answer is not a count by itself.
+	it.each([
+		['the worker timed out (200, unknown, no count)', worker('peer', 'Tower', 'unknown', { removal_chats: null }), /Tower didn't answer/],
+		['an older worker reports no count', worker('peer', 'Tower', 'ready'), /Tower needs an update before it can remove this project/]
+	])('keeps Remove disabled when %s', async (_case, fresh, reason) => {
+		vi.mocked(getProjectWorkers)
+			.mockResolvedValueOnce(stale)
+			.mockResolvedValueOnce(response([worker('self', 'Here', 'ready'), fresh]));
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
+		expect((await screen.findByRole('alert')).textContent).toMatch(reason);
+		expect(screen.queryByText(/all its chats|It has no chats/)).toBeNull();
+		expect(removeButton().disabled).toBe(true);
+	});
+
+	it('offers Remove for a fresh count of zero', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValueOnce(stale).mockResolvedValueOnce(stale);
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
+		await screen.findByText(/Remove Demo from Tower\? It has no chats\./);
+		expect(removeButton().disabled).toBe(false);
+	});
 });
 
 describe('Remove from list', () => {

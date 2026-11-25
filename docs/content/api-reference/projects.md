@@ -58,7 +58,7 @@ Update a project.
 
 ### DELETE /api/v1/projects/{project_id}
 
-Delete a project from the database (does not delete files). This worker's chats in the project are deleted with it, the same way deleting each chat would: chats linked to this project record, and chats linked only to its shared project identity when no other project on this worker uses that identity. Chats on other workers, and chats of other projects, are kept. Worktree folders stay on disk. The project leaves `GET /api/v1/cluster/projects` on this device, and another device's copy of the same repository stays listed.
+Delete a project from the database (does not delete files). This worker's chats in the project are deleted with it, the same way deleting each chat would: chats linked to this project record. Chats on other workers, chats of other projects, and chats linked only to a shared project identity (for example a chat another worker placed here) are kept: an identity alone does not show which project record a chat belongs to. Worktree folders stay on disk. The project leaves `GET /api/v1/cluster/projects` on this device, and another device's copy of the same repository stays listed.
 
 Returns `404` when the project does not exist or belongs to another worker on a shared database.
 

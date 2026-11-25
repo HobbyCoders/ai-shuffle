@@ -28,7 +28,7 @@
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
-	import { removalConfirmText } from './project-removal';
+	import { removalCheckError, removalConfirmText } from './project-removal';
 	import {
 		browseWorkerFolder,
 		cancelProjectSetup,
@@ -262,9 +262,8 @@
 			const res = await getProjectWorkers(projectRef);
 			if (ask !== removalAsk || destroyed) return;
 			const fresh = res.workers.find((x) => x.install_id === installId) ?? null;
-			removalCheck = fresh
-				? { installId, detail: fresh, error: null }
-				: { installId, detail: null, error: `${w.device_name} no longer lists this project.` };
+			const error = removalCheckError(fresh, w.device_name);
+			removalCheck = error ? { installId, detail: null, error } : { installId, detail: fresh, error: null };
 		} catch (e) {
 			if (ask !== removalAsk || destroyed) return;
 			removalCheck = { installId, detail: null, error: `Couldn't count the chats this removes on ${w.device_name}: ${errMessage(e, 'unknown error')}` };

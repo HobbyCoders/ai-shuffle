@@ -29,3 +29,23 @@ export function removalConfirmText(name: string, where: string | null, counts: R
 	}
 	return parts.join(' ');
 }
+
+/** The fresh worker row the Workers tab's removal confirmation reads. */
+export interface RemovalCheckRow {
+	state: string;
+	removal_chats?: number | null;
+}
+
+/**
+ * Why removing from a worker can't be confirmed yet, or `null` when it can:
+ * only a fresh `ready` row that reports how many chats it removes (zero
+ * counts). A worker that didn't answer still comes back as a row (`unknown`,
+ * no count), and an older worker never reports one.
+ */
+export function removalCheckError(row: RemovalCheckRow | null, where: string): string | null {
+	if (!row) return `${where} no longer lists this project.`;
+	if (row.state === 'unknown') return `${where} didn't answer, so the chats this removes can't be counted. Try again.`;
+	if (row.state !== 'ready') return `${where} doesn't have this project ready, so it can't be removed from here.`;
+	if (typeof row.removal_chats !== 'number') return `${where} needs an update before it can remove this project from here.`;
+	return null;
+}

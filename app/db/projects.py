@@ -121,17 +121,6 @@ def _catalog_project_v2_id(cursor, origin: str) -> Optional[str]:
     return row["id"] if row else None
 
 
-def _origin_claimed_locally(cursor, origin: str, excluding) -> bool:
-    """Whether another live project row on this worker is catalogued under ``origin``."""
-    excluded = sorted(excluding)
-    cursor.execute(
-        f"SELECT 1 FROM projects WHERE id NOT IN ({phs(len(excluded))}) AND link_group_id = %s "
-        "AND (instance_id = %s OR instance_id IS NULL) LIMIT 1",
-        (*excluded, origin, settings.effective_instance_id),
-    )
-    return cursor.fetchone() is not None
-
-
 def _retire_from_catalog(cursor, project: Dict[str, Any]) -> None:
     """Take a deleted project's base checkout out of the project catalog.
 
@@ -144,7 +133,12 @@ def _retire_from_catalog(cursor, project: Dict[str, Any]) -> None:
     from app.db.checkouts import retire_base_checkouts
 
     origin = _catalog_origin(project)
-    if _origin_claimed_locally(cursor, origin, {project["id"]}):
+    cursor.execute(
+        "SELECT 1 FROM projects WHERE id <> %s AND link_group_id = %s "
+        "AND (instance_id = %s OR instance_id IS NULL) LIMIT 1",
+        (project["id"], origin, settings.effective_instance_id),
+    )
+    if cursor.fetchone() is not None:
         return
     project_v2_id = _catalog_project_v2_id(cursor, origin)
     if project_v2_id:
@@ -471,50 +465,33 @@ def get_all_project_session_counts() -> Dict[str, int]:
         return {row["project_id"]: row["count"] for row in cursor.fetchall()}
 
 
-# Which chats removing a project deletes. Exactly this worker's chats of the
-# project, however they are bound; never another worker's, never another
-# project's. A chat is bound to a project row in one of two ways:
+# Which chats removing a project deletes: only chats whose binding names a
+# project row being removed, owned by this worker. Never another worker's,
+# never another project's.
 #
-#   * legacy: ``sessions.project_id`` names the row (whatever its
+#   * deleted: ``sessions.project_id`` names a removed row (whatever its
 #     ``project_v2_id``: a relinked project's older chats keep their first
-#     identity). Owned here when ``instance_id`` is this worker or NULL (a
-#     pre-instance row, shared like the project rows ``get_all_projects`` lists).
-#   * shared id only: ``project_id`` is NULL and ``project_v2_id`` is the
-#     identity the row is catalogued under (a chat placed here from a peer, or
-#     created by logical id). Owned here only when ``instance_id`` is this
-#     worker, and only while no other live project row on this worker claims
-#     that identity (that clone still hosts the chat). Chats bound only to a
-#     first-link alias are detached history and keep their binding.
-#
-#     Only a linked origin (``link_group_id``, e.g. a Git remote) proves the
-#     binding. A folder project's ``local:<id>`` identity is keyed by the row
-#     id, which a later project can reuse: the identity then still carries the
-#     earlier generation's detached chats (its first-link alias is revoked,
-#     or predates the provenance table). Removal fails closed there and keeps
-#     shared-id-only chats of an unlinked project, uncounted; it never guesses.
-#
-# Either way a chat another device executes (``owner_device_id`` set to it,
-# e.g. a mirror) is not this worker's to delete.
+#     identity), and ``instance_id`` is this worker or NULL (a pre-instance
+#     row, shared like the project rows ``get_all_projects`` lists), and no
+#     other device executes it (``owner_device_id`` unset or this device, so
+#     never a mirror).
+#   * kept: every chat bound only by a shared project identity
+#     (``project_id`` NULL, ``project_v2_id`` set; e.g. a chat a peer placed
+#     here). An identity does not prove which project row a chat came from:
+#     a relinked clone's older chats keep the old identity, which a later
+#     clone of that origin (or a reused ``local:<id>``) takes over. So removal
+#     never deletes by identity; those chats stay, uncounted.
 
 def _removal_binding(cursor, project_ids) -> Optional[Dict[str, Any]]:
     from app.db.sessions import _deleting_worker
 
-    removing = set(project_ids)
-    cursor.execute(f"SELECT * FROM projects WHERE id IN ({phs(len(removing))}) ORDER BY id", sorted(removing))
-    rows = [row_to_dict(row) for row in cursor.fetchall()]
+    removing = sorted(set(project_ids))
+    cursor.execute(f"SELECT id FROM projects WHERE id IN ({phs(len(removing))}) ORDER BY id", removing)
+    rows = cursor.fetchall()
     if not rows:
         return None
-    identities = set()
-    for row in rows:
-        origin = row.get("link_group_id")
-        if not origin or origin.startswith("local:"):
-            continue  # a reusable folder identity proves nothing (see above)
-        identity = _catalog_project_v2_id(cursor, origin)
-        if identity and not _origin_claimed_locally(cursor, origin, removing):
-            identities.add(identity)
     return {
-        "project_ids": sorted(row["id"] for row in rows),
-        "identities": sorted(identities),
+        "project_ids": [row["id"] for row in rows],
         "runner": settings.effective_instance_id,
         "device_id": _deleting_worker()[0],
     }
@@ -525,20 +502,16 @@ def chat_in_removal(row: Dict[str, Any], binding: Dict[str, Any]) -> bool:
     owner = row.get("owner_device_id")
     if owner and owner != binding["device_id"]:
         return False
-    instance = row.get("instance_id")
-    if row.get("project_id") is not None:
-        return row["project_id"] in binding["project_ids"] and instance in (None, binding["runner"])
-    return instance == binding["runner"] and row.get("project_v2_id") in binding["identities"]
+    return (row.get("project_id") in binding["project_ids"]
+            and row.get("instance_id") in (None, binding["runner"]))
 
 
 def _removal_chats(cursor, binding: Dict[str, Any]) -> List[Dict[str, Any]]:
-    ids, identities = binding["project_ids"], binding["identities"] or [None]
+    ids = binding["project_ids"]
     cursor.execute(
-        "SELECT * FROM sessions WHERE (owner_device_id IS NULL OR owner_device_id = %s) AND ("
-        f"(project_id IN ({phs(len(ids))}) AND (instance_id IS NULL OR instance_id = %s)) OR "
-        f"(project_id IS NULL AND instance_id = %s AND project_v2_id IN ({phs(len(identities))}))"
-        ") ORDER BY id",
-        (binding["device_id"], *ids, binding["runner"], binding["runner"], *identities),
+        "SELECT * FROM sessions WHERE (owner_device_id IS NULL OR owner_device_id = %s) "
+        f"AND project_id IN ({phs(len(ids))}) AND (instance_id IS NULL OR instance_id = %s) ORDER BY id",
+        (binding["device_id"], *ids, binding["runner"]),
     )
     return [row for row in rows_to_list(cursor.fetchall()) if chat_in_removal(row, binding)]
 

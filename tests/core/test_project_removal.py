@@ -1,4 +1,8 @@
-"""Removing a project deletes exactly this worker's chats of it, through the ordinary chat delete."""
+"""Removing a project deletes this worker's chats bound to its record, through the ordinary chat delete.
+
+A chat bound only by a shared project identity is never deleted: the identity
+does not prove which project record the chat came from (review round 2 S5).
+"""
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,9 +35,9 @@ def _set(session_id, **columns):
             conn.cursor().execute(f"UPDATE sessions SET {column} = %s WHERE id = %s", (value, session_id))
 
 
-async def test_removal_deletes_this_workers_chats_however_bound(project, tmp_path):
+async def test_removal_deletes_this_workers_chats_bound_to_the_project(project, tmp_path):
     folder, current, alias = project
-    # This worker's chats of the project: bound by legacy row, or by shared id only.
+    # This worker's chat of the project record, and one bound by shared id only (kept).
     database.create_session("legacy", "default", project_id="proj")
     database.create_session("shared", "default", project_v2_id=current)
     # A retained legacy worktree and its chat: the chat goes through the
@@ -58,53 +62,81 @@ async def test_removal_deletes_this_workers_chats_however_bound(project, tmp_pat
     database.create_project("other", "Other", None, str(tmp_path))
     database.create_session("elsewhere", "default", project_id="other", project_v2_id=current)
 
-    assert project_removal.preview(["proj"]) == {"chats": 3, "worktrees": [str(worktree_folder)]}
+    assert project_removal.preview(["proj"]) == {"chats": 2, "worktrees": [str(worktree_folder)]}
     tasks = BackgroundTasks()
     result = await project_removal.remove_projects(["proj"], tasks)
 
-    assert result == {"removed": ["proj"], "chats_removed": 3}
+    assert result == {"removed": ["proj"], "chats_removed": 2}
     assert database.get_project("proj") is None
-    for gone in ("legacy", "shared", "in-worktree"):
+    for gone in ("legacy", "in-worktree"):
         assert database.get_session(gone) is None
-    for kept in ("peer", "mirror", "detached", "elsewhere"):
+    for kept in ("shared", "peer", "mirror", "detached", "elsewhere"):
         assert database.get_session(kept) is not None, kept
     # Another worker's legacy chat is not deleted; its row reference is cleared.
     assert database.get_session("peer-legacy")["project_id"] is None
     # Each removed chat got the ordinary teardown (workers, pool, transcript).
     cleaned = sorted(t.args[0] for t in tasks.tasks if t.func is sessions_api._cleanup_session_artifacts)
-    assert cleaned == ["in-worktree", "legacy", "shared"]
+    assert cleaned == ["in-worktree", "legacy"]
     # The worktree records went with the project; the folder stays on disk.
     assert database.get_worktree("wt-proj") is None
     assert (worktree_folder / "work.txt").read_text() == "uncommitted"
     assert folder.is_dir()
 
 
-async def test_shared_id_chat_stays_while_another_local_clone_claims_it(project, tmp_path):
+def _relinked_clone(project, tmp_path):
+    """Review round 2 S5: a chat bound only by origin R's shared id on clone A;
+    A is relinked to S (the chat keeps R), then clone B registers at R here.
+    B now holds R's identity, but A's chat was never B's."""
+    _folder, current, _alias = project
+    database.create_session("a-shared", "default", project_v2_id=current)
+    database.set_project_link_group("proj", "git:example/relinked")
+    folder_b = tmp_path / "clone-b"
+    folder_b.mkdir()
+    database.create_project("clone-b", "Clone B", None, str(folder_b))
+    database.set_project_link_group("clone-b", ORIGIN)
+    assert projects_v2.get_project_v2_by_origin(ORIGIN)["id"] == current
+    database.create_session("b-legacy", "default", project_id="clone-b")
+    return current
+
+
+async def test_relinked_clones_shared_id_chat_survives_removing_the_new_clone(project, tmp_path):
+    _relinked_clone(project, tmp_path)
+
+    assert project_removal.preview(["clone-b"]) == {"chats": 1, "worktrees": []}
+    assert (await project_removal.remove_projects(["clone-b"], BackgroundTasks()))["chats_removed"] == 1
+    assert database.get_session("b-legacy") is None
+    assert database.get_session("a-shared") is not None
+
+
+async def test_shared_id_only_chat_survives_removing_every_local_clone(project, tmp_path):
     _folder, current, _alias = project
     database.create_project("clone", "Clone", None, str(tmp_path))
     database.set_project_link_group("clone", ORIGIN)
-    database.create_session("legacy", "default", project_id="proj")
     database.create_session("shared", "default", project_v2_id=current)
 
-    assert project_removal.preview(["proj"])["chats"] == 1
-    assert (await project_removal.remove_projects(["proj"], BackgroundTasks()))["chats_removed"] == 1
-    assert database.get_session("shared") is not None
-    # Removing every local record of the project together takes it too.
-    assert project_removal.preview(["clone"])["chats"] == 1
-    assert (await project_removal.remove_projects(["clone"], BackgroundTasks()))["chats_removed"] == 1
-    assert database.get_session("shared") is None
+    assert project_removal.preview(["proj", "clone"])["chats"] == 0
+    assert (await project_removal.remove_projects(["proj", "clone"], BackgroundTasks()))["chats_removed"] == 0
+    assert database.get_session("shared")["project_v2_id"] == current
 
 
-def test_project_page_delete_route_removes_exactly_this_workers_chats(project, monkeypatch):
-    """``DELETE /api/v1/projects/{id}`` as the project page calls it, owner auth."""
+def _owner_client(monkeypatch):
+    """The projects router as the project page calls it, with owner auth."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     from app.api import projects as projects_api
     from app.api.auth import require_admin
 
-    _, current, _ = project
     monkeypatch.setattr(projects_api, "_announce_catalog_change", lambda: None)
+    app = FastAPI()
+    app.include_router(projects_api.router)
+    app.dependency_overrides[require_admin] = lambda: "owner-token"
+    return TestClient(app)
+
+
+def test_project_page_delete_route_removes_exactly_this_workers_chats(project, monkeypatch):
+    """``DELETE /api/v1/projects/{id}`` as the project page calls it, owner auth."""
+    _, current, _ = project
     database.create_session("legacy", "default", project_id="proj")
     database.create_session("shared", "default", project_v2_id=current)
     database.create_session("peer-legacy", "default", project_id="proj")
@@ -112,33 +144,45 @@ def test_project_page_delete_route_removes_exactly_this_workers_chats(project, m
     database.create_session("peer", "default", project_v2_id=current)
     _set("peer", instance_id="other-worker")
 
-    app = FastAPI()
-    app.include_router(projects_api.router)
-    app.dependency_overrides[require_admin] = lambda: "owner-token"
-    with TestClient(app) as client:
+    with _owner_client(monkeypatch) as client:
         assert client.get("/api/v1/projects/proj/removal").json() == {
-            "project_id": "proj", "chats": 2, "worktrees": []}
+            "project_id": "proj", "chats": 1, "worktrees": []}
         assert client.delete("/api/v1/projects/proj").status_code == 204
         assert client.delete("/api/v1/projects/proj").status_code == 404
 
-    assert database.get_session("legacy") is None and database.get_session("shared") is None
+    assert database.get_session("legacy") is None
+    assert database.get_session("shared") is not None
     assert database.get_session("peer") is not None
     assert database.get_session("peer-legacy")["project_id"] is None
 
 
-async def test_peer_remove_action_removes_exactly_this_workers_chats(project, monkeypatch):
-    """A peer's 'Remove project and chats from <worker>' reaches this worker as the
-    ``project-setup`` control action ``remove``; it uses the same removal core."""
+def test_project_page_delete_route_keeps_a_relinked_clones_chat(project, tmp_path, monkeypatch):
+    _relinked_clone(project, tmp_path)
+    with _owner_client(monkeypatch) as client:
+        assert client.get("/api/v1/projects/clone-b/removal").json()["chats"] == 1
+        assert client.delete("/api/v1/projects/clone-b").status_code == 204
+    assert database.get_session("b-legacy") is None
+    assert database.get_session("a-shared") is not None
+
+
+def _as_enrolled_worker(monkeypatch):
+    """This worker's runner is device dev-me, as an enrolled worker sees itself."""
     from types import SimpleNamespace
 
-    from app.core import project_setup
     from app.network import engine, git as network_git
 
     me = SimpleNamespace(device_id="dev-me")
     monkeypatch.setattr(engine, "context", lambda: me)
     monkeypatch.setattr(engine, "_context", me)  # the chat delete's owner check reads it
-    # This worker's runner is device dev-me (as an enrolled worker sees itself).
     monkeypatch.setattr(network_git, "device_id", lambda runner_id: "dev-me" if runner_id == ME else runner_id)
+
+
+async def test_peer_remove_action_removes_exactly_this_workers_chats(project, monkeypatch):
+    """A peer's 'Remove project and chats from <worker>' reaches this worker as the
+    ``project-setup`` control action ``remove``; it uses the same removal core."""
+    from app.core import project_setup
+
+    _as_enrolled_worker(monkeypatch)
     _, current, _ = project
     database.create_session("legacy", "default", project_id="proj")
     database.create_session("shared", "default", project_v2_id=current)
@@ -146,13 +190,29 @@ async def test_peer_remove_action_removes_exactly_this_workers_chats(project, mo
     _set("peer", instance_id="other-worker")
 
     status = await project_setup.handle_control({"action": "status", "project_v2_id": current}, "dev-requester")
-    assert status["detail"]["removal_chats"] == 2
+    assert status["detail"]["removal_chats"] == 1
     assert (await project_setup.handle_control(
         {"action": "remove", "project_v2_id": current}, "dev-requester"))["removed"]
 
-    assert database.get_session("legacy") is None and database.get_session("shared") is None
+    assert database.get_session("legacy") is None
+    assert database.get_session("shared") is not None
     assert database.get_session("peer") is not None
     assert database.get_project("proj") is None
+
+
+async def test_peer_remove_action_keeps_a_relinked_clones_chat(project, tmp_path, monkeypatch):
+    from app.core import project_setup
+
+    _as_enrolled_worker(monkeypatch)
+    current = _relinked_clone(project, tmp_path)
+    status = await project_setup.handle_control({"action": "status", "project_v2_id": current}, "dev-requester")
+    assert status["detail"]["removal_chats"] == 1
+    assert (await project_setup.handle_control(
+        {"action": "remove", "project_v2_id": current}, "dev-requester"))["removed"]
+    assert database.get_project("clone-b") is None
+    assert database.get_project("proj") is not None
+    assert database.get_session("b-legacy") is None
+    assert database.get_session("a-shared") is not None
 
 
 async def test_unlinked_folder_project_keeps_shared_id_only_chats(mock_db, tmp_path, monkeypatch):

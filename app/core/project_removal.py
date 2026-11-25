@@ -3,7 +3,8 @@
 Both "Remove project and chats" paths land here: ``DELETE /projects/{id}``
 and the Workers tab's remove (``project_setup.remove_local``, run on the
 worker that holds the copy). The chats are exactly ``projects.chat_in_removal``:
-this worker's chats of the project, bound by legacy row or shared id. Each
+this worker's chats bound to a removed project row (a chat bound only by a
+shared identity stays, since the identity does not prove its row). Each
 goes through the ordinary chat delete (``app/api/sessions._delete_session``:
 the ordered DB delete, browser close, sync fan-out, then worker, pool and
 transcript teardown), re-checked under its lock. Files on disk stay,
