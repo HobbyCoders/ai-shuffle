@@ -40,7 +40,10 @@ FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
 
 Failure knobs: FAKE_ACP_RESUME_ERROR (JSON ``{"code", "message"}`` that
 ``session/resume`` fails with), FAKE_ACP_RESUME_EXIT=1 (the agent exits on
-``session/resume``), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
+``session/resume``), FAKE_ACP_CONFIG_EXIT=1 (the agent exits on
+``session/set_config_option``), FAKE_ACP_SILENT_CONFIG=1
+(``session/set_config_option`` is never answered), FAKE_ACP_VERSION (the
+version ``initialize`` reports; default 1.5.6), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
 a turn runs is refused as busy), FAKE_ACP_HOLD_STEER=1 (such a prompt is
 taken into the turn but never answered), FAKE_ACP_SILENT_MODES (mode ids
 ``session/set_mode`` never answers), FAKE_ACP_SILENT_CLOSE=1
@@ -200,6 +203,8 @@ class Agent:
                 await asyncio.Event().wait()
             caps = params.get("clientCapabilities") or {}
             init = json.loads(json.dumps(INIT))
+            if os.environ.get("FAKE_ACP_VERSION"):
+                init["agentInfo"]["version"] = os.environ["FAKE_ACP_VERSION"]
             if (caps.get("auth") or {}).get("terminal"):
                 init["authMethods"].append(TERMINAL_LOGIN)
             return init
@@ -235,7 +240,11 @@ class Agent:
                                   "config": config}
             return {"models": models_state(config), "configOptions": config_options(config)}
         if method == "session/set_config_option":
-            session = self.sessions.get(params.get("sessionId")) or {}
+            if os.environ.get("FAKE_ACP_CONFIG_EXIT") == "1":
+                os._exit(3)
+            if os.environ.get("FAKE_ACP_SILENT_CONFIG") == "1":
+                await asyncio.Event().wait()
+            session =self.sessions.get(params.get("sessionId")) or {}
             config = session.setdefault("config", default_config())
             option = next((o for o in config_options(config) if o["id"] == params.get("configId")), None)
             if option is None or params.get("value") not in [v["value"] for v in option["options"]]:
