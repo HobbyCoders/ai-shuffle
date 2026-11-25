@@ -922,9 +922,11 @@ async def test_close_waits_for_an_admission_only_until_the_callers_deadline():
     await asyncio.wait_for(entered.wait(), 5)
     loop = asyncio.get_running_loop()
     began = loop.time()
-    await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
-    assert loop.time() - began < 1.0
-    hang.set()
+    try:
+        await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
+        assert loop.time() - began < 1.0
+    finally:
+        hang.set()
     with pytest.raises(asyncio.CancelledError):
         await start
 
@@ -942,8 +944,10 @@ async def test_close_joins_running_swarms_only_until_the_callers_deadline():
     _, receipt = await c.start({"tasks": [spec("a")]}, ToolCtx())
     loop = asyncio.get_running_loop()
     began = loop.time()
-    await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
-    assert loop.time() - began < 1.0
-    hang.set()  # let the stuck runner finish, latched, so nothing leaks
+    try:
+        await asyncio.wait_for(c.aclose(deadline=began + 0.1), 2)
+        assert loop.time() - began < 1.0
+    finally:
+        hang.set()  # let the stuck runner finish, latched, so nothing leaks
     await asyncio.wait_for(c.jobs[receipt.task_id], 5)
     assert c.snapshot(receipt.task_id)["status"] == "cancelled"

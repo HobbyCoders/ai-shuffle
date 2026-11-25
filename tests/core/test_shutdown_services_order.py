@@ -35,7 +35,7 @@ def _reset_shutdown_flag():
 async def test_close_pool_runs_strictly_after_pool_shutdown():
     calls: list[str] = []
 
-    def _pool_shutdown_effect():
+    def _pool_shutdown_effect(**_):  # deadline=: the shared stop deadline
         # The flag must already be up when the FIRST teardown step runs, so
         # concurrent unpark deliveries see it before their client disappears.
         assert startup.is_shutting_down is True

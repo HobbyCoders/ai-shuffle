@@ -549,7 +549,7 @@ async def _begin_captured_user_stop(session_id: str, receipt: Optional[dict]) ->
             # and would dispatch workers once it does.
             try:
                 from app.core.swarm import latch_started_by
-                latch_started_by(session_id, receipt.get("input_cutoff"))
+                latch_started_by(session_id, (receipt or {}).get("input_cutoff"))
             except Exception:  # noqa: BLE001 — per-task Stops must still run.
                 logger.warning("Stop: latching older Swarm workflows failed for %s",
                                session_id, exc_info=True)
