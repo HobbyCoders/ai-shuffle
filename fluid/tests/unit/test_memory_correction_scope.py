@@ -205,3 +205,15 @@ def test_a_scope_only_save_moves_the_fact_with_a_new_revision(tmp_path):
     replica._facts.merge(SkillStore(tmp_path / "source")._facts.export())
     entry, = replica.memories()
     assert entry.scope == "project:alpha" and not entry.conflicted
+
+
+def test_a_scope_only_move_is_no_new_replacement_evidence(tmp_path):
+    store = SkillStore(tmp_path)
+    pnpm = store.save_memory("Use pnpm for frontend installs; it replaces yarn.")
+    yarn = store.save_memory("Use yarn for frontend installs.", scope="project:alpha")
+    moved = store.save_memory("Use pnpm for frontend installs; it replaces yarn.", memory_id=pnpm.id,
+                              scope="project:alpha", expected_revision=pnpm.revision)
+    assert moved.scope == "project:alpha" and moved.revision == pnpm.revision + 1
+    store._facts.reconcile_supersessions()
+    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
+    assert not store.archived_memories()

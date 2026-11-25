@@ -496,3 +496,49 @@ def test_skill_descriptions_are_bounded_and_a_tool_name_reads_the_tool(tmp_path)
     docs = session.render_docs("greet")
     assert "def greet(" in docs and long not in docs and "skills.greet" in docs
     assert session.render_docs("skills.greet") == source
+
+
+async def test_a_timeout_on_a_shortened_budget_slice_records_no_verdict(
+    tmp_path, monkeypatch
+) -> None:
+    import types
+
+    import fluid.codemode.verify as verify_mod
+    from fluid.codemode.kernel import KernelResult
+
+    clock = [0.0]
+    cost = {"a_slow": 9.0, "b_needs_five": 5.0}
+
+    class _Kernel:
+        def __init__(self, config):
+            pass
+
+        async def start(self):
+            pass
+
+        async def set_vfs(self, files, sources):
+            pass
+
+        async def stop(self):
+            pass
+
+        async def exec(self, code, *, timeout, on_host_call):
+            name = code.split()[1].split(".")[1]
+            if cost[name] > timeout:
+                clock[0] += timeout
+                return KernelResult(error=f"execution exceeded {timeout:.1f}s wall clock")
+            clock[0] += cost[name]
+            return KernelResult()
+
+    monkeypatch.setattr(verify_mod, "SubprocessKernel", _Kernel)
+    monkeypatch.setattr(verify_mod, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    store = SkillStore(tmp_path)
+    store.save("a_slow", '"""Slow."""\nvalue = 1\n')
+    store.save("b_needs_five", '"""Passes in five seconds."""\nvalue = 2\n')
+    # b_needs_five gets the 3 s the budget has left, short of its 10 s allowance.
+    assert await verify_store(store, budget=12.0) == {"a_slow": None}
+    assert store.needs_verification("b_needs_five")
+    assert "b_needs_five" not in store.verified_sources()
+    # The next mount gives it its full allowance and it passes.
+    assert await verify_store(store, budget=12.0) == {"b_needs_five": None}
+    assert set(store.verified_sources()) == {"a_slow", "b_needs_five"}

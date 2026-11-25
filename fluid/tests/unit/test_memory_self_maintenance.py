@@ -525,3 +525,43 @@ async def test_learner_insert_without_an_id_never_overwrites_a_keyed_value(tmp_p
     assert await synth._apply("<memory>The user's preferred name is Avery.</memory>") == [
         f"memory:{newer.id}"]
     assert [m.text for m in store.memories()] == ["The user's preferred name is Avery."]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_slot_contender_does_not_block_the_survivor(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    avery = a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name",
+                          durable=True)
+    a._facts.merge(b._facts.export())
+    assert all(m.conflicted for m in a.memories() if m.key == "profile.name")
+    real = time_mod.time
+    # Past the inferred lifetime, inside the durable one: Blair expires into the archive.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    [survivor] = [m for m in a.memories() if m.key == "profile.name"]
+    assert survivor.id == avery.id
+    synth = Synthesizer(provider=None, model="m", store=a)
+    synth._memory_lines()
+    changed = await synth._apply(f'<memory id="{avery.id}">The owner\'s name is Avery Lee.</memory>')
+    assert changed == [f"memory:{avery.id}"], synth.last_error
+    assert [m.text for m in a.memories() if m.key == "profile.name"] == ["The owner's name is Avery Lee."]
+
+
+@pytest.mark.asyncio
+async def test_learner_insert_without_an_id_cannot_rewrite_a_superseded_value(tmp_path):
+    store = SkillStore(tmp_path)
+    avery = store.save_memory("The user's preferred name is Avery.", provenance="session")
+    assert avery.key == "profile.name"
+    blair = store.save_memory("Address the user as Blair.", provenance="user", protected=True,
+                              replaces=[avery.id])
+    [superseded] = [m for m in store.archived_memories() if m.id == avery.id]
+    synth = Synthesizer(provider=None, model="m", store=store)
+    assert await synth._apply("<memory>The user's preferred name is Casey.</memory>") == []
+    [kept] = [m for m in store.archived_memories() if m.id == avery.id]
+    assert kept.text == "The user's preferred name is Avery." and kept.revision == superseded.revision
+    # Forgetting the owner's replacement cannot bring back the learner's text.
+    assert store.delete_memory(blair.id, explicit=True, expected_revision=blair.revision)
+    assert "Casey" not in json.dumps([m.text for m in store.memories() + store.archived_memories()])

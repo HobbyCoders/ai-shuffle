@@ -753,24 +753,29 @@ class FactStore:
                 slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
         return [e for group in slots.values() if len({e["text"] for e in group}) > 1 for e in group]
 
-    @staticmethod
-    def _disputed(doc, entry, scope=None, key=None):
-        """Whether a sync left ``entry``, or the (scope, key) slot it holds or
-        would hold, in a dispute only the owner settles: copies of one record
-        with different values (``conflicted``, ``alternatives``, a rule's
-        ``contested`` wordings), or different records holding one slot. A
-        merge keeps the higher revision, so a revision check alone does not
-        see the dispute; automatic curation refuses on this instead."""
-        if entry is not None and (entry.get("conflicted") or entry.get("alternatives")
-                                  or _contested(entry)):
+    @classmethod
+    def _disputed(cls, doc, entry, scope=None, key=None):
+        """Whether a sync left ``entry``, or the (scope, key, worker) slot it
+        holds or would hold, in a dispute only the owner settles: copies of
+        one record with different values (``alternatives``, a rule's
+        ``contested`` wordings), or different records that still contend for
+        one slot (:meth:`_slot_contenders`, so an expired, superseded or
+        retired copy, or another worker's slot, does not count; a stale
+        ``conflicted`` flag alone is not a dispute). A merge keeps the higher
+        revision, so a revision check alone does not see the dispute;
+        automatic curation refuses on this instead."""
+        if entry is not None and (entry.get("alternatives") or _contested(entry)):
+            return True
+        contenders = cls._slot_contenders(doc)
+        if entry is not None and any(e is entry for e in contenders):
             return True
         slot = key or (entry or {}).get("key")
         if not slot:
             return False
         where = scope or (entry or {}).get("scope", "global")
-        return any(e is not entry and e.get("conflicted") and e.get("key") == slot
-                   and e.get("scope", "global") == where and not e.get("retired_at")
-                   for e in doc["entries"] + doc["archived"])
+        worker = (entry or {}).get("worker") or ""
+        return any(e is not entry and e.get("key") == slot and e.get("scope", "global") == where
+                   and (e.get("worker") or "") == worker for e in contenders)
 
     @classmethod
     def _settle_slot_conflicts(cls, doc):
@@ -1061,13 +1066,17 @@ class FactStore:
                 # match: only the owner's answer settles which value holds.
                 raise ValueError("Memory is disputed between workers until the owner resolves it; "
                                  "nothing was saved")
-            if (automatic and old is not None and not addressed and not archived_old
+            reusable_archive = archived_old and not old.get("superseded_by")
+            if (automatic and old is not None and not addressed and not reusable_archive
                     and (old["text"] != text or rekey)):
                 # A save without an ID found the live slot or text it
                 # matches: it may repeat that value, but replacing it needs
                 # the ID and revision this pass was shown, or a newer value
                 # is lost. An archived value is not listed to the learner and
-                # is no longer current, so a new observation may replace it.
+                # is no longer current, so a new observation may replace it;
+                # a superseded one is not: rewriting it would keep its link to
+                # the fact that replaced it, so forgetting that fact would
+                # bring back the learner's text as if the owner had said it.
                 raise ValueError(f"[{old['id']}] already holds another value; background learning "
                                  "replaces it only by its listed ID; nothing was saved")
             # A revision guards a rewrite. A key-addressed correction must have
@@ -1208,8 +1217,14 @@ class FactStore:
             clock[doc["store_id"]] = clock.get(doc["store_id"], 0) + 1
             if len(clock) > 64:
                 raise ValueError("Memory has too many concurrent writers; no correction was saved")
+            # The same wording moved to another scope (or key) is a revision
+            # replicas must see, not a new observation: it keeps the time its
+            # wording was written, so supersession, which treats only a later
+            # wording as a replacement, does not read the move as fresh evidence.
+            reworded = not old or old["text"] != text or not old.get("updated_at")
             entry.update(clock=clock, alternatives=[], text=text,
-                         updated_at=self._write_time(doc, now), revision=entry["revision"] + 1,
+                         updated_at=self._write_time(doc, now) if reworded else old["updated_at"],
+                         revision=entry["revision"] + 1,
                          scope=scope or entry.get("scope", "global"),
                          provenance=provenance or entry.get("provenance", "session"),
                          protected=protected, conflicted=False, key=key or entry.get("key"),
@@ -1278,7 +1293,10 @@ class FactStore:
                         self._bump_metadata(doc, previous)
             if targets:
                 self._supersede(doc, entry, targets)
-            self._apply_supersessions(doc, [entry])
+            if reworded:
+                # Unchanged wording is no new replacement evidence; an
+                # explicit replaces= still applied above.
+                self._apply_supersessions(doc, [entry])
             self._maintain(doc, keep=entry["id"])
             receipt["replaced"] = self._replaced(entry, targets)
             if old is None and (protected or is_durable):
