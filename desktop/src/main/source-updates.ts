@@ -159,7 +159,17 @@ interface RestoreJournal {
   reason?: string;
   /** Made by the booting build itself because its launcher made none (lateRestorePoint). Launchers ignore it. */
   late?: true;
+  /**
+   * No copy was made: the previous build and the update declare the same database level
+   * (app/db/compatibility.json), so the previous build reads whatever the update migrates.
+   * A failed first start goes back to it over the same data. Launchers before 12 do not know
+   * this field and fail closed on it (validate or restore finds no copy).
+   */
+  compatible?: true;
 }
+/** The first launcher (and build) that writes and understands a compatible journal. */
+export const COMPATIBLE_POINT_LAUNCHER = 12;
+const DATABASE_LEVEL_FILE = 'source/app/db/compatibility.json';
 export type RestoreDatabaseFactory = (previous: string) => Promise<RollbackDatabase>;
 /** A late restore point could not be made. The message is written for the owner and shown as it is. */
 export class RestorePointError extends Error {}
@@ -857,7 +867,8 @@ export class SourceUpdates {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
     const j = JSON.parse(text) as RestoreJournal;
     if (!j || j.schemaVersion !== 1 || !['preparing', 'ready', 'restoring', 'restored', 'committed'].includes(j.phase) ||
-        !REVISION.test(j.revision) || !REVISION.test(j.previous) || j.previous === j.revision || (j.late !== undefined && j.late !== true)) throw new Error('Invalid database restore journal; no worker was started');
+        !REVISION.test(j.revision) || !REVISION.test(j.previous) || j.previous === j.revision || (j.late !== undefined && j.late !== true) ||
+        (j.compatible !== undefined && (j.compatible !== true || j.late || !['ready', 'restored', 'committed'].includes(j.phase)))) throw new Error('Invalid database restore journal; no worker was started');
     parseSourceState(JSON.stringify(j.state));
     if (j.state.active && j.state.active !== j.previous) throw new Error('Restore point does not match previous application');
     if (j.state.booting || j.state.pending || j.state.waiting || j.state.blocked || j.state.recoveryRequired || Object.keys(j.state.mayHaveMigrated ?? {}).length) throw new Error('Restore point contains unsafe application state');
@@ -876,8 +887,41 @@ export class SourceUpdates {
     try { return (await this.release(revision)).version ?? revision.slice(0, 12); }
     catch { return revision.slice(0, 12); }
   }
-  /** Fail closed before selecting code, even when the snapshot is out of space or interrupted. */
-  async prepareRollback(database: RestoreDatabaseFactory): Promise<void> {
+  /** The database level a build declares, or null when it declares none (code from before
+   * levels) or the file cannot be read. The same rules as docker/application_updates.py. */
+  private async databaseLevel(revision: string): Promise<number | null> {
+    try {
+      const file = path.join(this.directory(revision), DATABASE_LEVEL_FILE);
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.size > 4096) return null;
+      const data = JSON.parse(await fs.readFile(file, 'utf8'));
+      const level = data && typeof data === 'object' && data.format === 1 ? data.level : null;
+      return Number.isSafeInteger(level) && level > 0 && level < 2 ** 31 ? level : null;
+    } catch { return null; }
+  }
+  /** True when the update itself understands a compatible journal: its own launcher contract
+   * (desktop/launcher.json in its source) is COMPATIBLE_POINT_LAUNCHER or newer. */
+  private async understandsCompatiblePoint(revision: string): Promise<boolean> {
+    try {
+      const contract = JSON.parse(await fs.readFile(path.join(this.directory(revision), 'source/desktop/launcher.json'), 'utf8'));
+      return Number.isSafeInteger(contract?.version) && contract.version >= COMPATIBLE_POINT_LAUNCHER;
+    } catch { return false; }
+  }
+  /** An update needs no copy when the installed previous build and the update declare the same
+   * database level and the update knows a compatible journal. The bundled baseline has no
+   * source tree to read, so it always gets a copy. */
+  private async needsDatabaseCopy(previous: string, revision: string): Promise<boolean> {
+    if (previous !== this.state.active) return true;
+    const [before, after] = await Promise.all([this.databaseLevel(previous), this.databaseLevel(revision)]);
+    return before === null || before !== after || !await this.understandsCompatiblePoint(revision);
+  }
+  /**
+   * Fail closed before selecting code, even when the snapshot is out of space or interrupted.
+   * `compatible`: the caller's launcher is COMPATIBLE_POINT_LAUNCHER or newer, so an update at
+   * the same database level may skip the copy (owner policy: no restore point unless a release
+   * raises the level). Older launchers would find no copy and refuse the update.
+   */
+  async prepareRollback(database: RestoreDatabaseFactory, compatible = false): Promise<void> {
     this.rollbackDatabase = database;
     const revision = this.state.pending;
     // Existing fenced recovery (legacy failures) keeps its same/newer-build path, never a source-only rollback.
@@ -892,7 +936,7 @@ export class SourceUpdates {
         return;
       }
       if (existing.phase === 'ready' && existing.revision === revision) {
-        await (await database(existing.previous)).validate();
+        if (!existing.compatible) await (await database(existing.previous)).validate();
         return;
       }
       throw new Error('An unfinished database restore point must be recovered first');
@@ -904,6 +948,12 @@ export class SourceUpdates {
     const state = { ...this.state };
     delete state.pending; delete state.staged;
     const j: RestoreJournal = { schemaVersion: 1, phase: 'preparing', revision, previous, state, floor: this.migrationFloor ?? null };
+    if (compatible && !await this.needsDatabaseCopy(previous, revision)) {
+      // Written ready in one step: there is no copy that a crash could leave half made.
+      await durableJson(this.journalFile, { ...j, phase: 'ready', compatible: true });
+      console.info(`Update ${revision.slice(0, 12)}: no database copy; it declares the same database level as ${previous.slice(0, 12)}`);
+      return;
+    }
     await durableJson(this.journalFile, j);
     try {
       await (await database(previous)).snapshot();
@@ -935,7 +985,7 @@ export class SourceUpdates {
     const migrated = this.state.mayHaveMigrated ?? {};
     if (migrated[this.state.booting] !== undefined || this.state.failed?.some(revision => migrated[revision] !== undefined)) return;
     const j = await this.journal();
-    if (j?.phase === 'ready' && j.revision === this.state.booting && !j.late) { await database?.validate(); return; }
+    if (j?.phase === 'ready' && j.revision === this.state.booting && !j.late) { if (!j.compatible) await database?.validate(); return; }
     if (late && await this.lateRestorePoint(late, j)) return;
     throw new Error('No verified database restore point exists. Install the latest desktop launcher before starting this update.');
   }
@@ -1047,7 +1097,7 @@ export class SourceUpdates {
   /** Cancel a point no build was handed (committed first, so a crash can only leave cleanup), then remove it. */
   private async dropRestorePoint(j: RestoreJournal, database: RestoreDatabaseFactory): Promise<void> {
     if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
-    await (await database(j.previous)).discard();
+    if (!j.compatible) await (await database(j.previous)).discard();
     await fs.rm(this.journalFile, { force: true }); await syncDirectory(this.options.root);
   }
   /** Healthy callbacks may only dispose of a point, never restore a database. */
@@ -1065,7 +1115,7 @@ export class SourceUpdates {
     }
     try {
       if (j.phase !== 'committed') { j.phase = 'committed'; await durableJson(this.journalFile, j); }
-      await (await database(j.previous)).discard();
+      if (!j.compatible) await (await database(j.previous)).discard();
       await fs.rm(this.journalFile, { force: true }); await syncDirectory(this.options.root);
       this.cleanupFailure = null;
     } catch (error) {
@@ -1107,19 +1157,23 @@ export class SourceUpdates {
     // Before using old code or its database tools, verify that exact code still exists.
     if (j.state.active) await this.application(j.previous);
     else if (this.options.baseline?.revision !== j.previous) throw new Error('The bundled previous version is no longer installed; restore is blocked');
-    const db = await database(j.previous);
+    // A compatible point has no copy: the previous build reads the database as the update left it.
+    if (j.phase === 'ready' && j.compatible) { j.phase = 'restored'; await durableJson(this.journalFile, j); }
     if (j.phase === 'ready') { j.phase = 'restoring'; await durableJson(this.journalFile, j); }
     if (j.phase === 'restoring') {
-      await db.restore();
+      await (await database(j.previous)).restore();
       j.phase = 'restored'; await durableJson(this.journalFile, j);
     }
-    // preparing means no update was ever handed the database. Only that phase can skip restore.
+    // preparing means no update was ever handed the database. Only that phase, and a
+    // compatible point, skip restore; the fence is lowered only after one of those or a restore.
     if (j.phase === 'preparing' || j.phase === 'restored') {
       const floorFile = path.join(this.options.root, 'database-floor.json');
       if (j.floor) await durableJson(floorFile, { schemaVersion: 1, ...j.floor });
       else { await fs.rm(floorFile, { force: true }); await syncDirectory(this.options.root); }
       const notice = j.reason ?? (j.phase === 'preparing'
         ? `Update ${await this.releaseName(j.revision)} was not started: its database restore point was interrupted. Kept ${await this.releaseName(j.previous)}.`
+        : j.compatible
+        ? `Update ${await this.releaseName(j.revision)} failed to start. Went back to ${await this.releaseName(j.previous)}, which uses the same database format, so your data was kept as it is.`
         : `Update ${await this.releaseName(j.revision)} failed to start. Restored the database and went back to ${await this.releaseName(j.previous)}. Your data is as it was before the update.`);
       this.state = { ...j.state, failed: [...new Set([...(j.state.failed ?? []), j.revision])],
         supersededFailed: [...new Set([...(j.state.supersededFailed ?? []), j.revision])] };

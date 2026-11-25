@@ -88,8 +88,15 @@ export class SinglePassClusterCopy extends ColdClusterCopy {
  * inventory. ColdClusterCopy.validate still hashes every file in full and compares the
  * whole manifest, key order included (database-restore.test covers same-size changes in
  * any file); installed-entry.ts and source-updates.ts, the ready-journal path, are unchanged.
+ * Launcher 12 skips the copy when the update declares the same database level as the build
+ * it replaces, writing a compatible ready journal (source-updates.ts prepareRollback); a ready
+ * journal WITH a copy still gets the full ColdClusterCopy.validate before select.
  * A new version is NOT trusted automatically: review its factory and ready-journal path. */
-export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9, 10, 11]);
+export const RESTORE_POINT_VALIDATING_LAUNCHERS: ReadonlySet<number> = new Set([4, 5, 6, 7, 8, 9, 10, 11, 12]);
+/** Launchers that understand a compatible journal (no copy at the same database level).
+ * Older ones would find no copy and refuse the update, so the running build only skips
+ * the copy in front of one of these. */
+export const COMPATIBLE_POINT_LAUNCHERS: ReadonlySet<number> = new Set([12]);
 
 /** Unknown handoffs and fenced recovery must keep full validation. */
 export function launcherValidatedRestorePoint(platform: string, launcher: number, installedHandoff: boolean, migrationRisk: boolean): boolean {

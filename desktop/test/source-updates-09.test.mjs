@@ -90,7 +90,7 @@ test('installed-entry factory fully hashes a real ready journal before selection
  const { SinglePassClusterCopy, launcherValidatedRestorePoint, checkRestorePointStructure } = require('../dist/main/update-restore-point.js');
  const { IncrementalClusterCopy } = require('../dist/main/incremental-restore-point.js');
  const { ColdClusterCopy } = require('../dist/main/database-restore.js');
- assert.equal(version, 11, 'the audited installed factory must cover the shipped launcher');
+ assert.equal(version, 12, 'the audited installed factory must cover the shipped launcher');
  assert.equal(launcherValidatedRestorePoint('win32', version, true, false), true);
  const entry = await fs.readFile(new URL('../dist/main/installed-entry.js', import.meta.url), 'utf8');
  for (const [producer, Copy, cached] of [
@@ -127,7 +127,7 @@ test('installed-entry factory fully hashes a real ready journal before selection
    const events = [], module = { exports: {} };
    let manager;
    class InstalledUpdates extends SourceUpdates {
-    constructor(options) { super({ ...f.options, baseline: options.baseline, launcher: options.launcher }); manager = this; assert.equal(options.launcher, 11); }
+    constructor(options) { super({ ...f.options, baseline: options.baseline, launcher: options.launcher }); manager = this; assert.equal(options.launcher, 12); }
     async select(...args) {
      assert.deepEqual(events, ['hash:start', 'hash:done'], 'full validation must finish before selection');
      events.push('select'); return super.select(...args);
@@ -155,7 +155,7 @@ test('installed-entry factory fully hashes a real ready journal before selection
     if (id === './worker-process') return { quiesceRecordedWorker: () => assert.fail('ready validation must not stop a worker') };
     if (id === './launcher-swap') return require('../dist/main/launcher-swap.js');
     if (id === './installed-host') return { installedExecutable: () => '/test/AI Shuffle.exe', saveInstalledHost: async () => {}, installedLaunchArgs: () => [],
-     launchInstalledSource: async (selected, _root, _args, launcher) => { assert.equal(selected.revision, B); assert.equal(launcher, 11); events.push('launch'); } };
+     launchInstalledSource: async (selected, _root, _args, launcher) => { assert.equal(selected.revision, B); assert.equal(launcher, 12); events.push('launch'); } };
     assert.fail('Unexpected installed-entry dependency: ' + id);
    } });
    if (corrupt) {
