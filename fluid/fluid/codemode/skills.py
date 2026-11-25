@@ -1125,13 +1125,23 @@ class SkillStore:
             return None
 
     def _verdict_holds(self, info: dict, name: str, source: str) -> bool:
-        """Whether the stored verdict was issued on exactly ``source``."""
-        digest = info.get("verified_digest")
-        if digest is not None:
-            return digest == _source_digest(source)
-        # A verdict recorded before digests holds until the file changes.
+        """Whether the stored verdict still describes ``source``, for showing
+        a broken flag. A verdict recorded before digests (by mtime) counts
+        until the file changes; it never mounts anything (see
+        :meth:`_digest_holds`)."""
+        if info.get("verified_digest") is not None:
+            return self._digest_holds(info, source)
         mtime = info.get("verified_mtime")
         return mtime is not None and mtime == self._mtime_ns(name)
+
+    @staticmethod
+    def _digest_holds(info: dict, source: str) -> bool:
+        """Whether the stored verdict was issued on exactly ``source``. An
+        mtime-only verdict from before digests does not count: the old code
+        stamped whatever the file held when verification finished, which may
+        not be the bytes that ran, so it is re-verified once."""
+        digest = info.get("verified_digest")
+        return digest is not None and digest == _source_digest(source)
 
     def needs_verification(self, name: str) -> bool:
         """True when the skill was never verified for its current source."""
@@ -1142,7 +1152,7 @@ class SkillStore:
             source = self._path(name).read_text(encoding="utf-8")
         except (OSError, ValueError):
             return True
-        return not self._verdict_holds(info, name, source)
+        return not self._digest_holds(info, source)
 
     def verified_sources(self) -> dict[str, str]:
         """``{name: source}`` of the skills whose passing verdict was issued
@@ -1152,7 +1162,7 @@ class SkillStore:
         out = {}
         for s in self.list():
             info = meta.get(s.name, {})
-            if s.source and info.get("broken") is None and self._verdict_holds(info, s.name, s.source):
+            if s.source and info.get("broken") is None and self._digest_holds(info, s.source):
                 out[s.name] = s.source
         return out
 
@@ -1821,11 +1831,14 @@ class SkillStore:
         return deleted
 
     def retire_memory(self, memory_id: str, *, reason: str,
-                      expected_revision: int | None = None) -> bool:
+                      expected_revision: int | None = None, automatic: bool = False) -> bool:
         """Archive one unprotected fact for automatic curation. Unlike
         :meth:`delete_memory` it leaves no deletion barrier: Recall still
-        finds the fact and a later save can bring it back."""
-        return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision)
+        finds the fact and a later save can bring it back. ``automatic``
+        (the learner, consolidation, health repairs) also refuses a fact a
+        sync left disputed (see :meth:`FactStore.retire`)."""
+        return self._facts.retire(memory_id, reason=reason, expected_revision=expected_revision,
+                                  automatic=automatic)
 
     def propose_memory_supersession(self, old_id: str, new_id: str, *, old_revision: int, new_revision: int,
                                     protected_conflict: bool = False) -> bool:

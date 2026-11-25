@@ -599,6 +599,22 @@ async def test_a_rule_rewrite_skips_a_rule_changed_during_inference(tmp_path):
     assert "changed since it was read" in (synth.last_error or "")
 
 
+async def test_the_learner_retires_a_listed_rule_but_not_one_the_owner_kept(tmp_path):
+    store = SkillStore(tmp_path)
+    obsolete = store.save_memory("When opening a pull request: open a draft.", provenance="user",
+                                 durable=True, key=behavior.rule_key("all", "draft"), when=OWNER_WHEN)
+    kept = store.save_memory("When reporting: lead with the result.", provenance="user",
+                             protected=True, key=behavior.rule_key("all", "lead"), when=OWNER_WHEN)
+    synth = Synthesizer(NoChanges(), "gpt-test", store)
+    synth._memory_lines()
+    synth._rule_lines()  # the prompt lists both rules
+    changed = await synth._apply(f'<delete-memory id="{obsolete.id}"/>\n<delete-memory id="{kept.id}"/>')
+    assert changed == [f"-memory:{obsolete.id}"]
+    assert "kept by the owner" in (synth.last_error or "")
+    assert [m.id for m in rules(store)] == [kept.id]
+    assert obsolete.id in {m.id for m in store.archived_memories()}
+
+
 def test_an_expired_copy_does_not_hide_a_rule_moved_into_its_slot(tmp_path, monkeypatch):
     import time as time_mod
     from fluid.codemode import facts

@@ -456,3 +456,19 @@ def test_run_records_repairs_in_plain_words(tmp_path):
     assert view["repairs"][0]["summary"] == "Archived 1 exact duplicate."
     assert "ids" not in json.dumps(memory_health.load_state(a)["repairs"])
     assert view["signals"][0]["state"] in ("healthy", "attention")
+
+
+def test_texts_that_differ_only_in_case_are_not_exact_duplicates(tmp_path):
+    # Saved on two workers (one store folds a case variant into the fact it
+    # already holds), then synced.
+    store, other = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    store.save_memory("Settings are read from Config.toml.")
+    other.save_memory("Settings are read from config.toml.")
+    store._facts.merge(other._facts.export())
+    live = store._facts.snapshot()["entries"]
+    assert len(live) == 2
+    assert not memory_health._exact_duplicate_groups(live)
+    memory_health.repair(store)
+    assert {m.text for m in store.memories()} == {"Settings are read from Config.toml.",
+                                                   "Settings are read from config.toml."}
+    assert not store.archived_memories()

@@ -753,6 +753,25 @@ class FactStore:
                 slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
         return [e for group in slots.values() if len({e["text"] for e in group}) > 1 for e in group]
 
+    @staticmethod
+    def _disputed(doc, entry, scope=None, key=None):
+        """Whether a sync left ``entry``, or the (scope, key) slot it holds or
+        would hold, in a dispute only the owner settles: copies of one record
+        with different values (``conflicted``, ``alternatives``, a rule's
+        ``contested`` wordings), or different records holding one slot. A
+        merge keeps the higher revision, so a revision check alone does not
+        see the dispute; automatic curation refuses on this instead."""
+        if entry is not None and (entry.get("conflicted") or entry.get("alternatives")
+                                  or _contested(entry)):
+            return True
+        slot = key or (entry or {}).get("key")
+        if not slot:
+            return False
+        where = scope or (entry or {}).get("scope", "global")
+        return any(e is not entry and e.get("conflicted") and e.get("key") == slot
+                   and e.get("scope", "global") == where and not e.get("retired_at")
+                   for e in doc["entries"] + doc["archived"])
+
     @classmethod
     def _settle_slot_conflicts(cls, doc):
         """Clear the slot-contention flag a merge set once the contention is
@@ -855,8 +874,14 @@ class FactStore:
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
-             when=None, always=None, require_when=False, _document=None):
+             when=None, always=None, require_when=False, automatic=False, _document=None):
         """Save one fact in a tier.
+
+        ``automatic`` marks background learning (the learner, consolidation).
+        Checked under the store lock, it may rewrite a fact only by
+        ``memory_id`` at ``expected_revision``, never one a sync left
+        disputed (:meth:`_disputed`); a save without an ID may repeat a value
+        already held but never replaces one.
 
         ``protected`` is the explicit tier (the user asked). ``durable=True``
         is an agent's own save. Neither (the learner, harvests) keeps a
@@ -913,6 +938,10 @@ class FactStore:
             old = next((e for e in all_entries if e["id"] == memory_id), None) if memory_id else None
             if memory_id and (old is None or not visible_on(old, local)):
                 raise ValueError("Unknown memory ID; a rewrite cannot insert a new fact")
+            if automatic and memory_id and expected_revision is None:
+                raise ValueError("Background learning rewrites a fact only at the revision "
+                                 "it was shown; nothing was saved")
+            addressed = bool(memory_id)
             if not memory_id and key and expected_revision is not None:
                 # Restrict corrections to the authenticated project's/global
                 # slots. A revision of 1 is also sent on genuinely new saves;
@@ -1026,6 +1055,18 @@ class FactStore:
                     raise ValueError("This fact was saved at the user's request; an agent cannot "
                                      "rewrite it unless the user asked for the change")
                 raise ValueError("Background learning cannot rewrite an explicitly saved fact")
+            if automatic and self._disputed(doc, old, scope, key):
+                # A merge records both sides of a sync conflict and keeps the
+                # higher revision, so the revision this pass listed may still
+                # match: only the owner's answer settles which value holds.
+                raise ValueError("Memory is disputed between workers until the owner resolves it; "
+                                 "nothing was saved")
+            if automatic and old is not None and not addressed and (old["text"] != text or rekey):
+                # A save without an ID found the slot or text it matches: it
+                # may repeat that value, but replacing it needs the ID and
+                # revision this pass was shown, or a newer value is lost.
+                raise ValueError(f"[{old['id']}] already holds another value; background learning "
+                                 "replaces it only by its listed ID; nothing was saved")
             # A revision guards a rewrite. A key-addressed correction must have
             # resolved above; an unkeyed new save has no slot to compare.
             if expected_revision is not None and old and old.get("revision", 1) != expected_revision:
@@ -1045,7 +1086,10 @@ class FactStore:
             # worker-tagged fact, even when its text/metadata did not change.
             same_authority = not old or not protected or (
                 not old.get("worker") and (not provenance or old.get("provenance") == provenance))
-            if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
+            # The same text saved into another scope is a move: a revision
+            # replicas must see, not a repeat of the same value.
+            same_value = bool(old) and old["text"] == text and old.get("scope", "global") == (scope or "global")
+            if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and same_value
                     and not targets and self._metadata_differs(old, when, always)
                     and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
@@ -1059,7 +1103,7 @@ class FactStore:
                 if _document is None:
                     self._write(doc)
                 return self._entry(old)
-            if (old and not rekey and not resolves and not old.get("conflicted") and old["text"] == text
+            if (old and not rekey and not resolves and not old.get("conflicted") and same_value
                     and same_authority and old.get("protected", False) == protected and bool(old.get("durable")) == is_durable):
                 if not (protected or durable):
                     if archived_old and not old.get("retired_at") and old.get("expires_at", now + 1) <= now:
@@ -1610,7 +1654,7 @@ class FactStore:
             self._write(doc)
             return True
 
-    def retire(self, memory_id, *, reason, expected_revision=None):
+    def retire(self, memory_id, *, reason, expected_revision=None, automatic=False):
         """Move one unprotected fact into the archive, where Recall still finds it.
 
         Automatic curation (the learner, consolidation, health repairs) uses
@@ -1618,7 +1662,9 @@ class FactStore:
         and a later save of the same fact can bring it back. The clock bump
         makes the retirement win over a replica's older live copy, and
         ``retired_at`` keeps a merge from moving it back into the live list.
-        A fact the user asked to keep is never retired.
+        A fact the user asked to keep is never retired. ``automatic`` also
+        refuses a fact a sync left disputed (:meth:`_disputed`): archiving
+        one side would hide the dispute the owner has to settle.
         """
         with file_transaction(self.lock):
             doc = self._prepare()
@@ -1627,6 +1673,9 @@ class FactStore:
                 return False
             if expected_revision is not None and old.get("revision", 1) != expected_revision:
                 raise ValueError("Memory changed since it was read; recall it before retiring it")
+            if automatic and self._disputed(doc, old):
+                raise ValueError("Memory is disputed between workers until the owner resolves it; "
+                                 "nothing was retired")
             self._retire_entry(doc, old, reason)
             self._maintain(doc)
             self._write(doc)

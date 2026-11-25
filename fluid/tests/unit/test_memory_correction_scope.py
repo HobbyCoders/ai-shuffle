@@ -192,3 +192,16 @@ async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path
     assert not (await handler({"when": "When testing memory", "text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
     assert store.memories()[0].scope == "global"
 
+
+
+def test_a_scope_only_save_moves_the_fact_with_a_new_revision(tmp_path):
+    store = SkillStore(tmp_path / "source")
+    first = store.save_memory("Fixture runner is alpha.")
+    moved = store.save_memory("Fixture runner is alpha.", memory_id=first.id, scope="project:alpha",
+                              expected_revision=first.revision)
+    assert moved.scope == "project:alpha" and moved.revision == first.revision + 1
+    # Replicas see the move: the new revision wins over their global copy.
+    replica = SkillStore(tmp_path / "replica")
+    replica._facts.merge(SkillStore(tmp_path / "source")._facts.export())
+    entry, = replica.memories()
+    assert entry.scope == "project:alpha" and not entry.conflicted

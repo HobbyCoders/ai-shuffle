@@ -1673,6 +1673,7 @@ class Synthesizer:
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
                     expected_revision=revisions[memory_id],
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"memory {memory_id}: {exc}")
@@ -1685,7 +1686,8 @@ class Synthesizer:
                 continue
             try:
                 if self._store.retire_memory(match.group(1), reason="consolidation",
-                                             expected_revision=revisions[match.group(1)]):
+                                             expected_revision=revisions[match.group(1)],
+                                             automatic=True):
                     changed.append(f"-memory:{match.group(1)}")
             except ValueError as exc:
                 errors.append(f"memory {match.group(1)}: {exc}")
@@ -2182,6 +2184,7 @@ Never claim a workflow is installed because it was proposed."""
                     durable=True, key=key, source_session=session,
                     when="When working with the owner (learned behaviour rule)",
                     expected_revision=old.revision if old is not None else None,
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"{label}: {exc}")
@@ -2262,6 +2265,7 @@ Never claim a workflow is installed because it was proposed."""
                     scope=self._resolve_scope(scope_attr),
                     provenance=provenance,
                     expected_revision=listed[memory_id] if memory_id else None,
+                    automatic=True,
                 )
             except ValueError as exc:
                 errors.append(f"memory: {exc}")
@@ -2270,19 +2274,28 @@ Never claim a workflow is installed because it was proposed."""
             if saved.provenance == "tool":
                 held.append(f"{saved.id}: {saved.text}")
         self.last_held = held
+        # The prompt also lists behaviour rules (_rule_lines), and a rule is
+        # removed with <delete-memory> too; one the owner kept is not.
+        rules = getattr(self, "_rule_revisions", {})
         for match in _DELETE_MEMORY_RE.finditer(text or ""):
             # The learner retires into the archive. A deletion barrier here
             # used to stop every later save of the same text, agent saves
             # included, and Recall could no longer find the fact.
-            if match.group(1) not in listed:
-                errors.append(f"memory {match.group(1)}: not a fact listed this pass")
+            target = match.group(1)
+            rule = rules.get(target)
+            if rule is not None and rule.protected:
+                errors.append(f"memory {target}: kept by the owner")
+                continue
+            revision = listed.get(target, rule.revision if rule is not None else None)
+            if revision is None:
+                errors.append(f"memory {target}: not a fact listed this pass")
                 continue
             try:
-                if self._store.retire_memory(match.group(1), reason="learner",
-                                             expected_revision=listed[match.group(1)]):
-                    changed.append(f"-memory:{match.group(1)}")
+                if self._store.retire_memory(target, reason="learner",
+                                             expected_revision=revision, automatic=True):
+                    changed.append(f"-memory:{target}")
             except ValueError as exc:
-                errors.append(f"memory {match.group(1)}: {exc}")
+                errors.append(f"memory {target}: {exc}")
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
         changed.extend(self._apply_rules(text, entries, errors))

@@ -440,16 +440,33 @@ async def test_a_skill_replaced_during_verification_inherits_no_verdict(
     assert store.verified_sources() == {"swap": original}
 
 
-def test_a_verdict_recorded_by_mtime_holds_until_the_file_changes(tmp_path) -> None:
+async def test_a_verdict_recorded_by_mtime_mounts_nothing_until_re_verified(
+    tmp_path, monkeypatch
+) -> None:
+    import fluid.codemode.verify as verify_mod
+
     store = SkillStore(tmp_path)
-    store.save("legacy", '"""Legacy."""\nvalue = 1\n')
+    # Before digests: a peer replaced A with B while A was being verified,
+    # and the old code stamped B's mtime with A's verdict.
+    replaced = '"""Replaced by a peer."""\nvalue = 2\n'
+    store.save("legacy", replaced)
     meta = store._load_meta()
     meta["skills"]["legacy"]["verified_mtime"] = store._mtime_ns("legacy")
     store._save_meta(meta)
-    assert not store.needs_verification("legacy")
-    assert set(store.verified_sources()) == {"legacy"}
-    store.save("legacy", '"""Legacy."""\nvalue = 2\n')
     assert store.needs_verification("legacy")
+    assert "legacy" not in store.verified_sources()
+    assert store._load_meta()["skills"]["legacy"]["verified_mtime"]  # kept until re-verified
+    ran: list[str] = []
+
+    async def verify(sources, names, **kwargs):
+        ran.extend(names)
+        return {name: None for name in names}
+
+    monkeypatch.setattr(verify_mod, "verify_sources", verify)
+    assert await verify_store(store) == {"legacy": None}
+    assert store.verified_sources() == {"legacy": replaced}
+    assert await verify_store(store) == {}  # once: the digest verdict now holds
+    assert ran == ["legacy"]
 
 
 def test_skill_descriptions_are_bounded_and_a_tool_name_reads_the_tool(tmp_path) -> None:

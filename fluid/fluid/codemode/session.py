@@ -37,6 +37,7 @@ calls.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
@@ -69,6 +70,15 @@ def _brief(description: str) -> str:
     if len(description) <= SKILL_DESCRIPTION_CHARS:
         return description
     return description[:SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+
+
+def _mount_key(files: dict[str, str]) -> tuple:
+    """Change-detection key for one kernel VFS mount: each file's name and
+    the digest of the exact text mounted."""
+    return tuple(sorted(
+        (name, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
+        for name, text in files.items()
+    ))
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel: names you bind stay "
@@ -519,10 +529,11 @@ class CodeModeSession:
     async def _ensure_kernel(self) -> SubprocessKernel:
         sources = self._projection().sources()
         skills = await self._mountable_skills()
-        # Keyed on the verified sources actually mounted, not the directory:
-        # a skill verified in a later cell (the budget ran out earlier, or a
-        # verification pass failed) changes the mount with no file change.
-        signature = (tuple(sorted(sources.items())), tuple(sorted(skills.items())))
+        # Keyed on what set_vfs is given, not the directory: a skill verified
+        # in a later cell (the budget ran out earlier, or a verification pass
+        # failed) changes the mount with no file change. Names and digests
+        # only, so the session does not keep a second copy of every source.
+        signature = (_mount_key(sources), _mount_key(skills))
         if self._kernel is None:
             self._kernel = SubprocessKernel(self._config)
             await self._kernel.start()
