@@ -185,7 +185,8 @@ class SwarmCoordinator:
             self.swarms[key]["updated_at"] = now()
             await self.publish(self.snapshot(key))
 
-    async def start(self, data, ctx):
+    async def start(self, data, ctx, *, origin=None):
+        """``origin`` overrides ``self.origin()`` with one the host read earlier."""
         tasks, cap = validate(data)
         if self.closed:
             raise ValueError("Swarm host is closed")
@@ -198,7 +199,9 @@ class SwarmCoordinator:
                 depends_on=t.get("depends_on", []), status="queued", task_id=None,
                 worker_session_id=None, result=None, error=None, started_at=None,
                 finished_at=None) for t in tasks])
-        self._origins[key] = self.origin() if self.origin is not None else None
+        if origin is None and self.origin is not None:
+            origin = self.origin()
+        self._origins[key] = origin
         receipt = BackgroundTaskReceipt(task_id=key, description=self.swarms[key]["title"])
         started = ctx.extra.get("background_task_started")
         dispatch_ctx = replace(ctx, extra=dict(ctx.extra))

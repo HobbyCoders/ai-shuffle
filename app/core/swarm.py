@@ -157,8 +157,13 @@ def latch_all(session_id):
         coordinator.cancelled.update(_active_keys(coordinator))
 
 
-# session id -> the newest input a captured Stop ended (inclusive)
+# session id -> the newest input a captured Stop ended (inclusive). Kept with
+# the session, not its workflow host: a session's first workflow may still be
+# on its way to creating one. Dropped by ``close`` (session teardown); the
+# cap only bounds sessions that never get a host. Newer input orders above
+# every cutoff, so an entry left behind never holds back a later turn.
 stopped_through = {}
+_STOPPED_THROUGH_MAX = 1024
 
 
 def latch_started_by(session_id, input_cutoff):
@@ -173,13 +178,15 @@ def latch_started_by(session_id, input_cutoff):
     reads the same record when a workflow registers after the Stop and when
     one ends, so a stopped workflow neither dispatches nor wakes the parent.
     """
+    if input_cutoff is None:
+        return []
+    if session_id not in stopped_through and len(stopped_through) >= _STOPPED_THROUGH_MAX:
+        stopped_through.pop(next(iter(stopped_through)))
+    cutoff = stopped_through[session_id] = max(int(input_cutoff), stopped_through.get(session_id, 0))
     coordinator = coordinators.get(session_id)
     origins = getattr(coordinator, "active_origins", None)
-    if origins is None or input_cutoff is None:
-        # No workflow host yet: a start still on its way there is cancelled
-        # with the turn, and nothing here outlives the session (``close``).
-        return []
-    cutoff = stopped_through[session_id] = max(int(input_cutoff), stopped_through.get(session_id, 0))
+    if origins is None:
+        return []  # a first workflow still on its way registers under the record
     older = sorted(key for key, order in origins().items()
                    if order is not None and int(order) <= cutoff)
     coordinator.cancelled.update(older)
@@ -205,11 +212,11 @@ async def cancel_all(session_id):
 
 async def close(session_id, *, deadline=None):
     """Close the session's workflows; ``deadline`` is event-loop time (shutdown's)."""
+    stopped_through.pop(session_id, None)
     coordinator = coordinators.get(session_id)
     if coordinator:
         await coordinator.aclose(deadline=deadline)
         coordinators.pop(session_id, None)
-        stopped_through.pop(session_id, None)
         for key, launch in list(workers.items()):
             if launch.coordinator is coordinator:
                 workers.pop(key, None)
@@ -748,8 +755,12 @@ def make_handler(session_id_supplier):
         try:
             if data.get("action") == "start":
                 from app.core.agent_provider_models import caller_subagents_refusal
+                from app.core.task_registry import task_registry as registry
                 from app.db import database
 
+                # The input this start came from, read before any await: a
+                # Stop of it, or a newer turn going live, may land meanwhile.
+                origin = registry.current_input_order(session_id)
                 caller = await asyncio.to_thread(database.get_session, session_id)
                 refusal = caller_subagents_refusal((caller or {}).get("profile_id"))
                 if refusal is not None:
@@ -770,21 +781,32 @@ def make_handler(session_id_supplier):
                                 coordinator.cancelled.add(key)
                     async def finished(key, status, summary):
                         from app.core import turn_scheduler
+                        from app.core.task_registry import USER_STOP_REASON
                         wire_status = "completed" if status == "completed" else "killed" if status == "cancelled" else "error"
-                        task_registry.complete_task(session_id, key, wire_status, summary=summary)
-                        if stopped_by_scope(session_id, key):
+                        stopped = stopped_by_scope(session_id, key)
+                        task_registry.complete_task(session_id, key, wire_status, summary=summary,
+                            reason=USER_STOP_REASON if stopped and wire_status == "killed" else None)
+                        if stopped:
                             # The Stop ended it; its end must not steer or
                             # queue the turn that followed the Stop.
                             task_registry.suppress_wake(session_id, key)
-                        await turn_scheduler.on_task_terminal(session_id, dict(task_id=key,
-                            status=wire_status, tool_use_id=key, summary=summary))
+                        frame = dict(task_id=key, status=wire_status, tool_use_id=key, summary=summary)
+                        await turn_scheduler.on_task_terminal(session_id, frame)
+                        if stopped:
+                            # A suppressed frame neither retires the engine's
+                            # receipt nor ends a park that waited on it. A park
+                            # written after this is settled by its own
+                            # post-park check, which sees the suppression.
+                            from app.core.turn_finalize import settle_stopped_monitor_parks
+                            await turn_scheduler.retire_task_terminals(session_id, [{**frame, "kind": "agent"}])
+                            await settle_stopped_monitor_parks(session_id)
                     coordinator = SwarmCoordinator(
                         session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished,
                         # The turn each workflow starts under, which a Stop's
                         # ``input_cutoff`` places (``latch_started_by``).
                         origin=lambda: task_registry.current_input_order(session_id))
                     coordinators[session_id] = coordinator
-                snapshot, receipt = await coordinator.start(data, ctx)
+                snapshot, receipt = await coordinator.start(data, ctx, origin=origin)
                 return ToolOutcome(text=json.dumps({"swarm": snapshot}), ui={"swarm": snapshot}, background_task=receipt)
             key = data.get("swarm_id")
             if data.get("action") == "cancel":
