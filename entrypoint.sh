@@ -124,10 +124,16 @@ if [ -f /home/appuser/.config/gh/hosts.yml ]; then
     # skipped this setup). The app checks the token's validity itself.
     if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" gh auth token >/dev/null 2>&1; then
         echo "GitHub CLI: stored token found"
-        # Configure git to use gh as credential helper (as appuser so it goes to appuser's .gitconfig)
-        setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
-            git config --global credential.helper '!gh auth git-credential'
-        echo "Git configured to use GitHub CLI for authentication"
+        # A stored token may be revoked, so gh is only the default helper: a
+        # helper already configured in appuser's .gitconfig is left in place.
+        if setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
+            git config --global --get credential.helper >/dev/null 2>&1; then
+            echo "Git credential helper already configured; leaving it in place"
+        else
+            setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser PATH="$SHUFFLE_CONTAINER_PATH" \
+                git config --global credential.helper '!gh auth git-credential'
+            echo "Git configured to use GitHub CLI for authentication"
+        fi
     else
         echo "GitHub CLI: credentials file has no usable token - re-login via web UI recommended"
     fi
