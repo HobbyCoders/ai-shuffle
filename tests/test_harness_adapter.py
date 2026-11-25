@@ -4856,6 +4856,62 @@ async def test_a_failed_connect_closes_the_mcp_servers_it_started(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_a_connect_cancelled_during_the_pending_reconcile_closes_its_mcp_servers(
+    monkeypatch, tmp_path,
+):
+    """The pending reconcile is the last step of connect_with_sdk_options. An
+    ordinary failure there never fails the connect, but the caller's deadline
+    cancelling it does: the adapter is dropped, so the MCP server the connect
+    already started must be closed, not left running."""
+    import app.core.pending_reconcile as pending_reconcile
+    import app.core.provider.harness_adapter as ha
+    from fluid.store.base import MemoryStore
+    from fluid.tools.mcp import manager as manager_mod
+
+    started: list = []
+    closed: list = []
+    reconciling = asyncio.Event()
+
+    class FakeClient:
+        def __init__(self, name, config):
+            self.name, self.instructions = name, None
+
+        async def start(self):
+            started.append(self.name)
+
+        async def list_tools(self):
+            return []
+
+        async def aclose(self):
+            closed.append(self.name)
+
+    async def reconcile_hangs(*_args, **_kwargs):
+        reconciling.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager_mod, "McpClient", FakeClient)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    monkeypatch.setattr(
+        ha, "_native_external_mcp_servers",
+        lambda options: {"good": {"command": "node", "args": ["good.js"]}},
+    )
+    monkeypatch.setattr(
+        ha.HarnessAdapter, "_build_store", staticmethod(lambda options: MemoryStore())
+    )
+    monkeypatch.setattr(pending_reconcile, "reconcile_engine_pending", reconcile_hangs)
+
+    adapter = ha.HarnessAdapter()
+    sdk_options = _types.SimpleNamespace(model="gpt-4o", cwd=str(tmp_path), mcp_servers=None)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(adapter.connect_with_sdk_options(sdk_options), timeout=2.0)
+
+    assert reconciling.is_set()  # the cancel landed in the reconcile
+    assert started == ["good"]
+    assert closed == ["good"]
+    assert adapter._registry is None and adapter._engine is None
+
+
+@pytest.mark.asyncio
 async def test_delegated_leg_never_connects_external_mcp(monkeypatch):
     """Ruling PA5: the delegated leg passes external MCP servers to the claude
     CLI via --mcp-config, and the CLI spawns them inside its child process.
