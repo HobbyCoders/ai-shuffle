@@ -246,8 +246,37 @@ def test_nothing_is_filtered_before_a_compaction_was_answered():
     filter_.note(message)
     frame = _frame(project(message), 'u-1')
     assert not filter_.is_replay(frame)
-    filter_.seed([])
+    # The answer seeds from the stored path, which holds the message.
+    filter_.seed([SessionNode('node_1', None, message)])
     assert filter_.is_replay(frame)
+
+
+def test_replay_tracking_records_nothing_until_a_compaction_is_answered():
+    """A leg whose compaction mod is off never answers one, so the filter it
+    never turns on records no tool id however long the chat runs."""
+    filter_ = ReplayFilter()
+    for n in range(50):
+        filter_.note(Message('assistant', [ToolUseBlock(f't-{n}', 'Bash', {})],
+                             provider_meta={'claude_uuid': f'u-{n}'}))
+        filter_.note(Message('user', [ToolResultBlock(f't-{n}', 'ok')]))
+    assert not (filter_._calls or filter_._results or filter_._uuids)
+
+
+async def test_replay_tracking_goes_with_the_cli_process():
+    """A fresh CLI has compacted nothing, so it has nothing to replay: the
+    ids the last one could replay are not kept past its process."""
+    loop = DelegatedLoop(store=MemoryStore(), model='claude-x', claude_mod_compaction=True)
+    try:
+        message = Message('assistant', [ToolUseBlock('t-1', 'Bash', {})])
+        loop._replay_filter.seed([SessionNode('node_1', None, message)])
+        frame = _frame(project(message), 'u-1')
+        assert loop._replay_filter.is_replay(frame)
+        await loop._stop_process()
+        assert not loop._replay_filter.active
+        assert not loop._replay_filter._calls
+        assert not loop._replay_filter.is_replay(frame)
+    finally:
+        await loop.aclose()
 
 
 # ─── #727: archive once; bounded archive reads ───────────────────────────────

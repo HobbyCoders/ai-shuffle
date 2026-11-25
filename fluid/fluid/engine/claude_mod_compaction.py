@@ -1379,9 +1379,11 @@ class ReplayFilter:
     rows of that answer. A tool id is unique in a conversation, so a frame
     made only of recorded ids is never fresh execution. The window closes at
     the next model call (``message_start``), a result, or any assistant frame
-    that is not part of the answer. Nothing is filtered until the leg has
-    answered a compaction in this process: before that Claude Code has
-    nothing to replay.
+    that is not part of the answer. Nothing is filtered, or recorded, until
+    the leg has answered a compaction for the running CLI: before that Claude
+    Code has nothing to replay (the first answer seeds the whole stored path).
+    The leg drops the filter with the CLI process it served: a fresh CLI has
+    compacted nothing, so nothing it prints is a replay until it does.
     """
 
     def __init__(self) -> None:
@@ -1393,12 +1395,15 @@ class ReplayFilter:
 
     def seed(self, nodes: list[SessionNode]) -> None:
         """Learn everything the stored path already holds; turns the filter on."""
+        self.active = True
         for node in nodes:
             self.note(node.message)
-        self.active = True
 
     def note(self, message: Message) -> None:
-        """Record a message the leg stored (its ids are no longer new)."""
+        """Record a message the leg stored (its ids are no longer new). A no-op
+        until :meth:`seed`, which reads the stored path whole."""
+        if not self.active:
+            return
         uuid = message.provider_meta.get("claude_uuid")
         if isinstance(uuid, str) and uuid:
             self._uuids.add(uuid)

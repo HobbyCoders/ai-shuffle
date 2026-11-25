@@ -369,6 +369,49 @@ async def test_a_usage_limit_on_a_resumed_cli_is_not_replayed(tmp_path, status) 
         await run.aclose()
 
 
+async def test_a_transient_provider_error_on_a_resumed_cli_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI whose first turn fails with a 503 before any reply has
+    not refused its --resume handle: the turn reports the error, and the CLI
+    conversation it would have thrown away stays saved for the next turn."""
+    outage = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": "API Error: 503 upstream connect error", "api_error_status": 503,
+              "num_turns": 1, "total_cost_usd": 0.0, "usage": {}}
+    run = Scripted(tmp_path, {"turns": [[{"op": "frame", "frame": outage}]]},
+                   cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.status == 503
+        assert len(run.records("start")) == 1  # no fresh CLI
+        assert len(run.stdin_frames("user")) == 1  # not replayed elsewhere
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_the_cli_saying_no_conversation_found_replaces_the_handle(tmp_path) -> None:
+    """CLI 2.1.331 refuses an unknown --resume id with a failed result whose
+    ``errors`` say so (and no init frame): the handle is dropped and the turn
+    replays on a fresh CLI conversation."""
+    refused = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+               "num_turns": 0, "total_cost_usd": 0, "usage": {},
+               "errors": ["No conversation found with session ID: cli-prev"]}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[{"op": "frame", "frame": refused}]],
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        starts = run.records("start")
+        assert len(starts) == 2
+        assert "--resume" not in starts[-1]["argv"]
+        assert run.loop.cli_session_id != "cli-prev"
+    finally:
+        await run.aclose()
+
+
 async def test_stop_before_the_turn_reaches_the_cli_keeps_it_from_running(tmp_path) -> None:
     """A Stop that lands while the CLI is still starting must not let the
     turn run its tools once the CLI is up (the native loop honours an early
@@ -436,6 +479,65 @@ async def test_a_wake_between_turns_is_drained_and_its_prompt_denied(tmp_path) -
         assert "between turns" in decision["response"]["message"]
         path = await run.store.load_path(run.sid)
         assert all("WAKE" not in n.message.text() for n in path)
+    finally:
+        await run.aclose()
+
+
+async def test_a_wake_still_running_past_the_drain_bound_gets_a_fresh_cli(tmp_path, monkeypatch) -> None:
+    """A wake whose result comes after the drain gave up must not end the
+    next turn: that turn runs on a fresh CLI resumed from the saved handle,
+    not on the stream the wake is still writing to."""
+    monkeypatch.setattr(delegated_mod, "_WAKE_DRAIN_TIMEOUT", 0.3)
+    first = [
+        {"op": "text", "text": "first answer"}, {"op": "result"},
+        {"op": "sleep", "s": 0.05},
+        {"op": "text", "text": "WAKE text"},
+        {"op": "sleep", "s": 2.0},  # past the drain's bound
+        {"op": "text", "text": "LATE wake text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first], "resume_turns": [second]})
+    try:
+        await run.turn("one")
+        await asyncio.sleep(0.3)
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        starts = run.records("start")
+        assert len(starts) == 2
+        argv = starts[-1]["argv"]
+        assert argv[argv.index("--resume") + 1] == "cli-sess-1"
+    finally:
+        await run.aclose()
+
+
+async def test_an_oversized_frame_ends_the_cli_and_the_next_turn_resumes(tmp_path, monkeypatch) -> None:
+    """A stdout line over the stream limit fails its turn and ends that CLI at
+    once: what it writes next is never read as the next turn's reply, which
+    runs on a fresh CLI resumed from the saved handle."""
+    monkeypatch.setattr(delegated_mod, "STREAM_LINE_LIMIT", 64 * 1024)
+    first = [
+        {"op": "tool_use", "id": "toolu_big", "name": "Read", "input": {"file_path": "big.txt"}},
+        {"op": "tool_result", "tool_use_id": "toolu_big", "content": "x" * 200_000},
+        {"op": "sleep", "s": 1.0},
+        {"op": "text", "text": "LATE text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first], "resume_turns": [second]},
+                   permission_mode="bypassPermissions")
+    try:
+        events = await run.turn("one")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "limit" in error.message
+        assert run.loop._proc is None  # ended now, not at the next turn
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        starts = run.records("start")
+        assert len(starts) == 2
+        argv = starts[-1]["argv"]
+        assert argv[argv.index("--resume") + 1] == "cli-sess-1"
     finally:
         await run.aclose()
 

@@ -205,6 +205,11 @@ class ClaudeCliMissingError(RuntimeError):
         super().__init__(message)
 
 
+# What the CLI says when ``--resume`` names a conversation it does not have
+# (CLI 2.1.331: in the failed result's ``errors``; older builds: on stderr).
+_NO_CONVERSATION = "No conversation found with session ID"
+
+
 def _spawn_failure_message(exc: BaseException) -> str:
     """User-facing text for a CLI that could not be started."""
     if isinstance(exc, ClaudeCliMissingError):
@@ -1840,6 +1845,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         proc, self._proc = self._proc, None
         job, self._proc_job = getattr(self, "_proc_job", None), None
         self._stdout_backlog.clear()
+        self._stdout_desynced = False
+        # Its replay tracking goes with it: the next CLI has compacted nothing.
+        self.__dict__.pop("_replays", None)
         try:
             if proc is not None:
                 await self._end_process(proc, grace)
@@ -2288,6 +2296,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # say whether that answer applied: if not, what was left out goes back.
     _note_trusted_answer: bool = False
     _instructions_due: bool = False
+    # This CLI's stdout can no longer be matched to turns: a line overran the
+    # stream limit, or a wake turn was still writing when the drain gave up.
+    # The process is not reused; the next turn runs on a fresh CLI resumed
+    # from the saved handle. ``_stop_process`` clears it.
+    _stdout_desynced: bool = False
 
     @property
     def _boundary_steers(self) -> dict[str, list[SteerDelivery]]:
@@ -2514,7 +2527,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         process is finished whatever its returncode says.
         """
         proc = self._proc
-        if proc is None or proc.returncode is not None:
+        if proc is None or proc.returncode is not None or self._stdout_desynced:
             return False
         return proc.stdout is None or not proc.stdout.at_eof()
 
@@ -2523,8 +2536,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             assert self._proc is not None
             return self._proc
         if self._proc is not None and self._proc.returncode is None:
-            # stdout closed but not reaped yet: finish it off before the
-            # respawn, so the next turn does not write into a dead pipe.
+            # stdout closed but not reaped yet, or out of step with turns
+            # (``_stdout_desynced``): finish it off before the respawn, so the
+            # next turn does not write into a dead or still-busy pipe.
             await self._stop_process(grace=1.0)
         elif self._proc is not None:
             # The previous CLI exited on its own (a crash, or the CLI's own
@@ -2775,8 +2789,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 async with self._stdout_lock:
                     await self._discard_stale_stdout()
                 # Lines buffered ahead of EOF made a dead CLI look usable, and
-                # the drain has just read them. Resume on a fresh CLI, as for a
-                # dead pipe found mid-turn, rather than write into this one.
+                # the drain has just read them; or a wake is still writing past
+                # the drain's bound. Resume on a fresh CLI, as for a dead pipe
+                # found mid-turn, rather than write into this one.
                 if not self._proc_usable() and not await spawned():
                     return
                 if self._unconfirmed_settings and not self._interrupted.is_set():
@@ -2993,6 +3008,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
                 await self._drop_resume_handle(sid)
                 continue
+            if self._stdout_desynced:
+                # The CLI is still running the turn it could not report. End
+                # it now, not when the next turn comes: its tools must not run
+                # on with nobody reading. The next turn resumes the handle.
+                await self._stop_process(grace=1.0)
             await self._emit_terminal_with_park(ErrorEvent(
                 session_id=sid, turn_id=turn_id, message=failure,
                 # A failed result still billed the turn; say what it cost.
@@ -3021,7 +3041,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             logger.debug("interrupt after hook stop failed", exc_info=True)
 
     def _resume_handle_rejected(self, mapper: StreamJsonMapper, failure: str | None = None) -> bool:
-        """A first turn on a resumed process failed before mapping any frame.
+        """The CLI refused the saved ``--resume`` handle on a resumed process.
+
+        Only explicit evidence counts, because dropping the handle throws the
+        CLI's conversation away: the CLI's own "No conversation found" error
+        (a result frame on current CLIs), or a process that ended before
+        writing any frame (older CLIs print that error to stderr and exit). A
+        provider error (a 503, a dropped connection) comes after the init
+        frame, so a transient failure keeps the handle for the next turn.
 
         Never a usage limit: the CLI refuses a resumed turn at the session or
         weekly limit before any frame too, and replaying it into a fresh
@@ -3030,11 +3057,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if mapper.failed_status == 429 or is_usage_limit_text(failure):
             return False
-        return (
-            self._spawn_resume is not None
-            and self._proc_results == 0
-            and not mapper.produced_nodes
-        )
+        if (self._spawn_resume is None or self._proc_results or mapper.produced_nodes
+                or self._stdout_desynced):
+            return False
+        return _NO_CONVERSATION in (failure or "") or not mapper.saw_frame
 
     async def _drop_resume_handle(self, sid: str) -> None:
         self.cli_session_id = None
@@ -3623,7 +3649,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
         A wake turn still running when the user frame goes in would answer in
         the user's place, so once one shows a frame the drain waits (bounded)
-        for its result. Requests it makes are answered, never dropped: the
+        for its result. If the wait runs out (or the line cap is hit) the
+        stream is marked out of step (``_stdout_desynced``) and the caller
+        starts the turn on a fresh CLI: a late wake result must not end the
+        new turn. Requests it makes are answered, never dropped: the
         CLI blocks on each one, and an unanswered one wedges the next turn.
 
         A Stop ends the drain at once, whatever it was waiting for: the turn
@@ -3664,11 +3693,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     )
                 except TimeoutError:
                     if wake_deadline is not None:
+                        # Its result may still come, and would end the new
+                        # turn in its place: not on this process.
                         logger.warning(
                             "claude CLI wake turn did not finish within %.0fs; "
-                            "starting the turn anyway", _WAKE_DRAIN_TIMEOUT,
+                            "restarting the CLI for the turn", _WAKE_DRAIN_TIMEOUT,
                         )
                         self._wake_in_flight = False
+                        self._stdout_desynced = True
                     return
                 if line is None:  # stopped: the turn is not going to the CLI
                     return
@@ -3713,7 +3745,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if wake_deadline is None:
                     wake_deadline = loop.time() + _WAKE_DRAIN_TIMEOUT
                     self._wake_in_flight = True
-            logger.warning("stale-frame drain hit its line cap; continuing turn anyway")
+            logger.warning("stale-frame drain hit its line cap; restarting the CLI for the turn")
+            self._wake_in_flight = False
+            self._stdout_desynced = True
         finally:
             self._settle_setting_resync(resync)
 
@@ -3775,7 +3809,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         admits one waiter at a time, and cancelling it consumes nothing.
         """
         assert self._proc is not None and self._proc.stdout is not None
-        read = asyncio.ensure_future(self._proc.stdout.readline())
+        read = asyncio.ensure_future(self._read_stdout_line(self._proc.stdout))
         stop = asyncio.ensure_future(self._interrupted.wait())
         try:
             await asyncio.wait(
@@ -3886,6 +3920,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A model call whose Usage was held for its final counts is
                 # still a call the turn paid for: record it before failing.
                 await self._release_held_usage(mapper, held_snapshots)
+                if self._stdout_desynced:
+                    return (f"the Claude CLI wrote a reply frame over the {STREAM_LINE_LIMIT}-byte "
+                            "limit; the turn was stopped")
                 return "claude stream closed before result"
             text = line.decode(errors="replace").strip()
             if not text:
@@ -4411,7 +4448,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 del self._stdout_backlog[i]
                 return "cancelled"
         while True:
-            line = await stdout.readline()
+            line = await self._read_stdout_line(stdout)
             if not line:
                 self._stdout_backlog.append(line)
                 return "eof"
@@ -4588,7 +4625,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
                 return "timeout"
             try:
-                line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=remaining)
+                line = await asyncio.wait_for(
+                    self._read_stdout_line(self._proc.stdout), timeout=remaining,
+                )
             except TimeoutError:
                 continue
             if not line:
@@ -4628,7 +4667,29 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._stdout_backlog:
             return self._stdout_backlog.pop(0)
         assert self._proc is not None and self._proc.stdout is not None
-        return await self._proc.stdout.readline()
+        return await self._read_stdout_line(self._proc.stdout)
+
+    async def _read_stdout_line(self, stdout: asyncio.StreamReader) -> bytes:
+        """One line of the CLI's stdout; ``b""`` (end of stream) once a line
+        overran ``STREAM_LINE_LIMIT``.
+
+        ``readline`` raises on such a line and leaves the rest of the frame in
+        the pipe while the CLI goes on with its turn. Nothing read after it
+        can be matched to a turn, so every reader sees the stream end there:
+        the turn fails, and the next one runs on a fresh CLI resumed from the
+        saved handle (``_stdout_desynced``).
+        """
+        if self._stdout_desynced:
+            return b""
+        try:
+            return await stdout.readline()
+        except ValueError:
+            self._stdout_desynced = True
+            logger.warning(
+                "claude CLI wrote a stdout frame over the %d-byte line limit; "
+                "ending this CLI process", STREAM_LINE_LIMIT,
+            )
+            return b""
 
     async def _answer_hook_line(self, text: str) -> bool:
         """Answer ``text`` if it is a hook_callback control_request."""
@@ -5976,7 +6037,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 return _PumpOutcome.DEADLINE
             try:
                 line = await asyncio.wait_for(
-                    self._proc.stdout.readline(), timeout=min(remaining, _CONTROL_POLL),
+                    self._read_stdout_line(self._proc.stdout), timeout=min(remaining, _CONTROL_POLL),
                 )
             except TimeoutError:
                 continue  # nothing to read yet — re-check turn/deadline
