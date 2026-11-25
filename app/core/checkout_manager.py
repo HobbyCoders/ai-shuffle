@@ -56,7 +56,7 @@ from app.core.git_worktree_ops import (
     repo_worktree_lock,
     worktree_error_detail,
 )
-from app.core.project_links import auto_link_group_id
+from app.core.project_links import remote_link_ids
 from app.core.worktree_manager import (
     WorktreeError,
     resolve_rebound_branch_plan,
@@ -575,9 +575,10 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
     remote, so ``local:`` / ``manual:`` origins are hard-fail excluded up front
     with no DB lookup. For the rest we scan legacy ``projects`` ->
     ``git_repositories.remote_url`` and return the first URL whose
-    ``auto_link_group_id(remote_url)`` reproduces this exact ``origin`` — the same
-    deterministic, install-independent hash the v60 collapse used to assign origins,
-    so a match is a true identity, not a heuristic.
+    identity this exact ``origin`` is (``remote_link_ids``: the remote's own id, in any
+    spelling, or its spelling's older id) — the same deterministic,
+    install-independent hash the v60 collapse used to assign origins, so a match is
+    a true identity, not a heuristic.
 
     Every no-match path returns ``None`` explicitly (never an ``or``-fallback chain —
     a standing repo rule from a past production bug). Best-effort: a DB error logs
@@ -595,7 +596,7 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
         return pinned  # the owner pointed this project at another repository
     stored_url, _stored_branch = stored_remote(project_v2_row)
     if stored_url is not None and (project_v2_row or {}).get("origin") == origin \
-            and auto_link_group_id(stored_url) == origin:
+            and origin in remote_link_ids(stored_url):
         return stored_url
     try:
         with get_db() as conn:
@@ -615,7 +616,7 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
 
     for cand in candidates:
         remote_url = cand["remote_url"]
-        if auto_link_group_id(remote_url) == origin:
+        if origin in remote_link_ids(remote_url):
             return remote_url
     return None
 

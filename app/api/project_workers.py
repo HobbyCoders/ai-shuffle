@@ -686,7 +686,7 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
     from app.api.projects import check_new_project
     from app.core.git_service import classify_clone_url
     from app.core.models import ProjectCreate
-    from app.core.project_links import normalize_remote_url
+    from app.core.project_links import same_remote
     from app.core.project_remote import identity_for_remote, pinned_remote
     from app.core.scrub import strip_url_userinfo
     from app.db import git_ops as git_ops_db
@@ -716,7 +716,7 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
             or f"This repository is already the project {existing.get('name') or existing.get('id')}."})
     pv2 = projects_v2.get_project_v2_by_origin(origin)
     pinned = pinned_remote(pv2)
-    if pinned and normalize_remote_url(pinned) != normalize_remote_url(clean):
+    if pinned and not same_remote(pinned, clean):
         # The project this repository was first seen as now uses another one.
         raise HTTPException(status_code=409, detail={
             "error_code": setup.MOVED, "error": setup.moved_message(pinned)})
@@ -790,10 +790,11 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     """The project (this worker's row, else one listed from this database) whose
     remote is ``clean`` in any spelling, as the repository picker marks "Already added".
 
-    Identities are hashes of one spelling, so the same repository added from its
-    SSH URL is a different origin than its HTTPS URL; the hashes stay as they are.
-    Listed means :func:`_listed_elsewhere`; an identity only remembered from a
-    removed project does not block a new clone.
+    One repository's identity is the same for every spelling, but a project an
+    older version added over SSH is still keyed by that spelling until
+    ``project_remote.converge_spellings`` merges it. Listed means
+    :func:`_listed_elsewhere`; an identity only remembered from a removed
+    project does not block a new clone.
     """
     matches = sorted(_same_repository_origins(clean))
     if not matches:

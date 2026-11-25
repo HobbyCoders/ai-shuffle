@@ -1054,9 +1054,10 @@ def test_importing_a_git_folder_from_provider_settings_leaves_no_local_twin(ws, 
 # A new project cloned from the New project dialog (POST /projects/clone)
 # ---------------------------------------------------------------------------
 
-def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = True) -> str:
-    """An https:// URL that git reaches as the local repository ``local``
-    (``POST /projects/clone`` takes network remotes only).
+def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = True,
+           url: str | None = None) -> str:
+    """An https:// URL (or the given ``url``) that git reaches as the local
+    repository ``local`` (``POST /projects/clone`` takes network remotes only).
 
     Test-only: ``allow_file`` lets a new project's clone use the file
     transport, which the production ``NEW_PROJECT_PROTOCOLS`` refuses (see
@@ -1065,7 +1066,7 @@ def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = Tr
 
     if allow_file:
         monkeypatch.setattr(project_setup, "NEW_PROJECT_PROTOCOLS", "https:http:ssh:file")
-    url = f"https://git.example.com/example-org/{name}.git"
+    url = url or f"https://git.example.com/example-org/{name}.git"
     count = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
     monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", f"url.{local}.insteadOf")
     monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", url)
@@ -1375,8 +1376,9 @@ def test_a_workers_tab_setup_keeps_a_first_clone_from_being_hidden_or_duplicated
         assert detail["error_code"] == "being_set_up"
         assert detail["error"] == "Studio is setting up this repository; wait for it or cancel it there."
     assert projects_v2.get_project_v2_by_origin(origin)["name"] == "Demo"
-    assert projects_v2.get_project_v2_by_origin(auto_link_group_id("git@git.example.com:example-org/demo.git")) \
-        is None
+    # Every spelling is the one identity: no row under the SSH spelling's own id.
+    assert auto_link_group_id("git@git.example.com:example-org/demo.git") == origin
+    assert projects_v2.get_project_v2_by_origin(_legacy_id("git@git.example.com:example-org/demo.git")) is None
 
 
 def test_another_spelling_of_a_first_clone_in_progress_is_refused(client, ws, test_db, monkeypatch):
@@ -1389,7 +1391,8 @@ def test_another_spelling_of_a_first_clone_in_progress_is_refused(client, ws, te
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["error_code"] == "being_set_up"
     assert refused.json()["detail"]["worker"] == "This worker"
-    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(ssh)) is None
+    assert auto_link_group_id(ssh) == auto_link_group_id(remote)  # one identity for both
+    assert projects_v2.get_project_v2_by_origin(_legacy_id(ssh)) is None
 
 
 def test_cancelling_another_runners_queued_first_clone_hides_it_again(client, ws, test_db):
@@ -1586,3 +1589,218 @@ def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test
     status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
     assert status["error_code"] == "github_auth" and "secret" not in (status["error"] or "")
     assert database.get_project("private") is None
+
+
+# ---------------------------------------------------------------------------
+# Paired workers with their own databases converge on one project per
+# repository, in any URL spelling (no peer call, no hold, no refusal)
+# ---------------------------------------------------------------------------
+
+_SSH = "git@git.example.com:example-org/demo.git"
+_SSH_SCHEME = "ssh://git@git.example.com/example-org/demo.git"
+_HTTPS = "https://git.example.com/example-org/demo.git"
+
+
+def _legacy_id(url: str) -> str:
+    """The identity a worker from before this change derived from ``url``."""
+    from app.core.project_links import legacy_link_group_id
+
+    return legacy_link_group_id(url)
+
+
+def _legacy_project_here(ws: Path, remote: str = _SSH, project_id: str = "demo") -> tuple:
+    """A project this worker registered before the upgrade, keyed by its old SSH id."""
+    folder = init_repo(ws / project_id, files={"README.md": "demo\n"})
+    git(folder, "remote", "add", "origin", remote)
+    origin = _legacy_id(remote)
+    database.create_project(project_id=project_id, name="Demo", description=None, path=project_id,
+                            settings_dict={"keep": "me"}, link_group_id=origin)
+    database.create_git_repository(f"repo-{project_id}", project_id, remote_url=remote)
+    assert projects_v2.record_remote(origin, remote, "main")
+    return database.get_project(project_id), projects_v2.get_project_v2_by_origin(origin)
+
+
+def _replicated(remote: str, *, origin: str | None = None, name: str = "Demo", held: bool = True) -> dict:
+    """A project Studio (its own database) added: only its identity and remote replicate here."""
+    origin = origin or auto_link_group_id(remote)
+    pv2 = projects_v2.upsert_project(origin, name=name)
+    projects_v2.record_remote(origin, remote, "main")
+    if held:
+        checkouts_db.upsert_checkout(pv2["id"], PEER, f"/peer/code/{pv2['id']}")
+    return projects_v2.get_project_v2(pv2["id"])
+
+
+def _merged(pv2: dict):
+    from app.core import project_remote
+
+    return project_remote.merged_into(projects_v2.get_project_v2(pv2["id"]))
+
+
+def _listed_ids(client) -> set:
+    return {p["project_v2_id"] for p in client.get("/api/v1/projects/overview").json()["projects"]}
+
+
+def test_paired_workers_adding_ssh_and_https_spellings_get_one_project(client, ws, test_db, network,
+                                                                         monkeypatch):
+    from app.core import project_remote
+
+    ssh = _https(monkeypatch, _bare_remote(ws), url=_SSH)
+    resp = _clone_new(client, ssh)
+    assert resp.status_code == 202, resp.text
+    assert network.calls == []  # the clone never asked the paired worker anything
+    _run_setups()
+    assert client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()["status"] == "done"
+
+    # Meanwhile Studio, with its own database, added the HTTPS spelling.
+    # Both derive one identity, so replication merges them into one row.
+    theirs = _replicated(_HTTPS)
+    assert theirs["id"] == resp.json()["project_v2_id"]
+    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
+    assert [row["id"] for row in projects_v2.list_projects_v2()] == [theirs["id"]]
+    assert project_remote.reconcile_local() == 0  # nothing left to fold
+    assert _listed_ids(client) == {theirs["id"]}
+
+
+def test_a_legacy_ssh_project_folds_into_the_https_project_a_peer_added(client, ws, test_db, network, caplog):
+    import logging
+
+    from app.core import project_remote
+    from app.core.project_resolver import resolve_project_v2
+
+    here, legacy = _legacy_project_here(ws)
+    database.create_session("chat-on-old", "default", project_id="demo", project_v2_id=legacy["id"])
+    theirs = _replicated(_HTTPS)
+    assert theirs["id"] != legacy["id"]
+
+    with caplog.at_level(logging.INFO, logger="app.core.project_remote"):
+        assert project_remote.reconcile_local() >= 1
+    assert _merged(legacy) == theirs["origin"]
+    relinked = database.get_project("demo")
+    assert relinked["link_group_id"] == theirs["origin"]
+    assert relinked["settings"]["link_group_locked"] is True and relinked["settings"]["keep"] == "me"
+    assert relinked["path"] == here["path"] and (ws / "demo" / "README.md").is_file()
+    # The chat bound to the old identity still resolves to it (nothing lost).
+    assert resolve_project_v2(database.get_session("chat-on-old"))["id"] == legacy["id"]
+    assert _listed_ids(client) == {theirs["id"]}
+    merges = [r.getMessage() for r in caplog.records if "merged" in r.getMessage()]
+    assert len(merges) == 1
+    assert legacy["id"] in merges[0] and theirs["id"] in merges[0]
+    assert "git.example.com/example-org/demo" in merges[0] and "@" not in merges[0]
+
+    assert project_remote.reconcile_local() == 0  # idempotent
+    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
+
+
+def test_an_offline_peers_legacy_ssh_project_folds_into_this_workers_project(client, ws, test_db, network,
+                                                                              monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    resp = _clone_new(client, _https(monkeypatch, _bare_remote(ws)))
+    _run_setups()
+    mine = projects_v2.get_project_v2(resp.json()["project_v2_id"])
+    # Studio, offline until now and not upgraded yet, added the SSH spelling under its old id.
+    theirs = _replicated(_SSH, origin=_legacy_id(_SSH))
+    assert theirs["id"] != mine["id"]
+
+    project_remote.reconcile_local()
+    assert _merged(theirs) == mine["origin"]
+    assert _merged(mine) is None
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    assert project_remote.identity_for_remote(_SSH) == (mine["origin"], False)
+    assert _listed_ids(client) == {mine["id"]}
+
+
+def test_spellings_wait_while_any_of_them_is_being_cloned_or_set_up(client, ws, test_db):
+    from app.core import project_remote
+
+    _here, legacy = _legacy_project_here(ws)
+    theirs = _replicated(_HTTPS, held=False)
+    # Studio's first clone of it is running (its op is in Studio's database).
+    assert projects_v2.claim_provisional(theirs["origin"], _token(PEER), expect=None)
+    project_remote.reconcile_local()
+    assert _merged(legacy) is None
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+
+    projects_v2.mark_registered(theirs["origin"])  # Studio's clone finished
+    # A setup of the old identity waits on this worker: still left alone.
+    op = git_ops_db.insert_op(ME, project_setup.SETUP_OP, project_v2_id=legacy["id"],
+                              params={"origin": legacy["origin"]}, op_id=project_setup.new_op_id())
+    project_remote.reconcile_local()
+    assert _merged(legacy) is None
+
+    git_ops_db.complete_op(op["id"])
+    project_remote.reconcile_local()
+    assert _merged(legacy) == theirs["origin"]
+    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
+
+
+def test_a_lone_spelling_is_left_alone_and_a_forgotten_project_returns_only_for_two(client, ws, test_db):
+    from app.core import project_remote
+
+    canonical = auto_link_group_id(_HTTPS)
+    _here, legacy = _legacy_project_here(ws)
+    project_remote.reconcile_local()
+    assert projects_v2.get_project_v2_by_origin(canonical) is None  # a lone old spelling: no new row
+    assert _merged(legacy) is None
+
+    # The owner forgot the HTTPS project earlier: one live old spelling never brings it back.
+    projects_v2.upsert_project(canonical, name="Demo (https)")
+    projects_v2.record_remote(canonical, _HTTPS)
+    projects_v2.set_forgotten(canonical, True)
+    project_remote.reconcile_local()
+    assert projects_v2.get_project_v2_by_origin(canonical)["settings"].get("forgotten") is True
+    assert _merged(legacy) is None
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+
+    # A second live spelling needs one project to join: the canonical one returns.
+    second = _replicated(_SSH_SCHEME, origin=_legacy_id(_SSH_SCHEME), name="Demo two")
+    project_remote.reconcile_local()
+    kept = projects_v2.get_project_v2_by_origin(canonical)
+    assert kept["settings"].get("forgotten") is not True
+    assert _merged(legacy) == canonical and _merged(second) == canonical
+    assert database.get_project("demo")["link_group_id"] == canonical
+
+
+def test_two_old_spellings_with_no_canonical_project_converge_on_a_new_one(client, ws, test_db):
+    from app.core import project_remote
+    from app.db.projects_v2 import stored_remote
+
+    _here, legacy = _legacy_project_here(ws)
+    second = _replicated(_SSH_SCHEME, origin=_legacy_id(_SSH_SCHEME), name="Demo two")
+    project_remote.reconcile_local()
+    kept = projects_v2.get_project_v2_by_origin(auto_link_group_id(_HTTPS))
+    assert kept is not None and kept["name"] in {"Demo", "Demo two"}
+    assert stored_remote(kept)[0] in {_SSH, _SSH_SCHEME}  # a new copy elsewhere can clone it
+    assert _merged(legacy) == kept["origin"] and _merged(second) == kept["origin"]
+    assert database.get_project("demo")["link_group_id"] == kept["origin"]
+    assert _listed_ids(client) == {kept["id"]}
+
+
+def test_an_old_spelling_folds_into_the_project_pointed_at_that_repository(client, ws, test_db):
+    from app.core import project_remote
+
+    pinned = _replicated("https://git.example.com/example-org/demo-old.git", name="Demo")
+    projects_v2.pin_remote(pinned["origin"], _HTTPS, default_branch="main", generation=1,
+                           keep_upstream=False, previous=None)
+    _here, legacy = _legacy_project_here(ws)
+    project_remote.reconcile_local()
+    assert _merged(legacy) == pinned["origin"]
+    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(_HTTPS)) is None
+    assert database.get_project("demo")["link_group_id"] == pinned["origin"]
+
+
+def test_an_old_spelling_still_names_its_own_project(ws, test_db):
+    from app.core import checkout_manager, project_remote
+
+    origin = _legacy_id(_SSH)
+    assert origin != auto_link_group_id(_SSH)
+    projects_v2.upsert_project(origin, name="Demo")
+    assert projects_v2.record_remote(origin, _SSH, "main")
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert checkout_manager._resolve_clone_url(origin, row) == _SSH
+    assert project_remote.remote_names_origin(_SSH, origin)
+    assert project_remote.remote_names_origin(_HTTPS, origin)
+    assert project_setup._repo_info_by_origin()[origin]["clone_url"] == _SSH
+    # Until another spelling of it exists, a checkout of it keeps that identity.
+    assert project_remote.identity_for_remote(_HTTPS) == (origin, False)

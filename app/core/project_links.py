@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,17 +50,67 @@ def normalize_remote_url(url: Optional[str]) -> str:
     return normalized.lower()
 
 
+_SCHEME_REMOTE_RE = re.compile(
+    r"^(https?|ssh|git|git\+ssh|ssh\+git)://(?:[^@/]*@)?([^/:?#]+)(?::(\d*))?(/[^?#]*)?$", re.IGNORECASE)
+_SCP_REMOTE_RE = re.compile(r"^(?:[^@/\s]+@)?([^:/\\\s]+):(?!//)(.+)$")
+_DEFAULT_WEB_PORTS = {"", "80", "443"}
+
+
+def canonical_remote(url: Optional[str]) -> str:
+    """One spelling for every way of writing a network remote.
+
+    HTTPS, HTTP, ``ssh://``, ``git://`` and scp-style (``git@host:owner/repo``)
+    URLs of one repository all become ``https://host/owner/repo``: the login,
+    any SSH port and a default web port are dropped, then
+    :func:`normalize_remote_url` applies. A plain HTTPS URL comes out exactly
+    as :func:`normalize_remote_url` always made it, so its identity never
+    changes. Local paths and ``file://`` URLs are only normalized.
+    """
+    text = (url or "").strip()
+    if not text:
+        return ""
+    match = _SCHEME_REMOTE_RE.match(text)
+    if match:
+        scheme, host, port, path = match.groups()
+        keep_port = scheme.lower() in ("http", "https") and (port or "") not in _DEFAULT_WEB_PORTS
+        return normalize_remote_url(f"https://{host}{':' + port if keep_port else ''}{path or ''}")
+    scp = _SCP_REMOTE_RE.match(text)
+    if scp and len(scp.group(1)) > 1:  # never a Windows drive letter
+        return normalize_remote_url(f"https://{scp.group(1)}/{scp.group(2).lstrip('/')}")
+    return normalize_remote_url(text)
+
+
+def _link_id(normalized: str) -> Optional[str]:
+    if not normalized:
+        return None
+    return "git:" + hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
 def auto_link_group_id(remote_url: Optional[str]) -> Optional[str]:
-    """Deterministic link-group id for a git remote, identical on every install.
+    """Deterministic link-group id for a git remote, identical on every install
+    and for every spelling of it (:func:`canonical_remote`).
 
     Returns ``None`` when there's no usable remote — a local-only project keeps
     its own row and is not auto-grouped.
     """
-    normalized = normalize_remote_url(remote_url)
-    if not normalized:
-        return None
-    digest = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-    return f"git:{digest}"
+    return _link_id(canonical_remote(remote_url))
+
+
+def legacy_link_group_id(remote_url: Optional[str]) -> Optional[str]:
+    """The id older versions derived from this exact spelling (no canonical
+    form): what a project first registered under SSH, say, is still keyed by."""
+    return _link_id(normalize_remote_url(remote_url))
+
+
+def remote_link_ids(remote_url: Optional[str]) -> set:
+    """Every identity ``remote_url`` names: its id and its spelling's older id."""
+    return {gid for gid in (auto_link_group_id(remote_url), legacy_link_group_id(remote_url)) if gid}
+
+
+def same_remote(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two remote URLs are one repository, in any spelling."""
+    left = canonical_remote(a)
+    return bool(left) and left == canonical_remote(b)
 
 
 def is_link_locked(project: Optional[Dict[str, Any]]) -> bool:

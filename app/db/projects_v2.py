@@ -110,11 +110,11 @@ def record_remote(origin: str, remote_url: str, default_branch: Optional[str] = 
     stored one no longer names this origin; the branch only when absent or
     when the URL is being replaced. Returns whether the row changed.
     """
-    from app.core.project_links import auto_link_group_id
+    from app.core.project_links import remote_link_ids
 
     if not origin or not remote_url:
         return False
-    if origin.startswith("git:") and auto_link_group_id(remote_url) != origin:
+    if origin.startswith("git:") and origin not in remote_link_ids(remote_url):
         return False  # never store another repository's remote on this identity
     with get_db() as conn:
         cursor = conn.cursor()
@@ -131,7 +131,7 @@ def record_remote(origin: str, remote_url: str, default_branch: Optional[str] = 
             # put it back.
             return False
         patch: Dict[str, Any] = {}
-        if stored_url is None or (origin.startswith("git:") and auto_link_group_id(stored_url) != origin):
+        if stored_url is None or (origin.startswith("git:") and origin not in remote_link_ids(stored_url)):
             patch[REMOTE_URL_KEY] = remote_url
             if default_branch and default_branch != stored_branch:
                 patch[DEFAULT_BRANCH_KEY] = default_branch

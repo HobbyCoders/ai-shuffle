@@ -92,22 +92,31 @@ def merged_into(pv2: Optional[Dict[str, Any]]) -> Optional[str]:
 def remote_names_origin(url: Optional[str], origin: str, pv2: Optional[Dict[str, Any]] = None) -> bool:
     """Whether ``url`` is this identity's repository.
 
-    A ``git:`` origin is the hash of the remote it was first seen with; once an
-    owner points the project at another repository, the pinned remote names it
-    too. Pass ``pv2`` when it is already loaded.
+    A ``git:`` origin is the hash of the remote it was first seen with (in
+    any spelling, or that exact spelling for an identity an older version
+    keyed); once an owner points the project at another repository, the
+    pinned remote names it too. Pass ``pv2`` when it is already loaded.
     """
-    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.core.project_links import remote_link_ids, same_remote
+    from app.db.projects_v2 import stored_remote
 
     if not url or not origin:
         return False
-    if origin.startswith("git:") and auto_link_group_id(url) == origin:
+    if origin.startswith("git:") and origin in remote_link_ids(url):
         return True
     if pv2 is None:
         from app.db import projects_v2
 
         pv2 = projects_v2.get_project_v2_by_origin(origin)
-    pinned = pinned_remote(pv2) if pv2 and pv2.get("origin") == origin else None
-    return bool(pinned) and normalize_remote_url(pinned) == normalize_remote_url(url)
+    if not pv2 or pv2.get("origin") != origin:
+        return False
+    pinned = pinned_remote(pv2)
+    if pinned:
+        return same_remote(pinned, url)
+    # An identity keyed by an older spelling: its stored remote, in any spelling.
+    stored, _branch = stored_remote(pv2)
+    return (origin.startswith("git:") and bool(stored) and origin in remote_link_ids(stored)
+            and same_remote(stored, url))
 
 
 def _pinned_rows() -> List[Dict[str, Any]]:
@@ -119,27 +128,66 @@ def _pinned_rows() -> List[Dict[str, Any]]:
 def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     """``(origin, locked)`` a checkout with remote ``url`` belongs to, or None.
 
-    The remote's own ``git:`` id unless a project was pointed at this remote
-    (then that project, ``locked`` so auto-linking keeps it there) or the
-    remote's own project was merged into another one.
+    The remote's own ``git:`` id (the same for every spelling of it) unless a
+    project was pointed at this remote (then that project, ``locked`` so
+    auto-linking keeps it there) or the remote's own project was merged into
+    another one. While only an older version's identity for this exact
+    spelling is in use, a checkout joins that project: it moves only when
+    :func:`converge_spellings` merges it.
     """
-    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.core.project_links import auto_link_group_id, legacy_link_group_id, same_remote
     from app.db import projects_v2
 
     derived = auto_link_group_id(url)
     if not derived:
         return None
+    legacy = legacy_link_group_id(url)
     try:
-        wanted = normalize_remote_url(url)
         for row in _pinned_rows():  # a current pin beats an older merge
-            if row["origin"] != derived and normalize_remote_url(pinned_remote(row)) == wanted:
+            if row["origin"] not in (derived, legacy) and same_remote(pinned_remote(row), url):
                 return row["origin"], True
-        target = merged_into(projects_v2.get_project_v2_by_origin(derived))
+        canonical = projects_v2.get_project_v2_by_origin(derived)
+        target = merged_into(canonical)
         if target:
             return target, True
+        if canonical is None or _forgotten(canonical):
+            if legacy and legacy != derived:
+                old = projects_v2.get_project_v2_by_origin(legacy)
+                target = merged_into(old)
+                if target:
+                    return target, True
+                if old is not None and not _forgotten(old):
+                    return legacy, False
+            # Another spelling's project, when it is the only one in use.
+            others = _spelling_rows(url)
+            if len(others) == 1:
+                return others[0]["origin"], False
     except Exception:  # noqa: BLE001 - fall back to the remote's own identity
         logger.debug("identity_for_remote: lookup failed", exc_info=True)
     return derived, False
+
+
+def _spelling_rows(url: str) -> List[Dict[str, Any]]:
+    """Listed projects an older version keyed by another spelling of ``url``:
+    not merged, not pinned, and still recording that spelling."""
+    from app.core.project_links import auto_link_group_id, remote_link_ids, same_remote
+    from app.db import projects_v2
+
+    derived = auto_link_group_id(url)
+    out = []
+    for row in projects_v2.list_projects_v2():
+        origin = row.get("origin") or ""
+        if (origin == derived or not origin.startswith("git:") or _forgotten(row) or merged_into(row)
+                or pinned_remote(row)):
+            continue
+        stored = projects_v2.stored_remote(row)[0]
+        if stored and origin in remote_link_ids(stored) and same_remote(stored, url):
+            out.append(row)
+    return out
+
+
+def _forgotten(pv2: Optional[Dict[str, Any]]) -> bool:
+    return _settings(pv2).get("forgotten") is True
 
 
 def clone_url_for(pv2: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -430,16 +478,116 @@ def _fold_base_checkout(duplicate_origin: str, into_origin: str) -> Dict[str, An
     return {"folded": 0}
 
 
+def _first_clone_running(pv2: Dict[str, Any]) -> bool:
+    """Whether a first clone's provisional mark on ``pv2`` may still be live.
+
+    An op this database holds is live until it ends (or goes stale); one it
+    doesn't hold (a paired worker's) counts as live until that worker
+    registers its copy or hides the project, which the synced row shows.
+    """
+    from app.db import git_ops as git_ops_db
+    from app.db import projects_v2
+
+    owner = projects_v2.provisional_token(pv2)
+    if owner is None or _forgotten(pv2):
+        return False
+    op = git_ops_db.get_op(owner["op_id"])
+    if op is None:
+        return True
+    return not (op.get("status") in git_ops_db.TERMINAL_STATUSES or git_ops_db._is_stale_running(op))
+
+
+def converge_spellings() -> int:
+    """Merge projects that are one repository under different spellings (sync).
+
+    Older versions keyed a project by the exact spelling of its remote, so
+    the same repository added over SSH on one worker and HTTPS on another
+    became two projects. Every row of one repository (its pinned remote, else
+    its stored one, compared by :func:`~app.core.project_links.canonical_remote`)
+    is marked ``merged_into`` one kept project: the project pointed at that
+    repository if there is one, else the repository's own identity
+    (:func:`~app.core.project_links.auto_link_group_id`), created when no
+    worker has it yet. Each worker then relinks its copies on its own
+    (:func:`fold_local`); chats bound to a merged row keep resolving.
+
+    Deterministic, so workers that each run it end up with the same rows; it
+    never waits on another worker. A repository is left for a later pass
+    while any of its rows is a first clone in progress or being set up here,
+    or when the target is unclear (two pinned rows, a kept identity merged or
+    pointed elsewhere). A lone live row is never touched. Returns how many
+    rows it merged.
+    """
+    from app.core.project_links import auto_link_group_id, canonical_remote, remote_link_ids
+    from app.core.project_setup import SETUP_OP
+    from app.db import git_ops as git_ops_db
+    from app.db import projects_v2
+
+    rows = projects_v2.list_projects_v2()
+    by_origin = {row["origin"]: row for row in rows if row.get("origin")}
+    groups: Dict[str, List[Tuple[Dict[str, Any], str]]] = {}
+    for row in rows:
+        origin = row.get("origin") or ""
+        if not origin.startswith("git:") or _forgotten(row) or merged_into(row):
+            continue
+        pinned = pinned_remote(row)
+        url = pinned or projects_v2.stored_remote(row)[0]
+        if not url or (not pinned and origin not in remote_link_ids(url)):
+            continue
+        key = canonical_remote(url)
+        if key.startswith("https://"):
+            groups.setdefault(key, []).append((row, url))
+
+    merged = 0
+    for key, members in sorted(groups.items()):
+        if len(members) < 2:
+            continue
+        pinned_members = [row for row, _url in members if pinned_remote(row)]
+        if len(pinned_members) > 1:
+            continue
+        if pinned_members:
+            target, reason = pinned_members[0]["origin"], "pointed at this repository"
+        else:
+            target, reason = auto_link_group_id(key), "same repository, another spelling"
+        kept = by_origin.get(target)
+        if kept is not None and not pinned_members and (merged_into(kept) or pinned_remote(kept)):
+            continue  # the identity was merged or moved elsewhere: leave it to the owner
+        watched = [row for row, _url in members] + ([kept] if kept is not None else [])
+        if any(_first_clone_running(row) for row in watched):
+            continue
+        ids = sorted({projects_v2.project_v2_id_for_origin(row["origin"]) for row in watched}
+                     | {projects_v2.project_v2_id_for_origin(target)})
+        if git_ops_db.list_inflight_for_projects(SETUP_OP, ids):
+            continue
+        if kept is None:
+            oldest, url = min(members, key=lambda m: (str(m[0].get("created_at") or ""), m[0]["id"]))
+            projects_v2.upsert_project(target, name=oldest.get("name") or None)
+            projects_v2.record_remote(target, url, projects_v2.stored_remote(oldest)[1])
+        elif _forgotten(kept):
+            projects_v2.set_forgotten(target, False)
+        for row, _url in members:
+            if row["origin"] != target and projects_v2.mark_merged(row["origin"], target):
+                merged += 1
+                logger.info("project merged: %s -> %s (%s, %s)", row["id"],
+                            projects_v2.project_v2_id_for_origin(target), key, reason)
+    return merged
+
+
 def reconcile_local() -> int:
-    """Switch every copy on this worker that is not on its project's pinned
-    remote yet, and fold merged duplicates (sync). Returns how many projects
-    it changed; a copy that just failed waits :data:`RETRY_FAILED_AFTER`.
+    """Merge spellings of one repository (:func:`converge_spellings`), switch
+    every copy on this worker that is not on its project's pinned remote yet,
+    and fold merged duplicates (sync). Returns how many projects it changed; a
+    copy that just failed waits :data:`RETRY_FAILED_AFTER`.
     """
     from app.core.project_setup import _me, _origin_of, _own_project_rows
     from app.db import checkouts as checkouts_db
     from app.db import projects_v2
 
     me = _me()
+    try:
+        converged = converge_spellings()
+    except Exception:  # noqa: BLE001 - retried on the next pass
+        logger.warning("project remote: merging spellings failed", exc_info=True)
+        converged = 0
 
     def held() -> Dict[str, Dict[str, Any]]:
         origins = {_origin_of(row) for row in _own_project_rows()}
@@ -449,7 +597,7 @@ def reconcile_local() -> int:
                 if row.get("origin") in origins or row.get("id") in base_ids}
 
     by_origin = held()
-    changed = 0
+    changed = converged
     for origin, pv2 in by_origin.items():
         target = merged_into(pv2)
         if target and projects_v2.get_project_v2_by_origin(target):
@@ -576,7 +724,7 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
 
     Returns what to apply. Raises :class:`RepositoryChangeError`.
     """
-    from app.core.project_links import auto_link_group_id, normalize_remote_url
+    from app.core.project_links import auto_link_group_id, remote_link_ids, same_remote
     from app.core.project_resolver import resolve_catalog_project
     from app.db import projects_v2
 
@@ -588,26 +736,28 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
     if merged_into(pv2):
         raise RepositoryChangeError("This project was merged into another one. Change that project instead.")
     previous = current_remote(pv2)
-    wanted = normalize_remote_url(clean)
     for row in _pinned_rows():
-        if row["origin"] != origin and normalize_remote_url(pinned_remote(row)) == wanted:
+        if row["origin"] != origin and same_remote(pinned_remote(row), clean):
             raise RepositoryChangeError(f"The project “{row.get('name')}” already uses that repository.")
     default_branch = _probe(clean)
     duplicate = None
     derived = auto_link_group_id(clean)
-    if derived and derived != origin:
-        dup = projects_v2.get_project_v2_by_origin(derived)
+    # The repository's own identity, then its spelling's older one.
+    for candidate in sorted(remote_link_ids(clean), key=lambda gid: gid != derived):
+        if candidate == origin:
+            continue
+        dup = projects_v2.get_project_v2_by_origin(candidate)
         dup_now = pinned_remote(dup)
         # Only a project still on that repository is a duplicate: one that
         # since moved to another repository is a live project of its own.
-        if dup is not None and not merged_into(dup) and (dup_now is None or normalize_remote_url(dup_now) == wanted):
-            duplicate = derived
-            projects_v2.mark_merged(derived, origin)
+        if dup is not None and not merged_into(dup) and (dup_now is None or same_remote(dup_now, clean)):
+            duplicate = duplicate or candidate
+            projects_v2.mark_merged(candidate, origin)
     gen = generation(pv2) + 1
     projects_v2.pin_remote(
         origin, clean, default_branch=default_branch, generation=gen,
         keep_upstream=keep_upstream,
-        previous=previous if previous and normalize_remote_url(previous) != wanted else None,
+        previous=previous if previous and not same_remote(previous, clean) else None,
     )
     return {"project_v2_id": pv2["id"], "origin": origin, "name": pv2.get("name"), "remote_url": clean,
             "generation": gen, "keep_upstream": keep_upstream, "merged_origin": duplicate,

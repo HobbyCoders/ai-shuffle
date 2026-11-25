@@ -212,7 +212,7 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
     """``{origin: {clone_url, default_branch}}`` from git records this DB holds,
     then the remotes stored on the replicated ``projects_v2`` rows (which still
     know a project no local record has any more)."""
-    from app.core.project_links import auto_link_group_id
+    from app.core.project_links import remote_link_ids
     from app.core.scrub import strip_url_userinfo
     from app.db import projects_v2
     from app.db.base import get_db, parse_jsonb
@@ -235,8 +235,7 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
             continue
         info = {"clone_url": url, "default_branch": row["default_branch"] or None}
         out.setdefault(row["link_group_id"] or ("local:" + str(row["id"])), info)
-        derived = auto_link_group_id(url)
-        if derived:
+        for derived in sorted(remote_link_ids(url)):
             out.setdefault(derived, info)
     for row in stored_rows:
         url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
@@ -247,7 +246,7 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
             # worker that has not applied it yet still records.
             out[origin] = {"clone_url": url, "default_branch": branch}
             continue
-        if not url or (origin.startswith("git:") and auto_link_group_id(url) != origin):
+        if not url or (origin.startswith("git:") and origin not in remote_link_ids(url)):
             continue
         out.setdefault(origin, {"clone_url": url, "default_branch": branch})
     return out
@@ -354,7 +353,7 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     that remote. Any other origin can only name one through the remote stored
     on its replicated ``projects_v2`` row.
     """
-    from app.core.project_links import normalize_remote_url
+    from app.core.project_links import same_remote
     from app.db import projects_v2
 
     from app.core.project_remote import remote_names_origin
@@ -362,7 +361,7 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     if origin.startswith("git:"):
         return remote_names_origin(clean, origin)
     stored, _branch = projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(origin))
-    return bool(stored) and normalize_remote_url(stored) == normalize_remote_url(clean)
+    return bool(stored) and same_remote(stored, clean)
 
 
 def _validate_clone_url(url: str, origin: str) -> str:
@@ -726,7 +725,7 @@ async def remove_local(project_v2_id: str) -> Dict[str, Any]:
 
 def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
     from app.core.git_service import git_service
-    from app.core.project_links import normalize_remote_url
+    from app.core.project_links import same_remote
 
     if not path.is_dir() or not git_service.is_git_repo(str(path)):
         return False
@@ -737,7 +736,7 @@ def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
         from app.core.project_remote import remote_names_origin
 
         return remote_names_origin(remote, origin)
-    return bool(clone_url) and normalize_remote_url(remote) == normalize_remote_url(clone_url)
+    return bool(clone_url) and same_remote(remote, clone_url)
 
 
 def _is_empty_dir(path: Path) -> bool:
@@ -1068,9 +1067,9 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
         if pinned and params.get("project_id"):
             # A new project clones exactly the repository the owner entered.
-            from app.core.project_links import normalize_remote_url
+            from app.core.project_links import same_remote
 
-            if normalize_remote_url(pinned) != normalize_remote_url(clone_url):
+            if not same_remote(pinned, clone_url):
                 raise SetupError(MOVED, moved_message(pinned))
         elif pinned:
             try:

@@ -76,6 +76,66 @@ def test_auto_link_group_id_none_without_remote():
 
 
 # ---------------------------------------------------------------------------
+# One identity for every spelling of a network remote
+# ---------------------------------------------------------------------------
+
+_DEMO = "https://github.com/example-org/demo"
+
+
+@pytest.mark.parametrize("spelling", [
+    "https://github.com/example-org/demo.git",
+    "https://github.com/Example-Org/Demo/",
+    "HTTPS://GitHub.com/example-org/demo",
+    "http://github.com/example-org/demo.git",
+    "https://someone@github.com/example-org/demo.git",
+    "https://someone:hunter2@github.com/example-org/demo.git",
+    "https://github.com:443/example-org/demo",
+    "git@github.com:example-org/demo.git",
+    "git@github.com:/example-org/demo.git",
+    "github.com:example-org/demo",
+    "ssh://git@github.com/example-org/demo.git",
+    "ssh://git@github.com:22/example-org/demo.git",
+    "git+ssh://git@github.com/example-org/demo",
+    "git://github.com/example-org/demo.git",
+])
+def test_every_network_spelling_of_a_remote_has_one_identity(spelling):
+    assert project_links.canonical_remote(spelling) == _DEMO
+    assert auto_link_group_id(spelling) == auto_link_group_id(_DEMO)
+
+
+def test_an_https_identity_is_the_one_it_always_had():
+    # Plain HTTPS rows keep their origin (and projects_v2 id): only other
+    # spellings move. sha256("https://github.com/example-org/demo")[:16].
+    assert auto_link_group_id("https://github.com/Example-Org/demo.git") == "git:7f0224ffa6b6d980"
+    assert project_links.legacy_link_group_id("https://github.com/example-org/demo") == "git:7f0224ffa6b6d980"
+
+
+def test_spellings_that_are_other_repositories_stay_apart():
+    assert auto_link_group_id("git@github.com:example-org/demo") != auto_link_group_id(
+        "git@github.com:example-org/other")
+    assert auto_link_group_id("https://git.example.com:8443/example-org/demo") != auto_link_group_id(
+        "https://git.example.com/example-org/demo")
+    assert auto_link_group_id("git@git.example.com:example-org/demo") != auto_link_group_id(
+        "git@github.com:example-org/demo")
+
+
+@pytest.mark.parametrize("path", ["/srv/repos/demo.git", "file:///srv/repos/demo.git",
+                                  "C:/repos/demo.git", "C:\\repos\\demo.git", "../demo.git"])
+def test_a_local_repository_keeps_its_old_identity(path):
+    assert project_links.canonical_remote(path) == normalize_remote_url(path)
+    assert auto_link_group_id(path) == project_links.legacy_link_group_id(path)
+
+
+def test_a_remote_names_its_canonical_and_its_old_identity():
+    ssh = "git@github.com:example-org/demo.git"
+    ids = project_links.remote_link_ids(ssh)
+    assert ids == {auto_link_group_id(_DEMO), project_links.legacy_link_group_id(ssh)}
+    assert len(ids) == 2
+    assert project_links.remote_link_ids(_DEMO) == {auto_link_group_id(_DEMO)}
+    assert project_links.remote_link_ids("") == set()
+
+
+# ---------------------------------------------------------------------------
 # is_link_locked
 # ---------------------------------------------------------------------------
 
