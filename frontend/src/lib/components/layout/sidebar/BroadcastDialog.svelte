@@ -147,7 +147,7 @@
 {#if open}
 	<div
 		use:portal
-		use:focusTrap={{ initial: 'textarea' }}
+		use:focusTrap={{ initial: 'textarea:not([disabled])' }}
 		class="ui-overlay ui-surface"
 		role="dialog"
 		aria-modal="true"
