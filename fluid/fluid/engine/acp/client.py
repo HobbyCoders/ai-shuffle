@@ -17,18 +17,31 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import signal
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from fluid.tools.job_object import assign_kill_on_close_job, close_job
+
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
-# A single update can carry a whole file diff or an embedded image.
+# A single update can carry a whole file diff or an embedded image. A longer
+# line cannot be read whole, so the connection ends (``_read_loop``).
 STREAM_LINE_LIMIT = 16 * 1024 * 1024
+# Every write to the agent's stdin finishes within this or the connection is
+# taken as broken: an agent that stopped reading must not hold the write lock
+# (and with it ``session/cancel``) forever.
+WRITE_TIMEOUT = 30.0
+# ``initialize`` and other replies the engine cannot go on without.
+INITIALIZE_TIMEOUT = 60.0
+# ``close``: how long the agent gets to exit after stdin closes, and how long
+# its tree gets to die after it is killed. Kept short: the host closes an
+# engine under its own deadline (``AcpLoop.aclose``).
+CLOSE_GRACE = 1.0
+_GROUP_GRACE = 0.5
+_KILL_WAIT = 1.0
 # JSON-RPC / ACP error codes the client acts on.
 AUTH_REQUIRED = -32000
 METHOD_NOT_FOUND = -32601
@@ -57,6 +70,13 @@ class AcpError(Exception):
 class AcpConnectionClosed(AcpError):
     def __init__(self, detail: str = "the agent process exited") -> None:
         super().__init__(INTERNAL_ERROR, detail)
+
+
+class AcpTimeout(AcpError):
+    """The agent sent no reply to a request within its timeout."""
+
+    def __init__(self, method: str, timeout: float) -> None:
+        super().__init__(INTERNAL_ERROR, f"the agent did not answer within {timeout:g}s", method=method)
 
 
 class RpcFailure(Exception):
@@ -113,18 +133,40 @@ class AgentInfo:
         return isinstance(session, Mapping) and "systemPrompt" in session
 
 
-def _terminate_tree(proc: asyncio.subprocess.Process, sig: int) -> None:
+async def _end_agent(proc: asyncio.subprocess.Process, grace: float) -> None:
+    """Let the agent exit on its closed stdin for ``grace`` seconds, then end
+    its tree; and end what is left of its process group either way.
+
+    The agent runs in its own process group (POSIX), and an MCP server or a
+    shell command it started stays in that group after the agent itself is
+    gone. ``kill_tree`` (via ``_kill_cli_tree``) reaches the group while the
+    agent lives and ``_end_process_group`` once it has exited. Cancelled
+    during the grace (the host's deadline came first), the tree is killed at
+    once: nothing else holds its handle. Windows' kill-on-close job is closed
+    by the caller.
+    """
+    from fluid.engine.delegated import _end_process_group, _kill_cli_tree
+
     if proc.returncode is not None:
+        await _end_process_group(proc.pid, grace=_GROUP_GRACE)
         return
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        if sys.platform != "win32":
-            os.killpg(proc.pid, sig)
-            return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        if sig == getattr(signal, "SIGKILL", None):
-            proc.kill()
-        else:
-            proc.terminate()
+    with contextlib.suppress(Exception):
+        if proc.stdin is not None and not proc.stdin.is_closing():
+            proc.stdin.close()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+        await _end_process_group(proc.pid, grace=_GROUP_GRACE)
+        return
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+    except asyncio.CancelledError:
+        logger.info("ending the ACP agent tree: its close was cancelled during the exit grace")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(_kill_cli_tree(proc, group_grace=0), timeout=_KILL_WAIT)
+        raise
+    logger.info("ending the ACP agent tree: still running %.1fs after its stdin closed", grace)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(_kill_cli_tree(proc, group_grace=_GROUP_GRACE), timeout=_KILL_WAIT)
 
 
 class AcpConnection:
@@ -153,6 +195,8 @@ class AcpConnection:
         self.on_request = on_request
         self.stderr_sink = stderr_sink
         self._proc: asyncio.subprocess.Process | None = None
+        # Windows: a kill-on-close job holding the agent and all it starts.
+        self._job: int | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_id = 0
         self._reader: asyncio.Task[None] | None = None
@@ -189,6 +233,9 @@ class AcpConnection:
             limit=STREAM_LINE_LIMIT,
             **kwargs,
         )
+        # Windows has no process group to end once the agent is gone, and
+        # ``taskkill /T`` cannot reach an orphaned grandchild: the job can.
+        self._job = assign_kill_on_close_job(self._proc.pid)
         self._reader = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
@@ -201,60 +248,86 @@ class AcpConnection:
         }
         if client_info:
             params["clientInfo"] = dict(client_info)
-        result = await self.request("initialize", params)
+        result = await self.request("initialize", params, timeout=INITIALIZE_TIMEOUT)
         self.info = AgentInfo(result if isinstance(result, dict) else {})
         return self.info
 
-    async def close(self, *, grace: float = 3.0) -> None:
-        """Close stdin, give the agent ``grace`` seconds, then end its tree."""
-        proc = self._proc
-        if proc is not None and proc.returncode is None:
-            with contextlib.suppress(Exception):
-                if proc.stdin is not None and not proc.stdin.is_closing():
-                    proc.stdin.close()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=grace)
-            except (asyncio.TimeoutError, Exception):
-                _terminate_tree(proc, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=grace)
-                except (asyncio.TimeoutError, Exception):
-                    _terminate_tree(proc, getattr(signal, "SIGKILL", signal.SIGTERM))
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(proc.wait(), timeout=grace)
-        self._fail_pending(AcpConnectionClosed("the connection was closed"))
+    def abort(self, detail: str) -> None:
+        """Take the connection as broken: every waiting caller fails with
+        ``detail`` and ``alive`` turns False, so the owner's ``close`` ends
+        the process and a later turn starts a new one."""
+        self._fail_pending(AcpConnectionClosed(detail))
         self._closed.set()
-        for task in (self._reader, self._stderr_task, *self._handlers):
-            if task is not None and not task.done():
-                task.cancel()
+
+    async def close(self, *, grace: float = CLOSE_GRACE) -> None:
+        """Close stdin, give the agent ``grace`` seconds, then end its tree.
+
+        The tree goes also when the agent already exited on its own, and when
+        this call is cancelled (``_end_agent``).
+        """
+        proc, job = self._proc, self._job
+        self._job = None
+        try:
+            if proc is not None:
+                await _end_agent(proc, grace)
+        finally:
+            # Windows: whatever the agent started, orphans included, ends here.
+            close_job(job)
+            self._shut_down()
         for task in (self._reader, self._stderr_task, *self._handlers):
             if task is not None:
                 with contextlib.suppress(BaseException):
                     await task
 
+    def _shut_down(self) -> None:
+        self._fail_pending(AcpConnectionClosed("the connection was closed"))
+        self._closed.set()
+        for task in (self._reader, self._stderr_task, *self._handlers):
+            if task is not None and not task.done():
+                task.cancel()
+
     # ─── outgoing ───────────────────────────────────────────────────────
 
-    async def _write(self, message: dict[str, Any]) -> None:
+    async def _write(self, message: dict[str, Any], *, timeout: float = WRITE_TIMEOUT) -> None:
         proc = self._proc
         if proc is None or proc.stdin is None or proc.returncode is not None or self._closed.is_set():
             raise AcpConnectionClosed()
+        stdin = proc.stdin
         data = (json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
-        async with self._write_lock:
-            try:
-                proc.stdin.write(data)
-                await proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, RuntimeError) as exc:
-                raise AcpConnectionClosed(f"could not write to the agent: {exc!r}") from exc
+
+        async def write() -> None:
+            async with self._write_lock:
+                stdin.write(data)
+                await stdin.drain()
+
+        try:
+            await asyncio.wait_for(write(), timeout)
+        except asyncio.TimeoutError as exc:
+            # The agent stopped reading (or a writer ahead of this one is
+            # stuck). A frame may be half written: nothing more can be sent.
+            detail = f"the agent did not read its input within {timeout:g}s"
+            self.abort(detail)
+            raise AcpConnectionClosed(detail) from exc
+        except (BrokenPipeError, ConnectionResetError, RuntimeError) as exc:
+            raise AcpConnectionClosed(f"could not write to the agent: {exc!r}") from exc
 
     async def request(self, method: str, params: Mapping[str, Any] | None = None, *,
-                      timeout: float | None = None) -> Any:
+                      timeout: float | None = None, on_sent: Callable[[], None] | None = None) -> Any:
+        """Send a request and wait for its reply; ``timeout`` bounds the wait
+        for the reply (None: as long as it takes, for ``session/prompt``).
+        ``on_sent`` runs once the request is written, before the reply."""
         self._next_id += 1
         rid = self._next_id
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
         try:
             await self._write({"jsonrpc": "2.0", "id": rid, "method": method, "params": dict(params or {})})
-            result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
+            if on_sent is not None:
+                on_sent()
+            try:
+                result = await (asyncio.wait_for(fut, timeout) if timeout else fut)
+            except asyncio.TimeoutError:
+                raise AcpTimeout(method, timeout or 0) from None
         except AcpError as exc:
             if not exc.method:
                 exc.method = method
@@ -262,10 +335,13 @@ class AcpConnection:
             raise
         finally:
             self._pending.pop(rid, None)
+            if fut.done() and not fut.cancelled():
+                fut.exception()  # failed (``abort``) while its write was still under way
         return result
 
-    async def notify(self, method: str, params: Mapping[str, Any] | None = None) -> None:
-        await self._write({"jsonrpc": "2.0", "method": method, "params": dict(params or {})})
+    async def notify(self, method: str, params: Mapping[str, Any] | None = None, *,
+                     timeout: float = WRITE_TIMEOUT) -> None:
+        await self._write({"jsonrpc": "2.0", "method": method, "params": dict(params or {})}, timeout=timeout)
 
     # ─── incoming ───────────────────────────────────────────────────────
 
@@ -277,13 +353,20 @@ class AcpConnection:
     async def _read_loop(self) -> None:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
+        detail = "the agent process exited"
         try:
             while True:
                 try:
                     line = await proc.stdout.readline()
                 except (ValueError, asyncio.LimitOverrunError):
-                    logger.warning("ACP agent wrote a line over %d bytes; dropped", STREAM_LINE_LIMIT)
-                    continue
+                    # The line could be any message, a reply included: dropping
+                    # it could leave its caller waiting forever. The stream is
+                    # not trusted past it, so the connection ends, and the next
+                    # turn starts a new process on the saved session.
+                    logger.warning("ACP agent wrote a line over %d bytes; ending the connection",
+                                   STREAM_LINE_LIMIT)
+                    detail = f"the agent sent a message over {STREAM_LINE_LIMIT // (1024 * 1024)} MiB"
+                    break
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
@@ -298,10 +381,7 @@ class AcpConnection:
                     await self._dispatch(message)
         finally:
             tail = " | ".join(self.stderr_tail[-3:])
-            self._fail_pending(AcpConnectionClosed(
-                "the agent process exited" + (f": {tail}" if tail else "")
-            ))
-            self._closed.set()
+            self.abort(detail + (f": {tail}" if tail else ""))
 
     async def _read_stderr(self) -> None:
         proc = self._proc

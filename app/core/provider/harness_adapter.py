@@ -648,7 +648,11 @@ class HarnessAdapter(ProviderAdapter):
         kind = await run_sync(_decide_provider_kind, options)
         self._is_delegated = kind == "delegated"
         self._provider_kind = kind
-        if self._is_delegated:
+        if self._is_delegated or kind == _ANTIGRAVITY_KIND:
+            # An external agent (the claude CLI, an ACP agent) keeps its own
+            # context: the engine never builds a prompt from fluid's nodes, so
+            # the store holds metadata only and reads node bodies from the
+            # database when asked (a retry's point read, history, memory).
             from app.core.provider.fluid_pg_store import PgFluidStore
             if isinstance(store, PgFluidStore):
                 store.cache_nodes = False
@@ -5088,6 +5092,14 @@ class HarnessAdapter(ProviderAdapter):
                     "content": getattr(event, "message", "") or "",
                     **{key: data.get(key) for key in (
                         "expected", "effective", "source", "cli_version")},
+                })]
+            if kind == "agent_context_reset":
+                # An external agent (Antigravity over ACP) could not reopen
+                # its conversation and started a new one without the earlier
+                # context: the chat shows history the model no longer has.
+                return [SystemMessage(subtype="informational", data={
+                    "content": getattr(event, "message", "") or "",
+                    "level": "warning",
                 })]
             if kind != "compaction_failed":
                 # Audit-only findings (the bash-first steer, what a compaction
