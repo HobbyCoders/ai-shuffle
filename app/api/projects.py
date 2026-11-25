@@ -241,6 +241,7 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
 
     for project in projects:
         project["session_count"] = session_counts.get(project["id"], 0)
+        _with_folder_revision(project)
         # Resolve relative paths to absolute for display
         if not is_absolute_project_path(project["path"]):
             project["path"] = get_project_working_dir(project)
@@ -268,6 +269,7 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
             detail=f"Project not found: {project_id}"
         )
     project["session_count"] = session_count
+    _with_folder_revision(project)
     # Resolve relative paths to absolute for display
     if not is_absolute_project_path(project["path"]):
         project["path"] = get_project_working_dir(project)
@@ -430,12 +432,18 @@ async def update_project(
     token: str = Depends(require_admin)
 ):
     """Update a project - Admin only"""
-    from app.core.project_folders import retarget, revision
+    from app.core.project_folders import STALE_FOLDER, retarget, revision
 
     def _update():
         existing = database.get_project(project_id)
         if not existing or existing.get("instance_id") not in (None, settings.effective_instance_id):
             raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        # An editor that names the revision it opened on never overwrites a
+        # change made since (another window's folder save). Without one, the
+        # row just read is the expectation, as older clients always had.
+        expected = request.expected_revision
+        if expected is not None and expected != revision(existing):
+            raise HTTPException(status_code=409, detail=STALE_FOLDER)
         metadata = {
             "name": request.name,
             "description": request.description,
@@ -444,13 +452,25 @@ async def update_project(
         # Metadata-only clients can resend the stored path even if it no longer
         # exists. Actual moves share the Workers endpoint's safety checks.
         if request.path and request.path != existing.get("path"):
-            return retarget(existing, request.path, revision(existing), **metadata), True
+            return retarget(existing, request.path, expected or revision(existing), **metadata), True
         return database.update_project(project_id=project_id, **metadata), False
 
     updated, moved = await run_sync(_update)
     if moved:
         _announce_catalog_change()
-    return updated
+    return _with_folder_revision(updated)
+
+
+def _with_folder_revision(project: Optional[dict]) -> Optional[dict]:
+    """Add this worker's folder edit token to its own row (``Project.folder_revision``).
+
+    Call before a relative ``path`` is resolved for display: the token covers
+    the stored row."""
+    if project and _owned_here(project):
+        from app.core.project_folders import revision
+
+        project["folder_revision"] = revision(project)
+    return project
 
 
 def _owned_here(project: dict) -> bool:
