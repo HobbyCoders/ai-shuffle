@@ -208,6 +208,12 @@ class ClaudeCliMissingError(RuntimeError):
 # What the CLI says when ``--resume`` names a conversation it does not have
 # (CLI 2.1.331: in the failed result's ``errors``; older builds: on stderr).
 _NO_CONVERSATION = "No conversation found with session ID"
+# How much of the CLI's stderr is kept (the newest bytes), only to find that
+# diagnostic; and how long an exiting CLI's last stderr bytes are waited for.
+_STDERR_TAIL_BYTES = 16 * 1024
+_STDERR_SETTLE_S = 1.0
+# The turn's stdout ended without a result frame: the CLI exited or crashed.
+_STREAM_CLOSED = "claude stream closed before result"
 
 
 def _spawn_failure_message(exc: BaseException) -> str:
@@ -1852,6 +1858,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if proc is not None:
                 await self._end_process(proc, grace)
         finally:
+            self._stop_stderr_tail()
             # Windows: whatever the CLI started, orphans included, ends here.
             close_job(job)
             # After the process stops, so session.start cannot recreate it.
@@ -2301,6 +2308,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     # The process is not reused; the next turn runs on a fresh CLI resumed
     # from the saved handle. ``_stop_process`` clears it.
     _stdout_desynced: bool = False
+    # The newest bytes of this CLI's stderr and the task reading them
+    # (``_start_stderr_tail``).
+    _stderr_tail: bytearray | None = None
+    _stderr_task: asyncio.Task[None] | None = None
 
     @property
     def _boundary_steers(self) -> dict[str, list[SteerDelivery]]:
@@ -2604,12 +2615,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=child_env,
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,
         )
+        self._start_stderr_tail(self._proc)
         # Windows has no process group to end once the CLI is gone, and
         # ``taskkill /T`` cannot reach an orphaned grandchild. A kill-on-close
         # job holds the whole tree; _stop_process closes it (#436). A previous
@@ -2642,6 +2654,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._cli_hook_events():
             async with self._stdout_lock:
                 outcome = await self._initialize_cli_hooks()
+            if self._stdout_desynced:
+                # A startup frame overran the line limit: nothing this CLI
+                # prints can be matched to the turn, so it never gets one.
+                await self._stop_process()
+                raise RuntimeError(
+                    f"the Claude CLI wrote a startup frame over the {STREAM_LINE_LIMIT}-byte "
+                    "limit; the turn was not started"
+                )
             if outcome in ("refused", "timeout"):
                 # Preserve the existing contract: losing hook registration
                 # costs the hooks, not a plain chat. Only an existing deny
@@ -2926,11 +2946,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         event; the mapper that saw the result, or None when the retry's CLI
         could not be spawned.
 
-        One retry: when the process was spawned with ``--resume`` and its
-        first turn fails before a single frame is mapped, the handle is what
-        the CLI rejected. The handle is dropped (and cleared in the store),
-        the process restarted without it, and the same user frame replayed
-        into a fresh CLI conversation.
+        One retry: when the process was spawned with ``--resume`` and the CLI
+        says it has no such conversation (:meth:`_resume_handle_rejected`),
+        the handle is dropped (and cleared in the store), the process
+        restarted without it, and the same user frame replayed into a fresh
+        CLI conversation.
         """
         mapper: StreamJsonMapper | None = None
         for attempt in (1, 2):
@@ -2978,6 +2998,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 fast_requested=self._fast_setting(),
             )
             failure: str | None
+            # The CLI went away without a result frame (exited or crashed).
+            crashed = False
             self._live_mapper = mapper
             try:
                 try:
@@ -2986,22 +3008,25 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         "role": "user", "content": _content_to_cli(content),
                     }})
                 except (OSError, RuntimeError) as exc:
-                    # The CLI closed stdin before reading a turn: with a resume
-                    # handle in play that is the rejected-handle exit.
+                    # The CLI closed stdin before reading a turn (an older CLI
+                    # refusing its resume handle exits this way, saying so on
+                    # stderr).
                     failure = f"claude stdin closed before the turn was sent: {exc!r}"
+                    crashed = True
                 else:
                     await self._acknowledge_note()
                     self._peer_admission_open = not self._interrupted.is_set()
                     self._stdin_lane_closed = False  # a retried attempt reopens it
                     async with self._stdout_lock:
                         failure = await self._read_until_result(sid, turn_id, mapper, user_node)
+                    crashed = failure == _STREAM_CLOSED
             finally:
                 self._live_mapper = None
             if failure is None:
                 return mapper
             self._peer_admission_open = False
             self._drop_pending_peers()
-            if attempt == 1 and self._resume_handle_rejected(mapper, failure):
+            if attempt == 1 and await self._resume_handle_rejected(mapper, failure, crashed=crashed):
                 logger.warning(
                     "claude did not accept --resume %s (%s); starting a fresh "
                     "CLI conversation", self._spawn_resume, failure,
@@ -3015,6 +3040,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._stop_process(grace=1.0)
             await self._emit_terminal_with_park(ErrorEvent(
                 session_id=sid, turn_id=turn_id, message=failure,
+                # A CLI that died mid-turn kept its conversation: the next
+                # turn resumes it on a fresh process.
+                retriable=crashed,
                 # A failed result still billed the turn; say what it cost.
                 usage=dict(mapper.failed_usage),
                 cost_usd=mapper.failed_cost_usd,
@@ -3040,15 +3068,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — the result frame still ends the turn
             logger.debug("interrupt after hook stop failed", exc_info=True)
 
-    def _resume_handle_rejected(self, mapper: StreamJsonMapper, failure: str | None = None) -> bool:
+    async def _resume_handle_rejected(
+        self, mapper: StreamJsonMapper, failure: str | None = None, *, crashed: bool = False,
+    ) -> bool:
         """The CLI refused the saved ``--resume`` handle on a resumed process.
 
-        Only explicit evidence counts, because dropping the handle throws the
-        CLI's conversation away: the CLI's own "No conversation found" error
-        (a result frame on current CLIs), or a process that ended before
-        writing any frame (older CLIs print that error to stderr and exit). A
-        provider error (a 503, a dropped connection) comes after the init
-        frame, so a transient failure keeps the handle for the next turn.
+        Only the CLI's own "No conversation found" diagnostic counts, because
+        dropping the handle throws the CLI's conversation away. Current CLIs
+        put it in a failed result frame; older ones print it on stderr and
+        exit, so a ``crashed`` turn waits (bounded) for the exiting CLI's last
+        stderr bytes before looking there. A CLI that crashed or exited
+        without saying so, before or after its init frame, keeps the handle:
+        the turn fails, and the next one resumes the conversation on a fresh
+        CLI. So does a provider error (a 503, a dropped connection).
 
         Never a usage limit: the CLI refuses a resumed turn at the session or
         weekly limit before any frame too, and replaying it into a fresh
@@ -3060,7 +3092,51 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if (self._spawn_resume is None or self._proc_results or mapper.produced_nodes
                 or self._stdout_desynced):
             return False
-        return _NO_CONVERSATION in (failure or "") or not mapper.saw_frame
+        if _NO_CONVERSATION in (failure or ""):
+            return True
+        if crashed:
+            await self._settle_stderr()
+        return _NO_CONVERSATION in self._stderr_text()
+
+    def _start_stderr_tail(self, proc: asyncio.subprocess.Process) -> None:
+        """Read the CLI's stderr for its whole life, keeping the newest
+        ``_STDERR_TAIL_BYTES``. Read continuously, so a chatty CLI never
+        blocks on a full pipe; kept only for :meth:`_resume_handle_rejected`."""
+        tail = self._stderr_tail = bytearray()
+        self._stderr_task = None
+        stream = getattr(proc, "stderr", None)
+        if stream is None:
+            return
+
+        async def drain() -> None:
+            try:
+                while chunk := await stream.read(4096):
+                    tail.extend(chunk)
+                    if len(tail) > _STDERR_TAIL_BYTES:
+                        del tail[:len(tail) - _STDERR_TAIL_BYTES]
+            except (OSError, ValueError):
+                pass  # the pipe broke: the process is going away
+
+        self._stderr_task = asyncio.get_running_loop().create_task(drain())
+
+    async def _settle_stderr(self) -> None:
+        """Give an exiting CLI's stderr reader up to ``_STDERR_SETTLE_S`` to
+        take the last bytes it printed (its pipe closes as the CLI exits)."""
+        task = self._stderr_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), _STDERR_SETTLE_S)
+        except TimeoutError:
+            pass  # held open (a child kept it): judge by what has arrived
+
+    def _stderr_text(self) -> str:
+        return bytes(self._stderr_tail or b"").decode(errors="replace")
+
+    def _stop_stderr_tail(self) -> None:
+        task, self._stderr_task = self._stderr_task, None
+        if task is not None:
+            task.cancel()  # a no-op once the ended CLI's pipe closed
 
     async def _drop_resume_handle(self, sid: str) -> None:
         self.cli_session_id = None
@@ -3923,7 +3999,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if self._stdout_desynced:
                     return (f"the Claude CLI wrote a reply frame over the {STREAM_LINE_LIMIT}-byte "
                             "limit; the turn was stopped")
-                return "claude stream closed before result"
+                return _STREAM_CLOSED
             text = line.decode(errors="replace").strip()
             if not text:
                 continue
@@ -4587,7 +4663,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ``"refused"`` or ``"timeout"``, or ``"closed"`` when the CLI already
         closed stdin or stdout: that process is dying, and the turn reports
         what is wrong with it (a rejected ``--resume`` handle exits this way,
-        and the turn's retry spawns a fresh process).
+        and the turn's retry spawns a fresh process). Also ``"closed"`` when
+        a line overran the stream limit (``_stdout_desynced``), which the
+        caller treats as a failed start.
         """
         assert self._proc is not None and self._proc.stdout is not None
         events = self._cli_hook_events()

@@ -659,10 +659,6 @@ class StreamJsonMapper:
         # ``NEEDS_COMPACTION`` when the failed result was the CLI stopping at
         # the context limit (see :func:`context_outcome`).
         self.failed_outcome: str | None = None
-        # True once this turn mapped any CLI frame. A CLI that refuses
-        # ``--resume`` the old way prints to stderr and exits before writing
-        # one; a resumed CLI hitting a provider error has written its init.
-        self.saw_frame = False
         # The result frame's own text: for a turn that ran a local command
         # (``/compact``) it is the command's output, the only place a refusal
         # such as "Not enough messages to compact." shows up.
@@ -754,7 +750,6 @@ class StreamJsonMapper:
     # ─── frame dispatch ──────────────────────────────────────────────────
 
     def feed(self, frame: dict[str, Any]) -> Mapped:
-        self.saw_frame = True
         ftype = frame.get("type")
         if ftype == "system":
             return self._on_system(frame)

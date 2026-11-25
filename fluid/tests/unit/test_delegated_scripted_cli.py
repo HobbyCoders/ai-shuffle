@@ -412,6 +412,67 @@ async def test_the_cli_saying_no_conversation_found_replaces_the_handle(tmp_path
         await run.aclose()
 
 
+async def test_an_older_cli_saying_no_conversation_on_stderr_replaces_the_handle(tmp_path) -> None:
+    """Older CLIs print the refusal on stderr and exit instead of writing a
+    result frame: that diagnostic is evidence too, and the turn replays on a
+    fresh CLI conversation."""
+    refusal = {"op": "exit", "code": 1, "stderr": "No conversation found with session ID: cli-prev"}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[refusal]],
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        starts = run.records("start")
+        assert len(starts) == 2
+        assert "--resume" not in starts[-1]["argv"]
+        assert run.loop.cli_session_id != "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_resumed_cli_that_crashes_after_a_failed_turn_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI proved its handle good (init, then a 503 result), then
+    crashed on the next turn before writing a frame, saying nothing about the
+    conversation. A crash is not a refusal: the turn fails as retriable and
+    the handle stays saved for the next turn's fresh CLI."""
+    outage = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": "API Error: 503 upstream connect error", "api_error_status": 503,
+              "num_turns": 1, "total_cost_usd": 0.0, "usage": {}}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[{"op": "frame", "frame": outage}],
+                         [{"op": "exit", "code": 1, "stderr": "Segmentation fault"}]],
+    }, cli_session_id="cli-prev")
+    try:
+        first = await run.turn("hello again")
+        assert isinstance(first[-1], ErrorEvent) and first[-1].status == 503
+        events = await run.turn("and again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.retriable
+        assert len(run.records("start")) == 1  # not replayed into a fresh conversation
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_resumed_cli_that_exits_at_start_without_saying_why_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI that dies before its first frame for any other reason
+    has not refused the handle either: the turn fails, the handle stays."""
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": "Segmentation fault"}},
+                   cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.retriable
+        assert len(run.records("start")) == 1
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
 async def test_stop_before_the_turn_reaches_the_cli_keeps_it_from_running(tmp_path) -> None:
     """A Stop that lands while the CLI is still starting must not let the
     turn run its tools once the CLI is up (the native loop honours an early
@@ -538,6 +599,24 @@ async def test_an_oversized_frame_ends_the_cli_and_the_next_turn_resumes(tmp_pat
         assert len(starts) == 2
         argv = starts[-1]["argv"]
         assert argv[argv.index("--resume") + 1] == "cli-sess-1"
+    finally:
+        await run.aclose()
+
+
+async def test_an_oversized_startup_frame_never_gets_the_turn(tmp_path, monkeypatch) -> None:
+    """A frame over the stream limit while the CLI registers its hooks puts
+    that CLI out of step before any turn: it is ended and the turn fails
+    without the user frame ever being written to it."""
+    monkeypatch.setattr(delegated_mod, "STREAM_LINE_LIMIT", 64 * 1024)
+    run = Scripted(tmp_path, {"init": {"tools": ["Bash", "x" * 200_000]}})
+    try:
+        events = await run.turn("one")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "startup frame" in error.message
+        assert run.loop._proc is None
+        assert run.stdin_frames("control_request", "initialize")  # it got that far
+        assert not run.stdin_frames("user")
     finally:
         await run.aclose()
 
