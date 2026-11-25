@@ -967,3 +967,40 @@ async def test_cancel_during_lease_release_still_releases_and_propagates(
     with pytest.raises(asyncio.CancelledError):
         await cancelling  # the caller learns it was cancelled
     assert runs.get_active_run(sid) is None  # and the lease was still released
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["latch_all", "cancel_all"])
+async def test_stop_latches_a_swarm_whose_admission_is_still_pending(stop):
+    """A Stop while the initial publication is pending, then a new message
+    that clears the session's Stop latch: the admission returns later and
+    must not launch workers."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def publish(snapshot):
+        if snapshot["status"] == "queued" and not release.is_set():
+            entered.set()
+            await release.wait()
+
+    dispatch = AsyncMock()
+    coordinator = SwarmCoordinator("parent", dispatch, AsyncMock(), publish, AsyncMock())
+    swarm.coordinators["parent"] = coordinator
+    start = asyncio.create_task(coordinator.start(
+        {"tasks": [dict(id="a", agent="helper", prompt="do a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    start.cancel()
+    if stop == "latch_all":
+        swarm.latch_all("parent")
+    else:
+        stopping = asyncio.create_task(swarm.cancel_all("parent"))
+        await asyncio.sleep(0)
+    release.set()
+    for _ in range(100):
+        if coordinator.jobs:
+            break
+        await asyncio.sleep(0.01)
+    (key, job), = coordinator.jobs.items()
+    await asyncio.wait_for(job, 5)
+    if stop == "cancel_all":
+        await asyncio.wait_for(stopping, 5)
+    dispatch.assert_not_called()
+    assert coordinator.snapshot(key)["status"] == "cancelled"

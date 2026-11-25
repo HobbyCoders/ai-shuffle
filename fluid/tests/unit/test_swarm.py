@@ -812,3 +812,54 @@ async def test_a_stop_during_the_start_handshake_still_runs_and_settles_the_swar
     assert published[-1] == "completed"
     finished.assert_awaited_once()
     assert not c._admissions
+
+
+async def test_a_stop_latched_during_admission_settles_the_swarm_without_dispatching():
+    """A Stop while the first publication is pending latches the admitting
+    swarm too: the runner it starts later persists cancellation and never
+    dispatches a worker, even though the caller's start() was cancelled."""
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def publish(snapshot):
+        if snapshot["status"] == "queued":
+            entered.set()
+            await release.wait()
+
+    dispatch = AsyncMock(return_value=ToolOutcome(text="done"))
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), publish, AsyncMock())
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert c.active_ids() == set(c.swarms)  # not yet running, still admitting
+
+    start.cancel()
+    c.cancelled.update(c.active_ids())  # what the host's Stop latch does
+    release.set()
+    for _ in range(100):
+        if c.jobs:
+            break
+        await asyncio.sleep(0.01)
+    (key, job), = c.jobs.items()
+    await asyncio.wait_for(job, 5)
+    dispatch.assert_not_called()
+    assert c.snapshot(key)["status"] == "cancelled"
+    assert not c.active_ids()
+
+
+async def test_close_gives_up_on_an_admission_that_never_returns(monkeypatch, caplog):
+    import fluid.swarm as swarm_mod
+
+    monkeypatch.setattr(swarm_mod, "ADMISSION_DRAIN_S", 0.05)
+    entered = asyncio.Event()
+
+    async def publish(snapshot):
+        entered.set()
+        await asyncio.sleep(3600)  # the first publication never returns
+
+    c = SwarmCoordinator("main", AsyncMock(), AsyncMock(), publish, AsyncMock())
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ToolCtx()))
+    await asyncio.wait_for(entered.wait(), 5)
+    await asyncio.wait_for(c.aclose(), 5)  # used to wait for ever
+    assert "did not finish" in caplog.text
+    assert not c._admissions and not c.jobs
+    with pytest.raises(asyncio.CancelledError):
+        await start

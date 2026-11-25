@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import copy
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -19,9 +20,13 @@ from fluid.tools.registry import BackgroundTaskReceipt
 from fluid.tools.builtins.task import _background_outcome
 from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY
 
+log = logging.getLogger(__name__)
+
 TERMINAL = {"completed", "failed", "blocked", "cancelled", "interrupted"}
 RESULT_LIMIT = 12000
 MAX_TASKS = 64
+#: How long ``aclose`` waits for a start handshake still under way.
+ADMISSION_DRAIN_S = 10.0
 
 
 def now():
@@ -147,7 +152,7 @@ class SwarmCoordinator:
         self.closed = False
         self._publish_lock = asyncio.Lock()
         self._worker_stops = {}
-        self._admissions = set()  # handshakes a cancelled start() left running
+        self._admissions = {}  # swarm id -> start handshake still under way
 
     async def _stop_worker(self, task_id):
         # Receipt publication, cancel(), and interrupted-spawn cleanup can all
@@ -202,11 +207,21 @@ class SwarmCoordinator:
         # nothing runs or settles. The swarm then runs like any other
         # background task whose start the caller did not wait to hear about.
         admission = asyncio.create_task(admit())
-        self._admissions.add(admission)
-        admission.add_done_callback(self._admissions.discard)
+        self._admissions[key] = admission
+        admission.add_done_callback(lambda _job: self._admissions.pop(key, None))
         admission.add_done_callback(lambda job: None if job.cancelled() else job.exception())
         await asyncio.shield(admission)
         return self.snapshot(key), receipt
+
+    def active_ids(self):
+        """Swarm ids a Stop must latch: running ones and ones still admitting.
+
+        An admission is shielded from its caller's cancellation and starts
+        its runner when it returns; a latch that saw only runners would let
+        that runner dispatch workers after the Stop. Latched here, it starts
+        and settles the swarm as cancelled without dispatching.
+        """
+        return {key for key, job in self.jobs.items() if not job.done()} | set(self._admissions)
 
     async def _run(self, key, specs, cap, ctx):
         swarm = self.swarms[key]
@@ -360,7 +375,18 @@ class SwarmCoordinator:
         self.closed = True
         # An admission still in flight adds its job (already latched as
         # cancelled by ``closed``); let it, so that job is stopped below too.
-        await asyncio.gather(*self._admissions, return_exceptions=True)
+        # A publication or acknowledgement that never returns must not hold
+        # the close forever: past the deadline the admission is cancelled.
+        admissions = dict(self._admissions)
+        if admissions:
+            _, pending = await asyncio.wait(admissions.values(), timeout=ADMISSION_DRAIN_S)
+            if pending:
+                stuck = sorted(key for key, job in admissions.items() if job in pending)
+                log.warning("swarm admission did not finish within %.0fs at close; "
+                            "cancelling %s", ADMISSION_DRAIN_S, ", ".join(stuck))
+                for job in pending:
+                    job.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         for key in list(self.jobs):
             if not self.jobs[key].done():
                 await self.cancel(key)

@@ -133,15 +133,28 @@ async def cancel_worker(task_id):
     if launch:
         launch.finish("cancelled", "Session closed" if reason == "session_closed" else "Swarm cancelled")
 
+def _active_keys(coordinator):
+    """Running workflows plus ones whose start is still being admitted.
+
+    An admission outlives its caller's cancellation and starts its runner
+    when it returns, so a Stop that latched only runners would let it
+    dispatch workers after a newer message cleared the session's Stop latch.
+    """
+    active_ids = getattr(coordinator, "active_ids", None)
+    if active_ids is not None:
+        return sorted(active_ids())
+    return [key for key, job in coordinator.jobs.items() if not job.done()]
+
+
 def latch_all(session_id):
-    """Let no running workflow of ``session_id`` dispatch another worker.
+    """Let no running or admitting workflow of ``session_id`` dispatch a worker.
 
     Stop latches first and then stops each running worker as a task of its
     own; a workflow left unlatched would replace them as they die.
     """
     coordinator = coordinators.get(session_id)
     if coordinator:
-        coordinator.cancelled.update(key for key, job in coordinator.jobs.items() if not job.done())
+        coordinator.cancelled.update(_active_keys(coordinator))
 
 
 async def cancel_all(session_id):
@@ -149,7 +162,7 @@ async def cancel_all(session_id):
     if coordinator:
         # Latch every workflow before the first await: no successor may slip
         # through while the host is stopping another workflow's worker.
-        active = [key for key, job in coordinator.jobs.items() if not job.done()]
+        active = _active_keys(coordinator)
         coordinator.cancelled.update(active)
         await asyncio.gather(*(coordinator.cancel(key) for key in active))
 
