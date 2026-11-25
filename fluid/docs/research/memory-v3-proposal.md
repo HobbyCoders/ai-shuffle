@@ -236,3 +236,12 @@ Long briefs were the main source of noise: a brief that opens a subagent mention
 - **Enable word triggers with the final rules (window 12, threshold 3, clause coverage), on user turns and delegation briefs.** They are 6% of deliveries and 80–82% precise. Log their deliveries so the thresholds can be retuned on real data.
 - **Coverage is the gap.** Words-only facts reach 48% (30 of 63), so overall coverage is 57% of in-scope facts, short of the 70% target in section 6. Most undelivered facts describe a judgement situation ("when deciding whether …") with no command and no distinctive words. Phase 1 should have Remember ask the saving agent for explicit `command` or `paths` triggers, and keep the index and Recall for facts without one.
 - **Caps:** at most 3 facts and about 1,500 characters per event, once per fact per session. With these rules the p90 session would carry about 3.3k characters of delivered memory, less than today's 9k index.
+
+## 10. Phase 1 shipped
+
+Phase 1 added just-in-time delivery beside the index, which is unchanged. `docs/MEMORY_ARCHITECTURE.md` ("Just-in-time delivery") describes how it works.
+
+- Remember takes optional `command`, `paths` and `tools` triggers. They are stored on the fact as `triggers` and replicate like `when`. A save whose fact can only fire on words gets a receipt asking for `command` or `paths`.
+- User turns and delegation briefs carry matching facts in that turn's context note. Tool calls carry them with the call's result. Both legs follow the caps above, deliver each fact once per session and re-arm on compaction.
+- Each delivery is recorded only on the local worker (`jit_deliveries.json`), and memory health counts deliveries in its `delivery` signal. `FLUID_MEMORY_JIT=false` turns delivery off.
+- **Timing finding.** Delivery before the tool runs is not possible without holding the call. On either leg, a model reads added context only in its next request, which follows the call. Native PreToolUse context and the Claude Code CLI's PreToolUse `additionalContext` (CLI 2.1.331) arrive with the call's result, the same moment as PostToolUse context. Tool deliveries are therefore recorded as late, as section 9 asked, and user-turn deliveries as on time. Closing the gap needs an owner decision. One option: deny a call once, on its first command-fact match in a session, with the fact as the reason, and let the agent re-issue the call. The cost is one extra call per such fact per session.

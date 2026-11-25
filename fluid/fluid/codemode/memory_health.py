@@ -107,6 +107,7 @@ LABELS = {
     "saves": "Saving",
     "proposals": "Questions for you",
     "when": "Memory when-lines",
+    "delivery": "Just-in-time delivery",
 }
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
@@ -343,6 +344,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     signals.append(_saves_signal(store, now))
     signals.append(_proposals_signal(store, live, now))
     signals.append(_when_signal(store, live + _local(doc, "archived")))
+    signals.append(_delivery_signal(store))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",
@@ -589,6 +591,20 @@ def _when_signal(store, entries: list[dict]) -> dict:
     reason = (f"{no_when} memories still have no when-line" if no_when
               else "All memories have a when-line.")
     return _signal("when", False, reason, missing=no_when, backfill_failures=failures)
+
+
+def _delivery_signal(store) -> dict:
+    """Just-in-time deliveries counted on this worker (jit_delivery): how
+    many facts reached a session mid-task, and how many only late. A count,
+    never an attention: phases 2-3 of Memory v3 read it for the lifecycle."""
+    from fluid.codemode import jit_delivery
+    totals = jit_delivery.counts(store).get("totals") or {}
+    on_time = int(totals.get(jit_delivery.ON_TIME, 0) or 0)
+    late = int(totals.get(jit_delivery.LATE, 0) or 0)
+    kinds = {k: int(totals.get(k, 0) or 0) for k in ("command", "path", "tool", "words")}
+    reason = (f"{on_time + late} just-in-time deliveries ({late} late)." if on_time + late
+              else "No just-in-time deliveries yet.")
+    return _signal("delivery", False, reason, on_time=on_time, late=late, **kinds)
 
 
 def _usage_signal(live, plans, now) -> dict:

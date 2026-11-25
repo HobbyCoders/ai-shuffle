@@ -43,6 +43,59 @@ render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
+## Just-in-time delivery
+
+The snapshot's `# Memory` index tells the model that a fact exists and when it
+applies. Just-in-time delivery (Memory v3 phase 1,
+`fluid/fluid/codemode/jit_delivery.py`) hands the model a fact's full text
+when its situation happens. It runs beside the index, which is unchanged.
+
+Triggers come from `fluid/fluid/codemode/triggers.py`. Each fact's are derived
+from its when-line, plus any explicit triggers saved with Remember: `command`
+(literal strings matched as whole words against the program that runs, never
+compiled as a regular expression), `paths` (globs) and `tools` (tool names,
+transport prefix ignored). Explicit triggers are stored on the fact as
+`triggers` and stamped `triggers_at`, like `when` and `always`. They replicate
+as per-field metadata and never bump the text revision. A worker from before
+this field keeps the key untouched in the entry it holds and merges as before.
+When a save gives no triggers and only word triggers can be derived, the
+receipt suggests correcting the fact to add `command` or `paths`.
+
+The app adapter (`app/core/provider/harness_adapter.py`) delivers on two
+events, for native and delegated sessions alike:
+
+- **User turn or delegation brief.** `match_turn` adds the matching facts' full
+  text to that turn's context note as a `# Memory for this step` block. A
+  spawned session's brief arrives as its first user turn. These deliveries
+  are recorded as on time.
+- **Tool call.** On PostToolUse, `match_tool` matches the call's input and
+  appends the facts to that call's result. Every gate sends PostToolUse with
+  the call's input: the native loop, the Claude Code CLI hook, the code-mode
+  bridge and the bundled MCP server. These deliveries are recorded as late. A
+  model reads added context only in its next request, after the call already
+  ran, on either leg. Context added at PreToolUse (which the CLI accepts as
+  `additionalContext`) arrives in that same request. Reading a fact before
+  its call executes would mean holding or denying the call, which delivery
+  never does.
+
+Only delivery candidates are delivered: not ALWAYS, identity, superseded,
+conflicted, behaviour-rule or Recall-only facts. Facts outside the session's
+scope (global plus its project), facts not `visible_on` this worker, and facts
+failing the injection screen are also left out. Each event carries at most 3
+facts and about 1,500 characters; further matches are named by ID for Recall.
+Each fact is delivered once per session, and PreCompact re-arms the session,
+because the summary may have dropped the text. Prepared triggers are cached
+per store file revision, so a tool call costs a `stat` plus the bounded
+matcher. Proactive assistant and one-shot runs do not deliver.
+
+Each delivery is recorded only on this worker, in
+`<store root>/jit_deliveries.json`, which is never replicated. A record holds
+the fact ID, the trigger kind (command, path, tool or words), the session,
+the time, and whether it was on time or late. The file keeps totals, per-fact
+counts and the last 200 deliveries. Memory health reads the totals as its
+`delivery` signal, which is a count and never an attention. Set
+`FLUID_MEMORY_JIT=false` to turn delivery off; the index is unaffected.
+
 ## Learning from Claude Code sessions
 
 Claude Code (delegated) sessions feed the same journal as native JSON-mode

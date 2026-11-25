@@ -1,0 +1,95 @@
+"""The adapter's just-in-time memory wiring (fluid.codemode.jit_delivery).
+
+A tool call's matching facts ride its PostToolUse result on every gate and
+are recorded late (the model reads them only after the call ran). PreCompact
+re-arms, a user turn adds word matches to its reminder (on time), and
+FLUID_MEMORY_JIT turns it all off.
+"""
+from __future__ import annotations
+
+import pytest
+from fluid.codemode import jit_delivery
+from fluid.codemode.skills import SkillStore
+from fluid.hooks.bus import POST_TOOL_USE, PRE_COMPACT, PRE_TOOL_USE
+
+from app.core.config import Settings, settings
+from app.core.provider.harness_adapter import HarnessAdapter
+from app.core.provider.types import SessionOptions
+
+PUSH = "Pushes go through the merge queue; never push to main directly."
+OFFSITE = "The team offsite is booked for the second week of March in Lisbon."
+
+
+@pytest.fixture
+def jit_adapter(tmp_path, monkeypatch):
+    store = SkillStore(tmp_path / "memory")
+    store.save_memory(PUSH, durable=True, when="When publishing commits",
+                      triggers={"command": ["git push"]})
+    store.save_memory("Release notes list every merged PR.", durable=True,
+                      when="When releasing", triggers={"tools": ["Release"]})
+    store.save_memory(OFFSITE, durable=True, when="When planning a team offsite dinner")
+    monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda sid, cwd=None: (store, None))
+    monkeypatch.setattr(settings, "fluid_memory_jit", True)
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="fake", cwd=str(tmp_path))
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "app-session-1")
+    return adapter, store
+
+
+def _context(decision):
+    return decision.additional_context or ""
+
+
+@pytest.mark.asyncio
+async def test_a_matching_call_gets_the_fact_with_its_result_once(jit_adapter):
+    adapter, store = jit_adapter
+    call = {"name": "Bash", "input": {"command": "git push --dry-run"}, "tool_use_id": "t1",
+            "output": "ok"}
+    # Nothing rides PreToolUse: hook context reaches the model only after
+    # the call ran, so the result carries it and it is counted late.
+    pre = await adapter._hooks.emit(PRE_TOOL_USE, call)
+    assert PUSH not in _context(pre)
+    first = await adapter._hooks.emit(POST_TOOL_USE, call)
+    assert PUSH in _context(first)
+    again = await adapter._hooks.emit(POST_TOOL_USE, {**call, "tool_use_id": "t2"})
+    assert PUSH not in _context(again)
+    assert jit_delivery.counts(store)["totals"] == {"late": 1, "command": 1}
+    # Compaction may drop the text: the next match delivers it again.
+    await adapter._hooks.emit(PRE_COMPACT, {})
+    third = await adapter._hooks.emit(POST_TOOL_USE, {**call, "tool_use_id": "t3"})
+    assert PUSH in _context(third)
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_tool_trigger_matches_a_prefixed_tool(jit_adapter):
+    adapter, store = jit_adapter
+    post = await adapter._hooks.emit(POST_TOOL_USE, {
+        "name": "mcp__builtins__Release", "input": {}, "tool_use_id": "t9", "output": "ok"})
+    assert "Release notes" in _context(post)
+    assert jit_delivery.counts(store)["totals"] == {"late": 1, "tool": 1}
+
+
+@pytest.mark.asyncio
+async def test_user_turn_note_carries_word_matches(jit_adapter):
+    adapter, _ = jit_adapter
+    note = adapter._memory_jit_note("Help me plan the team offsite dinner for spring.")
+    assert note.startswith("<system-reminder>\n# Memory for this step") and OFFSITE in note
+    assert adapter._memory_jit_note("Help me plan the team offsite dinner for spring.") is None
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_turns_both_paths_off(jit_adapter, monkeypatch):
+    adapter, store = jit_adapter
+    monkeypatch.setattr(settings, "fluid_memory_jit", False)
+    off = await adapter._hooks.emit(POST_TOOL_USE, {
+        "name": "Bash", "input": {"command": "git push"}, "tool_use_id": "t1", "output": "ok"})
+    assert PUSH not in _context(off)
+    assert adapter._memory_jit_note("plan the team offsite dinner") is None
+    assert jit_delivery.counts(store) == {}
+
+
+def test_setting_defaults_on_and_reads_the_env(monkeypatch):
+    monkeypatch.delenv("FLUID_MEMORY_JIT", raising=False)
+    assert Settings(_env_file=None).fluid_memory_jit is True
+    monkeypatch.setenv("FLUID_MEMORY_JIT", "false")
+    assert Settings(_env_file=None).fluid_memory_jit is False

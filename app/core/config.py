@@ -483,6 +483,10 @@ class Settings(BaseSettings):
     fluid_continual: bool = True
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_memory_enabled: bool = True
+    # Memory v3 just-in-time delivery: a saved fact's full text with the tool
+    # call or user turn that matches its triggers, beside the # Memory index.
+    # FLUID_MEMORY_JIT=false turns it off (fluid.codemode.jit_delivery).
+    fluid_memory_jit: bool = True
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_continual_model: Optional[str] = None
     fluid_skills_dir: Optional[str] = None

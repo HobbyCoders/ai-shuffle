@@ -92,7 +92,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 
 from fluid._filelock import file_lock
@@ -798,6 +798,9 @@ class MemoryEntry:
     when: str | None = None
     # Owner-saved fact that renders in full in every session (ALWAYS_CHARS).
     always: bool = False
+    # Explicit just-in-time triggers ({"command": [...], "paths": [...],
+    # "tools": [...]}, see fluid.codemode.facts.validate_triggers), or None.
+    triggers: dict | None = dataclass_field(default=None, hash=False)
 
 
 def project_key_for(cwd: "str | Path | os.PathLike[str] | None") -> str:

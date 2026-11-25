@@ -192,6 +192,9 @@ class Triggers:
     # Paths fire only on tools that change files: the situation is changing
     # them, not reading them.
     edit_paths: bool = False
+    # Tools a fact names explicitly (Remember's ``tools``): they fire on the
+    # tool alone, without the when-line's words in its input.
+    explicit_tools: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.words or self.tools or self.command or self.paths)
@@ -373,15 +376,50 @@ def is_candidate(entry: Mapping[str, Any]) -> bool:
                 or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX))
 
 
+def with_explicit(triggers: Triggers, explicit: Mapping[str, Any] | None) -> Triggers:
+    """``triggers`` plus a fact's explicit ones (Remember's ``command``,
+    ``paths`` and ``tools``). An explicit command is a literal matched as
+    whole words, never compiled from its text; an explicit path is a glob
+    (a relative one matches at any depth) on any file tool; an explicit tool
+    fires on that tool alone."""
+    if not isinstance(explicit, Mapping) or not explicit:
+        return triggers
+    command = [CommandTrigger(LITERAL, _fold(c)) for c in explicit.get("command") or () if isinstance(c, str)]
+    paths = []
+    for raw in explicit.get("paths") or ():
+        if isinstance(raw, str) and raw.strip():
+            raw = raw.strip().replace("\\", "/")
+            paths.append(raw if raw.startswith(("/", "**")) else _glob(raw.removeprefix("./")))
+    tools = [normalize_tool(t) for t in explicit.get("tools") or () if isinstance(t, str)]
+    return Triggers(
+        words=triggers.words,
+        tools=tuple(dict.fromkeys((*triggers.tools, *tools))),
+        command=tuple(dict.fromkeys((*command, *triggers.command))),
+        paths=tuple(dict.fromkeys((*paths, *triggers.paths))),
+        clauses=triggers.clauses,
+        names=triggers.names,
+        # Explicit paths fire on reads too; derived ones keep their rule.
+        edit_paths=triggers.edit_paths and not paths,
+        explicit_tools=tuple(dict.fromkeys(tools)),
+    )
+
+
+def words_only(triggers: Triggers) -> bool:
+    """Only word triggers: such a fact fires on a turn or a brief, never on
+    a command, path or tool."""
+    return bool(triggers.words) and not (triggers.command or triggers.paths or triggers.tools)
+
+
 def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
-    """Delivery candidates with derived triggers, from store entry dicts."""
+    """Delivery candidates with derived and explicit triggers, from store
+    entry dicts."""
     out = []
     for entry in entries:
         if not is_candidate(entry):
             continue
         when = str(entry.get("when") or "")
         text = str(entry.get("text") or "")
-        triggers = derive_triggers(when, text, entry.get("key"))
+        triggers = with_explicit(derive_triggers(when, text, entry.get("key")), entry.get("triggers"))
         if triggers:
             out.append(TriggerFact(str(entry.get("id")), when or derived_when(text), triggers, len(text)))
     return out
@@ -716,6 +754,9 @@ def match_tool(name: str, tool_input: Mapping[str, Any] | None,
                      if (tool in EDIT_TOOLS or not t.edit_paths) and _glob_pattern(g).fullmatch(p)), None)
         if glob:
             matches.append(Match(fact.id, "path", 3, (glob,)))
+            continue
+        if tool in t.explicit_tools:
+            matches.append(Match(fact.id, "tool", 2, (tool,)))
             continue
         if tool in t.tools:
             # The tool alone is not the situation ("starting a code review
