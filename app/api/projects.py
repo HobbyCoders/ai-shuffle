@@ -84,8 +84,12 @@ def _backfill_link_groups(projects: List[dict]) -> None:
         for project in pending:
             group_id = (identity_for_remote(remotes.get(project["id"])) or (None,))[0]
             if group_id:
-                database.set_project_link_group(project["id"], group_id)
+                written = database.set_project_link_group(project["id"], group_id)
                 project["link_group_id"] = group_id
+                # The write touched updated_at: the listing's folder_revision
+                # must come from the row as written, not the one read before.
+                if written:
+                    project.update(written)
     except Exception:  # noqa: BLE001 — listing must never fail on the backfill
         logger.debug("link_group_id backfill failed", exc_info=True)
 
@@ -241,6 +245,7 @@ async def list_projects(request: Request, token: str = Depends(require_auth)):
 
     for project in projects:
         project["session_count"] = session_counts.get(project["id"], 0)
+        _with_folder_revision(project)
         # Resolve relative paths to absolute for display
         if not is_absolute_project_path(project["path"]):
             project["path"] = get_project_working_dir(project)
@@ -268,6 +273,7 @@ async def get_project(request: Request, project_id: str, token: str = Depends(re
             detail=f"Project not found: {project_id}"
         )
     project["session_count"] = session_count
+    _with_folder_revision(project)
     # Resolve relative paths to absolute for display
     if not is_absolute_project_path(project["path"]):
         project["path"] = get_project_working_dir(project)
@@ -430,12 +436,19 @@ async def update_project(
     token: str = Depends(require_admin)
 ):
     """Update a project - Admin only"""
-    from app.core.project_folders import retarget, revision
+    from app.core.project_folders import STALE_FOLDER, retarget, revision
+    from app.db import projects as projects_db
 
     def _update():
         existing = database.get_project(project_id)
         if not existing or existing.get("instance_id") not in (None, settings.effective_instance_id):
             raise HTTPException(status_code=404, detail=f"Project not found: {project_id}")
+        # An editor that names the revision it opened on never overwrites a
+        # change made since (another window's folder save). Without one, the
+        # row just read is the expectation, as older clients always had.
+        expected = request.expected_revision
+        if expected is not None and expected != revision(existing):
+            raise HTTPException(status_code=409, detail=STALE_FOLDER)
         metadata = {
             "name": request.name,
             "description": request.description,
@@ -444,13 +457,31 @@ async def update_project(
         # Metadata-only clients can resend the stored path even if it no longer
         # exists. Actual moves share the Workers endpoint's safety checks.
         if request.path and request.path != existing.get("path"):
-            return retarget(existing, request.path, revision(existing), **metadata), True
-        return database.update_project(project_id=project_id, **metadata), False
+            return retarget(existing, request.path, expected or revision(existing), **metadata), True
+        try:
+            # The revision was checked before the write lock: recheck it there.
+            return database.update_project(
+                project_id=project_id, snapshot=existing if expected is not None else None, **metadata
+            ), False
+        except projects_db.FolderConflict as exc:
+            raise HTTPException(status_code=409, detail=STALE_FOLDER) from exc
 
     updated, moved = await run_sync(_update)
     if moved:
         _announce_catalog_change()
-    return updated
+    return _with_folder_revision(updated)
+
+
+def _with_folder_revision(project: Optional[dict]) -> Optional[dict]:
+    """Add this worker's folder edit token to its own row (``Project.folder_revision``).
+
+    Call before a relative ``path`` is resolved for display: the token covers
+    the stored row."""
+    if project and _owned_here(project):
+        from app.core.project_folders import revision
+
+        project["folder_revision"] = revision(project)
+    return project
 
 
 def _owned_here(project: dict) -> bool:

@@ -262,6 +262,10 @@ class ProjectUpdate(BaseModel):
     description: Optional[str] = None
     path: Optional[str] = None
     settings: Optional[ProjectSettings] = None
+    # The ``folder_revision`` the editor opened on. When given and the row has
+    # changed since, the update is refused (409) and nothing is written, as the
+    # Workers folder endpoint does. Omitted: no check (older clients).
+    expected_revision: Optional[str] = Field(None, min_length=64, max_length=64)
 
 
 class Project(ProjectBase):
@@ -276,6 +280,9 @@ class Project(ProjectBase):
     settings: ProjectSettings
     session_count: Optional[int] = None  # Number of sessions in this project
     link_group_id: Optional[str] = None  # Groups same-repo clones across installs
+    # Edit token for this worker's own row (``PUT`` ``expected_revision``);
+    # None where this worker cannot change the folder.
+    folder_revision: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

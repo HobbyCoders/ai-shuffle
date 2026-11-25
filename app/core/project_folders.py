@@ -14,6 +14,8 @@ from app.core.project_links import auto_link_group_id, normalize_remote_url
 from app.core.project_utils import get_project_working_dir, is_absolute_project_path
 from app.db import projects as projects_db
 
+STALE_FOLDER = 'The project folder changed. Close this editor and reopen it.'
+
 
 def revision(row: dict) -> str:
     """Opaque edit token, including row identity and the workspace for relative paths."""
@@ -29,7 +31,7 @@ def retarget(project: dict, folder: str, expected_revision: str, **metadata) -> 
     if project.get('instance_id') != settings.effective_instance_id:
         raise HTTPException(409, 'This folder is not registered exclusively to this worker.')
     if revision(project) != expected_revision:
-        raise HTTPException(409, 'The project folder changed. Close this editor and reopen it.')
+        raise HTTPException(409, STALE_FOLDER)
     folder = folder.strip()
     if not folder or '\x00' in folder:
         raise HTTPException(400, 'Enter an existing folder path on this worker.')

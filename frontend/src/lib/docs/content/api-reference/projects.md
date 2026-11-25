@@ -56,6 +56,17 @@ Update a project.
 
 **Auth:** Owner only
 
+Send any of `name`, `description`, `settings` and `path`. A new `path` points this worker's copy at another existing folder (no files move), with the same checks as the Workers folder editor.
+
+To keep a save from overwriting a change made in another window, send `expected_revision`: the `folder_revision` that `GET /api/v1/projects` or `GET /api/v1/projects/{project_id}` returned when the editor opened. If the project changed since, the update returns `409` ("The project folder changed. Close this editor and reopen it.") and changes nothing. Without `expected_revision` there is no check, as before. `folder_revision` is set only on rows this worker can change.
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/projects/my-web-app \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/home/user/projects/web-app", "expected_revision": "<folder_revision>"}'
+```
+
 ### DELETE /api/v1/projects/{project_id}
 
 Delete a project from the database (does not delete files). This worker's chats in the project are deleted with it, the same way deleting each chat would: chats linked to this project record. Chats on other workers, chats of other projects, and chats linked only to a shared project identity (for example a chat another worker placed here) are kept: an identity alone does not show which project record a chat belongs to. Worktree folders stay on disk. The project leaves `GET /api/v1/cluster/projects` on this device, and another device's copy of the same repository stays listed.

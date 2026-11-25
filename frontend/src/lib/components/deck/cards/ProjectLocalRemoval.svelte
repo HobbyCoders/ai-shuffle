@@ -26,25 +26,40 @@
 		ask?: number;
 		/** The request was taken: clear it so a remount (desktop ↔ phone) does not ask again. */
 		onAsked?: () => void;
+		/**
+		 * Whether the confirmation is open. Bind it from a parent that remounts
+		 * this row (the worker inspector moving between its aside and phone
+		 * sheet) so an open confirmation survives; Cancel clears it, so a
+		 * cancelled one never reopens.
+		 */
+		confirming?: boolean;
+		/**
+		 * The removal request is running, and why the last one failed. Bind them
+		 * with `confirming` so a remount mid-request keeps Remove disabled (no
+		 * second request) and shows that request's failure in the new row.
+		 */
+		removing?: boolean;
+		error?: string | null;
 		onRemoved?: () => void;
 	}
 
-	let { projectId, projectName, where, ask = 0, onAsked, onRemoved }: Props = $props();
+	let {
+		projectId, projectName, where, ask = 0, onAsked,
+		confirming = $bindable(false), removing = $bindable(false), error = $bindable(null),
+		onRemoved
+	}: Props = $props();
 
-	let confirming = $state(false);
 	let preview = $state<ProjectRemovalPreview | null>(null);
 	let pending = $state(false);
-	let removing = $state(false);
-	let error = $state<string | null>(null);
 	let askSeq = 0;
 	let trigger = $state<HTMLButtonElement | null>(null);
 
-	async function askRemove() {
+	async function askRemove(fresh = true) {
 		const mine = ++askSeq;
 		confirming = true;
 		preview = null;
 		pending = true;
-		error = null;
+		if (fresh) error = null;
 		try {
 			const res = await getProjectRemovalPreview(projectId);
 			if (mine === askSeq) preview = res;
@@ -64,6 +79,7 @@
 	}
 
 	async function remove() {
+		if (removing) return;
 		removing = true;
 		error = null;
 		try {
@@ -78,6 +94,12 @@
 			removing = false;
 		}
 	}
+
+	// Mounted with the confirmation already open (a layout switch remounted
+	// this row): count again, behind a disabled Remove, rather than reuse a
+	// number from before the remount. A request still running keeps Remove
+	// disabled through `removing`; a failure already shown stays shown.
+	if (untrack(() => confirming)) void askRemove(false);
 
 	let asked = 0;
 	$effect(() => {
@@ -95,7 +117,7 @@
 		<button class="st-btn" disabled={removing} onclick={cancel}>Cancel</button>
 		<button class="st-btn danger" disabled={removing || pending} onclick={remove}>{removing ? 'Removing…' : 'Remove'}</button>
 	{:else}
-		<button bind:this={trigger} class="st-btn danger" title={`Remove ${projectName} and its chats from ${where ?? 'this worker'}`} onclick={askRemove}>Remove project and chats</button>
+		<button bind:this={trigger} class="st-btn danger" disabled={removing} title={`Remove ${projectName} and its chats from ${where ?? 'this worker'}`} onclick={() => askRemove()}>Remove project and chats</button>
 	{/if}
 </SettingRow>
 {#snippet details()}

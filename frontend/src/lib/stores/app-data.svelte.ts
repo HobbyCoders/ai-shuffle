@@ -997,7 +997,7 @@ export const appData = {
 		return created;
 	},
 
-	async updateProject(projectId: string, data: { name?: string; description?: string; path?: string }) {
+	async updateProject(projectId: string, data: { name?: string; description?: string; path?: string; expected_revision?: string }) {
 		await api.put(`/projects/${projectId}`, data);
 		await appData.loadProjects();
 	},

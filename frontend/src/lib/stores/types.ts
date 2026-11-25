@@ -169,6 +169,8 @@ export interface Project {
 	settings: Record<string, unknown>;
 	session_count?: number;  // Number of sessions in this project
 	link_group_id?: string | null;  // Groups same-repo clones across installs
+	/** Edit token of this worker's own row: send it back as `expected_revision` when changing the folder. */
+	folder_revision?: string | null;
 	created_at: string;
 	updated_at: string;
 }

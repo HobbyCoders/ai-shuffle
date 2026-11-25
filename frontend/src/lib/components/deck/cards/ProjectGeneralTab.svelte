@@ -88,14 +88,25 @@
 		}
 	}
 
-	// Folder fallback (editFolderHere): the folder it opened on, so a change made
-	// elsewhere meanwhile blocks the save instead of being overwritten.
-	let folderDraft = $state<{ opened: string; folder: string; browsing: boolean; saving: boolean; error: string | null } | null>(null);
+	// Folder fallback (editFolderHere): the folder and revision it opened on, so a
+	// change made elsewhere meanwhile blocks the save instead of being
+	// overwritten. A catalog that already shows the change blocks it here; one
+	// that does not yet is refused by the server (409, the Workers editor's
+	// revision check), and the refreshed catalog then shows it here too.
+	let folderDraft = $state<{ opened: string; revision: string | null; folder: string; browsing: boolean; saving: boolean; error: string | null } | null>(null);
 	const folderStale = $derived(!!folderDraft && !!project && project.path !== folderDraft.opened);
+	$effect(() => {
+		// Only the name or settings changed (this tab's own rename included): the
+		// folder it opened on is still current, so its newer revision is too.
+		const fresh = project;
+		untrack(() => {
+			if (folderDraft && fresh && fresh.path === folderDraft.opened && fresh.folder_revision) folderDraft.revision = fresh.folder_revision;
+		});
+	});
 	let folderForm = $state<HTMLFormElement | null>(null);
 	function openFolderDraft() {
 		if (!project) return;
-		folderDraft = { opened: project.path, folder: project.path, browsing: false, saving: false, error: null };
+		folderDraft = { opened: project.path, revision: project.folder_revision ?? null, folder: project.path, browsing: false, saving: false, error: null };
 	}
 	async function saveFolderDraft() {
 		const draft = folderDraft;
@@ -105,11 +116,14 @@
 		draft.saving = true;
 		draft.error = null;
 		try {
-			await appData.updateProject(projectId, { path: next });
+			await appData.updateProject(projectId, draft.revision ? { path: next, expected_revision: draft.revision } : { path: next });
 			if (folderDraft === draft) folderDraft = null;
 		} catch (e: unknown) {
-			const err = e as { detail?: unknown; message?: string };
+			const err = e as { detail?: unknown; message?: string; status?: number };
 			draft.error = typeof err.detail === 'string' ? err.detail : err.message || "Couldn't change the folder. Check the current folder before retrying.";
+			// Refused as stale: this window's catalog is behind. Read it again so
+			// the folder changed elsewhere shows and locks the editor.
+			if (err.status === 409) void appData.loadProjects();
 			// Saving disabled the focused control; put the keyboard back on the field
 			// (inside Settings, so Escape still closes it) to correct the folder.
 			draft.saving = false;
