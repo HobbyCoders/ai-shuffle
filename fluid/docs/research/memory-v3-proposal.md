@@ -181,18 +181,19 @@ The store is read only. `--sample N --out FILE` writes a labelling sample (when-
 
 ### Numbers (final rules)
 
+The library carries only generic command rules (git, gh, curl, pytest, psql, docker); rules for one repository's own scripts were removed before review, and the facts they covered fell back to word triggers without changing coverage.
+
 | Measure | Value |
 |---|---|
-| Sessions replayed | 2,061 (5,835 user turns, 196,562 tool calls) |
+| Sessions replayed | 2,063 (5,843 user turns, 196,983 tool calls) |
 | Candidate facts (live, not ALWAYS, identity, behaviour rule or pair answer) | 89 of 102 live; 77 in scope of at least one replayed session |
 | Facts delivered at least once | 44 (49% of candidates, 57% of those in scope) |
-| Coverage by trigger shape, in scope | command 14 of 14, path 1 of 1, tool 1 of 1, words only 28 of 61 |
-| Deliveries per session, mean / p50 / p90 | 2.7 / 0 / 8 |
-| Characters per session if each delivery carried full text (1,500 cap per event), mean / p90 | 1,200 / 3,456 |
-| Events with more fresh matches than the 3-per-event cap | 205 of 5,611 deliveries |
-| Deliveries by kind | command 5,153 (92%), words 321, tool 113, path 24 |
-| Word deliveries by source | delegation brief 198, long user turn (usually a parent's brief opening a subagent) 113, short user turn 10 |
-| Command facts matched before their first matching command | 18 of 5,279 session-fact pairs (0.3%) |
+| Coverage by trigger shape, in scope | command 12 of 12, path 1 of 1, tool 1 of 1, words only 30 of 63 |
+| Deliveries per session, mean / p50 / p90 | 2.6 / 0 / 8 |
+| Characters per session if each delivery carried full text (1,500 cap per event), mean / p90 | 1,100 / 3,196 |
+| Deliveries by kind | command 4,826 (91%), words 324, tool 113, path 24 |
+| Word deliveries by source | delegation brief 201, long user turn (usually a parent's brief opening a subagent) 113, short user turn 10 |
+| Command facts matched before their first matching command | 14 of 4,948 session-fact pairs (0.3%) |
 
 The five most-delivered facts are all commit and push rules. Several of them fire on the same `git commit` or `git push`, which is what the per-event cap is for.
 

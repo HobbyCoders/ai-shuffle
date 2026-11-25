@@ -125,15 +125,6 @@ _COMMAND_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
           r"|--data|--json\s|\s-d\s*['\"{@$])",)),
         (r"^(?!.*\bmutat).*\bcurl\b", ("re:" + _RUNS + r"curl\s",)),
         (r"\bpytest\b|\bpython tests?\b", ("re:" + _RUNS + r"pytest(?:\s|$)",)),
-        # Rules for this repository's own tools (devloop, UI journeys, the
-        # nightly). Phase 1 should take these from explicit triggers instead.
-        # A topic word alone (devloop, journeys, nightly) is not a command:
-        # only the action the when-line names is.
-        (r"\bstart\w*\b[^,;]*\b(?:devloop|dev instance)\b", ("scripts.devloop up",)),
-        (r"\brun\w*\b[^,;]*\bjourneys?\b", (r"re:\bnode\s+\S*(?:run-all|\.journey)\.mjs\b",)),
-        (r"\bmerged change is in\b|\bpublished nightly\b", (r"re:\bpython\S*\s+(?:-m\s+)?\S*nightly_wait\b",)),
-        (r"\bdispatch\w*\b[^,;]*\bnightly\b|\bcut\w* (?:a |the )?nightly\b",
-         (r"re:\bgh workflow run\b[^|;&]*nightly",)),
         (r"\bdelet\w*\b[^,;]*\bworktrees?\b|\bworktrees?\b[^,;]*\bdelet\w*", ("git worktree remove",)),
         (r"\b(?:job|actions?|ci) logs?\b|\blogs? (?:of|from) (?:a |the )?(?:ci|github actions)\b",
          (r"re:\bgh run view\b[^|;&]*--log", r"re:\bgh api\b[^|;&]*/logs\b")),
