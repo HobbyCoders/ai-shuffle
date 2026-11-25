@@ -427,15 +427,33 @@ async def update_project(
     return updated
 
 
-def _require_own_project(project_id: str) -> dict:
+def _own_project(project_id: str) -> Optional[dict]:
     """The project row, when this worker may remove it (as ``update_project`` checks)."""
     existing = database.get_project(project_id)
     if not existing or existing.get("instance_id") not in (None, settings.effective_instance_id):
+        return None
+    return existing
+
+
+def _require_own_project(project_id: str) -> dict:
+    existing = _own_project(project_id)
+    if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
         )
     return existing
+
+
+def _delete_own_project(project_id: str) -> bool:
+    """Re-check ownership and delete the row in the same hop.
+
+    The DELETE route checks first, before any chat goes, but the row delete
+    happens after the chats, so it decides again here rather than trusting
+    the earlier read. It returns False instead of raising, so the chat
+    teardown already queued on the response's background tasks still runs.
+    """
+    return _own_project(project_id) is not None and database.delete_project(project_id)
 
 
 @router.get("/{project_id}/removal")
@@ -457,7 +475,7 @@ async def delete_project(project_id: str, background_tasks: BackgroundTasks,
                          token: str = Depends(require_admin)):
     """Delete a project and its chats on this worker (not files) - Admin only"""
     await run_sync(_require_own_project, project_id)
-    await project_removal.remove_projects([project_id], background_tasks)
+    await project_removal.remove_projects([project_id], background_tasks, delete_row=_delete_own_project)
     _announce_catalog_change()
 
 
