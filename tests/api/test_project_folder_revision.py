@@ -106,7 +106,9 @@ def test_the_listing_hands_out_the_revision_of_the_row_its_backfill_wrote(setup,
     assert database.get_project("p1")["link_group_id"] is None
 
     listed = next(p for p in client.get("/api/v1/projects").json() if p["id"] == "p1")
-    assert database.get_project("p1")["link_group_id"] == listed["link_group_id"]
+    persisted = database.get_project("p1")["link_group_id"]
+    assert persisted is not None
+    assert persisted == listed["link_group_id"]
     assert listed["folder_revision"] == client.get("/api/v1/projects/p1").json()["folder_revision"]
 
     saved = client.put("/api/v1/projects/p1", json={"name": "Renamed", "expected_revision": listed["folder_revision"]})
