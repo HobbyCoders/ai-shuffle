@@ -995,7 +995,7 @@ def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) 
     is matched on its text.
     """
     for message in reversed(history):
-        if is_harness_note(message):
+        if is_harness_note(message) and PLAN_REVISION_META_KEY in message.provider_meta:
             return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
         if plan_note in message.text():
             return True
@@ -4927,10 +4927,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # The model ran out of output budget mid-answer (reasoning-
                 # heavy models do this routinely). Ending the turn here would
                 # abandon the work, so ask it to pick up where it stopped.
+                # A harness note, never a turn start: compaction must keep
+                # the real request as this turn's first message rather than
+                # digest it as a finished turn behind the nudge.
                 continuations += 1
                 nudge = SessionNode(
                     node_id=new_id("node"), parent_id=parent.node_id,
-                    message=Message(role="user", content=[Text(_CONTINUE_NUDGE)]),
+                    message=Message(
+                        role="user", content=[Text(_CONTINUE_NUDGE)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
+                    ),
                 )
                 await self._append_node(sid, nudge)
                 parent = nudge

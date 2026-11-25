@@ -60,9 +60,11 @@ SETTING_SOURCES = ("user", "project", "local")
 # Claude Code's permission entries: ``Tool(pattern)`` or a bare ``Tool``.
 _RULE_RE = re.compile(r"^\s*(?P<tool>[^()\s]+)\s*(?:\((?P<pattern>.*)\)\s*)?$", re.DOTALL)
 
-# Which input field a tool's pattern constrains. Tools outside this table get a
-# tool-wide rule: fluid cannot guess which argument the pattern is about, and a
-# too-narrow guess would silently fail open.
+# Which input field a tool's pattern constrains. Fluid cannot guess which
+# argument another tool's pattern is about, so a patterned entry for a tool
+# outside this table is applied conservatively: ``ask``/``deny`` widen to the
+# whole tool (more restrictive), ``allow`` is dropped with a warning (widening
+# it would authorize inputs the entry never named).
 _PATTERN_FIELD: dict[str, str] = {
     "Bash": "command",
     "Read": "file_path",
@@ -271,9 +273,10 @@ def parse_permission_entry(entry: str, decision: str) -> Rule | None:
     """Parse one ``Tool(pattern)`` / bare ``Tool`` entry into a fluid ``Rule``.
 
     The pattern narrows the rule only for tools whose constrained input field is
-    known (:data:`_PATTERN_FIELD`); anything else — an unknown tool, an MCP
-    server name, a bare tool name — becomes a tool-wide rule so the entry still
-    has its intended effect rather than being dropped.
+    known (:data:`_PATTERN_FIELD`). A bare tool name (an MCP server name
+    included) is a tool-wide rule. A pattern fluid cannot map fails safe: an
+    ``ask`` or ``deny`` entry covers the whole tool, while an ``allow`` entry is
+    skipped with a warning rather than silently granting every input.
     """
     if not isinstance(entry, str) or not entry.strip():
         return None
@@ -286,6 +289,13 @@ def parse_permission_entry(entry: str, decision: str) -> Rule | None:
     field = _PATTERN_FIELD.get(tool)
     if pattern and field:
         return Rule(tool=tool, decision=decision, input_globs={field: pattern})
+    if pattern and decision == "allow":
+        log.warning(
+            "skipping permission allow entry %r: fluid cannot scope a %s pattern, "
+            "and allowing the whole tool would widen it",
+            entry, tool,
+        )
+        return None
     return Rule(tool=tool, decision=decision)
 
 
