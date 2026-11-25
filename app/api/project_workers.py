@@ -33,6 +33,7 @@ from app.api.auth import get_api_user_from_request, require_admin, require_auth
 from app.api.cluster import _catalog_scoped_origin, _self_install_id
 from app.api.common import require_origin_access
 from app.core import project_setup as setup
+from app.core.project_links import remote_key
 from app.db import database
 from app.db.async_database import run_sync
 
@@ -270,6 +271,8 @@ def _project_info(pv2: Dict[str, Any], snapshot: Dict[str, Any],
         "kind": "git" if clone_url or origin.startswith("git:") else "folder",
         "clone_url": clone_url,
         "remote": setup.display_remote(clone_url),
+        # What the New project dialog compares a pasted URL with: never a credential.
+        "remote_key": remote_key(clone_url) or None,
         "default_branch": repo.get("default_branch") or peer_info.get("default_branch"),
         "default_folder": folder_name,
         "local_project_id": own.get("id") if own and origin not in snapshot["superseded"] else None,
@@ -416,6 +419,7 @@ async def projects_overview(request: Request, token: str = Depends(require_auth)
             "name": pv2.get("name") or origin,
             "kind": info["kind"],
             "remote": info["remote"],
+            "remote_key": info["remote_key"],
             "default_branch": info["default_branch"],
             "session_count": snapshot["session_counts"].get(pv2["id"], 0),
             "workers": workers,
@@ -677,8 +681,8 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
     worker's own database shows (:func:`_listed_elsewhere`), a taken id, name
     or folder, and a folder that has other files in it, so the owner hears it
     at once instead of after a clone; and one that a runner on this database
-    is cloning as a new project or setting up, in any spelling of its remote
-    (``being_set_up``). A paired worker with its own database is not asked:
+    is cloning as a new project or setting up, under either joined spelling
+    of its remote (``being_set_up``). A paired worker with its own database is not asked:
     a duplicate between such workers is not refused here.
     """
     from pathlib import Path
@@ -720,7 +724,7 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
         # The project this repository was first seen as now uses another one.
         raise HTTPException(status_code=409, detail={
             "error_code": setup.MOVED, "error": setup.moved_message(pinned)})
-    # Any spelling of this repository being set up on this database already:
+    # This repository (either joined spelling) being set up on this database already:
     # another spelling's first clone (its provisional mark), or an ordinary
     # setup (the Workers tab), which no mark records.
     spellings = _same_repository_origins(clean) | {origin}
@@ -771,27 +775,27 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
     }
 
 
-def _remote_key(url: Optional[str]) -> str:
-    """``github.com/owner/repo`` for any spelling (HTTPS, SSH, ``.git``), case-folded;
-    the New project dialog's ``remoteKey``."""
-    return (setup.display_remote(url) or "").casefold()
-
-
 def _same_repository_origins(clean: str) -> set:
-    """Every identity whose remote is ``clean`` in any spelling (:func:`_remote_key`)."""
-    key = _remote_key(clean)
-    if not key:
+    """Every identity whose remote is ``clean`` by identity: a remote naming
+    one of the ids ``clean`` names (``remote_link_ids``), so
+    ``git@host:owner/repo`` and ``https://host/owner/repo`` match and two SSH
+    logins on one host don't."""
+    from app.core.project_links import remote_link_ids
+
+    wanted = remote_link_ids(clean)
+    if not wanted:
         return set()
     return {origin for origin, info in setup._repo_info_by_origin().items()
-            if _remote_key(info.get("clone_url")) == key}
+            if remote_link_ids(info.get("clone_url")) & wanted}
 
 
 def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     """The project (this worker's row, else one listed from this database) whose
-    remote is ``clean`` in any spelling, as the repository picker marks "Already added".
+    remote is ``clean`` (:func:`_same_repository_origins`), as the repository
+    picker marks "Already added".
 
-    One repository's identity is the same for every spelling, but a project an
-    older version added over SSH stays keyed by that spelling. Listed means
+    ``git@host:owner/repo`` and ``https://host/owner/repo`` are one identity,
+    but a project an older version added over SSH stays keyed by that spelling. Listed means
     :func:`_listed_elsewhere`; an identity only remembered from a removed
     project does not block a new clone.
     """

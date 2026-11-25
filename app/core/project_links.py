@@ -50,74 +50,33 @@ def normalize_remote_url(url: Optional[str]) -> str:
     return normalized.lower()
 
 
-# A host name, or a bracketed IPv6 address (``[2001:db8::1]``).
-_HOST = r"(\[[0-9A-Za-z:.%]+\]|[^\s/:?#@\[\]\\]+)"
-_SCHEME_REMOTE_RE = re.compile(
-    r"^(https?|ssh|git\+ssh|ssh\+git|git)://(?:([^/?#\s]*)@)?" + _HOST + r"(?::(\d*))?(/[^?#]*)?$",
-    re.IGNORECASE)
-_SCP_REMOTE_RE = re.compile(r"^(?:([^/\s]*)@)?" + _HOST + r":(?!//)(.+)$")
-# The SSH login forges use: ``git@host:owner/repo`` is ``https://host/owner/repo``.
-_FORGE_LOGIN = "git"
-_USERINFO_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/?#\s]*@", re.IGNORECASE)
-# Each scheme's own default port: only that one is dropped.
-_DEFAULT_PORT = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}
+# The one spelling joined to another: scp ``git@host:path``, the login exactly
+# ``git`` (the forges' SSH login), the path relative (neither ``/`` nor ``~``).
+_FORGE_SCP_RE = re.compile(r"^git@([^\s/:@\[\]\\]+):(?![/~])(\S+)$")
 
 
 def canonical_remote(url: Optional[str]) -> str:
-    """One spelling for the ways of writing one network remote.
+    """The form a remote's identity is hashed from.
 
-    - HTTPS and HTTP become ``https://host[:port]/path``. A port is dropped
-      only when it is the URL's own scheme default (443 for HTTPS, 80 for
-      HTTP), so ``https://host:80/…`` stays its own remote.
-    - The forge form, scp-style with the login ``git`` and a relative path
-      (``git@host:owner/repo``, as GitHub, GitLab, Bitbucket, Gitea and
-      Forgejo use), is the same repository as ``https://host/owner/repo``.
-    - Any other SSH form keeps its own spelling, as ``ssh://`` with the scp
-      and URL forms agreeing. A path relative to the login's home (another
-      login, no login, or a ``~`` path) keeps the login, since it picks the
-      home: ``alice@host:repos/app`` is ``ssh://alice@host/~/repos/app``. An
-      absolute path (``git@host:/srv/repo``, ``ssh://git@host/srv/repo``)
-      drops it. A non-default port is kept. ``git://`` stays ``git://``.
-    - A password is always dropped, and the login everywhere but a home
-      path; a bracketed IPv6 host is read as one host.
-
-    Then :func:`normalize_remote_url` applies. A plain HTTPS URL comes out
-    exactly as :func:`normalize_remote_url` always made it, so its identity
-    never changes. Local paths and ``file://`` URLs are only normalized.
+    One spelling is rewritten: scp ``git@host:owner/repo`` (the login exactly
+    ``git``, a path neither absolute nor ``~``), which GitHub, GitLab,
+    Bitbucket, Gitea and Forgejo all serve as ``https://host/owner/repo``,
+    becomes that URL. Every other remote is :func:`normalize_remote_url`
+    unchanged, so its identity is exactly the one it always had.
     """
-    text = (url or "").strip()
-    if not text:
-        return ""
-    match = _SCHEME_REMOTE_RE.match(text)
-    if match:
-        scheme, userinfo, host, port, path = match.groups()
-        scheme = scheme.lower()
-        kind = "ssh" if "ssh" in scheme else scheme
-        port = port or ""
-        keep = f":{port}" if port and port != _DEFAULT_PORT[kind] else ""
-        path = path or ""
-        if kind == "http":
-            kind = "https"  # one repository whichever of the two it is fetched over
-        if kind == "ssh" and path.startswith("/~"):
-            return normalize_remote_url(f"ssh://{_login(userinfo)}{host}{keep}{path}")
-        return normalize_remote_url(f"{kind}://{host}{keep}{path}")
-    scp = _SCP_REMOTE_RE.match(text)
-    if scp and len(scp.group(2)) > 1:  # never a Windows drive letter
-        userinfo, host, path = scp.groups()
-        if path.startswith("/"):
-            return normalize_remote_url(f"ssh://{host}{path}")
-        login = _login(userinfo)
-        if login == f"{_FORGE_LOGIN}@" and not path.startswith("~"):
-            return normalize_remote_url(f"https://{host}/{path}")
-        home = path if path.startswith("~") else f"~/{path}"
-        return normalize_remote_url(f"ssh://{login}{host}/{home}")
-    return normalize_remote_url(_USERINFO_RE.sub(r"\1", text))
+    forge = _FORGE_SCP_RE.match((url or "").strip())
+    if forge:
+        return normalize_remote_url(f"https://{forge.group(1)}/{forge.group(2)}")
+    return normalize_remote_url(url)
 
 
-def _login(userinfo: Optional[str]) -> str:
-    """``alice@`` from ``alice`` or ``alice:secret``; empty without a login."""
-    login = (userinfo or "").split(":", 1)[0]
-    return f"{login}@" if login else ""
+def remote_key(url: Optional[str]) -> str:
+    """A comparison key for a remote that never holds a credential: the
+    :func:`canonical_remote` of its stored form (``strip_url_userinfo``). Two
+    remotes with one key are one identity; the New project dialog's ``remoteKey``."""
+    from app.core.scrub import strip_url_userinfo
+
+    return canonical_remote(strip_url_userinfo(url or ""))
 
 
 def _link_id(normalized: str) -> Optional[str]:
@@ -127,8 +86,9 @@ def _link_id(normalized: str) -> Optional[str]:
 
 
 def auto_link_group_id(remote_url: Optional[str]) -> Optional[str]:
-    """Deterministic link-group id for a git remote, identical on every install
-    and for every spelling of it (:func:`canonical_remote`).
+    """Deterministic link-group id for a git remote, identical on every install,
+    and one for ``git@host:owner/repo`` and ``https://host/owner/repo``
+    (:func:`canonical_remote`).
 
     Returns ``None`` when there's no usable remote — a local-only project keeps
     its own row and is not auto-grouped.
@@ -137,18 +97,20 @@ def auto_link_group_id(remote_url: Optional[str]) -> Optional[str]:
 
 
 def legacy_link_group_id(remote_url: Optional[str]) -> Optional[str]:
-    """The id older versions derived from this exact spelling (no canonical
-    form): what a project first registered under SSH, say, is still keyed by."""
+    """The id older versions derived from this exact spelling: what a project
+    first registered as ``git@host:owner/repo`` is still keyed by. The same as
+    :func:`auto_link_group_id` for every other remote."""
     return _link_id(normalize_remote_url(remote_url))
 
 
 def remote_link_ids(remote_url: Optional[str]) -> set:
-    """Every identity ``remote_url`` names: its id and its spelling's older id."""
+    """Every identity ``remote_url`` names: its id and its spelling's older id
+    (two only for ``git@host:owner/repo``)."""
     return {gid for gid in (auto_link_group_id(remote_url), legacy_link_group_id(remote_url)) if gid}
 
 
 def same_remote(a: Optional[str], b: Optional[str]) -> bool:
-    """Whether two remote URLs are one repository, in any spelling."""
+    """Whether two remote URLs are one identity (:func:`canonical_remote`)."""
     left = canonical_remote(a)
     return bool(left) and left == canonical_remote(b)
 
@@ -172,11 +134,11 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
     project's effective link_group_id (possibly unchanged) or ``None``.
 
     A project already linked to an identity that still names this remote (its
-    id in any spelling, or the remote the project was pointed at) keeps it:
-    another project's row for another spelling arriving later never moves the
-    checkout. It moves only when its identity was merged into another one
-    (**Change repository**) or a project was pointed at this exact remote, as
-    before. Choosing by spelling is for a project with no such identity yet.
+    own id or older id, or the remote it was pointed at) gets its answer from
+    :func:`_kept_identity` and never from the remote's spelling, so another
+    project's row arriving later never moves the checkout. Choosing by the
+    remote (:func:`~app.core.project_remote.identity_for_remote`) is for a
+    project with no such identity yet.
     """
     from app.core.project_remote import identity_for_remote
 
@@ -211,30 +173,32 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
 
 def _kept_identity(current: Optional[str], remote_url: Optional[str]) -> Optional[Tuple[str, bool]]:
     """``(origin, locked)`` for a project already linked to ``current``, or None
-    to choose by the remote.
+    when ``current`` doesn't name ``remote_url`` (choose by the remote then).
 
-    ``current`` is kept while it still names ``remote_url``; it gives way to a
-    project pointed at this exact remote, and an explicit merge of it is
-    followed.
+    Once ``current`` names it, this is the answer: where an explicit merge of
+    ``current`` (**Change repository**) leads, else a different live project
+    pointed at this exact remote (as before), else ``current``.
     """
-    from app.core.project_remote import merged_into, pinned_remote, remote_names_origin
-    from app.db import projects_v2
+    from app.core.project_remote import exact_pins, is_live, merge_target, remote_names_origin
 
     if not current or not remote_url:
         return None
     try:
         if not remote_names_origin(remote_url, current):
             return None
-        wanted = normalize_remote_url(remote_url)
-        for row in projects_v2.list_projects_v2():  # a project pointed at this remote, as before
-            pinned = pinned_remote(row)
-            if pinned and row["origin"] != current and normalize_remote_url(pinned) == wanted:
-                return None
-        target = merged_into(projects_v2.get_project_v2_by_origin(current))
-        return (target, True) if target else (current, False)
-    except Exception:  # noqa: BLE001 - fall back to choosing by the remote
+    except Exception:  # noqa: BLE001 - not recognised: choose by the remote
         logger.debug("maybe_auto_link_project: current identity check failed", exc_info=True)
         return None
+    try:
+        target = merge_target(current)
+        if target:
+            return target, True
+        for row in exact_pins(remote_url):
+            if row["origin"] != current and is_live(row):
+                return row["origin"], True
+    except Exception:  # noqa: BLE001 - recognised: keep it
+        logger.debug("maybe_auto_link_project: merge or pin lookup failed", exc_info=True)
+    return current, False
 
 
 def record_project_remote(project_id: str, remote_url: Optional[str],

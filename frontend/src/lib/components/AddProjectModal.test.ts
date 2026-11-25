@@ -170,8 +170,8 @@ describe('AddProjectModal create flow', () => {
 		const promise = new Promise<T>((r) => (resolve = r));
 		return { promise, resolve };
 	};
-	const row = (name: string, remote: string, local: string | null) => ({
-		project_v2_id: `pv2-${name}`, local_project_id: local, name, kind: 'git', remote, default_branch: 'main',
+	const row = (name: string, remote: string, local: string | null, remote_key: string | null = null) => ({
+		project_v2_id: `pv2-${name}`, local_project_id: local, name, kind: 'git', remote, remote_key, default_branch: 'main',
 		session_count: 0, workers: []
 	});
 
@@ -311,7 +311,7 @@ describe('AddProjectModal create flow', () => {
 	});
 
 	it('marks a pasted repository that is already a project and offers to open it', async () => {
-		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site')]);
+		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site', 'https://github.com/acme/site')]);
 		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
 		const onCreated = vi.fn();
 		await openClone({ onCreated });
@@ -351,13 +351,24 @@ describe('AddProjectModal create flow', () => {
 });
 
 describe('remoteKey', () => {
-	it('matches the same repository in any spelling', async () => {
+	it('matches the HTTPS and git@ spellings of one repository', async () => {
 		const { remoteKey } = await import('$lib/api/project-workers');
-		const want = 'github.com/acme/site';
+		const want = 'https://github.com/acme/site';
 		for (const url of ['https://github.com/Acme/site.git', 'https://token@github.com/acme/site/', 'git@github.com:acme/site.git',
-			'ssh://git@github.com/acme/site', 'github.com/acme/site']) {
+			' https://user:pw-example@github.com/acme/site ']) {
 			expect(remoteKey(url)).toBe(want);
 		}
 		expect(remoteKey('')).toBe('');
+	});
+
+	it('keeps every other spelling as written, so SSH logins on one host stay apart', async () => {
+		const { remoteKey } = await import('$lib/api/project-workers');
+		const alice = remoteKey('alice@code.example.test:repos/app.git');
+		const bob = remoteKey('bob@code.example.test:repos/app.git');
+		expect(alice).toBe('alice@code.example.test:repos/app');
+		expect(new Set([alice, bob, remoteKey('https://code.example.test/repos/app')]).size).toBe(3);
+		expect(remoteKey('ssh://git@github.com/acme/site')).toBe('ssh://git@github.com/acme/site');
+		expect(remoteKey('git@github.com:/srv/site')).toBe('git@github.com:/srv/site');
+		expect(remoteKey('ssh://alice:pw-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
 	});
 });

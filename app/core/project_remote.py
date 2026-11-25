@@ -92,10 +92,10 @@ def merged_into(pv2: Optional[Dict[str, Any]]) -> Optional[str]:
 def remote_names_origin(url: Optional[str], origin: str, pv2: Optional[Dict[str, Any]] = None) -> bool:
     """Whether ``url`` is this identity's repository.
 
-    A ``git:`` origin is the hash of the remote it was first seen with (in
-    any spelling, or that exact spelling for an identity an older version
-    keyed); once an owner points the project at another repository, the
-    pinned remote names it too. Pass ``pv2`` when it is already loaded.
+    A ``git:`` origin is the hash of the remote it was first seen with (its
+    id, or the exact-spelling id an older version keyed ``git@host:owner/repo``
+    by); once an owner points the project at another repository, the pinned
+    remote names it too. Pass ``pv2`` when it is already loaded.
     """
     from app.core.project_links import remote_link_ids, same_remote
     from app.db.projects_v2 import stored_remote
@@ -113,7 +113,7 @@ def remote_names_origin(url: Optional[str], origin: str, pv2: Optional[Dict[str,
     pinned = pinned_remote(pv2)
     if pinned:
         return same_remote(pinned, url)
-    # An identity keyed by an older spelling: its stored remote, in any spelling.
+    # An identity keyed by an older spelling: its stored remote, either joined spelling.
     stored, _branch = stored_remote(pv2)
     return (origin.startswith("git:") and bool(stored) and origin in remote_link_ids(stored)
             and same_remote(stored, url))
@@ -125,6 +125,38 @@ def _pinned_rows() -> List[Dict[str, Any]]:
     return [row for row in projects_v2.list_projects_v2() if pinned_remote(row)]
 
 
+def exact_pins(url: Optional[str]) -> List[Dict[str, Any]]:
+    """Projects an owner pointed at exactly ``url``. The one "exact remote"
+    comparison, as it has always been: :func:`normalize_remote_url` equality."""
+    from app.core.project_links import normalize_remote_url
+
+    wanted = normalize_remote_url(url)
+    if not wanted:
+        return []
+    return [row for row in _pinned_rows() if normalize_remote_url(pinned_remote(row)) == wanted]
+
+
+def merge_target(origin: Optional[str]) -> Optional[str]:
+    """Where an explicit merge of ``origin`` (**Change repository**) leads,
+    following merges of merges; None when it was never merged."""
+    from app.db import projects_v2
+
+    seen = {origin}
+    current = origin
+    for _ in range(16):
+        nxt = merged_into(projects_v2.get_project_v2_by_origin(current)) if current else None
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        current = nxt
+    return current if current != origin else None
+
+
+def is_live(row: Optional[Dict[str, Any]]) -> bool:
+    """A project neither forgotten nor merged into another."""
+    return row is not None and not _forgotten(row) and not merged_into(row)
+
+
 def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     """``(origin, locked)`` a checkout with remote ``url`` belongs to, or None.
 
@@ -132,20 +164,15 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     (then that project, ``locked`` so auto-linking keeps it there) or the
     remote's own project was merged into another one.
 
-    That id is the same for every spelling of one repository
-    (:func:`~app.core.project_links.auto_link_group_id`), so a new add in any
-    spelling joins the project already there. An existing checkout never
+    That id is one for ``git@host:owner/repo`` and ``https://host/owner/repo``
+    (:func:`~app.core.project_links.auto_link_group_id`), so a new add in
+    either joins the project already there. An existing checkout never
     moves off the identity it has: while a live project an older version
     keyed by this exact spelling exists, the checkout stays on it. Nor does
     another spelling join a project of the repository's own id that was
     pointed at a different repository; that spelling keeps its own id.
     """
-    from app.core.project_links import (
-        auto_link_group_id,
-        legacy_link_group_id,
-        normalize_remote_url,
-        same_remote,
-    )
+    from app.core.project_links import auto_link_group_id, legacy_link_group_id, same_remote
     from app.db import projects_v2
 
     derived = auto_link_group_id(url)
@@ -154,10 +181,9 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     legacy = legacy_link_group_id(url) or derived
     own = (legacy, derived)
     try:
-        wanted = normalize_remote_url(url)
         pinned = _pinned_rows()
-        for row in pinned:  # a current pin beats an older merge
-            if row["origin"] not in own and normalize_remote_url(pinned_remote(row)) == wanted:
+        for row in exact_pins(url):  # a current pin beats an older merge
+            if row["origin"] != legacy:  # a project pointed at this exact remote, as always
                 return row["origin"], True
         exact = projects_v2.get_project_v2_by_origin(legacy)
         target = merged_into(exact)

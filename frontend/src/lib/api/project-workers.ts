@@ -76,6 +76,8 @@ export interface ProjectOverviewRow {
 	kind: ProjectKind;
 	/** Display form (no credentials), e.g. github.com/owner/repo. */
 	remote: string | null;
+	/** The repository's comparison key (no credentials): equal to `remoteKey()` of any URL of it. */
+	remote_key?: string | null;
 	default_branch: string | null;
 	session_count: number;
 	workers: ProjectWorker[];
@@ -143,20 +145,19 @@ export function refQuery(ref: ProjectRef): string {
 }
 
 /**
- * A comparison key for a Git remote in any spelling (HTTPS, SSH `git@host:o/r`,
- * with or without `.git`, credentials or a trailing slash): `host/owner/repo`
- * lower-cased. Mirrors the server's `display_remote`, so it also matches an
- * overview row's `remote`. Empty for a blank URL.
+ * A Git remote's comparison key, equal to an overview row's `remote_key` for the
+ * same repository (the server's `remote_key`): credentials dropped (an SSH login
+ * stays), `git@host:owner/repo` read as `https://host/owner/repo`, then a trailing
+ * slash and `.git` removed and lower-cased. Every other spelling is compared as
+ * written, so two SSH logins on one host stay apart. Empty for a blank URL.
  */
 export function remoteKey(url: string | null | undefined): string {
 	let text = (url ?? '').trim();
-	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(.*)$/.exec(text);
-	if (scheme) {
-		text = scheme[1].replace(/^[^@/]*@/, '');
-	} else {
-		const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.*)$/.exec(text);
-		if (scp && scp[1].length > 1) text = `${scp[1]}/${scp[2]}`;
-	}
+	text = text.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^\s/?#"'<>[\]{}\\^|]+)@/, (whole, scheme: string, info: string) =>
+		/^(?:git\+)?ssh(?:\+git)?:\/\/$/i.test(scheme) && !info.includes(':') ? whole : scheme
+	);
+	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(text);
+	if (forge) text = `https://${forge[1]}/${forge[2]}`;
 	text = text.replace(/\/+$/, '');
 	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
 	return text.toLowerCase();

@@ -1536,12 +1536,30 @@ def test_clone_new_refuses_the_same_repository_by_another_spelling(client, ws, t
     assert elsewhere.json()["detail"]["project_id"] is None
     assert "Tool on another worker" in elsewhere.json()["detail"]["error"]
 
-    # The scheme form of SSH (with its login) is the same repository too.
+    # Only git@host:owner/repo is joined with HTTPS: the scheme form of SSH is
+    # compared as written (its own identity), like every other spelling.
     _held_by_peer(_peer_project(test_db, "kit", "Kit", remote="ssh://git@github.com/example-org/kit.git"))
-    scheme = client.post("/api/v1/projects/clone", json={
-        "id": "kit", "name": "Kit here", "clone_url": "https://github.com/example-org/kit"})
-    assert scheme.status_code == 409 and scheme.json()["detail"]["error_code"] == "already_added", scheme.text
+    assert project_workers._same_repository_origins("https://github.com/example-org/kit") == set()
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+
+def test_two_ssh_logins_on_one_host_are_two_projects_and_git_at_is_still_https(client, ws, test_db,
+                                                                               monkeypatch):
+    alice, bob = "alice@code.example.test:repos/app.git", "bob@code.example.test:repos/app.git"
+    _held_by_peer(_peer_project(test_db, "app", "App", remote=alice))
+    # The dialog compares the overview's key, which keeps the login and no credential.
+    keys = {p["name"]: p.get("remote_key") for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert keys["App"] == "alice@code.example.test:repos/app"
+    # Bob's home is another repository: it clones.
+    resp = _clone_new(client, _https(monkeypatch, _bare_remote(ws), url=bob))
+    assert resp.status_code == 202, resp.text
+    # git@ and HTTPS are still one repository.
+    _held_by_peer(_peer_project(test_db, "site", "Site", remote="git@github.com:example-org/site.git"))
+    again = client.post("/api/v1/projects/clone", json={
+        "id": "site", "name": "Site here", "clone_url": "https://github.com/example-org/site"})
+    assert again.status_code == 409 and again.json()["detail"]["error_code"] == "already_added", again.text
+    keys = {p["name"]: p.get("remote_key") for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert keys["Site"] == "https://github.com/example-org/site"
 
 
 def test_a_remembered_identity_with_no_copy_does_not_block_a_new_clone(client, ws, test_db):
@@ -1689,6 +1707,30 @@ def test_an_ssh_checkout_stays_put_when_the_https_project_moved_to_another_repos
     # A new SSH add with no SSH project in use does not join the moved project either.
     projects_v2.set_forgotten(legacy["origin"], True)
     assert project_remote.identity_for_remote(_SSH) == (legacy["origin"], False)
+
+
+def test_a_respelled_checkout_never_joins_a_project_that_moved_to_another_repository(client, ws, test_db):
+    from app.core import project_remote
+
+    # Three older projects of one repository: explicit-port HTTPS (this worker's
+    # copy), plain HTTPS, and git@ SSH (the old SSH id).
+    port_https = "https://git.example.com:443/example-org/demo.git"
+    _here, mine = _legacy_project_here(ws, remote=port_https)
+    plain = _replicated(_HTTPS)
+    legacy = _replicated(_SSH, origin=_legacy_id(_SSH))
+    # The SSH project moved to another repository; the HTTPS one was pointed at the SSH URL.
+    projects_v2.pin_remote(legacy["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_SSH)
+    projects_v2.pin_remote(plain["origin"], _SSH, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_HTTPS)
+    # This copy's remote becomes that SSH URL.
+    git(ws / "demo", "remote", "set-url", "origin", _SSH)
+    _refresh_git_record("demo", ws / "demo")
+    linked = database.get_project("demo")["link_group_id"]
+    assert linked in (mine["origin"], plain["origin"]) and linked != legacy["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never pointed at the other repository
+    assert database.get_project("demo")["link_group_id"] != legacy["origin"]
 
 
 def test_an_ssh_checkout_stays_put_when_an_older_ssh_project_arrives_late_and_moved(client, ws, test_db):

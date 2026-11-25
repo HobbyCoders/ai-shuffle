@@ -76,7 +76,7 @@ def test_auto_link_group_id_none_without_remote():
 
 
 # ---------------------------------------------------------------------------
-# One identity for every spelling of a network remote
+# One identity for the HTTPS and git@ spellings of a remote
 # ---------------------------------------------------------------------------
 
 _DEMO = "https://github.com/example-org/demo"
@@ -86,90 +86,63 @@ _DEMO = "https://github.com/example-org/demo"
     "https://github.com/example-org/demo.git",
     "https://github.com/Example-Org/Demo/",
     "HTTPS://GitHub.com/example-org/demo",
-    "http://github.com/example-org/demo.git",
-    "http://github.com:80/example-org/demo",
-    "https://someone@github.com/example-org/demo.git",
-    "https://someone:pw-example@github.com/example-org/demo.git",
-    "https://github.com:443/example-org/demo",
     "git@github.com:example-org/demo.git",
     "git@github.com:Example-Org/demo",
+    " git@github.com:example-org/demo/ ",
 ])
-def test_every_forge_spelling_of_a_remote_has_one_identity(spelling):
+def test_the_https_and_git_at_spellings_have_one_identity(spelling):
     assert project_links.canonical_remote(spelling) == _DEMO
     assert auto_link_group_id(spelling) == auto_link_group_id(_DEMO)
 
 
-def _same(a, b):
-    return auto_link_group_id(a) == auto_link_group_id(b)
-
-
-def test_an_ssh_path_relative_to_the_login_is_not_the_absolute_one():
-    relative, absolute = "git@git.example.test:repos/app.git", "git@git.example.test:/repos/app.git"
-    assert not _same(relative, absolute)
-    assert _same(relative, "https://git.example.test/repos/app")
-    # An absolute path is the same whichever SSH form names it, and not the web one.
-    assert project_links.canonical_remote(absolute) == "ssh://git.example.test/repos/app"
-    for spelling in ("ssh://git@git.example.test/repos/app.git", "ssh://git@git.example.test:22/repos/app",
-                     "git+ssh://git@git.example.test/repos/app", "ssh+git://git.example.test/repos/app"):
-        assert _same(spelling, absolute), spelling
-    assert not _same("ssh://git@git.example.test/repos/app", "https://git.example.test/repos/app")
-    assert _same("git@git.example.test:~/repos/app", "ssh://git@git.example.test/~/repos/app")
-    assert not _same("git@git.example.test:~/repos/app", absolute)
-
-
-def test_only_the_forge_login_makes_an_scp_path_the_web_repository():
-    web = "https://git.example.test/repos/app"
-    alice, bob, nobody = ("alice@git.example.test:repos/app.git", "bob@git.example.test:repos/app.git",
-                          "git.example.test:repos/app.git")
-    # Each login's home is its own: three repositories, none of them the web one.
-    ids = {auto_link_group_id(url) for url in (alice, bob, nobody, web)}
-    assert len(ids) == 4
-    assert project_links.canonical_remote(alice) == "ssh://alice@git.example.test/~/repos/app"
-    assert _same(alice, "ssh://alice@git.example.test/~/repos/app.git")
-    assert _same(alice, "alice@git.example.test:~/repos/app")
-    assert not _same("alice@git.example.test:/srv/app", "alice@git.example.test:srv/app")
-    # The forge login is the web repository; its home path is not.
-    assert _same("git@git.example.test:repos/app.git", web)
-    assert not _same("GIT@git.example.test:repos/app.git", web)
-    assert not _same("git@git.example.test:~/repos/app", web)
-    # A password in a URL form never reaches it; the login that picks the home does.
-    homed = project_links.canonical_remote("ssh://alice:pw-example@git.example.test/~/repos/app")
-    assert homed == "ssh://alice@git.example.test/~/repos/app"
-
-
-def test_only_the_schemes_own_default_port_is_dropped():
-    web = "https://git.example.test/org/app"
-    assert not _same("https://git.example.test:80/org/app", web)
-    assert not _same("http://git.example.test:443/org/app", web)
-    assert _same("https://git.example.test:443/org/app", web)
-    assert _same("http://git.example.test:80/org/app", web)
-    assert not _same("ssh://git@git.example.test:2222/org/app", "ssh://git@git.example.test/org/app")
-    assert not _same("ssh://git@git.example.test:2222/org/app", "git@git.example.test:org/app")
-    assert _same("git://git.example.test:9418/org/app", "git://git.example.test/org/app")
-    assert not _same("git://git.example.test/org/app", web)
-
-
-def test_a_bracketed_ipv6_host_is_one_host():
-    web = "https://[2001:db8::1]/org/app"
-    assert project_links.canonical_remote("https://[2001:db8::1]/org/app.git") == web
-    assert project_links.canonical_remote("git@[2001:db8::1]:org/app.git") == web
-    assert project_links.canonical_remote("ssh://git@[2001:db8::1]/org/app.git") == "ssh://[2001:db8::1]/org/app"
-    assert _same("ssh://git@[2001:db8::1]/org/app.git", "git@[2001:db8::1]:/org/app")
-    assert project_links.canonical_remote("https://[2001:db8::1]:8443/org/app") == "https://[2001:db8::1]:8443/org/app"
-    assert _same("https://user:pw-example@[2001:db8::1]/org/app", web)
-
-
 @pytest.mark.parametrize("spelling", [
-    "https://user:pw-example@git.example.test/org/app",
-    "https://user:pw@example@git.example.test/org/app",
-    "https://user:pw-example@[2001:db8::1]/org/app",
-    "ssh://user:pw-example@git.example.test/org/app",
-    "ssh://user:pw-example@[2001:db8::1]:2222/org/app",
-    "https://user:pw-example@git.example.test/org/app?ref=main",
+    # Only scp ``git@host:path`` with a relative path is rewritten; everything
+    # else hashes exactly as it always did (``normalize_remote_url``).
+    "http://github.com/example-org/demo.git",
+    "https://github.com:443/example-org/demo",
+    "https://someone:pw-example@github.com/example-org/demo.git",
+    "ssh://git@github.com/example-org/demo.git",
+    "ssh://git@github.com:22/example-org/demo",
+    "git+ssh://git@github.com/example-org/demo",
+    "git://github.com/example-org/demo",
+    "GIT@github.com:example-org/demo",
+    "alice@code.example.test:repos/app.git",
+    "bob@code.example.test:repos/app.git",
+    "code.example.test:repos/app.git",
+    "git@code.example.test:/srv/repos/app.git",
+    "git@code.example.test:~/repos/app.git",
+    "git@[2001:db8::1]:org/app.git",
+    "https://[2001:db8::1]/org/app.git",
+    "/srv/repos/demo.git",
+    "file:///srv/repos/demo.git",
+    "C:/repos/demo.git",
+    "C:\\repos\\demo.git",
+    "../demo.git",
 ])
-def test_no_login_reaches_the_identity(spelling):
-    canonical = project_links.canonical_remote(spelling)
-    assert "pw" not in canonical and "user" not in canonical and "@" not in canonical
+def test_every_other_spelling_keeps_the_identity_it_always_had(spelling):
+    assert project_links.canonical_remote(spelling) == normalize_remote_url(spelling)
+    assert auto_link_group_id(spelling) == project_links.legacy_link_group_id(spelling)
+    assert project_links.remote_link_ids(spelling) == {project_links.legacy_link_group_id(spelling)}
+
+
+def test_two_ssh_logins_on_one_host_are_two_repositories():
+    alice, bob = "alice@code.example.test:repos/app.git", "bob@code.example.test:repos/app.git"
+    assert auto_link_group_id(alice) != auto_link_group_id(bob)
+    assert project_links.remote_key(alice) != project_links.remote_key(bob)
+    assert not project_links.same_remote(alice, bob)
+    assert project_links.same_remote("git@code.example.test:repos/app.git", "https://code.example.test/repos/app")
+
+
+def test_a_remote_key_never_holds_a_credential():
+    key = project_links.remote_key("https://someone:pw-example@github.com/example-org/demo.git")
+    assert key == _DEMO
+    assert project_links.remote_key("ssh://alice:pw-example@code.example.test/repos/app") == \
+        "ssh://code.example.test/repos/app"
+    # An SSH login is not a credential: it stays and keeps two logins apart.
+    assert project_links.remote_key("ssh://alice@code.example.test/repos/app") == \
+        "ssh://alice@code.example.test/repos/app"
+    assert project_links.remote_key("git@github.com:example-org/demo.git") == _DEMO
+    assert project_links.remote_key(None) == ""
 
 
 def test_an_https_identity_is_the_one_it_always_had():
@@ -182,17 +155,8 @@ def test_an_https_identity_is_the_one_it_always_had():
 def test_spellings_that_are_other_repositories_stay_apart():
     assert auto_link_group_id("git@github.com:example-org/demo") != auto_link_group_id(
         "git@github.com:example-org/other")
-    assert auto_link_group_id("https://git.example.com:8443/example-org/demo") != auto_link_group_id(
-        "https://git.example.com/example-org/demo")
     assert auto_link_group_id("git@git.example.com:example-org/demo") != auto_link_group_id(
         "git@github.com:example-org/demo")
-
-
-@pytest.mark.parametrize("path", ["/srv/repos/demo.git", "file:///srv/repos/demo.git",
-                                  "C:/repos/demo.git", "C:\\repos\\demo.git", "../demo.git"])
-def test_a_local_repository_keeps_its_old_identity(path):
-    assert project_links.canonical_remote(path) == normalize_remote_url(path)
-    assert auto_link_group_id(path) == project_links.legacy_link_group_id(path)
 
 
 def test_a_remote_names_its_canonical_and_its_old_identity():
