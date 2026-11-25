@@ -772,3 +772,43 @@ async def test_cancel_during_launch_intent_never_spawns():
     await c.jobs[receipt.task_id]
     dispatch.assert_not_called()
     assert c.snapshot(receipt.task_id)["status"] == "cancelled"
+
+
+async def test_a_stop_during_the_start_handshake_still_runs_and_settles_the_swarm():
+    """native.md Medium #6: a Stop while ``start`` awaited the background
+    acknowledgement, after the queued row was persisted, left that row with
+    no runner: nothing would ever run or settle it."""
+    entered, release = asyncio.Event(), asyncio.Event()
+    published = []
+
+    async def started(receipt):
+        entered.set()
+        await release.wait()
+
+    async def dispatch(data, ctx):
+        return ToolOutcome(text="done")
+
+    async def publish(snapshot):
+        published.append(snapshot["status"])
+
+    finished = AsyncMock()
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), publish, finished)
+    ctx = ToolCtx(extra={"background_task_started": started})
+    start = asyncio.create_task(c.start({"tasks": [spec("a")]}, ctx))
+    await asyncio.wait_for(entered.wait(), 5)
+    assert published == ["queued"]
+
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    release.set()
+    for _ in range(100):
+        if c.jobs:
+            break
+        await asyncio.sleep(0.01)
+    (key, job), = c.jobs.items()
+    await asyncio.wait_for(job, 5)
+    assert c.snapshot(key)["status"] == "completed"
+    assert published[-1] == "completed"
+    finished.assert_awaited_once()
+    assert not c._admissions

@@ -147,6 +147,7 @@ class SwarmCoordinator:
         self.closed = False
         self._publish_lock = asyncio.Lock()
         self._worker_stops = {}
+        self._admissions = set()  # handshakes a cancelled start() left running
 
     async def _stop_worker(self, task_id):
         # Receipt publication, cancel(), and interrupted-spawn cleanup can all
@@ -184,15 +185,27 @@ class SwarmCoordinator:
                 depends_on=t.get("depends_on", []), status="queued", task_id=None,
                 worker_session_id=None, result=None, error=None, started_at=None,
                 finished_at=None) for t in tasks])
-        await self.emit(key)  # persist intent BEFORE any launch
         receipt = BackgroundTaskReceipt(task_id=key, description=self.swarms[key]["title"])
         started = ctx.extra.get("background_task_started")
-        if started is not None:
-            await started(receipt)
-        if self.closed:
-            self.cancelled.add(key)
         dispatch_ctx = replace(ctx, extra=dict(ctx.extra))
-        self.jobs[key] = asyncio.create_task(self._run(key, tasks, cap, dispatch_ctx), name=key)
+
+        async def admit():
+            await self.emit(key)  # persist intent BEFORE any launch
+            if started is not None:
+                await started(receipt)
+            if self.closed:
+                self.cancelled.add(key)
+            self.jobs[key] = asyncio.create_task(self._run(key, tasks, cap, dispatch_ctx), name=key)
+
+        # Once the queued row may be persisted, the runner must start: a Stop
+        # landing mid-handshake would otherwise leave a queued swarm that
+        # nothing runs or settles. The swarm then runs like any other
+        # background task whose start the caller did not wait to hear about.
+        admission = asyncio.create_task(admit())
+        self._admissions.add(admission)
+        admission.add_done_callback(self._admissions.discard)
+        admission.add_done_callback(lambda job: None if job.cancelled() else job.exception())
+        await asyncio.shield(admission)
         return self.snapshot(key), receipt
 
     async def _run(self, key, specs, cap, ctx):
@@ -345,6 +358,9 @@ class SwarmCoordinator:
 
     async def aclose(self):
         self.closed = True
+        # An admission still in flight adds its job (already latched as
+        # cancelled by ``closed``); let it, so that job is stopped below too.
+        await asyncio.gather(*self._admissions, return_exceptions=True)
         for key in list(self.jobs):
             if not self.jobs[key].done():
                 await self.cancel(key)
