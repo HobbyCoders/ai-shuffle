@@ -304,6 +304,18 @@ describe('agent question', () => {
 			await waitFor(() => expect(form.closest('[hidden]')).toBeNull());
 			expect(screen.getByRole('form', { name: 'Answer questions' })).toBe(form);
 		});
+
+		it('still says to reconnect while folded and offline', async () => {
+			const view = renderDock({ permissions: [], questions: [question] });
+			await fireEvent.click(fold());
+			const head = () => fold().closest('.p-head') as HTMLElement;
+			expect(within(head()).getByText(question.questions[0].question)).toBeTruthy();
+
+			await view.rerender({ permissions: [], questions: [question], connected: false });
+			expect(fold().getAttribute('aria-expanded')).toBe('false');
+			expect(within(head()).getByText('Reconnect to answer')).toBeTruthy();
+			expect(within(head()).queryByText(question.questions[0].question)).toBeNull();
+		});
 	});
 
 	it('uses the shared question form for a multi-part request', () => {

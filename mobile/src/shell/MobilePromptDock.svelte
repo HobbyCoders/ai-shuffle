@@ -384,8 +384,10 @@
 				<div class="p-head">
 					<MessageCircleQuestionMark size={17} class="t-ico q" aria-hidden="true" />
 					<strong>Question</strong>
-					{#if isFolded && question}
-						<!-- Folded: one line of the question, so it is clear what waits. -->
+					{#if isFolded && question && connected}
+						<!-- Folded: one line of the question, so it is clear what waits.
+						     Offline, the status wins: a folded card must still say it
+						     can't be answered until the connection is back. -->
 						<span class="q-peek">{question.question || question.header}</span>
 					{:else}
 						<span class="what">{!connected ? 'Reconnect to answer' : request.nonblocking && working ? 'Still working' : 'Waiting for you'}</span>
