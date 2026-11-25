@@ -329,6 +329,33 @@ async def test_rows_reprinted_while_a_slow_automatic_compaction_runs_are_not_sto
         await loop.aclose()
 
 
+async def test_a_late_answer_does_not_hide_the_next_model_reply_that_matches_it(monkeypatch):
+    """The mod gave up waiting, Claude Code's summarizer compacted and the
+    next model call started before Fluid's answer was ready. No boundary will
+    apply that answer, so a fresh reply with the same words as one of its rows
+    is the model's and is stored."""
+    from fluid.engine import delegated
+
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    monkeypatch.setattr(delegated, 'MOD_COMPACT_WAIT_S', -1.0)  # the mod gave up
+    try:
+        await _read(loop, sid, [{'type': 'stream_event', 'event': {'type': 'message_start'}}])
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200
+        replies = [row for row in body['messages']
+                   if row['role'] == 'assistant' and row['text'] and not row['toolUses']]
+        assert replies, 'the answer must carry a text reply for the test to mean anything'
+        stored_before = len(await loop.store.load_path(sid))
+        await _read(loop, sid, [_frame(replies[-1], 'fresh-reply')])
+        path = await loop.store.load_path(sid)
+        assert len(path) == stored_before + 1
+        assert path[-1].message.provider_meta.get('claude_uuid') == 'fresh-reply'
+    finally:
+        await loop.aclose()
+
+
 async def test_replay_tracking_goes_with_the_cli_process():
     """A fresh CLI has compacted nothing, so it has nothing to replay: the
     ids the last one could replay are not kept past its process."""

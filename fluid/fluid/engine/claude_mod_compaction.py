@@ -1375,8 +1375,8 @@ class ReplayFilter:
 
     A main-conversation frame is a replay when its uuid is a stored frame's,
     when every tool call (or result) it carries is one already recorded, or,
-    in the window after a compaction this leg answered, when it is one of the
-    rows of that answer. A tool id is unique in a conversation, so a frame
+    in the window after a boundary applied an answer of this leg, when it is
+    one of the rows of that answer. A tool id is unique in a conversation, so a frame
     made only of recorded ids is never fresh execution. The window closes at
     the next model call (``message_start``), a result, or any assistant frame
     that is not part of the answer. Nothing is filtered, or recorded, until

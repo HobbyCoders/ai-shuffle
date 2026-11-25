@@ -2309,7 +2309,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         late = time.monotonic() - received > MOD_COMPACT_WAIT_S
         if not late:
             self._replay_filter.seed(nodes)
-        self._replay_filter.expect(messages)
+        # The answer's rows are expected only once a boundary says Claude Code
+        # applied it (_bind_compaction). Set here, a late answer's text rows
+        # would hide a fresh model reply with the same words.
         if checkpoint.get("skipped"):
             logger.warning("claude mod compaction %s: no portable checkpoint (%s); a re-seed "
                            "on another worker starts from the stored path, compacted to "
