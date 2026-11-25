@@ -6,7 +6,7 @@ import logging
 import shutil
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 from threading import Lock
 
@@ -308,6 +308,55 @@ def remote_link_group(project_path: Path) -> Optional[str]:
         return None
 
 
+def check_new_project(request: ProjectCreate) -> Tuple[ProjectCreate, str, Path]:
+    """The id, path and duplicate checks a new project must pass (409/400).
+
+    Returns ``(payload, db_path, project_path)``; ``payload`` carries the id the
+    project would get (suffixed on a cross-install collision). Creation runs it
+    under the creation lock; cloning a new project (``POST /projects/clone``)
+    runs it first too, so a duplicate is refused before anything is cloned.
+    """
+    payload = request
+
+    # Keep cross-install ID suffixing: another worker may use the same ID.
+    existing = database.get_project(payload.id)
+    if existing:
+        if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
+            import hashlib
+            suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
+            payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
+            if database.get_project(payload.id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Project already exists: {payload.id}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists: {payload.id}"
+            )
+
+    effective_path = normalize_docker_path(payload.path) if payload.path else None
+    db_path = effective_path if effective_path else payload.id
+    project_path = validate_project_path(db_path, allow_create=True)
+    refuse_nested_repository(project_path)
+
+    # Only this worker's projects (including legacy rows) are duplicates.
+    # Resolve paths so relative, absolute and symlink spellings agree.
+    for project in database.get_all_projects():
+        if project["name"].strip().casefold() == payload.name.strip().casefold():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists with name '{payload.name}': {project['id']}"
+            )
+        if get_project_working_dir_as_path(project).resolve() == project_path:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project already exists at path '{project_path}': {project['id']}"
+            )
+    return payload, db_path, project_path
+
+
 def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optional[str] = None,
                                link_locked: bool = False) -> dict:
     """The blocking body of :func:`create_project_record` (run it off the loop).
@@ -322,45 +371,7 @@ def create_project_record_sync(request: ProjectCreate, *, link_group_id: Optiona
     # Serialize local creates so concurrent REST/tool calls cannot both pass
     # the name/path checks. Filesystem and DB work stay off the event loop.
     with _project_creation_lock:
-        payload = request
-
-        # Keep cross-install ID suffixing: another worker may use the same ID.
-        existing = database.get_project(payload.id)
-        if existing:
-            if existing.get("instance_id") and existing["instance_id"] != settings.effective_instance_id:
-                import hashlib
-                suffix = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest()[:6]
-                payload = payload.model_copy(update={"id": f"{payload.id}-{suffix}"})
-                if database.get_project(payload.id):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Project already exists: {payload.id}"
-                    )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists: {payload.id}"
-                )
-
-        effective_path = normalize_docker_path(payload.path) if payload.path else None
-        db_path = effective_path if effective_path else payload.id
-        project_path = validate_project_path(db_path, allow_create=True)
-        refuse_nested_repository(project_path)
-
-        # Only this worker's projects (including legacy rows) are duplicates.
-        # Resolve paths so relative, absolute and symlink spellings agree.
-        for project in database.get_all_projects():
-            if project["name"].strip().casefold() == payload.name.strip().casefold():
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists with name '{payload.name}': {project['id']}"
-                )
-            if get_project_working_dir_as_path(project).resolve() == project_path:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Project already exists at path '{project_path}': {project['id']}"
-                )
-
+        payload, db_path, project_path = check_new_project(request)
         project_path.mkdir(parents=True, exist_ok=True)
         settings_dict = request.settings.model_dump(exclude_none=True) if request.settings else None
         if link_group_id and link_locked:

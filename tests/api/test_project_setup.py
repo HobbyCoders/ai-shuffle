@@ -1040,3 +1040,94 @@ def test_importing_a_git_folder_from_provider_settings_leaves_no_local_twin(ws, 
     assert database.get_project(project_id)["link_group_id"] == auto_link_group_id(remote)
     assert _local_twin(project_id) is None
     assert database.get_git_repository_by_project(project_id)["remote_url"] == remote
+
+
+# ---------------------------------------------------------------------------
+# A new project cloned from the New project dialog (POST /projects/clone)
+# ---------------------------------------------------------------------------
+
+def _clone_new(client, clone_url: str, **extra):
+    return client.post("/api/v1/projects/clone", json={"id": "demo", "name": "Demo", "clone_url": clone_url, **extra})
+
+
+def _listed(client, project_v2_id: str) -> bool:
+    return any(p["project_v2_id"] == project_v2_id for p in client.get("/api/v1/projects/overview").json()["projects"])
+
+
+def test_clone_new_registers_the_project_only_after_the_clone(client, ws, test_db):
+    remote = _bare_remote(ws)
+    resp = _clone_new(client, remote)
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["project_id"] == "demo" and body["status"] == "queued"
+    assert database.get_project("demo") is None  # nothing registered while it clones
+    assert client.get(f"/api/v1/projects/setup/{body['op_id']}").json()["status"] == "queued"
+
+    _run_setups()
+
+    status = client.get(f"/api/v1/projects/setup/{body['op_id']}").json()
+    assert status["status"] == "done" and status["progress"] == 100 and status["project_id"] == "demo"
+    row = database.get_project("demo")
+    assert row["name"] == "Demo" and row["path"] == "demo" and row["instance_id"] == ME
+    assert row["link_group_id"] == auto_link_group_id(remote)
+    assert (ws / "demo" / "README.md").read_text() == "demo\n"
+    assert _listed(client, body["project_v2_id"])
+
+
+def test_a_failed_clone_leaves_no_project_and_a_retry_works(client, ws, test_db):
+    remote = _local_remote(ws / "_remotes" / "demo.git")  # not created yet
+    first = _clone_new(client, remote)
+    assert first.status_code == 202, first.text
+    _run_setups()
+
+    status = client.get(f"/api/v1/projects/setup/{first.json()['op_id']}").json()
+    assert status["status"] == "error" and status["error_code"] == "not_found", status
+    assert status["project_id"] is None
+    assert database.get_project("demo") is None
+    assert not (ws / "demo").exists()
+    assert not _listed(client, first.json()["project_v2_id"])  # no half-made project on the Projects page
+
+    assert _bare_remote(ws) == remote  # the repository now exists: the same request succeeds
+    retry = _clone_new(client, remote)
+    assert retry.status_code == 202, retry.text
+    _run_setups()
+    assert client.get(f"/api/v1/projects/setup/{retry.json()['op_id']}").json()["status"] == "done"
+    assert database.get_project("demo")["name"] == "Demo"
+    assert _listed(client, retry.json()["project_v2_id"])
+
+
+def test_clone_new_refuses_a_repository_that_is_already_a_project(client, ws, test_db):
+    remote = _bare_remote(ws)
+    _clone_new(client, remote)
+    _run_setups()
+    again = client.post("/api/v1/projects/clone", json={"id": "demo-2", "name": "Demo 2", "clone_url": remote + "/"})
+    assert again.status_code == 409
+    assert again.json()["detail"]["error_code"] == "already_added"
+    assert again.json()["detail"]["project_id"] == "demo"
+
+
+def test_clone_new_refuses_a_taken_id_or_a_folder_with_files_before_cloning(client, ws, test_db):
+    remote = _bare_remote(ws)
+    database.create_project(project_id="demo", name="Other", description=None, path="other")
+    taken = _clone_new(client, remote)
+    assert taken.status_code == 409 and "already exists" in taken.json()["detail"]
+
+    (ws / "demo2").mkdir()
+    (ws / "demo2" / "notes.txt").write_text("mine")
+    busy = client.post("/api/v1/projects/clone", json={"id": "demo2", "name": "Demo 2", "clone_url": remote})
+    assert busy.status_code == 409 and busy.json()["detail"]["error_code"] == "folder_exists"
+    assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+    assert (ws / "demo2" / "notes.txt").read_text() == "mine"
+
+
+def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test_db):
+    with auth_required_http_remote() as url:
+        resp = client.post("/api/v1/projects/clone", json={
+            "id": "private", "name": "Private", "clone_url": url.replace("http://", "http://user:secret@")})
+        assert resp.status_code == 202, resp.text
+        op = git_ops_db.get_op(resp.json()["op_id"])
+        assert "secret" not in str(op["params"])
+        _run_setups()
+    status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
+    assert status["error_code"] == "github_auth" and "secret" not in (status["error"] or "")
+    assert database.get_project("private") is None

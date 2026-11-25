@@ -74,6 +74,8 @@ INTERNAL = "internal"
 CANCELLED = "cancelled"
 
 _OP_ID_RE = re.compile(r"^psetup-[0-9a-f]{32}$")
+# Same rule as ``ProjectCreate.id``.
+_PROJECT_ID_RE = re.compile(r"^[a-z0-9-]{1,50}$")
 _UNKNOWN_ACTION = "Unknown control action"
 
 
@@ -395,6 +397,10 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     ``spec``: ``project_v2_id``, ``origin``, ``name``, ``kind`` (``git`` or
     ``folder``), ``clone_url`` (git), ``folder``, ``mode`` (``auto``/``adopt``).
+    A new project cloned from the New project dialog (``POST /projects/clone``)
+    also passes ``project_id`` (the id the owner chose) and ``hide_on_failure``
+    (the identity was not a listed project before, so a failed or cancelled
+    clone must not leave it on the Projects page).
     Raises ``ValueError`` for a request this worker refuses outright.
     """
     from app.db import git_ops as git_ops_db
@@ -413,6 +419,9 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     if mode not in ("auto", "adopt"):
         raise ValueError("Unknown setup mode")
     name = str(spec.get("name") or "").strip()[:100] or "Project"
+    project_id = spec.get("project_id")
+    if project_id is not None and (not isinstance(project_id, str) or not _PROJECT_ID_RE.match(project_id)):
+        raise ValueError("Invalid project ID")
 
     me = _me()
     device = _own_device_id()
@@ -422,6 +431,8 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     params = {"origin": origin, "name": name, "kind": kind, "mode": mode,
               "clone_url": None, "requested_by": requested_by}
+    if project_id is not None:
+        params.update(project_id=project_id, hide_on_failure=bool(spec.get("hide_on_failure")))
     existing = _registered_row(origin)
     if existing is not None:
         # Already set up here: record a finished op so the caller has an answer.
@@ -861,7 +872,29 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     Never deletes or overwrites a folder it did not create. A plain folder
     project uses an existing folder as it is, unless that folder is this
     worker's own other project.
+
+    A new project's first clone (``hide_on_failure``) registers nothing until
+    the clone succeeded; when it fails or is cancelled its identity is hidden
+    again, so no half-made project is left on the Projects page and a retry
+    starts clean.
     """
+    params = op_row.get("params") or {}
+    try:
+        return _execute_setup(op_row)
+    except BaseException:
+        if params.get("hide_on_failure") and params.get("origin"):
+            from app.db import projects_v2
+
+            try:
+                if _registered_row(params["origin"]) is None:
+                    projects_v2.set_forgotten(params["origin"], True)
+            except Exception:  # noqa: BLE001 - the failure itself is what the caller needs
+                logger.warning("project setup: could not hide failed new project %s", op_row.get("id"),
+                               exc_info=True)
+        raise
+
+
+def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     from app.db import git_ops as git_ops_db
 
     op_id = op_row["id"]
@@ -943,7 +976,8 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
             raise SetupError(CANCELLED, "Setup was cancelled.")
         job.finalizing = True
     project_id = register_local_project(pv2_id, origin=origin, name=params.get("name") or path.name,
-                                        folder=params["folder"], path=path, kind=kind)
+                                        folder=params["folder"], path=path, kind=kind,
+                                        project_id=params.get("project_id"))
     return {"project_id": project_id, "adopted": adopted, "progress": 100}
 
 
@@ -977,14 +1011,16 @@ def _unique_id(seed: str) -> str:
 
 
 def register_local_project(project_v2_id: str, *, origin: str, name: str, folder: str,
-                           path: Path, kind: str) -> str:
+                           path: Path, kind: str, project_id: Optional[str] = None) -> str:
     """Register the folder as this worker's copy of the logical project (sync).
 
     A normal project row (this worker's ``instance_id``) through the same
     creation path as adding a project here, linked to the logical project's
     origin (auto-linked from the remote for a ``git:`` origin, a locked manual
     link otherwise), the git repository record, and the base checkout the
-    catalog and ``ensure_checkout`` read.
+    catalog and ``ensure_checkout`` read. ``project_id`` is the id and ``name``
+    the exact name the owner chose for a new project (checked before the clone
+    started); otherwise both are made unique here.
     """
     from app.api.git_helpers import ensure_git_repository_record
     from app.api.projects import create_project_record_sync
@@ -1003,9 +1039,10 @@ def register_local_project(project_v2_id: str, *, origin: str, name: str, folder
             # Created under the logical identity from the start: a row first
             # seeded as ``local:<id>`` and then linked left that superseded
             # identity behind as a second, stale project.
-            project = create_project_record_sync(ProjectCreate(
-                id=_unique_id(path.name or name), name=_unique_name(name), path=folder),
-                link_group_id=origin, link_locked=not origin.startswith("git:"))
+            chosen = ProjectCreate(id=project_id, name=name[:100], path=folder) if project_id else ProjectCreate(
+                id=_unique_id(path.name or name), name=_unique_name(name), path=folder)
+            project = create_project_record_sync(chosen, link_group_id=origin,
+                                                 link_locked=not origin.startswith("git:"))
         except HTTPException as exc:
             raise SetupError(INTERNAL, f"Couldn't register the project: {_http_detail(exc)}") from exc
     project_id = project["id"]

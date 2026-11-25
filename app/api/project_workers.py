@@ -564,6 +564,99 @@ async def setup_project(request: Request, body: SetupRequest,
             "status": "done" if result.get("status") == "done" else "queued"}
 
 
+ALREADY_ADDED = "already_added"
+
+
+class CloneNewRequest(BaseModel):
+    """A new project cloned from the New project dialog (same id/name rules as ``ProjectCreate``)."""
+    id: str = Field(..., pattern=r"^[a-z0-9-]+$", min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    clone_url: str = Field(..., min_length=1, max_length=2048)
+    #: A folder name or path on this worker; omitted = ``<workspace>/<id>``.
+    folder: Optional[str] = Field(None, max_length=1024)
+
+
+def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
+    """Check a new clone before anything runs; the setup spec for it (sync).
+
+    Refuses (409) a repository that is already a project on this worker, a
+    taken id, name or folder, and a folder that has other files in it, so the
+    owner hears it at once instead of after a clone.
+    """
+    from pathlib import Path
+
+    from app.api.projects import check_new_project
+    from app.core.models import ProjectCreate
+    from app.core.project_remote import identity_for_remote
+    from app.core.scrub import strip_url_userinfo
+    from app.db import projects_v2
+
+    # Each worker clones with its own sign-in: credentials in a pasted URL are
+    # never used or stored.
+    clean = strip_url_userinfo(body.clone_url.strip()) or ""
+    found = identity_for_remote(clean)
+    if not found:
+        raise HTTPException(status_code=400, detail="Enter the repository's clone URL")
+    origin = found[0]
+    existing = setup._own_rows_by_origin().get(origin)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail={
+            "error_code": ALREADY_ADDED, "project_id": existing["id"],
+            "error": f"This repository is already the project {existing.get('name') or existing['id']}."})
+    payload, _db_path, path = check_new_project(
+        ProjectCreate(id=body.id, name=body.name.strip(), path=(body.folder or "").strip() or None))
+    if path.exists() and not setup._is_empty_dir(Path(path)) and not setup._same_repo(path, clean, origin):
+        raise HTTPException(status_code=409, detail={
+            "error_code": setup.FOLDER_EXISTS,
+            "error": f"{path} already exists and has other files in it. Choose another project ID."})
+    pv2 = projects_v2.get_project_v2_by_origin(origin)
+    listed = pv2 is not None and (pv2.get("settings") or {}).get("forgotten") is not True
+    projects_v2.set_forgotten(origin, False)  # wanted again; hidden again if the clone fails
+    return {
+        "project_v2_id": projects_v2.project_v2_id_for_origin(origin), "origin": origin,
+        "name": payload.name, "kind": "git", "clone_url": clean,
+        "folder": (body.folder or "").strip() or payload.id, "mode": "auto",
+        "project_id": payload.id, "hide_on_failure": not listed,
+    }
+
+
+@router.post("/clone", status_code=status.HTTP_202_ACCEPTED)
+async def clone_new_project(body: CloneNewRequest, token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Create a project by cloning a repository on THIS worker.
+
+    Runs as a setup op (``app.core.project_setup``): the clone goes to a
+    temporary folder with progress and cancel, and the project is registered
+    only once it succeeded. A failed or cancelled clone leaves no project
+    behind, so retrying with the same id works. Poll ``GET /projects/setup/{op_id}``.
+    """
+    spec = await run_sync(_clone_new_spec, body)
+    try:
+        result = await setup.start_local_now(spec, op_id=setup.new_op_id(), requested_by=setup._own_device_id())
+    except ValueError as exc:
+        if spec["hide_on_failure"]:
+            from app.db import projects_v2
+
+            await run_sync(projects_v2.set_forgotten, spec["origin"], True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    setup.emit_changed()
+    return {"op_id": result["id"], "project_v2_id": spec["project_v2_id"],
+            "project_id": spec["project_id"], "status": result["status"]}
+
+
+@router.get("/setup/{op_id}")
+async def setup_status(op_id: str, token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """One setup op on THIS worker: status, progress, and the project once done."""
+    from app.db import git_ops as git_ops_db
+
+    row = await run_sync(git_ops_db.get_op, op_id)
+    if row is None or row.get("op") != setup.SETUP_OP or row.get("runner_id") != setup._me():
+        raise HTTPException(status_code=404, detail="Unknown setup")
+    summary = setup._summarize_op(row)
+    result = row.get("result") or {}
+    summary["project_id"] = result.get("project_id") if row.get("status") == "done" else None
+    return summary
+
+
 @router.post("/setup/{op_id}/cancel")
 async def cancel_setup(op_id: str, token: str = Depends(require_admin)) -> Dict[str, Any]:
     """Cancel a waiting or running setup (best effort; never touches a folder it did not create)."""
