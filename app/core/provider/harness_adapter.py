@@ -617,7 +617,27 @@ class HarnessAdapter(ProviderAdapter):
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
-        """Build the fluid engine from SessionOptions and prime its session."""
+        """Build the fluid engine from SessionOptions and prime its session.
+
+        All or nothing: a setup that raises or is cancelled part way (a later
+        MCP server stalls past the caller's deadline, hydration fails) closes
+        what it already started (MCP servers, the engine, the provider client)
+        before the error goes on. The caller gets no adapter to tear down, so
+        without this every retry would leak those servers.
+        """
+        try:
+            await self._connect(options)
+        except BaseException:
+            await self._undo_connect()
+            raise
+
+    async def _undo_connect(self) -> None:
+        """Close what a failed or cancelled connect started (transport only:
+        the app session's Task and Swarm jobs are not this connect's).
+        Shielded, so a second cancel cannot cut the cleanup short."""
+        await asyncio.shield(self.disconnect_transport())
+
+    async def _connect(self, options: SessionOptions) -> None:
         from fluid.tools.child_env import scrub_claude_auth_env
 
         options.env = scrub_claude_auth_env(options.env or {})
@@ -1525,10 +1545,15 @@ class HarnessAdapter(ProviderAdapter):
         from app.db.turns import entry_state
         self._connect_turn_person_entered = entry_state(getattr(sdk_options, "aih_turn_person_entered", None))
         await self.connect(opts)
-        await self.prepare_background_completions(
-            getattr(sdk_options, "aih_background_task_completions", None)
-        )
-        await self.reconcile_user_questions()
+        try:
+            await self.prepare_background_completions(
+                getattr(sdk_options, "aih_background_task_completions", None)
+            )
+            await self.reconcile_user_questions()
+        except BaseException:
+            # Same rule as connect(): the caller gets no adapter to close.
+            await self._undo_connect()
+            raise
         # Rehydrate reconcile. Fluid rebuilds its pending
         # set from the SubagentEvent log alone, so a completion that never
         # reached the engine is re-created as a phantom on every resume and
@@ -5896,6 +5921,10 @@ class HarnessAdapter(ProviderAdapter):
         )
 
         registry = ToolRegistry(**_registry_bound_kwargs())
+        # Owned by the adapter from here, before any MCP server connects: a
+        # connect that fails or is cancelled part way closes ``self._registry``
+        # (see connect), and with it every server already started.
+        self._registry = registry
         # Constraint: native legs (anthropic / openai_responses / openrouter)
         # get fluid's builtin file/shell tools as first-class tools. Delegated
         # sessions keep the CLI's copies. Search is the exception where the CLI

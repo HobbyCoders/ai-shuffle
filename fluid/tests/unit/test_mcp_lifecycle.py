@@ -66,6 +66,40 @@ async def test_stuck_handshake_fails_at_connect_timeout() -> None:
         await reg.aclose()
 
 
+async def test_a_connect_cancelled_mid_handshake_ends_its_server() -> None:
+    """Nobody has registered a client whose start() was cancelled, so nobody
+    else would close it: start() itself must end the actor and its server."""
+    reg = ToolRegistry()
+    cfg = {**_config(FLUID_FAKE_HANG_HANDSHAKE="1"), "connect_timeout": 600, "shutdown_timeout": 3}
+    created: list = []
+    from fluid.tools.mcp import manager as manager_mod
+
+    class _Recording(manager_mod.McpClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+    original = manager_mod.McpClient
+    manager_mod.McpClient = _Recording
+    try:
+        connect = asyncio.ensure_future(reg.connect_mcp("hang", cfg))
+        while not created or created[0]._task is None:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.5)  # the server is up, its handshake hangs
+        connect.cancel()
+        try:
+            await connect
+        except asyncio.CancelledError:
+            pass
+        task = created[0]._task
+        await asyncio.wait_for(asyncio.wait({task}), SLACK_S)
+        assert task.done()
+        assert reg._manager.client("hang") is None
+    finally:
+        manager_mod.McpClient = original
+        await reg.aclose()
+
+
 async def test_native_loop_connects_servers_side_by_side(tmp_path) -> None:
     """One stuck server costs the first turn its connect timeout, not the
     turn; the healthy server registered alongside it is usable."""

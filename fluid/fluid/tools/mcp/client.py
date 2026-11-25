@@ -111,6 +111,12 @@ class McpClient:
                 f"MCP server {self.name!r} did not finish connecting within "
                 f"{self.connect_timeout:g} s"
             ) from None
+        except BaseException:
+            # The caller was cancelled mid-connect. Nobody has registered this
+            # client yet, so nobody else would ever close it: end the actor and
+            # its transport (and the server process) here.
+            self._task.cancel()
+            raise
 
     async def aclose(self) -> None:
         """Stop the actor; never waits longer than ``shutdown_timeout`` twice.
