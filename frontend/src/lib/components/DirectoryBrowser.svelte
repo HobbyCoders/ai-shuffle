@@ -103,6 +103,13 @@
 		}
 	}
 
+	/** Retry leaves with the error, so keyboard focus goes back to the folder's expander. */
+	function retry(e: MouseEvent, node: TreeNode) {
+		const row = (e.currentTarget as HTMLElement).closest('.tree-error')?.previousElementSibling;
+		row?.querySelector<HTMLElement>('.expand-btn')?.focus();
+		void toggleNode(node);
+	}
+
 	function selectNode(node: TreeNode) {
 		onSelect(node.entry.path);
 	}
@@ -133,7 +140,7 @@
 				aria-label={`Show folders in ${node.entry.name}`}
 				aria-expanded={node.expanded}
 				title={node.expanded ? `Hide folders in ${node.entry.name}` : `Show folders in ${node.entry.name}`}
-				disabled={node.loading}
+				aria-busy={node.loading}
 				onclick={() => toggleNode(node)}
 				onkeydown={(e) => treeKeys(e, node)}
 			>
@@ -166,7 +173,7 @@
 	{#if node.error}
 		<div class="tree-error" style="--depth: {depth + 1}" role="alert">
 			<span>Couldn't open {node.entry.name}: {node.error}</span>
-			<button type="button" class="st-btn" disabled={node.loading} onclick={() => toggleNode(node)} aria-label={`Retry opening ${node.entry.name}`}>Retry</button>
+			<button type="button" class="st-btn" onclick={(e) => retry(e, node)} aria-label={`Retry opening ${node.entry.name}`}>Retry</button>
 		</div>
 	{/if}
 	{#if node.expanded && node.children}
@@ -279,6 +286,14 @@
 		flex-shrink: 0;
 		width: 22px;
 		height: 22px;
+	}
+
+	/* A finger needs a larger target than the chevron. */
+	@media (pointer: coarse) {
+		.expand-btn, .expand-spacer {
+			width: 36px;
+			height: 36px;
+		}
 	}
 
 	.expand-btn {

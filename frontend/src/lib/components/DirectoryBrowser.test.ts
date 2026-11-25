@@ -63,9 +63,13 @@ it('expands from the keyboard with a named expander, separate from selecting', a
 
 	// A native button: Enter/Space activate it (jsdom does not synthesize that click).
 	expect(expander.tagName).toBe('BUTTON');
+	expander.focus();
 	await fireEvent.click(expander);
+	// Loading must not disable the focused expander: that would drop focus to the page.
+	expect((expander as HTMLButtonElement).disabled).toBe(false);
 	await screen.findByText('child');
 	expect(expander.getAttribute('aria-expanded')).toBe('true');
+	expect(document.activeElement).toBe(expander);
 	expect(onSelect).not.toHaveBeenCalled();
 
 	// ArrowLeft collapses and ArrowRight reopens from the name button too.
@@ -94,8 +98,12 @@ it('shows a failed folder load with a retry instead of an empty folder', async (
 	expect(expander.getAttribute('aria-expanded')).toBe('false');
 
 	fail = false;
-	await fireEvent.click(screen.getByRole('button', { name: 'Retry opening root' }));
+	const retry = screen.getByRole('button', { name: 'Retry opening root' });
+	retry.focus();
+	await fireEvent.click(retry);
 	await screen.findByText('child');
 	expect(screen.queryByRole('alert')).toBeNull();
 	expect(expander.getAttribute('aria-expanded')).toBe('true');
+	// Retry leaves with the error; keyboard focus lands on the folder's expander.
+	expect(document.activeElement).toBe(expander);
 });
