@@ -1439,6 +1439,9 @@ def test_in_a_network_a_clone_is_decided_from_this_workers_own_database(client, 
     assert fresh.status_code == 202, fresh.text
     row = projects_v2.get_project_v2_by_origin(auto_link_group_id(other))
     assert row["name"] == "Fresh" and projects_v2.provisional_token(row)["op_id"] == fresh.json()["op_id"]
+    # This worker's own first clone, cancelled, still hides it again.
+    assert client.post(f"/api/v1/projects/setup/{fresh.json()['op_id']}/cancel").json() == {"status": "cancelled"}
+    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(other))["settings"].get("forgotten") is True
     assert network.calls == []
 
 
