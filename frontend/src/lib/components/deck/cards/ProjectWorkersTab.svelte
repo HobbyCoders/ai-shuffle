@@ -413,6 +413,14 @@
 	}
 
 	function newChatHere(w: ProjectWorkerDetail) {
+		// On a phone the inspector is a sheet above everything: close it, or the new
+		// chat opens behind it. Focus stays with the chat, not the row (unlike select).
+		if (stacked) {
+			editing = null;
+			askLocal = 0;
+			cancelRemove();
+			selectedInstallId = null;
+		}
 		activeSession.newChat();
 		activeSession.setProject(localProjectId ?? '', data?.project_v2_id ?? null, { user: true });
 		activeSession.setDeviceIntent(w.is_self ? null : { id: w.install_id, name: w.device_name });

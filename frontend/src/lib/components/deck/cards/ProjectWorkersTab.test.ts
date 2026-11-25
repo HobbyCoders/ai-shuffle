@@ -193,6 +193,24 @@ describe('Worker table', () => {
 		expect(within(sheet).getByRole('button', { name: 'Retry' })).toBeTruthy();
 	});
 
+	it('closes the phone sheet when New chat here opens the chat, so the chat is not behind it', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
+		const { layout } = await import('$lib/stores/layout.svelte');
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+
+		const list = await screen.findByRole('list', { name: 'Workers' });
+		const row = within(list).getByText('Home server').closest('button')!;
+		await fireEvent.click(row);
+		const sheet = await screen.findByRole('dialog', { name: 'Home server' });
+		await fireEvent.click(within(sheet).getByRole('button', { name: 'New chat here' }));
+
+		expect(layout.openChat).toHaveBeenCalledWith(null);
+		await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Home server' })).toBeNull());
+		// The new chat keeps focus: the row that opened the sheet doesn't take it back.
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.activeElement).not.toBe(row);
+	});
+
 	it('shows a failed Retry inside the phone sheet, not on the page behind its scrim', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		vi.mocked(startProjectSetup).mockRejectedValue({ status: 409, detail: 'Folder exists.' });
