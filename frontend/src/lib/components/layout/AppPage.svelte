@@ -639,8 +639,7 @@
 		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
 		onMessageAllActive={() => {
 			showSpotlight = false;
-			// The sidebar owns the dialog; a closed phone drawer has none mounted.
-			openBroadcastDialog(() => layout.setSidebarCollapsed(false));
+			openBroadcastDialog();
 		}}
 	/>
 

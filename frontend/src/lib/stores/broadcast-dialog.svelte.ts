@@ -1,6 +1,8 @@
 /**
  * Whether "Message all active chats" is open. The sidebar owns the dialog
  * (it knows which chats are active); the command palette opens it from here.
+ * When no sidebar is mounted (a collapsed desktop sidebar, a phone drawer not
+ * opened yet), each shell sees `open` with no host and mounts its sidebar.
  */
 export const broadcastDialog = $state({ open: false, hosts: 0 });
 
@@ -12,9 +14,7 @@ export function hostBroadcastDialog(): () => void {
 	};
 }
 
-/** Open it. `reveal` mounts a sidebar first when none is (a closed phone drawer). */
-export function openBroadcastDialog(reveal?: () => void) {
-	if (broadcastDialog.hosts === 0) reveal?.();
+export function openBroadcastDialog() {
 	broadcastDialog.open = true;
 }
 

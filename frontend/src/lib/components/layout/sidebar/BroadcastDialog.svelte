@@ -24,7 +24,7 @@
 	 */
 	import { Megaphone, X, Plus, Check, AlertTriangle, Loader2 } from 'lucide-svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
-	import { broadcastMessage, type BroadcastResult } from '$lib/api/broadcast';
+	import { broadcastMessage, MAX_BROADCAST_CHATS, type BroadcastResult } from '$lib/api/broadcast';
 	import type { ApiError } from '$lib/api/client';
 
 	interface Props {
@@ -46,7 +46,9 @@
 
 	const included = (c: BroadcastCandidate) => picked[c.id] ?? tickedByDefault(c);
 	const recipients = $derived(candidates.filter(included));
-	const canSend = $derived(!sending && recipients.length > 0 && message.trim().length > 0);
+	// The server takes a bounded list; say so here rather than have it refuse.
+	const tooMany = $derived(recipients.length > MAX_BROADCAST_CHATS);
+	const canSend = $derived(!sending && recipients.length > 0 && !tooMany && message.trim().length > 0);
 
 	const summary = $derived.by(() => {
 		const count = (state: BroadcastCandidate['state']) => candidates.filter((c) => c.state === state).length;
@@ -102,7 +104,13 @@
 				result: byId.get(chat.id) ?? { session_id: chat.id, status: 'failed', detail: 'No answer for this chat' }
 			}));
 		} catch (e) {
-			error = (e as ApiError)?.detail || 'Could not send. Nothing was sent.';
+			const { status, detail } = (e ?? {}) as Partial<ApiError>;
+			// A 4xx refused the whole request before any chat got it. Anything else
+			// (no connection, a lost answer, a server error) may have come after
+			// some chats took the message, and a resend would give them a second copy.
+			error = typeof status === 'number' && status >= 400 && status < 500
+				? detail || 'Could not send. Nothing was sent.'
+				: 'Could not confirm the send. Some chats may already have it: check them before sending again.';
 		} finally {
 			sending = false;
 		}
@@ -128,16 +136,13 @@
 		offline: 'Offline'
 	};
 
-	/** What the chat did with it, in the words of its state when it was sent. */
-	function receiptWord(chat: BroadcastCandidate, result: BroadcastResult): string {
+	/** What the chat's intake said. It reports admission only, not whether a
+	 *  working chat steered it in or queued it for after the turn. */
+	function receiptWord(result: BroadcastResult): string {
 		if (result.status === 'failed') return 'Not sent';
 		if (result.status === 'maybe_sent') return 'May have been sent';
 		if (result.status === 'held') return 'Held until its move finishes';
-		if (chat.state === 'working') return 'Sent mid-turn';
-		if (chat.state === 'parked') return 'Woke it';
-		if (chat.state === 'needs') return 'Queued behind your answer';
-		if (chat.state === 'offline') return 'Queued until its worker is back';
-		return 'Started';
+		return 'Sent';
 	}
 
 	const sentCount = $derived(receipts?.filter((r) => r.result.status === 'sent' || r.result.status === 'held').length ?? 0);
@@ -191,7 +196,7 @@
 									{/if}
 								</span>
 								<span class="r-title" title={chat.title}>{chat.title}</span>
-								<span class="r-word">{receiptWord(chat, result)}</span>
+								<span class="r-word">{receiptWord(result)}</span>
 								{#if result.detail && result.status !== 'sent'}
 									<span class="r-detail">{result.detail}</span>
 								{/if}
@@ -230,8 +235,9 @@
 						disabled={sending}
 					></textarea>
 					<p class="hint">
-						Working chats get it mid-turn. Chats waiting on you or on an offline worker start unticked; click a chip to add or remove it.
+						A working chat gets it mid-turn, or after its turn when it can't take it sooner. Chats waiting on you or on an offline worker start unticked; click a chip to add or remove it.
 					</p>
+					{#if tooMany}<p class="err">One message can go to {MAX_BROADCAST_CHATS} chats at most. Untick {recipients.length - MAX_BROADCAST_CHATS}.</p>{/if}
 					{#if error}<p class="err" role="alert">{error}</p>{/if}
 				{/if}
 			</div>

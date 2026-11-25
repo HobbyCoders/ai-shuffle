@@ -22,6 +22,7 @@
 	import { backToChats } from '$lib/services/session-navigation';
 	import MainPanel from './MainPanel.svelte';
 	import Sidebar from './Sidebar.svelte';
+	import { broadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
 	import ClaudeReloginBanner from '../ClaudeReloginBanner.svelte';
 	import FirstCopyBanner from '../FirstCopyBanner.svelte';
@@ -117,6 +118,12 @@
 	const showSidebar = $derived(rail || !$sidebarCollapsed);
 	/** Narrow window: the open sidebar floats over the main panel. */
 	const sidebarFloating = $derived(!$sidebarCollapsed && narrow);
+
+	// "Message all active chats" lives in the sidebar: show it when the
+	// command palette asks for the dialog while the sidebar is collapsed.
+	$effect(() => {
+		if (broadcastDialog.open && broadcastDialog.hosts === 0) layout.setSidebarCollapsed(false);
+	});
 
 	function closeFloatingSidebar() {
 		if (sidebarFloating) layout.setSidebarCollapsed(true);

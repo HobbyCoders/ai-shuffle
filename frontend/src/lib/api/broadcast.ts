@@ -1,5 +1,8 @@
 import { api } from './client';
 
+/** The most chats one broadcast may name (MAX_BROADCAST_CHATS in sessions_broadcast.py). */
+export const MAX_BROADCAST_CHATS = 100;
+
 /** What happened to one chat of a broadcast (see app/api/sessions_broadcast.py). */
 export interface BroadcastResult {
 	session_id: string;

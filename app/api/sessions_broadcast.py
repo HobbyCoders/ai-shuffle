@@ -3,7 +3,8 @@
 Each chat gets the message through the composer's own intake
 (``submit_http_query``), so it behaves exactly as if the owner had typed it
 into that chat: an idle chat starts a turn, a working chat has it steered into
-the running turn, a parked chat wakes on it, and a chat owned by another
+the running turn (or queued after it when it cannot steer), a parked chat
+wakes on it, and a chat owned by another
 worker is placed on that worker. One chat refusing never stops the others; the
 answer lists what happened to each.
 """

@@ -7,7 +7,7 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const broadcastMessage = vi.hoisted(() => vi.fn());
-vi.mock('$lib/api/broadcast', () => ({ broadcastMessage }));
+vi.mock('$lib/api/broadcast', () => ({ broadcastMessage, MAX_BROADCAST_CHATS: 100 }));
 
 import BroadcastDialog, { type BroadcastCandidate } from './BroadcastDialog.svelte';
 
@@ -71,28 +71,60 @@ describe('BroadcastDialog', () => {
 
 		expect(broadcastMessage).toHaveBeenCalledWith(['needs', 'work', 'park'], 'Wrap up and report.');
 		const receipts = screen.getByRole('list', { name: 'What each chat did' });
-		expect(receipts.textContent).toContain('Sent mid-turn');
-		expect(receipts.textContent).toContain('Woke it');
-		expect(receipts.textContent).toContain('Not sent');
+		const word = (title: string) =>
+			[...receipts.querySelectorAll('li')].find((li) => li.textContent?.includes(title))?.querySelector('.r-word')?.textContent;
+		// Admission only: the intake does not say whether a working chat steered it in.
+		expect(word('Review harness')).toBe('Sent');
+		expect(word('Project setup')).toBe('Sent');
+		expect(word('Fix flaky emulator job')).toBe('Not sent');
 		expect(receipts.textContent).toContain('This chat cannot take messages.');
 		expect(screen.getByText('Sent to 2 of 3 chats')).toBeTruthy();
 		expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Done' }));
 	});
 
-	it('keeps the message when the request fails, so it can be sent again', async () => {
-		broadcastMessage.mockRejectedValue({ detail: 'Network down', status: 0 });
+	async function sendFailing(rejection: unknown) {
+		broadcastMessage.mockRejectedValue(rejection);
 		render(BroadcastDialog, { props: { open: true, candidates: chats, onClose: vi.fn() } });
 		await settle();
-
 		const field = screen.getByRole('textbox', { name: 'Message' }) as HTMLTextAreaElement;
 		await fireEvent.input(field, { target: { value: 'hello' } });
 		await settle();
 		await fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true });
 		await settle();
+		return field;
+	}
 
-		expect(screen.getByRole('alert').textContent).toBe('Network down');
+	it('keeps the message when the server refuses the request, so it can be sent again', async () => {
+		const field = await sendFailing({ detail: 'Write a message first.', status: 422 });
+
+		expect(screen.getByRole('alert').textContent).toBe('Write a message first.');
 		expect(field.value).toBe('hello');
 		expect((screen.getByRole('button', { name: 'Send to 3 chats' }) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('does not claim nothing was sent when the answer is lost', async () => {
+		// fetch rejects with a bare TypeError when the connection drops mid-request.
+		const field = await sendFailing(new TypeError('Failed to fetch'));
+
+		expect(screen.getByRole('alert').textContent).toMatch(/Some chats may already have it: check them before sending again/);
+		expect(field.value).toBe('hello');
+	});
+
+	it('will not send to more chats than the server takes', async () => {
+		const many: BroadcastCandidate[] = Array.from({ length: 102 }, (_, i) => ({
+			id: `c${i}`, title: `Chat ${i}`, state: 'idle', worker: null
+		}));
+		render(BroadcastDialog, { props: { open: true, candidates: many, onClose: vi.fn() } });
+		await settle();
+		await fireEvent.input(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'hello' } });
+		await settle();
+
+		expect((screen.getByRole('button', { name: 'Send to 102 chats' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText('One message can go to 100 chats at most. Untick 2.')).toBeTruthy();
+		await fireEvent.click(chip('Chat 0'));
+		await fireEvent.click(chip('Chat 101'));
+		await settle();
+		expect((screen.getByRole('button', { name: 'Send to 100 chats' }) as HTMLButtonElement).disabled).toBe(false);
 	});
 
 	it('Escape closes it', async () => {
