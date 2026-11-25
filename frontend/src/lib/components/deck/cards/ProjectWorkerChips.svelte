@@ -3,15 +3,15 @@
 	 * ProjectWorkerChips — which workers hold a project, one chip per worker.
 	 *
 	 *   ready     solid, green dot
-	 *   missing   dashed; a click sets the project up there (default folder)
+	 *   missing   dashed; with `onSetup` a click sets the project up there (default folder)
 	 *   busy      spinner ("Studio · cloning 40%")
 	 *   offline   grey ("offline · has it", "offline", "queued")
 	 *   failed    red; its title is the reason
 	 *   unknown   quiet outline (the worker's catalog could not be read)
 	 *
-	 * Every chip is a real button with a full-sentence label: a missing chip
-	 * starts a setup (`onSetup`), the others open the project's Workers tab
-	 * (`onOpen`). Colours are theme tokens; the state never rests on colour
+	 * Every chip is a real button with a full-sentence label: given `onSetup`,
+	 * a missing chip starts a setup; every other chip (all of them without
+	 * `onSetup`) opens that worker (`onOpen`). Colours are theme tokens; the state never rests on colour
 	 * alone (each has its own shape and words).
 	 */
 	import type { ProjectKind, ProjectWorker } from '$lib/api/project-workers';
@@ -43,7 +43,7 @@
 				type="button"
 				class="wchip wchip--{chip.tone}"
 				title={chip.title}
-				aria-label="{chip.text}: {chip.actionable ? `not set up — set ${projectName} up on ${workerDisplayName(worker.device_name, worker.is_self ? 'Local' : 'Worker')}` : chip.title}"
+				aria-label="{chip.text}: {chip.actionable && onSetup ? `not set up — set ${projectName} up on ${workerDisplayName(worker.device_name, worker.is_self ? 'Local' : 'Worker')}` : chip.title}"
 				data-worker-state={worker.state}
 				onclick={(e) => activate(e, worker, chip.actionable)}
 				onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); }}

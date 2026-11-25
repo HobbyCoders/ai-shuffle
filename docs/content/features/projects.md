@@ -25,15 +25,19 @@ Creation follows the same approval rules as other app configuration writes: Ask 
 
 ## Projects across workers
 
-A new project appears in connected workers' project catalogs as soon as it is added; you do not need to start a chat first. Each worker still needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a missing chip to set the project up on that worker.
+A new project appears in connected workers' project catalogs as soon as it is added; you do not need to start a chat first. Each worker still needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a chip to open that worker in the project's worker table.
 
-A project's **Workers** tab lists each worker's folder and branch. From there you can:
+A project's **Workers** tab is a table with one row per worker: its status, folder, branch and when it was last seen. Select a row to open that worker's details beside the table (on a phone, as a sheet). From there you can:
 
-- **Set up** the project on a worker that doesn't have it, or **Set up on all missing**.
+- **Set up** the project on a worker that doesn't have it, or **Set up on all missing** (**Set up here** when only this worker lacks it).
 - Choose an existing folder on that worker instead of a new one. A folder that already holds the same repository is used as it is.
 - **Change folder** on a ready, online worker. Enter or browse to an existing directory on that worker. This changes only its project registration; no files are moved or copied. New chats and future turns in chats without worktrees use the new folder. Existing worktrees stay in place and still need their original checkout. After a folder change, AI Shuffle can reopen a removed app-managed worktree only in its original Git checkout, on the branch tip saved by **Keep branch**. For a removed external worktree, use the original Git checkout to check out the kept branch manually; AI Shuffle will not recreate it or reopen the old chat automatically. Leave external worktrees in place if you still need to use their bound chats. If an older worktree’s Git registration cannot be verified, restore it or forget the stale registration in Worktree management before changing folders. Finish any queued or running chats on that worker before changing the folder.
 - Cancel a setup that is still running.
-- **Remove from** a worker. This drops that worker's record of the project; its files stay.
+- **Remove project and chats from** a worker. This drops that worker's record of the project; its files stay.
+
+The project's repository and group sit beside its name. **Change repository** points every worker's copy at another repository at once. The group menu moves the project to another group; **No group** takes only this project out of its group, and **Delete group** is a separate, confirmed action. **New chat** starts a chat on this worker, or on any worker that has the project ready. **Project settings** (the gear) holds the name, version control and the project's one danger zone.
+
+The **Resources** tab holds the project's MCP servers, agents, hooks and memory on this worker. A project that isn't on this worker yet offers to set it up here instead.
 
 Setting up a Git project clones its remote on that worker, with that worker's own GitHub sign-in. A project that isn't a Git repository uses the worker's folder of that name as it is, or gets an empty folder when there is none. Setup never overwrites anything: for a Git project, a folder that already holds something else is refused, and you can choose another. If a worker is offline, the setup waits and runs when it is back.
 

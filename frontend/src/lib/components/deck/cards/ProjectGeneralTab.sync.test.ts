@@ -1,83 +1,54 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ProjectGeneralTab from './ProjectGeneralTab.svelte';
 import { appData, projects } from '$lib/stores/app-data.svelte';
 import type { Writable } from 'svelte/store';
-import { groups as groupsStore } from '$lib/stores/groups.svelte';
 vi.mock('$lib/stores/app-data.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { projects: writable([]), appData: { updateProject: vi.fn() } };
-});
-vi.mock('$lib/stores/groups.svelte', async () => {
-	const { writable } = await import('svelte/store');
-	return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn(), deleteGroup: vi.fn(), removeFromGroup: vi.fn() }) };
 });
 vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_git_repo: true }) }));
 vi.mock('$lib/stores/git.svelte', () => ({ git: { refreshStatus: vi.fn() } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 const list = projects as unknown as Writable<any[]>;
-describe('project general remote fields', () => {
-	it('focuses the New group field and preserves Escape and Enter', async () => {
-		list.set([{id:'project',name:'Original',path:'/old'}]);
-		render(ProjectGeneralTab, {projectId:'project'});
-		await fireEvent.click(screen.getByRole('button', {name:'New group'}));
-		const input = screen.getByRole('textbox', {name:'Group name'});
-		await waitFor(() => expect(document.activeElement).toBe(input));
-		await fireEvent.keyDown(input, {key:'Escape'});
-		expect(screen.queryByRole('textbox', {name:'Group name'})).toBeNull();
-		await fireEvent.click(screen.getByRole('button', {name:'New group'}));
-		const second = screen.getByRole('textbox', {name:'Group name'});
-		await fireEvent.input(second, {target:{value:'Tools'}});
-		await fireEvent.keyDown(second, {key:'Enter'});
-		expect(groupsStore.createGroup).toHaveBeenCalledWith('projects','Tools');
-		expect(groupsStore.assignToGroup).toHaveBeenCalledWith('projects','project','Tools');
-	});
+describe('project identity fields', () => {
 	it('preserves Enter-to-save through the Settings field wrapper', async () => {
-		list.set([{id:'project',name:'Original',path:'/old'}]);
-		render(ProjectGeneralTab, {projectId:'project'});
+		list.set([{ id: 'project', name: 'Original', path: '/workspace/example/old' }]);
+		render(ProjectGeneralTab, { projectId: 'project' });
 		const name = screen.getByPlaceholderText('Project name');
-		await fireEvent.input(name, {target:{value:'Renamed'}});
-		await fireEvent.keyDown(name, {key:'Enter'});
-		expect(appData.updateProject).toHaveBeenCalledWith('project', {name:'Renamed'});
-		const path = screen.getByPlaceholderText('Project path');
-		await fireEvent.input(path, {target:{value:'/new'}});
-		await fireEvent.keyDown(path, {key:'Enter'});
-		expect(appData.updateProject).toHaveBeenCalledWith('project', {path:'/new'});
+		await fireEvent.input(name, { target: { value: 'Renamed' } });
+		await fireEvent.keyDown(name, { key: 'Enter' });
+		expect(appData.updateProject).toHaveBeenCalledWith('project', { name: 'Renamed' });
 	});
-	it('updates clean fields but preserves dirty fields and makes deleted-project text recoverable', async () => {
-		list.set([{id:'project',name:'Original',path:'/old'}]);
-		render(ProjectGeneralTab, {projectId:'project'});
+	it('shows the folder read-only, or sends folder changes to the worker row', async () => {
+		list.set([{ id: 'project', name: 'Original', path: '/workspace/example/old' }]);
+		const first = render(ProjectGeneralTab, { projectId: 'project', selfName: 'Home server' });
+		expect(screen.queryByPlaceholderText('Project path')).toBeNull();
+		expect(screen.getByText('/workspace/example/old')).toBeTruthy();
+		first.unmount();
+
+		const onOpenFolders = vi.fn();
+		render(ProjectGeneralTab, { projectId: 'project', selfName: 'Home server', onOpenFolders });
+		expect(screen.queryByText('/workspace/example/old')).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open Home server' }));
+		expect(onOpenFolders).toHaveBeenCalled();
+	});
+	it('updates a clean name but preserves a dirty one and makes deleted-project text recoverable', async () => {
+		list.set([{ id: 'project', name: 'Original', path: '/workspace/example/old' }]);
+		render(ProjectGeneralTab, { projectId: 'project' });
 		const name = screen.getByPlaceholderText('Project name') as HTMLInputElement;
-		const path = screen.getByPlaceholderText('Project path') as HTMLInputElement;
-		await fireEvent.input(name,{target:{value:'Unsaved name'}});
-		list.set([{id:'project',name:'Remote name',path:'/new'}]);
+		list.set([{ id: 'project', name: 'Remote name', path: '/workspace/example/old' }]);
+		await tick();
+		expect(name.value).toBe('Remote name');
+		await fireEvent.input(name, { target: { value: 'Unsaved name' } });
+		list.set([{ id: 'project', name: 'Remote again', path: '/workspace/example/old' }]);
 		await tick();
 		expect(name.value).toBe('Unsaved name');
-		expect(path.value).toBe('/new');
-		expect(screen.getByRole('status').textContent).toContain('changed elsewhere');
+		expect(screen.getByText(/changed elsewhere/)).toBeTruthy();
 		list.set([]);
 		await tick();
 		expect(screen.getByDisplayValue('Unsaved name')).toBeTruthy();
-		expect(screen.getByRole('status').textContent).toContain('deleted elsewhere');
-	});
-	it('asks before deleting a group, naming it and how many projects become ungrouped', async () => {
-		list.set([{id:'project',name:'One',path:'/one'},{id:'other',name:'Two',path:'/two'},{id:'third',name:'Three',path:'/three'}]);
-		// The assignments are synced: 'on-peer' is listed only on another worker,
-		// and deleting the group clears it too, so it counts.
-		(groupsStore as unknown as Writable<any>).set({ projects: { groups: [{name:'Work',collapsed:true}], assignments: { project: 'Work', other: 'Work', third: 'Home', 'on-peer': 'Work' } } });
-		render(ProjectGeneralTab, {projectId:'project'});
-		await fireEvent.click(screen.getByRole('button', {name:'Delete group'}));
-		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
-		const dialog = await screen.findByRole('dialog');
-		expect(dialog.textContent).toContain('Delete the group "Work"? 3 projects become ungrouped.');
-		await fireEvent.click(within(dialog).getAllByRole('button', {name:'Cancel'}).at(-1)!);
-		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
-
-		await fireEvent.click(screen.getByRole('button', {name:'Delete group'}));
-		await fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', {name:'Delete group'}));
-		expect(groupsStore.deleteGroup).toHaveBeenCalledWith('projects', 'Work');
-		expect(groupsStore.removeFromGroup).not.toHaveBeenCalled();
+		expect(screen.getByText(/deleted elsewhere/)).toBeTruthy();
 	});
 });

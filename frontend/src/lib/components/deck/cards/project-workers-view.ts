@@ -83,6 +83,34 @@ export function workerChip(worker: ProjectWorker, kind: ProjectKind | null | und
 	}
 }
 
+export type WorkerStatusTone = 'ready' | 'busy' | 'missing' | 'failed' | 'queued' | 'offline' | 'unknown';
+
+/** The worker table's Status cell: a tone for the dot and the words beside it. */
+export function workerStatus(worker: ProjectWorker, kind: ProjectKind | null | undefined): { tone: WorkerStatusTone; label: string } {
+	if (isRunning(worker)) {
+		const p = worker.setup?.progress;
+		const verb = kind === 'folder' ? 'Setting up' : 'Cloning';
+		return { tone: 'busy', label: typeof p === 'number' ? `${verb} ${Math.round(p)}%` : `${verb}…` };
+	}
+	switch (worker.state) {
+		case 'ready': return { tone: 'ready', label: 'Ready' };
+		case 'offline_has': return { tone: 'offline', label: 'Ready · offline' };
+		case 'queued_offline': return { tone: 'queued', label: 'Queued until online' };
+		case 'failed': return { tone: 'failed', label: 'Failed' };
+		case 'missing':
+		case 'offline_missing': return { tone: 'missing', label: worker.is_self ? 'Not set up here' : 'Not set up' };
+		default: return { tone: 'unknown', label: "Couldn't check" };
+	}
+}
+
+/** A long path shortened in the middle so both its root and its folder name stay readable. */
+export function middleTruncate(path: string, max: number): string {
+	if (path.length <= max || max < 5) return path;
+	const keep = max - 1;
+	const tail = Math.ceil(keep / 2);
+	return `${path.slice(0, keep - tail)}…${path.slice(path.length - tail)}`;
+}
+
 /** Workers that lack the project and are online now (a setup would start at once). */
 export function missingOnline(workers: ProjectWorker[]): ProjectWorker[] {
 	return workers.filter((w) => w.online && (w.state === 'missing' || w.state === 'failed') && !isPending(w));

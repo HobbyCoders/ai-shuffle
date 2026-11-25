@@ -6,6 +6,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectWorker, RepositoryChangeResponse, RepositoryChangeWorker } from '$lib/api/project-workers';
 import {
+	middleTruncate,
+	workerStatus,
 	errorAction,
 	heldByNoWorker,
 	repositoryChangeSummary,
@@ -236,5 +238,31 @@ describe('repositoryChangeSummary', () => {
 			'Studio: Sign in to GitHub on Studio.',
 			'Tower: Update Tower first.'
 		]);
+	});
+});
+
+describe('worker table status cell', () => {
+	const base = { install_id: 'w', device_name: 'Desktop', is_self: false, online: true, approved: true, setup: null } as unknown as ProjectWorker;
+	const at = (state: string, extra: Partial<ProjectWorker> = {}) => ({ ...base, state, ...extra }) as ProjectWorker;
+	it.each([
+		[at('ready'), 'git', 'ready', 'Ready'],
+		[at('offline_has', { online: false }), 'git', 'offline', 'Ready · offline'],
+		[at('setting_up', { setup: { op_id: 'o', status: 'running', progress: 40.4, error: null } as never }), 'git', 'busy', 'Cloning 40%'],
+		[at('setting_up'), 'folder', 'busy', 'Setting up…'],
+		[at('queued_offline', { online: false, setup: { op_id: 'o', status: 'queued', progress: null, error: null } as never }), 'git', 'queued', 'Queued until online'],
+		[at('failed'), 'git', 'failed', 'Failed'],
+		[at('missing'), 'git', 'missing', 'Not set up'],
+		[at('missing', { is_self: true }), 'git', 'missing', 'Not set up here'],
+		[at('unknown'), 'git', 'unknown', "Couldn't check"]
+	])('%#: reads %s', (worker, kind, tone, label) => {
+		expect(workerStatus(worker, kind as 'git' | 'folder')).toEqual({ tone, label });
+	});
+	it('shortens a long folder in the middle, keeping its root and its name', () => {
+		expect(middleTruncate('/workspace/example/demo', 40)).toBe('/workspace/example/demo');
+		const short = middleTruncate('/workspace/example/clients/acme/projects/demo-app', 24);
+		expect(short).toHaveLength(24);
+		expect(short.startsWith('/workspace/')).toBe(true);
+		expect(short.endsWith('demo-app')).toBe(true);
+		expect(short).toContain('…');
 	});
 });
