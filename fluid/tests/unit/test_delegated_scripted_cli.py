@@ -476,7 +476,7 @@ async def test_a_resumed_cli_that_exits_at_start_without_saying_why_keeps_the_ha
 def _recorder(outcome: delegated_mod.ResumeRecovery) -> tuple[list, Callable]:
     calls: list = []
 
-    async def recover(handle: str, before_node: str) -> delegated_mod.ResumeRecovery:
+    async def recover(handle: str, before_node: str, **kw: Any) -> delegated_mod.ResumeRecovery:
         calls.append((handle, before_node))
         return outcome
 
@@ -563,6 +563,124 @@ async def test_a_frame_from_the_cli_resets_the_silent_exit_count(tmp_path) -> No
                                    encoding="utf-8")
         assert (await run.turn("four"))[-1].retriable
         assert calls == []
+    finally:
+        await run.aclose()
+
+
+class _Host:
+    """The host's ``recover_resume``: the silent-exit check re-seeds
+    ``cli-new``; a restore re-seeds ``cli-restored``. Each re-seed keeps the
+    prompts it would write (the stored path before ``before_node``) and stores
+    ``recovery`` with the new handle, as the real one does in one row update."""
+
+    def __init__(self, run: Scripted) -> None:
+        self.run = run
+        self.calls: list[dict] = []
+
+    async def __call__(self, handle: str, before_node: str, *, recovery: dict | None = None,
+                       restore: bool = False) -> delegated_mod.ResumeRecovery:
+        path = await self.run.store.load_path(self.run.sid)
+        cut = next(i for i, n in enumerate(path) if n.node_id == before_node)
+        written = [n.message.content[0].text for n in path[:cut] if n.message.role == "user"]
+        new = "cli-restored" if restore else "cli-new"
+        self.calls.append({"handle": handle, "restore": restore, "written": written})
+        await self.run.store.set_cli_session_id(self.run.sid, new)
+        await self.run.store.set_cli_resume_recovery(self.run.sid, {**(recovery or {}), "handle": new})
+        return delegated_mod.ResumeRecovery("reseeded", new)
+
+
+async def _replay_never_recorded(tmp_path) -> tuple[Scripted, _Host]:
+    """Three silent exits on ``cli-prev``; the host re-seeds ``cli-new`` and
+    the replay of "three" exits on it too, before the CLI records it."""
+    run = Scripted(tmp_path, {
+        "spawn_exit": {"code": 1, "stderr": "", "resume": ["cli-prev", "cli-new"]},
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    host = _Host(run)
+    run.loop.recover_resume = host
+    for text in ("one", "two", "three"):
+        error = (await run.turn(text))[-1]
+        assert isinstance(error, ErrorEvent) and error.retriable, error
+    assert [c["restore"] for c in host.calls] == [False]
+    assert run.loop.cli_session_id == "cli-new"
+    meta = await run.store.get_session(run.sid)
+    assert meta.cli_resume_recovery["handle"] == "cli-new"
+    assert meta.cli_resume_recovery["pending"]
+    assert run.stdin_frames("user") == []  # no CLI read a prompt
+    return run, host
+
+
+def _prompts_sent(run: Scripted) -> list[str]:
+    return [json.dumps(f) for f in run.stdin_frames("user")]
+
+
+async def test_a_replay_the_cli_never_recorded_is_restored_before_a_new_prompt(tmp_path) -> None:
+    """The re-seeded handle's replay died before the CLI recorded "three".
+    The next, different prompt must not resume a conversation without it:
+    the history through "three" is written out again first, and "three"
+    reaches the CLI exactly once (in that history, not also as input)."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        events = await run.turn("four")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        restore = host.calls[1]
+        assert restore["handle"] == "cli-new"
+        assert restore["written"].count("three") == 1
+        sent = _prompts_sent(run)
+        assert sum("three" in frame for frame in sent) == 0
+        assert len(sent) == 1 and "four" in sent[0]
+        resumed = [s["argv"][s["argv"].index("--resume") + 1] for s in run.records("start")]
+        assert resumed[-1] == "cli-restored"
+        # The CLI recorded "four": nothing is owed, the handle stays marked.
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-restored"
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_retry_of_a_replay_the_cli_never_recorded_is_sent_once(tmp_path) -> None:
+    """The next send retries "three" itself (a resubmitted wake): it goes to
+    the CLI once, as the turn's input, and is not written back first."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "three" in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-new"
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_new_loop_does_not_reseed_a_handle_a_recovery_already_made(tmp_path) -> None:
+    """The adapter is recreated after a recovery re-seed: the new loop reads
+    the stored marker, so three more silent exits on that handle end with
+    the clear error instead of a second re-seed."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("reseeded", "cli-other"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-new", recover_resume=recover)
+    try:
+        run.sid = (await run.store.create_session()).session_id
+        run.loop._session_id = run.sid
+        await run.store.set_cli_session_id(run.sid, "cli-new")
+        await run.store.set_cli_resume_recovery(
+            run.sid, {"handle": "cli-new", "pending": None, "prompt": None})
+        for text in ("one", "two"):
+            assert (await run.turn(text))[-1].retriable
+        error = (await run.turn("three"))[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "could not resume this chat's saved conversation" in error.message
+        assert calls == []
+        assert run.loop.cli_session_id == "cli-new"
     finally:
         await run.aclose()
 

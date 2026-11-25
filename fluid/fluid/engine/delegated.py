@@ -65,6 +65,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import glob
+import hashlib
 import inspect
 import json
 import logging
@@ -241,6 +242,16 @@ class ResumeRecovery:
 
     status: Literal["reseeded", "present", "unknown"]
     cli_session_id: str | None = None
+
+
+def _prompt_key(content: Any) -> str:
+    """A short key of a submitted prompt's text (``SessionMeta.
+    cli_resume_recovery`` keeps this, not the text)."""
+    if isinstance(content, str):
+        text = content
+    else:
+        text = "".join(block.text for block in content or () if isinstance(block, Text))
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32]
 
 
 def _spawn_failure_message(exc: BaseException) -> str:
@@ -1031,7 +1042,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
-        recover_resume: Callable[[str, str], Awaitable[ResumeRecovery]] | None = None,
+        recover_resume: Callable[..., Awaitable[ResumeRecovery]] | None = None,
         one_shot: bool = False,
     ) -> None:
         self.store = store
@@ -1103,15 +1114,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self.bridge_deferred = bridge_deferred
         # The host's answer to a resume handle the CLI keeps exiting on
         # without a frame (``_SILENT_RESUME_EXITS`` in a row): called with the
-        # handle and the running turn's user node id, it checks the handle's
-        # transcript and, when it is gone, writes the session's history before
-        # that node out as a new one (:class:`ResumeRecovery`). None: such a
-        # turn just fails, retriable, as any crash does.
+        # handle, the running turn's user node id and ``recovery=`` (the
+        # ``SessionMeta.cli_resume_recovery`` to store with a new handle), it
+        # checks the handle's transcript and, when it is gone, writes the
+        # session's history before that node out as a new one
+        # (:class:`ResumeRecovery`). With ``restore=True`` it writes that
+        # history out without the check (:meth:`_restore_owed_replay`). None:
+        # such a turn just fails, retriable, as any crash does.
         self.recover_resume = recover_resume
-        # Those exits in a row on this loop (reset by any frame the CLI
-        # writes), and whether this loop has re-seeded once already.
+        # Those exits in a row on this loop (reset by any frame the CLI writes).
         self._silent_resume_exits = 0
-        self._resume_reseeded = False
+        # ``SessionMeta.cli_resume_recovery``: what a re-seed this loop (or an
+        # earlier one on this session) made left owing on its handle. Read
+        # from the stored meta on the first turn, so it outlives the adapter.
+        self._resume_recovery: dict[str, Any] | None = None
+        self._resume_recovery_loaded = False
+        # A key of the running turn's prompt as submitted (before any note
+        # this loop adds), to tell a retry of an owed prompt from a new one.
+        self._turn_prompt_key: str | None = None
         # Frames read from the live CLI (reset on every spawn).
         self._proc_frames = 0
         # Parent-owned identity, keyed by the CLI's tool id (never model arguments).
@@ -2883,6 +2903,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     if not await spawned():
                         return
             op, question_ids = await self._question_turn_content(op)
+            self._turn_prompt_key = _prompt_key(op.content)
+            if not self._resume_recovery_loaded:
+                self._resume_recovery_loaded = True
+                stored = getattr(meta, "cli_resume_recovery", None)
+                self._resume_recovery = dict(stored) if isinstance(stored, dict) else None
             self.ctx.extra["time_turn_source"] = op.source
             content = [Text(op.content)] if isinstance(op.content, str) else list(op.content)
             from fluid.tools.time_context import delegated_wake_time
@@ -3014,7 +3039,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         mapper: StreamJsonMapper | None = None
         for attempt in (1, 2):
-            if attempt == 2:
+            # A re-seeded handle still owes an earlier prompt: write it back
+            # first (that stops this turn's process, so it spawns again).
+            restored_handle = attempt == 1 and await self._restore_owed_replay(sid, user_node)
+            if attempt == 2 or restored_handle:
                 # The retry runs on a fresh process (the rejected handle's
                 # was stopped), so there is no stale stdout to drain.
                 try:
@@ -3024,6 +3052,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                         session_id=sid, turn_id=turn_id, message=_spawn_failure_message(exc)
                     ))
                     return mapper
+            if attempt == 2:
                 restored, context_pin = await self._fresh_turn_content(
                     content, user_node.message.context_pin,
                 )
@@ -3082,6 +3111,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     crashed = failure == _STREAM_CLOSED
             finally:
                 self._live_mapper = None
+            if failure is None or mapper.produced_nodes:
+                # The CLI took the prompt into its transcript: nothing is owed.
+                await self._settle_owed_replay(sid)
             if failure is None:
                 return mapper
             self._peer_admission_open = False
@@ -3094,7 +3126,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 await self._drop_resume_handle(sid)
                 continue
             if attempt == 1 and self._silent_resume_exit(mapper, failure, crashed=crashed):
-                recovered = await self._recover_silent_resume(user_node)
+                recovered = await self._recover_silent_resume(sid, user_node)
                 if recovered:
                     continue
                 if recovered is not None:
@@ -3185,28 +3217,31 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._silent_resume_exits += 1
         return self._silent_resume_exits >= _SILENT_RESUME_EXITS
 
-    async def _recover_silent_resume(self, user_node: SessionNode) -> bool | None:
+    async def _recover_silent_resume(self, sid: str, user_node: SessionNode) -> bool | None:
         """Ask the host about the handle the CLI keeps exiting on.
 
         True: its transcript was gone and the host re-seeded it; this loop now
         resumes the new handle (the store already holds it), on a fresh
-        process. False: the transcript is there, or this loop already
-        re-seeded once, so the same handle cannot work; the turn ends with
+        process. False: the transcript is there, or the handle is itself a
+        re-seed (``_resume_recovery``, kept in the store, so a new adapter
+        knows too), so the same handle cannot work; the turn ends with
         ``RESUME_UNRECOVERABLE_MESSAGE``. None: no answer (no host callback,
         or the check failed); the turn fails as an ordinary crash.
 
         The re-seed writes the history before ``user_node``, since the replay
-        sends that turn again.
+        sends that turn again. Until the CLI records it, the new handle owes
+        that prompt (:meth:`_restore_owed_replay`).
         """
         handle = self._spawn_resume
         if handle is None:
             return None
-        if self._resume_reseeded:
+        if self._reseeded_handle(handle):
             return False
         if self.recover_resume is None:
             return None
+        owed = {"pending": user_node.node_id, "prompt": self._turn_prompt_key}
         try:
-            outcome = await self.recover_resume(handle, user_node.node_id)
+            outcome = await self.recover_resume(handle, user_node.node_id, recovery=owed)
         except Exception:  # noqa: BLE001 — the turn still fails, retriable
             logger.warning("checking claude's resume handle %s failed", handle, exc_info=True)
             return None
@@ -3222,11 +3257,79 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             "claude kept exiting on --resume %s and its transcript was gone; "
             "resuming re-seeded %s", handle, outcome.cli_session_id,
         )
-        self._resume_reseeded = True
         self._silent_resume_exits = 0
         self.cli_session_id = outcome.cli_session_id
+        await self._save_resume_recovery(sid, {**owed, "handle": outcome.cli_session_id})
         await self._stop_process(grace=1.0)
         return True
+
+    def _reseeded_handle(self, handle: str | None) -> bool:
+        recovery = self._resume_recovery
+        return bool(handle) and recovery is not None and recovery.get("handle") == handle
+
+    async def _restore_owed_replay(self, sid: str, user_node: SessionNode) -> bool:
+        """Before a turn on a re-seeded handle whose replay the CLI never
+        recorded (it exited first): write that prompt back into the CLI's
+        conversation. True when the handle changed (the process was stopped).
+
+        A retry of the owed prompt (same text) needs nothing: sending it now
+        restores it, and writing it back too would hand it over twice. Any
+        other turn re-seeds the history before ``user_node`` once more: that
+        is the path through the owed prompt, written once whether or not the
+        CLI took part of it in before it exited. A failed re-seed leaves it
+        owed and runs the turn on the current handle.
+        """
+        recovery = self._resume_recovery
+        handle = self.cli_session_id
+        if (recovery is None or not recovery.get("pending") or not self._reseeded_handle(handle)
+                or self.recover_resume is None):
+            return False
+        if self._turn_prompt_key is not None and recovery.get("prompt") == self._turn_prompt_key:
+            return False
+        owed = {"pending": user_node.node_id, "prompt": self._turn_prompt_key}
+        try:
+            outcome = await self.recover_resume(
+                handle, user_node.node_id, recovery=owed, restore=True,
+            )
+        except Exception:  # noqa: BLE001 — the turn runs on the handle it has
+            logger.warning("restoring claude's owed prompt on %s failed", handle, exc_info=True)
+            return False
+        if outcome.status != "reseeded" or not outcome.cli_session_id:
+            logger.warning(
+                "could not restore the prompt claude's --resume %s never recorded (%s)",
+                handle, outcome.status,
+            )
+            return False
+        logger.warning(
+            "claude never recorded the prompt replayed on --resume %s; resuming "
+            "re-seeded %s, which holds it", handle, outcome.cli_session_id,
+        )
+        self.cli_session_id = outcome.cli_session_id
+        await self._save_resume_recovery(sid, {**owed, "handle": outcome.cli_session_id})
+        await self._stop_process(grace=1.0)
+        return True
+
+    async def _settle_owed_replay(self, sid: str) -> None:
+        """The CLI recorded this turn's prompt: its handle owes nothing. The
+        handle stays marked as a re-seed (no second recovery re-seed)."""
+        recovery = self._resume_recovery
+        if recovery is None or not recovery.get("pending"):
+            return
+        if not self._reseeded_handle(self._spawn_resume):
+            return
+        await self._save_resume_recovery(sid, {**recovery, "pending": None, "prompt": None})
+
+    async def _save_resume_recovery(self, sid: str, recovery: dict[str, Any]) -> None:
+        """Keep ``recovery`` here and in the session's stored meta (a store
+        without ``set_cli_resume_recovery`` keeps it for this loop only)."""
+        self._resume_recovery = recovery
+        setter = getattr(self.store, "set_cli_resume_recovery", None)
+        if setter is None:
+            return
+        try:
+            await setter(sid, recovery)
+        except Exception:  # noqa: BLE001 — this loop still holds it
+            logger.warning("could not store claude's resume recovery for %s", sid, exc_info=True)
 
     def _start_stderr_tail(self, proc: asyncio.subprocess.Process) -> None:
         """Read the CLI's stderr for its whole life, keeping the newest
