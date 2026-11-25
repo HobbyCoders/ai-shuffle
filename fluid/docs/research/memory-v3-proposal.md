@@ -86,12 +86,12 @@ when: "When opening a pull request or pushing review fixes"
 triggers:
   words:   ["pull request", "open a pr", "push"]   # user turn / brief text
   tools:   ["Bash"]
-  command: ["gh pr create", "git push"]            # substring or regex on tool input
+  command: ["gh pr create", "git push"]            # literal, whole words (superseded: see §10)
   paths:   ["docs/guides/**"]                      # file-tool path globs
 ```
 
 - **User turn:** the harness scores the turn (and the brief, for subagents) against `when` plus `words` with the existing lexical scorer, and adds the full text of the top matches to the turn's memory reminder.
-- **Tool boundary:** before a tool runs (or on its result, where the leg cannot inject before), matching facts are delivered in full. The native leg controls its own loop. The delegated leg already injects `additionalContext` at tool boundaries for peer messages (`engine/delegated.py:3447`), so both legs have a delivery channel.
+- **Tool boundary:** before a tool runs (or on its result, where the leg cannot inject before), matching facts are delivered in full. *Superseded by §10: neither leg can deliver before the call runs without holding it, so phase 1 delivers with the result and records it as late; explicit `command` triggers are literal whole-word strings, never regular expressions.* The native leg controls its own loop. The delegated leg already injects `additionalContext` at tool boundaries for peer messages (`engine/delegated.py:3447`), so both legs have a delivery channel.
 - **Once per session per fact**, re-sent after compaction drops it. Each delivery is capped at about 1,500 characters (about 3 facts); the rest are named for Recall.
 - **Where triggers come from:** Remember accepts them. If none are given, they are derived without a model from the when-line (tool and command words, paths, content words). An agent's Remember call can also be asked to fill them in, so no backfill learner is needed.
 - Recall and the index stay as the fallback. They are no longer the main path.
@@ -243,5 +243,5 @@ Phase 1 added just-in-time delivery beside the index, which is unchanged. `docs/
 
 - Remember takes optional `command`, `paths` and `tools` triggers. They are stored on the fact as `triggers` and replicate like `when`. A save whose fact can only fire on words gets a receipt asking for `command` or `paths`.
 - User turns and delegation briefs carry matching facts in that turn's context note. Tool calls carry them with the call's result. Both legs follow the caps above, deliver each fact once per session and re-arm on compaction.
-- Each delivery is recorded only on the local worker (`jit_deliveries.json`), and memory health counts deliveries in its `delivery` signal. `FLUID_MEMORY_JIT=false` turns delivery off.
+- Each delivery is recorded only on the local worker, in an append-only log (`jit_deliveries.jsonl`, rotated by size), and memory health counts deliveries in its `delivery` signal. `FLUID_MEMORY_JIT=false` turns delivery off.
 - **Timing finding.** Delivery before the tool runs is not possible without holding the call. On either leg, a model reads added context only in its next request, which follows the call. Native PreToolUse context and the Claude Code CLI's PreToolUse `additionalContext` (CLI 2.1.331) arrive with the call's result, the same moment as PostToolUse context. Tool deliveries are therefore recorded as late, as section 9 asked, and user-turn deliveries as on time. Closing the gap needs an owner decision. One option: deny a call once, on its first command-fact match in a session, with the fact as the reason, and let the agent re-issue the call. The cost is one extra call per such fact per session.

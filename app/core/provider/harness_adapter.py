@@ -3031,16 +3031,22 @@ class HarnessAdapter(ProviderAdapter):
             return self._jit
         from app.core.fluid_memory import session_memory
         from fluid.codemode.jit_delivery import SessionDelivery
+        from fluid.codemode.skills import checkout_identity
 
         try:
             store, project = session_memory(sid, self._options.cwd)
         except ValueError:
             return None  # no session row (yet): nothing to deliver from
+        checkout = checkout_identity(self._options.cwd)
         jit = self._jit
         if (jit is None or jit.session_id != sid or jit.project != project
-                or str(jit.store.root) != str(store.root)):
-            jit = self._jit = SessionDelivery(
-                store, project, sid, enabled=lambda: bool(settings.fluid_memory_jit))
+                or jit.checkout != checkout or str(jit.store.root) != str(store.root)):
+            jit = SessionDelivery(store, project, sid, checkout=checkout,
+                                  enabled=lambda: bool(settings.fluid_memory_jit))
+            # A replacement adapter (idle eviction, resume, a new process)
+            # takes up what the session already has since its last compaction.
+            jit.restore()
+            self._jit = jit
         return jit
 
     async def _jit_post_tool(self, event: str, payload: Dict[str, Any]) -> Optional[HookDecision]:
@@ -3050,24 +3056,34 @@ class HarnessAdapter(ProviderAdapter):
         bundled tools) sends the call's input with PostToolUse. A model
         reads new context only in its next request, which follows the
         call; reading a fact before the call runs would mean holding the
-        call, so these deliveries are recorded as late."""
+        call, so these deliveries are recorded as late. The delivery is an
+        attachment: it counts once the gate has put it where the model
+        reads it (in code mode, the cell's own result)."""
         try:
             from fluid.codemode.jit_delivery import LATE
 
-            jit = await run_sync(self._jit_session)
-            if jit is None:
-                return None
-            name, tool_input = str(payload.get("name") or ""), payload.get("input")
-            delivery = await run_sync(lambda: jit.on_tool(name, tool_input, timing=LATE))
-            return HookDecision(additional_context=delivery.text) if delivery else None
+            def match() -> Optional[Any]:
+                jit = self._jit_session()
+                if jit is None:
+                    return None
+                return jit.on_tool(str(payload.get("name") or ""), payload.get("input"), timing=LATE)
+
+            delivery = await run_sync(match)
+            return HookDecision(attachments=(delivery.attachment(),)) if delivery else None
         except Exception:  # noqa: BLE001 — delivery never fails a tool call
             logger.warning("[HarnessAdapter] just-in-time memory failed", exc_info=True)
             return None
 
     async def _jit_rearm(self, event: str, payload: Dict[str, Any]) -> None:
-        """Compaction may summarise delivered facts away: deliver them again."""
-        if self._jit is not None:
-            self._jit.rearm()
+        """Compaction may summarise delivered facts away: deliver them again.
+        Logged even before this adapter delivered anything, so a later
+        replacement adapter does not restore what compaction dropped."""
+        try:
+            jit = await run_sync(self._jit_session)
+            if jit is not None:
+                await run_sync(jit.rearm)
+        except Exception:  # noqa: BLE001 — compaction never waits on memory
+            logger.warning("[HarnessAdapter] just-in-time memory re-arm failed", exc_info=True)
 
     def _memory_jit_note(self, query: str) -> Optional[str]:
         """Full text of facts whose words this user turn matches, or None.

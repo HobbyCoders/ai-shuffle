@@ -63,6 +63,11 @@ class HostReply:
     error_code: str | None = None
     shell_exit_code: int | None = None
     fields: dict | None = None
+    # Host-side only, like ``images``: harness context for the model
+    # (fluid.hooks.bus.Attachment, e.g. just-in-time memory). The cell's
+    # program may never print this call's result, so the host puts these on
+    # the enclosing cell's result, outside its output fence.
+    attachments: tuple = ()
 
 
 @dataclass(frozen=True)

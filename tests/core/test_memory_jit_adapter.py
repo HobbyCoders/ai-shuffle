@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from fluid.codemode import jit_delivery
 from fluid.codemode.skills import SkillStore
-from fluid.hooks.bus import POST_TOOL_USE, PRE_COMPACT, PRE_TOOL_USE
+from fluid.hooks.bus import POST_TOOL_USE, PRE_COMPACT, PRE_TOOL_USE, place_attachments
 
 from app.core.config import Settings, settings
 from app.core.provider.harness_adapter import HarnessAdapter
@@ -30,14 +30,19 @@ def jit_adapter(tmp_path, monkeypatch):
     store.save_memory(OFFSITE, durable=True, when="When planning a team offsite dinner")
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda sid, cwd=None: (store, None))
     monkeypatch.setattr(settings, "fluid_memory_jit", True)
+    return _adapter(tmp_path, monkeypatch), store
+
+
+def _adapter(tmp_path, monkeypatch, sid="app-session-1"):
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(model="fake", cwd=str(tmp_path))
-    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "app-session-1")
-    return adapter, store
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: sid)
+    return adapter
 
 
 def _context(decision):
-    return decision.additional_context or ""
+    """What a gate puts on the result: the attachments, settled as placed."""
+    return "\n".join([decision.additional_context or "", *place_attachments(decision.attachments)])
 
 
 @pytest.mark.asyncio
@@ -85,7 +90,41 @@ async def test_kill_switch_turns_both_paths_off(jit_adapter, monkeypatch):
         "name": "Bash", "input": {"command": "git push"}, "tool_use_id": "t1", "output": "ok"})
     assert PUSH not in _context(off)
     assert adapter._memory_jit_note("plan the team offsite dinner") is None
-    assert jit_delivery.counts(store) == {}
+    assert not jit_delivery.counts(store).get("totals")
+
+
+PUSH_CALL = {"name": "Bash", "input": {"command": "git push"}, "tool_use_id": "t1", "output": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_adapter_keeps_the_session_once_set(jit_adapter, tmp_path, monkeypatch):
+    """Idle eviction then resume builds a new adapter for the same session:
+    it takes up what the session was given since its last compaction."""
+    adapter, _ = jit_adapter
+    assert PUSH in _context(await adapter._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+    resumed = _adapter(tmp_path, monkeypatch)
+    assert PUSH not in _context(await resumed._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+    # Another session is unaffected.
+    other = _adapter(tmp_path, monkeypatch, sid="app-session-2")
+    assert PUSH in _context(await other._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+    # After compaction the resumed session gets it again, and a further
+    # replacement does not restore what compaction dropped.
+    await resumed._hooks.emit(PRE_COMPACT, {})
+    again = _adapter(tmp_path, monkeypatch)
+    assert PUSH in _context(await again._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+
+
+@pytest.mark.asyncio
+async def test_only_a_placed_delivery_counts(jit_adapter):
+    """A gate that drops the attachment leaves the fact undelivered: it is
+    offered again with the next match and nothing is recorded for it."""
+    adapter, store = jit_adapter
+    dropped = await adapter._hooks.emit(POST_TOOL_USE, PUSH_CALL)
+    [attachment] = dropped.attachments
+    attachment.settle(False)
+    assert not jit_delivery.counts(store).get("totals")
+    assert PUSH in _context(await adapter._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+    assert jit_delivery.counts(store)["totals"] == {"late": 1, "command": 1}
 
 
 def test_setting_defaults_on_and_reads_the_env(monkeypatch):

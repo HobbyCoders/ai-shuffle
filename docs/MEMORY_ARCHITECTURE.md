@@ -69,9 +69,14 @@ events, for native and delegated sessions alike:
   spawned session's brief arrives as its first user turn. These deliveries
   are recorded as on time.
 - **Tool call.** On PostToolUse, `match_tool` matches the call's input and
-  appends the facts to that call's result. Every gate sends PostToolUse with
-  the call's input: the native loop, the Claude Code CLI hook, the code-mode
-  bridge and the bundled MCP server. These deliveries are recorded as late. A
+  hands the facts to the gate as an attachment (`fluid.hooks.bus.Attachment`).
+  Every gate sends PostToolUse with the call's input and places the
+  attachment where the model reads it: on the call's result in the native
+  loop and the bundled MCP server, in the Claude Code CLI hook's
+  `additionalContext`, and in code mode on the enclosing cell's result,
+  outside its output fence, because a cell may never print an inner call's
+  result. A fact counts as delivered only once its gate settles the
+  attachment as placed; a dropped one is offered again with the next match. These deliveries are recorded as late. A
   model reads added context only in its next request, after the call already
   ran, on either leg. Context added at PreToolUse (which the CLI accepts as
   `additionalContext`) arrives in that same request. Reading a fact before
@@ -81,18 +86,29 @@ events, for native and delegated sessions alike:
 Only delivery candidates are delivered: not ALWAYS, identity, superseded,
 conflicted, behaviour-rule or Recall-only facts. Facts outside the session's
 scope (global plus its project), facts not `visible_on` this worker, and facts
-failing the injection screen are also left out. Each event carries at most 3
-facts and about 1,500 characters; further matches are named by ID for Recall.
-Each fact is delivered once per session, and PreCompact re-arms the session,
-because the summary may have dropped the text. Prepared triggers are cached
-per store file revision, so a tool call costs a `stat` plus the bounded
-matcher. Proactive assistant and one-shot runs do not deliver.
+failing the injection screen are also left out, as are setup receipts for
+another checkout of the project (the index's own filter). Each event carries
+at most 3 facts, and the whole block, the line naming further matches
+included, stays within 1,500 characters; further matches are named by ID for
+Recall as far as they fit, then counted. Each fact is delivered once per
+session, and PreCompact re-arms the session, because the summary may have
+dropped the text. A replacement adapter for the same session (after idle
+eviction or a restart) takes up the session's deliveries since its last
+re-arm from the local log. Candidates come from the store's read-only
+snapshot, without the writer lock, and are prepared once per store file
+revision and checkout; a read that takes longer than a quarter second
+delivers nothing for that event. Proactive assistant and one-shot runs do
+not deliver.
 
-Each delivery is recorded only on this worker, in
-`<store root>/jit_deliveries.json`, which is never replicated. A record holds
-the fact ID, the trigger kind (command, path, tool or words), the session,
-the time, and whether it was on time or late. The file keeps totals, per-fact
-counts and the last 200 deliveries. Memory health reads the totals as its
+Each delivery is recorded only on this worker, in the append-only log
+`<store root>/jit_deliveries.jsonl`, which is never replicated. A record is
+one JSON line written in a single append, so concurrent processes do not lose
+each other's records, and no write waits on an fsync. It holds the fact ID,
+the trigger kind (command, path, tool or words), the session, the time, and
+whether it was on time or late; compaction re-arms are logged too. Past
+256 KB the log rotates to `jit_deliveries.1.jsonl`, so at most two files are
+kept. Totals, per-fact counts (the 200 most recently delivered facts) and
+the last 200 deliveries are computed on read. Memory health reads the totals as its
 `delivery` signal, which is a count and never an attention. Set
 `FLUID_MEMORY_JIT=false` to turn delivery off; the index is unaffected.
 

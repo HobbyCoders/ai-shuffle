@@ -195,9 +195,12 @@ class Triggers:
     # Tools a fact names explicitly (Remember's ``tools``): they fire on the
     # tool alone, without the when-line's words in its input.
     explicit_tools: tuple[str, ...] = ()
+    # Globs a fact names explicitly (Remember's ``paths``): they fire on any
+    # file tool, reads included, while derived ``paths`` keep ``edit_paths``.
+    explicit_paths: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
-        return bool(self.words or self.tools or self.command or self.paths)
+        return bool(self.words or self.tools or self.command or self.paths or self.explicit_paths)
 
 
 @dataclass(frozen=True)
@@ -395,19 +398,22 @@ def with_explicit(triggers: Triggers, explicit: Mapping[str, Any] | None) -> Tri
         words=triggers.words,
         tools=tuple(dict.fromkeys((*triggers.tools, *tools))),
         command=tuple(dict.fromkeys((*command, *triggers.command))),
-        paths=tuple(dict.fromkeys((*paths, *triggers.paths))),
+        paths=triggers.paths,
         clauses=triggers.clauses,
         names=triggers.names,
-        # Explicit paths fire on reads too; derived ones keep their rule.
-        edit_paths=triggers.edit_paths and not paths,
+        # Explicit paths fire on reads too; derived ones keep their own rule,
+        # so naming one path never widens the when-line's paths to reads.
+        edit_paths=triggers.edit_paths,
         explicit_tools=tuple(dict.fromkeys(tools)),
+        explicit_paths=tuple(dict.fromkeys(paths)),
     )
 
 
 def words_only(triggers: Triggers) -> bool:
     """Only word triggers: such a fact fires on a turn or a brief, never on
     a command, path or tool."""
-    return bool(triggers.words) and not (triggers.command or triggers.paths or triggers.tools)
+    return bool(triggers.words) and not (
+        triggers.command or triggers.paths or triggers.explicit_paths or triggers.tools)
 
 
 def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
@@ -750,8 +756,10 @@ def match_tool(name: str, tool_input: Mapping[str, Any] | None,
         if hit:
             matches.append(Match(fact.id, "command", 3, (hit.value,)))
             continue
-        glob = next((g for g in t.paths for p in paths
-                     if (tool in EDIT_TOOLS or not t.edit_paths) and _glob_pattern(g).fullmatch(p)), None)
+        glob = next((g for g in t.explicit_paths for p in paths
+                     if _glob_pattern(g).fullmatch(p)), None) or next(
+            (g for g in t.paths for p in paths
+             if (tool in EDIT_TOOLS or not t.edit_paths) and _glob_pattern(g).fullmatch(p)), None)
         if glob:
             matches.append(Match(fact.id, "path", 3, (glob,)))
             continue

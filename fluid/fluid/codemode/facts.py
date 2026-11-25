@@ -177,6 +177,7 @@ def validate_triggers(value: object) -> dict[str, list[str]]:
     [...], "tools": [...]}`` with only non-empty kinds, each a de-duplicated
     list of single-line strings. An empty result means "no explicit
     triggers". Raises ValueError on anything else."""
+    from fluid.context.screening import looks_like_secret
     if value is None:
         return {}
     if not isinstance(value, dict) or set(value) - set(TRIGGER_KINDS):
@@ -201,6 +202,10 @@ def validate_triggers(value: object) -> dict[str, list[str]]:
                 raise ValueError("a command trigger needs at least two characters")
             if kind == "tools" and not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", item):
                 raise ValueError("a tool trigger is a tool name such as Bash or Edit")
+            # Saves and replica imports both pass here: a token pasted into a
+            # command is refused, and never stored or passed on.
+            if looks_like_secret(item):
+                raise ValueError(f"triggers.{kind} contains a credential; name the command, not its token")
             items.append(item)
         items = list(dict.fromkeys(items))
         if items:

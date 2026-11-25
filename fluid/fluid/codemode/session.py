@@ -616,6 +616,10 @@ class CodeModeSession:
         # caption as text, and the real blocks ride out on this cell's outcome
         # so the model can actually see them (JSON-path parity).
         collected_images: list[Any] = []
+        # Harness context from inner calls (just-in-time memory) is host-side
+        # too: it goes on this cell's result, outside the output fence, since
+        # the cell's program may never print the inner result it came with.
+        collected_attachments: list[Any] = []
 
         async def _host_call(name: str, kwargs: dict) -> HostReply:
             spec = self._registry.get(name)
@@ -661,6 +665,7 @@ class CodeModeSession:
                     return
                 finished = True
                 collected_images.extend(reply.images)
+                collected_attachments.extend(reply.attachments)
                 record["ok"] = reply.result is not None
                 record["shell_exit_code"] = reply.shell_exit_code
                 if reply.result is not None:
@@ -737,10 +742,16 @@ class CodeModeSession:
             await _finish(reply)
             return reply
 
-        result = await kernel.exec(
-            code, timeout=timeout, on_host_call=_host_call,
-            host_wait_credit=human_wait.seconds,
-        )
+        try:
+            result = await kernel.exec(
+                code, timeout=timeout, on_host_call=_host_call,
+                host_wait_credit=human_wait.seconds,
+            )
+        except BaseException:
+            # No cell result to carry them: their producer may offer them again.
+            for attachment in collected_attachments:
+                attachment.settle(False)
+            raise
         self._record_cell(code, result, called_tools)
 
         parts: list[str] = []
@@ -787,6 +798,11 @@ class CodeModeSession:
                 f"{_CELL_IMAGE_CAP} are attached. Read fewer per cell.)"
             )
             collected_images = collected_images[dropped:]
+        if collected_attachments:
+            from fluid.hooks.bus import place_attachments
+
+            # Ahead of the output, so no cap on a long cell result cuts them.
+            text = "\n\n".join([*place_attachments(collected_attachments), text])
         return ToolOutcome(
             text=text,
             is_error=bool(result.error),

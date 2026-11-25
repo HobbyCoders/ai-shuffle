@@ -5006,10 +5006,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             reason = decision.note or "blocked by hook"
             await self._hook_event("info", f"PostToolUse hook on {name}: {reason}", POST_TOOL_USE, name)
             output = {"decision": "block", "reason": reason}
-        if decision.additional_context:
-            output["hookSpecificOutput"] = {
-                "hookEventName": event, "additionalContext": decision.additional_context,
-            }
+        # Harness context (just-in-time memory) joins the hook's context: the
+        # CLI attaches this answer's additionalContext to the call's result.
+        context = "\n\n".join(c for c in (
+            decision.additional_context, *(a.text for a in decision.attachments)) if c)
+        if context:
+            output["hookSpecificOutput"] = {"hookEventName": event, "additionalContext": context}
+        for attachment in decision.attachments:
+            attachment.settle(bool(attachment.text))
         return output
 
     async def _cli_prompt_submit(self, data: dict[str, Any]) -> dict[str, Any]:

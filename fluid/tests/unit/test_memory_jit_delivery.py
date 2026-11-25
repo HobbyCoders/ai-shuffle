@@ -43,6 +43,14 @@ def bash(command):
     return ("Bash", {"command": command})
 
 
+def give(jit, *call):
+    """A tool delivery its gate placed where the model reads it."""
+    delivery = jit.on_tool(*call)
+    if delivery is not None:
+        delivery.commit()
+    return delivery
+
+
 # ─── the stored field ───────────────────────────────────────────────────────
 
 def test_validate_triggers_canonicalises_and_refuses_bad_input():
@@ -198,18 +206,18 @@ def test_tool_delivery_caps_names_overflow_once_and_delivers_once(tmp_path):
     store = SkillStore(tmp_path)
     saved = _push_facts(store, MAX_FACTS + 2)
     jit = SessionDelivery(store, None, "sess-1")
-    first = jit.on_tool(*bash("git push --dry-run"))
+    first = give(jit, *bash("git push --dry-run"))
     assert len(first.delivered) == MAX_FACTS and len(first.overflow) == 2
     assert first.text.startswith(jit_delivery.HEADING)
     assert "Also matching (Recall by id): " + ", ".join(first.overflow) in first.text
     assert {i for i, _ in first.delivered} | set(first.overflow) == {f.id for f in saved}
     assert all(kind == "command" for _, kind in first.delivered)
     # The rest arrive with the next match; nothing repeats after that.
-    second = jit.on_tool(*bash("git push"))
+    second = give(jit, *bash("git push"))
     assert {i for i, _ in second.delivered} == set(first.overflow) and not second.overflow
-    assert jit.on_tool(*bash("git push")) is None
+    assert give(jit, *bash("git push")) is None
     # Another session has its own once-set.
-    assert SessionDelivery(store, None, "sess-2").on_tool(*bash("git push"))
+    assert give(SessionDelivery(store, None, "sess-2"), *bash("git push"))
 
 
 def test_character_cap_and_a_single_long_fact(tmp_path):
@@ -222,18 +230,21 @@ def test_character_cap_and_a_single_long_fact(tmp_path):
     one = SessionDelivery(store2, None, "s").on_tool(*bash("git push"))
     assert one.delivered == ((long.id, "command"),)
     assert f"(Recall [{long.id}] for the rest)" in one.text
-    body = one.text.split("\n", 2)[2]
-    assert len(body) <= MAX_CHARS
+    assert len(one.text) <= MAX_CHARS
 
 
 def test_rearm_after_compaction_delivers_again(tmp_path):
     store = SkillStore(tmp_path)
     _push_facts(store, 1)
     jit = SessionDelivery(store, None, "s")
-    assert jit.on_tool(*bash("git push"))
-    assert jit.on_tool(*bash("git push")) is None
+    assert give(jit, *bash("git push"))
+    assert give(jit, *bash("git push")) is None
     jit.rearm()
-    assert jit.on_tool(*bash("git push"))
+    assert give(jit, *bash("git push"))
+    # A replacement after compaction does not take up what compaction dropped.
+    assert give(SessionDelivery(store, None, "s"), *bash("git push")) is None
+    jit.rearm()
+    assert give(SessionDelivery(store, None, "s"), *bash("git push"))
 
 
 def test_turn_delivery_matches_words_and_counts_once(tmp_path):
@@ -253,7 +264,7 @@ def _doc_store(tmp_path, entries, store_id="w1"):
     path.write_text("{}")
     doc = {"store_id": store_id, "entries": entries}
     return SimpleNamespace(memories_path=path, root=tmp_path,
-                           _facts=SimpleNamespace(snapshot=lambda: doc))
+                           _facts=SimpleNamespace(snapshot=lambda read_only=False: doc))
 
 
 def _entry(fid, **extra):
@@ -271,7 +282,7 @@ def test_out_of_scope_foreign_conflicted_superseded_always_and_identity_never_de
     ])
     jit = SessionDelivery(store, "proj-a", "s")
     delivered = []
-    while (d := jit.on_tool(*bash("./deploy.sh --dry-run"))) is not None:
+    while (d := give(jit, *bash("./deploy.sh --dry-run"))) is not None:
         delivered += [i for i, _ in d.delivered]
     assert sorted(delivered) == ["g1", "p1", "w1"]
 
@@ -292,7 +303,7 @@ def test_kill_switch_turns_delivery_off(tmp_path):
     jit = SessionDelivery(store, None, "s", enabled=lambda: switch["on"])
     assert jit.on_tool(*bash("git push")) is None
     assert jit.on_turn("When pushing step 0") is None
-    assert jit_delivery.counts(store) == {}
+    assert not jit_delivery.counts(store).get("totals")
     switch["on"] = True
     assert jit.on_tool(*bash("git push"))
 
@@ -308,7 +319,7 @@ def test_on_time_and_late_deliveries_are_recorded_and_reach_health(tmp_path):
     jit = SessionDelivery(store, None, "sess-a")
     # A turn's facts ride that turn: on time. A call's ride its result: late.
     assert jit.on_turn("Help me plan the team offsite dinner for spring.")
-    assert jit.on_tool("mcp__builtins__Release", {})
+    assert give(jit, "mcp__builtins__Release", {})
     record = jit_delivery.counts(store)
     assert record["totals"] == {ON_TIME: 1, LATE: 1, "words": 1, "tool": 1}
     assert record["facts"][early.id][ON_TIME] == 1 and record["facts"][late.id][LATE] == 1
@@ -361,3 +372,191 @@ async def test_native_post_tool_context_reaches_the_next_request():
     result = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, ToolResult))
     assert "pushed" in result.output and "push rule" in result.output
     assert "push rule" in json.dumps(provider.requests[1].messages, default=str)
+
+
+# ─── review round 1 ─────────────────────────────────────────────────────────
+
+TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+
+
+async def test_a_secret_in_a_trigger_is_refused_on_save_and_on_import(tmp_path):
+    with pytest.raises(ValueError, match="credential"):
+        validate_triggers({"command": [f"curl -H 'Authorization: token {TOKEN}'"]})
+    store = SkillStore(tmp_path / "a")
+    out = await remember({"text": PUSH, "when": PUSH_WHEN, "command": [f"git push {TOKEN}"]},
+                         ctx(store))
+    assert out.is_error and TOKEN not in json.dumps(store._facts.export())
+    # A replica carrying one (an older or a tampered worker) never stores it.
+    fact = store.save_memory(PUSH, durable=True, when=PUSH_WHEN, triggers={"command": ["git push"]})
+    doc = store._facts.export()
+    [entry] = [e for e in doc["entries"] if e["id"] == fact.id]
+    entry["triggers"] = {"command": [f"git push {TOKEN}"]}
+    entry["triggers_at"] = [entry["triggers_at"][0] + 60, "zz"]
+    other = SkillStore(tmp_path / "b")
+    other._facts.merge(doc)
+    merged = json.dumps(other._facts.export())
+    assert PUSH in merged and TOKEN not in merged
+
+
+def test_an_explicit_path_does_not_widen_derived_paths_to_reads():
+    [fact] = trig.prepare([{"id": "m1", "text": "Guides are generated; edit docs/guides/ sources.",
+                            "when": "When editing files under docs/guides/",
+                            "triggers": {"paths": ["config/*.yaml"]}}])
+    # The explicit glob fires on a read; the derived one stays edit-only.
+    assert trig.match_tool("Read", {"file_path": "/srv/repo/config/app.yaml"}, [fact])
+    assert trig.match_tool("Read", {"file_path": "/srv/repo/docs/guides/intro.md"}, [fact]) == []
+    assert trig.match_tool("Edit", {"file_path": "/srv/repo/docs/guides/intro.md"}, [fact])
+
+
+def test_the_whole_block_fits_the_budget_with_many_matches(tmp_path):
+    store = SkillStore(tmp_path)
+    _push_facts(store, 40, size=420)
+    delivery = SessionDelivery(store, None, "s").on_tool(*bash("git push"))
+    assert len(delivery.text) <= MAX_CHARS
+    assert delivery.delivered and (delivery.overflow or delivery.more)
+    named = delivery.overflow
+    assert len(delivery.delivered) + len(named) + delivery.more == 40
+    if delivery.more:
+        assert f"and {delivery.more} more matched" in delivery.text or \
+            f"{delivery.more} more facts matched" in delivery.text
+    for fact_id in named:
+        assert fact_id in delivery.text
+
+
+def test_setup_receipts_for_another_checkout_are_left_out(tmp_path):
+    from fluid.codemode.skills import checkout_identity
+
+    store = SkillStore(tmp_path)
+    receipt = store.save_memory("feat/alpha has a .venv with pytest installed; run tests there.",
+                                durable=True, when="When running tests in this project",
+                                scope="proj", triggers={"command": ["pytest"]})
+    a = SessionDelivery(store, "proj", "s1", checkout=checkout_identity("/srv/wt/feat-alpha"))
+    b = SessionDelivery(store, "proj", "s2", checkout=checkout_identity("/srv/wt/feat-beta"))
+    assert {i for i, _ in a.on_tool(*bash("pytest -q")).delivered} == {receipt.id}
+    assert b.on_tool(*bash("pytest -q")) is None
+
+
+def test_the_log_takes_concurrent_writers_from_two_processes(tmp_path):
+    import multiprocessing as mp
+
+    ctx_ = mp.get_context("spawn")
+    procs = [ctx_.Process(target=_log_writer, args=(str(tmp_path), f"w{n}", 150)) for n in range(2)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    store = SimpleNamespace(root=tmp_path)
+    assert jit_delivery.counts(store)["totals"] == {LATE: 300, "command": 300}
+    assert len(jit_delivery.session_delivered(store, "w0")) == 150
+
+
+def _log_writer(root, session, n):
+    store = SimpleNamespace(root=root)
+    for i in range(n):
+        jit_delivery.record(store, session, [(f"{session}-m{i}", "command")], LATE)
+
+
+def test_the_log_is_capped_and_per_fact_rows_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(jit_delivery, "MAX_LOG_BYTES", 4096)
+    store = SimpleNamespace(root=tmp_path)
+    for i in range(500):
+        jit_delivery.record(store, "s", [(f"m{i}", "command")], LATE)
+    sizes = [p.stat().st_size for p in tmp_path.glob("jit_deliveries*.jsonl")]
+    assert len(sizes) == 2 and max(sizes) <= 4096
+    record = jit_delivery.counts(store)
+    assert len(record["facts"]) <= jit_delivery.MAX_FACT_ROWS
+    assert len(record["recent"]) <= jit_delivery.MAX_RECENT
+    assert "m499" in record["facts"]
+
+
+def test_a_failing_log_or_a_slow_store_never_fails_or_holds_a_call(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    store = SkillStore(tmp_path)
+    _push_facts(store, 1)
+    # The log cannot be written: the delivery still goes out.
+    monkeypatch.setattr(jit_delivery.os, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("full")))
+    assert give(SessionDelivery(store, None, "s"), *bash("git push"))
+    monkeypatch.undo()
+    # A store read that hangs: the call gets nothing, quickly.
+    gate = threading.Event()
+    slow = SimpleNamespace(root=tmp_path / "slow", memories_path=tmp_path / "slow.json",
+                           _facts=SimpleNamespace(snapshot=lambda read_only=False: gate.wait(5) and {}))
+    jit_delivery._cache.clear()
+    started = _time.monotonic()
+    assert SessionDelivery(slow, None, "s").on_tool(*bash("git push")) is None
+    assert _time.monotonic() - started < 1.0
+    gate.set()
+
+
+def test_candidates_read_without_the_writer_lock(tmp_path):
+    store = SkillStore(tmp_path)
+    _push_facts(store, 1)
+    jit_delivery._cache.clear()
+    calls = []
+    real = store._facts.snapshot
+    store._facts.snapshot = lambda read_only=False: calls.append(read_only) or real(read_only=read_only)
+    assert jit_delivery.candidates(store, None).facts
+    assert calls == [True]
+
+
+# ─── code mode: the cell result carries the delivery ────────────────────────
+
+async def test_code_mode_cell_result_carries_the_fact_even_when_it_prints_nothing(tmp_path):
+    from fluid.codemode.session import CodeModeSession
+    from fluid.engine.native import NativeLoop
+    from fluid.events import ToolResult, UserTurn
+    from fluid.hooks.bus import POST_TOOL_USE, HookBus, HookDecision
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools.builtins import bash as bash_tool
+    from fluid.tools.registry import ToolRegistry
+
+    from tests.unit.test_codemode import ScriptedProvider, _run_python, _text
+
+    memory = SkillStore(tmp_path / "memory")
+    alpha = memory.save_memory("Alpha probes need the staging flag.", durable=True,
+                               when="When running the alpha probe",
+                               triggers={"command": ["echo alpha-probe"]})
+    beta = memory.save_memory("Beta probes print to stderr too.", durable=True,
+                              when="When running the beta probe",
+                              triggers={"command": ["echo beta-probe"]})
+    jit = SessionDelivery(memory, None, "sess-cm")
+    hooks = HookBus()
+
+    async def deliver(_event, payload):
+        delivery = jit.on_tool(payload.get("name") or "", payload.get("input"))
+        return HookDecision(attachments=(delivery.attachment(),)) if delivery else None
+
+    hooks.on(POST_TOOL_USE, deliver)
+    registry = ToolRegistry()
+    registry.register_builtin(bash_tool.SPEC, bash_tool.handler)
+    imp = "from tools.Bash import Bash\n"
+    cells = [
+        imp + "r = Bash(command='echo alpha-probe')\n",          # prints nothing
+        imp + "print(Bash(command='echo beta-probe').output)\n",  # .output only
+        imp + "r = Bash(command='echo alpha-probe')\n",          # already delivered
+    ]
+    provider = ScriptedProvider([*(_run_python(c, f"t{n}") for n, c in enumerate(cells)), _text("done")])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="claude-sonnet-5",
+                      registry=registry, codemode=CodeModeSession(registry), hooks=hooks,
+                      permissions=PermissionEngine("never_ask"), ctx=ToolCtx(cwd=str(tmp_path)))
+    try:
+        await loop.submit(UserTurn(content="run the probes"))
+        await loop.wait_turn()
+        results = [e.output for e in loop.bus.log(loop.session_id)
+                   if isinstance(e, ToolResult) and e.name == "run_python"]
+        assert len(results) == 3
+        assert "Alpha probes need the staging flag." in results[0]
+        assert "Beta probes print to stderr too." in results[1] and "beta-probe" in results[1]
+        assert "Alpha probes" not in results[1] + results[2]
+        # Outside the cell's untrusted output, as a harness reminder.
+        assert results[0].index("Alpha probes") < results[0].index("</system•reminder>")
+        # The model's next request carries it, and only placed facts count.
+        assert "Alpha probes need" in json.dumps(provider.requests[1].messages, default=str)
+        assert jit_delivery.counts(memory)["facts"].keys() == {alpha.id, beta.id}
+        assert jit_delivery.counts(memory)["totals"] == {LATE: 2, "command": 2}
+    finally:
+        await loop.aclose()
