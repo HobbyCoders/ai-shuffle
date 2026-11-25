@@ -567,6 +567,33 @@ async def test_delegated_pg_connect_keeps_history_durable_not_cached(mock_db, mo
     assert [n.node_id for n in await cold.load_path(SID)] == ["n1", "n2", "n3"]
 
 
+@pytest.mark.asyncio
+async def test_antigravity_pg_connect_keeps_history_durable_not_cached(mock_db, monkeypatch, tmp_path):
+    """The ACP agent owns its context too: no node bodies stay in memory."""
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    await _seed(PgFluidStore(), PELICAN, handle="old-handle")
+    reader = PgFluidStore()
+    captured: dict = {}
+
+    async def connect_antigravity(self, options, store, *args, **kwargs):
+        captured["store"] = store
+        self._engine = _CapturingLoop(store=store, session_id=SID)
+
+    monkeypatch.setattr(ha, "_decide_provider_kind", lambda _o: "antigravity")
+    monkeypatch.setattr(ha.HarnessAdapter, "_connect_antigravity", connect_antigravity)
+    monkeypatch.setattr(ha.HarnessAdapter, "_build_store", staticmethod(lambda _o: reader))
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_options(tmp_path))
+    assert adapter.provider_kind == "antigravity"
+    assert captured["store"] is reader and not reader.cache_nodes
+    await reader.append(SID, _node("n3", "n2", "user", "next agent turn"))
+    assert not reader._nodes.get(SID)
+    # Point reads and the whole path still come back from the database.
+    assert (await reader.get_node(SID, "n1")).node_id == "n1"
+    assert [n.node_id for n in await reader.load_path(SID)] == ["n1", "n2", "n3"]
+
+
 # ─── the prompt match itself ────────────────────────────────────────────────
 
 

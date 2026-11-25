@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, Dict, Any, Callable, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
 from app.db.compat import phs
@@ -465,8 +465,105 @@ def get_all_project_session_counts() -> Dict[str, int]:
         return {row["project_id"]: row["count"] for row in cursor.fetchall()}
 
 
-def delete_project(project_id: str) -> bool:
-    """Delete a project and all associated sessions (sessions are cwd-dependent)"""
+# Which chats removing a project deletes: only chats whose binding names a
+# project row being removed, owned by this worker. Never another worker's,
+# never another project's.
+#
+#   * deleted: ``sessions.project_id`` names a removed row (whatever its
+#     ``project_v2_id``: a relinked project's older chats keep their first
+#     identity), and ``instance_id`` is this worker or NULL (a pre-instance
+#     row, shared like the project rows ``get_all_projects`` lists), and no
+#     other device executes it (``owner_device_id`` unset or this device, so
+#     never a mirror).
+#   * kept: every chat bound only by a shared project identity
+#     (``project_id`` NULL, ``project_v2_id`` set; e.g. a chat a peer placed
+#     here). An identity does not prove which project row a chat came from:
+#     a relinked clone's older chats keep the old identity, which a later
+#     clone of that origin (or a reused ``local:<id>``) takes over. So removal
+#     never deletes by identity; those chats stay, uncounted.
+
+def _removal_binding(cursor, project_ids) -> Optional[Dict[str, Any]]:
+    from app.db.sessions import _deleting_worker
+
+    removing = sorted(set(project_ids))
+    cursor.execute(f"SELECT id FROM projects WHERE id IN ({phs(len(removing))}) ORDER BY id", removing)
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+    return {
+        "project_ids": [row["id"] for row in rows],
+        "runner": settings.effective_instance_id,
+        "device_id": _deleting_worker()[0],
+    }
+
+
+def chat_in_removal(row: Dict[str, Any], binding: Dict[str, Any]) -> bool:
+    """Whether removing ``binding``'s projects deletes this chat (see above)."""
+    owner = row.get("owner_device_id")
+    if owner and owner != binding["device_id"]:
+        return False
+    return (row.get("project_id") in binding["project_ids"]
+            and row.get("instance_id") in (None, binding["runner"]))
+
+
+def _removal_chats(cursor, binding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ids = binding["project_ids"]
+    cursor.execute(
+        "SELECT * FROM sessions WHERE (owner_device_id IS NULL OR owner_device_id = %s) "
+        f"AND project_id IN ({phs(len(ids))}) AND (instance_id IS NULL OR instance_id = %s) ORDER BY id",
+        (binding["device_id"], *ids, binding["runner"]),
+    )
+    return [row for row in rows_to_list(cursor.fetchall()) if chat_in_removal(row, binding)]
+
+
+def _removal_worktrees(cursor, project_ids) -> List[Dict[str, Any]]:
+    """Active legacy worktree rows (folder on disk) that cascade away with these projects.
+
+    Removal never runs ``git worktree remove``: the rows go with the project
+    (``git_repositories`` -> ``worktrees`` ON DELETE CASCADE) and the folders
+    stay on disk, so the confirmation lists them.
+    """
+    cursor.execute(
+        "SELECT w.id, w.worktree_path FROM worktrees w JOIN git_repositories r ON r.id = w.repository_id "
+        f"WHERE r.project_id IN ({phs(len(project_ids))}) AND w.status = 'active' ORDER BY w.worktree_path, w.id",
+        list(project_ids),
+    )
+    return rows_to_list(cursor.fetchall())
+
+
+def project_removal_plan(project_ids) -> Optional[Dict[str, Any]]:
+    """``{"binding", "chats", "worktrees"}`` for removing these project rows together, or None.
+
+    ``chats`` are full session rows, for the ordinary chat delete; pass
+    ``binding`` to :func:`chat_in_removal` to re-check each under its lock.
+    ``worktrees`` are the folders that stay on disk (:func:`_removal_worktrees`).
+    """
+    if not project_ids:
+        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        binding = _removal_binding(cursor, project_ids)
+        if binding is None:
+            return None
+        return {"binding": binding, "chats": _removal_chats(cursor, binding),
+                "worktrees": _removal_worktrees(cursor, binding["project_ids"])}
+
+
+class ProjectOwnerChanged(Exception):
+    """The locked project row no longer passes the caller's ownership rule."""
+
+
+def delete_project(project_id: str, owned: Optional[Callable[[Dict[str, Any]], bool]] = None) -> bool:
+    """Delete a project and its chats on this worker (see ``chat_in_removal``); files stay.
+
+    The API removes the chats first through the ordinary chat delete
+    (``app/core/project_removal.py``); this sweep covers the rest.
+
+    ``owned`` is the caller's ownership rule, checked on the row as locked
+    for the delete: a row another worker claimed after the caller's earlier
+    read raises :class:`ProjectOwnerChanged` and stays as it is (aliases,
+    catalog entry and row untouched).
+    """
     from app.db import project_catalog_aliases
     from app.db.sessions import delete_session
 
@@ -476,19 +573,18 @@ def delete_project(project_id: str) -> bool:
     # It also clears the runtime rows (runs, turns, events) a raw DELETE left.
     # A chat created in the project after this read survives as a no-project
     # chat (project_id is ON DELETE SET NULL), never as a dangling reference.
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM sessions WHERE project_id = %s ORDER BY id", (project_id,))
-        session_ids = [row["id"] for row in cursor.fetchall()]
-    for session_id in session_ids:
-        # Conditional: a chat moved to another project after this read (a
-        # cross-device resume or worktree reopen) is not this project's to
-        # delete (review S10). The old WHERE project_id delete kept it too.
-        delete_session(session_id, expected_project_id=project_id)
+    plan = project_removal_plan([project_id])
+    for row in plan["chats"] if plan else ():
+        # Conditional: a chat moved to another project or worker after this
+        # read (a cross-device resume or worktree reopen) is not this
+        # project's to delete (review S10).
+        delete_session(row["id"], matches=lambda locked, b=plan["binding"]: chat_in_removal(locked, b))
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s FOR UPDATE", (project_id,))
         project = row_to_dict(cursor.fetchone())
+        if project and owned is not None and not owned(project):
+            raise ProjectOwnerChanged(project_id)
         if project:
             project_catalog_aliases.revoke(cursor, project_id)
             _retire_from_catalog(cursor, project)

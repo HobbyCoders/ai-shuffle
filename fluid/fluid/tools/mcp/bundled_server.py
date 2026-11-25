@@ -459,7 +459,8 @@ async def _gate_call(
     The hook contract is the native loop's: a PreToolUse ``deny`` or
     ``stop`` refuses the call (``stop`` also ends the turn through
     ``on_stop``), a ``permissionDecision`` of ``allow`` skips the permission
-    gate and ``ask`` forces one, ``updatedInput`` replaces the arguments; a
+    prompt (a rule or mode deny still refuses the call) and ``ask`` forces
+    one, ``updatedInput`` replaces the arguments; a
     PostToolUse ``deny`` or ``additionalContext`` rides back to the model
     appended to the result, and a PostToolUse ``stop`` ends the turn after
     it.
@@ -502,11 +503,14 @@ async def _gate_call(
         hook_permission = decision.permission_decision
         hook_reason = decision.note
     spec = registry.get(name)
-    if permissions is not None and spec is not None and hook_permission != "allow":
+    if permissions is not None and spec is not None:
         decided = permissions.decide(spec, args, cwd=ctx.cwd)
         verdict = decided.decision
         deny_message: str | None = decided.deny_message()
-        if verdict == "allow" and permissions.note_execution(name, args):
+        if hook_permission == "allow" and verdict != "deny":
+            # The hook answered the prompt; a configured deny still wins.
+            verdict = "allow"
+        elif verdict == "allow" and permissions.note_execution(name, args):
             verdict = "deny"
             deny_message = non_interactive_denial(
                 name, "doom-loop guard: this exact tool call was repeated "

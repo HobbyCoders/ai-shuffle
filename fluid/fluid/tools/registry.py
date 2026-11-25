@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 
 import hashlib
+import itertools
 import json
 import logging
 import re
@@ -74,23 +75,27 @@ _API_NAME_BAD_CHAR = re.compile(r"[^a-zA-Z0-9_-]")
 def api_tool_name(server: str, tool: str, taken: Callable[[str], bool]) -> str:
     """``mcp__<server>__<tool>`` made valid for the provider.
 
-    Disallowed characters become ``_``; a name past 64 characters loses the
-    tail of its tool part and gains a 6-hex digest of the original so two long
-    names stay distinct. ``taken`` reports names already registered to a
-    different tool, and a collision gets the same digest suffix.
+    Disallowed characters become ``_``; a name past 64 characters (a long tool
+    name or a long server name) is cut to fit and gains a 6-hex digest of the
+    original tool name so two long names stay distinct. ``taken`` reports names
+    already registered to a different tool; a collision gets the digest suffix,
+    and when that name is taken too (two server names that differ only in
+    disallowed characters, both long) the digest also covers the server and a
+    counter until the name is free. Each tool keeps a name of its own.
     """
-    prefix = f"mcp__{_API_NAME_BAD_CHAR.sub('_', server)}__"
-    safe = _API_NAME_BAD_CHAR.sub("_", tool) or "_"
-    digest = hashlib.sha1(tool.encode("utf-8")).hexdigest()[:6]
-    room = max(API_TOOL_NAME_MAX - len(prefix), len(digest) + 2)
-
-    def with_digest() -> str:
-        return prefix + safe[: room - len(digest) - 1] + "_" + digest
-
-    if len(safe) > room:
-        return with_digest()
-    name = prefix + safe
-    return with_digest() if taken(name) else name
+    plain = (
+        f"mcp__{_API_NAME_BAD_CHAR.sub('_', server)}__"
+        f"{_API_NAME_BAD_CHAR.sub('_', tool) or '_'}"
+    )
+    if len(plain) <= API_TOOL_NAME_MAX and not taken(plain):
+        return plain
+    for salt in itertools.count():
+        key = tool if salt == 0 else f"{server}\0{tool}\0{salt}"
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:6]
+        name = plain[: API_TOOL_NAME_MAX - len(digest) - 1] + "_" + digest
+        if not taken(name):
+            return name
+    raise AssertionError("unreachable")
 
 
 @dataclass

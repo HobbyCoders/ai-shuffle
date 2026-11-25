@@ -267,15 +267,37 @@ class TurnMapper:
                                 output=text, is_error=status == "failed"))
         return out
 
-    def interjection(self, text: str) -> list[Event]:
+    def interjection(self, text: str) -> tuple[list[Event], tuple[str, list[Any]]]:
         """Another agent's message joined the turn here: a user node of its own.
 
         The reply so far closes first, so the transcript reads in the order
         the agent saw it (as native's ``_finish_peer_messages`` stores one).
+        Returns the events and the segment, for ``withdraw``.
         """
         out = self._finish_assistant()
-        self._segments.append(("user", [Text(text=text)]))
-        return out
+        segment: tuple[str, list[Any]] = ("user", [Text(text=text)])
+        self._segments.append(segment)
+        return out, segment
+
+    def withdraw(self, segment: tuple[str, list[Any]]) -> None:
+        """Take back an ``interjection`` the agent did not accept: the reply
+        on either side of it joins up again, as if it had never been placed."""
+        for i, seg in enumerate(self._segments):
+            if seg is not segment:
+                continue
+            del self._segments[i]
+            before = self._segments[i - 1] if i > 0 else None
+            if before is None or before[0] != "assistant":
+                return
+            if i < len(self._segments):
+                after = self._segments[i]
+                if after[0] == "assistant":
+                    self._segments[i - 1:i + 1] = [("assistant", before[1] + after[1])]
+            else:
+                # The reply after it is still open: the earlier part continues it.
+                self._segments.pop()
+                self._assistant_blocks = before[1] + self._assistant_blocks
+            return
 
     def _finish_assistant(self) -> list[Event]:
         out = self.close_block()

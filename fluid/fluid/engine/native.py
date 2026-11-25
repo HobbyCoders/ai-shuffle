@@ -186,6 +186,7 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.hooks.bus import (
+    HOOK_STOP_SKIP,
     NOTIFICATION,
     POST_TOOL_USE,
     PRE_COMPACT,
@@ -995,7 +996,7 @@ def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) 
     is matched on its text.
     """
     for message in reversed(history):
-        if is_harness_note(message):
+        if is_harness_note(message) and PLAN_REVISION_META_KEY in message.provider_meta:
             return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
         if plan_note in message.text():
             return True
@@ -1506,9 +1507,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._turn_ultrafast_attempted = False
         self._turn_speed_calls: dict[str, int] = {}
         self._turn_speed_at_start = "standard"
-        # Nested-instruction injection: instruction-file paths already injected
-        # this session (each nested AGENTS-family file enters context once).
-        self._nested_injected: set[str] = set()
+        # Nested-instruction injection: instruction-file path -> (id of the
+        # tool result that carried it, the block it carried). A file enters
+        # context once while that block is still visible; once trim or a fold
+        # removes it from the request (see ``_prune_nested_injected``), the
+        # next visit to its directory may carry it again.
+        self._nested_injected: dict[str, tuple[str, str]] = {}
+        # The input a JSON-path call was finally allowed with (after a hook's
+        # rewrite and a prompt's edit); None when the call was refused before
+        # it could run. Set by ``_gated_call``, read by ``_dispatch_tool``.
+        self._authorized_input: dict[str, Any] | None = None
         # Deferred-catalog injection: tool names already announced to the model
         # (each known-but-unloaded tool is listed once, on the user turn after
         # it becomes known — the static system prompt stays byte-stable).
@@ -1555,6 +1563,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Only one handoff runs at a time.
         self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
+        # The side model input ``_pending_summary`` was built from: a
+        # checkpoint that does not save is remembered against it.
+        self._pending_summary_source: str | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
         self._checkpoint_latched = False
@@ -3120,7 +3131,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 pass
         self._summary_task = None
+        self._clear_pending_checkpoint()
+
+    def _clear_pending_checkpoint(self) -> None:
+        """Drop the pending checkpoint and the input it was built from together."""
         self._pending_summary = None
+        self._pending_summary_source = None
 
     async def _build_checkpoint(self, sid: str, turn_id: str,
                                 region: tuple[str, str, str], *,
@@ -3197,7 +3213,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     scale=self._summary_scale(nodes, measured), due_only=True,
                 )
                 if region is not None:
-                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    built = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    if built is None:
+                        self._compactor.reject_summary_region(region)
+                    else:
+                        self._pending_summary, self._pending_summary_source = built, region[2]
             except Exception as exc:
                 log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
 
@@ -3212,7 +3232,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         ids = {n.node_id for n in nodes}
         if pending[0] not in ids or pending[1] not in ids:
-            self._pending_summary = None  # fork/rewind: never install another path's summary
+            self._clear_pending_checkpoint()  # fork/rewind: never install another path's summary
             return None
         threshold = self._compactor._threshold(
             self._compactor.config.trigger_tokens, self.context_window,
@@ -3222,10 +3242,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         cold = turn_boundary and cache is not None and cache.cold_now
         if not (cold or batch_due or size >= threshold):
             return None
-        self._pending_summary = None
+        source = self._pending_summary_source
+        self._clear_pending_checkpoint()
         return self._compactor.apply_summary(
             nodes, pending, overhead_tokens=overhead,
             decision_reason="summary_cold" if cold else "summary_batch",
+            source=source,
         )
 
     async def _checkpoint_for_compaction(
@@ -3254,11 +3276,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             region = self._compactor.summary_region(
                 nodes, context_window=self.context_window, scale=scale,
                 for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
+                retry_rejected=manual,
             )
             if region is None or self._interrupted.is_set():
                 return None
             pending = self._pending_summary
+            source = self._pending_summary_source
             if pending is None or pending[:2] != region[:2]:
+                source = region[2]
                 self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
                 try:
                     pending = await self._manual_summary_task
@@ -3269,12 +3294,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return None  # Stop cancelled the side call, not the ladder.
                 finally:
                     self._manual_summary_task = None
-            self._pending_summary = None
+            self._clear_pending_checkpoint()
             if pending is None:
+                self._compactor.reject_summary_region(region)
                 return None
             return self._compactor.apply_summary(
                 nodes, pending, overhead_tokens=overhead,
                 decision_reason="manual" if manual else "summary_batch",
+                source=source,
             )
         finally:
             if not manual:
@@ -4332,6 +4359,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # whose target this request no longer carries is shown as gone.
             in_view = verbatim_tool_results(nodes, history)
             self._request_views[sid] = in_view
+            self._prune_nested_injected(history)
             history = settle_pointers(history, in_view)
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
@@ -4927,10 +4955,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # The model ran out of output budget mid-answer (reasoning-
                 # heavy models do this routinely). Ending the turn here would
                 # abandon the work, so ask it to pick up where it stopped.
+                # A harness note, never a turn start: compaction must keep
+                # the real request as this turn's first message rather than
+                # digest it as a finished turn behind the nudge.
                 continuations += 1
                 nudge = SessionNode(
                     node_id=new_id("node"), parent_id=parent.node_id,
-                    message=Message(role="user", content=[Text(_CONTINUE_NUDGE)]),
+                    message=Message(
+                        role="user", content=[Text(_CONTINUE_NUDGE)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
+                    ),
                 )
                 await self._append_node(sid, nudge)
                 parent = nudge
@@ -4983,21 +5017,21 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # every one with a deterministic ToolResult before stopping, so
                 # the stream keeps its one-result-per-use invariant.
                 for tu in result.tool_uses:
-                    text = (
+                    blocks.append(await self._skip_tool(
+                        sid, turn_id, tu,
                         "Tool not executed: the configured maximum number of "
-                        "model calls for this turn was reached."
-                    )
-                    await self._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id,
-                        tool_use_id=tu["tool_use_id"], name=tu["name"],
-                        output=text, is_error=True,
-                    ))
-                    blocks.append(ToolResultBlock(
-                        tool_use_id=tu["tool_use_id"], content=[Text(text)],
-                        is_error=True,
+                        "model calls for this turn was reached.",
                     ))
             else:
                 for tu in result.tool_uses:
+                    if self._hook_stop_reason is not None:
+                        # A hook ended the turn on an earlier call of this
+                        # batch: nothing after it runs, but every published
+                        # ToolUse still gets its result.
+                        blocks.append(await self._skip_tool(
+                            sid, turn_id, tu, HOOK_STOP_SKIP,
+                        ))
+                        continue
                     if tu.get("arg_error"):
                         tu["arg_error"] = _explain_truncation(
                             tu["arg_error"], result.stop_reason
@@ -6341,6 +6375,19 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
+    async def _skip_tool(
+        self, sid: str, turn_id: str, tu: dict[str, Any], text: str,
+    ) -> ToolResultBlock:
+        """Answer a published ToolUse that will not run with an error result,
+        so the transcript keeps its one-result-per-use invariant."""
+        await self._emit(ToolResult(
+            session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
+            name=tu["name"], output=text, is_error=True,
+        ))
+        return ToolResultBlock(
+            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+        )
+
     async def _dispatch_tool_interruptible(
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
@@ -6405,13 +6452,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     await dispatch
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
-        text = "Tool execution cancelled: the turn was interrupted."
-        await self._emit(ToolResult(
-            session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
-            name=tu["name"], output=text, is_error=True,
-        ))
-        return ToolResultBlock(
-            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+        return await self._skip_tool(
+            sid, turn_id, tu, "Tool execution cancelled: the turn was interrupted.",
         )
 
     async def _dispatch_tool(
@@ -6442,11 +6484,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # PostToolUse) leaves its offer here; it must never be committed.
         self.ctx.staged_delivery = None
         self._tool_deliveries = []
+        self._authorized_input = None
         try:
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         finally:
             self.ctx.extra.pop("tool_use_id", None)
             self.ctx.view_results = None
+        authorized_input, self._authorized_input = self._authorized_input, None
         if (
             outcome.background_task is not None
             and not outcome.background_task.serves
@@ -6470,8 +6514,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Nested-instruction injection (instruction-file seam): when a tool
         # touches a path whose own directory carries an AGENTS-family file not
         # in the project stack, ride those instructions into context on this
-        # tool result — model-facing only, once per file per session.
-        reminder = self._nested_instruction_reminder(tu["input"])
+        # tool result — model-facing only, once per file while that result is
+        # visible. Only a call that was allowed and succeeded touched the path,
+        # and only the input it ran with names it: a denied, blocked or failed
+        # call never pulls a directory's instructions into context.
+        reminder = (
+            self._nested_instruction_reminder(authorized_input, tool_use_id)
+            if authorized_input is not None and not outcome.is_error
+            else None
+        )
         if reminder:
             content.append(Text(reminder))
         # Reflection nudge: at most one per turn, appended to the first result
@@ -6554,7 +6605,36 @@ class NativeLoop(BackgroundLifecycleMixin):
     # instruction files.
     _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path", "directory")
 
-    def _nested_instruction_reminder(self, input: dict[str, Any]) -> str | None:
+    def _prune_nested_injected(self, history: Sequence[Message]) -> None:
+        """Forget nested instruction files this request no longer shows.
+
+        A file stays recorded only while the tool result that carried it is
+        in ``history`` with the injected block intact. A trim placeholder, a
+        fold into a checkpoint or a rewound branch drops it, so the next visit
+        to that directory delivers the file again; a result that only gained
+        steers or lost an image still shows it and keeps it recorded.
+        """
+        if not self._nested_injected:
+            return
+        wanted = {carrier for carrier, _ in self._nested_injected.values()}
+        shown: dict[str, str] = {}
+        for message in history:
+            if message.role != "user":
+                continue
+            for part in message.content:
+                if isinstance(part, ToolResultBlock) and part.tool_use_id in wanted:
+                    shown[part.tool_use_id] = "\n".join(
+                        b.text for b in part.content if isinstance(b, Text)
+                    )
+        self._nested_injected = {
+            path: (carrier, block)
+            for path, (carrier, block) in self._nested_injected.items()
+            if block and carrier in shown and block in shown[carrier]
+        }
+
+    def _nested_instruction_reminder(
+        self, input: dict[str, Any], carrier_id: str,
+    ) -> str | None:
         from pathlib import Path
 
         from fluid.context.instructions import (
@@ -6562,6 +6642,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
 
         if not isinstance(input, dict):
+            return None
+        # Nested files are project-scope instructions: a session whose
+        # setting_sources leave out "project" never loads them.
+        if self._setting_sources is not None and "project" not in self._setting_sources:
             return None
         targets = [
             v for k in self._PATH_INPUT_KEYS
@@ -6587,9 +6671,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                     if (is_global_instruction_path(f.path)
                             or directory in covered or f.path in self._nested_injected):
                         continue
-                    self._nested_injected.add(f.path)
-                    if f.content.strip():
-                        blocks.append(f"# From: {f.path}\n{f.content.rstrip()}")
+                    # An empty file carries nothing, so nothing is recorded:
+                    # once it gains content, the next visit delivers it.
+                    if not f.content.strip():
+                        continue
+                    block = f"# From: {f.path}\n{f.content.rstrip()}"
+                    self._nested_injected[f.path] = (carrier_id, block)
+                    blocks.append(block)
             except OSError:
                 continue
         if not blocks:
@@ -6641,8 +6729,9 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         # PreToolUse hook: deny short-circuits with an in-context error result;
         # modify replaces the input before permissions/dispatch see it; a
-        # permission decision of "allow" skips the permission gate and "ask"
-        # forces a prompt; a stop denies the call and ends the turn after it.
+        # permission decision of "allow" skips the permission prompt (a rule
+        # or mode that denies the call still wins) and "ask" forces a prompt;
+        # a stop denies the call and ends the turn after it.
         hook_permission: str | None = None
         hook_reason: str | None = None
         if self.hooks is not None:
@@ -6670,21 +6759,18 @@ class NativeLoop(BackgroundLifecycleMixin):
                 input = decision.replacement_input
             hook_permission = decision.permission_decision
             hook_reason = decision.note
-            if hook_permission == "allow":
-                await self._emit(HookEvent(
-                    session_id=sid, turn_id=turn_id, level="info",
-                    message=f"hook approved {name}; permission prompt skipped",
-                    hook_event=PRE_TOOL_USE, tool_name=name,
-                ))
 
-        # Permission gate.
-        if self.permissions is not None and spec is not None and hook_permission != "allow":
+        # Permission gate. A hook's "allow" answers the prompt, never a deny.
+        if self.permissions is not None and spec is not None:
             decided = self.permissions.decide(spec, input, cwd=self.ctx.cwd)
             verdict = decided.decision
             # Default denial text: names the configured rule when one decided.
             deny_message: str | None = decided.deny_message()
             ask_reason: str | None = None
-            if verdict == "allow" and self.permissions.note_execution(name, input):
+            if hook_permission == "allow" and verdict != "deny":
+                # The hook approved the call: no doom-loop prompt, no ask.
+                verdict = "allow"
+            elif verdict == "allow" and self.permissions.note_execution(name, input):
                 # Doom-loop checkpoint. Under never_ask there may be nobody
                 # listening for permission prompts (headless embedders), so an
                 # "ask" would park the turn until ``permission_timeout`` —
@@ -6723,6 +6809,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Every allow path (a hook's allow, a rule or mode, a remembered
         # allow_always, a prompt answer) arrives here: observers hear of it
         # before the tool runs.
+        self._authorized_input = input
+        if hook_permission == "allow":
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="info",
+                message=f"hook approved {name}; permission prompt skipped",
+                hook_event=PRE_TOOL_USE, tool_name=name,
+            ))
         if self.hooks is not None:
             await self.hooks.tool_allowed({
                 "session_id": sid, "name": name, "input": input,

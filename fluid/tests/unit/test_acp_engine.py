@@ -11,8 +11,11 @@ text, auth-required, and clean shutdown.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,7 @@ from fluid.engine.acp.antigravity import AntigravitySpec, offered_models, split_
 from fluid.engine.acp.loop import AcpLoop
 from fluid.engine.acp.mapping import TurnMapper
 from fluid.events.model import (
+    DelegatedDiagnostic,
     ErrorEvent,
     Interrupted,
     ModelServed,
@@ -699,6 +703,825 @@ async def test_resume_after_restart_uses_session_resume(tmp_path: Path) -> None:
         assert second.loop.cli_session_id == acp_sid
     finally:
         await second.close()
+
+
+async def _saved_session(tmp_path: Path, store: MemoryStore) -> str:
+    """A chat whose agent conversation was saved by an earlier process."""
+    first = await _driver(tmp_path, store=store, session_id="s-1")
+    assert isinstance(await first.turn("hello"), TurnComplete)
+    acp_sid = first.loop.cli_session_id
+    await first.close()
+    assert acp_sid
+    return acp_sid
+
+
+def _resets(events: list[Any]) -> list[DelegatedDiagnostic]:
+    """The reset warnings the chat shows (not the audit-only resume state)."""
+    return [e for e in events if isinstance(e, DelegatedDiagnostic) and e.kind == "agent_context_reset"]
+
+
+async def test_a_resume_that_fails_this_time_keeps_the_saved_session(tmp_path: Path) -> None:
+    """A busy or failing agent is not a lost conversation: the turn fails,
+    to be sent again, and the next try resumes the same session."""
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable
+        assert "backend unavailable" in end.message and "send the message again" in end.message
+        assert d.loop.cli_session_id == acp_sid
+        assert (await store.get_session("s-1")).cli_session_id == acp_sid
+        assert len(_received(tmp_path, "session/new")) == 1
+        assert d.loop.pid is None
+
+        del d.loop.spec.env["FAKE_ACP_RESUME_ERROR"]
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert [r["params"]["sessionId"] for r in _received(tmp_path, "session/resume")] == [acp_sid, acp_sid]
+        assert d.loop.cli_session_id == acp_sid
+        assert not _resets(d.events)
+        # The streak was recorded, then cleared by the resume that worked.
+        states = [e.data for e in d.events if isinstance(e, DelegatedDiagnostic) and e.kind == "acp_resume_state"]
+        assert [(s["handle"], s["failures"]) for s in states] == [(acp_sid, 1), (acp_sid, 0)]
+    finally:
+        await d.close()
+
+
+async def test_a_gone_session_starts_fresh_and_says_so(tmp_path: Path) -> None:
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32002, "message": "Resource not found"})
+        assert isinstance(await d.turn("again"), TurnComplete)
+        notices = _resets(d.events)
+        assert len(notices) == 1
+        assert "starts fresh" in notices[0].message
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        assert (await store.get_session("s-1")).cli_session_id == d.loop.cli_session_id
+        # Said once, not on every later turn.
+        assert isinstance(await d.turn("more"), TurnComplete)
+        assert len(_resets(d.events)) == 1
+    finally:
+        await d.close()
+
+
+async def test_a_resume_that_keeps_failing_gives_the_session_up(tmp_path: Path) -> None:
+    """The chat is never stuck behind a resume that fails every time."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+        for _ in range(acp_loop.RESUME_ATTEMPTS - 1):
+            assert isinstance(await d.turn("again"), ErrorEvent)
+            assert d.loop.cli_session_id == acp_sid
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        assert len(_resets(d.events)) == 1
+    finally:
+        await d.close()
+
+
+@pytest.mark.parametrize("code,message", [
+    (-32002, "Resource not found"),
+    (-32603, "unknown session 1f2e3d4c"),
+    (-32603, "Session 1f2e-3d4c not found"),
+    (-32603, "Session with id 'abc' not found"),
+    (-32603, "session/resume failed: session 7 does not exist"),
+    (-32603, "No such session"),
+    (-32603, "invalid session id"),
+    (-32603, "conversation expired"),
+    (-32603, "No session found with id 42"),
+    (-32603, "Session not found."),
+    (-32603, "Internal error: Session 1f2e3d4c not found (it may have expired)"),
+])
+def test_a_message_that_the_session_itself_is_gone_counts_as_gone(code: int, message: str) -> None:
+    from fluid.engine.acp.client import AcpError
+    from fluid.engine.acp.loop import _session_gone
+
+    assert _session_gone(AcpError(code, message))
+
+
+@pytest.mark.parametrize("message", [
+    "MCP server executable not found",
+    "MCP server session not found",
+    "spawn npx ENOENT: command not found",
+    "model gemini-x does not exist",
+    "session/resume failed: tool Read not found",
+    "Session file not found",
+    "backend unavailable",
+    "Invalid session configuration: MCP server executable not found",
+    "invalid session config",
+    "Invalid session configuration",
+    "session/resume failed: invalid session settings (mcpServers[0].command)",
+    "unknown session option: additionalDirectories",
+    "session expired token: sign in again",
+])
+def test_another_resource_that_is_missing_is_not_a_gone_session(message: str) -> None:
+    """Only the session itself missing replaces its handle at the first failure."""
+    from fluid.engine.acp.client import AcpError
+    from fluid.engine.acp.loop import _session_gone
+
+    assert not _session_gone(AcpError(-32603, message))
+    assert not _session_gone(AcpError(-32603, message), "1f2e3d4c-5b6a")
+
+
+def test_a_message_naming_the_saved_handle_counts_as_gone() -> None:
+    """A handle with no digit in it reads as a session id only when it is the
+    one this chat saved."""
+    from fluid.engine.acp.client import AcpError
+    from fluid.engine.acp.loop import _session_gone
+
+    message = "conversation chat-alpha not found"
+    assert _session_gone(AcpError(-32603, message), "chat-alpha")
+    assert not _session_gone(AcpError(-32603, message), "chat-beta")
+    assert not _session_gone(AcpError(-32603, message))
+    assert _session_gone(AcpError(-32603, "No session with id chat-alpha"), "chat-alpha")
+    assert _session_gone(AcpError(-32603, "Error: No session with id 'chat-alpha'."), "chat-alpha")
+
+
+@pytest.mark.parametrize("handle,message", [
+    ("1f2e3d4c", "Session 42 not found"),  # another session
+    ("1f2e3d4c", "No session with id 42"),
+    ("1f2e3d4c", "unknown session 1f2e3d4c-old"),
+    ("1f2e3d4c", "Session not found: tool x unavailable"),  # more than the session
+    ("1f2e3d4c", "Session 1f2e3d4c not found; MCP server x failed to start"),
+    ("setting", "invalid session settings"),  # the handle inside a longer word
+    ("setting", "Invalid session settings: mcpServers[0].command"),
+    ("1f2e3d4c", "Session 1f2e3d4c is busy"),  # names the handle, but only busy
+    ("1f2e3d4c", "rate limit exceeded for session 1f2e3d4c"),
+    ("1f2e3d4c", "Error: session 1f2e3d4c rate limited, retry later"),
+])
+def test_a_message_about_another_session_or_more_than_the_session_is_not_gone(
+        handle: str, message: str) -> None:
+    """The whole message, wrappers aside, must say the saved session is
+    missing; an id it names must be the saved handle as a whole token."""
+    from fluid.engine.acp.client import AcpError
+    from fluid.engine.acp.loop import _session_gone
+
+    assert not _session_gone(AcpError(-32603, message), handle)
+
+
+async def test_a_resume_that_names_another_missing_resource_keeps_the_session(tmp_path: Path) -> None:
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps(
+            {"code": -32603, "message": "MCP server executable not found"})
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable
+        assert d.loop.cli_session_id == acp_sid
+        assert len(_received(tmp_path, "session/new")) == 1
+        assert not _resets(d.events)
+    finally:
+        await d.close()
+
+
+async def test_an_agent_that_exits_on_resume_gets_a_new_conversation_on_a_new_process(tmp_path: Path) -> None:
+    """The third crash on loading the saved conversation does not strand the
+    chat: ``session/new`` goes to a fresh process, not the dead one, and later
+    turns never try the crashing resume again."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_EXIT"] = "1"
+        for _ in range(acp_loop.RESUME_ATTEMPTS - 1):
+            end = await d.turn("again")
+            assert isinstance(end, ErrorEvent) and end.retriable, end
+            assert d.loop.cli_session_id == acp_sid
+        assert isinstance(await d.turn("again"), TurnComplete)
+        new_sid = d.loop.cli_session_id
+        assert new_sid not in (None, acp_sid)
+        assert (await store.get_session("s-1")).cli_session_id == new_sid
+        assert len(_resets(d.events)) == 1
+        resumes = len(_received(tmp_path, "session/resume"))
+        assert resumes == acp_loop.RESUME_ATTEMPTS
+        assert isinstance(await d.turn("more"), TurnComplete)
+        assert len(_received(tmp_path, "session/resume")) == resumes
+    finally:
+        await d.close()
+
+
+async def test_the_failure_streak_survives_a_new_engine(tmp_path: Path) -> None:
+    """The host's pool evicting an idle chat makes a new engine: the streak
+    of failed resumes carries on with it instead of starting again."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    for _ in range(acp_loop.RESUME_ATTEMPTS - 1):
+        d = await _driver(tmp_path, store=store, session_id="s-1")
+        try:
+            assert d.loop.spec.env is not None
+            d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+            assert isinstance(await d.turn("again"), ErrorEvent)
+        finally:
+            await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "backend unavailable"})
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        [notice] = _resets(d.events)
+        assert "backend unavailable" in notice.message
+    finally:
+        await d.close()
+
+
+async def test_a_resume_that_works_clears_the_streak_for_the_next_engine(tmp_path: Path) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    for failing in [True] * (acp_loop.RESUME_ATTEMPTS - 1) + [False] + [True] * (acp_loop.RESUME_ATTEMPTS - 1):
+        d = await _driver(tmp_path, store=store, session_id="s-1")
+        try:
+            assert d.loop.spec.env is not None
+            if failing:
+                d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "busy"})
+            end = await d.turn("again")
+            assert isinstance(end, ErrorEvent if failing else TurnComplete), end
+            assert d.loop.cli_session_id == acp_sid
+        finally:
+            await d.close()
+
+
+@pytest.mark.parametrize("fails_on", ["mode", "silent_mode"])
+async def test_a_new_session_that_fails_setup_keeps_the_saved_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails_on: str,
+) -> None:
+    """The replacement is not the chat's until it is set up; the next engine
+    tries again and shows the warning once that one works."""
+    from fluid.engine.acp import loop as acp_loop
+
+    monkeypatch.setattr(acp_loop, "CONTROL_TIMEOUT", 0.5)
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    gone = json.dumps({"code": -32002, "message": "Resource not found"})
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = gone
+        # A new session opens in Accept Edits and will not leave it for Ask.
+        d.loop.spec.env["FAKE_ACP_MODES"] = "accept-edits,default,plan"
+        d.loop.spec.env["FAKE_ACP_REJECT_MODES" if fails_on == "mode" else "FAKE_ACP_SILENT_MODES"] = "default"
+        end = await d.turn("again", timeout=15)
+        assert isinstance(end, ErrorEvent), end
+        assert len(_received(tmp_path, "session/new")) == 2
+        assert d.loop.cli_session_id == acp_sid
+        assert (await store.get_session("s-1")).cli_session_id == acp_sid
+        assert not _resets(d.events)
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = gone
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        assert len(_resets(d.events)) == 1
+    finally:
+        await d.close()
+
+
+@pytest.mark.parametrize("knob", ["FAKE_ACP_CONFIG_EXIT", "FAKE_ACP_SILENT_CONFIG"])
+async def test_an_agent_lost_while_setting_up_a_new_session_keeps_the_saved_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, knob: str,
+) -> None:
+    """Exiting or going silent on the model setting is not a refusal: the new
+    session was never set up, so the turn fails to be sent again and the
+    chat keeps its saved conversation (the mode needs no change here)."""
+    from fluid.engine.acp import loop as acp_loop
+
+    monkeypatch.setattr(acp_loop, "CONTROL_TIMEOUT", 0.5)
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    gone = json.dumps({"code": -32002, "message": "Resource not found"})
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = gone
+        d.loop.spec.env[knob] = "1"
+        end = await d.turn("again", timeout=15)
+        assert isinstance(end, ErrorEvent) and end.retriable, end
+        assert len(_received(tmp_path, "session/new")) == 2
+        assert d.loop.cli_session_id == acp_sid
+        assert (await store.get_session("s-1")).cli_session_id == acp_sid
+        assert not _resets(d.events)
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = gone
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        assert len(_resets(d.events)) == 1
+    finally:
+        await d.close()
+
+
+async def _failing_launch(tmp_path: Path, store: MemoryStore, acp_sid: str, version: str | None = None) -> None:
+    """One engine whose resume fails as busy and whose new session fails
+    setup: the chat keeps its saved handle."""
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "busy"})
+        d.loop.spec.env["FAKE_ACP_CONFIG_EXIT"] = "1"
+        if version is not None:
+            d.loop.spec.env["FAKE_ACP_VERSION"] = version
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable, end
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+
+
+async def _give_up_resuming(tmp_path: Path, store: MemoryStore, acp_sid: str, version: str | None = None) -> None:
+    """Fail every resume try of the saved session; the new session the last
+    one falls back to fails setup, so the chat keeps its handle, given up."""
+    from fluid.engine.acp import loop as acp_loop
+
+    for _ in range(acp_loop.RESUME_ATTEMPTS):
+        await _failing_launch(tmp_path, store, acp_sid, version)
+    assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS
+
+
+async def test_a_version_that_changes_on_every_launch_gets_at_most_two_more_resumes(tmp_path: Path) -> None:
+    """A build stamp in the version is new on every launch: the extra tries
+    after giving up are bounded per saved session, not per version."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)
+    for stamp in range(5):
+        await _failing_launch(tmp_path, store, acp_sid, f"1.6.0+build{stamp}")
+    assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS + 2
+
+
+async def test_a_rollback_to_a_version_that_already_tried_gets_no_resume(tmp_path: Path) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)  # under 1.5.6
+    await _failing_launch(tmp_path, store, acp_sid, "1.5.7")  # its one extra try
+    tries = acp_loop.RESUME_ATTEMPTS + 1
+    assert len(_received(tmp_path, "session/resume")) == tries
+    await _failing_launch(tmp_path, store, acp_sid, "1.5.6")  # rolled back
+    assert len(_received(tmp_path, "session/resume")) == tries
+
+
+async def test_an_agent_that_reports_no_version_gets_no_extra_resume(tmp_path: Path) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid, "-")
+    for _ in range(2):
+        await _failing_launch(tmp_path, store, acp_sid, "-")
+    assert len(_received(tmp_path, "session/resume")) == acp_loop.RESUME_ATTEMPTS
+
+
+async def test_an_upgraded_agent_gets_one_more_resume_after_the_streak_gave_up(tmp_path: Path) -> None:
+    """The streak gave up under one agent version: the same version never
+    tries again, a new one gets a single try, and its success clears the streak."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)
+    tries = acp_loop.RESUME_ATTEMPTS
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:  # the same version: straight to a new session (which fails setup again)
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_CONFIG_EXIT"] = "1"
+        assert isinstance(await d.turn("again"), ErrorEvent)
+        assert len(_received(tmp_path, "session/resume")) == tries
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:  # upgraded: one resume, which works
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_VERSION"] = "1.5.7"
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert len(_received(tmp_path, "session/resume")) == tries + 1
+        assert d.loop.cli_session_id == acp_sid
+        assert not _resets(d.events)
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:  # the streak starts again from nothing: one failure keeps the handle
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_VERSION"] = "1.5.7"
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32603, "message": "busy"})
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable, end
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+
+
+async def test_an_upgraded_agent_that_still_cannot_resume_starts_fresh_without_retrying(tmp_path: Path) -> None:
+    """The upgrade's one try fails: straight to a new session, and that
+    version never tries the saved one again."""
+    from fluid.engine.acp import loop as acp_loop
+
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    await _give_up_resuming(tmp_path, store, acp_sid)
+    tries = acp_loop.RESUME_ATTEMPTS
+    busy = json.dumps({"code": -32603, "message": "busy"})
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:  # upgraded: one more resume, then a new session (which fails setup)
+        assert d.loop.spec.env is not None
+        d.loop.spec.env.update({"FAKE_ACP_VERSION": "1.5.7", "FAKE_ACP_RESUME_ERROR": busy,
+                                "FAKE_ACP_CONFIG_EXIT": "1"})
+        news = len(_received(tmp_path, "session/new"))
+        end = await d.turn("again")
+        assert isinstance(end, ErrorEvent) and end.retriable, end
+        assert len(_received(tmp_path, "session/resume")) == tries + 1
+        assert len(_received(tmp_path, "session/new")) == news + 1
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1", model="gemini-3.8-flash")
+    try:  # the same new version: no resume, a new session that works
+        assert d.loop.spec.env is not None
+        d.loop.spec.env.update({"FAKE_ACP_VERSION": "1.5.7", "FAKE_ACP_RESUME_ERROR": busy})
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert len(_received(tmp_path, "session/resume")) == tries + 1
+        assert d.loop.cli_session_id not in (None, acp_sid)
+        [notice] = _resets(d.events)
+        assert "busy" in notice.message
+    finally:
+        await d.close()
+
+
+async def test_a_reset_warning_not_yet_shown_survives_a_new_engine(tmp_path: Path) -> None:
+    """Recorded with the new handle: an engine that takes over before the
+    warning was shown shows it, once."""
+    store = MemoryStore()
+    acp_sid = await _saved_session(tmp_path, store)
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_RESUME_ERROR"] = json.dumps({"code": -32002, "message": "Resource not found"})
+        await d.loop._ensure_process()  # the new session is set up; no turn has shown it yet
+        new_sid = d.loop.cli_session_id
+        assert new_sid not in (None, acp_sid)
+        assert (await store.get_session("s-1")).cli_session_id == new_sid
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert d.loop.cli_session_id == new_sid
+        [notice] = _resets(d.events)
+        assert "starts fresh" in notice.message
+        assert isinstance(await d.turn("more"), TurnComplete)
+        assert len(_resets(d.events)) == 1
+    finally:
+        await d.close()
+    d = await _driver(tmp_path, store=store, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("later"), TurnComplete)
+        assert not _resets(d.events)
+    finally:
+        await d.close()
+
+
+def _ended(pid: int) -> bool:
+    """Whether ``pid`` is gone (a zombie waiting for its reaper counts)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] in ("Z", "X")
+
+
+async def _wait_ended(pid: int, timeout: float = 5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _ended(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return _ended(pid)
+
+
+async def _child_pid(pidfile: Path, timeout: float = 10) -> int:
+    deadline = time.monotonic() + timeout
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        assert time.monotonic() < deadline, "the agent never started its child"
+        await asyncio.sleep(0.05)
+    return int(pidfile.read_text())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX; Windows uses a job object")
+async def test_an_agent_that_exits_leaves_nothing_it_started_running(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_CHILD_PIDFILE"] = str(pidfile)
+        assert isinstance(await d.turn("die"), ErrorEvent)
+        child = await _child_pid(pidfile)
+        assert await _wait_ended(child), "the agent's child outlived it"
+    finally:
+        await d.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and process groups are POSIX")
+async def test_close_ends_a_stuck_agent_inside_the_hosts_deadline(tmp_path: Path) -> None:
+    """An agent that neither reads its input, answers, nor exits on EOF or
+    SIGTERM is ended, with what it started, well inside the app's 5 s."""
+    pidfile = tmp_path / "child.pid"
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env.update({"FAKE_ACP_CHILD_PIDFILE": str(pidfile), "FAKE_ACP_IGNORE_EOF": "1"})
+        await d.loop.submit(UserTurn(content="deaf"))
+        await d.until(TextDelta)
+        child, pid = await _child_pid(pidfile), d.loop.pid
+        assert pid is not None
+        started = time.monotonic()
+        await d.loop.aclose()
+        assert time.monotonic() - started < 4.5
+        assert await _wait_ended(pid, timeout=1) and await _wait_ended(child, timeout=1)
+    finally:
+        await d.close()
+
+
+async def test_a_silent_initialize_fails_the_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.engine.acp import client as acp_client
+
+    monkeypatch.setattr(acp_client, "INITIALIZE_TIMEOUT", 0.5)
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_SILENT_INIT"] = "1"
+        end = await d.turn("hello", timeout=10)
+        assert isinstance(end, ErrorEvent) and "did not answer" in end.message
+        assert d.loop.pid is None
+    finally:
+        await d.close()
+
+
+async def test_stop_is_not_held_by_an_agent_that_stopped_reading(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    from fluid.engine.acp import loop as acp_loop
+
+    monkeypatch.setattr(acp_loop, "CANCEL_WRITE_TIMEOUT", 0.5)
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        await d.loop.submit(UserTurn(content="deaf"))
+        await d.until(TextDelta)
+        acp_sid = d.loop.cli_session_id
+        # Far more than a pipe holds: its write blocks, and holds the writer.
+        await d.loop.submit(Steer(text="x" * (2 * 1024 * 1024), id="s-big"))
+        await asyncio.sleep(0.2)
+        await asyncio.wait_for(d.loop.submit(Interrupt()), 5)
+        assert isinstance(await d.until(TERMINAL, timeout=5), Interrupted)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        # The next turn runs on a new process, on the same conversation.
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert d.loop.cli_session_id == acp_sid
+    finally:
+        await d.close()
+
+
+@pytest.mark.parametrize("kind", ["user", "agent"])
+async def test_a_steer_the_agent_refuses_gets_no_receipt(tmp_path: Path, kind: str) -> None:
+    """No receipt, so the host keeps the message and sends it as its own turn;
+    a refused peer message is not left in the chat either."""
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_REJECT_STEER"] = "1"
+        await d.loop.submit(UserTurn(content="slow"))
+        await d.until(TextDelta)
+        await d.loop.submit(Steer(text="go left", id="s1") if kind == "user"
+                            else AgentMessage(text="go left", sender="worker-7", id="row-1", wake=False))
+        deadline = time.monotonic() + 10
+        while not all(t.done() for t in d.loop._steer_requests):
+            assert time.monotonic() < deadline, "the steer was never answered"
+            await asyncio.sleep(0.05)
+        assert len(_received(tmp_path, "session/prompt")) == 2
+        await d.loop.submit(Interrupt())
+        assert isinstance(await d.until(TERMINAL), Interrupted)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        assert [n.message.role for n in nodes].count("user") == 1
+        assert not any("go left" in t for t in texts)
+    finally:
+        await d.close()
+
+
+async def test_a_failed_turn_withdraws_a_peer_message_the_agent_never_answered(tmp_path: Path) -> None:
+    """The turn's prompt fails while a peer message's prompt is still waiting:
+    it is called off and withdrawn before the turn is stored, so the message
+    is neither in the chat as delivered nor receipted (the host runs it)."""
+    d = await _driver(tmp_path)
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_HOLD_STEER"] = "1"
+        await d.loop.submit(UserTurn(content="failsteer"))
+        await d.until(TextDelta)
+        await d.loop.submit(AgentMessage(text="go left", sender="worker-7", id="row-1", wake=False))
+        started = time.monotonic()
+        end = await d.until(TERMINAL, timeout=10)
+        assert isinstance(end, ErrorEvent), end
+        assert time.monotonic() - started < 5  # not held for the steer's own wait
+        assert all(t.done() for t in d.loop._steer_requests)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        assert not any("go left" in t for t in texts), texts
+    finally:
+        await d.close()
+
+
+class _BlockStopGate(SerializingStore):
+    """Holds the first ``BlockStop`` write after ``armed`` until ``release``,
+    as a slow PostgreSQL write would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = False
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def append_event(self, session_id, event):
+        if self.armed and type(event).__name__ == "BlockStop":
+            self.armed = False
+            self.entered.set()
+            await self.release.wait()
+        await super().append_event(session_id, event)
+
+
+async def test_a_turn_that_fails_while_a_peer_message_is_being_placed_withdraws_it(tmp_path: Path) -> None:
+    """The turn fails while the reply block before a peer message is still
+    being written: the message is withdrawn with its delivery, not stored as
+    delivered with no receipt (the host runs it as a turn of its own)."""
+    store = _BlockStopGate()
+    d = await _driver(tmp_path, store=store)
+    sending: asyncio.Task[None] | None = None
+    try:
+        await d.loop.submit(UserTurn(content="failsteer"))
+        await d.until(TextDelta)
+        store.armed = True
+        sending = asyncio.create_task(
+            d.loop.submit(AgentMessage(text="go left", sender="worker-7", id="row-1", wake=False)))
+        await asyncio.wait_for(store.entered.wait(), 10)
+        assert d.loop._conn is not None
+        d.loop._conn.abort("the agent process exited")
+        end = await d.until(TERMINAL, timeout=10)
+        assert isinstance(end, ErrorEvent), end
+        store.release.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(sending, 5)
+        await asyncio.sleep(0.2)
+        assert not [e for e in d.events if isinstance(e, SteerDelivered)]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        assert not any("go left" in t for t in texts), texts
+    finally:
+        store.release.set()
+        if sending is not None and not sending.done():
+            sending.cancel()
+        await d.close()
+
+
+async def test_peer_messages_reach_the_agent_and_the_transcript_in_the_order_they_came(tmp_path: Path) -> None:
+    """The first message's placement is slow (the block before it is still
+    being written): the second waits for it, so the agent, the receipts and
+    the stored transcript all have them first, second, once each."""
+    store = _BlockStopGate()
+    d = await _driver(tmp_path, store=store)
+    sends: list[asyncio.Task[None]] = []
+    try:
+        await d.loop.submit(UserTurn(content="twosteers"))
+        await d.until(TextDelta)
+        store.armed = True
+        sends.append(asyncio.create_task(
+            d.loop.submit(AgentMessage(text="go first", sender="worker-7", id="row-1", wake=False))))
+        await asyncio.wait_for(store.entered.wait(), 10)
+        sends.append(asyncio.create_task(
+            d.loop.submit(AgentMessage(text="go second", sender="worker-7", id="row-2", wake=False))))
+        await asyncio.sleep(0.3)  # time for the second to overtake, if it could
+        store.release.set()
+        assert isinstance(await d.until(TERMINAL, timeout=10), TurnComplete)
+        await asyncio.wait_for(asyncio.gather(*sends), 5)
+        prompts = ["".join(b.get("text", "") for b in r["params"]["prompt"])
+                   for r in _received(tmp_path, "session/prompt")]
+        steered = [p for p in prompts if "go first" in p or "go second" in p]
+        assert ["go first" in p for p in steered] == [True, False], steered
+        receipts = [s["id"] for e in d.events if isinstance(e, SteerDelivered) for s in e.steers]
+        assert receipts == ["row-1", "row-2"]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        texts = ["".join(getattr(b, "text", "") for b in n.message.content) for n in nodes]
+        stored = [t for t in texts if "go first" in t or "go second" in t]
+        assert ["go first" in t for t in stored] == [True, False], texts
+    finally:
+        store.release.set()
+        for task in sends:
+            if not task.done():
+                task.cancel()
+        await d.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process liveness is checked with POSIX signals")
+async def test_close_cancelled_during_session_close_still_ends_the_agent(tmp_path: Path) -> None:
+    """The host gives up on close while ``session/close`` is unanswered: the
+    process is still ended, though the connection was already detached."""
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_SILENT_CLOSE"] = "1"
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        pid = d.loop.pid
+        assert pid is not None
+        closing = asyncio.create_task(d.loop.aclose())
+        deadline = time.monotonic() + 5
+        while not _received(tmp_path, "session/close"):
+            assert time.monotonic() < deadline, "session/close was never sent"
+            await asyncio.sleep(0.01)
+        closing.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await closing
+        assert await _wait_ended(pid, timeout=3)
+    finally:
+        await d.close()
+
+
+async def test_an_unanswered_mode_change_restarts_the_agent_in_the_recorded_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout is not a refusal: the agent may still switch late, so the
+    process is not prompted again; the next one is set to the shown mode."""
+    from fluid.engine.acp import loop as acp_loop
+
+    monkeypatch.setattr(acp_loop, "CONTROL_TIMEOUT", 0.5)
+    d = await _driver(tmp_path, session_id="s-1", permission_mode="plan")
+    try:
+        assert d.loop.spec.env is not None
+        d.loop.spec.env["FAKE_ACP_SILENT_MODES"] = "accept-edits"
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        acp_sid, pid = d.loop.cli_session_id, d.loop.pid
+        with pytest.raises(acp_loop.AcpModeRejected):
+            await d.loop.submit(SetPermissionMode(mode="acceptEdits"))
+        assert d.loop.permission_mode == "plan"
+        assert d.loop.pid is None  # not prompted again in an unknown mode
+        assert isinstance(await d.turn("more"), TurnComplete)
+        assert d.loop.pid not in (None, pid)
+        assert d.loop.cli_session_id == acp_sid
+        modes = [r["params"]["modeId"] for r in _received(tmp_path, "session/set_mode")]
+        assert modes[-2:] == ["accept-edits", "plan"], modes
+    finally:
+        await d.close()
+
+
+async def test_an_oversized_reply_ends_the_connection_and_the_next_turn_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fluid.engine.acp import client as acp_client
+
+    monkeypatch.setattr(acp_client, "STREAM_LINE_LIMIT", 100_000)
+    d = await _driver(tmp_path, session_id="s-1")
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        acp_sid = d.loop.cli_session_id
+        end = await d.turn("huge", timeout=15)
+        assert isinstance(end, ErrorEvent)
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert d.loop.cli_session_id == acp_sid
+        assert [r["params"]["sessionId"] for r in _received(tmp_path, "session/resume")] == [acp_sid]
+    finally:
+        await d.close()
 
 
 async def test_a_resumed_session_still_takes_mode_changes(tmp_path: Path) -> None:
