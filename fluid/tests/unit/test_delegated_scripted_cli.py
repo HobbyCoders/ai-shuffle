@@ -23,6 +23,7 @@ from fluid.events import (
     ErrorEvent,
     PermissionRequest,
     RespondPermission,
+    RespondQuestion,
     TextDelta,
     ToolResult,
     ToolUse,
@@ -32,6 +33,7 @@ from fluid.events import (
 )
 from fluid.events.model import Interrupted, RateLimit
 from fluid.events.ops import Interrupt, SetModel, SetPermissionMode
+from fluid.messages import Image, Text
 from fluid.store.base import MemoryStore
 
 FAKE = Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py"
@@ -73,9 +75,9 @@ class Scripted:
         return frames
 
     async def turn(
-        self, text: str, *, on_permission: Responder | None = None,
+        self, text: Any, *, on_permission: Responder | None = None,
         on_event: Callable[[Any], Awaitable[None]] | None = None,
-        submitted_prompt: str | None = None,
+        submitted_prompt: str | None = None, source: str = "user",
     ) -> list:
         """Run one user turn; the events it produced, terminal last.
         ``submitted_prompt`` is what the host sets when ``text`` carries a
@@ -98,7 +100,8 @@ class Scripted:
 
         watcher = asyncio.create_task(watch())
         await asyncio.sleep(0)  # subscribed before the turn can publish
-        await self.loop.submit(UserTurn(content=text, submitted_prompt=submitted_prompt))
+        await self.loop.submit(UserTurn(content=text, submitted_prompt=submitted_prompt,
+                                        source=source))
         await asyncio.wait_for(watcher, TURN_BUDGET)
         await asyncio.wait_for(self.loop.wait_turn(), TURN_BUDGET)
         return seen
@@ -585,9 +588,11 @@ class _Host:
                        restore: bool = False) -> delegated_mod.ResumeRecovery:
         path = await self.run.store.load_path(self.run.sid)
         cut = next(i for i, n in enumerate(path) if n.node_id == before_node)
-        written = [n.message.content[0].text for n in path[:cut] if n.message.role == "user"]
+        users = [n.message for n in path[:cut] if n.message.role == "user"]
+        written = [m.content[0].text for m in users]
         new = "cli-restored" if restore else "cli-new"
-        self.calls.append({"handle": handle, "restore": restore, "written": written})
+        self.calls.append({"handle": handle, "restore": restore, "written": written,
+                           "text": "\n".join(m.text() for m in users)})
         if restore and self.fail_restore:
             raise OSError("disk full")
         await self.run.store.set_cli_session_id(self.run.sid, new)
@@ -596,19 +601,24 @@ class _Host:
 
 
 async def _replay_never_recorded(
-    tmp_path, third: str = "three", *, submitted: str | None = None,
+    tmp_path, third: Any = "three", *, submitted: str | None = None, source: str = "user",
+    prepare: Callable[[Scripted], Awaitable[None]] | None = None,
 ) -> tuple[Scripted, _Host]:
     """Three silent exits on ``cli-prev``; the host re-seeds ``cli-new`` and
     the replay of the third prompt exits on it too, before the CLI records
-    it. ``third``/``submitted`` are that turn's content and submitted prompt."""
+    it. ``third``/``submitted``/``source`` are that turn's; ``prepare`` runs
+    just before it."""
     run = Scripted(tmp_path, {
         "spawn_exit": {"code": 1, "stderr": "", "resume": ["cli-prev", "cli-new"]},
         "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
     }, cli_session_id="cli-prev")
     host = _Host(run)
     run.loop.recover_resume = host
-    for text, prompt in (("one", None), ("two", None), (third, submitted)):
-        error = (await run.turn(text, submitted_prompt=prompt))[-1]
+    for i, (text, prompt, kind) in enumerate((("one", None, "user"), ("two", None, "user"),
+                                              (third, submitted, source))):
+        if i == 2 and prepare is not None:
+            await prepare(run)
+        error = (await run.turn(text, submitted_prompt=prompt, source=kind))[-1]
         assert isinstance(error, ErrorEvent) and error.retriable, error
     assert [c["restore"] for c in host.calls] == [False]
     assert run.loop.cli_session_id == "cli-new"
@@ -729,6 +739,76 @@ async def test_a_failed_restore_keeps_the_prompt_owed(tmp_path) -> None:
         assert not meta.cli_resume_recovery["pending"]
     finally:
         await run.aclose()
+
+
+def _answered(question: str) -> Callable[[Scripted], Awaitable[None]]:
+    """Post an AskUser ``question`` and answer it, leaving the answer for the
+    next turn to carry (``wake=False``: the test sends that turn itself)."""
+    async def prepare(run: Scripted) -> None:
+        [rid] = await run.loop.ctx.extra["post_questions"](
+            [{"question": question, "options": [{"label": "9000"}, {"label": "8080"}]}],
+            tool_use_id=f"ask-{len(question)}")
+        await run.loop.submit(RespondQuestion(request_id=rid, answer="1",
+                                              user_answered=True, wake=False))
+    return prepare
+
+
+def _normal_cli(run: Scripted) -> None:
+    run.script_path.write_text(json.dumps({
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]] * 2,
+    }), encoding="utf-8")
+
+
+async def test_a_second_question_wake_does_not_settle_an_owed_one(tmp_path) -> None:
+    """A question wake (empty content, the answer appended once and marked
+    delivered) is owed on the re-seeded handle. The next question wake also
+    has empty content, but carries a different answer: it is not a retry,
+    so the first answer is restored before it rather than lost."""
+    run, host = await _replay_never_recorded(
+        tmp_path, [], source="unpark", prepare=_answered("Which port?"))
+    try:
+        assert not await run.loop.pending_question_answers()  # delivered once
+        _normal_cli(run)
+        await _answered("Which host name?")(run)
+        events = await run.turn([], source="unpark")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        assert host.calls[1]["text"].count("Which port?") == 1
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "Which host name?" in sent[0] and "Which port?" not in sent[0]
+        assert run.loop.cli_session_id == "cli-restored"
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_retry_without_the_answer_an_owed_turn_carried_restores_it(tmp_path) -> None:
+    """"continue" carried a buffered answer and was left owed. A retry of
+    "continue" no longer carries it (it was delivered), so it is not the same
+    turn: the history through the answer is restored before the retry."""
+    run, host = await _replay_never_recorded(
+        tmp_path, "continue", prepare=_answered("Which port?"))
+    try:
+        _normal_cli(run)
+        events = await run.turn("continue")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        assert host.calls[1]["text"].count("Which port?") == 1
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "continue" in sent[0] and "Which port?" not in sent[0]
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+def test_an_image_only_prompt_has_its_own_key() -> None:
+    image = Image(media_type="image/png", data="aGVsbG8=")
+    other = Image(media_type="image/png", data="d29ybGQ=")
+    keys = {delegated_mod._prompt_key(c) for c in ([], [image], [other])}
+    assert len(keys) == 3
+    assert delegated_mod._prompt_key("three") == delegated_mod._prompt_key([Text("three")])
 
 
 async def test_a_new_loop_does_not_reseed_a_handle_a_recovery_already_made(tmp_path) -> None:

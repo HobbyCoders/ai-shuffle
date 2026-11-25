@@ -244,14 +244,19 @@ class ResumeRecovery:
     cli_session_id: str | None = None
 
 
-def _prompt_key(content: Any) -> str:
-    """A short key of a submitted prompt's text (``SessionMeta.
-    cli_resume_recovery`` keeps this, not the text)."""
+def _prompt_key(content: Any, question_ids: tuple[str, ...] = ()) -> str:
+    """A short key of a submitted prompt (``SessionMeta.cli_resume_recovery``
+    keeps this, not the text): its text, any non-text blocks (an image-only
+    prompt is not empty) and the AskUser answers it delivers."""
     if isinstance(content, str):
         text = content
     else:
-        text = "".join(block.text for block in content or () if isinstance(block, Text))
-    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:32]
+        text = "".join(block.text if isinstance(block, Text) else repr(block)
+                       for block in content or ())
+    text = text.strip()
+    if question_ids:
+        text += "\0" + "\0".join(question_ids)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
 def _spawn_failure_message(exc: BaseException) -> str:
@@ -2904,12 +2909,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     if not await spawned():
                         return
             # What was typed or scheduled, not what the host rendered around
-            # it (a retried wake carries a fresh clock note each time) nor the
-            # question answers this loop adds below.
-            self._turn_prompt_key = _prompt_key(
-                op.submitted_prompt if op.submitted_prompt is not None else op.content
-            )
+            # it: a retried wake carries a fresh clock note each time.
+            submitted = op.submitted_prompt if op.submitted_prompt is not None else op.content
             op, question_ids = await self._question_turn_content(op)
+            # The question answers it carries are delivered once (marked so
+            # below), so they belong to the key: a later turn without them,
+            # or a question wake carrying other ones, is not a retry.
+            self._turn_prompt_key = _prompt_key(submitted, question_ids)
             if not self._resume_recovery_loaded:
                 self._resume_recovery_loaded = True
                 stored = getattr(meta, "cli_resume_recovery", None)
