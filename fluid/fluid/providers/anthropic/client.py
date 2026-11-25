@@ -255,9 +255,10 @@ class AnthropicClient:
                                 text = text.replace(self._api_key, "[redacted]")
                             refusal = refusal_payload(
                                 resp.status_code, text, resp.headers.get("retry-after"))
-                            if refusal["retriable"] and attempt < self._retry.max_retries:
-                                await asyncio.sleep(self._retry.delay(
-                                    attempt, resp.headers.get("retry-after")))
+                            wait = self._retry.refusal_delay(
+                                attempt, refusal, resp.headers.get("retry-after"))
+                            if wait is not None:
+                                await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
                             yield StreamChunk("error", refusal)

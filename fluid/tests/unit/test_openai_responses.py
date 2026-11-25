@@ -352,12 +352,14 @@ async def test_client_refreshes_and_retries_once_on_401() -> None:
         def __init__(self) -> None:
             self.tokens = ["stale", "fresh"]
             self.on_401_calls = 0
+            self.rejected: list[str | None] = []
 
         async def get_access_token(self) -> str:
             return self.tokens[0]
 
-        async def on_401(self) -> None:
+        async def on_401(self, rejected_token: str | None = None) -> None:
             self.on_401_calls += 1
+            self.rejected.append(rejected_token)
             self.tokens.pop(0)
 
     auth = FakeAuth()
@@ -382,6 +384,9 @@ async def test_client_refreshes_and_retries_once_on_401() -> None:
     await http.aclose()
 
     assert auth.on_401_calls == 1
+    # The hook is told which token was refused, so it can tell a late 401
+    # for an already-renewed token from a live one.
+    assert auth.rejected == ["stale"]
     assert seen == ["Bearer stale", "Bearer fresh"]
     assert chunks[-1].kind == "message_stop"
     assert not any(c.kind == "error" for c in chunks)
@@ -1297,8 +1302,7 @@ def _rate_limited(message: str) -> str:
 @pytest.mark.parametrize("message,expected", [
     ("Rate limit reached for gpt-6 on tokens per min. Please try again in 1.898s.", 1.898),
     ("Rate limit reached. Please try again in 250ms.", 0.25),
-    # A hint past the long floor is capped at it.
-    ("Rate limit reached. Please try again in 45s.", OVERLOAD_BACKOFF_FLOOR_S),
+    ("Rate limit reached. Please try again in 10s.", OVERLOAD_BACKOFF_FLOOR_S),
 ])
 async def test_rate_limit_hint_drives_the_backoff(
     _sleeps: list[float], message: str, expected: float,
@@ -1316,6 +1320,25 @@ async def test_rate_limit_hint_drives_the_backoff(
     assert calls == 2
     assert _sleeps == [pytest.approx(expected)]
     assert chunks[-1].kind == "message_stop"
+
+
+async def test_rate_limit_hint_past_the_floor_surfaces_instead_of_retrying_early(
+    _sleeps: list[float],
+) -> None:
+    """A wait longer than the client is willing to sleep is not shortened:
+    re-sending before the provider's time only meets the same refusal."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _rate_limited("Rate limit reached. Please try again in 45s."))
+
+    chunks = await _run_client(handler)
+    assert calls == 1
+    assert _sleeps == []
+    assert chunks[-1].kind == "error"
+    assert "45s" in chunks[-1].payload["message"]
 
 
 async def test_rate_limit_without_a_hint_uses_the_default_backoff(

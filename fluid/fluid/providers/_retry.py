@@ -9,6 +9,7 @@ retried — the engine has already seen (and emitted) part of the message.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -241,12 +242,41 @@ class RetryPolicy:
         return self.max_transport_retries
 
     def delay(self, attempt: int, retry_after: str | None = None) -> float:
-        """Backoff for the given 0-based attempt, honoring a Retry-After
-        header when the server sent a parseable one."""
+        """Backoff for the given 0-based attempt. A parseable Retry-After
+        header is a minimum: the delay is never shorter than the server
+        asked for (callers check :meth:`refusal_delay` first, which refuses
+        to wait longer than ``max_delay``)."""
         delay = min(self.base_delay * (2 ** attempt), self.max_delay)
         wait = parse_retry_after(retry_after)
         if wait is not None:
-            delay = max(delay, min(wait, self.max_delay))
+            delay = max(delay, wait)
         if self.jitter > 0 and delay > 0:
             delay += random.uniform(0.0, delay * self.jitter)
         return delay
+
+    def refusal_delay(
+        self, attempt: int, refusal: dict, retry_after: str | None = None,
+    ) -> float | None:
+        """Seconds to wait before re-sending a refused request, or None to
+        surface ``refusal`` now.
+
+        None when the refusal is not retriable, the attempts are spent, or
+        the server's Retry-After asks for longer than ``max_delay``: sending
+        again before the server's time only meets the same refusal, so the
+        error goes to the caller instead, with the wait it asked for
+        (``retry_after_seconds``, and a note in ``message``).
+        """
+        if not refusal.get("retriable"):
+            return None
+        wait = parse_retry_after(retry_after)
+        if wait is not None and wait > self.max_delay:
+            refusal["retry_after_seconds"] = wait
+            refusal["message"] = (
+                f"the provider asked for {math.ceil(wait)}s before a retry, longer than "
+                f"the {self.max_delay:g}s this client waits, so it was not "
+                f"retried. {refusal.get('message', '')}"
+            )
+            return None
+        if attempt >= self.max_retries:
+            return None
+        return self.delay(attempt, retry_after)

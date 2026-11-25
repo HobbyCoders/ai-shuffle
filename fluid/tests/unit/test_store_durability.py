@@ -352,6 +352,33 @@ async def test_two_stores_in_one_process_share_the_lock(tmp_path) -> None:
     assert [n.node_id for n in await JsonlStore(tmp_path).load_path(sid)] == ["u1", "a1"]
 
 
+async def test_taking_the_lock_reloads_a_snapshot_another_writer_moved_on(tmp_path) -> None:
+    """A store that read a session earlier, then takes its write lock after
+    another writer added a turn and let go, continues from that turn: the
+    head, nodes and events are re-read under the lock."""
+    writer = JsonlStore(tmp_path)
+    sid = (await writer.create_session()).session_id
+    await writer.append(sid, SessionNode("u1", None, _msg("user", "q")))
+    writer.close()
+
+    reader = JsonlStore(tmp_path)
+    meta = await reader.get_session(sid)  # cached: head u1
+    assert meta.head_node_id == "u1"
+    assert await reader.events_since(sid, 0) == []
+
+    writer = JsonlStore(tmp_path)
+    await writer.append(sid, SessionNode("a1", "u1", _msg("assistant", "r")))
+    await writer.append_event(sid, TurnStarted(session_id=sid, seq=1, model="m", provider="p"))
+    writer.close()
+
+    reader.lock_session(sid)
+    assert meta.head_node_id == "a1"  # the object the caller already holds
+    await reader.append(sid, SessionNode("u2", meta.head_node_id, _msg("user", "next")))
+    assert [n.node_id for n in await reader.load_path(sid)] == ["u1", "a1", "u2"]
+    assert [e.seq for e in await reader.events_since(sid, 0)] == [1]
+    reader.close()
+
+
 # ─── events stay lazy and tolerant ───────────────────────────────────────────
 
 

@@ -5985,12 +5985,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     block["done_item"] = payload["block"]
                 if block and block["type"] == "tool_use":
                     raw_args = block["args"]
-                    if not raw_args:
-                        # No deltas streamed — fall back to the done item's
-                        # complete arguments (a JSON string on Responses).
-                        fallback = (block.get("done_item") or {}).get("arguments")
-                        if isinstance(fallback, str):
-                            raw_args = fallback
+                    # The done item's complete arguments (a JSON string on
+                    # Responses) are what the provider settled on, so they are
+                    # what runs. The deltas only fed the live display and the
+                    # stream guards: a dropped or partial fragment must not
+                    # change the call.
+                    final = (block.get("done_item") or {}).get("arguments")
+                    if isinstance(final, str) and final:
+                        raw_args = final
                     args, arg_error = _parse_tool_args(raw_args)
                     block["input"] = args
                     tool_uses.append({

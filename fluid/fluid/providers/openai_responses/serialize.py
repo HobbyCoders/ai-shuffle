@@ -349,7 +349,8 @@ _RETRIABLE_ERROR_TYPES = frozenset(("server_error", "service_unavailable_error")
 OVERLOAD_CODE = "server_is_overloaded"
 OVERLOAD_MAX_RETRIES = 2
 #: The Responses client's long backoff floor. Overload never retries sooner;
-#: a rate-limit "try again in Xs" hint is never waited on for longer.
+#: a rate-limit "try again in Xs" hint longer than this is not retried at all
+#: (the error surfaces, carrying the provider's own wait).
 LONG_BACKOFF_FLOOR_S = 10.0
 OVERLOAD_BACKOFF_FLOOR_S = LONG_BACKOFF_FLOOR_S
 

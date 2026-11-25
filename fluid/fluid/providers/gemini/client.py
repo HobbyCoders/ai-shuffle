@@ -173,8 +173,9 @@ class GeminiClient:
                             text = (await resp.aread()).decode(errors="replace")
                             text = _redact(text, self._api_key)
                             refusal = http_refusal(resp.status_code, text, resp.headers.get("retry-after"))
-                            if refusal["retriable"] and attempt < self._retry.max_retries:
-                                await asyncio.sleep(self._retry.delay(attempt, resp.headers.get("retry-after")))
+                            wait = self._retry.refusal_delay(attempt, refusal, resp.headers.get("retry-after"))
+                            if wait is not None:
+                                await asyncio.sleep(wait)
                                 attempt += 1
                                 continue
                             yield StreamChunk("error", refusal)

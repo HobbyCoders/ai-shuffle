@@ -621,15 +621,22 @@ class CodexAuth:
             assert self._bundle is not None
             return self._bundle.access_token
 
-    async def on_401(self) -> None:
+    async def on_401(self, rejected_token: str | None = None) -> None:
         """Refresh once after an upstream 401.
 
-        If a peer already rotated the token on disk while we waited on the lock
-        (the stored access token differs from our in-memory one), adopt it and
-        skip the redundant POST — a wasted refresh could trip reuse detection.
+        ``rejected_token`` is the access token the refused request carried
+        (the in-memory one when the caller does not say). If this process
+        already moved past it — a late 401 from a request sent before another
+        call's refresh — the current token is kept. If a peer already rotated
+        the token on disk while we waited on the lock (the stored access token
+        differs from the rejected one), adopt it. Either way the redundant
+        POST is skipped — a wasted refresh could trip reuse detection.
         """
         async with self._lock:
-            stale = self._bundle.access_token if self._bundle else None
+            current = self._bundle.access_token if self._bundle else None
+            stale = rejected_token or current
+            if current is not None and current != stale:
+                return
             disk = load_bundle(self.token_path)
             if disk is not None and stale is not None and disk.access_token != stale:
                 self._bundle = disk

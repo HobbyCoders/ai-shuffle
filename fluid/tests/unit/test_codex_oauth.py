@@ -241,6 +241,33 @@ async def test_on_401_skips_post_when_peer_already_rotated(tmp_path) -> None:
     assert auth._bundle.access_token == "at_peer"
 
 
+async def test_late_401_for_an_already_renewed_token_does_not_refresh_again(tmp_path) -> None:
+    """Two requests go out with token A. The first 401 renews A to B; the
+    second 401, for A, lands afterwards. It must leave B in place rather than
+    rotate B to C (each extra rotation is a token-endpoint call and a chance
+    to trip refresh-token reuse detection)."""
+    path = tmp_path / "codex_auth.json"
+    save_bundle(
+        StoredBundle(access_token="at_a", refresh_token="rt_a", last_refresh=_now_iso()),
+        path,
+    )
+    calls: list = []
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_token_endpoint(calls, rotate_to="rt_b")))
+    auth = CodexAuth(token_path=path, client=http)
+    first = await auth.get_access_token()
+    second = await auth.get_access_token()
+    assert first == second == "at_a"
+
+    await auth.on_401(first)  # renews A → B
+    renewed = auth._bundle.access_token
+    await auth.on_401(second)  # late 401 for A: B is already current
+    await http.aclose()
+
+    assert calls == ["rt_a"]
+    assert auth._bundle.access_token == renewed != "at_a"
+    assert load_bundle(path).refresh_token == "rt_b"
+
+
 # ─── refresh error mapping ───────────────────────────────────────────────────
 
 

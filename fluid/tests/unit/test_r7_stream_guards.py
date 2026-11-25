@@ -281,6 +281,43 @@ def test_a_wrapped_socket_error_is_still_transient() -> None:
 # ─── runaway tool-argument streams ───────────────────────────────────────────
 
 
+async def test_the_done_items_final_arguments_are_what_runs() -> None:
+    """Responses closes a function call with the authoritative arguments.
+    When the streamed deltas disagree (a fragment lost on the way), the
+    final arguments are dispatched, not the deltas' concatenation."""
+    script = _tool_call(['{"file_path":"/a.txt","content":"hel'])
+    final = '{"file_path":"/a.txt","content":"hello world"}'
+    stop = next(i for i, c in enumerate(script) if c.kind == "block_stop")
+    script[stop] = StreamChunk("block_stop", {"index": 0, "block": {
+        "type": "function_call", "call_id": "call_1", "name": "Write",
+        "arguments": final,
+    }})
+    seen: list[dict] = []
+
+    async def _wrote(input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        seen.append(input)
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="Write", description="Write a file.",
+                 input_schema={"type": "object", "properties": {}}, source="builtin"),
+        _wrote,
+    )
+    loop = NativeLoop(
+        provider=_Scripted([script, _text_call()]), store=MemoryStore(), model=MODEL,
+        registry=registry, permissions=PermissionEngine("never_ask"),
+    )
+    try:
+        events = await _run(loop)
+    finally:
+        await loop.aclose()
+
+    assert seen == [{"file_path": "/a.txt", "content": "hello world"}]
+    use = next(e for e in events if isinstance(e, ToolUse))
+    assert use.input == {"file_path": "/a.txt", "content": "hello world"}
+
+
 async def test_a_whitespace_runaway_is_abandoned_and_the_call_retried() -> None:
     provider = _Scripted([_runaway_call(), _text_call("recovered")])
     loop = NativeLoop(

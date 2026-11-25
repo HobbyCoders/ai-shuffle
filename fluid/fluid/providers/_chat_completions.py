@@ -16,7 +16,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 import httpx
@@ -685,10 +685,10 @@ async def stream_chat_completions(
                         text = (await resp.aread()).decode(errors="replace")
                         refusal = refusal_payload(
                             resp.status_code, text, resp.headers.get("retry-after"))
-                        if refusal["retriable"] and attempt < retry.max_retries:
-                            await asyncio.sleep(
-                                retry.delay(attempt, resp.headers.get("retry-after"))
-                            )
+                        wait = retry.refusal_delay(
+                            attempt, refusal, resp.headers.get("retry-after"))
+                        if wait is not None:
+                            await asyncio.sleep(wait)
                             attempt += 1
                             continue
                         yield StreamChunk("error", with_request_evidence(refusal))
@@ -697,16 +697,27 @@ async def stream_chat_completions(
                     # ``[DONE]`` is the server's own end-of-stream sentinel.
                     # sse_events drops it (it is not JSON), so it is noted on
                     # the way through: a stream that reached it was not cut.
+                    # Reading stops there. A server that leaves the connection
+                    # open after it (keepalives, a proxy holding the socket)
+                    # would otherwise turn a finished reply into a timeout;
+                    # leaving the response scope closes the connection.
                     done_seen = [False]
 
                     async def _lines(
-                        source: AsyncIterator[str] = diagnostics.lines(),
+                        source: AsyncGenerator[str, None] = diagnostics.lines(),
                         seen: list[bool] = done_seen,
                     ) -> AsyncIterator[str]:
-                        async for line in source:
-                            if line.strip().replace(" ", "") == "data:[DONE]":
-                                seen[0] = True
-                            yield line
+                        try:
+                            async for line in source:
+                                if line.strip().replace(" ", "") == "data:[DONE]":
+                                    seen[0] = True
+                                    # A blank line flushes a frame the server
+                                    # sent without its own terminator.
+                                    yield ""
+                                    return
+                                yield line
+                        finally:
+                            await source.aclose()
 
                     events = sse_events(_lines()).__aiter__()
                     starved = False
