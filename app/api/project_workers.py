@@ -357,8 +357,8 @@ def would_list(origin: str) -> bool:
     Each worker's state comes from what this worker already has: its own
     status; on a shared database, the peer's rows and setup ops; in a network,
     the peer's catalog cached by the last overview read (a paired worker's
-    project rows are not replicated here, only the identity). A peer that is
-    online with no cached catalog is unknown, and counts as holding the
+    project rows are not replicated here, only the identity). A peer with no
+    cached catalog, online or offline, is unknown, and counts as holding the
     project, unless it is hidden.
 
     A first clone in progress (a provisional token on the identity) is judged
@@ -401,7 +401,9 @@ def would_list(origin: str) -> bool:
         pv2 = {**pv2, "settings": {**marks, "forgotten": True}}
         workers = [w for w in workers if w["state"] != "unknown"]
     elif marks.get("forgotten") is not True and (
-            any(w["state"] == "unknown" for w in workers) or _stale_catalog(pv2, installs, me, networked)):
+            any(w["state"] == "unknown" for w in workers) or _stale_catalog(pv2, installs, me, networked)
+            or (networked and any(i["id"] != me and i["id"] not in catalogs for i in installs))):
+        # A peer whose catalog this worker never read (online or not) may hold it.
         return True
     pv2s = {row["id"]: row for row in projects_v2.list_projects_v2()}
     return _shown(pv2, {**pv2s, pv2["id"]: pv2}, workers, offline_has)
@@ -669,12 +671,27 @@ def _owner_install(owner: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return rows.get(owner.get("device_id") or "") or rows.get(owner.get("runner_id") or "")
 
 
+def _revoked(owner: Dict[str, Any]) -> bool:
+    """Whether a token's worker is known to be removed from the network (a
+    revoked member is no approved worker any more, but stays a known member;
+    a worker this one has no record of is unknown, not removed)."""
+    from app.network import engine, membership
+
+    ctx = engine.context()
+    device_id = owner.get("device_id")
+    if ctx is None or not device_id or device_id == setup._own_device_id():
+        return False
+    member = ctx.member(device_id)
+    return member is not None and member.status == membership.STATUS_REVOKED
+
+
 def _first_clone_alive(pv2: Dict[str, Any], owner: Dict[str, Any]) -> bool:
     """Whether the first clone owning ``pv2`` (its provisional token) may still
     be running. Only a provably finished or abandoned one is False: settled
-    (its owner hid it after it failed); this worker's own op, finished or
-    stale; on a shared database, another runner's op finished or stale; in a
-    network, its worker offline for longer than a stale op. Unknown is alive.
+    (its owner hid it after it failed); its worker removed from the network;
+    this worker's own op, finished or stale; on a shared database, another
+    runner's op finished or stale; in a network, its worker offline for longer
+    than a stale op. Unknown is alive.
     """
     from app.db import git_ops as git_ops_db
     from app.network import engine
@@ -682,6 +699,8 @@ def _first_clone_alive(pv2: Dict[str, Any], owner: Dict[str, Any]) -> bool:
     marks = pv2.get("settings") if isinstance(pv2.get("settings"), dict) else {}
     if marks.get("forgotten") is True:
         return False
+    if _revoked(owner):
+        return False  # removed from the network: it will never finish or settle it
     mine = owner.get("runner_id") == setup._me()
     if mine or engine.context() is None:
         row = git_ops_db.get_op(owner["op_id"])
@@ -695,17 +714,19 @@ def _first_clone_alive(pv2: Dict[str, Any], owner: Dict[str, Any]) -> bool:
     return seen is None or (datetime.now(timezone.utc) - seen).total_seconds() <= git_ops_db.STALE_RUNNING_SECONDS
 
 
-def _being_set_up(owner: Optional[Dict[str, Any]]) -> HTTPException:
-    """409 for a repository whose first clone another worker is running."""
+def _being_set_up(owner: Optional[Dict[str, Any]], doing: str = "cloning") -> HTTPException:
+    """409 for a repository a worker is cloning as a new project (its token)
+    or setting up from the Workers tab (:func:`setup.setup_holder`)."""
     owner = owner or {}
     install = _owner_install(owner)
-    if owner.get("runner_id") == setup._me():
+    device_id = owner.get("device_id")
+    if owner.get("runner_id") == setup._me() or (device_id and device_id == setup._own_device_id()):
         worker = "This worker"
     else:
         worker = (install or {}).get("device_name") or "Another worker"
     return HTTPException(status_code=409, detail={
         "error_code": BEING_SET_UP, "worker": worker,
-        "error": f"{worker} is cloning this repository; wait for it or cancel it there."})
+        "error": f"{worker} is {doing} this repository; wait for it or cancel it there."})
 
 
 def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
@@ -713,8 +734,9 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
 
     Refuses (409) a repository that is already a project on this worker, a
     taken id, name or folder, and a folder that has other files in it, so the
-    owner hears it at once instead of after a clone; and one whose first
-    clone another worker is running (``being_set_up``).
+    owner hears it at once instead of after a clone; and one that a worker
+    is cloning as a new project or setting up from the Workers tab, in any
+    spelling of its remote (``being_set_up``).
     """
     from pathlib import Path
 
@@ -754,6 +776,18 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
         # The project this repository was first seen as now uses another one.
         raise HTTPException(status_code=409, detail={
             "error_code": setup.MOVED, "error": setup.moved_message(pinned)})
+    # Any spelling of this repository being set up already: another spelling's
+    # first clone (its token), or a setup the owner asked for from the Workers
+    # tab, which no token marks.
+    spellings = _same_repository_origins(clean) | {origin}
+    for other in sorted(spellings - {origin}):
+        other_row = projects_v2.get_project_v2_by_origin(other)
+        other_owner = projects_v2.provisional_token(other_row)
+        if other_owner is not None and _first_clone_alive(other_row, other_owner):
+            raise _being_set_up(other_owner)
+    holder = setup.setup_holder([projects_v2.project_v2_id_for_origin(o) for o in sorted(spellings)])
+    if holder is not None:
+        raise _being_set_up(holder, "setting up")
     # The id asked for: on a cross-install collision the locked creation path
     # adds the suffix itself (``payload.id`` only names the folder it would get).
     payload, _db_path, path = check_new_project(
@@ -782,6 +816,8 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
         claimed = projects_v2.claim_provisional(origin, token, expect=owner, name=payload.name)
     if not claimed:
         raise _being_set_up(projects_v2.provisional_token(projects_v2.get_project_v2_by_origin(origin)) or owner)
+    # Its remote on the identity, so another spelling finds it while it clones.
+    projects_v2.record_remote(origin, clean)
     return {
         "project_v2_id": projects_v2.project_v2_id_for_origin(origin), "origin": origin,
         "name": payload.name, "kind": "git", "clone_url": clean,
@@ -796,6 +832,15 @@ def _remote_key(url: Optional[str]) -> str:
     return (setup.display_remote(url) or "").casefold()
 
 
+def _same_repository_origins(clean: str) -> set:
+    """Every identity whose remote is ``clean`` in any spelling (:func:`_remote_key`)."""
+    key = _remote_key(clean)
+    if not key:
+        return set()
+    return {origin for origin, info in setup._repo_info_by_origin().items()
+            if _remote_key(info.get("clone_url")) == key}
+
+
 def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     """The project (this worker's row, else a listed one elsewhere) whose remote is
     ``clean`` in any spelling, as the repository picker marks "Already added".
@@ -806,11 +851,7 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     (:func:`would_list`); an identity only remembered from a removed project
     does not block a new clone.
     """
-    key = _remote_key(clean)
-    if not key:
-        return None
-    matches = [origin for origin, info in setup._repo_info_by_origin().items()
-               if _remote_key(info.get("clone_url")) == key]
+    matches = sorted(_same_repository_origins(clean))
     if not matches:
         return None
     own = setup._own_rows_by_origin()

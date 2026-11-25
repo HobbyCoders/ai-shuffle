@@ -1432,6 +1432,102 @@ def test_a_dead_runners_first_clone_neither_blocks_nor_keeps_a_card(client, ws, 
     assert _listed(client, pv2["id"])
 
 
+def test_a_workers_tab_setup_keeps_a_first_clone_from_being_hidden_or_duplicated(client, ws, test_db,
+                                                                                 monkeypatch):
+    # Shared database: this worker re-clones a remembered project, and the
+    # owner also asks for it on Studio (offline) from the Workers tab.
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    remote = _https(monkeypatch, _bare_remote(ws))
+    origin = auto_link_group_id(remote)
+    pv2 = projects_v2.upsert_project(origin, name="Demo")
+    projects_v2.record_remote(origin, remote)
+    projects_v2.set_forgotten(origin, True)  # its last copy was removed
+    first = _clone_new(client, remote)
+    assert first.status_code == 202, first.text
+    test_db.execute("UPDATE installs SET last_seen = '2020-01-01T00:00:00+00:00' WHERE id = ?", (PEER,))
+    test_db.commit()
+    queued = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": PEER})
+    assert queued.status_code == 202 and queued.json()["status"] == "queued_offline", queued.text
+
+    # This worker's clone is cancelled: Studio's setup still wants the identity.
+    assert client.post(f"/api/v1/projects/setup/{first.json()['op_id']}/cancel").json() == {"status": "cancelled"}
+    assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
+
+    # No spelling of it becomes a second project while Studio's setup waits.
+    for url in (remote, "git@git.example.com:example-org/demo.git"):
+        refused = _clone_new(client, url, id="demo-two", name="Two")
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["error_code"] == "being_set_up" and detail["worker"] == "Studio"
+        assert detail["error"] == "Studio is setting up this repository; wait for it or cancel it there."
+    assert projects_v2.get_project_v2_by_origin(origin)["name"] == "Demo"
+    assert projects_v2.get_project_v2_by_origin(auto_link_group_id("git@git.example.com:example-org/demo.git")) \
+        is None
+
+
+def test_another_spelling_of_a_first_clone_in_progress_is_refused(client, ws, test_db, monkeypatch):
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    remote = _https(monkeypatch, _bare_remote(ws))
+    first = _clone_new(client, remote)  # a brand-new identity: no remote known before
+    assert first.status_code == 202, first.text
+    ssh = "git@git.example.com:example-org/demo.git"
+    refused = _clone_new(client, ssh, id="demo-ssh", name="Demo SSH")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error_code"] == "being_set_up"
+    assert refused.json()["detail"]["worker"] == "This worker"
+    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(ssh)) is None
+
+
+def test_an_offline_peer_never_read_may_hold_a_known_project(client, ws, test_db, network):
+    # Studio registered the repository (the identity replicated here, from
+    # another peer) while offline, and this worker never read its catalog.
+    remote = "https://github.com/example-org/elsewhere.git"
+    origin = auto_link_group_id(remote)
+    pv2 = projects_v2.upsert_project(origin, name="Elsewhere")
+    projects_v2.record_remote(origin, remote)
+    network.peer["online"] = False
+    assert setup_db.peer_catalogs() == {}
+    for url in (remote, "git@github.com:example-org/elsewhere.git"):
+        refused = _clone_new(client, url, id="elsewhere-here", name="Mine")
+        assert refused.status_code == 409, refused.text
+        detail = refused.json()["detail"]
+        assert detail["error_code"] == "already_added"
+        assert detail["error"] == ("This repository is already the project Elsewhere on another worker. "
+                                   "Set it up here from its page in Projects.")
+    marks = projects_v2.get_project_v2(pv2["id"])
+    assert marks["name"] == "Elsewhere" and projects_v2.PROVISIONAL_KEY not in marks["settings"]
+
+    # Once its catalog shows it lacks the project, the clone goes ahead.
+    setup_db.save_peer_catalog(PEER, [])
+    admitted = _clone_new(client, remote, id="elsewhere-here", name="Mine")
+    assert admitted.status_code == 202, admitted.text
+
+
+def test_a_first_clone_owned_by_a_removed_worker_can_be_taken_over(client, ws, test_db, network, monkeypatch):
+    from app.network import engine
+
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    remote = "https://github.com/example-org/orphaned.git"
+    origin = auto_link_group_id(remote)
+    projects_v2.upsert_project(origin, name="Orphaned")
+    theirs = _token("peer-instance", device_id=PEER)
+    assert projects_v2.claim_provisional(origin, theirs, expect=None)  # replicated before Studio died
+    # The owner removed Studio from the network: no approved worker any more.
+    me_only = [row for row in project_workers._approved_workers() if row["id"] != PEER]
+    monkeypatch.setattr(project_workers, "_approved_workers", lambda: me_only)
+    ctx = engine.context()
+
+    # A worker this one has no record of is unknown: still refused.
+    ctx.member = lambda device_id: None
+    assert _clone_new(client, remote, id="orphaned", name="Mine").status_code == 409
+
+    ctx.member = lambda device_id: SimpleNamespace(status="revoked") if device_id == PEER else None
+    taken = _clone_new(client, remote, id="orphaned", name="Mine")
+    assert taken.status_code == 202, taken.text
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert row["name"] == "Mine" and projects_v2.provisional_token(row)["op_id"] == taken.json()["op_id"]
+
+
 def test_any_local_registration_makes_a_hidden_or_provisional_identity_listed(ws, test_db):
     from app.api.projects import create_project_record_sync
     from app.core.models import ProjectCreate

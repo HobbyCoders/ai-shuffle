@@ -973,6 +973,46 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def dispatched_hold_seconds() -> float:
+    """How long a setup handed to a paired worker counts as still running: its
+    op lives in that worker's database, so only its age is known here (the
+    longest a clone may run, plus a stale op's age)."""
+    from app.db import git_ops as git_ops_db
+
+    return CLONE_DEADLINE_SECONDS + git_ops_db.STALE_RUNNING_SECONDS
+
+
+def setup_holder(project_v2_ids: List[str]) -> Optional[Dict[str, Any]]:
+    """Where an ordinary setup (the Workers tab) of one of these identities is
+    waiting or running, as ``{runner_id}`` or ``{device_id}``; else None (sync).
+
+    Read from what this worker knows: every runner's ops on this database
+    (a stale running one is left out), and the requests it sent to paired
+    workers: one waiting for its worker, or one handed over recently enough
+    that it may still run there (:func:`dispatched_hold_seconds`). A new
+    project's first clone is left out: its token says who owns it.
+    """
+    from datetime import datetime, timezone
+
+    from app.db import git_ops as git_ops_db
+    from app.db import project_setup as setup_db
+
+    ids = [pid for pid in project_v2_ids if pid]
+    for row in git_ops_db.list_inflight_for_projects(SETUP_OP, ids):
+        if not (row.get("params") or {}).get("project_id"):
+            return {"runner_id": row.get("runner_id")}
+    now = datetime.now(timezone.utc)
+    for pid in ids:
+        for row in setup_db.list_requests(project_v2_id=pid):
+            if row["status"] == setup_db.REQUEST_QUEUED_OFFLINE:
+                return {"device_id": row["target_id"]}
+            sent = git_ops_db._as_aware_utc(row.get("updated_at") or row.get("created_at"))
+            if row["status"] == setup_db.REQUEST_DISPATCHED and (
+                    sent is None or (now - sent).total_seconds() <= dispatched_hold_seconds()):
+                return {"device_id": row["target_id"]}
+    return None
+
+
 def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     """Hide a new project's identity again after its first clone ended without a project.
 
@@ -991,6 +1031,10 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     if not params.get("project_id") or not origin or not op_row.get("id"):
         return
     try:
+        if setup_holder([projects_v2.project_v2_id_for_origin(origin)]) is not None:
+            # The owner also asked for it on a worker (the Workers tab): it is
+            # wanted there, so it stays.
+            return
         projects_v2.settle_provisional(origin, op_row.get("runner_id") or _me(), op_row["id"])
     except Exception:  # noqa: BLE001
         logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)

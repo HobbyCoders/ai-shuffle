@@ -337,6 +337,24 @@ def list_stale_running(
     ]
 
 
+def list_inflight_for_projects(op: str, project_v2_ids: List[str]) -> List[Dict[str, Any]]:
+    """Queued and live running ``op`` rows for any of these projects, on every
+    runner this database holds (a stale running row is left out)."""
+    ids = sorted({pid for pid in project_v2_ids if pid})
+    if not ids:
+        return []
+    marks = ", ".join(["%s"] * len(ids))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT * FROM git_ops WHERE op = %s AND status IN ('queued', 'running') "
+            f"AND project_v2_id IN ({marks}) ORDER BY created_at ASC, id ASC",
+            (op, *ids),
+        )
+        rows = _rows(cursor.fetchall())
+    return [row for row in rows if not _is_stale_running(row)]
+
+
 def list_recent_for_project(
     project_v2_id: str, limit: int = 20
 ) -> List[Dict[str, Any]]:
