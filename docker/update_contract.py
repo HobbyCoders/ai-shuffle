@@ -83,7 +83,7 @@ OVERLAYS = ()
 # The trust key is checked on its own (scripts/ci/update_reach.py).
 IMAGE_INPUTS = ("Dockerfile", "entrypoint.sh")
 # sha256 of IMAGE_INPUTS with comment lines removed. Update with --pin.
-IMAGE_INPUTS_PIN = "476e090d39803781df359a69305c1feb6107ed6de1961b64cfeacf7bcadd422f"
+IMAGE_INPUTS_PIN = "4a95e9487ae187725c94d5b12fa7f43c4f8a0acb5138c2971e5f0e00c02804ab"
 
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,39}")
 
