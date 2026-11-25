@@ -501,6 +501,20 @@ export async function openFromSidebar(page, title) {
 	await row.click();
 }
 
+/**
+ * Open a rail destination (Settings, Projects…) from the visible Workspace nav.
+ * The phone's tab row seats only the rail's first few places, so the rest are
+ * under More there; this taps the tab when it has one and goes through More
+ * when it does not.
+ */
+export async function openRailPlace(page, label) {
+	const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
+	const tab = nav.getByRole('button', { name: label, exact: true });
+	if (await tab.count()) return tab.click();
+	await nav.getByRole('button', { name: 'More', exact: true }).click();
+	await page.getByRole('menuitem', { name: label, exact: true }).click();
+}
+
 /** Wait for an opened chat to show its settled transcript, then hold a moment for late reloads. */
 export async function waitChatOpen(page, { messagesAtLeast = 1, hold = 1500 } = {}) {
 	await waitChat(page, { surface: 'active', loading: 'false', session: /^s:/, messagesAtLeast }, { timeout: 60_000 });
