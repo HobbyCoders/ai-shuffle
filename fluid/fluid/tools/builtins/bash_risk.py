@@ -14,7 +14,9 @@ The classifier is deliberately conservative. It parses the command with
 only when:
 
 - every simple command's program is in :data:`READ_ONLY_PROGRAMS` and passes
-  that program's extra check (if any);
+  that program's extra check (if any), and is named bare: a program written
+  as a path (``./ls``, ``scripts/cat``, ``/usr/bin/grep``, ``C:\\bin\\git.exe``)
+  runs whatever file is there, so it is ``write``;
 - there is no output redirection (``>``, ``>>``, ``2>``, ``>&``, ``<(``);
   ``2>&1`` alone is tolerated because it merges streams without touching a file;
 - there is no command substitution (``$(`` or backticks), no background ``&``,
@@ -814,6 +816,10 @@ def _simple_command_ok(tokens: list[str]) -> bool:
             return False
         tokens = tokens[1:]
     if not tokens:
+        return False
+    # A program named by path (./ls, scripts/cat, /tmp/x/grep, C:\bin\git.exe)
+    # runs whatever file sits there, not the utility its basename suggests.
+    if re.search(r"[\\/]", tokens[0]):
         return False
     program = _program_name(tokens[0])
     if program not in READ_ONLY_PROGRAMS:

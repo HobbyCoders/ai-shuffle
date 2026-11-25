@@ -239,7 +239,8 @@ class HostBridge:
 
         # PreToolUse hook: deny and stop short-circuit (stop also ends the
         # turn), modify rewrites the input, a permission decision of "allow"
-        # skips the permission gate and "ask" forces a prompt.
+        # skips the permission prompt (a rule or mode deny still wins) and
+        # "ask" forces a prompt.
         hook_permission: str | None = None
         if self._hooks is not None:
             decision = await self._hooks.emit(
@@ -257,13 +258,12 @@ class HostBridge:
                 tool_input = decision.replacement_input
             hook_permission = decision.permission_decision
 
-        # PermissionEngine: allow / deny / ask, plus the doom-loop guard.
-        if hook_permission == "allow":
+        # PermissionEngine: allow / deny / ask, plus the doom-loop guard. A
+        # hook's allow answers the prompt, never a configured deny.
+        decided = self._permissions.decide(spec, tool_input, cwd=self._ctx.cwd)
+        verdict = decided.decision
+        if hook_permission == "allow" and verdict != "deny":
             verdict = "allow"
-            decided = None
-        else:
-            decided = self._permissions.decide(spec, tool_input, cwd=self._ctx.cwd)
-            verdict = decided.decision
         if verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
                 # Match the native gate: Bypass must not park on an approval
@@ -283,7 +283,7 @@ class HostBridge:
         if verdict == "deny":
             return HostReply(
                 denied=True,
-                message=decided.deny_message() if decided is not None else "permission denied",
+                message=decided.deny_message(),
             )
         if verdict == "ask":
             if self._on_permission is None:

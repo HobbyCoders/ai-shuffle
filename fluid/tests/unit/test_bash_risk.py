@@ -40,8 +40,6 @@ SAFE_COMMANDS = [
     "cat file.txt",
     'cat "a b.txt"',
     r"cat C:\Users\dev\notes.txt",  # Windows path as an argument
-    r'"C:\Program Files\Git\bin\git.exe" status',  # quoted Windows program path
-    "/usr/bin/grep -r pattern src",
     "git status --short",
     "git status",
     "git log --oneline -10",
@@ -207,6 +205,26 @@ WRITE_COMMANDS = [
 def test_read_only_commands_are_safe(command: str) -> None:
     assert is_read_only(command), command
     assert classify({"command": command}) == "safe"
+
+
+@pytest.mark.parametrize("command", [
+    "./ls",
+    "./cat notes.txt",
+    "scripts/cat notes.txt",
+    "bin/git status",
+    "/tmp/x/grep -r pattern src",
+    "/usr/bin/grep -r pattern src",
+    "git status && ./ls",
+    r"tools\grep.exe pattern",
+    r"C:\tools\cat.exe notes.txt",
+    r'"C:\Program Files\Git\bin\git.exe" status',
+    "FOO=1 ./ls",
+])
+def test_a_program_named_by_path_is_never_read_only(command: str) -> None:
+    """``./ls`` runs whatever file is there, not the ls utility: a program
+    named by a relative, absolute or Windows path is not provably read-only."""
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
 
 
 @pytest.mark.parametrize("command", WRITE_COMMANDS)

@@ -25,7 +25,7 @@ from fluid.events import (
 )
 from fluid.context.compaction import CompactionConfig
 from fluid.context.trim import TrimConfig
-from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, HookDecision
 from fluid.messages import ToolResultBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.rules import Rule
@@ -718,6 +718,72 @@ async def test_pre_tool_use_hook_deny_short_circuits() -> None:
     result = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, ToolResult))
     assert result.is_error
     assert "blocked by hook: not allowed" in result.output
+
+
+def _two_tools(first: tuple[str, str, str], second: tuple[str, str, str]) -> list[StreamChunk]:
+    """One model response that asks for two tool calls."""
+    chunks = [StreamChunk("message_start", {"usage": {"input_tokens": 10}})]
+    for index, (tuid, name, args_json) in enumerate((first, second)):
+        chunks += [
+            StreamChunk("block_start", {"index": index, "block_type": "tool_use",
+                                        "tool_name": name, "tool_use_id": tuid}),
+            StreamChunk("tool_args_delta", {"index": index, "partial_json": args_json}),
+            StreamChunk("block_stop", {"index": index}),
+        ]
+    return chunks + [
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+@pytest.mark.parametrize("event,ran_first", [(PRE_TOOL_USE, False), (POST_TOOL_USE, True)])
+async def test_hook_stop_skips_the_rest_of_the_batch(event: str, ran_first: bool) -> None:
+    """A hook's ``continue: false`` on one call ends the turn before the next
+    call of the same response runs; that call still gets an error result."""
+    ran: list[int] = []
+
+    @tool("touch", "Touch", {"type": "object", "properties": {"n": {"type": "integer"}}},
+          risk="write")
+    async def touch(args: dict) -> dict:
+        ran.append(args["n"])
+        return {"content": [{"type": "text", "text": "touched"}]}
+
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("m", [touch]))
+    hooks = HookBus()
+
+    async def stop_on_first(_event: str, payload: dict):
+        if payload.get("tool_use_id") == "t1":
+            return HookDecision(stop=True, note="enough for today")
+        return None
+
+    hooks.on(event, stop_on_first)
+    provider = ScriptedProvider([
+        _two_tools(("t1", "mcp__m__touch", '{"n": 1}'), ("t2", "mcp__m__touch", '{"n": 2}')),
+        _text("never reached"),
+    ])
+    store = MemoryStore()
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5",
+        registry=registry, hooks=hooks, permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+
+    assert ran == ([1] if ran_first else [])  # the second call never ran
+    assert provider.calls == 1
+    events = loop.bus.log(loop.session_id)
+    results = {e.tool_use_id: e for e in events if isinstance(e, ToolResult)}
+    assert set(results) == {"t1", "t2"}
+    assert results["t2"].is_error
+    assert "a hook stopped the turn" in results["t2"].output
+    # The transcript keeps one result per tool use.
+    stored = [
+        block.tool_use_id
+        for node in await store.load_path(loop.session_id)
+        for block in node.message.content if isinstance(block, ToolResultBlock)
+    ]
+    assert stored == ["t1", "t2"]
 
 
 # ─── per-turn cost reporting ─────────────────────────────────────────────────

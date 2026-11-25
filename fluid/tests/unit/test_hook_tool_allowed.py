@@ -143,6 +143,16 @@ async def test_native_rule_and_hook_denials_are_not_reported() -> None:
     assert seen == seen2 == [] and ran == ran2 == []
 
 
+async def test_native_hook_allow_never_overrides_a_deny_rule() -> None:
+    """A hook's allow answers the prompt; a configured deny still wins."""
+    bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
+    deny = PermissionEngine("never_ask", rules=[Rule(tool=TOOL, decision="deny")])
+    _sid, prompted, result = await _native_turn(bus, registry, deny)
+    assert not prompted and result.is_error
+    assert "permission denied by a configured rule" in result.output
+    assert seen == [] and ran == []
+
+
 # ─── code-mode bridge ───────────────────────────────────────────────────────
 
 
@@ -159,6 +169,15 @@ async def test_code_mode_bridge_reports_allowed_calls_only() -> None:
     bus, registry, seen, ran = _recording_bus()
     bridge = HostBridge(registry, PermissionEngine("always_ask"), hooks=bus, ctx=ctx)
     assert (await bridge.on_host_call(TOOL, {"n": 2})).denied
+    assert seen == [] and ran == []
+
+
+async def test_code_mode_hook_allow_never_overrides_a_deny_rule() -> None:
+    bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
+    deny = PermissionEngine("always_ask", rules=[Rule(tool=TOOL, decision="deny")])
+    bridge = HostBridge(registry, deny, hooks=bus, ctx=ToolCtx(session_id="ses_cm"))
+    reply = await bridge.on_host_call(TOOL, {"n": 2}, tool_use_id="tu")
+    assert reply.denied and "configured rule" in reply.message
     assert seen == [] and ran == []
 
 
@@ -186,6 +205,18 @@ async def test_bundled_bridge_reports_calls_the_cli_sends_through(
     bus, registry, seen, ran = _recording_bus()
     denied = await _answer(
         registry, ctx, call, permissions=PermissionEngine("always_ask"), hooks=bus,
+    )
+    assert denied["is_error"] is True
+    assert seen == [] and ran == []
+
+
+async def test_bundled_bridge_hook_allow_never_overrides_a_deny_rule() -> None:
+    bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
+    call = {"op": "call", "name": TOOL, "arguments": {"n": 3}}
+    denied = await _answer(
+        registry, ToolCtx(session_id="ses_dl"), call,
+        permissions=PermissionEngine("always_ask", rules=[Rule(tool=TOOL, decision="deny")]),
+        hooks=bus,
     )
     assert denied["is_error"] is True
     assert seen == [] and ran == []

@@ -7,9 +7,13 @@ import json
 from collections.abc import AsyncIterator
 
 from fluid.cli.repl import Repl
+from fluid.context.compaction import CompactionConfig
+from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import SetModel, SetPermissionMode, UserTurn
+from fluid.messages import ToolResultBlock
 from fluid.permissions.engine import PermissionEngine
+from fluid.permissions.rules import Rule
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
 from fluid.tools.builtins import register_builtins
@@ -126,6 +130,102 @@ async def test_nested_instructions_ride_tool_result_once(tmp_path) -> None:
     joined = "\n".join(_all_text(n.message) for n in path)
     assert joined.count("Nested rule: use tabs.") == 1
     assert "<system-reminder>" in joined
+
+
+def _result_texts(path) -> dict[str, str]:
+    """Each stored tool result's text, by tool_use_id."""
+    return {
+        block.tool_use_id: "\n".join(getattr(b, "text", "") for b in block.content)
+        for node in path for block in node.message.content
+        if isinstance(block, ToolResultBlock)
+    }
+
+
+def _nested_project(tmp_path):
+    project = tmp_path / "proj"
+    nested = project / "sub"
+    nested.mkdir(parents=True)
+    (project / ".git").mkdir()
+    (nested / "AGENTS.md").write_text("Nested rule: use tabs.")
+    (nested / "f.txt").write_text("data")
+    return project, nested
+
+
+async def _run_nested(project, calls, **loop_kwargs):
+    """One user turn making the (tool_use_id, tool, args) calls in order."""
+    registry = ToolRegistry()
+    register_builtins(registry)
+    provider = ScriptedProvider([
+        *[_tool_call(tuid, name, json.dumps(args)) for tuid, name, args in calls],
+        _text("done"),
+    ])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop_kwargs.setdefault("permissions", PermissionEngine("never_ask"))
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", session_id=sid,
+        registry=registry, ctx=ToolCtx(cwd=str(project)), **loop_kwargs,
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+    return _result_texts(await store.load_path(sid))
+
+
+async def test_denied_or_failed_calls_never_pull_nested_instructions(tmp_path) -> None:
+    """Only an allowed call that succeeded touched the directory; a denied or
+    failed one leaves its instructions out, and the next real visit gets them."""
+    project, nested = _nested_project(tmp_path)
+    results = await _run_nested(project, [
+        ("t1", "Grep", {"pattern": "x", "path": str(nested)}),       # denied by rule
+        ("t2", "Read", {"file_path": str(nested / "missing.txt")}),  # fails
+        ("t3", "Read", {"file_path": str(nested / "f.txt")}),        # succeeds
+    ], permissions=PermissionEngine("never_ask", rules=[Rule(tool="Grep", decision="deny")]))
+    assert "permission denied" in results["t1"]
+    assert "Nested rule" not in results["t1"]
+    assert "Nested rule" not in results["t2"]
+    assert results["t3"].count("Nested rule: use tabs.") == 1
+
+
+async def test_nested_instructions_respect_setting_sources(tmp_path) -> None:
+    """A session whose setting_sources leave out "project" never loads
+    project-scope instructions, nested ones included."""
+    project, nested = _nested_project(tmp_path)
+    results = await _run_nested(
+        project, [("t1", "Read", {"file_path": str(nested / "f.txt")})],
+        setting_sources=["user"],
+    )
+    # The same session with project sources on does load it.
+    results_on = await _run_nested(
+        project, [("t1", "Read", {"file_path": str(nested / "f.txt")})],
+        setting_sources=["user", "project"],
+    )
+    assert "Nested rule" not in results["t1"]
+    assert "Nested rule: use tabs." in results_on["t1"]
+
+
+async def test_trimmed_nested_instructions_return_on_the_next_visit(tmp_path) -> None:
+    """Once trim replaces the result that carried a nested AGENTS.md, the
+    rules are out of context: the next visit to that directory brings them
+    back. While the carrier is still visible, a revisit does not repeat them."""
+    project, nested = _nested_project(tmp_path)
+    (nested / "big.txt").write_text("line of data\n" * 400)
+    # Every request is over the trigger and only the newest result is kept,
+    # so the request after t2 shows t1 as a trim placeholder.
+    compaction = CompactionConfig(
+        trigger_tokens=1, trigger_window_ratio=0.0,
+        trim=TrimConfig(
+            trigger_tokens=1, trigger_window_ratio=0.0,
+            keep_recent_tool_results=1, min_result_chars=100,
+        ),
+    )
+    results = await _run_nested(project, [
+        ("t1", "Read", {"file_path": str(nested / "big.txt")}),
+        ("t2", "Read", {"file_path": str(nested / "f.txt")}),  # t1 still shown
+        ("t3", "Read", {"file_path": str(nested / "f.txt")}),  # t1 trimmed by now
+    ], compaction=compaction)
+    assert "Nested rule: use tabs." in results["t1"]
+    assert "Nested rule" not in results["t2"]
+    assert "Nested rule: use tabs." in results["t3"]
 
 
 async def test_reading_home_and_fluid_never_reinjects_global_instructions(tmp_path, monkeypatch) -> None:
