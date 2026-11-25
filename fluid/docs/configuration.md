@@ -143,11 +143,15 @@ file still layers after it.
 Each instruction file is capped at 24,000 characters (8,000 for a nested
 file); past that, the head and tail are kept and a marker names the file so
 the rest can be read on demand. Reading is bounded too: at most four bytes
-per character of that cap are read from a file, and its `@` imports share one
-budget of the same size, so a huge file or many repeated imports cost no
-more; a file or import cut this way ends with a note naming it, and imports
-past the budget keep their literal `@path`. Skill discovery reads at most
-64 KiB of each `SKILL.md` for its frontmatter. Codex applies a 32 KiB budget to the whole
+per character of that cap are read from a file (its start and its end, with
+a note naming the file between them, so the final rules of a huge file still
+arrive), and its `@` imports share one budget of the same size, counted in
+bytes read, so a huge file or many repeated imports cost no more. An import
+cut this way ends with a note naming it, and imports past the budget keep
+their literal `@path`. Skill discovery reads at most 64 KiB of each
+`SKILL.md` for its frontmatter; a skill whose frontmatter does not close
+within that is left out of the model's skills index with a warning, and the
+`Skill` tool still loads it by name. Codex applies a 32 KiB budget to the whole
 chain instead, so a chain that fits fluid can exceed Codex's limit.
 
 Skills (`<dir>/.fluid/skills/<name>/SKILL.md`, `<dir>/.agents/skills/...`,

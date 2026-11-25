@@ -416,14 +416,79 @@ def test_instruction_and_skill_reads_are_bounded(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "read_text", no_whole_reads)
     [agents] = discover_instruction_files(proj, include_global=False)
     assert agents.content.startswith("RULES-START")
-    assert "END" not in agents.content and len(agents.content) < 25_000
-    assert "is larger than" in agents.content  # the read cut is named, not silent
+    assert agents.content.endswith("\nEND") and len(agents.content) < 25_000  # the real tail
+    assert "only its start and end were read" in agents.content  # the read gap is named
     [found] = [s for s in discover_skills(proj, include_global=False, include_builtin=False)]
-    assert (found.name, found.description) == ("huge", "Big body.")
+    assert (found.name, found.description, found.model_invocable) == ("huge", "Big body.", True)
 
-    # A multi-byte character cut by the budget is dropped, not a decode failure.
+    # A multi-byte character cut by the budget is dropped, not a decode
+    # failure, and its byte still counts as read.
     text, used, truncated = instructions._read_bounded(proj / "AGENTS.md", 13)
-    assert (text, used, truncated) == ("RULES-START\n", 12, True)
+    assert (text, used, truncated) == ("RULES-START\n", 13, True)
+
+
+def test_oversized_instruction_file_keeps_its_final_rule(tmp_path) -> None:
+    # Review finding: the byte cap made the "tail" the end of the first
+    # 96,000 bytes, so the last rule of a 100 KiB AGENTS.md was lost.
+    proj = _mk_project(tmp_path)
+    lines = [f"rule {i}: keep the build green." for i in range(3_400)]
+    (proj / "AGENTS.md").write_text("FIRST-RULE\n" + "\n".join(lines) + "\nFINAL-RULE: ship it.\n",
+                                    encoding="utf-8")
+    assert (proj / "AGENTS.md").stat().st_size > 100 * 1024
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("FIRST-RULE")
+    assert agents.content.rstrip().endswith("FINAL-RULE: ship it.")
+    assert "instruction file truncated" in agents.content and len(agents.content) < 25_000
+
+
+def test_head_and_tail_reads_never_split_a_character(tmp_path) -> None:
+    from fluid.context import instructions
+
+    path = tmp_path / "AGENTS.md"
+    # One line, so the tail starts inside a two-byte character.
+    path.write_bytes(("ab" + "é" * 60_000 + "Z-END").encode("utf-8"))
+    head, tail = instructions._read_head_tail(path, 1_001)
+    assert head == "ab" + "é" * 374  # 750 bytes: the next character would cross
+    assert tail == "é" * 122 + "Z-END"  # the last 250 bytes, less the cut byte
+    # A tail that starts mid-line drops the cut line, so a cut word is no import.
+    path.write_text("x" * 2_000 + "y@x.md\nLAST\n", encoding="utf-8")
+    assert instructions._read_head_tail(path, 44)[1] == "LAST\n"  # not "@x.md\nLAST\n"
+
+
+def test_import_budget_is_debited_by_bytes_read(tmp_path) -> None:
+    # Review finding: the budget charged decoded bytes. With one byte left, an
+    # import starting with a two-byte character decoded to nothing and left
+    # the budget unchanged, so every repeat was reread and cut again.
+    (tmp_path / "accent.md").write_text("é" * 10, encoding="utf-8")
+    src = tmp_path / "AGENTS.md"
+    out = expand_imports("@accent.md\n@accent.md\n@accent.md", src, max_bytes=1)
+    assert out.count("is larger than") == 1 and out.count("@accent.md") == 2
+    # Bytes that are not UTF-8 are read too: they cost, and their token stays.
+    (tmp_path / "bad.md").write_bytes(b"\xff\xfe" * 10)
+    (tmp_path / "good.md").write_text("ok", encoding="utf-8")
+    assert expand_imports("@bad.md\n@good.md", src, max_bytes=20) == "@bad.md\n@good.md"
+    assert expand_imports("@bad.md\n@good.md", src, max_bytes=22) == "@bad.md\nok"
+
+
+def test_skill_header_cut_by_the_discovery_read_is_not_offered_to_the_model(
+    tmp_path, caplog
+) -> None:
+    # Review finding: a header past the 64 KiB read was parsed as complete, so
+    # a later ``disable-model-invocation: true`` was lost and the skill was
+    # offered to the model.
+    proj = _mk_project(tmp_path)
+    skills = proj / ".fluid" / "skills"
+    (skills / "long").mkdir(parents=True)
+    (skills / "long" / "SKILL.md").write_text(
+        "---\nname: long\ndescription: " + "d" * 70_000
+        + "\ndisable-model-invocation: true\n---\nbody", encoding="utf-8")
+    (skills / "short").mkdir()
+    (skills / "short" / "SKILL.md").write_text(
+        "---\nname: short\ndescription: s\n---\n" + "b" * 70_000, encoding="utf-8")
+    found = {s.name: s.model_invocable
+             for s in discover_skills(proj, include_global=False, include_builtin=False)}
+    assert found == {"long": False, "short": True}
+    assert "frontmatter does not close" in caplog.text
 
 
 # ─── CLAUDE.local.md / AGENTS.override.md (CE3) ──────────────────────────────
