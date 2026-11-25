@@ -75,8 +75,11 @@ class Scripted:
     async def turn(
         self, text: str, *, on_permission: Responder | None = None,
         on_event: Callable[[Any], Awaitable[None]] | None = None,
+        submitted_prompt: str | None = None,
     ) -> list:
-        """Run one user turn; the events it produced, terminal last."""
+        """Run one user turn; the events it produced, terminal last.
+        ``submitted_prompt`` is what the host sets when ``text`` carries a
+        note it rendered around the prompt."""
         if self.sid is None:
             self.sid = (await self.store.create_session()).session_id
             self.loop._session_id = self.sid
@@ -95,7 +98,7 @@ class Scripted:
 
         watcher = asyncio.create_task(watch())
         await asyncio.sleep(0)  # subscribed before the turn can publish
-        await self.loop.submit(UserTurn(content=text))
+        await self.loop.submit(UserTurn(content=text, submitted_prompt=submitted_prompt))
         await asyncio.wait_for(watcher, TURN_BUDGET)
         await asyncio.wait_for(self.loop.wait_turn(), TURN_BUDGET)
         return seen
@@ -576,6 +579,7 @@ class _Host:
     def __init__(self, run: Scripted) -> None:
         self.run = run
         self.calls: list[dict] = []
+        self.fail_restore = False  # writing the restored transcript fails
 
     async def __call__(self, handle: str, before_node: str, *, recovery: dict | None = None,
                        restore: bool = False) -> delegated_mod.ResumeRecovery:
@@ -584,22 +588,27 @@ class _Host:
         written = [n.message.content[0].text for n in path[:cut] if n.message.role == "user"]
         new = "cli-restored" if restore else "cli-new"
         self.calls.append({"handle": handle, "restore": restore, "written": written})
+        if restore and self.fail_restore:
+            raise OSError("disk full")
         await self.run.store.set_cli_session_id(self.run.sid, new)
         await self.run.store.set_cli_resume_recovery(self.run.sid, {**(recovery or {}), "handle": new})
         return delegated_mod.ResumeRecovery("reseeded", new)
 
 
-async def _replay_never_recorded(tmp_path) -> tuple[Scripted, _Host]:
+async def _replay_never_recorded(
+    tmp_path, third: str = "three", *, submitted: str | None = None,
+) -> tuple[Scripted, _Host]:
     """Three silent exits on ``cli-prev``; the host re-seeds ``cli-new`` and
-    the replay of "three" exits on it too, before the CLI records it."""
+    the replay of the third prompt exits on it too, before the CLI records
+    it. ``third``/``submitted`` are that turn's content and submitted prompt."""
     run = Scripted(tmp_path, {
         "spawn_exit": {"code": 1, "stderr": "", "resume": ["cli-prev", "cli-new"]},
         "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
     }, cli_session_id="cli-prev")
     host = _Host(run)
     run.loop.recover_resume = host
-    for text in ("one", "two", "three"):
-        error = (await run.turn(text))[-1]
+    for text, prompt in (("one", None), ("two", None), (third, submitted)):
+        error = (await run.turn(text, submitted_prompt=prompt))[-1]
         assert isinstance(error, ErrorEvent) and error.retriable, error
     assert [c["restore"] for c in host.calls] == [False]
     assert run.loop.cli_session_id == "cli-new"
@@ -656,6 +665,67 @@ async def test_a_retry_of_a_replay_the_cli_never_recorded_is_sent_once(tmp_path)
         assert run.loop.cli_session_id == "cli-new"
         meta = await run.store.get_session(run.sid)
         assert meta.cli_resume_recovery["handle"] == "cli-new"
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+def _clock(stamp: str) -> str:
+    return f"<system-reminder>\nCurrent time: {stamp}\n</system-reminder>"
+
+
+async def test_a_retried_wake_with_a_fresh_clock_note_is_still_a_retry(tmp_path) -> None:
+    """The host renders a fresh clock note around every send, so a wake the
+    scheduler retries a minute later has different content but the same
+    submitted prompt. It is the owed prompt's retry: sent once, with only
+    the new note, and the old wake is not written back first."""
+    run, host = await _replay_never_recorded(
+        tmp_path, f"three\n\n{_clock('10:00')}", submitted="three")
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        events = await run.turn(f"three\n\n{_clock('10:01')}", submitted_prompt="three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "three" in sent[0]
+        assert "10:01" in sent[0] and "10:00" not in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_failed_restore_keeps_the_prompt_owed(tmp_path) -> None:
+    """Writing the restored transcript fails, so "four" runs on the handle
+    that still lacks "three". Its result must not settle the marker: the
+    next send restores the history through "three" after all."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]] * 2,
+        }), encoding="utf-8")
+        host.fail_restore = True
+        events = await run.turn("four")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "four" in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-new"
+        assert meta.cli_resume_recovery["pending"]
+        assert meta.cli_resume_recovery["prompt"] == delegated_mod._prompt_key("three")
+
+        host.fail_restore = False
+        events = await run.turn("five")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True, True]
+        assert host.calls[2]["written"].count("three") == 1
+        assert run.loop.cli_session_id == "cli-restored"
+        meta = await run.store.get_session(run.sid)
         assert not meta.cli_resume_recovery["pending"]
     finally:
         await run.aclose()

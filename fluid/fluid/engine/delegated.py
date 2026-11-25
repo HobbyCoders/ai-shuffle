@@ -1129,7 +1129,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # from the stored meta on the first turn, so it outlives the adapter.
         self._resume_recovery: dict[str, Any] | None = None
         self._resume_recovery_loaded = False
-        # A key of the running turn's prompt as submitted (before any note
+        # A key of the running turn's prompt as submitted (``submitted_prompt``
+        # when the host added a note or expanded a command, before any note
         # this loop adds), to tell a retry of an owed prompt from a new one.
         self._turn_prompt_key: str | None = None
         # Frames read from the live CLI (reset on every spawn).
@@ -2902,8 +2903,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await self._stop_process()
                     if not await spawned():
                         return
+            # What was typed or scheduled, not what the host rendered around
+            # it (a retried wake carries a fresh clock note each time) nor the
+            # question answers this loop adds below.
+            self._turn_prompt_key = _prompt_key(
+                op.submitted_prompt if op.submitted_prompt is not None else op.content
+            )
             op, question_ids = await self._question_turn_content(op)
-            self._turn_prompt_key = _prompt_key(op.content)
             if not self._resume_recovery_loaded:
                 self._resume_recovery_loaded = True
                 stored = getattr(meta, "cli_resume_recovery", None)
@@ -3112,7 +3118,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             finally:
                 self._live_mapper = None
             if failure is None or mapper.produced_nodes:
-                # The CLI took the prompt into its transcript: nothing is owed.
+                # The CLI took this prompt into its transcript: if it is the
+                # owed one, nothing is owed any more.
                 await self._settle_owed_replay(sid)
             if failure is None:
                 return mapper
@@ -3310,12 +3317,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return True
 
     async def _settle_owed_replay(self, sid: str) -> None:
-        """The CLI recorded this turn's prompt: its handle owes nothing. The
-        handle stays marked as a re-seed (no second recovery re-seed)."""
+        """The CLI recorded this turn's prompt. When that prompt is the owed
+        one (a retry of it, or this turn's own replay after a re-seed or a
+        restore, which owe this turn), the handle owes nothing. The handle
+        stays marked as a re-seed (no second recovery re-seed).
+
+        Any other prompt settles nothing: a turn that ran on the handle after
+        a failed restore leaves the owed prompt still missing.
+        """
         recovery = self._resume_recovery
         if recovery is None or not recovery.get("pending"):
             return
         if not self._reseeded_handle(self._spawn_resume):
+            return
+        key = self._turn_prompt_key
+        if key is None or recovery.get("prompt") != key:
             return
         await self._save_resume_recovery(sid, {**recovery, "pending": None, "prompt": None})
 
