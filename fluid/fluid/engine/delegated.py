@@ -2202,9 +2202,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         archive: list[dict[str, str]] = []
         checkpoint: dict[str, Any] = {}
         report: dict[str, Any] = {}
-        # A compaction answered or not, the stored path is what Claude Code
-        # may replay from now on: its ids are not new activity (#679).
-        self._replay_filter.seed(nodes)
+        # Once Claude Code compacts, it may print rows of the stored path again
+        # (#679): their ids are not new activity. It compacts after a valid
+        # answer, or with its own summarizer when the mod hands one back
+        # unanswered: an automatic compaction (the mod falls back for a skip
+        # or an error) or the host's emergency one. A manual one Fluid refuses
+        # or skips is left as it is, so the filter stays off for it.
+        summarizer_stands_in = trigger == "auto"
         compaction_id = new_id("cmp")
         try:
             # Pure CPU over the whole path: off the event loop, so the turn's
@@ -2218,19 +2222,24 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # The reason is a fixed phrase, never message content.
             if trigger == "auto":
                 logger.info("claude mod compaction fell back to the CLI summarizer: %s", exc)
+                self._replay_filter.seed(nodes)
             elif trigger == "manual" and self._turn_emergency_compaction:
                 logger.info("emergency compaction at the context limit: Fluid has nothing "
                             "more to compact; Claude Code's summarizer stands in")
+                self._replay_filter.seed(nodes)
                 return {"fallback": NOTHING_TO_COMPACT}
             else:
                 self._compact_noop = True
                 logger.info("claude mod compaction (%s): nothing more to compact; "
                             "left as it is, no summarizer", trigger)
             return {"skip": NOTHING_TO_COMPACT}
-        except ValueError as exc:
-            # A 400: the mod falls back for an automatic compaction and leaves
-            # a manual one as it is.
-            logger.info("claude mod compaction refused (%s): %s", trigger, exc)
+        except Exception as exc:
+            if summarizer_stands_in:
+                self._replay_filter.seed(nodes)
+            if isinstance(exc, ValueError):
+                # A 400: the mod falls back for an automatic compaction and
+                # leaves a manual one as it is.
+                logger.info("claude mod compaction refused (%s): %s", trigger, exc)
             raise
         fresh = archive
         if archive:
@@ -2252,7 +2261,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             except Exception as exc:
                 logger.warning("claude mod compaction: could not archive dropped rows: %s",
                                type(exc).__name__)
+                if summarizer_stands_in:
+                    self._replay_filter.seed(nodes)
                 raise ValueError("could not archive the rows it would drop") from exc
+        # The mod stopped waiting before this answer was ready: it fell back
+        # (automatic) or skipped (manual), so no boundary will apply it.
+        late = time.monotonic() - received > MOD_COMPACT_WAIT_S
+        if not late or summarizer_stands_in:
+            self._replay_filter.seed(nodes)
         self._replay_filter.expect(messages)
         if checkpoint.get("skipped"):
             logger.warning("claude mod compaction %s: no portable checkpoint (%s); a re-seed "
@@ -2270,9 +2286,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             log("claude mod compaction (%s) kept ~%d tokens, over its %d soft goal; "
                 "what is left: %s", trigger, report.get("after_tokens", 0),
                 report.get("target_tokens", 0), report.get("contributors"))
-        if time.monotonic() - received > MOD_COMPACT_WAIT_S:
-            # The mod stopped waiting before this answer was ready: it fell
-            # back or skipped, so no boundary will ever apply this answer.
+        if late:
             logger.warning("claude mod compaction %s (%s) answered after the mod's %.0fs "
                            "wait; it cannot be applied and gets no checkpoint",
                            compaction_id, trigger, MOD_COMPACT_WAIT_S)

@@ -262,6 +262,31 @@ def test_replay_tracking_records_nothing_until_a_compaction_is_answered():
     assert not (filter_._calls or filter_._results or filter_._uuids)
 
 
+async def test_a_refused_manual_compaction_does_not_turn_replay_tracking_on():
+    """A manual /compact Fluid refuses (a 400: the posted rows end in a call
+    with no result) is left as it is by the mod, so Claude Code compacts
+    nothing and has nothing to replay: the filter stays off, and records
+    nothing for the rest of the CLI's life. An automatic one refused the same
+    way goes to Claude Code's summarizer, whose kept rows can come back."""
+    chat = Chat()
+    chat.grow(6)
+    chat.add(Message('assistant', [ToolUseBlock('t-open', 'Bash', {'command': 'still running'})]))
+    loop, _sid = await _loop_with(chat)
+    try:
+        status, _ = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
+        assert status == 400
+        assert not loop._replay_filter.active
+        loop._replay_filter.note(Message('assistant', [ToolUseBlock('t-later', 'Bash', {})]))
+        assert not loop._replay_filter._calls
+
+        status, _ = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 400
+        assert loop._replay_filter.active
+        assert 't0-0' in loop._replay_filter._calls
+    finally:
+        await loop.aclose()
+
+
 async def test_replay_tracking_goes_with_the_cli_process():
     """A fresh CLI has compacted nothing, so it has nothing to replay: the
     ids the last one could replay are not kept past its process."""

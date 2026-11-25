@@ -1380,8 +1380,9 @@ class ReplayFilter:
     made only of recorded ids is never fresh execution. The window closes at
     the next model call (``message_start``), a result, or any assistant frame
     that is not part of the answer. Nothing is filtered, or recorded, until
-    the leg has answered a compaction for the running CLI: before that Claude
-    Code has nothing to replay (the first answer seeds the whole stored path).
+    the running CLI can compact: the leg seeds the whole stored path when it
+    hands back a valid answer, or a compaction Claude Code's summarizer will
+    take instead. Before that Claude Code has nothing to replay.
     The leg drops the filter with the CLI process it served: a fresh CLI has
     compacted nothing, so nothing it prints is a replay until it does.
     """
