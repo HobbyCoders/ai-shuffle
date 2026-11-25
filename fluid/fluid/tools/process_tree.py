@@ -30,6 +30,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 from fluid.tools.child_env import scrub_child_env
@@ -54,9 +55,12 @@ _CREATE_SUSPENDED = 0x00000004
 
 
 async def spawn_tree(
-    *argv: str, **kwargs: Any,
+    *argv: str, env: Mapping[str, str], **kwargs: Any,
 ) -> tuple[asyncio.subprocess.Process, int | None]:
     """``asyncio.create_subprocess_exec`` with the tree recorded from the start.
+
+    ``env`` is required: every caller passes a scrubbed environment, never the
+    host's own (the app-owned launch scan checks the spawn calls below).
 
     Returns ``(proc, job)``: pass ``job`` to :func:`kill_tree` or
     :func:`release_tree` exactly once. It is None on POSIX, where the caller's
@@ -70,9 +74,9 @@ async def spawn_tree(
     is killed and the error raised, never left suspended.
     """
     if sys.platform != "win32":
-        return await asyncio.create_subprocess_exec(*argv, **kwargs), None
+        return await asyncio.create_subprocess_exec(*argv, env=env, **kwargs), None
     kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | _CREATE_SUSPENDED
-    proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
+    proc = await asyncio.create_subprocess_exec(*argv, env=env, **kwargs)
     # Known gap: if this process dies (crash, hard kill) between the spawn
     # above and the job assignment below, the shell stays suspended outside
     # any job, so nothing ends it. It runs no command (it never resumed) and

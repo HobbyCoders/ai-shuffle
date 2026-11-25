@@ -10,6 +10,7 @@ left suspended.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -62,7 +63,7 @@ def _as_windows(monkeypatch, calls: list, *, resume_error: Exception | None = No
 async def test_the_shell_starts_suspended_and_joins_the_job_before_it_runs(monkeypatch) -> None:
     calls: list = []
     proc = _as_windows(monkeypatch, calls)
-    got, job = await tree_mod.spawn_tree("cmd", creationflags=0x4000)
+    got, job = await tree_mod.spawn_tree("cmd", env={}, creationflags=0x4000)
     assert got is proc and job == 77
     # Priority flags kept, CREATE_SUSPENDED added; job before resume.
     assert calls == [("spawn", 0x4000 | 0x4), ("assign", 4242), ("resume", 4242)]
@@ -72,7 +73,7 @@ async def test_a_shell_that_cannot_be_resumed_is_killed_not_left_suspended(monke
     calls: list = []
     proc = _as_windows(monkeypatch, calls, resume_error=OSError("access denied"))
     with pytest.raises(OSError, match="access denied"):
-        await tree_mod.spawn_tree("cmd")
+        await tree_mod.spawn_tree("cmd", env={})
     assert proc.killed
     assert ("close", 77) in calls
 
@@ -87,7 +88,7 @@ async def test_a_child_spawned_at_once_dies_with_the_tree() -> None:  # pragma: 
         "time.sleep(60)\n"
     )
     proc, job = await tree_mod.spawn_tree(
-        sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE,
+        sys.executable, "-c", script, env=dict(os.environ), stdout=asyncio.subprocess.PIPE,
     )
     assert job is not None
     assert proc.stdout is not None
