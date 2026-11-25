@@ -59,6 +59,7 @@
 	import ImportSessionModal from '$lib/components/ImportSessionModal.svelte';
 	import TagManager from '$lib/components/TagManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
+	import { openBroadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { pendingDeepLink, deepLinkSessionId as deepLinkSessionIdFrom } from '$lib/stores/pending-deep-link';
 
@@ -636,6 +637,11 @@
 		onOpenSetting={handleSpotlightOpenSetting}
 		onImportSession={() => { showSpotlight = false; showImportModal = true; }}
 		onManageTags={() => { showSpotlight = false; showTagManager = true; }}
+		onMessageAllActive={() => {
+			showSpotlight = false;
+			// The sidebar owns the dialog; a closed phone drawer has none mounted.
+			openBroadcastDialog(() => layout.setSidebarCollapsed(false));
+		}}
 	/>
 
 	<!-- Keyboard Shortcuts Modal -->
