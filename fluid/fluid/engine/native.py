@@ -4749,14 +4749,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                     and result.error_message
                     and "invalid_encrypted_content" in result.error_message
                 )
-                rewrite_retry = overflow_retries < 3 and (
-                    _is_payload_rejection(result.error_message or "", result.error_status)
-                    or _is_context_overflow(result.error_message or "", result.error_status)
-                )
-                if not budget_left and (reasoning_retry or rewrite_retry):
-                    # No history rewrite or retry notice for a request the cap
-                    # keeps from going out.
+                if reasoning_retry and not budget_left:
+                    # No retry notice for a request the cap keeps from going out.
                     retry_capped = True
+                # The two rewrite rungs below run at the cap too: only the
+                # rung itself knows whether it can reclaim anything (an
+                # oversized image the person attached leaves no earlier one
+                # to drop). When it can, the turn ends on the cap without a
+                # retry, and the rewrite (sticky, made at the turn's end) stays
+                # for the next turn. When it cannot, the provider's error
+                # surfaces as it does below the cap.
                 if reasoning_retry and not retry_capped:
                     # The history carries an encrypted reasoning blob the
                     # current model+account cannot decrypt — the session
@@ -4810,7 +4812,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 batch_final=index == len(consumed) - 1,
                                 batch_before_tokens=consumed[0].before_tokens,
                             )
-                        continue
+                        if budget_left:
+                            continue
+                        retry_capped = True
                 if (
                     not retry_capped
                     and overflow_retries < 3
@@ -4850,13 +4854,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 batch_final=index == len(escalations) - 1,
                                 batch_before_tokens=escalations[0].before_tokens,
                             )
-                        continue
+                        if budget_left:
+                            continue
+                        retry_capped = True
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
                 parent = await self._keep_failed_call(sid, turn_id, parent, result)
                 if retry_capped:
-                    # A retry above would have followed, but the turn has no
-                    # model call left: end on the cap, not on the error, and
+                    # A retry above would have followed (a rewrite above found
+                    # something to reclaim, or the reasoning strip or replay
+                    # applies), but the turn has no model call left: end on
+                    # the cap, not on the error, and
                     # never announce a retry that cannot go out. What the call
                     # streamed is stored above as an interrupted node, never
                     # handed on as the turn's reply.

@@ -122,6 +122,31 @@ async def test_a_dropped_connection_at_the_cap_announces_no_reconnect() -> None:
     assert texts == ["Partial answer"]
 
 
+async def test_a_rejection_nothing_can_rewrite_keeps_its_error_at_the_cap() -> None:
+    """An image the person attached is over the provider's limit and no earlier
+    image is there to drop: the rewrite rung finds nothing, so no retry was due
+    and the provider's error reaches the person, not the cap warning."""
+    from fluid.events import ErrorEvent
+
+    rejection = (
+        "invalid_request_error: The image you provided requires 38025 patches "
+        "after processing, exceeding the limit of 30000"
+    )
+    provider = ScriptedProvider([
+        [StreamChunk("error", {"message": rejection, "status": 400, "retriable": False})],
+        _text("never sent"),
+    ])
+    loop, _store, sid = await _run(provider, max_model_calls_per_turn=1)
+
+    events = loop.bus.log(sid)
+    assert provider.calls == 1
+    assert not [e for e in events if isinstance(e, ProviderRetry)]
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert errors and "38025 patches" in errors[-1].message
+    # The error ends the turn; it does not end on the cap.
+    assert not [e for e in events if isinstance(e, TurnComplete)]
+
+
 async def test_a_refusal_at_the_cap_does_not_ask_to_switch_models() -> None:
     """S7: a provider refusal opened the switch-model prompt and, on allow,
     reported "Continued this turn on…" though the cap kept the retry from
