@@ -892,6 +892,20 @@ def test_a_pinned_window_mismatch_is_shown_on_the_session():
     )) == []
 
 
+def test_an_agent_that_starts_fresh_is_shown_on_the_session():
+    """An ACP agent could not reopen its saved conversation: the chat says
+    the agent lost its earlier context, as a visible warning card."""
+    from fluid.events.model import DelegatedDiagnostic
+
+    adapter = ha.HarnessAdapter()
+    [card] = adapter._translate(DelegatedDiagnostic(
+        session_id="s", turn_id="t", kind="agent_context_reset",
+        message="The agent could not reopen its earlier conversation, so it starts fresh"))
+    assert card.subtype == "informational"
+    assert card.data == {"content": "The agent could not reopen its earlier conversation, so it starts fresh",
+                         "level": "warning"}
+
+
 # ─── Search guidance follows what the leg can actually call ─────────────────
 
 # Allow-only surfaces with Bash, Read and Edit (so the file-tool rule is

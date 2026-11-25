@@ -1525,6 +1525,11 @@ class SweepPlan:
         }
 
 
+# Checkpoint regions remembered as failed or non-shrinking (Compactor.
+# reject_summary_region); older entries fall out first.
+_REJECTED_REGIONS_MAX = 8
+
+
 @dataclass
 class Compactor:
     """Owns the eviction ladder state and renders compacted history views."""
@@ -1537,6 +1542,9 @@ class Compactor:
     _summaries: dict[tuple[str, str], str] = field(default_factory=dict)
     # Stored with the text and kept with it (:meth:`_checkpoint_pin`).
     _summary_pins: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    # Checkpoint regions whose last build failed or did not shrink the view:
+    # (start, end) -> hash of the side model input it was built from.
+    _rejected_regions: dict[tuple[str, str], int] = field(default_factory=dict)
     _epoch_by_start: dict = field(default_factory=dict)
     _digest_by_start: dict = field(default_factory=dict)
     _optional_retry: tuple[int, int] | None = None
@@ -3371,6 +3379,7 @@ class Compactor:
     def summary_region(
         self, nodes: list[SessionNode], *, context_window: int | None = None,
         scale: float = 1.0, due_only: bool = False, for_target: bool = False,
+        retry_rejected: bool = False,
     ) -> tuple[str, str, str] | None:
         """A whole-turn compacted prefix, frozen before starting the side call.
 
@@ -3408,7 +3417,28 @@ class Compactor:
         # Do not repeatedly summarize an unchanged checkpoint.
         if (nodes[0].node_id, end) in self._summaries:
             return None
-        rendered = self._render(nodes[:stop])
+        text = self._summary_input(nodes[:stop])
+        # Nor rebuild one whose last attempt failed or did not shrink the
+        # view, until its input changes; an owner's /compact still retries.
+        if not retry_rejected and self._rejected_regions.get((nodes[0].node_id, end)) == hash(text):
+            return None
+        return nodes[0].node_id, end, text
+
+    def reject_summary_region(self, region: tuple[str, str, str]) -> None:
+        """Remember that ``region``'s checkpoint failed to build or to shrink.
+
+        Process memory, bounded to the newest few regions: a restart may
+        retry each once more.
+        """
+        key = region[:2]
+        self._rejected_regions.pop(key, None)
+        self._rejected_regions[key] = hash(region[2])
+        while len(self._rejected_regions) > _REJECTED_REGIONS_MAX:
+            self._rejected_regions.pop(next(iter(self._rejected_regions)))
+
+    def _summary_input(self, prefix: list[SessionNode]) -> str:
+        """The side model's input for a checkpoint of ``prefix``, as rendered now."""
+        rendered = self._render(prefix)
         def content_text(block: Any) -> str:
             if isinstance(block, Text):
                 return block.text
@@ -3432,13 +3462,21 @@ class Compactor:
             prefix = previous[:max(0, cap - len(marker) - 1)]
             tail_chars = cap - len(prefix) - len(marker)
             text = prefix + marker + (text[-tail_chars:] if tail_chars else "")
-        return nodes[0].node_id, end, text
+        return text
 
     def apply_summary(
         self, nodes: list[SessionNode], pending: tuple[str, str, str], *,
         overhead_tokens: int = 0, decision_reason: str = "summary_batch",
+        source: str | None = None,
     ) -> Promotion | None:
-        """Commit persisted text only on its original path and only if it saves."""
+        """Commit persisted text only on its original path and only if it saves.
+
+        ``source`` is the side model input the text was built from (the
+        :meth:`summary_region` text). A checkpoint that does not save is
+        remembered against that input, not the prefix as rendered now: the
+        ladder may have changed the prefix since, and that new input has never
+        been tried. Without it, the prefix as rendered now is recorded.
+        """
         if not self.config.enabled or not self.config.summary_enabled:
             return None
         start, end, text = pending
@@ -3458,7 +3496,11 @@ class Compactor:
         after = self._estimate(nodes, overhead_tokens)
         if after >= before:
             restore()
+            if source is None:
+                source = self._summary_input(nodes[index[start]:index[end] + 1])
+            self.reject_summary_region((start, end, source))
             return None
+        self._rejected_regions.pop((start, end), None)
         return Promotion(tier=4, reason="summary", summary_text=text, summary_pin=pin,
                          spans=((start, end, "summary"),), before_tokens=before,
                          after_tokens=after, reclaimed_chars=(before - after) * 4,

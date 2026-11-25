@@ -44,6 +44,7 @@ from urllib.parse import urlencode
 import httpx
 
 from fluid._filelock import file_lock
+from fluid.context.screening import redact_text
 from fluid.tools.child_env import scrub_child_env
 
 logger = logging.getLogger(__name__)
@@ -385,9 +386,17 @@ async def poll_device_code(
 
 
 async def refresh_tokens(
-    refresh_token: str, *, client: httpx.AsyncClient | None = None
+    refresh_token: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+    access_token: str | None = None,
 ) -> TokenBundle:
-    """Refresh the access token; returns the ROTATED bundle."""
+    """Refresh the access token; returns the ROTATED bundle.
+
+    A refusal's code and description are redacted against the refresh token
+    and the expiring ``access_token`` before they are raised: the server may
+    echo the token it rejected, and the error is logged and becomes the
+    turn's terminal error, outside any stream's error redaction."""
     resp = await _post(
         client,
         TOKEN_URL,
@@ -399,6 +408,11 @@ async def refresh_tokens(
     )
     if resp.status_code >= 400:
         code, message = _error_code(_safe_json(resp))
+        known = (refresh_token, access_token or "")
+        if code:
+            code = redact_text(code, known)
+        if message is not None:
+            message = redact_text(str(message), known)
         raise CodexAuthError(code or f"http_{resp.status_code}", message)
     return _bundle_from_token_response(_safe_json(resp), prior_refresh_token=refresh_token)
 
@@ -599,7 +613,8 @@ class CodexAuth:
             if disk is not None and disk.refresh_token != prior.refresh_token:
                 self._bundle = disk
                 return
-            new = await refresh_tokens(prior.refresh_token, client=self._client)
+            new = await refresh_tokens(
+                prior.refresh_token, client=self._client, access_token=prior.access_token)
             bundle = StoredBundle(
                 access_token=new.access_token,
                 refresh_token=new.refresh_token,

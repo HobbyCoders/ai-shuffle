@@ -17,11 +17,13 @@ Three content paths, in order of dispatch:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from collections.abc import Iterator
 from io import BytesIO
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from fluid.tools.builtins._util import (
     is_binary,
@@ -158,20 +160,48 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
     )
 
 
+# Characters pulled per read while skipping the unshown rest of a long line.
+_SKIP_CHUNK_CHARS = 64 * 1024
+
+
+def _bounded_lines(fh: TextIO, keep: int) -> Iterator[str]:
+    """Each line of ``fh`` without its ending, holding at most ``keep + 1`` chars.
+
+    A longer line comes back as its first ``keep + 1`` characters (so the
+    caller can tell it was cut) and the rest is read and dropped in fixed-size
+    chunks. Neither a giant single-line file nor a deep offset ever has more
+    than one bounded piece of a line in memory.
+    """
+    while True:
+        piece = fh.readline(keep + 1)
+        if not piece:
+            return
+        if not piece.endswith("\n") and len(piece) > keep:
+            while (rest := fh.readline(_SKIP_CHUNK_CHARS)) and not rest.endswith("\n"):
+                pass
+        yield piece.rstrip("\r\n")
+
+
 def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool, int]:
     """Read a bounded page, returning text, whether more remains, and line count.
 
     The character budget stops before a whole numbered line, never midway
     through one. The caller must use the delivered count for continuation,
     Edit coverage and ResultRef slicing, not the requested window length.
+    Lines are read through :func:`_bounded_lines`, so memory stays bounded
+    whatever the file's line lengths; this blocks, so callers run it on a
+    worker thread.
     """
     window_len = int(limit) if limit else DEFAULT_LINE_LIMIT
     out: list[str] = []
     chars = 0
     more = False
     with path.open("r", encoding="utf-8", errors="replace") as fh:
-        lines = (line.rstrip("\r\n") for line in fh)
-        for i, line in enumerate(islice(lines, offset - 1, offset - 1 + window_len)):
+        # Skipped lines keep nothing; shown lines keep enough to be cut.
+        for _ in islice(_bounded_lines(fh, 0), offset - 1):
+            pass
+        lines = _bounded_lines(fh, MAX_LINE_CHARS)
+        for i, line in enumerate(islice(lines, window_len)):
             if len(line) > MAX_LINE_CHARS:
                 line = line[:MAX_LINE_CHARS] + "… [line truncated]"
             numbered_line = f"{offset + i}\t{line}"
@@ -182,7 +212,7 @@ def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool, i
             out.append(numbered_line)
             chars += size
         else:
-            more = next(lines, None) is not None
+            more = fh.read(1) != ""
     numbered = "\n".join(out)
     if more:
         numbered += (
@@ -220,7 +250,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     offset = max(1, int(input.get("offset", 1)))
     limit = input.get("limit")
-    numbered, more, window_len = _read_text(path, offset, limit)
+    numbered, more, window_len = await asyncio.to_thread(_read_text, path, offset, limit)
     ctx.read_files.add(str(path))
     # The lines actually delivered, for Edit's window check: a windowed read
     # that stopped short owns exactly its window; one that reached the end of

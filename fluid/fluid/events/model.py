@@ -807,6 +807,9 @@ class DelegatedDiagnostic(Event):
       no pin, the one Fluid's compactor sizes against). ``data`` carries
       ``expected``, ``effective``, ``pinned``, ``source`` (the CLI's
       ``autocompactSource``), ``raw_max_tokens`` and ``cli_version`` (#754).
+    * ``"agent_context_reset"``: an ACP agent could not reopen its saved
+      conversation and the engine started a new one, without the earlier
+      context; ``message`` says so for the person reading the chat.
 
     Stored with the session for audits; hosts that do not know it skip it.
     Never terminal, never part of the model conversation.

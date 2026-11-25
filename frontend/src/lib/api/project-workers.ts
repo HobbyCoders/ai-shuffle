@@ -8,7 +8,8 @@
  *   GET    /projects/workers?<ref>               one project's per-worker detail (Workers tab)
  *   POST   /projects/setup                       start a setup (202)
  *   POST   /projects/setup/{op_id}/cancel        best-effort cancel (409 once finished)
- *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record (files untouched)
+ *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record and its chats there (files untouched)
+ *   GET    /projects/{id}/removal                what DELETE /projects/{id} removes here (chat count, kept worktree folders)
  *   PUT    /projects/catalog/repository?<ref>    point the project at another repository on every worker
  *   POST   /projects/catalog/forget?<ref>        take a project no worker holds off the list (nothing deleted)
  *
@@ -92,6 +93,12 @@ export interface ProjectWorkerDetail extends ProjectWorker {
 	branch: string | null;
 	dirty: boolean | null;
 	changed_files: number | null;
+	/** Chats "Remove project and chats" deletes on that worker; null from an older worker. */
+	removal_chats?: number | null;
+	/** Worktree folders whose records go with the project while the folders stay on disk. */
+	removal_worktree_count?: number | null;
+	/** Their paths; owner/admin only. */
+	removal_worktrees?: string[] | null;
 	last_seen: string | null;
 }
 
@@ -176,6 +183,24 @@ export function startProjectSetup(ref: ProjectRef, request: SetupRequest): Promi
 
 export function cancelProjectSetup(opId: string): Promise<{ status: string }> {
 	return api.post<{ status: string }>(`/projects/setup/${encodeURIComponent(opId)}/cancel`);
+}
+
+export interface ProjectRemovalPreview {
+	project_id: string;
+	/** Chats `DELETE /projects/{id}` deletes on this worker. */
+	chats: number;
+	/** Worktree folders whose records go with the project; the folders stay on disk. */
+	worktrees: string[];
+}
+
+/** What removing this worker's project row does. `null` when this worker predates the endpoint. */
+export async function getProjectRemovalPreview(projectId: string): Promise<ProjectRemovalPreview | null> {
+	try {
+		return await api.get<ProjectRemovalPreview>(`/projects/${encodeURIComponent(projectId)}/removal`);
+	} catch (error) {
+		if (isUnsupported(error)) return null;
+		throw error;
+	}
 }
 
 export async function removeProjectFromWorker(installId: string, ref: ProjectRef): Promise<void> {

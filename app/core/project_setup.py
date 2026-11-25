@@ -568,6 +568,10 @@ def local_status(project_v2_id: Optional[str] = None) -> Dict[str, Any]:
     }
     if project_v2_id:
         out["detail"] = _checkout_detail(project_v2_id, me)
+        # The Workers tab's remove confirmation names these.
+        removal = local_removal_preview(project_v2_id)
+        out["detail"]["removal_chats"] = removal["chats"] if removal else None
+        out["detail"]["removal_worktrees"] = removal["worktrees"] if removal else None
     return out
 
 
@@ -626,31 +630,56 @@ def cancel_local(op_id: str) -> Dict[str, Any]:
     raise SetupConflict("This setup already finished")
 
 
-def remove_local(project_v2_id: str) -> Dict[str, Any]:
-    """Delete THIS worker's project record(s) for the logical project (sync).
-
-    Same as deleting the project here: the record (and its chats) go, the
-    files stay. Raises ``LookupError`` when this worker has no record.
-    """
-    from app.db import database, projects_v2
+def _local_removal_ids(project_v2_id: str) -> List[str]:
+    """THIS worker's project record ids for the logical project (sync)."""
+    from app.db import projects_v2
     from app.network import engine
 
     pv2 = projects_v2.get_project_v2(project_v2_id)
     if pv2 is None:
         raise LookupError("Unknown project")
-    me = _me()
-    removed = []
-    for row in _own_project_rows():
-        if _origin_of(row) != pv2.get("origin"):
-            continue
-        # An unowned legacy row is every worker's on a shared database.
-        if row.get("instance_id") != me and engine.context() is None:
-            continue
-        database.delete_project(row["id"])
-        removed.append(row["id"])
-    if not removed:
+    ids = [row["id"] for row in _own_project_rows()
+           if _origin_of(row) == pv2.get("origin") and _removable_here(row, engine.context())]
+    if not ids:
         raise LookupError("This worker has no record of the project")
-    return {"removed": removed}
+    return ids
+
+
+def _removable_here(row: Dict[str, Any], network_context: Any) -> bool:
+    """The Workers tab's rule for removing a project row on this worker.
+
+    The row must belong to this worker; an unowned legacy row counts only
+    while networked (``_local_removal_ids``). The removal checks it again on
+    the locked row before deleting it.
+    """
+    owner = row.get("instance_id")
+    return owner == _me() or (owner is None and network_context is not None)
+
+
+def local_removal_preview(project_v2_id: str) -> Optional[Dict[str, Any]]:
+    """What :func:`remove_local` would remove here, or None without a record (sync)."""
+    from app.core.project_removal import preview
+
+    try:
+        return preview(_local_removal_ids(project_v2_id))
+    except LookupError:
+        return None
+
+
+async def remove_local(project_v2_id: str) -> Dict[str, Any]:
+    """Delete THIS worker's project record(s) for the logical project.
+
+    Same as deleting the project here: the record and its chats on this
+    worker go (``app/core/project_removal.py``), the files stay. Raises
+    ``LookupError`` when this worker has no record.
+    """
+    from app.core.project_removal import remove_projects
+    from app.db.async_database import run_sync
+    from app.network import engine
+
+    ids = await run_sync(_local_removal_ids, project_v2_id)
+    networked = engine.context()
+    return await remove_projects(ids, owned=lambda row: _removable_here(row, networked))
 
 
 # ---------------------------------------------------------------------------
@@ -1212,7 +1241,7 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         emit_changed()
         return result
     if action == "remove":
-        result = await run_sync(remove_local, str(body.get("project_v2_id") or ""))
+        result = await remove_local(str(body.get("project_v2_id") or ""))
         _after_local_registration_change()
         return result
     if action in ("browse-folder", "change-folder"):

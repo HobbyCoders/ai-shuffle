@@ -104,7 +104,8 @@ model *reads* framing tokens even when they can't structurally escape.
 permission engine (policy + last-match-wins rules + scoped allow-always; an
 MCP tool's own `readOnlyHint` counts only for a server with
 `trust_annotations = true`, and a Bash allow-always names what a wrapper such
-as `sudo` or `npm` ran, not the wrapper alone), the
+as `sudo` or `npm` ran, not the wrapper alone; a program named by path, such
+as `/usr/bin/git` or `scripts/git`, is approved for that one call only), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

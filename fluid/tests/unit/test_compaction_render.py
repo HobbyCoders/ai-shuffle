@@ -553,6 +553,20 @@ def test_traceback_result_survives_one_turn() -> None:
     assert ("n0c", "c0") in trimmer._eligible(nodes[:8], keep_recent=0)
 
 
+def test_recency_tail_batch_keeps_the_traceback_hold() -> None:
+    # Review finding (context #8): the tail branch reused keep_recent=0 as its
+    # sentinel, which also waived the hold meant only for overflow recovery.
+    plain = "ok line\n" * 600
+    nodes = _cell_turn(0) + _cell_turn(1, plain)
+    trimmer = _trim_only().trimmer
+    # Both results sit before the tail; one turn start follows the traceback.
+    tail = trimmer._eligible(nodes, protected_from=7)
+    assert ("n0c", "c0") not in tail and ("n1c", "c1") in tail
+    # Turn starts inside the tail count toward releasing it.
+    later = nodes + _cell_turn(2, plain)
+    assert ("n0c", "c0") in trimmer._eligible(later, protected_from=7)
+
+
 # Version 1 output for the cell fixture, captured from origin/main 0163171fe.
 V1_DIGEST = (
     '[compacted turn n0a..n0d — mechanical digest; originals intact: '

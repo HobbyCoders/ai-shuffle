@@ -52,6 +52,7 @@ from fluid.cli.repl import (
 )
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
+from fluid.context.screening import REDACTED, is_credential_name, redact_argv, redact_text
 from fluid.events import ErrorEvent, Event, Interrupted, TurnComplete, Usage
 from fluid.events.bus import EventBus
 from fluid.store.base import SessionLocked
@@ -419,9 +420,31 @@ def _resume_target(args: argparse.Namespace, store_dir) -> str | None:
     return None
 
 
+def _redacted_config(value: Any, key: str = "") -> Any:
+    """``value`` (a config dict) safe to print: every ``headers`` and ``env``
+    value is masked (they hold credentials expanded from the environment), so
+    is any field named like a credential (fluid.context.screening.
+    is_credential_name) and the value of a credential-named flag in ``args``
+    (``--api-key VALUE``, ``--api-key=VALUE``), and the recognised credential
+    shapes are cut from all other strings (a password in a URL, a token in a
+    command line). Keys and structure are kept; the config itself is not
+    touched."""
+    if isinstance(value, dict):
+        if key in ("headers", "env"):
+            return {k: REDACTED for k in value}
+        return {k: _redacted_config(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if key == "args":
+            value = redact_argv(value)
+        return [_redacted_config(v, key) for v in value]
+    if isinstance(value, str):
+        return REDACTED if value and is_credential_name(key) else redact_text(value)
+    return value
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     config = _resolve_config(args)
-    print(json.dumps(config.to_dict(), indent=2, default=str))
+    print(json.dumps(_redacted_config(config.to_dict()), indent=2, default=str))
     return 0
 
 

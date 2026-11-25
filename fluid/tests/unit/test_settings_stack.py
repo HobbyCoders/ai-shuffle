@@ -154,6 +154,23 @@ def test_permission_entry_grammar() -> None:
     assert parse_permission_entry("", "allow") is None
 
 
+def test_unmapped_patterned_allow_is_skipped_not_widened(caplog) -> None:
+    # Widening "allow mcp__docs__fetch for one URL" to the whole tool would
+    # authorize every other input, so the entry is dropped with a warning.
+    with caplog.at_level("WARNING", logger="fluid.context.settings_stack"):
+        rule = parse_permission_entry("mcp__docs__fetch(https://example.com/*)", "allow")
+    assert rule is None
+    assert "mcp__docs__fetch" in caplog.text
+
+    rules = permission_rules({"permissions": {
+        "allow": ["WebFetch(domain:example.com)"],
+        "deny": ["WebFetch(domain:evil.example)"],
+    }})
+    # The restrictive entry fails safe across the whole tool; nothing allows it.
+    assert [(r.tool, r.decision, r.input_globs) for r in rules] == [("WebFetch", "deny", {})]
+    assert evaluate_rules(rules, "WebFetch", {"url": "https://example.com/a"}) == "deny"
+
+
 def test_permission_rules_emit_allow_then_ask_then_deny(tmp_path, monkeypatch) -> None:
     proj = _scoped(
         tmp_path, monkeypatch,
