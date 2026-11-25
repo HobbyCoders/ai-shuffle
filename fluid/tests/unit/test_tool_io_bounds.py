@@ -20,7 +20,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from fluid.tools.builtins import _util
 from fluid.tools.builtins import edit as edit_mod
 from fluid.tools.builtins import grep as grep_mod
@@ -29,6 +28,7 @@ from fluid.tools.builtins import write as write_mod
 from fluid.tools.mcp import client as client_mod
 from fluid.tools.mcp.client import McpClient
 from fluid.tools.registry import API_TOOL_NAME_MAX, ToolCtx, api_tool_name
+
 from tests.unit.test_grep_engine_edges import FakeRgProc
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and symlinks")
