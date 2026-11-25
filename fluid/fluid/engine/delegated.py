@@ -3699,13 +3699,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     if not await self._answer_stale_control_request(frame):
                         continue
                 elif kind == "result":
-                    logger.warning("discarding stale between-turn CLI result: %.300s", text)
+                    # Metadata only: the frame's text is conversation data.
+                    logger.warning(
+                        "discarding stale between-turn CLI result: subtype=%.40s "
+                        "uuid=%.64s chars=%d",
+                        frame.get("subtype"), frame.get("uuid"), len(text),
+                    )
                     wake_deadline = None
                     self._wake_in_flight = False
                     settle_until = 0.0
                     continue
                 else:
-                    logger.warning("discarding stale between-turn CLI frame: %.300s", text)
+                    logger.warning(
+                        "discarding stale between-turn CLI frame: type=%.40s "
+                        "subtype=%.40s uuid=%.64s chars=%d",
+                        kind, frame.get("subtype"), frame.get("uuid"), len(text),
+                    )
                     # A lone system frame (a task_notification, say) is no proof
                     # a wake turn is running; only a turn's own frames arm the wait.
                     if kind not in _WAKE_FRAME_TYPES:
@@ -5997,7 +6006,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # context-usage capture between turns): the next turn's drain
                 # must wait for its result, as it would had it seen this frame.
                 self._wake_in_flight = True
-            logger.warning("discarding between-turn CLI frame: %.300s", text)
+            logger.warning("discarding between-turn CLI frame: type=%.40s chars=%d", kind, len(text))
         return _PumpOutcome.REPLY
 
     async def get_context_usage(self) -> dict[str, Any] | None:

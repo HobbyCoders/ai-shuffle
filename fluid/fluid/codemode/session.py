@@ -50,6 +50,7 @@ from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.truncate import FULL_STDOUT_MAX
 from fluid.codemode.verify import verify_sources, verify_store
+from fluid.context.screening import redact_text
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
@@ -800,12 +801,13 @@ class CodeModeSession:
             # The kernel's one-line summary of the exception; a host-authored
             # error (timeout, kernel death) has none and is short.
             error = getattr(result, "error_summary", "") or (
-                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
+                redact_text(error_lines[-1])[:_JOURNAL_VALUE_CAP] if error_lines else None)
+            # Redacted before the clips (see SkillStore.journal_append).
             self._skills.journal_append({
                 "kind": "cell",
-                "code": _cap_code(code),
-                "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
-                "value": result.value_repr[:_JOURNAL_VALUE_CAP],
+                "code": _cap_code(redact_text(code)),
+                "stdout": redact_text(result.stdout)[:_JOURNAL_STDOUT_CAP],
+                "value": redact_text(result.value_repr)[:_JOURNAL_VALUE_CAP],
                 "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),

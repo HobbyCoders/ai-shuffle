@@ -49,11 +49,13 @@ from fluid.providers._transport import (
     StreamDeadlineExceeded,
     deadline_error_payload,
     first_byte_note,
+    header_secrets,
     is_closed_client_error,
     billing_summary,
     is_usable_client,
     open_stream,
     provider_error_summary,
+    redact_errors,
     refusal_payload,
     usage_limit_summary,
 )
@@ -573,11 +575,28 @@ class ChatCompletionsNormalizer:
 FIRST_DATA_TIMEOUT = 30.0
 
 
-async def stream_chat_completions(
+def stream_chat_completions(
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    **kwargs: Any,
+) -> AsyncIterator[StreamChunk]:
+    """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks
+    (see :func:`_stream_chat_completions`). Error chunks never carry the
+    credential values in ``headers``, which a proxy can echo back.
+    """
+    secrets = header_secrets(headers)
+    return redact_errors(
+        _stream_chat_completions(url, body, headers, secrets=secrets, **kwargs), secrets,
+    )
+
+
+async def _stream_chat_completions(
     url: str,
     body: dict[str, Any],
     headers: dict[str, str],
     *,
+    secrets: list[str],
     http_client: httpx.AsyncClient | None,
     timeout: float,
     retry: RetryPolicy,
@@ -684,7 +703,8 @@ async def stream_chat_completions(
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
                         refusal = refusal_payload(
-                            resp.status_code, text, resp.headers.get("retry-after"))
+                            resp.status_code, text, resp.headers.get("retry-after"),
+                            secrets=secrets)
                         if refusal["retriable"] and attempt < retry.max_retries:
                             await asyncio.sleep(
                                 retry.delay(attempt, resp.headers.get("retry-after"))

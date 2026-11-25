@@ -72,9 +72,11 @@ from fluid.providers._transport import (
     StreamDeadlineExceeded,
     deadline_error_payload,
     first_byte_note,
+    header_secrets,
     is_closed_client_error,
     is_usable_client,
     open_stream,
+    redact_errors,
     refusal_payload,
     truncated_stream_payload,
     with_deadline,
@@ -415,7 +417,15 @@ class OpenAIResponsesClient:
         assert owned is not None
         return owned, owned
 
-    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+    def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        # Error chunks lose the request's own credential: an OAuth token is
+        # added to ``secrets`` as each attempt fetches it.
+        secrets = [self._api_key]
+        return redact_errors(self._stream(request, secrets), secrets)
+
+    async def _stream(
+        self, request: ProviderRequest, secrets: list[str]
+    ) -> AsyncIterator[StreamChunk]:
         # A resumed history (or an LRU eviction) can require image encoding.
         body = await asyncio.to_thread(build_request_body, request)
         if self._is_codex_backend():
@@ -450,6 +460,7 @@ class OpenAIResponsesClient:
                 )
                 try:
                     headers = await self._headers(body, wire, request_id, request.model)
+                    secrets.extend(header_secrets(headers))
                     trace_request("openai_responses", body)
                     first_byte = self._first_byte_timeout
                     sent_at = time.monotonic()
@@ -644,7 +655,8 @@ class OpenAIResponsesClient:
                             refreshed_401 = True
                             continue
                         refusal = refusal_payload(
-                            resp.status_code, text, resp.headers.get("retry-after"))
+                            resp.status_code, text, resp.headers.get("retry-after"),
+                            secrets=secrets)
                         if (
                             refusal["retriable"] and not native_image
                             and attempt < self._retry.max_retries

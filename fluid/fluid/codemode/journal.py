@@ -36,6 +36,7 @@ from typing import Any
 
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
+from fluid.context.screening import redact_text
 from fluid.tools.view import POINTER_MARK
 
 _EVENT_CAP = 1_500
@@ -310,7 +311,8 @@ def conversation_entry(kind: str, text: str, cap: int,
         text = strip_reminders(text)
     if not (text or "").strip():
         return None
-    entry: dict[str, Any] = {"kind": kind, "text": text[:cap]}
+    # Redacted before the clip (see SkillStore.journal_append).
+    entry: dict[str, Any] = {"kind": kind, "text": redact_text(text)[:cap]}
     if kind == "user" and model:
         entry["model"] = str(model)[:80]
     if kind == "user":
@@ -399,7 +401,10 @@ class ToolJournal:
     def record_tool(
         self, name: str, input: dict[str, Any], output: str, is_error: bool
     ) -> None:
-        """Journal one JSON-surface tool call (compact previews only)."""
+        """Journal one JSON-surface tool call (compact previews only).
+
+        Arguments and output are redacted before they are clipped (see
+        SkillStore.journal_append)."""
         try:
             compact = json.dumps(input, ensure_ascii=False, default=str)
         except Exception:
@@ -407,8 +412,8 @@ class ToolJournal:
         entry: dict[str, Any] = {
             "kind": "tool",
             "name": name,
-            "input": compact[:_INPUT_CAP],
-            "output": " ".join((output or "").split())[:_OUTPUT_CAP],
+            "input": redact_text(compact)[:_INPUT_CAP],
+            "output": redact_text(" ".join((output or "").split()))[:_OUTPUT_CAP],
         }
         if is_error:
             entry["error"] = True

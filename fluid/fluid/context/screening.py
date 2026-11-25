@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,88 @@ def looks_like_secret(content: str) -> str | None:
         if pattern.search(content):
             return kind
     return None
+
+
+REDACTED = "[redacted]"
+
+# Shapes redacted in place, on top of the vendor prefixes above. Each keeps
+# its label (the header scheme, the field name, the URL's user and host) so a
+# redacted diagnostic still says what it was about.
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?"
+            r"(?:-----END \1PRIVATE KEY-----|\Z)"
+        ),
+        REDACTED,
+    ),
+    (re.compile(r"\b(Bearer|Basic)(\s+)[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE),
+     r"\1\2" + REDACTED),
+    (
+        re.compile(
+            r"\b((?:api[_-]?key|access[_-]?token|client[_-]?secret|password)"
+            r"[\"']?\s*[=:]\s*[\"']?)[A-Za-z0-9+/_.~=-]{16,}",
+            re.IGNORECASE,
+        ),
+        r"\1" + REDACTED,
+    ),
+    # ``scheme://user:password@host``: only the password goes. A match starts
+    # only where a run of scheme characters starts, so a long token with no
+    # ``://`` is scanned once rather than once per character.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9+.\-])([A-Za-z][A-Za-z0-9+.\-]*://[^\s:/?#@\"'<>]*:)"
+            r"[^\s/?#@\"'<>]+(?=@)"
+        ),
+        r"\1" + REDACTED,
+    ),
+)
+
+# Shorter known values are not credentials (an "EMPTY" local-server key) and
+# replacing them would garble ordinary words in the text.
+_MIN_KNOWN_SECRET = 8
+
+
+def redact_text(text: str, known: Iterable[str] = ()) -> str:
+    """``text`` with credentials replaced by ``[redacted]``.
+
+    ``known`` are exact values to remove wherever they appear (the key or
+    token a request actually carried); the recognised credential shapes go
+    too, and so does a known value's prefix at the very end of ``text`` (a
+    clip, with or without its ``…``, that cut the value in half). Recognised
+    shapes only, not arbitrary-secret detection.
+    """
+    for value in sorted({k for k in known if k and len(k) >= _MIN_KNOWN_SECRET},
+                        key=len, reverse=True):
+        text = text.replace(value, REDACTED)
+        body, mark = (text[:-1], "…") if text.endswith("…") else (text, "")
+        for n in range(len(value) - 1, _MIN_KNOWN_SECRET - 1, -1):
+            if body.endswith(value[:n]):
+                text = body[:-n] + REDACTED + mark
+                break
+    for kind, pattern in _SECRET_PATTERNS:
+        if kind not in ("private-key block", "credential assignment"):
+            text = pattern.sub(REDACTED, text)
+    for pattern, replacement in _REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact_secrets(value: Any, known: Iterable[str] = ()) -> Any:
+    """A copy of ``value`` with every string passed through :func:`redact_text`.
+
+    Dicts and lists are walked; keys and other scalars are kept as they are.
+    """
+    known = tuple(known)
+    if isinstance(value, str):
+        return redact_text(value, known)
+    if isinstance(value, dict):
+        return {k: redact_secrets(v, known) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(v, known) for v in value]
+    if isinstance(value, tuple):
+        return tuple(redact_secrets(v, known) for v in value)
+    return value
 
 
 def screen_findings(content: str) -> list[str]:
