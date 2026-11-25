@@ -14,3 +14,9 @@
 .project-memory-editor:focus-visible, .project-memory-preview:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 2px; }
 .project-progress { width: 80px; height: 6px; accent-color: var(--st-mfg); }
 @media (max-width: 600px) { .project-memory-editor { font-size: 16px; } }
+
+/* "Remove project and chats": the worktree folders that stay on disk. */
+.kept-worktrees { font-size: 13px; color: var(--st-mfg); }
+.kept-worktrees summary { cursor: pointer; }
+.kept-worktrees ul { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow-y: auto; }
+.kept-worktrees li { overflow-wrap: anywhere; font-size: 11.5px; }

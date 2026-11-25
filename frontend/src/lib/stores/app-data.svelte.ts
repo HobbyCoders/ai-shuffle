@@ -1005,12 +1005,11 @@ export const appData = {
 	async deleteProject(projectId: string) {
 		await api.delete(`/projects/${projectId}`);
 
-		// The backend deletes every session attached to the project. Mirror that
-		// cascade locally as soon as the request succeeds so stale chats cannot
-		// remain in the sidebar or keep the deleted project in its filter menu.
-		const removedSessionIds = new Set(
-			_state.sessions.filter(session => session.project_id === projectId).map(session => session.id)
-		);
+		// The server deletes only this worker's chats of the project; another
+		// worker's chat with the same project id stays. So no chat is guessed
+		// from its project_id here: each deleted chat arrives as its own
+		// user_session_deleted broadcast (which also leaves an open view of it),
+		// and the session reload below is the authoritative list.
 		_update(s => ({
 			...s,
 			projects: s.projects.filter(project => project.id !== projectId),
@@ -1018,28 +1017,11 @@ export const appData = {
 			// would re-offer the deleted project as one on this device until the
 			// catalog reload answers (#434). Another worker's clone still lists it.
 			clusterProjects: withoutLocalClone(s.clusterProjects, projectId),
-			sessions: s.sessions.filter(session => session.project_id !== projectId),
-			sessionsTotal: Math.max(0, s.sessionsTotal - removedSessionIds.size),
-			...(s.sessions.length === removedSessionIds.size
-				? {
-					sessionsCursor: null,
-					sessionsCursorId: null,
-					sessionsHasMore: false,
-				}
-				: {}),
 		}));
-
-		// The DELETE already succeeded, so the cascade is confirmed — but a list
-		// load may still be in flight with the pre-delete rows. Tombstone them so
-		// its commit cannot resurrect the deleted project's chats.
-		recordLocalRemoval(removedSessionIds);
-		confirmLocalEdits(removedSessionIds);
-
-		if (activeSession.current.sessionId && removedSessionIds.has(activeSession.current.sessionId)) {
-			activeSession.newChat();
-		}
 		activeSession.dropMissingProject();
-		await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), refreshProjectsOverviewIfUsed()]);
+		await Promise.all([
+			appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions(), refreshProjectsOverviewIfUsed(),
+		]);
 		activeSession.dropMissingProject();
 	},
 

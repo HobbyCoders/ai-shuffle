@@ -107,13 +107,13 @@ def test_repair_then_edit_with_noncanonical_legacy_path(registered):
 
 @pytest.mark.parametrize('pre_upgrade', [False, True])
 @pytest.mark.parametrize('resolve', [project_resolver.resolve_existing_cwd, project_resolver.resolve_cwd])
-def test_remove_setup_different_folder_and_edit(registered, pre_upgrade, resolve):
+async def test_remove_setup_different_folder_and_edit(registered, pre_upgrade, resolve):
     row, identity, old, new = registered
     original = checkouts.upsert_checkout(identity, ME, str(old))
     checkouts.repair_relative_checkout_paths(ME, old.parent)
     branch = checkouts.upsert_checkout(identity, ME, str(old / 'topic'), branch='topic')
     peer = checkouts.upsert_checkout(identity, 'other', str(old.parent / 'peer'))
-    assert project_setup.remove_local(identity)['removed'] == [row['id']]
+    assert (await project_setup.remove_local(identity))['removed'] == [row['id']]
     assert checkouts.get_checkout(identity, ME)['status'] == 'removed'
     # A chat bound to a truly removed project can still use its retained folder.
     assert resolve({'project_v2_id': identity}) == str(old)

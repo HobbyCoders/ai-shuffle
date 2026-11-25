@@ -58,7 +58,21 @@ Update a project.
 
 ### DELETE /api/v1/projects/{project_id}
 
-Delete a project from the database (does not delete files). Its chats are deleted with it, and it leaves `GET /api/v1/cluster/projects` on this device. Another device's copy of the same repository stays listed.
+Delete a project from the database (does not delete files). This worker's chats in the project are deleted with it, the same way deleting each chat would: chats linked to this project record. Chats on other workers, chats of other projects, and chats linked only to a shared project identity (for example a chat another worker placed here) are kept: an identity alone does not show which project record a chat belongs to. Worktree folders stay on disk. The project leaves `GET /api/v1/cluster/projects` on this device, and another device's copy of the same repository stays listed.
+
+Returns `404` when the project does not exist or belongs to another worker on a shared database.
+
+Returns `409` when another worker claims the project while it is being removed: the project stays, and this worker's chats in it that were already removed stay removed.
+
+**Auth:** Owner only
+
+### GET /api/v1/projects/{project_id}/removal
+
+What deleting the project would remove on this worker, so a confirmation can say so before anything is deleted. `chats` is the number of chats deleted. `worktrees` lists the worktree folders whose records are dropped while the folders stay on disk.
+
+```json
+{"project_id": "my-web-app", "chats": 3, "worktrees": ["/home/user/projects/my-web-app-feature"]}
+```
 
 **Auth:** Owner only
 
@@ -93,6 +107,8 @@ Cancel a queued or running setup. A partly cloned folder is removed.
 ### DELETE /api/v1/projects/workers/{install_id}
 
 Remove one worker's record of the project. Pass `project_v2_id` or `project_id`. Its files stay on that worker.
+
+Returns `removed` (the project records deleted) and `kept` (records another worker claimed during the removal, left in place).
 
 **Auth:** Owner only
 
