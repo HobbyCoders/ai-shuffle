@@ -350,6 +350,11 @@ async def test_pending_checkpoint_rejected_after_prefix_changes_keeps_its_input(
                                           overhead=0, batch_due=True) is None
     assert c._rejected_regions[pending[:2]] == hash(built_from[2])
     assert c.summary_region(path) == folded
+    # The input is consumed with the checkpoint, and dropped with it on cancel.
+    assert (loop._pending_summary, loop._pending_summary_source) == (None, None)
+    loop._pending_summary, loop._pending_summary_source = pending, built_from[2]
+    await loop.cancel_checkpoint()
+    assert (loop._pending_summary, loop._pending_summary_source) == (None, None)
     await loop.aclose()
 
 
