@@ -17,7 +17,8 @@
 	 */
 	import { untrack } from 'svelte';
 	import { get } from 'svelte/store';
-	import { ChevronRight, KeyRound, ShieldAlert, MessageCircleQuestionMark, Pencil, SendHorizontal, SkipForward, Terminal, Check, X } from 'lucide-svelte';
+	import { SvelteSet } from 'svelte/reactivity';
+	import { ChevronDown, ChevronRight, KeyRound, ShieldAlert, MessageCircleQuestionMark, Pencil, SendHorizontal, SkipForward, Terminal, Check, X } from 'lucide-svelte';
 	import UserQuestion from '$lib/components/UserQuestion.svelte';
 	import type { QuestionDraft, QuestionResponse, UserQuestionData } from '$lib/components/UserQuestion.svelte';
 	import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
@@ -96,6 +97,20 @@
 	function keep(id: string, patch: Partial<Draft>) {
 		drafts.set(id, { typing: false, typed: '', ...drafts.get(id), ...patch });
 	}
+
+	/**
+	 * Questions folded down to their header, by queue id, so the owner can
+	 * read the chat above and come back to answer. The body is hidden, not
+	 * unmounted, so a typed answer or the shared form's picks survive. A new
+	 * question always arrives open.
+	 */
+	const folded = new SvelteSet<string>();
+	const isFolded = $derived(!!currentId && folded.has(currentId));
+	function toggleFold() {
+		if (!currentId) return;
+		if (folded.has(currentId)) folded.delete(currentId);
+		else folded.add(currentId);
+	}
 	// Forget a draft once its question is neither open nor on its way. The
 	// open list is rebuilt whenever the sent marks change, so a relay_offline
 	// return is safe because the mark drops and the question reappears in the
@@ -108,6 +123,10 @@
 			for (const id of drafts.keys()) {
 				const requestId = id.slice(2);
 				if (!open.has(requestId) && !sent.has(requestId)) drafts.delete(id);
+			}
+			for (const id of folded) {
+				const requestId = id.slice(2);
+				if (!open.has(requestId) && !sent.has(requestId)) folded.delete(id);
 			}
 		});
 	});
@@ -361,14 +380,26 @@
 			{:else}
 				{@const request = current.request}
 				{@const question = request.questions[0]}
+				{@const bodyId = `q-body-${request.request_id}`}
 				<div class="p-head">
 					<MessageCircleQuestionMark size={17} class="t-ico q" aria-hidden="true" />
 					<strong>Question</strong>
-					<span class="what">{!connected ? 'Reconnect to answer' : request.nonblocking && working ? 'Still working' : 'Waiting for you'}</span>
+					{#if isFolded && question}
+						<!-- Folded: one line of the question, so it is clear what waits. -->
+						<span class="q-peek">{question.question || question.header}</span>
+					{:else}
+						<span class="what">{!connected ? 'Reconnect to answer' : request.nonblocking && working ? 'Still working' : 'Waiting for you'}</span>
+					{/if}
 					{#if queue.length > 1}
 						<button type="button" class="count" onclick={next} aria-label={`${position} of ${queue.length}. Show the next request`}>{position} of {queue.length}<ChevronRight size={14} aria-hidden="true" /></button>
 					{/if}
+					<button type="button" class="fold" class:open={!isFolded} aria-expanded={!isFolded} aria-controls={bodyId}
+						aria-label={isFolded ? 'Show the question' : 'Hide the question'} onclick={toggleFold}>
+						<ChevronDown size={18} aria-hidden="true" />
+					</button>
 				</div>
+				<!-- Hidden rather than unmounted: folding keeps the draft. -->
+				<div id={bodyId} class="q-body" hidden={isFolded}>
 				{#if simple(request) && question}
 					<p class="p-body q-text">{question.question}</p>
 					{#if typing || !question.options?.length}
@@ -398,6 +429,7 @@
 						{/key}
 					</div>
 				{/if}
+				</div>
 			{/if}
 		</section>
 	</div>
@@ -448,6 +480,29 @@
 		cursor: pointer;
 	}
 	.count:hover { background: var(--hover-overlay); color: var(--foreground); }
+	/* Folds a question to its header so the chat above can be read. */
+	.fold {
+		display: grid;
+		place-items: center;
+		flex-shrink: 0;
+		width: 44px;
+		height: 44px;
+		margin: -7px -8px -7px auto;
+		padding: 0;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+	}
+	.count + .fold { margin-left: 0; }
+	.fold:hover { background: var(--hover-overlay); color: var(--foreground); }
+	/* Open, the chevron points down (fold it away); folded, up (bring it back). */
+	.fold :global(svg) { transform: rotate(180deg); transition: transform 0.18s ease; }
+	.fold.open :global(svg) { transform: none; }
+	.q-peek { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); }
+	.q-body[hidden] { display: none; }
 	.cmd {
 		max-height: 5.8em;
 		margin: 8px 0 2px;
@@ -537,7 +592,7 @@
 	.q-form { margin-top: 10px; }
 	/* The shared form holds more than a tap card; let it fit without scrolling. */
 	.prompt:has(.q-form) { max-height: min(56dvh, 30rem); }
-	.count:focus-visible, .scope-chip:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible, .q-skip:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.count:focus-visible, .fold:focus-visible, .scope-chip:focus-visible, .review-btn:focus-visible, .q-opt:focus-visible, .q-send:focus-visible, .q-skip:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
 	/* Typing with the keyboard up: keep the decision, drop to one line of context. */
 	:global(.input-slot:has(.ProseMirror-focused)) .prompt .cmd,
@@ -551,5 +606,6 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.prompt { animation: none; }
+		.fold :global(svg) { transition: none; }
 	}
 </style>

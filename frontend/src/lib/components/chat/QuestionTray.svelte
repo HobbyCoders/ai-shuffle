@@ -64,6 +64,12 @@
 	.tray-toggle :global(svg) { flex-shrink: 0; }
 	.tray-toggle :global(.expanded) { transform: rotate(180deg); }
 	.tray-content { border-top: 1px solid var(--border); max-height: min(40dvh, 22rem); overflow-y: auto; overscroll-behavior: contain; }
+	/* A desktop-sized window shows the whole question, with no fixed cap. It
+	   only stops where it would push the composer out of the chat; the header
+	   folds it away to read the chat. Phone-width windows keep the cap. */
+	@media (min-width: 640px) {
+		.tray-content { max-height: max(12rem, calc(var(--chat-surface-height, 100dvh) - 14rem)); }
+	}
 	[hidden] { display: none !important; }
 	.request-tabs { display: flex; gap: 6px; padding: 0.625rem 0.75rem 0; flex-wrap: wrap; }
 	.request-tabs button { border: 1px solid transparent; border-radius: 4px; padding: 4px 7px; background: none; color: var(--muted-foreground); font: inherit; font-size: 0.6875rem; cursor: pointer; }
