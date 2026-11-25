@@ -4228,7 +4228,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # The cap holds for every provider dispatch: an empty-response
                 # or dropped-stream retry, a max_tokens or Stop-hook
                 # continuation each count as one call (any of them can bill),
-                # so a turn capped at N never sends request N+1.
+                # so a turn capped at N never sends request N+1. One
+                # deliberate exception: an Ultrafast request the provider
+                # refused did no model work and is uncounted (see the
+                # ``ultrafast_refused`` branch), so a turn capped at one call
+                # still sends the Standard request that follows it.
                 final_stop = "max_calls"
                 break
             nodes = await self._context_path(sid, parent.node_id)
@@ -4534,6 +4538,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if (
                     arg_stream_retries < _ARG_STREAM_MAX_RETRIES
                     and not self._interrupted.is_set()
+                    # The reissue is a model call: at the cap it takes the
+                    # spent-retry route below instead of announcing one.
+                    and self._model_call_budget_left(num_calls)
                 ):
                     # A degenerate generation is usually a one-off. Re-send the
                     # same history — nothing is
@@ -4592,8 +4599,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                     session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                     reason="guardrail",
                 ))
+                # A retry on another model is a model call: at the cap the
+                # person is not asked to pick one that could never be sent.
+                budget_left = self._model_call_budget_left(num_calls)
                 if await self._guardrail_pause(
                     sid, turn_id, parent, result, num_calls, projected_prompt, total_usage,
+                    budget_left=budget_left,
                 ):
                     continue  # the same history, on the model the person chose
                 if self._interrupted.is_set():
@@ -4605,7 +4616,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         num_model_calls=num_calls,
                     ))
                     return
-                final_stop = "refusal"
+                final_stop = "refusal" if budget_left else "max_calls"
                 # Partial output a declined call streamed is discarded, never
                 # kept as the turn's reply.
                 result.message = Message(role="assistant", content=[])
@@ -4630,6 +4641,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                         replay_drop = lowered_effort is not None
                     else:
                         replay_drop = True
+                # Every retry below re-sends the request, a model call. At the
+                # cap none goes out, so none is announced, prompted for or
+                # backed off for: the failed call is still recorded and the
+                # turn ends on the cap.
+                budget_left = self._model_call_budget_left(num_calls)
+                retry_capped = False
+                if replay_drop and not budget_left:
+                    replay_drop, lowered_effort, retry_capped = False, None, True
                 # A failed HTTP request can still be billable. Record and
                 # publish it before deciding whether the context-overflow path
                 # is eligible for another escalation retry.
@@ -4725,11 +4744,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                         delay_seconds=0.0, model=self.model,
                     ))
                     continue
-                if (
+                reasoning_retry = bool(
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
                     and "invalid_encrypted_content" in result.error_message
-                ):
+                )
+                rewrite_retry = overflow_retries < 3 and (
+                    _is_payload_rejection(result.error_message or "", result.error_status)
+                    or _is_context_overflow(result.error_message or "", result.error_status)
+                )
+                if not budget_left and (reasoning_retry or rewrite_retry):
+                    # No history rewrite or retry notice for a request the cap
+                    # keeps from going out.
+                    retry_capped = True
+                if reasoning_retry and not retry_capped:
                     # The history carries an encrypted reasoning blob the
                     # current model+account cannot decrypt — the session
                     # switched model or account on the same provider dialect
@@ -4752,7 +4780,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
                     continue
                 if (
-                    overflow_retries < 3
+                    not retry_capped
+                    and overflow_retries < 3
                     and _is_payload_rejection(
                         result.error_message or "", result.error_status
                     )
@@ -4783,7 +4812,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                             )
                         continue
                 if (
-                    overflow_retries < 3
+                    not retry_capped
+                    and overflow_retries < 3
                     and _is_context_overflow(
                         result.error_message or "", result.error_status
                     )
@@ -4823,62 +4853,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                         continue
                 # The failed call's usage was folded in above (before the
                 # escalation decision) — snapshot it, don't re-fold.
-                #
-                # Whatever the user watched stream is kept, however the stream
-                # ended (a dropped connection, an in-stream error, a body cut
-                # before its terminal event): the visible text and the tool
-                # requests that closed, for a later user-directed continuation.
-                # The node is marked interrupted so no reader takes it for a
-                # finished answer. Incomplete arguments and opaque reasoning
-                # envelopes are not safe provider history and are dropped.
-                transport = bool(result.usage.get("transport_failure"))
-                completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
-                content = [
-                    block for block in result.message.content
-                    if (isinstance(block, Text) and block.text) or (
-                        isinstance(block, ToolUseBlock) and block.id in completed_ids
-                    )
-                ]
-                if content:
-                    node = SessionNode(
-                        node_id=new_id("node"), parent_id=parent.node_id,
-                        message=Message(
-                            role="assistant", content=content,
-                            provider_meta={
-                                INTERRUPTED_META_KEY: (
-                                    "transport_failure" if transport else "provider_error"
-                                ),
-                            },
-                        ),
-                    )
-                    await self._append_node(sid, node)
-                    parent = node
-                # The tool blocks that closed before the failure were already
-                # published as ToolUse events. Answer each one, so a host
-                # rendering the stream never keeps a tool card open for a call
-                # that will never run, and the stored call has its result.
-                text = (
-                    "Tool not executed: the provider connection was interrupted "
-                    "before the response finished."
-                    if transport else _FAILED_CALL_TOOL_TEXT
-                )
-                aborted = []
-                for tu in result.tool_uses:
-                    await self._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id,
-                        tool_use_id=tu["tool_use_id"], name=tu["name"],
-                        output=text, is_error=True,
-                    ))
-                    aborted.append(ToolResultBlock(
-                        tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
-                    ))
-                if aborted and content:
-                    node = SessionNode(
-                        node_id=new_id("node"), parent_id=parent.node_id,
-                        message=Message(role="user", content=aborted),
-                    )
-                    await self._append_node(sid, node)
-                    parent = node
+                parent = await self._keep_failed_call(sid, turn_id, parent, result)
+                if retry_capped:
+                    # A retry above would have followed, but the turn has no
+                    # model call left: end on the cap, not on the error, and
+                    # never announce a retry that cannot go out. What the call
+                    # streamed is stored above as an interrupted node, never
+                    # handed on as the turn's reply.
+                    final_stop = "max_calls"
+                    result.message = Message(role="assistant", content=[])
+                    break
                 if (
                     drop_retries
                     and isinstance(result.usage.get("transport_failure"), dict)
@@ -6898,16 +6882,82 @@ class NativeLoop(BackgroundLifecycleMixin):
             reason="provider_reroute" if rerouted else None,
         ))
 
+    async def _keep_failed_call(
+        self, sid: str, turn_id: str, parent: SessionNode, result: _CallResult,
+    ) -> SessionNode:
+        """Store what a failed call streamed and answer its published tool calls.
+
+        Whatever the user watched stream is kept, however the stream ended (a
+        dropped connection, an in-stream error, a body cut before its terminal
+        event): the visible text and the tool requests that closed, for a
+        later user-directed continuation. The node is marked interrupted so no
+        reader takes it for a finished answer. Incomplete arguments and opaque
+        reasoning envelopes are not safe provider history and are dropped.
+        Returns the new tip of the branch.
+        """
+        transport = bool(result.usage.get("transport_failure"))
+        completed_ids = {tu["tool_use_id"] for tu in result.tool_uses}
+        content = [
+            block for block in result.message.content
+            if (isinstance(block, Text) and block.text) or (
+                isinstance(block, ToolUseBlock) and block.id in completed_ids
+            )
+        ]
+        if content:
+            node = SessionNode(
+                node_id=new_id("node"), parent_id=parent.node_id,
+                message=Message(
+                    role="assistant", content=content,
+                    provider_meta={
+                        INTERRUPTED_META_KEY: (
+                            "transport_failure" if transport else "provider_error"
+                        ),
+                    },
+                ),
+            )
+            await self._append_node(sid, node)
+            parent = node
+        # The tool blocks that closed before the failure were already
+        # published as ToolUse events. Answer each one, so a host rendering
+        # the stream never keeps a tool card open for a call that will never
+        # run, and the stored call has its result.
+        text = (
+            "Tool not executed: the provider connection was interrupted "
+            "before the response finished."
+            if transport else _FAILED_CALL_TOOL_TEXT
+        )
+        aborted = []
+        for tu in result.tool_uses:
+            await self._emit(ToolResult(
+                session_id=sid, turn_id=turn_id,
+                tool_use_id=tu["tool_use_id"], name=tu["name"],
+                output=text, is_error=True,
+            ))
+            aborted.append(ToolResultBlock(
+                tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+            ))
+        if aborted and content:
+            node = SessionNode(
+                node_id=new_id("node"), parent_id=parent.node_id,
+                message=Message(role="user", content=aborted),
+            )
+            await self._append_node(sid, node)
+            parent = node
+        return parent
+
     async def _guardrail_pause(
         self, sid: str, turn_id: str, parent: SessionNode, result: _CallResult,
         num_calls: int, projected_prompt: int, total_usage: dict[str, Any],
+        *, budget_left: bool = True,
     ) -> bool:
         """Ask the person what to do with a call a provider safety check declined.
 
         Returns True when the turn retries the same history on the model they
         approved (``self.model`` is switched for the rest of the turn), False
         when the turn ends here. The declined call is billed and recorded but
-        never appended: its partial output is discarded. See
+        never appended: its partial output is discarded. With no model call
+        left this turn (``budget_left`` False) the person is not asked: a
+        retry on another model could not go out. See
         :mod:`fluid.engine.guardrail`.
         """
         self._fold_call_usage(total_usage, result.usage)
@@ -6960,6 +7010,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
             return False
 
+        if not budget_left:
+            return await stopped("no model calls left this turn")
         if self._turn_guardrail_prompts >= GUARDRAIL_MAX_PROMPTS_PER_TURN:
             return await stopped("blocked again after a retry")
         self._turn_guardrail_prompts += 1
