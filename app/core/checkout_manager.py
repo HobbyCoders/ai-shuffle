@@ -56,7 +56,7 @@ from app.core.git_worktree_ops import (
     repo_worktree_lock,
     worktree_error_detail,
 )
-from app.core.project_links import remote_link_ids
+from app.core.project_links import legacy_link_group_id, remote_link_ids
 from app.core.worktree_manager import (
     WorktreeError,
     resolve_rebound_branch_plan,
@@ -614,6 +614,12 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
         )
         return None
 
+    # A record whose own spelling is this origin first: a git@ record must not
+    # shadow the HTTPS project's own URL (or the reverse).
+    for cand in candidates:
+        remote_url = cand["remote_url"]
+        if legacy_link_group_id(remote_url) == origin:
+            return remote_url
     for cand in candidates:
         remote_url = cand["remote_url"]
         if origin in remote_link_ids(remote_url):

@@ -212,7 +212,7 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
     """``{origin: {clone_url, default_branch}}`` from git records this DB holds,
     then the remotes stored on the replicated ``projects_v2`` rows (which still
     know a project no local record has any more)."""
-    from app.core.project_links import remote_link_ids
+    from app.core.project_links import legacy_link_group_id, remote_link_ids
     from app.core.scrub import strip_url_userinfo
     from app.db import projects_v2
     from app.db.base import get_db, parse_jsonb
@@ -229,14 +229,17 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         cursor.execute("SELECT origin, settings FROM projects_v2")
         stored_rows = cursor.fetchall()
     out: Dict[str, Dict[str, Any]] = {}
+    aliases = []
     for row in rows:
         url = strip_url_userinfo(row["remote_url"])
         if not url:
             continue
         info = {"clone_url": url, "default_branch": row["default_branch"] or None}
         out.setdefault(row["link_group_id"] or ("local:" + str(row["id"])), info)
-        for derived in sorted(remote_link_ids(url)):
+        derived = legacy_link_group_id(url)
+        if derived:
             out.setdefault(derived, info)
+        aliases.append((url, info))
     for row in stored_rows:
         url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
         url = strip_url_userinfo(url) if url else None
@@ -249,6 +252,12 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         if not url or (origin.startswith("git:") and origin not in remote_link_ids(url)):
             continue
         out.setdefault(origin, {"clone_url": url, "default_branch": branch})
+    # The other spelling's id (git@ vs https) only fills gaps once every row
+    # holds its own: a git@ project read first must not shadow the HTTPS
+    # project's own clone URL.
+    for url, info in aliases:
+        for derived in sorted(remote_link_ids(url)):
+            out.setdefault(derived, info)
     return out
 
 

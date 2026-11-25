@@ -660,7 +660,7 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
 
     Returns what to apply. Raises :class:`RepositoryChangeError`.
     """
-    from app.core.project_links import auto_link_group_id, normalize_remote_url, remote_link_ids
+    from app.core.project_links import legacy_link_group_id, normalize_remote_url
     from app.core.project_resolver import resolve_catalog_project
     from app.db import projects_v2
 
@@ -678,18 +678,18 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
             raise RepositoryChangeError(f"The project “{row.get('name')}” already uses that repository.")
     default_branch = _probe(clean)
     duplicate = None
-    derived = auto_link_group_id(clean)
-    # The repository's own identity, then its spelling's older one.
-    for candidate in sorted(remote_link_ids(clean), key=lambda gid: gid != derived):
-        if candidate == origin:
-            continue
-        dup = projects_v2.get_project_v2_by_origin(candidate)
+    # Only this spelling's own identity, as before: a project found under the
+    # other spelling's id (git@ vs https) is never marked merged, so changing
+    # back later cannot leave a stale merge that redirects that repository.
+    derived = legacy_link_group_id(clean)
+    if derived and derived != origin:
+        dup = projects_v2.get_project_v2_by_origin(derived)
         dup_now = pinned_remote(dup)
         # Only a project still on that repository is a duplicate: one that
         # since moved to another repository is a live project of its own.
         if dup is not None and not merged_into(dup) and (dup_now is None or normalize_remote_url(dup_now) == wanted):
-            duplicate = duplicate or candidate
-            projects_v2.mark_merged(candidate, origin)
+            duplicate = derived
+            projects_v2.mark_merged(derived, origin)
     gen = generation(pv2) + 1
     projects_v2.pin_remote(
         origin, clean, default_branch=default_branch, generation=gen,

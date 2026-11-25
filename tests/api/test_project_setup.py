@@ -1734,6 +1734,43 @@ def test_a_checkout_never_follows_a_stale_merge_of_the_other_spelling(client, ws
     assert database.get_project("tool")["link_group_id"] == _legacy_id(_SSH)
 
 
+def test_changing_a_repository_never_merges_the_other_spellings_project(client, ws, test_db, monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(project_remote, "_probe", lambda url: "main")
+    t = _replicated(_MOVED_TO, name="T")
+    r = _replicated(_HTTPS, name="R")
+    # T is changed from S to R's git@ URL, then back to S.
+    project_remote.prepare_change(t["id"], _SSH, keep_upstream=False)
+    project_remote.prepare_change(t["id"], _MOVED_TO, keep_upstream=False)
+    assert project_remote.merged_into(projects_v2.get_project_v2(r["id"])) is None
+    # A later HTTPS add of R stays on R, and so does a checkout pointed at it.
+    assert project_remote.identity_for_remote(_HTTPS) == (r["origin"], False)
+    tool = "https://git.example.com/example-org/tool.git"
+    _legacy_project_here(ws, remote=tool, project_id="tool", origin=auto_link_group_id(tool))
+    git(ws / "tool", "remote", "set-url", "origin", _HTTPS)
+    _refresh_git_record("tool", ws / "tool")
+    assert database.get_project("tool")["link_group_id"] == r["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "tool") == _HTTPS  # never pointed at S
+
+
+def test_an_https_projects_setup_clones_its_own_url_when_an_ssh_project_is_read_first(ws, test_db):
+    # Existing projects of one repository: legacy git@ (registered first, so
+    # read first) and HTTPS, each with its own record here.
+    _legacy_project_here(ws, remote=_SSH, project_id="old")
+    _here, https = _legacy_project_here(ws, remote=_HTTPS, project_id="new",
+                                        origin=auto_link_group_id(_HTTPS))
+    info = project_setup._repo_info_by_origin()
+    assert info[https["origin"]]["clone_url"] == _HTTPS
+    assert info[_legacy_id(_SSH)]["clone_url"] == _SSH
+    from app.core import checkout_manager
+
+    assert checkout_manager._resolve_clone_url(https["origin"], https) == _HTTPS
+    # With no remote stored on the row, the records alone still pick the HTTPS one.
+    assert checkout_manager._resolve_clone_url(https["origin"]) == _HTTPS
+
+
 def test_the_overview_never_returns_a_password_git_reads_but_a_url_parser_does_not(client, ws, test_db):
     secret = "https://user:pa[ss-example@git.example.com/example-org/demo.git"
     _legacy_project_here(ws, remote=secret, project_id="demo", origin=auto_link_group_id(secret))
