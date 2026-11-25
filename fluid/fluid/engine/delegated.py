@@ -3008,6 +3008,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # host handles it like the same status from any provider.
                 status=mapper.failed_status,
                 provider_message=mapper.failed_provider_message,
+                # A 429 the CLI's own rate-limit verdict or words call a
+                # spent allowance (session, five-hour, weekly), not a blip.
+                usage_limit=self._is_usage_limit_failure(mapper, failure),
                 # The CLI stopped at the context limit: the host compacts and
                 # continues the work instead of leaving it cut off.
                 outcome=mapper.failed_outcome,
@@ -3023,6 +3026,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             await self._send_control({"subtype": "interrupt"})
         except Exception:  # noqa: BLE001 — the result frame still ends the turn
             logger.debug("interrupt after hook stop failed", exc_info=True)
+
+    @staticmethod
+    def _is_usage_limit_failure(mapper: StreamJsonMapper, failure: str | None) -> bool:
+        """Whether a failed turn's 429 is a spent usage allowance: the CLI
+        rejected a rate-limit window this turn, or its error says so."""
+        if mapper.failed_status != 429:
+            return False
+        return (
+            mapper.limit_rejected
+            or is_usage_limit_text(failure)
+            or is_usage_limit_text(mapper.failed_provider_message)
+        )
 
     def _resume_handle_rejected(self, mapper: StreamJsonMapper, failure: str | None = None) -> bool:
         """A first turn on a resumed process failed before mapping any frame.

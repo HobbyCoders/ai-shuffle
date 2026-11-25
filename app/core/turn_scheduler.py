@@ -663,15 +663,17 @@ async def _maybe_failover(
     settled: Dict[str, Any],
     terminal: Dict[str, Any],
 ) -> None:
-    """Policy (1): usage-limit fail + not user-stopped → surface the
-    rate-limited state via ``attempt_failover``. Account rotation is retired,
-    so no ``source=failover`` retry is enqueued.
+    """Policy (1): a 429 + not user-stopped → surface the rate-limited state
+    via ``attempt_failover``; only a usage limit (the terminal's typed
+    ``usage_limit``, ``account_failover.is_usage_limit_error``) goes on to
+    ``limit_resume``. Account rotation is retired, so no ``source=failover``
+    retry is enqueued.
 
     "Not user-stopped" holds by construction: the usage-limit signal lives in a
     settled turn's terminal ``turn.completed`` payload or the ``turn.aborted``
     payload of an error (:func:`_turn_limit_payload`), which a user stop
     (``reason == "interrupt"``) / park never carries — so
-    ``is_usage_limit_error`` is False on those settlements and this returns
+    ``is_rate_limited`` is False on those settlements and this returns
     early.
     """
     from app.core import account_failover
@@ -683,11 +685,18 @@ async def _maybe_failover(
         # the session either.
         return
 
-    if not account_failover.is_usage_limit_error(terminal):
+    if not account_failover.is_rate_limited(terminal):
         return
 
     payload = settled.get("payload") or {}
     await account_failover.attempt_failover(session_id, payload.get("api_user_id"), terminal)
+    if not account_failover.is_usage_limit_error(terminal):
+        # A transient 429 (a per-minute rate limit, not a spent allowance):
+        # the notice above is all it gets. No banner, no resume, and no hold
+        # beyond its own typed deadline (limit_resume.hold_until).
+        logger.info("turn_scheduler: rate limit for %s turn %s — notice only",
+                    session_id, settled.get("id"))
+        return
     logger.info(
         "turn_scheduler: usage limit for %s turn %s — no retry "
         "(account failover retired)",

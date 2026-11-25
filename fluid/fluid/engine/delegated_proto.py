@@ -656,6 +656,9 @@ class StreamJsonMapper:
         # and its short explanation; None when it gave neither.
         self.failed_status: int | None = None
         self.failed_provider_message: str | None = None
+        # True once a rate_limit_event this turn rejected its window: the
+        # CLI's own verdict that a usage allowance is spent.
+        self.limit_rejected = False
         # ``NEEDS_COMPACTION`` when the failed result was the CLI stopping at
         # the context limit (see :func:`context_outcome`).
         self.failed_outcome: str | None = None
@@ -1489,6 +1492,8 @@ class StreamJsonMapper:
         kind = info.get("rateLimitType")
         status = info.get("status")
         status = status if isinstance(status, str) and status else None
+        if status == "rejected":
+            self.limit_rejected = True
         events = []
         # Claude Code 2.1.285 reports all observed windows here, without a
         # top-level utilization. The verdict applies only to rateLimitType:

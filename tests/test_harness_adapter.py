@@ -8014,6 +8014,52 @@ async def test_a_retry_after_too_long_to_wait_reaches_the_app():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,window,expected", [
+    (False, None, False),         # a plain 429: a transient rate limit
+    (True, None, True),           # the transport called it a usage limit
+    (False, "rejected", True),    # a window the provider rejected this turn
+    (False, "allowed_warning", False),
+])
+async def test_a_429_carries_a_typed_usage_limit_verdict(verdict, window, expected):
+    """S8: only a refusal Fluid (or the turn's rate-limit windows) already
+    knows to be a spent allowance is typed ``usage_limit=True``. The text
+    plays no part: "usage limit" in a transient refusal's words changes
+    nothing."""
+    events = ([lm.RateLimit(session_id=SID, kind="five_hour", status=window)] if window else [])
+    events.append(lm.ErrorEvent(
+        session_id=SID, retriable=False, status=429, usage_limit=verdict,
+        message="Temporary usage limit on requests per minute.",
+        provider_message="Temporary usage limit on requests per minute.",
+    ))
+    [result] = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+                if type(e).__name__ == "ResultMessage"]
+
+    assert result.api_error_status == 429
+    assert result.usage_limit is expected
+
+
+@pytest.mark.asyncio
+async def test_a_retried_429_that_succeeds_carries_no_limit():
+    """A 429 the client retried, after a window it saw rejected, then a
+    successful reply: the turn completed, so its terminal carries no status
+    and no usage-limit verdict for the scheduler to act on."""
+    from app.core import account_failover
+
+    events = [
+        lm.RateLimit(session_id=SID, kind="five_hour", status="rejected"),
+        lm.ProviderRetry(session_id=SID, attempt=1, max_attempts=3,
+                         reason="HTTP 429", delay_seconds=1.0),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    [result] = [e for e in await _collect(_adapter_with(FakeEngine(events)))
+                if type(e).__name__ == "ResultMessage"]
+
+    assert not result.is_error
+    assert result.api_error_status is None and result.usage_limit is None
+    assert account_failover.is_rate_limited({"api_error_status": result.api_error_status}) is False
+
+
+@pytest.mark.asyncio
 async def test_error_event_without_status_keeps_its_message():
     events = [lm.ErrorEvent(session_id=SID, message="stream truncated", retriable=False,
                             provider_message="ignored without a status")]

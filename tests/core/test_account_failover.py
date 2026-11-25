@@ -45,6 +45,20 @@ class TestIsUsageLimitError:
     def test_garbage_false(self):
         assert af.is_usage_limit_error({"api_error_status": "nope"}) is False
 
+    def test_a_typed_transient_429_is_rate_limited_not_a_usage_limit(self):
+        """Only the typed verdict splits a 429: a transient one gets the 429
+        notice (``is_rate_limited``) but no usage-limit banner, hold or
+        resume, whatever its words say."""
+        transient = {"api_error_status": 429, "usage_limit": False,
+                     "errors": ["provider returned HTTP 429: Usage limit reached"]}
+        assert af.is_rate_limited(transient) is True
+        assert af.is_usage_limit_error(transient) is False
+        assert af.is_usage_limit_error({"api_error_status": 429, "usage_limit": True}) is True
+
+    def test_a_terminal_without_the_verdict_keeps_the_old_reading(self):
+        # Settled before ``usage_limit`` existed: any 429, as before.
+        assert af.is_usage_limit_error({"api_error_status": 429}) is True
+
 
 # ---------------------------------------------------------------------------
 # attempt_failover — no rotation; surfaces the rate-limited state
@@ -157,6 +171,17 @@ class TestApiKey429IsNotAUsageWindow:
             {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
         )
         assert message == af.RATE_LIMIT_MESSAGE
+
+    @pytest.mark.parametrize("usage_limit,claude_mode,expected", [
+        (False, "subscription", "rate"),   # a transient 429 on a subscription
+        (True, "api_key", "usage"),        # a spent allowance on an API key
+    ])
+    async def test_the_typed_verdict_words_the_notice(self, usage_limit, claude_mode, expected):
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode=claude_mode,
+            metadata={"api_error_status": 429, "usage_limit": usage_limit},
+        )
+        assert message == (af.USAGE_LIMIT_MESSAGE if expected == "usage" else af.RATE_LIMIT_MESSAGE)
 
     async def test_a_failed_lookup_keeps_the_usage_window_notice(self):
         from app.db import database

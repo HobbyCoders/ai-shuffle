@@ -38,8 +38,11 @@ logger = logging.getLogger(__name__)
 # Error classification
 # ---------------------------------------------------------------------------
 
-def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
-    """True iff this turn's metadata carries a 429 usage-limit API error.
+def is_rate_limited(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True iff this turn's metadata carries an HTTP 429, of any kind: a spent
+    usage allowance or a transient rate limit. Each gets the 429 notice
+    (:func:`attempt_failover`); only a usage limit gets more
+    (:func:`is_usage_limit_error`).
 
     Handles ``api_error_status`` arriving as an int or a numeric string. Never
     raises — a malformed metadata blob simply yields ``False``.
@@ -50,6 +53,28 @@ def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
         return int(metadata.get("api_error_status")) == 429
     except (TypeError, ValueError):
         return False
+
+
+def typed_usage_limit(metadata: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """The turn's typed usage-limit classification (``usage_limit``, see
+    ``app.core.provider.events.ResultMessage``), or None when the terminal
+    predates it and carries none."""
+    flag = (metadata or {}).get("usage_limit")
+    return flag if isinstance(flag, bool) else None
+
+
+def is_usage_limit_error(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True iff this turn stopped on a 429 that is a spent usage allowance.
+
+    Only such a stop gets the usage-limit banner, a hold on automatic turns
+    and a resume after the reset. The typed ``usage_limit`` decides; the
+    provider's text never does. A terminal recorded before the field existed
+    keeps the old reading (any 429), so an upgrade changes nothing already
+    settled.
+    """
+    if not is_rate_limited(metadata):
+        return False
+    return typed_usage_limit(metadata) is not False
 
 
 # ---------------------------------------------------------------------------
@@ -165,11 +190,15 @@ async def attempt_failover(
     """
     from app.db.async_database import run_sync
 
-    subscription = await run_sync(_is_subscription_session, session_id)
+    # The typed classification words it; a terminal without one falls back
+    # to the session's login (a subscription's 429 was a usage window).
+    usage = typed_usage_limit(metadata)
+    if usage is None:
+        usage = await run_sync(_is_subscription_session, session_id)
     await _notify(
         api_user_id, session_id,
         severity="warning",
-        message=USAGE_LIMIT_MESSAGE if subscription else rate_limit_message(metadata),
+        message=USAGE_LIMIT_MESSAGE if usage else rate_limit_message(metadata),
     )
     logger.info(
         "Usage limit hit for session %s — automatic account failover retired; "
@@ -194,7 +223,7 @@ async def execute_query_with_failover(**kwargs) -> Dict[str, Any]:
     from app.core.query_engine import execute_query
 
     result = await execute_query(**kwargs)
-    if is_usage_limit_error(result.get("metadata")):
+    if is_rate_limited(result.get("metadata")):
         await attempt_failover(
             result.get("session_id"), kwargs.get("api_user_id"), result.get("metadata"),
         )

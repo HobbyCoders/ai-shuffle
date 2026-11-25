@@ -508,6 +508,9 @@ class _CallResult:
     # The provider's Retry-After when it was too long to wait out, so the
     # refusal was surfaced instead of retried (``retry_after_seconds``).
     error_retry_after: float | None = None
+    # The refusal is a spent usage allowance, as the transport classified it
+    # (the error chunk's ``usage_limit``), not a transient rate limit.
+    error_usage_limit: bool = False
     # The stream failed while a tool_use block was still open: the provider
     # cut it mid-arguments. Such a call is retried under its own, lower cap
     # (TRUNCATED_STREAM_MAX_RETRIES) and reported as a truncated stream.
@@ -4847,6 +4850,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     status=result.error_status,
                     provider_message=result.error_provider_message,
                     retry_after_seconds=result.error_retry_after,
+                    usage_limit=result.error_usage_limit,
                 ))
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
@@ -6095,6 +6099,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         and not isinstance(retry_after, bool) and retry_after > 0
                         else None
                     ),
+                    error_usage_limit=payload.get("usage_limit") is True,
                     native_stop_reason=native_stop_reason,
                     served_model=served_model,
                     cut_in_tool_args=any(

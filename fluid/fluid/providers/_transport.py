@@ -34,6 +34,7 @@ from fluid.providers._retry import (
     billing_error_code,
     is_usage_limit,
     is_usage_limit_text,
+    parse_retry_after,
 )
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
@@ -271,12 +272,14 @@ def refusal_payload(
     called "out of credit"; a bare 402 carries the provider's explanation.
     A usage limit (see fluid.providers._retry.is_usage_limit; ``retry_after``
     is the response's Retry-After header) keeps its 429 but is never retried
-    either: the turn stops on it and the user sees the limit.
+    either: the turn stops on it and the user sees the limit. Its Retry-After,
+    when the response gave one, rides along as ``retry_after_seconds``: the
+    host must not resume before it.
     """
     summary = provider_error_summary(text)
     code = billing_error_code(text)
     if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
-        return {
+        limited: dict[str, Any] = {
             "status": status,
             "message": (
                 f"the provider refused the request with HTTP {status}: a usage "
@@ -286,6 +289,10 @@ def refusal_payload(
             "retriable": False,
             "usage_limit": True,
         }
+        wait = parse_retry_after(retry_after)
+        if wait is not None and wait > 0:
+            limited["retry_after_seconds"] = wait
+        return limited
     if code is None and status != BILLING_STATUS:
         return {
             "status": status,

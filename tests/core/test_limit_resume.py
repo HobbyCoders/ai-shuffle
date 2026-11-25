@@ -633,6 +633,43 @@ def test_hold_waits_for_the_typed_retry_deadline_past_an_earlier_reset(monkeypat
     assert lr.hold_until("s1", now=NOW + 1801) is None
 
 
+@pytest.mark.parametrize("usage_limit,retry_at,expected", [
+    # A transient 429 holds only until its own typed deadline, however
+    # exhausted the usage snapshot looks...
+    (False, NOW + 90, NOW + 90),
+    (False, None, None),
+    # ...while a typed usage limit holds until the snapshot's reset, even
+    # when its words never say "usage limit".
+    (True, None, NOW + 6000),
+])
+def test_the_typed_verdict_wins_over_a_disagreeing_usage_snapshot(
+    monkeypatch, usage_limit, retry_at, expected,
+):
+    from app.core import turn_scheduler
+    from app.db import database
+
+    terminal = {"reason": "error", "message": "provider returned HTTP 429: Too many requests.",
+                "api_error_status": 429, "usage_limit": usage_limit}
+    if retry_at is not None:
+        terminal.update(retry_after_seconds=retry_at - NOW, retry_at=retry_at)
+    monkeypatch.setattr(lr, "_last_settled_turn", lambda sid: {"id": "t1", "ended_at": NOW})
+    monkeypatch.setattr(turn_scheduler, "_turn_limit_payload", lambda sid, tid: dict(terminal))
+    monkeypatch.setattr(database, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr(lr, "session_leg", lambda session: "fluid")
+    monkeypatch.setattr(lr, "session_provider_key", lambda session, leg: "prov-1")
+    monkeypatch.setattr(lr, "_provider_windows", lambda pid: [
+        {"type": "five_hour", "utilization": 100.0, "resets_at": str(int(NOW + 6000))},
+    ])
+    assert lr.hold_until("s1", now=NOW + 30) == expected
+
+
+def test_a_terminal_without_the_typed_verdict_keeps_the_old_reading(monkeypatch):
+    """A 429 settled before ``usage_limit`` existed still reads as before:
+    a usage limit for the hold when its words say so."""
+    _held(monkeypatch, ["provider returned HTTP 429: Usage limit reached: Rate limited"])
+    assert lr.hold_until("s1", now=NOW + 60) == NOW + lr.HOLD_FALLBACK_SECONDS
+
+
 # ─── Settings ───────────────────────────────────────────────────────────────
 
 

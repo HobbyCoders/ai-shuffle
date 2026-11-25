@@ -1060,10 +1060,11 @@ def hold_until(session_id: str, *, now: Optional[float] = None) -> Optional[floa
     an automation or any other turn nobody typed would only ask the provider
     again before the reset, so it waits (``turn_scheduler`` does not start it)
     until the reset, or :data:`HOLD_FALLBACK_SECONDS` after the stop when the
-    reset time is unknown. A 429 that is not a usage limit (a per-minute rate
-    limit the client already retried) holds nothing, unless its typed
-    ``retry_at`` says the provider asked for a wait the client did not sit
-    out: that holds until then, or until a later reset. Sync (DB).
+    reset time is unknown. A 429 that is not a usage limit (its typed
+    ``usage_limit`` is False: a per-minute rate limit) holds only until its
+    own typed ``retry_at``, the wait the provider asked for and the client did
+    not sit out, and nothing at all without one: a usage snapshot never holds
+    it. Sync (DB).
     """
     from app.core import account_failover
     from app.core.turn_scheduler import _turn_limit_payload
@@ -1074,17 +1075,23 @@ def hold_until(session_id: str, *, now: Optional[float] = None) -> Optional[floa
     if not last:
         return None
     terminal = _turn_limit_payload(session_id, last["id"])
-    if not account_failover.is_usage_limit_error(terminal):
+    if not account_failover.is_rate_limited(terminal):
         return None
     current = time.time() if now is None else now
+    if not account_failover.is_usage_limit_error(terminal):
+        deadline = retry_deadline(terminal)
+        return deadline if deadline is not None and current < deadline else None
     ended = _epoch(last.get("ended_at")) or current
     text = _errors_text(terminal)
     session = database.get_session(session_id)
     reset = find_reset(session_provider_key(session, session_leg(session)), text,
                        retry_at=retry_deadline(terminal), now=ended)
+    typed = account_failover.typed_usage_limit(terminal)
     if reset is not None:
         until = reset.at
-    elif is_usage_limit_text(text):
+    elif typed or (typed is None and is_usage_limit_text(text)):
+        # A usage limit with no known reset: hold for the common window. Only
+        # a terminal without the typed field falls back to reading its text.
         until = ended + HOLD_FALLBACK_SECONDS
     else:
         return None

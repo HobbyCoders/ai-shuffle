@@ -739,12 +739,16 @@ def _retry_kind(
 
     ``limit`` is the typed refusal of the worker's terminal turn
     (``provider_agent.terminal_limit_signal``: ``api_error_status``,
-    ``retry_at``). It is read BEFORE any text: a 429 is a rate limit even when
-    its body is empty, and a refusal whose Retry-After the client did not wait
+    ``usage_limit``, ``retry_at``). A refusal that carries a status is
+    classified from it alone, never from the provider's wording: a 429 is a
+    rate limit even when its body is empty or talks of a "usage limit", and
+    only its typed ``usage_limit`` makes it a spent allowance, which no
+    re-dispatch clears. A refusal whose Retry-After the client did not wait
     out is not re-dispatched when the time left is longer than
     ``rate_wait_cap`` (the longest one reschedule waits) — any sooner attempt
     meets the same refusal (:func:`_waited_out_worded` says when to retry
-    instead). Provider text never sets or stretches that wait.
+    instead). Provider text never sets or stretches that wait. The text
+    heuristics remain only for a refusal with no typed status.
     """
     from app.core import provider_agent
 
@@ -752,14 +756,17 @@ def _retry_kind(
         return None
     text = error_text or ""
     limit = limit or {}
+    typed = provider_agent.typed_limit_kind(limit, text)
+    if typed == "usage":
+        return None
     wait = _time_left(limit.get("retry_at"))
     if wait is not None:
         if wait > rate_wait_cap:
             return None
         return "rate" if used["rate"] < rate_max else None
-    if provider_agent.looks_usage_limited(text):
+    if typed is None and provider_agent.looks_usage_limited(text):
         return None
-    if limit.get("api_error_status") == 429 or provider_agent.looks_rate_limited(text):
+    if typed == "rate" or (typed is None and provider_agent.looks_rate_limited(text)):
         return "rate" if used["rate"] < rate_max else None
     lowered = text.lower()
     if any(marker in lowered for marker in _PERMANENT_START_FAILURES):
@@ -780,17 +787,41 @@ def _outcome_limit(outcome) -> Dict[str, Any]:
     :func:`_retry_kind` reads."""
     return {
         key: getattr(outcome, key, None)
-        for key in ("api_error_status", "retry_after_seconds", "retry_at")
+        for key in ("api_error_status", "retry_after_seconds", "retry_at", "usage_limit")
         if getattr(outcome, key, None) is not None
     }
+
+
+def _with_retry_time(outcome):
+    """A final failed outcome that carries a typed deadline (``retry_at``)
+    leads with "Retry after HH:MM:SS UTC.", whether or not it qualified for a
+    re-dispatch, so the caller never re-sends into the same refusal. Wording
+    that already leads with it is left alone."""
+    from dataclasses import replace
+
+    from app.core import provider_agent
+
+    retry_at = getattr(outcome, "retry_at", None)
+    if outcome is None or outcome.ok or not isinstance(retry_at, (int, float)):
+        return outcome
+    error = outcome.error or "The worker failed."
+    if error.startswith("Retry after "):
+        return outcome
+    return replace(
+        outcome, error=f"Retry after {provider_agent.retry_time_utc(retry_at)}. {error}",
+    )
 
 
 def _unwaitable_rate_wait(status: str, outcome, cap: float) -> Optional[float]:
     """The time left on the provider's typed wait when it is the reason
     :func:`_retry_kind` declined a rate re-dispatch (longer than ``cap``),
     else ``None``."""
+    from app.core import provider_agent
+
     if status != "error" or outcome.frames_forwarded:
         return None
+    if provider_agent.typed_limit_kind(_outcome_limit(outcome), outcome.error) == "usage":
+        return None  # a spent allowance, not a rate limit to wait out
     wait = _time_left(getattr(outcome, "retry_at", None))
     return wait if wait is not None and wait > cap else None
 
@@ -839,11 +870,11 @@ def _capacity_worded(outcome, reschedules: int):
 
     if outcome.ok or outcome.frames_forwarded:
         return outcome
-    if provider_agent.looks_usage_limited(outcome.error):
+    typed = provider_agent.typed_limit_kind(_outcome_limit(outcome), outcome.error)
+    if typed == "usage" or (typed is None and provider_agent.looks_usage_limited(outcome.error)):
         # Not capacity: "wait a minute and re-dispatch" would be wrong advice.
         return outcome
-    if (getattr(outcome, "api_error_status", None) != 429
-            and not provider_agent.looks_rate_limited(outcome.error)):
+    if typed != "rate" and not (typed is None and provider_agent.looks_rate_limited(outcome.error)):
         return outcome
     tried = (
         f" It was rescheduled {reschedules} time(s) and the provider is still "
@@ -1021,7 +1052,7 @@ async def _dispatch_worker_with_retries(
         if kind is None:
             if _unwaitable_rate_wait(status, outcome, backoff_cap) is not None:
                 return _waited_out_worded(outcome, used["rate"])
-            return _capacity_worded(outcome, used["rate"])
+            return _with_retry_time(_capacity_worded(outcome, used["rate"]))
 
         # The failed attempt may already have accepted a follow-up. Use the
         # locked finisher's fresh busy check before reclaiming its checkout.
@@ -1041,7 +1072,7 @@ async def _dispatch_worker_with_retries(
                 # say when to retry rather than hand back the bare refusal.
                 if getattr(outcome, "retry_at", None) is not None:
                     return _waited_out_worded(outcome, used["rate"] - 1)
-            return outcome
+            return _with_retry_time(outcome)
         logger.warning(
             "task_dispatch: worker %s never started (%s) — re-dispatching the "
             "same brief in %.1fs (attempt %d)",
@@ -1085,6 +1116,13 @@ async def _dispatch_worker_with_retries(
                 f"{outcome.error or 'The worker failed to start.'} The "
                 f"automatic re-dispatch could not be admitted: {capacity_error}"
             )
+            final = _with_retry_time(provider_agent.WorkerOutcome(
+                ok=False,
+                session_id=outcome.session_id,
+                error=error,
+                frames_forwarded=outcome.frames_forwarded,
+                **_outcome_limit(outcome),
+            ))
             if background:
                 # The failed attempt's wake was suppressed on the promise of
                 # this retry. The retry is not happening, so somebody has to
@@ -1093,14 +1131,9 @@ async def _dispatch_worker_with_retries(
                 await provider_agent.announce_abandoned_retry(
                     kwargs.get("context_session_id") or parent_session_id or "",
                     worker_id,
-                    error[:240],
+                    final.error[:240],
                 )
-            return provider_agent.WorkerOutcome(
-                ok=False,
-                session_id=outcome.session_id,
-                error=error,
-                frames_forwarded=outcome.frames_forwarded,
-            )
+            return final
 
 
 # ---------------------------------------------------------------------------

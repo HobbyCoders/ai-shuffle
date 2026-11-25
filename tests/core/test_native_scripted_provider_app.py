@@ -571,7 +571,8 @@ async def _chat_turn_outcome(tmp_path: Path, result: ResultMessage) -> dict:
 
     notices = AsyncMock()
     with patch("app.services.notification_service.emit_notification", new=notices):
-        if account_failover.is_usage_limit_error(metadata):
+        # The settlement hook's 429 notice gate (turn_scheduler._maybe_failover).
+        if account_failover.is_rate_limited(metadata):
             await account_failover.attempt_failover("native-429", "u-1", metadata)
     return {
         "api_error_frames": frames_of(events, "api_error"),
@@ -588,6 +589,8 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     """Regression: a native provider's 429 surfaced as body text only; the
     ResultMessage had no ``api_error_status``, so the app's rate-limited
     notice never fired for native sessions."""
+    from app.core import account_failover
+
     provider.script(*[fps.error_reply(429, "Rate limit reached for requests",
                                       retry_after="0") for _ in range(3)])
     async with NativeRun(monkeypatch, tmp_path, provider) as run:
@@ -604,13 +607,19 @@ async def test_a_native_429_reaches_the_app_like_the_cli_legs_429(
     native_outcome = await _chat_turn_outcome(tmp_path, native)
     cli_outcome = await _chat_turn_outcome(tmp_path, cli)
 
+    # Same frames, status and notice count. The wording differs on purpose:
+    # the native terminal carries the typed verdict (a transient 429, retried
+    # three times), the bare CLI result does not and keeps the login's reading.
+    native_notices = native_outcome.pop("rate_limited_notices")
+    cli_notices = cli_outcome.pop("rate_limited_notices")
     assert native_outcome == cli_outcome
+    assert native.usage_limit is False
     assert native_outcome["api_error_status"] == 429
     assert native_outcome["api_error_frames"] == [
         {"type": "api_error", "status": 429, "session_id": "native-429"}]
     assert native_outcome["generic_notifications"] == 0  # the 429 notice owns it
-    [notice] = native_outcome["rate_limited_notices"]
-    assert notice.startswith("Usage limit reached")
+    assert native_notices == [account_failover.RATE_LIMIT_MESSAGE]
+    assert len(cli_notices) == 1
 
 
 @pytest.mark.asyncio

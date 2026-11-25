@@ -2988,3 +2988,89 @@ async def test_a_chat_429_with_a_long_retry_after_settles_with_its_wait(
     # The hold on automatic turns reads the same aborted terminal.
     assert limit_resume.hold_until(sid, now=time.time()) == pytest.approx(retry_at)
     assert turns_db.get_turn(row["id"])["state"] == "aborted"
+
+
+@pytest.mark.parametrize("usage_limit", [False, True])
+async def test_only_a_usage_limit_429_schedules_a_resume(
+    mock_db, monkeypatch, tmp_path, usage_limit,
+):
+    """An API-key chat refused with a plain 429 + ``Retry-After: 90`` (a
+    per-minute rate limit, typed ``usage_limit=False``) settles through the
+    real pump, runtime and scheduler with automatic resume ON. It gets the 429
+    notice and its own typed deadline, and nothing else: no resume, no
+    "Usage limit reached" stop for the banner or "Resume once", and no hold
+    past the deadline. The same refusal classified as a usage limit does
+    schedule its resume, so the resume policy here is the real one."""
+    import time
+
+    import app.core.query_engine as qe
+    from app.core import account_failover, limit_resume, wakeup_service
+    from app.core.provider.events import ResultMessage
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import wakeups as wdb
+    from tests.core.engine_harness import collect
+    from tests.core.helpers import make_pump
+    from tests.core.query_engine_flow_harness import engine_patches, frames_of, fresh_adapter
+    from tests.core.test_session_runtime import _runtime_env
+    from tests.shared_fixtures import seed_session
+
+    sid = f"chat-429-{usage_limit}"
+    retry_at = time.time() + 90
+    refusal = ResultMessage(
+        subtype="error_during_execution", is_error=True, api_error_status=429,
+        errors=["provider returned HTTP 429: Too many requests."],
+        retry_after_seconds=90.0, retry_at=retry_at, usage_limit=usage_limit,
+    )
+    with ExitStack() as stack:
+        engine_patches(stack, cwd=str(tmp_path), adapter=fresh_adapter([refusal]))
+        stack.enter_context(
+            patch("app.services.notification_service.emit_notification", new=AsyncMock()))
+        stack.enter_context(
+            patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
+        frames = await collect(qe._stream_to_websocket_impl("hi", sid, "claude-code"))
+    [error] = frames_of(frames, "error")
+    assert error["usage_limit"] is usage_limit
+
+    seed_session(sid)
+    row = turns_db.enqueue_turn(sid, "user", prompt="hi")
+
+    async def create_recorder(session_id, **kw):
+        recorder = TurnRecorder(session_id, None, kw["run_id"], kw["fence_token"], "fixture")
+        recorder.turn_id = kw["turn_id"]
+        recorder._owns_lease = False
+        return recorder
+
+    with _runtime_env(pump=make_pump([error])), monkeypatch.context() as patched:
+        patched.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
+        outcome = await session_runtime.SessionRuntime(row).execute()
+    assert outcome == "aborted"
+
+    limit_resume.update_settings(resume_on_reset=True)
+    # The seeded chat runs on Claude Code (the delegated leg); the policy
+    # decides everything else for real.
+    monkeypatch.setattr(limit_resume, "session_leg", lambda session: "delegated")
+    monkeypatch.setattr(limit_resume, "structured_reset", lambda key, now=None: None)
+    notices = AsyncMock()
+    try:
+        with patch("app.services.notification_service.emit_notification", new=notices), \
+                patch.object(account_failover, "_is_subscription_session", return_value=False), \
+                _patch_execute():
+            await turn_scheduler._on_turn_settled_impl(sid, row["id"], outcome)
+
+        [notice] = [c.kwargs["message"] for c in notices.await_args_list]
+        resumes = wdb.get_session_wakeups(sid, limit_resume.LIMIT_RESUME_SOURCE)
+        stopped = (await limit_resume.state(sid))["limit_stopped"]
+        hold = limit_resume.hold_until(sid, now=time.time())
+        if usage_limit:
+            assert notice == account_failover.USAGE_LIMIT_MESSAGE
+            assert len(resumes) == 1 and stopped is not None
+        else:
+            assert "wait 90s" in notice and "was retried" not in notice
+            assert resumes == []      # no automatic continuation
+            assert stopped is None    # no usage-limit banner, no "Resume once"
+            assert hold == pytest.approx(retry_at)  # its own deadline, no more
+            assert limit_resume.hold_until(sid, now=retry_at + 1) is None
+    finally:
+        for task in list(wakeup_service._timers.values()):
+            task.cancel()
+        wakeup_service._timers.clear()

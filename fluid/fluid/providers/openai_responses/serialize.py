@@ -857,6 +857,8 @@ class ResponsesStreamNormalizer:
                 summary = billing_summary(billing, summary)
             elif usage_limit:
                 summary = usage_limit_summary(summary)
+                # The typed verdict a host reads (``ErrorEvent.usage_limit``).
+                payload["usage_limit"] = True
             if status is not None:
                 payload["status"] = status
             payload["provider_message"] = summary

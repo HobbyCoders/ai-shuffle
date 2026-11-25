@@ -183,6 +183,12 @@ class ErrorEvent(Event):
     # the client waits, so the request was surfaced instead of retried. A
     # host must not send again (or resume) before then. ``None`` otherwise.
     retry_after_seconds: float | None = None
+    # True when the provider's refusal is a spent usage or subscription
+    # allowance (a session, five-hour or weekly limit, Codex's
+    # ``usage_limit_reached``), as the transport classified it, not a
+    # transient rate limit. Only such a stop warrants waiting for a reset and
+    # resuming; a plain 429 does not. ``False`` when unknown.
+    usage_limit: bool = False
     # Set when the error ended the turn because its context no longer fits
     # (:data:`NEEDS_COMPACTION`): compacting, then continuing, recovers it.
     outcome: str | None = None

@@ -215,6 +215,28 @@ async def test_a_usage_limit_result_carries_429(tmp_path) -> None:
     assert "usage limit" in error.provider_message
     assert "|1790812800" not in error.provider_message
     assert "usage limit" in error.message
+    assert error.usage_limit is True
+
+
+@pytest.mark.parametrize("window,expected", [(None, False), ("rejected", True)])
+async def test_a_429_is_a_usage_limit_only_on_the_clis_verdict(tmp_path, window, expected) -> None:
+    """A CLI 429 is typed a usage limit only when the CLI rejected a window
+    this turn (or its words name a spent allowance, above): a bare "Too many
+    requests" is a transient rate limit the host must not wait a reset for."""
+    turn = []
+    if window:
+        turn.append({"op": "frame", "frame": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {"rateLimitType": "five_hour", "status": window},
+        }})
+    turn.append(_failed_frame(api_error_status=429, result="Too many requests"))
+    run = Scripted(tmp_path, {"turns": [turn]})
+    try:
+        error = await run.turn("hi")
+    finally:
+        await run.aclose()
+    assert isinstance(error, ErrorEvent) and error.status == 429
+    assert error.usage_limit is expected
 
 
 async def test_an_auth_failure_carries_401(tmp_path) -> None:

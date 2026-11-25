@@ -424,6 +424,8 @@ class ChatCompletionsNormalizer:
             "provider_message": summary,
             # A usage limit keeps its 429 but is never retried.
             "retriable": is_retriable_status(status) and not usage_limit,
+            # The typed verdict a host reads (``ErrorEvent.usage_limit``).
+            **({"usage_limit": True} if usage_limit else {}),
         }
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:

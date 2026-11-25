@@ -1798,6 +1798,31 @@ async def test_a_usage_limit_stops_the_turn_without_a_retry(server, kind, body, 
     assert len(server.requests) == 1
 
 
+@pytest.mark.parametrize("kind", DIALECTS)
+@pytest.mark.parametrize("retry_after,usage_limit", [("900", True), ("90", False)])
+async def test_a_refusal_carries_its_usage_limit_verdict_and_its_wait(
+    server, kind, retry_after, usage_limit,
+):
+    """S10: a 429 the transport classifies as a usage limit (here by its
+    900 s Retry-After) kept only its message: the wait was dropped, so the
+    host could resume before the provider allowed. It now carries the wait and
+    the typed verdict. A 90 s wait on a plain 429 is not a usage limit: it is
+    surfaced unretried with its wait and ``usage_limit`` False."""
+    body = {"error": {"type": "rate_limit_error", "message": "Rate limited"}}
+    server.script(*[fps.error_reply(429, body=body, retry_after=retry_after) for _ in range(4)])
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and error.status == 429
+    assert error.usage_limit is usage_limit
+    assert error.retry_after_seconds == float(retry_after)
+    assert len(server.requests) == 1
+
+
 @pytest.mark.parametrize("status,body,retry_after,expected", [
     # Usage limits.
     (429, {"error": {"code": "usage_limit_reached"}}, None, True),

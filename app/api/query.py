@@ -68,7 +68,7 @@ async def _stream_query_with_failover(
       surfaced via ``attempt_failover`` before the held 429 and the ``done``
       are flushed.
     """
-    from app.core.account_failover import is_usage_limit_error, attempt_failover
+    from app.core.account_failover import is_rate_limited, attempt_failover
 
     sid = session_id
     held_api_error = None  # most-recent 429 api_error, held for the done decision
@@ -93,7 +93,7 @@ async def _stream_query_with_failover(
             yield event  # non-429 errors pass through immediately
             continue
         if etype == "done":
-            if is_usage_limit_error(event.get("metadata")):
+            if is_rate_limited(event.get("metadata")):
                 sid = event.get("session_id") or sid
                 # OC-4: surface the rate-limited notification (native
                 # failover is retired, so nothing is retried).

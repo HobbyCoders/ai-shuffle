@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from fluid.providers._retry import RetryPolicy
+from fluid.providers._retry import RetryPolicy, parse_retry_after
 from fluid.providers._sse import sse_events
 from fluid.providers._trace import trace_request
 from fluid.providers._transport import (
@@ -88,6 +88,10 @@ def http_refusal(status: int, text: str, retry_after: str | None) -> dict[str, A
                 retriable=False, usage_limit=True,
                 provider_message=detailed.get("provider_message"),
             )
+            # Like any usage-limit refusal, it keeps the wait it asked for.
+            wait = parse_retry_after(retry_after)
+            if wait is not None and wait > 0:
+                payload["retry_after_seconds"] = wait
     return payload
 
 

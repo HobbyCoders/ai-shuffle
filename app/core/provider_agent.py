@@ -505,6 +505,9 @@ class WorkerOutcome:
     api_error_status: Optional[int] = None
     retry_after_seconds: Optional[float] = None
     retry_at: Optional[float] = None
+    #: For a 429: True when it is a spent usage allowance, False when it is a
+    #: transient rate limit (the terminal's typed ``usage_limit``).
+    usage_limit: Optional[bool] = None
 
 
 #: Shapes a tool call takes when a model emits it as PROSE instead of a
@@ -2200,9 +2203,10 @@ def terminal_limit_signal(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     ``api_error_status`` (the HTTP status the provider refused with) plus
     ``retry_after_seconds``/``retry_at`` when its Retry-After was longer than
-    the client waits (``app.core.provider.events.RETRY_FIELDS``). These, never
-    the error text, decide whether a refused worker may be re-dispatched and
-    when: a provider body that merely mentions a wait changes nothing.
+    the client waits (``app.core.provider.events.RETRY_FIELDS``), and for a 429
+    ``usage_limit``, whether it is a spent allowance. These, never the error
+    text, decide whether a refused worker may be re-dispatched and when: a
+    provider body that merely mentions a wait or a limit changes nothing.
     """
     from app.core.provider.events import retry_fields
 
@@ -2214,6 +2218,29 @@ def terminal_limit_signal(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     elif isinstance(status, str) and status.strip().isdigit():
         out["api_error_status"] = int(status.strip())
     return out
+
+
+def typed_limit_kind(
+    limit: Optional[Dict[str, Any]], text: Optional[str] = None,
+) -> Optional[str]:
+    """How a typed refusal (:func:`terminal_limit_signal`) classifies itself:
+    ``"usage"`` (a 429 that is a spent allowance), ``"rate"`` (any other 429)
+    or ``"other"`` (another status); None when it carries no status, the only
+    case in which a caller may fall back to reading the provider's text.
+
+    The typed ``usage_limit`` alone splits a 429. ``text`` is read only for a
+    429 recorded before that field existed (no bool): it keeps the old
+    reading, a usage limit when its words say so and a rate limit otherwise.
+    """
+    status = (limit or {}).get("api_error_status")
+    if not isinstance(status, int) or isinstance(status, bool):
+        return None
+    if status != 429:
+        return "other"
+    flag = (limit or {}).get("usage_limit")
+    if isinstance(flag, bool):
+        return "usage" if flag else "rate"
+    return "usage" if looks_usage_limited(text) else "rate"
 
 
 def retry_time_utc(retry_at: float) -> str:
@@ -2328,6 +2355,7 @@ def _failure_summary(
     frames_forwarded: int,
     *,
     retry_at: Optional[float] = None,
+    limit: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """The registry ``summary`` for a terminal worker, or None to keep it as-is.
 
@@ -2350,11 +2378,16 @@ def _failure_summary(
     cuts the one fact a parent needs to re-dispatch at the right time. It is
     the time the wait ends counted from when the refusal arrived, not from
     when this summary is written.
+
+    ``limit`` is the whole typed refusal: its classification (usage limit or
+    rate limit) words the summary. Only a refusal with no typed status falls
+    back to reading the provider's text.
     """
     if status not in _REGISTRY_FAILURE_STATUSES:
         return None
     text = _message_first(" ".join((preview or "").split())) \
         or "no error detail was recorded"
+    kind = typed_limit_kind(limit, text)
     asked_to_wait = retry_at is not None
     if len(text) > _FAILURE_SUMMARY_CHARS:
         text = text[: _FAILURE_SUMMARY_CHARS - 1].rstrip() + "…"
@@ -2364,8 +2397,14 @@ def _failure_summary(
         # only the raw provider string ("Rate limit reached for gpt-5.6-luna in
         # organization org-…") learns to work around the harness instead, for
         # example by capping its own workers' tool calls.
+        usage = kind == "usage" or (kind is None and looks_usage_limited(text))
         if "forwarded no output within" in text:
             prefix = "worker stopped before first output"
+        elif asked_to_wait and usage:
+            prefix = (
+                f"retry after {retry_time_utc(retry_at)}: worker stopped by a "
+                "usage limit (not retried)"
+            )
         elif asked_to_wait:
             # The provider asked for a wait the client did not sit out, so
             # "already retried" would be untrue. The time goes first.
@@ -2373,16 +2412,17 @@ def _failure_summary(
                 f"retry after {retry_time_utc(retry_at)}: worker failed to start "
                 "(provider rate limit, not retried)"
             )
-        elif looks_usage_limited(text):
+        elif usage:
             prefix = "worker stopped by a usage limit (not retried)"
-        elif looks_rate_limited(text):
+        elif kind == "rate" or (kind is None and looks_rate_limited(text)):
             prefix = "worker failed to start (provider at capacity, already retried)"
         else:
             prefix = "worker failed to start"
     elif asked_to_wait:
+        reason = "usage limit" if kind == "usage" else "provider rate limit"
         prefix = (
             f"retry after {retry_time_utc(retry_at)}: worker failed "
-            "(provider rate limit, not retried)"
+            f"({reason}, not retried)"
         )
     else:
         prefix = "worker failed"
@@ -3657,7 +3697,7 @@ async def _dispatch_worker(
             ))
             terminal_summary = stop_summary or _failure_summary(
                 status, preview, feed.frames_forwarded,
-                retry_at=limit_signal.get("retry_at"),
+                retry_at=limit_signal.get("retry_at"), limit=limit_signal,
             ) or completion_summary
             # A caller that is about to RE-DISPATCH this brief takes the chip
             # and the wake off this attempt: the parent should hear once, about
