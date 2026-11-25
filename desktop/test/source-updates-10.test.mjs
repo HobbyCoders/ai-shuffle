@@ -2,7 +2,8 @@ import { assert, test, fs, path, A, B, fixture, installedLauncher } from './help
 
 // Launcher 12: an update that declares the same database level (app/db/compatibility.json)
 // as the build it replaces takes no database copy (owner policy, docker/application_updates.py).
-const level = value => JSON.stringify({ format: 1, level: value, destructive: '0'.repeat(64) });
+// Raw text, so a test can write a level token the way a file might (1.0, 1e0).
+const level = value => `{"format": 1, "level": ${value}, "destructive": "${'0'.repeat(64)}"}`;
 const contract = version => JSON.stringify({ version, minimum: 4, start: 4 });
 async function levelPair(t, { before = 1, after = 1, launcher = 12 } = {}) {
  const f = await fixture(t); const u = f.create(); await u.load();
@@ -50,6 +51,9 @@ for (const [name, options, compatible] of [
  ['a raised database level', { after: 2 }, true],
  ['an update that declares no level', { after: null }, true],
  ['a previous build that declares no level', { before: null }, true],
+ // Docker reads these as floats and takes a copy; desktop must agree.
+ ['an update whose level is written as a decimal', { after: '1.0' }, true],
+ ['an update whose level is written with an exponent', { after: '1e0' }, true],
  ['an update whose own code predates launcher 12', { launcher: 11 }, true],
  ['an installed launcher before 12', {}, false],
 ]) test(`a database copy is still made for ${name}`, async t => {
