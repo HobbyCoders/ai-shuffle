@@ -149,13 +149,15 @@ export function refQuery(ref: ProjectRef): string {
  * same repository (the server's `remote_key`). In a `scheme://` URL the authority
  * (up to the first `/`) loses everything up to its last `@`, except an SSH login
  * with no `:`; what is left must be a host and port, with no `@` after it, else
- * the key is empty (no marker; the server still refuses a duplicate). Then
- * `git@host:owner/repo` on github.com, gitlab.com, bitbucket.org or codeberg.org
- * (plain path segments, two of them, GitLab two or more: the server's
- * `joined_pair`) is read as `https://host/owner/repo`, a trailing slash and
- * `.git` are removed, and it is lower-cased. Every other spelling, a self-hosted
- * server's `git@` included, is compared as written, so two SSH logins on one
- * host stay apart. Empty for a blank URL.
+ * the key is empty (no marker; the server still refuses a duplicate). Then, as
+ * the server's `canonical_remote`, it is normalized first (trailing slashes and
+ * one `.git` removed, lower-cased) and only then `git@host:owner/repo` on
+ * github.com, gitlab.com, bitbucket.org or codeberg.org (plain path segments,
+ * two of them, GitLab two or more: the server's `joined_pair`) is read as
+ * `https://host/owner/repo`. So two URLs one project on the server always have
+ * one key here. Every other spelling, a self-hosted server's `git@` included,
+ * stays as normalized, so two SSH logins on one host stay apart. Empty for a
+ * blank URL.
  */
 export function remoteKey(url: string | null | undefined): string {
 	let text = (url ?? '').trim();
@@ -175,9 +177,14 @@ export function remoteKey(url: string | null | undefined): string {
 	} else if (text.includes('@') && text.split('@', 1)[0].includes(':')) {
 		return '';
 	}
-	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(text);
-	if (forge && isPublicForgePath(forge[1], forge[2])) text = `https://${forge[1]}/${forge[2]}`;
-	text = text.replace(/\/+$/, '');
+	const normalized = normalizeRemote(text);
+	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(normalized);
+	return forge && isPublicForgePath(forge[1], forge[2]) ? normalizeRemote(`https://${forge[1]}/${forge[2]}`) : normalized;
+}
+
+/** The server's `normalize_remote_url`: trailing slashes, then one `.git`, removed; lower-cased. */
+function normalizeRemote(url: string): string {
+	let text = url.trim().replace(/\/+$/, '');
 	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
 	return text.toLowerCase();
 }

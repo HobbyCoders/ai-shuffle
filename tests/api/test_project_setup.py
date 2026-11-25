@@ -1896,6 +1896,33 @@ def test_a_checkout_keeps_its_identity_when_its_remote_is_respelled(client, ws, 
     assert _remote_of(ws / "demo") == _HTTPS
 
 
+_SSH_UPPER_HOST = "git@GitHub.com:example-org/demo.git"  # one project with _SSH on main
+
+
+def test_setup_adopts_a_copy_whose_ssh_host_is_spelled_in_another_case(client, ws, test_db, monkeypatch):
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=_SSH)
+    git(ws, "clone", "-q", _bare_remote(ws), "demo")
+    git(ws / "demo", "remote", "set-url", "origin", _SSH_UPPER_HOST)
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=_SSH)  # nothing is cloned
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done" and op["result"]["adopted"] is True, op
+
+
+def test_a_checkout_keeps_its_link_group_when_its_ssh_host_is_respelled(client, ws, test_db):
+    from app.core import project_remote
+
+    _here, pv2 = _legacy_project_here(ws, _SSH, origin=auto_link_group_id(_SSH))
+    git(ws / "demo", "remote", "set-url", "origin", _SSH_UPPER_HOST)
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == pv2["origin"]
+    project_remote.reconcile_local()
+    assert database.get_project("demo")["link_group_id"] == pv2["origin"]
+    assert _remote_of(ws / "demo") == _SSH_UPPER_HOST  # the owner's spelling is left alone
+
+
 def test_an_existing_ssh_checkout_keeps_its_project_when_an_https_one_appears(client, ws, test_db):
     from app.core import project_remote
 

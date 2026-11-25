@@ -89,6 +89,10 @@ _DEMO = "https://github.com/example-org/demo"
     "git@github.com:example-org/demo.git",
     "git@github.com:Example-Org/demo",
     " git@github.com:example-org/demo/ ",
+    # Main gave these the git@ spelling's identity: they keep sharing it.
+    "GIT@github.com:example-org/demo",
+    "git@GitHub.com:example-org/demo.git",
+    "GIT@GITHUB.COM:Example-Org/Demo.GIT",
 ])
 def test_the_https_and_git_at_spellings_have_one_identity(spelling):
     assert project_links.canonical_remote(spelling) == _DEMO
@@ -105,7 +109,6 @@ def test_the_https_and_git_at_spellings_have_one_identity(spelling):
     "ssh://git@github.com:22/example-org/demo",
     "git+ssh://git@github.com/example-org/demo",
     "git://github.com/example-org/demo",
-    "GIT@github.com:example-org/demo",
     "alice@code.example.test:repos/app.git",
     "bob@code.example.test:repos/app.git",
     "code.example.test:repos/app.git",
@@ -116,7 +119,6 @@ def test_the_https_and_git_at_spellings_have_one_identity(spelling):
     # under a prefix, so ``https://host/team/demo`` may be another repository.
     "git@forge.example:code/team/demo.git",
     "git@git.example.com:example-org/demo.git",
-    "git@GitHub.com:example-org/demo.git",  # a public forge's host exactly
     "git@github.com:example-org/sub/demo.git",  # nesting is GitLab's only
     "git@github.com:example-org/%64emo.git",
     "https://[2001:db8::1]/org/app.git",
@@ -139,6 +141,40 @@ def test_two_ssh_logins_on_one_host_are_two_repositories():
     assert not project_links.same_remote(alice, bob)
     assert not project_links.same_remote("git@code.example.test:repos/app.git", "https://code.example.test/repos/app")
     assert project_links.same_remote("git@github.com:example-org/demo.git", "https://github.com/example-org/demo")
+
+
+_MAIN_ONE_PROJECT_PAIRS = [
+    # Case, ``.git`` and trailing slashes: one project on main, on any host.
+    ("git@github.com:team/demo.git", "git@GitHub.com:team/demo.git"),
+    ("git@github.com:team/demo", "GIT@GITHUB.COM:Team/Demo.GIT"),
+    ("git@github.com:team/demo", "git@github.com:team/demo//"),
+    ("git@gitlab.com:team/sub/demo", "git@GitLab.com:Team/Sub/Demo.git/"),
+    ("https://github.com/team/demo", "HTTPS://GitHub.com/Team/Demo.git"),
+    ("git@forge.example:code/team/demo", "git@Forge.Example:Code/Team/Demo.git"),
+    ("https://forge.example/code/team/demo", "https://FORGE.example/code/team/demo/"),
+    ("alice@code.example.test:repos/app", "ALICE@code.example.test:repos/app.git"),
+    ("ssh://git@github.com/team/demo", "SSH://git@GitHub.com/team/demo.git"),
+    ("git@github.com:team/sub/demo", "git@GitHub.com:team/sub/demo.git"),  # not joined, still one
+    ("git@github.com:team/%64emo", "git@GITHUB.com:team/%64emo"),
+    ("/srv/repos/demo.git", "/SRV/repos/demo"),
+    # Not one project on main: nothing below may assume they join.
+    ("alice@code.example.test:repos/app", "bob@code.example.test:repos/app"),
+    ("git@forge.example:code/team/demo", "https://forge.example/code/team/demo"),
+    ("git@github.com:team/demo", "https://github.com/team/demo"),
+]
+
+
+@pytest.mark.parametrize("a, b", _MAIN_ONE_PROJECT_PAIRS)
+def test_remotes_main_gave_one_identity_always_share_it(a, b):
+    # canonical_remote is a function of main's normalize_remote_url, so equal
+    # main ids imply equal ids, keys and id sets here; nothing main kept as one
+    # project can split.
+    assert project_links.canonical_remote(a) == project_links.canonical_remote(normalize_remote_url(a))
+    if project_links.legacy_link_group_id(a) == project_links.legacy_link_group_id(b):
+        assert auto_link_group_id(a) == auto_link_group_id(b)
+        assert project_links.remote_key(a) == project_links.remote_key(b)
+        assert project_links.remote_link_ids(a) == project_links.remote_link_ids(b)
+        assert project_links.same_remote(a, b)
 
 
 def test_a_self_hosted_servers_two_transports_are_two_identities():
@@ -368,7 +404,7 @@ class TestResolveRunnableLocalProject:
     # Only a public forge: a self-hosted one may serve HTTPS under a prefix.
     ("https://forge.example/code/team/demo.git", None),
     ("git@git.example.com:example-org/demo.git", None),
-    ("https://GitHub.com/example-org/demo", None),  # the host exactly
+    ("https://GitHub.com/example-org/demo", "git@github.com:example-org/demo"),  # the host in any case
     ("https://github.com/example-org/sub/demo", None),  # nesting is GitLab's only
     ("https://github.com/demo", None),
     ("https://github.com/example-org/%64emo.git", None),  # HTTP decodes it, scp doesn't
@@ -400,7 +436,9 @@ def test_only_a_joined_remote_has_another_spelling(url, other):
     ("https://github.com/team/demo.git", "deploy@github.com:team/demo.git", False),
     ("https://github.com:8443/team/demo.git", "git@github.com:team/demo.git", False),
     ("https://github.com/team/demo.git", "ssh://git@github.com/team/demo.git", False),
-    ("https://GitHub.com/team/demo.git", "git@github.com:team/demo.git", False),  # a forge's host exactly
+    ("https://GitHub.com/team/demo.git", "git@github.com:team/demo.git", True),  # the host in any case
+    ("git@GitHub.com:team/demo.git", "https://github.com/team/demo", True),
+    ("GIT@github.com:team/demo.git", "https://github.com/team/demo", False),  # the login exactly
     # Only on a public forge: a self-hosted one may serve HTTPS under a prefix.
     ("https://git.example.com/team/demo.git", "git@git.example.com:team/demo.git", False),
     ("https://forge.example/code/team/demo", "git@forge.example:code/team/demo", False),

@@ -324,6 +324,16 @@ describe('AddProjectModal create flow', () => {
 		expect(m.cloneNew).not.toHaveBeenCalled();
 	});
 
+	it('marks the SSH spelling with the host in another case, as the server refuses it', async () => {
+		// A project added as git@github.com:acme/site: its server key is the HTTPS form.
+		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site', 'https://github.com/acme/site')]);
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
+		await openClone();
+		await fireEvent.input(urlInput(), { target: { value: 'git@GitHub.com:acme/site.git' } });
+		expect((await screen.findByTestId('already-added')).textContent).toContain('Already added as Site');
+		expect((screen.getByRole('button', { name: 'Clone project' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
 	it('keeps the Project ID under Advanced and checks the server rules inline', async () => {
 		m.overview.mockResolvedValue([]);
 		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
@@ -374,7 +384,10 @@ describe('remoteKey', () => {
 		expect(remoteKey('git@forge.example:code/team/demo')).not.toBe(remoteKey('https://forge.example/code/team/demo'));
 		expect(remoteKey('git@gitlab.com:team/sub/demo.git')).toBe('https://gitlab.com/team/sub/demo');
 		expect(remoteKey('git@github.com:acme/sub/site')).toBe('git@github.com:acme/sub/site');
-		expect(remoteKey('git@GitHub.com:acme/site')).toBe('git@github.com:acme/site');
+		// Normalized first, as the server's canonical_remote: main's one project is one key.
+		expect(remoteKey('git@GitHub.com:acme/site')).toBe('https://github.com/acme/site');
+		expect(remoteKey('GIT@GITHUB.COM:Acme/Site.GIT/')).toBe('https://github.com/acme/site');
+		expect(remoteKey('git@Forge.Example:Code/Team/Demo.git')).toBe(remoteKey('git@forge.example:code/team/demo'));
 		expect(remoteKey('ssh://alice:pw-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
 	});
 

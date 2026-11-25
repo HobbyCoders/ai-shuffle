@@ -93,7 +93,9 @@ def remote_key(url: Optional[str]) -> str:
     when one can't be made safely; the New project dialog's ``remoteKey``.
 
     :func:`strip_remote_userinfo`, then :func:`canonical_remote`, so two
-    remotes with one key are one identity.
+    remotes with one key are one identity, and two that main gave one
+    identity have one key (stripping a credential never depends on case,
+    ``.git`` or a trailing ``/``).
     """
     return canonical_remote(strip_remote_userinfo(url))
 
@@ -122,17 +124,18 @@ def joined_pair(url: Optional[str]) -> Optional[Tuple[str, str, str]]:
     :func:`other_transport_of`.
 
     ``transport`` is ``"ssh"`` for ``git@host:path`` and ``"https"`` for
-    ``https://host/path``; ``path`` is as written. Only on github.com,
-    gitlab.com, bitbucket.org and codeberg.org (exactly, lower-case), with a
-    path of plain segments (``[A-Za-z0-9._-]``, none empty, ``.`` or ``..``;
-    one trailing ``/`` and one ``.git`` aside), two of them (GitLab: two or
-    more). No userinfo is allowed beyond the scp ``git`` login."""
+    ``https://host/path``; ``host`` is lower-cased and ``path`` is as written.
+    Only on github.com, gitlab.com, bitbucket.org and codeberg.org (in any
+    case), with a path of plain segments (``[A-Za-z0-9._-]``, none empty,
+    ``.`` or ``..``; one trailing ``/`` and one ``.git`` aside), two of them
+    (GitLab: two or more). No userinfo is allowed beyond the scp ``git``
+    login."""
     text = (url or "").strip()
     forge = _FORGE_SCP_RE.match(text)
     match = forge or _FORGE_HTTPS_RE.match(text)
     if not match:
         return None
-    host, path = match.group(1), match.group(2)
+    host, path = match.group(1).lower(), match.group(2)
     depth = _PUBLIC_FORGE_DEPTH.get(host)
     if depth is None:
         return None
@@ -151,18 +154,26 @@ def _path_core(path: str) -> str:
 
 
 def canonical_remote(url: Optional[str]) -> str:
-    """The form a remote's identity is hashed from.
+    """The form a remote's identity is hashed from: a function of
+    :func:`normalize_remote_url` alone, so two remotes main gave one identity
+    always share this one too.
 
     One spelling is rewritten: ``git@host:owner/repo`` on a public forge
-    (:func:`joined_pair`), which it serves as ``https://host/owner/repo``,
-    becomes that URL. Every other remote, a self-hosted server's included,
-    is :func:`normalize_remote_url` unchanged, so its identity is exactly the
-    one it always had.
+    (:func:`joined_pair` of the normalized form, so ``GIT@GitHub.com:Team/Demo.git``
+    reads as ``git@github.com:team/demo``), which it serves as
+    ``https://host/owner/repo``, becomes that URL. Every other remote, a
+    self-hosted server's included, is :func:`normalize_remote_url` unchanged,
+    so its identity is exactly the one it always had.
     """
-    pair = joined_pair(url)
+    return _joined_identity(normalize_remote_url(url))
+
+
+def _joined_identity(normalized: str) -> str:
+    """:func:`canonical_remote` of a remote already :func:`normalize_remote_url`'d."""
+    pair = joined_pair(normalized)
     if pair and pair[0] == "ssh":
         return normalize_remote_url(f"https://{pair[1]}/{pair[2]}")
-    return normalize_remote_url(url)
+    return normalized
 
 
 def joined_counterpart(url: Optional[str]) -> Optional[str]:
@@ -181,7 +192,7 @@ def joined_counterpart(url: Optional[str]) -> Optional[str]:
 def other_transport_of(first: Optional[str], url: Optional[str]) -> bool:
     """Whether ``url`` is ``first`` over the other transport: both joined
     (:func:`joined_pair`, public forges only), one ``git@host:path`` and the
-    other ``https://host/path``, the same host and EXACTLY the same path (case
+    other ``https://host/path``, the same host (any case) and EXACTLY the same path (case
     kept; one trailing ``/`` and one ``.git`` aside), credentials ignored.
     Only such a URL may be tried when ``first`` is refused: two URLs that
     merely share a project id (``team/demo`` and ``team/Demo`` on a
