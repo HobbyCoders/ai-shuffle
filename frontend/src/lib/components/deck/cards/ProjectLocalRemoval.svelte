@@ -26,12 +26,18 @@
 		ask?: number;
 		/** The request was taken: clear it so a remount (desktop ↔ phone) does not ask again. */
 		onAsked?: () => void;
+		/**
+		 * Whether the confirmation is open. Bind it from a parent that remounts
+		 * this row (the worker inspector moving between its aside and phone
+		 * sheet) so an open confirmation survives; Cancel clears it, so a
+		 * cancelled one never reopens.
+		 */
+		confirming?: boolean;
 		onRemoved?: () => void;
 	}
 
-	let { projectId, projectName, where, ask = 0, onAsked, onRemoved }: Props = $props();
+	let { projectId, projectName, where, ask = 0, onAsked, confirming = $bindable(false), onRemoved }: Props = $props();
 
-	let confirming = $state(false);
 	let preview = $state<ProjectRemovalPreview | null>(null);
 	let pending = $state(false);
 	let removing = $state(false);
@@ -78,6 +84,11 @@
 			removing = false;
 		}
 	}
+
+	// Mounted with the confirmation already open (a layout switch remounted
+	// this row): count again, behind a disabled Remove, rather than reuse a
+	// number from before the remount.
+	if (untrack(() => confirming)) void askRemove();
 
 	let asked = 0;
 	$effect(() => {

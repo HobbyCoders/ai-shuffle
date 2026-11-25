@@ -326,6 +326,79 @@ describe('Project settings asks for this worker’s removal', () => {
 	});
 });
 
+describe('This worker’s open removal confirmation across a layout switch', () => {
+	const self = () => response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]);
+	// clearAllMocks keeps queued once-answers; a failed test must not hand them to the next.
+	beforeEach(() => vi.mocked(getProjectRemovalPreview).mockReset());
+
+	it('stays open when the inspector moves into the phone sheet and back, re-counting each time behind a disabled Remove', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(self());
+		let answer: (v: { project_id: string; chats: number; worktrees: string[] }) => void = () => {};
+		vi.mocked(getProjectRemovalPreview)
+			.mockResolvedValueOnce({ project_id: 'demo', chats: 2, worktrees: [] })
+			.mockImplementationOnce(() => new Promise((r) => { answer = r; }))
+			.mockResolvedValueOnce({ project_id: 'demo', chats: 0, worktrees: [] });
+		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Here');
+		const inspector = screen.getByRole('complementary', { name: 'Here details' });
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+
+		// Desktop → phone without Cancel: the sheet shows the same confirmation, counting afresh.
+		await rerender({ stacked: true });
+		const sheet = await screen.findByRole('dialog', { name: 'Here' });
+		const remove = await within(sheet).findByRole('button', { name: 'Remove' });
+		expect((remove as HTMLButtonElement).disabled).toBe(true);
+		expect(within(sheet).getByText('Counting the chats this removes…')).toBeTruthy();
+		expect(within(sheet).queryByRole('button', { name: 'Remove project and chats' })).toBeNull();
+		answer({ project_id: 'demo', chats: 3, worktrees: [] });
+		expect(await within(sheet).findByText(/its 3 chats\?/)).toBeTruthy();
+		expect((within(sheet).getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false);
+
+		// And back to desktop: still open; a zero count still says so.
+		await rerender({ stacked: false });
+		const aside = await screen.findByRole('complementary', { name: 'Here details' });
+		expect(await within(aside).findByText(/This removes no chats\./)).toBeTruthy();
+		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(3);
+	});
+
+	it('does not reopen a cancelled confirmation on a layout switch', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(self());
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Here');
+		const inspector = screen.getByRole('complementary', { name: 'Here details' });
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
+
+		await rerender({ stacked: true });
+		const sheet = await screen.findByRole('dialog', { name: 'Here' });
+		expect(within(sheet).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
+		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+	});
+
+	it('forgets the open confirmation when the inspector closes', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(self());
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Here');
+		const inspector = screen.getByRole('complementary', { name: 'Here details' });
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Close Here details' }));
+
+		await openRow('Here');
+		const reopened = screen.getByRole('complementary', { name: 'Here details' });
+		expect(within(reopened).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+	});
+});
+
 describe('Another local checkout of the same origin', () => {
 	// Two folders on this worker cloned from one origin share a logical project:
 	// read by the second one's local id, the answer describes the first one.
