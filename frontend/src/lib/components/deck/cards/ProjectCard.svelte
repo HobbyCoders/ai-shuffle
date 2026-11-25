@@ -200,9 +200,11 @@
 	// ── Selection ─────────────────────────────────────────────────────────────
 
 	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
+	// Only a local project has drafts (its local tabs): a row with no copy here,
+	// such as a first clone that failed and left the list, simply closes.
 	let retainedRow = $state<ListRow | undefined>();
 	const liveRow = $derived(allRows.find((r) => r.key === selectedKey || (!!r.localId && r.localId === selectedKey)));
-	$effect(() => { if (liveRow) retainedRow = liveRow; });
+	$effect(() => { if (liveRow) retainedRow = liveRow.localId ? liveRow : undefined; });
 	const selectedRow = $derived(liveRow ?? (retainedRow && (retainedRow.key === selectedKey || retainedRow.localId === selectedKey) ? retainedRow : undefined));
 	const selectedProject = $derived(selectedRow?.local);
 	/** The selected project is not on this worker (no local tabs). */
@@ -220,6 +222,15 @@
 		activeTab = tab ?? (row.localId ? 'general' : 'workers');
 		focusInstallId = installId;
 		cancelRemove();
+	}
+
+	/** A project just created from this panel: open its detail (the row arrives with the refresh). */
+	function handleCreated(localId: string) {
+		void loadProjectsOverview();
+		selectedKey = localId;
+		activeTab = 'general';
+		focusInstallId = null;
+		confirmingRemove = false;
 	}
 
 	function handleBack() {
@@ -413,7 +424,7 @@
 		{/if}
 	{/snippet}
 </ViewShell>
-<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
+<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={handleCreated} />
 
 <style>
 	/* The filter's space, held while the overview may still show it (filterGeometry). */
