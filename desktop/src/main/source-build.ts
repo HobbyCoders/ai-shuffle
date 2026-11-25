@@ -427,7 +427,8 @@ async function nodePackage(name: string, opts: BuildOptions, python: string, ide
           if (!(await exists(electron))) throw new Error('Electron installation did not produce its runtime');
         }
       }
-      // `integrity` stays the legacy digest so an earlier build (after a rollback) still reuses this install.
+      // `integrity` stays the legacy digest, the field earlier builds check, so the marker stays readable
+      // after a rollback. Those builds still reject the install once any file's change time has moved.
       const integrity = await nodeDependencyTree(path.join(temporary, 'node_modules'));
       await fs.writeFile(path.join(temporary, '.complete'), JSON.stringify({ key, integrity: integrity.legacy, stableIntegrity: integrity.stable }));
       await fs.unlink(path.join(temporary, '.install.lock'));
