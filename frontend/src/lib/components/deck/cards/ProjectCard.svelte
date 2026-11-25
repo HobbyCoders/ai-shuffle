@@ -199,9 +199,11 @@
 	// ── Selection ─────────────────────────────────────────────────────────────
 
 	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
+	// Only a local project has drafts (its local tabs): a row with no copy here,
+	// such as a first clone that failed and left the list, simply closes.
 	let retainedRow = $state<ListRow | undefined>();
 	const liveRow = $derived(allRows.find((r) => r.key === selectedKey || (!!r.localId && r.localId === selectedKey)));
-	$effect(() => { if (liveRow) retainedRow = liveRow; });
+	$effect(() => { if (liveRow) retainedRow = liveRow.localId ? liveRow : undefined; });
 	const selectedRow = $derived(liveRow ?? (retainedRow && (retainedRow.key === selectedKey || retainedRow.localId === selectedKey) ? retainedRow : undefined));
 	const selectedProject = $derived(selectedRow?.local);
 	/** The selected project is not on this worker (no local tabs). */

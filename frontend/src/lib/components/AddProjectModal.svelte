@@ -605,7 +605,7 @@
 			</div>
 
 			<details class="advanced" bind:open={advancedOpen}>
-				<summary>Advanced{#if !advancedOpen && projectId.trim()}<span class="hint mono"> · ID {projectId.trim()}</span>{/if}</summary>
+				<summary>Advanced{#if !advancedOpen && projectId.trim()}<span class="hint mono">{` · ID ${projectId.trim()}`}</span>{/if}</summary>
 				<div class="ui-field">
 					<label class="ui-label" for="add-project-id">Project ID</label>
 					<input
