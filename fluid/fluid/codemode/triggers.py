@@ -134,7 +134,7 @@ _COMMAND_RULES: tuple[tuple[re.Pattern[str], tuple[CommandTrigger, ...]], ...] =
         # A mutating call is the situation, not a read: it needs a method or
         # body flag (the head is casefolded, so -X is -x).
         (r"\bmutat\w*\b[^,;]*\bcurl\b|\bcurl\b[^,;]*\bmutat\w*",
-         (r"^curl(?=\s).*\s(?:-x\s*(?:post|put|patch|delete)\b|--request\s|--data|--json\s"
+         (r"^curl(?=\s).*\s(?:(?:-x\s*|--request[\s=]+)(?:post|put|patch|delete)\b|--data|--json\s"
           r"|-d\b)",)),
         (r"^(?!.*\bmutat).*\bcurl\b", (r"^curl(?:\s|$)",)),
         (r"\bpytest\b|\bpython tests?\b", (r"^pytest(?:\s|$)",)),

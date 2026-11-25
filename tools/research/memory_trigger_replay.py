@@ -286,10 +286,16 @@ def _word_source(event: tuple[str, object]) -> str:
     return "short_turn" if len(str(event[1])) <= SHORT_TURN_CHARS else "long_turn"
 
 
-def transcript_files(transcripts: Path, days: int) -> list[Path]:
-    """The transcripts a run reads: ``<dir>/*.jsonl`` changed in the last ``days``."""
+def transcript_files(transcripts: Path, days: int | None) -> list[Path]:
+    """``<dir>/*.jsonl`` changed in the last ``days`` (``None``: every transcript).
+
+    The replay reads the windowed list; the output guard checks every one, so
+    a write can't land on an older transcript a later, wider replay would read.
+    """
+    if days is None:
+        return sorted(transcripts.glob("*/*.jsonl"))
     cutoff = time.time() - days * 86400
-    return sorted(p for p in transcripts.glob("*/*.jsonl") if p.stat().st_mtime >= cutoff)
+    return sorted(p for p in transcripts.glob("*/*.jsonl") if p.exists() and p.stat().st_mtime >= cutoff)
 
 
 def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "global",
@@ -507,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.sample and not args.out:
         parser.error("--sample needs --out")
     args.transcripts = args.transcripts.expanduser()
-    inputs = [p for p in (args.facts, args.project_map) if p] + transcript_files(args.transcripts, args.days)
+    inputs = [p for p in (args.facts, args.project_map) if p] + transcript_files(args.transcripts, None)
     for output in (args.json, args.out):
         if output and _overwrites_input(output, inputs, args.transcripts):
             parser.error(f"refusing to write {output}: it is an input")

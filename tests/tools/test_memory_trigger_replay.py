@@ -4,7 +4,9 @@ Every record and fact is invented; the transcript is written to tmp_path.
 """
 import importlib.util
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -112,6 +114,22 @@ def test_outputs_never_overwrite_a_transcript_linked_from_outside(corpus, tmp_pa
         with pytest.raises(SystemExit):
             replay_tool.main(base + extra)
     assert outside.read_text(encoding="utf-8") == original
+
+
+def test_outputs_never_overwrite_a_transcript_older_than_the_window(corpus, tmp_path):
+    facts, transcripts = corpus
+    outside = tmp_path / "old.jsonl"
+    outside.write_text("{}\n", encoding="utf-8")
+    old = time.time() - 90 * 86400
+    os.utime(outside, (old, old))
+    try:
+        (transcripts / "svc" / "old.jsonl").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+    with pytest.raises(SystemExit):
+        replay_tool.main(["--facts", str(facts), "--transcripts", str(transcripts),
+                          "--days", "30", "--json", str(outside)])
+    assert outside.read_text(encoding="utf-8") == "{}\n"
 
 
 def test_project_map_scopes_a_directory(corpus):

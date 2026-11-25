@@ -235,8 +235,12 @@ def test_program_names_fire_only_where_they_run():
 
 def test_mutating_curl_needs_a_method_or_body():
     f = [fact("When calling the example API with mutating requests from curl")]
-    assert match_tool("Bash", {"command": "curl -s http://host/api/items"}, f) == []
+    for read in ("curl -s http://host/api/items", "curl --request GET http://host/api/items",
+                 "curl -X GET http://host/api/items"):
+        assert match_tool("Bash", {"command": read}, f) == [], read
     for mutating in ("curl -s -X POST http://host/api/items", "curl -X POST http://host/api/items",
+                     "curl --request DELETE http://host/api/items/1",
+                     "curl --request=PATCH http://host/api/items/1",
                      "curl --data a=1 http://host/api/items"):
         assert fired(match_tool("Bash", {"command": mutating}, f)) == [("f1", "command")], mutating
 
