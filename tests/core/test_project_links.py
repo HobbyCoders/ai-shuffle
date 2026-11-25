@@ -112,6 +112,13 @@ def test_the_https_and_git_at_spellings_have_one_identity(spelling):
     "git@code.example.test:/srv/repos/app.git",
     "git@code.example.test:~/repos/app.git",
     "git@[2001:db8::1]:org/app.git",
+    # A self-hosted server's git@ keeps its own identity: it may serve HTTPS
+    # under a prefix, so ``https://host/team/demo`` may be another repository.
+    "git@forge.example:code/team/demo.git",
+    "git@git.example.com:example-org/demo.git",
+    "git@GitHub.com:example-org/demo.git",  # a public forge's host exactly
+    "git@github.com:example-org/sub/demo.git",  # nesting is GitLab's only
+    "git@github.com:example-org/%64emo.git",
     "https://[2001:db8::1]/org/app.git",
     "/srv/repos/demo.git",
     "file:///srv/repos/demo.git",
@@ -130,7 +137,21 @@ def test_two_ssh_logins_on_one_host_are_two_repositories():
     assert auto_link_group_id(alice) != auto_link_group_id(bob)
     assert project_links.remote_key(alice) != project_links.remote_key(bob)
     assert not project_links.same_remote(alice, bob)
-    assert project_links.same_remote("git@code.example.test:repos/app.git", "https://code.example.test/repos/app")
+    assert not project_links.same_remote("git@code.example.test:repos/app.git", "https://code.example.test/repos/app")
+    assert project_links.same_remote("git@github.com:example-org/demo.git", "https://github.com/example-org/demo")
+
+
+def test_a_self_hosted_servers_two_transports_are_two_identities():
+    # A GitLab under /code serves git@forge.example:team/demo at
+    # https://forge.example/code/team/demo, so these two may be two repositories.
+    https, ssh = "https://forge.example/code/team/demo", "git@forge.example:code/team/demo"
+    assert auto_link_group_id(https) != auto_link_group_id(ssh)
+    assert project_links.remote_link_ids(https).isdisjoint(project_links.remote_link_ids(ssh))
+    assert project_links.remote_key(https) != project_links.remote_key(ssh)
+    assert not project_links.other_transport_of(https, ssh)
+    assert project_links.joined_counterpart(https) is None and project_links.joined_counterpart(ssh) is None
+    assert project_links.joined_pair(https) is None and project_links.joined_pair(ssh) is None
+    assert project_links.joined_pair("git@gitlab.com:team/sub/demo.git") == ("ssh", "gitlab.com", "team/sub/demo.git")
 
 
 def test_a_remote_key_never_holds_a_credential():
@@ -369,16 +390,22 @@ def test_only_a_joined_remote_has_another_spelling(url, other):
 @pytest.mark.parametrize("first, url, same", [
     ("git@github.com:example-org/demo", "https://github.com/example-org/demo", True),
     ("https://github.com/example-org/demo.git", "git@github.com:example-org/demo", True),
-    ("https://GitHub.com/example-org/demo/", "git@github.com:example-org/demo.git", True),  # host: any case
-    ("https://tok@git.example.com/team/demo.git", "git@git.example.com:team/demo.git", True),
-    ("https://git.example.com/team/demo.git", "git@git.example.com:team/Demo.git", False),  # path: exactly
-    ("https://git.example.com/team/demo.git", "https://git.example.com/team/Demo.git", False),  # same transport
-    ("https://git.example.com/team/demo.git", "https://git.example.com/team/demo", False),
-    ("https://git.example.com/team/demo.git", "git@other.example.com:team/demo.git", False),
-    ("https://git.example.com/team/demo.git", "deploy@git.example.com:team/demo.git", False),
-    ("https://git.example.com:8443/team/demo.git", "git@git.example.com:team/demo.git", False),
-    ("https://git.example.com/team/demo.git", "ssh://git@git.example.com/team/demo.git", False),
-    (None, "git@git.example.com:team/demo.git", False),
+    ("https://github.com/example-org/demo/", "git@github.com:example-org/demo.git", True),
+    ("https://tok@github.com/team/demo.git", "git@github.com:team/demo.git", True),
+    ("git@gitlab.com:team/sub/demo.git", "https://gitlab.com/team/sub/demo", True),
+    ("https://github.com/team/demo.git", "git@github.com:team/Demo.git", False),  # path: exactly
+    ("https://github.com/team/demo.git", "https://github.com/team/Demo.git", False),  # same transport
+    ("https://github.com/team/demo.git", "https://github.com/team/demo", False),
+    ("https://github.com/team/demo.git", "git@gitlab.com:team/demo.git", False),
+    ("https://github.com/team/demo.git", "deploy@github.com:team/demo.git", False),
+    ("https://github.com:8443/team/demo.git", "git@github.com:team/demo.git", False),
+    ("https://github.com/team/demo.git", "ssh://git@github.com/team/demo.git", False),
+    ("https://GitHub.com/team/demo.git", "git@github.com:team/demo.git", False),  # a forge's host exactly
+    # Only on a public forge: a self-hosted one may serve HTTPS under a prefix.
+    ("https://git.example.com/team/demo.git", "git@git.example.com:team/demo.git", False),
+    ("https://forge.example/code/team/demo", "git@forge.example:code/team/demo", False),
+    ("https://forge.example/code/team/demo", "git@forge.example:team/demo", False),
+    (None, "git@github.com:team/demo.git", False),
 ])
 def test_only_the_same_url_over_the_other_transport_is_tried_next(first, url, same):
     assert project_links.other_transport_of(first, url) is same

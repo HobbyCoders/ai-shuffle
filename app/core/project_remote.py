@@ -165,7 +165,7 @@ def identity_for_remote(url: Optional[str]) -> Optional[Tuple[str, bool]]:
     remote's own project was merged into another one.
 
     That id is one for ``git@host:owner/repo`` and ``https://host/owner/repo``
-    (:func:`~app.core.project_links.auto_link_group_id`), so a new add in
+    on a public forge (:func:`~app.core.project_links.auto_link_group_id`), so a new add in
     either joins the project already there. An existing checkout never
     moves off the identity it has: while a live project an older version
     keyed by this exact spelling exists, the checkout stays on it. Nor does

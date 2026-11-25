@@ -150,9 +150,12 @@ export function refQuery(ref: ProjectRef): string {
  * (up to the first `/`) loses everything up to its last `@`, except an SSH login
  * with no `:`; what is left must be a host and port, with no `@` after it, else
  * the key is empty (no marker; the server still refuses a duplicate). Then
- * `git@host:owner/repo` is read as `https://host/owner/repo`, a trailing slash
- * and `.git` are removed, and it is lower-cased. Every other spelling is compared
- * as written, so two SSH logins on one host stay apart. Empty for a blank URL.
+ * `git@host:owner/repo` on github.com, gitlab.com, bitbucket.org or codeberg.org
+ * (plain path segments, two of them, GitLab two or more: the server's
+ * `joined_pair`) is read as `https://host/owner/repo`, a trailing slash and
+ * `.git` are removed, and it is lower-cased. Every other spelling, a self-hosted
+ * server's `git@` included, is compared as written, so two SSH logins on one
+ * host stay apart. Empty for a blank URL.
  */
 export function remoteKey(url: string | null | undefined): string {
 	let text = (url ?? '').trim();
@@ -173,10 +176,29 @@ export function remoteKey(url: string | null | undefined): string {
 		return '';
 	}
 	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(text);
-	if (forge) text = `https://${forge[1]}/${forge[2]}`;
+	if (forge && isPublicForgePath(forge[1], forge[2])) text = `https://${forge[1]}/${forge[2]}`;
 	text = text.replace(/\/+$/, '');
 	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
 	return text.toLowerCase();
+}
+
+/** Path segments a repository has on each public forge whose `git@` and HTTPS spellings are joined. */
+const PUBLIC_FORGE_DEPTH: Record<string, [number, number | null]> = {
+	'github.com': [2, 2],
+	'gitlab.com': [2, null],
+	'bitbucket.org': [2, 2],
+	'codeberg.org': [2, 2]
+};
+
+/** Whether `git@host:path` names the same repository as `https://host/path` (the server's `joined_pair`). */
+function isPublicForgePath(host: string, path: string): boolean {
+	const depth = Object.hasOwn(PUBLIC_FORGE_DEPTH, host) ? PUBLIC_FORGE_DEPTH[host] : undefined;
+	if (!depth) return false;
+	let core = path.endsWith('/') ? path.slice(0, -1) : path;
+	if (core.endsWith('.git')) core = core.slice(0, -4);
+	const segments = core.split('/');
+	if (segments.length < depth[0] || (depth[1] !== null && segments.length > depth[1])) return false;
+	return segments.every((s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== '.' && s !== '..');
 }
 
 /** True for an answer that means "this worker has no such route" (an older worker). */

@@ -50,26 +50,6 @@ def normalize_remote_url(url: Optional[str]) -> str:
     return normalized.lower()
 
 
-# The one spelling joined to another: scp ``git@host:path``, the login exactly
-# ``git`` (the forges' SSH login), the path relative (neither ``/`` nor ``~``).
-_FORGE_SCP_RE = re.compile(r"^git@([^\s/:@\[\]\\]+):(?![/~])(\S+)$")
-
-
-def canonical_remote(url: Optional[str]) -> str:
-    """The form a remote's identity is hashed from.
-
-    One spelling is rewritten: scp ``git@host:owner/repo`` (the login exactly
-    ``git``, a path neither absolute nor ``~``), which GitHub, GitLab,
-    Bitbucket, Gitea and Forgejo all serve as ``https://host/owner/repo``,
-    becomes that URL. Every other remote is :func:`normalize_remote_url`
-    unchanged, so its identity is exactly the one it always had.
-    """
-    forge = _FORGE_SCP_RE.match((url or "").strip())
-    if forge:
-        return normalize_remote_url(f"https://{forge.group(1)}/{forge.group(2)}")
-    return normalize_remote_url(url)
-
-
 # ``scheme://`` then the authority, which runs to the first ``/``.
 _SCHEME_AUTHORITY_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)(.*)$", re.DOTALL)
 _SSH_SCHEMES = {"ssh://", "git+ssh://", "ssh+git://"}
@@ -118,14 +98,16 @@ def remote_key(url: Optional[str]) -> str:
     return canonical_remote(strip_remote_userinfo(url))
 
 
-# ``https://host/path``, the path relative: the other spelling of ``git@host:path``.
+# The two spellings that may be joined: scp ``git@host:path`` (the login
+# exactly ``git``, the forges' SSH login) and ``https://host/path``, the path
+# relative (neither ``/`` nor ``~``) in both.
+_FORGE_SCP_RE = re.compile(r"^git@([^\s/:@\[\]\\]+):(?![/~])(\S+)$")
 _FORGE_HTTPS_RE = re.compile(r"^https://([^\s/:@\[\]\\]+)/(?![/~])(\S+)$")
-
-
 # Public forges that serve one repository at ``git@host:owner/repo`` and
 # ``https://host/owner/repo`` alike, with how many path segments a repository
-# has there (GitLab nests groups). A self-hosted forge may serve HTTPS under a
-# prefix (``/code/``), so its other spelling is never guessed.
+# has there (GitLab nests groups). A self-hosted server may serve HTTPS under
+# a prefix (``https://host/code/team/repo`` for ``git@host:team/repo``), so its
+# two spellings are never joined.
 _PUBLIC_FORGE_DEPTH = {"github.com": (2, 2), "gitlab.com": (2, None), "bitbucket.org": (2, 2),
                        "codeberg.org": (2, 2)}
 # A segment the two transports read the same way: no escapes (HTTP decodes
@@ -133,60 +115,80 @@ _PUBLIC_FORGE_DEPTH = {"github.com": (2, 2), "gitlab.com": (2, None), "bitbucket
 _PLAIN_SEGMENT_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
-def joined_counterpart(url: Optional[str]) -> Optional[str]:
-    """The other spelling of a joined remote on a public forge
-    (``git@github.com:owner/repo`` <-> ``https://github.com/owner/repo``),
-    else ``None``. There both name one repository, so a worker that can sign
-    in over only one of them can still clone it. Any other host, or a path
-    the two transports could read differently, has none."""
+def joined_pair(url: Optional[str]) -> Optional[Tuple[str, str, str]]:
+    """``(transport, host, path)`` of a remote whose ``git@`` and HTTPS
+    spellings name one repository, else ``None``; the one rule behind
+    :func:`canonical_remote`, :func:`joined_counterpart` and
+    :func:`other_transport_of`.
+
+    ``transport`` is ``"ssh"`` for ``git@host:path`` and ``"https"`` for
+    ``https://host/path``; ``path`` is as written. Only on github.com,
+    gitlab.com, bitbucket.org and codeberg.org (exactly, lower-case), with a
+    path of plain segments (``[A-Za-z0-9._-]``, none empty, ``.`` or ``..``;
+    one trailing ``/`` and one ``.git`` aside), two of them (GitLab: two or
+    more). No userinfo is allowed beyond the scp ``git`` login."""
     text = (url or "").strip()
     forge = _FORGE_SCP_RE.match(text)
-    if forge:
-        host, path = forge.group(1), forge.group(2)
-        other = f"https://{host}/{path}"
-    else:
-        https = _FORGE_HTTPS_RE.match(text)
-        if not https:
-            return None
-        host, path = https.group(1), https.group(2)
-        other = f"git@{host}:{path}"
+    match = forge or _FORGE_HTTPS_RE.match(text)
+    if not match:
+        return None
+    host, path = match.group(1), match.group(2)
     depth = _PUBLIC_FORGE_DEPTH.get(host)
     if depth is None:
         return None
-    segments = path.split("/")
+    segments = _path_core(path).split("/")
     least, most = depth
     if len(segments) < least or (most is not None and len(segments) > most):
         return None
     if not all(_PLAIN_SEGMENT_RE.fullmatch(s) and s not in (".", "..") for s in segments):
         return None
-    return other if same_remote(other, text) else None
+    return ("ssh" if forge else "https"), host, path
 
 
-def _transport_parts(url: Optional[str]) -> Optional[Tuple[str, str, str]]:
-    """``(transport, host, path)`` of a ``git@host:path`` or ``https://host/path``
-    remote (no credentials, no port), the path without one trailing ``/`` and
-    one ``.git``; else ``None``."""
-    text = strip_remote_userinfo(url) or ""
-    forge = _FORGE_SCP_RE.match(text)
-    https = None if forge else _FORGE_HTTPS_RE.match(text)
-    match = forge or https
-    if not match:
+def _path_core(path: str) -> str:
+    core = path[:-1] if path.endswith("/") else path
+    return core[:-4] if core.endswith(".git") else core
+
+
+def canonical_remote(url: Optional[str]) -> str:
+    """The form a remote's identity is hashed from.
+
+    One spelling is rewritten: ``git@host:owner/repo`` on a public forge
+    (:func:`joined_pair`), which it serves as ``https://host/owner/repo``,
+    becomes that URL. Every other remote, a self-hosted server's included,
+    is :func:`normalize_remote_url` unchanged, so its identity is exactly the
+    one it always had.
+    """
+    pair = joined_pair(url)
+    if pair and pair[0] == "ssh":
+        return normalize_remote_url(f"https://{pair[1]}/{pair[2]}")
+    return normalize_remote_url(url)
+
+
+def joined_counterpart(url: Optional[str]) -> Optional[str]:
+    """The other spelling of a joined remote (:func:`joined_pair`:
+    ``git@github.com:owner/repo`` <-> ``https://github.com/owner/repo``), else
+    ``None``. Both name one repository, so a worker that can sign in over
+    only one of them can still clone it."""
+    pair = joined_pair(url)
+    if not pair:
         return None
-    path = match.group(2)
-    path = path[:-1] if path.endswith("/") else path
-    path = path[:-4] if path.endswith(".git") else path
-    return ("ssh" if forge else "https"), match.group(1).lower(), path
+    transport, host, path = pair
+    other = f"https://{host}/{path}" if transport == "ssh" else f"git@{host}:{path}"
+    return other if same_remote(other, url) else None
 
 
 def other_transport_of(first: Optional[str], url: Optional[str]) -> bool:
-    """Whether ``url`` is ``first`` over the other transport: one is
-    ``git@host:path`` and the other ``https://host/path``, the same host (any
-    case) and EXACTLY the same path (case kept; one trailing ``/`` and one
-    ``.git`` aside). Only such a URL may be tried when ``first`` is refused:
-    two URLs that merely share a project id (``team/demo`` and ``team/Demo``
-    on a case-sensitive server) may be two repositories."""
-    a, b = _transport_parts(first), _transport_parts(url)
-    return bool(a and b and a[0] != b[0] and a[1:] == b[1:])
+    """Whether ``url`` is ``first`` over the other transport: both joined
+    (:func:`joined_pair`, public forges only), one ``git@host:path`` and the
+    other ``https://host/path``, the same host and EXACTLY the same path (case
+    kept; one trailing ``/`` and one ``.git`` aside), credentials ignored.
+    Only such a URL may be tried when ``first`` is refused: two URLs that
+    merely share a project id (``team/demo`` and ``team/Demo`` on a
+    case-sensitive server) may be two repositories, and a self-hosted server
+    may serve its two transports under different paths."""
+    a, b = joined_pair(strip_remote_userinfo(first)), joined_pair(strip_remote_userinfo(url))
+    return bool(a and b and a[0] != b[0] and a[1] == b[1] and _path_core(a[2]) == _path_core(b[2]))
 
 
 def _link_id(normalized: str) -> Optional[str]:

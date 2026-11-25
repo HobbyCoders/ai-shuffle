@@ -369,6 +369,12 @@ describe('remoteKey', () => {
 		expect(new Set([alice, bob, remoteKey('https://code.example.test/repos/app')]).size).toBe(3);
 		expect(remoteKey('ssh://git@github.com/acme/site')).toBe('ssh://git@github.com/acme/site');
 		expect(remoteKey('git@github.com:/srv/site')).toBe('git@github.com:/srv/site');
+		// Only a public forge joins git@ and HTTPS: a self-hosted server may serve HTTPS under a prefix.
+		expect(remoteKey('git@forge.example:code/team/demo.git')).toBe('git@forge.example:code/team/demo');
+		expect(remoteKey('git@forge.example:code/team/demo')).not.toBe(remoteKey('https://forge.example/code/team/demo'));
+		expect(remoteKey('git@gitlab.com:team/sub/demo.git')).toBe('https://gitlab.com/team/sub/demo');
+		expect(remoteKey('git@github.com:acme/sub/site')).toBe('git@github.com:acme/sub/site');
+		expect(remoteKey('git@GitHub.com:acme/site')).toBe('git@github.com:acme/site');
 		expect(remoteKey('ssh://alice:pw-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
 	});
 

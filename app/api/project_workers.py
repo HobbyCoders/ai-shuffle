@@ -782,7 +782,8 @@ def _clone_new_spec(body: CloneNewRequest, op_id: str) -> Dict[str, Any]:
 def _same_repository_origins(clean: str) -> set:
     """Every identity whose remote is ``clean`` by identity: a remote naming
     one of the ids ``clean`` names (``remote_link_ids``), so
-    ``git@host:owner/repo`` and ``https://host/owner/repo`` match and two SSH
+    ``git@github.com:owner/repo`` and ``https://github.com/owner/repo`` (on a
+    public forge, :func:`~app.core.project_links.joined_pair`) match and two SSH
     logins on one host don't."""
     from app.core.project_links import remote_link_ids
 
@@ -798,7 +799,7 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     remote is ``clean`` (:func:`_same_repository_origins`), as the repository
     picker marks "Already added".
 
-    ``git@host:owner/repo`` and ``https://host/owner/repo`` are one identity,
+    On a public forge ``git@host:owner/repo`` and ``https://host/owner/repo`` are one identity,
     but a project an older version added over SSH stays keyed by that spelling. Listed means
     :func:`_listed_elsewhere`; an identity only remembered from a removed
     project does not block a new clone.
