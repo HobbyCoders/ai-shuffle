@@ -234,6 +234,28 @@ describe('isRemovedProjectSession', () => {
 			project_v2_id: 'pv2-remote', origin: 'git:remote.git', project_name: 'Remote' }), new Set())).toBe(false);
 	});
 
+	// Review round 3 S6: removal keeps a chat bound only by the shared id; the
+	// owning worker must still list it once neither catalog has its project.
+	it('keeps a local chat bound only by a shared id when both loaded catalogs lack it', () => {
+		const empty = liveProjectKeys([], []);
+		const kept = session({ is_remote: false, project_id: null, project_v2_id: 'pv2-gone',
+			origin: 'git:gone.git', project_name: 'Gone' });
+		expect(isRemovedProjectSession(kept, empty)).toBe(false);
+		expect(isVisibleSidebarSession(kept, empty)).toBe(true);
+		// Unnamed too (enrichment found no catalog row for its identity).
+		expect(isVisibleSidebarSession({ ...kept, project_name: null }, empty)).toBe(true);
+	});
+
+	it('keeps a local chat whose project record was deleted after it was made (ON DELETE SET NULL)', () => {
+		expect(isVisibleSidebarSession(session({ is_remote: false, project_id: null,
+			project_v2_id: 'pv2-gone', origin: 'local:gone' }), liveProjectKeys([], []))).toBe(true);
+	});
+
+	it('still hides a remote chat whose project is gone from both catalogs', () => {
+		expect(isRemovedProjectSession(session({ is_remote: true, project_id: null,
+			project_v2_id: 'pv2-gone', origin: 'git:gone.git' }), liveProjectKeys([], []))).toBe(true);
+	});
+
 	it('hides a chat whose project is gone from both catalogs', () => {
 		expect(isRemovedProjectSession(session({
 			project_id: 'deleted-1',

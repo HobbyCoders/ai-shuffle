@@ -103,7 +103,7 @@ describe('Remove project and chats from a worker', () => {
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
 		expect(screen.getByText('Counting the chats this removes…')).toBeTruthy();
-		expect(screen.queryByText(/It has no chats/)).toBeNull();
+		expect(screen.queryByText(/This removes no chats/)).toBeNull();
 		expect(removeButton().disabled).toBe(true);
 
 		// A chat was created on Tower since the cached read.
@@ -120,7 +120,7 @@ describe('Remove project and chats from a worker', () => {
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
 		expect((await screen.findByRole('alert')).textContent).toContain('Tower did not answer');
-		expect(screen.queryByText(/It has no chats/)).toBeNull();
+		expect(screen.queryByText(/This removes no chats/)).toBeNull();
 		expect(removeButton().disabled).toBe(true);
 	});
 
@@ -136,7 +136,7 @@ describe('Remove project and chats from a worker', () => {
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
 		expect((await screen.findByRole('alert')).textContent).toMatch(reason);
-		expect(screen.queryByText(/all its chats|It has no chats/)).toBeNull();
+		expect(screen.queryByText(/all its chats|This removes no chats/)).toBeNull();
 		expect(removeButton().disabled).toBe(true);
 	});
 
@@ -145,7 +145,7 @@ describe('Remove project and chats from a worker', () => {
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
-		await screen.findByText(/Remove Demo from Tower\? It has no chats\./);
+		await screen.findByText(/Remove Demo from Tower\? This removes no chats\./);
 		expect(removeButton().disabled).toBe(false);
 	});
 });

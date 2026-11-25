@@ -11,7 +11,7 @@ describe('removalConfirmText', () => {
 
 	it('says when nothing is lost and when the count is unknown', () => {
 		expect(removalConfirmText('Demo', 'Worker A', { chats: 0, worktrees: 0 }))
-			.toBe('Remove Demo from Worker A? It has no chats. Files stay on disk.');
+			.toBe('Remove Demo from Worker A? This removes no chats. Files stay on disk.');
 		expect(removalConfirmText('Demo', 'Worker A', { chats: null, worktrees: null }))
 			.toBe('Remove Demo from Worker A and all its chats? This cannot be undone. Files stay on disk.');
 	});

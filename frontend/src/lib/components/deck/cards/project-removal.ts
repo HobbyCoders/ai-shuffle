@@ -21,7 +21,7 @@ export function removalConfirmText(name: string, where: string | null, counts: R
 	const head = chats === null
 		? `Remove ${target} and all its chats?`
 		: chats === 0
-			? `Remove ${target}? It has no chats.`
+			? `Remove ${target}? This removes no chats.`
 			: `Remove ${target} and its ${plural(chats, 'chat', 'chats')}?`;
 	const parts = [head, chats === 0 ? 'Files stay on disk.' : 'This cannot be undone. Files stay on disk.'];
 	if (counts.worktrees) {
