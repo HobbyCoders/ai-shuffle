@@ -228,18 +228,31 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         rows = cursor.fetchall()
         cursor.execute("SELECT origin, settings FROM projects_v2")
         stored_rows = cursor.fetchall()
+    # Precedence per origin: 0 the owner's pin, 1 a URL whose own spelling is
+    # that origin (or a record linked to an origin its URL does not derive, as
+    # before), 2 a URL that reaches it only through the other spelling (git@
+    # vs https). A git@ add shares the HTTPS id, so neither the id nor a
+    # record's link alone proves the spelling: an SSH URL never shadows an
+    # HTTPS one for the HTTPS id. First seen wins within a rank, as before.
     out: Dict[str, Dict[str, Any]] = {}
-    aliases = []
+    rank: Dict[str, int] = {}
+
+    def put(origin: str, info: Dict[str, Any], level: int) -> None:
+        if origin not in out or level < rank[origin]:
+            out[origin], rank[origin] = info, level
+
+    def level_for(origin: str, url: str) -> int:
+        return 1 if legacy_link_group_id(url) == origin or origin not in remote_link_ids(url) else 2
+
     for row in rows:
         url = strip_url_userinfo(row["remote_url"])
         if not url:
             continue
         info = {"clone_url": url, "default_branch": row["default_branch"] or None}
-        out.setdefault(row["link_group_id"] or ("local:" + str(row["id"])), info)
-        derived = legacy_link_group_id(url)
-        if derived:
-            out.setdefault(derived, info)
-        aliases.append((url, info))
+        linked = row["link_group_id"] or ("local:" + str(row["id"]))
+        put(linked, info, level_for(linked, url))
+        for derived in sorted(remote_link_ids(url)):
+            put(derived, info, level_for(derived, url))
     for row in stored_rows:
         url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
         url = strip_url_userinfo(url) if url else None
@@ -247,17 +260,11 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
         if url and parse_jsonb(row["settings"]).get(projects_v2.PINNED_KEY) is True:
             # The owner pointed this project at a repository: that beats what a
             # worker that has not applied it yet still records.
-            out[origin] = {"clone_url": url, "default_branch": branch}
+            put(origin, {"clone_url": url, "default_branch": branch}, 0)
             continue
         if not url or (origin.startswith("git:") and origin not in remote_link_ids(url)):
             continue
-        out.setdefault(origin, {"clone_url": url, "default_branch": branch})
-    # The other spelling's id (git@ vs https) only fills gaps once every row
-    # holds its own: a git@ project read first must not shadow the HTTPS
-    # project's own clone URL.
-    for url, info in aliases:
-        for derived in sorted(remote_link_ids(url)):
-            out.setdefault(derived, info)
+        put(origin, {"clone_url": url, "default_branch": branch}, level_for(origin, url))
     return out
 
 

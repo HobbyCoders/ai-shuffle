@@ -566,8 +566,10 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
 
     The remote stored on the replicated ``projects_v2`` row
     (``settings.remote_url``, see ``app.db.projects_v2.record_remote``) wins when
-    it reproduces ``origin``: it survives the last local record of the project
-    going away, which the legacy scan below does not.
+    it reproduces ``origin`` in its own spelling: it survives the last local
+    record of the project going away, which the legacy scan below does not. A
+    stored URL that reaches ``origin`` only through the other spelling (git@ vs
+    https) yields to a local record in the exact spelling.
 
     A v2 ``origin`` is the collapse key ``project_resolver.origin_for_legacy_project``
     seeds: the legacy ``link_group_id`` (a ``git:…`` / ``manual:…`` token) or a synth
@@ -594,9 +596,15 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
     pinned = pinned_remote(project_v2_row)
     if pinned is not None and (project_v2_row or {}).get("origin") == origin:
         return pinned  # the owner pointed this project at another repository
+    # Then a URL whose own spelling is this origin, from the row or a local
+    # record, before one that reaches it only through the other spelling
+    # (git@ vs https): a git@ add shares the HTTPS id, so the row's stored
+    # SSH URL must not shadow an HTTPS record this runner can clone.
     stored_url, _stored_branch = stored_remote(project_v2_row)
-    if stored_url is not None and (project_v2_row or {}).get("origin") == origin \
-            and origin in remote_link_ids(stored_url):
+    if stored_url is None or (project_v2_row or {}).get("origin") != origin \
+            or origin not in remote_link_ids(stored_url):
+        stored_url = None
+    elif legacy_link_group_id(stored_url) == origin:
         return stored_url
     try:
         with get_db() as conn:
@@ -612,14 +620,14 @@ def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = N
         logger.warning(
             "checkout_manager: clone-url lookup failed for origin %r: %s", origin, e
         )
-        return None
+        return stored_url
 
-    # A record whose own spelling is this origin first: a git@ record must not
-    # shadow the HTTPS project's own URL (or the reverse).
     for cand in candidates:
         remote_url = cand["remote_url"]
         if legacy_link_group_id(remote_url) == origin:
             return remote_url
+    if stored_url is not None:
+        return stored_url
     for cand in candidates:
         remote_url = cand["remote_url"]
         if origin in remote_link_ids(remote_url):

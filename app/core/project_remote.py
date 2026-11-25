@@ -684,10 +684,13 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
     derived = legacy_link_group_id(clean)
     if derived and derived != origin:
         dup = projects_v2.get_project_v2_by_origin(derived)
-        dup_now = pinned_remote(dup)
-        # Only a project still on that repository is a duplicate: one that
-        # since moved to another repository is a live project of its own.
-        if dup is not None and not merged_into(dup) and (dup_now is None or normalize_remote_url(dup_now) == wanted):
+        # Only a project still on that repository, in this spelling, is a
+        # duplicate: one that since moved to another repository is a live
+        # project of its own, and a git@ add shares the HTTPS id, so the id
+        # alone does not prove the spelling. Compare the URL it actually uses:
+        # its pin, else its stored or recorded URL in that spelling first.
+        dup_now = current_remote(dup) if dup is not None else None
+        if dup is not None and not merged_into(dup) and dup_now and normalize_remote_url(dup_now) == wanted:
             duplicate = derived
             projects_v2.mark_merged(derived, origin)
     gen = generation(pv2) + 1

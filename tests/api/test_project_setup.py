@@ -1771,6 +1771,56 @@ def test_an_https_projects_setup_clones_its_own_url_when_an_ssh_project_is_read_
     assert checkout_manager._resolve_clone_url(https["origin"]) == _HTTPS
 
 
+def test_changing_a_repository_never_merges_a_project_a_git_at_add_created(client, ws, test_db, monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(project_remote, "_probe", lambda url: "main")
+    # This worker added R over git@: the HTTPS id, storing the SSH URL.
+    _here, mine = _legacy_project_here(ws, remote=_SSH, origin=auto_link_group_id(_SSH))
+    t = _replicated(_MOVED_TO, name="T")
+    # Elsewhere, T is changed from S to R's HTTPS URL, then back to S.
+    plan = project_remote.prepare_change(t["id"], _HTTPS, keep_upstream=False)
+    assert plan["merged_origin"] is None
+    project_remote.prepare_change(t["id"], _MOVED_TO, keep_upstream=False)
+    assert project_remote.merged_into(projects_v2.get_project_v2(mine["id"])) is None
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never pointed at S
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+
+
+def _record_only(project_id: str, remote: str, origin: str) -> None:
+    """A local project record for ``remote`` linked to ``origin``, storing nothing on the catalog row."""
+    database.create_project(project_id=project_id, name="Demo", description=None, path=project_id,
+                            link_group_id=origin)
+    database.create_git_repository(f"repo-{project_id}", project_id, remote_url=remote)
+
+
+def test_a_git_at_add_never_shadows_an_https_url_this_runner_can_clone(ws, test_db):
+    from app.core import checkout_manager
+
+    canonical = auto_link_group_id(_HTTPS)
+    # A git@ add made the HTTPS id and stored the SSH URL on it.
+    projects_v2.upsert_project(canonical, name="Demo")
+    assert projects_v2.record_remote(canonical, _SSH, "main")
+    row = projects_v2.get_project_v2_by_origin(canonical)
+    # Only the SSH URL known: that one, as before.
+    assert checkout_manager._resolve_clone_url(canonical, row) == _SSH
+    assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _SSH
+    # A git@ record linked to it (read first), then an exact HTTPS record.
+    _record_only("viassh", _SSH, canonical)
+    _record_only("viahttps", _HTTPS, canonical)
+    assert checkout_manager._resolve_clone_url(canonical, row) == _HTTPS
+    assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _HTTPS  # what setup sends
+    # A legacy SSH project still gets its own SSH URL.
+    legacy = _legacy_id(_SSH)
+    projects_v2.upsert_project(legacy, name="Old")
+    assert projects_v2.record_remote(legacy, _SSH, "main")
+    assert checkout_manager._resolve_clone_url(legacy, projects_v2.get_project_v2_by_origin(legacy)) == _SSH
+    assert project_setup._repo_info_by_origin()[legacy]["clone_url"] == _SSH
+
+
 def test_the_overview_never_returns_a_password_git_reads_but_a_url_parser_does_not(client, ws, test_db):
     secret = "https://user:pa[ss-example@git.example.com/example-org/demo.git"
     _legacy_project_here(ws, remote=secret, project_id="demo", origin=auto_link_group_id(secret))
