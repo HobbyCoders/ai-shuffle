@@ -1992,7 +1992,7 @@ def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monk
     session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
     # After the project's chat list is read, before any chat is deleted.
     barriers = _Barriers(monkeypatch, {"project": (
-        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE project_id"), False)})
+        lambda sql, params: sql.startswith("SELECT * FROM sessions WHERE") and "project_id IN" in sql, False)})
     cleanups = []
     monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda s, row=None: cleanups.append(("ref", s)))
     monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda s: cleanups.append(("wake", s)))
