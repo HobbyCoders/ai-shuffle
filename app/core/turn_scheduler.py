@@ -131,6 +131,38 @@ def _turn_terminal_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _turn_limit_payload(session_id: str, turn_id: str) -> Dict[str, Any]:
+    """The payload the 429 consumers (the rate-limit notice, the limit resume)
+    read for a settled turn: its ``turn.completed`` payload, or else the
+    ``turn.aborted`` payload of a turn that ended on an error.
+
+    The chat pump settles a failed provider call as an error abort carrying
+    ``api_error_status`` and the typed wait (``retry_at``), never as a
+    completion, so reading only ``turn.completed`` would miss every chat 429.
+    A user stop (``reason == "interrupt"``) is not an error and yields ``{}``.
+    Kept apart from :func:`_turn_terminal_payload`, whose other readers take
+    any payload it returns as a completion.
+    """
+    completed = _turn_terminal_payload(session_id, turn_id)
+    if completed:
+        return completed
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM session_events "
+            "WHERE session_id=%s AND turn_id=%s AND event_type='turn.aborted' "
+            "ORDER BY seq DESC LIMIT 1",
+            (session_id, turn_id),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return {}
+    payload = parse_jsonb(row["payload"])
+    if not isinstance(payload, dict) or payload.get("reason") != "error":
+        return {}
+    return payload
+
+
 def _compaction_result(session_id: str, compact_turn_id: str) -> str:
     """What a settled ``/compact`` turn did, read from the event log:
     ``"compacted"`` (a compaction boundary was recorded for it),
@@ -552,8 +584,14 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     terminal = await asyncio.to_thread(_turn_terminal_payload, session_id, turn_id)
 
     # (1) FAILOVER — surfaces the rate-limited state only; account rotation is
-    # retired, so it never enqueues a retry and the drain below runs.
-    await _maybe_failover(session_id, settled, terminal)
+    # retired, so it never enqueues a retry and the drain below runs. A chat
+    # turn that failed on a 429 settles as an error abort, not a completion:
+    # its aborted payload carries the status and wait (_turn_limit_payload).
+    # Only this policy reads it; nothing below takes it for a completion.
+    limit_terminal = terminal or await asyncio.to_thread(
+        _turn_limit_payload, session_id, turn_id,
+    )
+    await _maybe_failover(session_id, settled, limit_terminal)
 
     # (1b) WAKE RECOVERY — a source=unpark turn that died on a provider error
     # before making a single model call. Same precedence rule as failover: the
@@ -630,9 +668,11 @@ async def _maybe_failover(
     so no ``source=failover`` retry is enqueued.
 
     "Not user-stopped" holds by construction: the usage-limit signal lives in a
-    settled turn's terminal ``turn.completed`` payload, which a user stop
-    (``aborted``) / park never carries — so ``is_usage_limit_error`` is False on
-    every non-completed settlement and this returns early.
+    settled turn's terminal ``turn.completed`` payload or the ``turn.aborted``
+    payload of an error (:func:`_turn_limit_payload`), which a user stop
+    (``reason == "interrupt"``) / park never carries — so
+    ``is_usage_limit_error`` is False on those settlements and this returns
+    early.
     """
     from app.core import account_failover
 

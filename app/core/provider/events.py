@@ -181,6 +181,29 @@ class ResultMessage(ProviderEvent):
     api_error_status: Optional[int] = None
     uuid: Optional[str] = None
     terminal_reason: Optional[str] = None
+    #: The provider refused with a Retry-After longer than the client waits, so
+    #: the request was surfaced, not retried: the seconds it asked for, and the
+    #: epoch time that wait ends, counted from when the refusal arrived. Nothing
+    #: may send again (or resume) before ``retry_at``. ``None`` otherwise.
+    retry_after_seconds: Optional[float] = None
+    retry_at: Optional[float] = None
+
+
+#: The typed keys a refused turn's terminal carries (see ``ResultMessage``),
+#: copied unchanged into the pump metadata, the error frame and the durable
+#: terminal event. Consumers read these, never the error text.
+RETRY_FIELDS = ("retry_after_seconds", "retry_at")
+
+
+def retry_fields(source: Any) -> Dict[str, float]:
+    """The :data:`RETRY_FIELDS` ``source`` carries (an object or a dict), each
+    a positive number, or an empty dict."""
+    out: Dict[str, float] = {}
+    for key in RETRY_FIELDS:
+        value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            out[key] = float(value)
+    return out
 
 
 @dataclass

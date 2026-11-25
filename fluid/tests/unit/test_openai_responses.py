@@ -1339,6 +1339,27 @@ async def test_rate_limit_hint_past_the_floor_surfaces_instead_of_retrying_early
     assert _sleeps == []
     assert chunks[-1].kind == "error"
     assert "45s" in chunks[-1].payload["message"]
+    # The host gets the wait as a typed field, the shape refusal_delay gives
+    # an HTTP Retry-After it did not wait out.
+    assert chunks[-1].payload["retry_after_seconds"] == pytest.approx(45.0)
+
+
+async def test_rate_limit_hint_within_the_floor_carries_no_surfaced_wait(
+    _sleeps: list[float],
+) -> None:
+    """Only a wait the client did NOT sit out is surfaced as typed: a short
+    in-stream hint is retried and never reaches the host as a wait."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _sse(_CREATED + _rate_limited("Rate limit reached. Please try again in 2s."))
+
+    chunks = await _run_client(handler)
+    assert calls > 1
+    assert chunks[-1].kind == "error"
+    assert "retry_after_seconds" not in chunks[-1].payload
 
 
 async def test_rate_limit_without_a_hint_uses_the_default_backoff(

@@ -2918,3 +2918,73 @@ async def test_question_answer_after_folder_removal_names_no_copied_folders(mock
         qo.build_options_from_profile(profile={"id": profile, "config": {"model": "fable"}},
                                       overrides=started["overrides"], session_id="f-ask")
     assert normalize_workspace_project_ids(resolve.call_args.args[0]) == ["docs"]
+
+
+async def test_a_chat_429_with_a_long_retry_after_settles_with_its_wait(
+    mock_db, monkeypatch, tmp_path,
+):
+    """A chat turn refused with 429 + ``Retry-After: 60`` ends on the pump's
+    ``error`` frame, so it settles ``aborted``. That frame carried only the
+    message: the aborted terminal had no status or wait, and the rate-limit
+    notice and the limit resume, which read only ``turn.completed``, never saw
+    the refusal. Drives the real pump, recorder, runtime settle and scheduler."""
+    import time
+
+    import app.core.query_engine as qe
+    from app.core import account_failover, limit_resume
+    from app.core.provider.events import ResultMessage
+    from app.core.turn_recorder import TurnRecorder
+    from tests.core.engine_harness import collect
+    from tests.core.helpers import make_pump
+    from tests.core.query_engine_flow_harness import engine_patches, frames_of, fresh_adapter
+    from tests.core.test_session_runtime import _runtime_env
+    from tests.shared_fixtures import seed_session
+
+    sid = "chat-429"
+    retry_at = time.time() + 60
+    refusal = ResultMessage(
+        subtype="error_during_execution", is_error=True, api_error_status=429,
+        errors=["provider returned HTTP 429: Too many requests."],
+        retry_after_seconds=60.0, retry_at=retry_at,
+    )
+    with ExitStack() as stack:
+        engine_patches(stack, cwd=str(tmp_path), adapter=fresh_adapter([refusal]))
+        stack.enter_context(
+            patch("app.services.notification_service.emit_notification", new=AsyncMock()))
+        stack.enter_context(
+            patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
+        frames = await collect(qe._stream_to_websocket_impl("hi", sid, "claude-code"))
+    [error] = frames_of(frames, "error")
+    assert "retry-after" not in error["message"].lower()  # no machine note in the text
+
+    seed_session(sid)
+    row = turns_db.enqueue_turn(sid, "user", prompt="hi")
+
+    async def create_recorder(session_id, **kw):
+        recorder = TurnRecorder(session_id, None, kw["run_id"], kw["fence_token"], "fixture")
+        recorder.turn_id = kw["turn_id"]
+        recorder._owns_lease = False
+        return recorder
+
+    with _runtime_env(pump=make_pump([error])), monkeypatch.context() as patched:
+        patched.setattr(session_runtime.TurnRecorder, "create_for_run", create_recorder)
+        outcome = await session_runtime.SessionRuntime(row).execute()
+    assert outcome == "aborted"
+    assert turns_db.get_turn(row["id"])["state"] == "aborted"  # not made a success
+
+    notices = AsyncMock()
+    on_limit_stop = AsyncMock(return_value=None)
+    with patch("app.services.notification_service.emit_notification", new=notices), \
+            patch.object(account_failover, "_is_subscription_session", return_value=False), \
+            patch("app.core.limit_resume.on_limit_stop", new=on_limit_stop), \
+            _patch_execute():
+        await turn_scheduler._on_turn_settled_impl(sid, row["id"], outcome)
+
+    [notice] = [c.kwargs["message"] for c in notices.await_args_list]
+    assert "was retried" not in notice and "wait 60s" in notice
+    terminal = on_limit_stop.await_args.args[2]
+    assert terminal["api_error_status"] == 429
+    assert terminal["retry_at"] == pytest.approx(retry_at)
+    # The hold on automatic turns reads the same aborted terminal.
+    assert limit_resume.hold_until(sid, now=time.time()) == pytest.approx(retry_at)
+    assert turns_db.get_turn(row["id"])["state"] == "aborted"

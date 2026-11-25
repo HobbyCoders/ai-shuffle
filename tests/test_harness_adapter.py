@@ -7993,9 +7993,10 @@ async def test_error_event_status_reaches_api_error_status():
 @pytest.mark.asyncio
 async def test_a_retry_after_too_long_to_wait_reaches_the_app():
     """Fluid surfaces a 429 whose Retry-After is longer than it waits, with
-    ``retry_after_seconds``. The short provider message alone dropped that
-    wait, so the Task re-dispatch, the notice and limit resume never saw it."""
-    from app.core import provider_agent
+    ``retry_after_seconds``. The adapter carries it as typed fields (the wait
+    and the deadline counted from when the refusal arrived) and leaves the
+    message as the provider's own words: no machine marker in the text."""
+    import time as _time
 
     events = [lm.ErrorEvent(
         session_id=SID, retriable=True, status=429,
@@ -8003,13 +8004,13 @@ async def test_a_retry_after_too_long_to_wait_reaches_the_app():
         provider_message="Too many requests.",
         retry_after_seconds=60.0,
     )]
+    before = _time.time()
     [result] = await _collect(_adapter_with(FakeEngine(events)))
 
     assert result.api_error_status == 429
-    [error] = result.errors
-    assert error.startswith("provider returned HTTP 429: Too many requests. ")
-    assert provider_agent.not_retried_wait(error) == 60.0
-    assert provider_agent.rate_limit_retry_after(error) == 60.0
+    assert result.errors == ["provider returned HTTP 429: Too many requests."]
+    assert result.retry_after_seconds == 60.0
+    assert before + 60.0 <= result.retry_at <= _time.time() + 60.0
 
 
 @pytest.mark.asyncio

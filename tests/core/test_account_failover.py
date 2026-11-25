@@ -14,6 +14,7 @@ execute_query``, and ``emit_notification`` is imported lazily inside ``_notify``
 — both are patched where they are DEFINED so the consumer's binding is reached.
 """
 
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -129,18 +130,33 @@ class TestApiKey429IsNotAUsageWindow:
     async def test_an_unretried_429_does_not_say_it_was_retried(self):
         """Fluid surfaced a 429 whose Retry-After was longer than it waits:
         "The request was retried" would be untrue, so the notice names the
-        wait instead."""
-        from app.core.provider_agent import not_retried_note
-
-        metadata = {"api_error_status": 429, "errors": [
-            "provider returned HTTP 429: Too many requests. " + not_retried_note(60),
-        ]}
+        wait and the time instead, read from the typed fields."""
+        metadata = {
+            "api_error_status": 429,
+            "errors": ["provider returned HTTP 429: Too many requests."],
+            "retry_after_seconds": 60.0,
+            "retry_at": 1795651260.0,
+        }
         message = await self._notice(
             {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
         )
         assert "was retried" not in message
-        assert message == af.RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=60)
+        assert message == af.RATE_LIMIT_NOT_RETRIED_MESSAGE.format(
+            wait=60, at=time.strftime("%H:%M:%S UTC", time.gmtime(1795651260.0)))
         assert "wait 60s" in message
+
+    async def test_provider_text_never_changes_the_notice(self):
+        """A provider body that reads like a wait note is still provider text:
+        without the typed fields the notice keeps its ordinary wording."""
+        metadata = {"api_error_status": 429, "errors": [
+            "provider returned HTTP 429: The provider asked to wait 60s before "
+            "another request (retry-after: 60), longer than the client waits, "
+            "so the request was not retried.",
+        ]}
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key", metadata=metadata,
+        )
+        assert message == af.RATE_LIMIT_MESSAGE
 
     async def test_a_failed_lookup_keeps_the_usage_window_notice(self):
         from app.db import database

@@ -729,6 +729,7 @@ def _retry_kind(
     start_max: int,
     rate_max: int,
     rate_wait_cap: float = math.inf,
+    limit: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """``"rate"``, ``"start"`` or ``None`` — how (and whether) to re-dispatch.
 
@@ -736,23 +737,29 @@ def _retry_kind(
     the caller's post-return decision cannot disagree: both read the same
     ``used`` counters, which only ever change between attempts.
 
-    A rate limit the client did not retry because the provider's Retry-After
-    was long (``provider_agent.not_retried_note``) is not re-dispatched when
-    that wait is longer than ``rate_wait_cap`` (the longest one reschedule
-    waits): any sooner attempt meets the same refusal
-    (:func:`_waited_out_worded` says when to retry instead).
+    ``limit`` is the typed refusal of the worker's terminal turn
+    (``provider_agent.terminal_limit_signal``: ``api_error_status``,
+    ``retry_at``). It is read BEFORE any text: a 429 is a rate limit even when
+    its body is empty, and a refusal whose Retry-After the client did not wait
+    out is not re-dispatched when the time left is longer than
+    ``rate_wait_cap`` (the longest one reschedule waits) — any sooner attempt
+    meets the same refusal (:func:`_waited_out_worded` says when to retry
+    instead). Provider text never sets or stretches that wait.
     """
     from app.core import provider_agent
 
     if status != "error" or frames_forwarded:
         return None
     text = error_text or ""
+    limit = limit or {}
+    wait = _time_left(limit.get("retry_at"))
+    if wait is not None:
+        if wait > rate_wait_cap:
+            return None
+        return "rate" if used["rate"] < rate_max else None
     if provider_agent.looks_usage_limited(text):
         return None
-    if provider_agent.looks_rate_limited(text):
-        wait = provider_agent.not_retried_wait(text)
-        if wait is not None and wait > rate_wait_cap:
-            return None
+    if limit.get("api_error_status") == 429 or provider_agent.looks_rate_limited(text):
         return "rate" if used["rate"] < rate_max else None
     lowered = text.lower()
     if any(marker in lowered for marker in _PERMANENT_START_FAILURES):
@@ -760,41 +767,62 @@ def _retry_kind(
     return "start" if used["start"] < start_max else None
 
 
-def _unwaitable_rate_wait(status: str, outcome, cap: float) -> Optional[float]:
-    """The provider's wait when it is the reason :func:`_retry_kind` declined a
-    rate re-dispatch (longer than ``cap``), else ``None``."""
-    from app.core import provider_agent
+def _time_left(retry_at: Any) -> Optional[float]:
+    """Seconds until the typed ``retry_at`` deadline (never negative), or None
+    when there is none."""
+    if not isinstance(retry_at, (int, float)) or isinstance(retry_at, bool):
+        return None
+    return max(0.0, float(retry_at) - time.time())
 
+
+def _outcome_limit(outcome) -> Dict[str, Any]:
+    """The typed refusal a :class:`WorkerOutcome` carries, as the dict
+    :func:`_retry_kind` reads."""
+    return {
+        key: getattr(outcome, key, None)
+        for key in ("api_error_status", "retry_after_seconds", "retry_at")
+        if getattr(outcome, key, None) is not None
+    }
+
+
+def _unwaitable_rate_wait(status: str, outcome, cap: float) -> Optional[float]:
+    """The time left on the provider's typed wait when it is the reason
+    :func:`_retry_kind` declined a rate re-dispatch (longer than ``cap``),
+    else ``None``."""
     if status != "error" or outcome.frames_forwarded:
         return None
-    text = outcome.error or ""
-    if provider_agent.looks_usage_limited(text) or not provider_agent.looks_rate_limited(text):
-        return None
-    wait = provider_agent.not_retried_wait(text)
+    wait = _time_left(getattr(outcome, "retry_at", None))
     return wait if wait is not None and wait > cap else None
 
 
-def _retry_backoff(kind: str, error_text: Optional[str], attempt: int, cap: float) -> float:
+def _retry_backoff(
+    kind: str,
+    error_text: Optional[str],
+    attempt: int,
+    cap: float,
+    *,
+    retry_at: Optional[float] = None,
+) -> float:
     """How long to wait before the next attempt of ``kind``.
 
     A capacity refusal starts from the provider's OWN retry-after — it knows
     when its window rolls over and we do not — doubled per attempt so a
-    still-saturated org is not hammered, and clamped at ``cap``. A wait the
-    client did not sit out (``provider_agent.not_retried_note``) is read
+    still-saturated org is not hammered, and clamped at ``cap``. The typed
+    deadline of a wait the client did not sit out (``retry_at``) is read
     first, and the clamp never cuts below it: :func:`_retry_kind` declines a
-    re-dispatch whose noted wait exceeds ``cap``.
+    re-dispatch whose time left exceeds ``cap``.
     """
     from app.core import provider_agent
 
     if kind != "rate":
         return _START_RETRY_BACKOFF_SECONDS
-    base = (
-        provider_agent.not_retried_wait(error_text)
-        or provider_agent.rate_limit_retry_after(error_text)
-    )
+    left = _time_left(retry_at)
+    base = left if left is not None else provider_agent.rate_limit_retry_after(error_text)
     if base is None:
         base = _RATE_RETRY_FALLBACK_SECONDS
-    return min(max(0.0, float(cap)), base * (2 ** max(0, attempt)) + 0.25)
+    delay = min(max(0.0, float(cap)), base * (2 ** max(0, attempt)) + 0.25)
+    # The typed wait is a minimum: never send again before it ends.
+    return max(delay, left) if left is not None else delay
 
 
 def _capacity_worded(outcome, reschedules: int):
@@ -814,7 +842,8 @@ def _capacity_worded(outcome, reschedules: int):
     if provider_agent.looks_usage_limited(outcome.error):
         # Not capacity: "wait a minute and re-dispatch" would be wrong advice.
         return outcome
-    if not provider_agent.looks_rate_limited(outcome.error):
+    if (getattr(outcome, "api_error_status", None) != 429
+            and not provider_agent.looks_rate_limited(outcome.error)):
         return outcome
     tried = (
         f" It was rescheduled {reschedules} time(s) and the provider is still "
@@ -833,28 +862,34 @@ def _capacity_worded(outcome, reschedules: int):
     )
 
 
-def _waited_out_worded(outcome, wait: float, reschedules: int):
-    """Re-word a rate-limit failure whose provider asked for ``wait`` seconds,
-    longer than an automatic re-dispatch waits, so it was not re-dispatched.
+def _waited_out_worded(outcome, reschedules: int):
+    """Re-word a rate-limit failure whose provider asked for a wait longer than
+    an automatic re-dispatch waits, so it was not re-dispatched.
 
-    Says when another attempt can succeed, so the parent neither re-sends
-    straight away (the same refusal) nor shrinks a brief that was fine.
+    Worded from the outcome's typed wait (``retry_after_seconds``, and
+    ``retry_at``, the time it ends counted from when the refusal arrived). The
+    retry time leads, so a reader that clips the text keeps it. Says when
+    another attempt can succeed, so the parent neither re-sends straight away
+    (the same refusal) nor shrinks a brief that was fine.
     """
     from dataclasses import replace
 
-    seconds = max(1, math.ceil(wait))
-    at = time.strftime("%H:%M:%S UTC", time.gmtime(time.time() + seconds))
+    from app.core import provider_agent
+
+    retry_at = outcome.retry_at
+    asked = outcome.retry_after_seconds or _time_left(retry_at) or 0.0
+    seconds = max(1, math.ceil(asked))
     tried = (
         f" It was already rescheduled {reschedules} time(s)." if reschedules else ""
     )
     return replace(
         outcome,
         error=(
-            f"Provider rate limit: the provider asked to wait {seconds}s before "
-            f"another request (until about {at}), longer than an automatic "
-            f"re-dispatch waits, so the worker was not re-dispatched.{tried} "
-            "Re-dispatch after then — the brief is fine. "
-            f"Provider said: {outcome.error}"
+            f"Retry after {provider_agent.retry_time_utc(retry_at)}. Provider rate "
+            f"limit: the provider asked to wait {seconds}s before another "
+            "request, longer than an automatic re-dispatch waits, so the worker "
+            f"was not re-dispatched.{tried} Re-dispatch after then — the brief "
+            f"is fine. Provider said: {outcome.error}"
         ),
     )
 
@@ -946,11 +981,13 @@ async def _dispatch_worker_with_retries(
             attempt_kwargs["max_wall_seconds"] = remaining
 
         def _will_retry(
-            status: str, preview: Optional[str], frames: int
+            status: str, preview: Optional[str], frames: int,
+            limit: Optional[Dict[str, Any]] = None,
         ) -> bool:
             return _retry_kind(
                 status, preview, frames, used,
                 start_max=start_max, rate_max=rate_max, rate_wait_cap=backoff_cap,
+                limit=limit,
             ) is not None
 
         try:
@@ -979,11 +1016,11 @@ async def _dispatch_worker_with_retries(
         kind = _retry_kind(
             status, outcome.error, outcome.frames_forwarded, used,
             start_max=start_max, rate_max=rate_max, rate_wait_cap=backoff_cap,
+            limit=_outcome_limit(outcome),
         )
         if kind is None:
-            wait = _unwaitable_rate_wait(status, outcome, backoff_cap)
-            if wait is not None:
-                return _waited_out_worded(outcome, wait, used["rate"])
+            if _unwaitable_rate_wait(status, outcome, backoff_cap) is not None:
+                return _waited_out_worded(outcome, used["rate"])
             return _capacity_worded(outcome, used["rate"])
 
         # The failed attempt may already have accepted a follow-up. Use the
@@ -991,7 +1028,10 @@ async def _dispatch_worker_with_retries(
         from app.core.worker_checkout import reclaim_finished_worker_checkout
         await reclaim_finished_worker_checkout(worker_id)
 
-        delay = _retry_backoff(kind, outcome.error, used[kind], backoff_cap)
+        delay = _retry_backoff(
+            kind, outcome.error, used[kind], backoff_cap,
+            retry_at=getattr(outcome, "retry_at", None),
+        )
         used[kind] += 1
         if overall_deadline is not None and (
             time.monotonic() + delay >= overall_deadline
@@ -999,9 +1039,8 @@ async def _dispatch_worker_with_retries(
             if kind == "rate":
                 # The synchronous budget ends before the provider's window:
                 # say when to retry rather than hand back the bare refusal.
-                wait = provider_agent.not_retried_wait(outcome.error)
-                if wait is not None:
-                    return _waited_out_worded(outcome, wait, used["rate"] - 1)
+                if getattr(outcome, "retry_at", None) is not None:
+                    return _waited_out_worded(outcome, used["rate"] - 1)
             return outcome
         logger.warning(
             "task_dispatch: worker %s never started (%s) — re-dispatching the "

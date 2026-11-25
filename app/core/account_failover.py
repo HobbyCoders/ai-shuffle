@@ -89,23 +89,33 @@ RATE_LIMIT_MESSAGE = (
     "still refused; try again shortly."
 )
 #: The provider's Retry-After was longer than the client waits, so it was not
-#: retried at all (``provider_agent.not_retried_note`` in the turn's errors).
+#: retried at all (the turn's typed ``retry_after_seconds``/``retry_at``).
 RATE_LIMIT_NOT_RETRIED_MESSAGE = (
     "Rate limited by the provider (HTTP 429). It asked to wait {wait}s, longer "
-    "than the client waits, so the request was not retried; try again after then."
+    "than the client waits, so the request was not retried; try again after "
+    "{at}."
 )
 
 
 def rate_limit_message(metadata: Optional[Dict[str, Any]]) -> str:
-    """The API-key 429 notice: says the request was retried only if it was."""
-    from app.core.provider_agent import not_retried_wait
+    """The API-key 429 notice: says the request was retried only if it was.
 
-    errors = (metadata or {}).get("errors")
-    text = " ".join(str(e) for e in errors) if isinstance(errors, list) else str(errors or "")
-    wait = not_retried_wait(text)
-    if wait is None:
+    Worded from the turn's typed wait alone (``retry_after_seconds`` and
+    ``retry_at``, see ``app.core.provider.events.RETRY_FIELDS``); the
+    provider's text never changes it.
+    """
+    import math
+    import time
+
+    from app.core.provider.events import retry_fields
+
+    waits = retry_fields(metadata or {})
+    seconds = waits.get("retry_after_seconds")
+    if seconds is None:
         return RATE_LIMIT_MESSAGE
-    return RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=int(wait))
+    at = waits.get("retry_at")
+    when = time.strftime("%H:%M:%S UTC", time.gmtime(at)) if at else "then"
+    return RATE_LIMIT_NOT_RETRIED_MESSAGE.format(wait=max(1, math.ceil(seconds)), at=when)
 
 
 def _is_subscription_session(session_id: Optional[str]) -> bool:
@@ -151,7 +161,7 @@ async def attempt_failover(
     window to reset or signs into a different account. A 429 on an API key
     (OpenRouter, Groq, xAI, a custom row, the Claude API key) has no usage
     window: it gets the plain rate-limit notice instead, worded from the turn's
-    ``metadata`` errors (:func:`rate_limit_message`).
+    typed wait in ``metadata`` (:func:`rate_limit_message`).
     """
     from app.db.async_database import run_sync
 

@@ -618,25 +618,31 @@ async def test_a_retry_after_too_long_to_wait_reaches_the_app(monkeypatch, tmp_p
     """A 429 + ``Retry-After: 60`` is longer than the client waits, so it is
     surfaced at once. The app kept only the short body text, so the Task
     re-dispatch fell back to 5 s, the chat had no reset time, and an API-key
-    notice said the request had been retried."""
+    notice said the request had been retried. The wait now arrives as typed
+    fields; the text stays the provider's own."""
+    import time
     from unittest.mock import patch
 
     from app.core import account_failover, limit_resume, provider_agent
 
     provider.script(fps.error_reply(429, "Too many requests.", retry_after="60"))
+    before = time.time()
     async with NativeRun(monkeypatch, tmp_path, provider) as run:
         messages = await run.turn("hi")
 
     native = messages[-1]
     assert isinstance(native, ResultMessage) and native.api_error_status == 429
     assert len(provider.requests) == 1, "not re-sent inside the provider's window"
-    [error] = native.errors
-    assert error.startswith("provider returned HTTP 429: Too many requests.")
-    # The wait reaches what reads the error text: the Task re-dispatch, the
-    # chat's reset time and the worker's failure summary.
-    assert provider_agent.not_retried_wait(error) == 60.0
-    assert limit_resume.reset_from_text(error, now=1000.0).at == 1060.0
-    assert "already retried" not in provider_agent._failure_summary("error", error, 0)
+    assert native.errors == ["provider returned HTTP 429: Too many requests."]
+    # The wait reaches the Task re-dispatch, the chat's reset time and the
+    # worker's failure summary as typed fields, counted from receipt.
+    assert native.retry_after_seconds == 60.0
+    assert before + 60 <= native.retry_at <= time.time() + 60
+    reset = limit_resume.find_reset("", "", retry_at=native.retry_at, now=before)
+    assert reset is not None and reset.at == native.retry_at
+    assert provider_agent._failure_summary(
+        "error", native.errors[0], 0, retry_at=native.retry_at,
+    ).startswith("retry after ")
 
     with patch.object(account_failover, "_is_subscription_session", return_value=False):
         outcome = await _chat_turn_outcome(tmp_path, native)

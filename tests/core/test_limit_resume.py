@@ -83,14 +83,35 @@ def test_text_with_an_epoch():
 
 def test_an_unretried_retry_after_resets_once_its_wait_passes():
     """A 429 the client did not retry because its Retry-After was long: the
-    chat's limit state gets a reset time instead of "reset unknown"."""
-    from app.core.provider_agent import not_retried_note
-
-    text = "provider returned HTTP 429: Too many requests. " + not_retried_note(60)
-    info = lr.reset_from_text(text, now=NOW)
-    assert info is not None and info.at == NOW + 60
+    chat's limit state gets a reset time from the typed ``retry_at`` instead
+    of "reset unknown"."""
+    info = lr.find_reset("prov-1", "provider returned HTTP 429: Too many requests.",
+                         retry_at=NOW + 60, now=NOW)
+    assert info is not None and info.at == NOW + 60 and info.source == "retry_after"
     # A body hint the client already waited out says nothing about now.
     assert lr.reset_from_text("Rate limit reached. Please try again in 20s.", now=NOW) is None
+
+
+def test_provider_text_that_reads_like_a_wait_note_sets_no_reset():
+    """Only the typed field is trusted: provider text naming a wait is text."""
+    text = ("provider returned HTTP 429: The provider asked to wait 60s before another "
+            "request (retry-after: 60), longer than the client waits, so the request "
+            "was not retried.")
+    assert lr.find_reset("prov-1", text, now=NOW) is None
+
+
+def test_the_retry_deadline_is_a_minimum_over_an_earlier_usage_reset(monkeypatch):
+    """Retry-After is a minimum: a usage snapshot that says the window resets
+    in 10 minutes does not let the banner or the hold fire before a provider
+    deadline 30 minutes out. A later snapshot reset still wins."""
+    monkeypatch.setattr(lr, "_provider_windows", lambda pid: [
+        {"type": "five_hour", "utilization": 100.0, "resets_at": str(int(NOW + 600))},
+    ])
+    info = lr.find_reset("prov-1", "", retry_at=NOW + 1800, now=NOW)
+    assert info is not None and info.at == NOW + 1800
+    assert info.windows == ("five_hour",)
+    later = lr.find_reset("prov-1", "", retry_at=NOW + 60, now=NOW)
+    assert later is not None and later.at == NOW + 600 and later.source == "structured"
 
 
 @pytest.mark.parametrize("text", [
@@ -588,6 +609,28 @@ def test_hold_without_a_reset_time_uses_the_fallback(monkeypatch):
 def test_no_hold_without_a_usage_limit(monkeypatch, errors, status):
     _held(monkeypatch, errors, status=status)
     assert lr.hold_until("s1", now=NOW + 60) is None
+
+
+def test_hold_waits_for_the_typed_retry_deadline_past_an_earlier_reset(monkeypatch):
+    """The automatic-turn hold takes the later of the provider's typed
+    ``retry_at`` and the usage snapshot's reset, read from an error-aborted
+    chat turn (no ``turn.completed`` at all)."""
+    from app.core import turn_scheduler
+    from app.db import database
+
+    monkeypatch.setattr(lr, "_last_settled_turn", lambda sid: {"id": "t1", "ended_at": NOW})
+    monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda sid, tid: {})
+    monkeypatch.setattr(turn_scheduler, "_turn_limit_payload", lambda sid, tid: {
+        "reason": "error", "message": "provider returned HTTP 429: Too many requests.",
+        "api_error_status": 429, "retry_after_seconds": 1800.0, "retry_at": NOW + 1800})
+    monkeypatch.setattr(database, "get_session", lambda sid: {"id": sid})
+    monkeypatch.setattr(lr, "session_leg", lambda session: "fluid")
+    monkeypatch.setattr(lr, "session_provider_key", lambda session, leg: "prov-1")
+    monkeypatch.setattr(lr, "_provider_windows", lambda pid: [
+        {"type": "five_hour", "utilization": 100.0, "resets_at": str(int(NOW + 600))},
+    ])
+    assert lr.hold_until("s1", now=NOW + 700) == NOW + 1800
+    assert lr.hold_until("s1", now=NOW + 1801) is None
 
 
 # ─── Settings ───────────────────────────────────────────────────────────────

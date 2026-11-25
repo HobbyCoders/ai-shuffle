@@ -447,6 +447,54 @@ async def test_an_engine_resumes_from_what_another_process_wrote(tmp_path) -> No
     reread.close()
 
 
+@pytest.mark.parametrize("leg", ["delegated", "acp"])
+async def test_delegated_and_acp_legs_resume_from_what_another_process_wrote(
+    tmp_path, leg,
+) -> None:
+    """The delegated and ACP legs claim the session (lock, so re-read) before
+    they read its head and seed the event sequence, as NativeLoop does: a
+    store that cached seq 10 still numbers the next event 21."""
+    from fluid.engine.acp.antigravity import AntigravitySpec
+    from fluid.engine.acp.loop import AcpLoop
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.events.bus import EventBus
+
+    sid = "ses_legs"
+    first = JsonlStore(tmp_path)
+    await first.create_session(sid)
+    await first.append(sid, SessionNode("u1", None, _msg("user", "q")))
+    for seq in range(1, 11):
+        await first.append_event(sid, TurnStarted(session_id=sid, seq=seq, model="m", provider="p"))
+    first.close()
+
+    a = JsonlStore(tmp_path)
+    assert (await a.get_session(sid)).head_node_id == "u1"
+    assert len(await a.events_since(sid, 0)) == 10  # cached at seq 10
+
+    b = JsonlStore(tmp_path)
+    await b.append(sid, SessionNode("a1", "u1", _msg("assistant", "r")))
+    for seq in range(11, 21):
+        await b.append_event(sid, TurnStarted(session_id=sid, seq=seq, model="m", provider="p"))
+    b.close()
+
+    bus = EventBus()
+    if leg == "delegated":
+        loop = DelegatedLoop(store=a, model="claude-sonnet-5", bus=bus, session_id=sid,
+                             cwd=str(tmp_path))
+    else:
+        spec = AntigravitySpec.build(sys.executable, auth_mode="oauth-personal",
+                                     home=str(tmp_path / "home"))
+        loop = AcpLoop(store=a, spec=spec, bus=bus, session_id=sid, cwd=str(tmp_path))
+    try:
+        session = await loop._ensure_session()
+        assert session.head_node_id == "a1"
+        published = await bus.publish(TurnStarted(session_id=sid, seq=0, model="m", provider="p"))
+        assert published.seq == 21
+    finally:
+        await loop.aclose()
+        a.close()
+
+
 async def test_set_head_accepts_a_node_another_process_added(tmp_path) -> None:
     """set_head checks its target against the nodes re-read under the lock,
     not the snapshot cached before another process appended it."""

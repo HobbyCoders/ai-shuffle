@@ -5355,17 +5355,14 @@ class HarnessAdapter(ProviderAdapter):
             if status is not None and isinstance(short, str) and short:
                 message = f"provider returned HTTP {status}: {short}"
             # The provider's Retry-After was longer than Fluid waits, so the
-            # request was surfaced, not retried. Name the wait in the text the
-            # Task re-dispatch, the rate-limit notice and the limit resume
-            # read, so none of them sends again before it is over.
+            # request was surfaced, not retried. Carried as typed fields (the
+            # message stays the provider's own words): the Task re-dispatch,
+            # the rate-limit notice and the limit resume read them, so none of
+            # them sends again before the wait is over. The deadline counts
+            # from now, when the refusal arrived.
             wait = getattr(event, "retry_after_seconds", None)
-            if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
-                from app.core.provider_agent import not_retried_note
-
-                message = message.rstrip()
-                if not message.endswith((".", "!", "?")):
-                    message += "."
-                message = f"{message} {not_retried_note(wait)}"
+            if not (isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0):
+                wait = None
             return [
                 ResultMessage(
                     subtype="error_during_execution",
@@ -5378,6 +5375,8 @@ class HarnessAdapter(ProviderAdapter):
                     usage=self._stamp_usage_estimated(usage),
                     uuid=self._uuid(event),
                     api_error_status=status,
+                    retry_after_seconds=float(wait) if wait is not None else None,
+                    retry_at=time.time() + float(wait) if wait is not None else None,
                     # A stop at the context limit: compact, then continue.
                     terminal_reason=(
                         NEEDS_COMPACTION
