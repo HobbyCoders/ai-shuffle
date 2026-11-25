@@ -247,6 +247,18 @@ def test_short_configured_key_redacted_but_the_clients_own_placeholder_ignored()
     assert header_secrets({"Authorization": "Bearer sk-1234"}) == ["Bearer sk-1234", "sk-1234"]
 
 
+def test_short_known_key_masked_as_a_token_but_kept_inside_words():
+    """A short configured key (``k``, ``local``) never rewrites the words
+    that contain it; standing alone it still goes."""
+    assert redact_text("check your plan: terminal usage chunk", ["k"]) == (
+        "check your plan: terminal usage chunk")
+    assert redact_text("open http://localhost:8080 or local.example.com", ["local"]) == (
+        "open http://localhost:8080 or local.example.com")
+    assert redact_text("invalid API key local.", ["local"]) == "invalid API key [redacted]."
+    assert redact_text("Bearer local", ["Bearer local", "local"]) == "[redacted]"
+    assert redact_text('{"apiKey": "k"} key=k', ["k"]) == '{"apiKey": "[redacted]"} key=[redacted]'
+
+
 async def test_chat_refusal_echoing_a_short_key_is_redacted():
     async with _refusing(401, "invalid key sk-1234 for this gateway") as http:
         chunks = [c async for c in stream_chat_completions(

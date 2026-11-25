@@ -339,8 +339,9 @@ def redact_text(text: str, known: Iterable[str] = ()) -> str:
 
     ``known`` are exact values to remove wherever they appear, at any length
     (the key or token a request actually carried; blanks are skipped, and a
-    caller leaves out a placeholder it chose itself). A known value's prefix
-    at the very end of
+    caller leaves out a placeholder it chose itself). One shorter than
+    _MIN_GUESSED goes only as a whole token, never inside a word (a key
+    ``k`` leaves ``check`` alone). A known value's prefix at the very end of
     ``text`` goes too (a clip, with or without its ``…``, that cut the value
     in half). Then the recognised shapes: vendor key prefixes, private-key
     blocks, ``Bearer``/``Basic`` tokens, URL passwords, and literal values
@@ -349,7 +350,15 @@ def redact_text(text: str, known: Iterable[str] = ()) -> str:
     detection. A caller that clips redacts first (see :func:`clip_redacted`).
     """
     for value in sorted(set(credential_values(known)), key=len, reverse=True):
-        text = text.replace(value, REDACTED)
+        if len(value) < _MIN_GUESSED:
+            # A short key (``k``, ``local``) goes only as a whole token: a
+            # plain replace would mask it inside every word that holds it
+            # (``check``, ``localhost``).
+            text = re.sub(
+                rf"(?<![A-Za-z0-9_\-.]){re.escape(value)}(?![A-Za-z0-9_\-]|\.[A-Za-z0-9_\-])",
+                REDACTED, text)
+        else:
+            text = text.replace(value, REDACTED)
         body, mark = (text[:-1], "…") if text.endswith("…") else (text, "")
         for n in range(len(value) - 1, _MIN_KNOWN_PREFIX - 1, -1):
             if body.endswith(value[:n]):
