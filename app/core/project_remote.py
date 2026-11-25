@@ -655,6 +655,33 @@ def current_remote(pv2: Dict[str, Any]) -> Optional[str]:
     return pinned_remote(pv2) or (_repo_info_by_origin().get(pv2.get("origin") or "") or {}).get("clone_url")
 
 
+def _own_remote(pv2: Dict[str, Any]) -> Optional[str]:
+    """The URL a project itself uses: its pin, else its own stored remote,
+    else a record of one of its own copies (linked to its origin) in the
+    spelling its origin derives from. Never a URL only another project records."""
+    from app.core.project_links import legacy_link_group_id
+    from app.db import projects_v2
+    from app.db.base import get_db
+
+    pinned = pinned_remote(pv2)
+    if pinned:
+        return pinned
+    stored, _branch = projects_v2.stored_remote(pv2)
+    if stored:
+        return stored
+    origin = pv2.get("origin") or ""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT gr.remote_url AS remote_url FROM git_repositories gr "
+            "JOIN projects p ON p.id = gr.project_id "
+            "WHERE p.link_group_id = %s AND gr.remote_url IS NOT NULL AND gr.remote_url <> ''",
+            (origin,),
+        )
+        urls = [row["remote_url"] for row in cursor.fetchall()]
+    return next((url for url in urls if legacy_link_group_id(url) == origin), None)
+
+
 def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, Any]:
     """Validate and pin the new remote on the synced project row (sync).
 
@@ -687,9 +714,9 @@ def prepare_change(pv2_id: str, url: str, *, keep_upstream: bool) -> Dict[str, A
         # Only a project still on that repository, in this spelling, is a
         # duplicate: one that since moved to another repository is a live
         # project of its own, and a git@ add shares the HTTPS id, so the id
-        # alone does not prove the spelling. Compare the URL it actually uses:
-        # its pin, else its stored or recorded URL in that spelling first.
-        dup_now = current_remote(dup) if dup is not None else None
+        # alone does not prove the spelling. Compare the URL it uses itself
+        # (:func:`_own_remote`), never a URL another project records.
+        dup_now = _own_remote(dup) if dup is not None else None
         if dup is not None and not merged_into(dup) and dup_now and normalize_remote_url(dup_now) == wanted:
             duplicate = derived
             projects_v2.mark_merged(derived, origin)

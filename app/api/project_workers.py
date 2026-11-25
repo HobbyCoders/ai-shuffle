@@ -273,6 +273,8 @@ def _project_info(pv2: Dict[str, Any], snapshot: Dict[str, Any],
         "remote": setup.display_remote(clone_url),
         # What the New project dialog compares a pasted URL with: never a credential.
         "remote_key": remote_key(clone_url) or None,
+        # Other spellings of the remote (git@ vs https) a setup tries if this one is refused.
+        "alternate_urls": list(repo.get("alternate_urls") or []) if repo.get("clone_url") else [],
         "default_branch": repo.get("default_branch") or peer_info.get("default_branch"),
         "default_folder": folder_name,
         "local_project_id": own.get("id") if own and origin not in snapshot["superseded"] else None,
@@ -528,7 +530,8 @@ async def _spec_for(pv2: Dict[str, Any], body: SetupRequest, installs: List[Dict
     folder = (body.folder or "").strip() or info["default_folder"]
     return {
         "project_v2_id": pv2["id"], "origin": origin, "name": pv2.get("name") or info["default_folder"],
-        "kind": info["kind"], "clone_url": info["clone_url"], "folder": folder, "mode": body.mode,
+        "kind": info["kind"], "clone_url": info["clone_url"], "alternate_urls": info["alternate_urls"],
+        "folder": folder, "mode": body.mode,
     }
 
 
@@ -539,7 +542,8 @@ def _shared_db_enqueue(target_id: str, spec: Dict[str, Any], op_id: str) -> Dict
     for row in git_ops_db.list_ops_for_runner(target_id, setup.SETUP_OP, limit=50):
         if row.get("project_v2_id") == spec["project_v2_id"] and row["status"] in ("queued", "running"):
             return row
-    params = {key: spec.get(key) for key in ("origin", "name", "kind", "mode", "clone_url", "folder")}
+    params = {key: spec.get(key) for key in ("origin", "name", "kind", "mode", "clone_url", "alternate_urls",
+                                             "folder")}
     params.update(path=None, requested_by=None)
     return git_ops_db.insert_op(target_id, setup.SETUP_OP, project_v2_id=spec["project_v2_id"],
                                 params=params, op_id=op_id)

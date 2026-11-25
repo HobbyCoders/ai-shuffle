@@ -72,6 +72,8 @@ CLONE_DEADLINE_SECONDS = 3600.0
 # overrides every protocol.* setting in any gitconfig, and applies to the URL
 # after insteadOf rewrites). No ``file``: a local folder is added with Folder.
 NEW_PROJECT_PROTOCOLS = "https:http:ssh"
+# Other spellings of a project's remote a setup may fall back to (git@ vs https).
+MAX_ALTERNATE_URLS = 4
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -208,63 +210,119 @@ def _superseded_local_origins(rows: List[Dict[str, Any]]) -> set:
     return out
 
 
-def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
-    """``{origin: {clone_url, default_branch}}`` from git records this DB holds,
-    then the remotes stored on the replicated ``projects_v2`` rows (which still
-    know a project no local record has any more)."""
+def clone_records(*, clean: bool = True) -> List[Dict[str, Any]]:
+    """Every git record this database holds, ready for :func:`clone_candidates`.
+
+    ``clean`` strips userinfo from each URL (what is sent to another worker
+    or shown). ``own`` marks this runner's own records (its ``instance_id``,
+    else an unowned legacy row, as :func:`_own_project_rows`): it cloned or
+    added that spelling itself, so it holds that spelling's credentials.
+    """
     from app.core.project_links import legacy_link_group_id, remote_link_ids
     from app.core.scrub import strip_url_userinfo
-    from app.db import projects_v2
-    from app.db.base import get_db, parse_jsonb
+    from app.db.base import get_db
 
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT gr.remote_url AS remote_url, gr.default_branch AS default_branch, "
-            "p.id AS id, p.link_group_id AS link_group_id "
+            "p.id AS id, p.link_group_id AS link_group_id, p.instance_id AS instance_id "
             "FROM git_repositories gr JOIN projects p ON p.id = gr.project_id "
             "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''"
         )
         rows = cursor.fetchall()
-        cursor.execute("SELECT origin, settings FROM projects_v2")
-        stored_rows = cursor.fetchall()
-    # Precedence per origin: 0 the owner's pin, 1 a URL whose own spelling is
-    # that origin (or a record linked to an origin its URL does not derive, as
-    # before), 2 a URL that reaches it only through the other spelling (git@
-    # vs https). A git@ add shares the HTTPS id, so neither the id nor a
-    # record's link alone proves the spelling: an SSH URL never shadows an
-    # HTTPS one for the HTTPS id. First seen wins within a rank, as before.
-    out: Dict[str, Dict[str, Any]] = {}
-    rank: Dict[str, int] = {}
-
-    def put(origin: str, info: Dict[str, Any], level: int) -> None:
-        if origin not in out or level < rank[origin]:
-            out[origin], rank[origin] = info, level
-
-    def level_for(origin: str, url: str) -> int:
-        return 1 if legacy_link_group_id(url) == origin or origin not in remote_link_ids(url) else 2
-
+    me = _me()
+    out: List[Dict[str, Any]] = []
     for row in rows:
-        url = strip_url_userinfo(row["remote_url"])
+        url = strip_url_userinfo(row["remote_url"]) if clean else row["remote_url"]
         if not url:
             continue
-        info = {"clone_url": url, "default_branch": row["default_branch"] or None}
-        linked = row["link_group_id"] or ("local:" + str(row["id"]))
-        put(linked, info, level_for(linked, url))
-        for derived in sorted(remote_link_ids(url)):
-            put(derived, info, level_for(derived, url))
-    for row in stored_rows:
-        url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
-        url = strip_url_userinfo(url) if url else None
-        origin = row["origin"]
-        if url and parse_jsonb(row["settings"]).get(projects_v2.PINNED_KEY) is True:
-            # The owner pointed this project at a repository: that beats what a
-            # worker that has not applied it yet still records.
-            put(origin, {"clone_url": url, "default_branch": branch}, 0)
+        out.append({"url": url, "default_branch": row["default_branch"] or None,
+                    "own": row["instance_id"] in (None, "", me),
+                    "linked": row["link_group_id"] or ("local:" + str(row["id"])),
+                    "ids": remote_link_ids(url), "exact": legacy_link_group_id(url)})
+    return out
+
+
+def stored_candidate(pv2: Optional[Dict[str, Any]], *, clean: bool = True) -> Optional[Dict[str, Any]]:
+    """The remote stored on a ``projects_v2`` row, for :func:`clone_candidates`."""
+    from app.core.scrub import strip_url_userinfo
+    from app.db import projects_v2
+
+    url, branch = projects_v2.stored_remote(pv2)
+    url = (strip_url_userinfo(url) if clean else url) if url else None
+    if not url:
+        return None
+    settings_ = (pv2 or {}).get("settings") or {}
+    pinned = isinstance(settings_, dict) and settings_.get(projects_v2.PINNED_KEY) is True
+    return {"url": url, "default_branch": branch, "pinned": pinned}
+
+
+def clone_candidates(origin: str, records: List[Dict[str, Any]],
+                     stored: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The URLs to clone ``origin`` from, in the order to try them, no repeats.
+
+    Each is ``{url, default_branch}``. A project the owner pointed at a
+    repository clones exactly that one (``[pin]``). Otherwise: this runner's
+    own records that name the origin (it holds that spelling's credentials),
+    then the catalog row's stored remote, then other records that name it, a
+    record in the origin's own spelling before one that names it only
+    through the other spelling (git@ vs https). A ``git:`` origin never gets
+    a URL that does not name it (``remote_link_ids``): a fork linked into the
+    group is another repository. A ``local:`` or ``manual:`` origin, which no
+    URL names, falls back to the records linked to it, as before.
+    """
+    from app.core.project_links import remote_link_ids
+
+    if stored and stored.get("pinned"):
+        return [{"url": stored["url"], "default_branch": stored.get("default_branch")}]
+    is_git = origin.startswith("git:")
+    naming = [r for r in records if origin in r["ids"]]
+    ordered: List[Dict[str, Any]] = []
+    ordered += [r for r in naming if r["own"] and r["exact"] == origin]
+    ordered += [r for r in naming if r["own"] and r["exact"] != origin]
+    if stored and (not is_git or origin in remote_link_ids(stored["url"])):
+        ordered.append(stored)
+    ordered += [r for r in naming if not r["own"] and r["exact"] == origin]
+    ordered += [r for r in naming if not r["own"] and r["exact"] != origin]
+    if not is_git:
+        linked = [r for r in records if r["linked"] == origin and origin not in r["ids"]]
+        ordered += [r for r in linked if r["own"]] + [r for r in linked if not r["own"]]
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for entry in ordered:
+        if entry["url"] in seen:
             continue
-        if not url or (origin.startswith("git:") and origin not in remote_link_ids(url)):
-            continue
-        put(origin, {"clone_url": url, "default_branch": branch}, level_for(origin, url))
+        seen.add(entry["url"])
+        out.append({"url": entry["url"], "default_branch": entry.get("default_branch")})
+    return out
+
+
+def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
+    """``{origin: {clone_url, default_branch, alternate_urls}}`` from git
+    records this DB holds and the remotes stored on the replicated
+    ``projects_v2`` rows (which still know a project no local record has any
+    more). ``clone_url`` is the first of :func:`clone_candidates`;
+    ``alternate_urls`` the rest, tried in order when a clone fails."""
+    from app.db.base import get_db, parse_jsonb
+
+    records = clone_records()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin, settings FROM projects_v2")
+        stored = {row["origin"]: stored_candidate({"settings": parse_jsonb(row["settings"])})
+                  for row in cursor.fetchall()}
+    origins = set(stored)
+    for record in records:
+        origins.add(record["linked"])
+        origins.update(record["ids"])
+    out: Dict[str, Dict[str, Any]] = {}
+    for origin in origins:
+        candidates = clone_candidates(origin, records, stored.get(origin))
+        if candidates:
+            out[origin] = {"clone_url": candidates[0]["url"],
+                           "default_branch": candidates[0]["default_branch"],
+                           "alternate_urls": [c["url"] for c in candidates[1:]]}
     return out
 
 
@@ -414,6 +472,27 @@ def _validate_clone_url(url: str, origin: str) -> str:
     return clean
 
 
+def _valid_alternates(urls: Any, origin: str, first: Optional[str]) -> List[str]:
+    """The other spellings a setup may clone if ``first`` is refused, each
+    checked as :func:`_validate_clone_url` checks ``first``; one it refuses
+    (another repository, an unsafe source) is dropped, never cloned."""
+    out: List[str] = []
+    if not isinstance(urls, list):
+        return out
+    for url in urls[:MAX_ALTERNATE_URLS]:
+        if not isinstance(url, str) or len(url) > 2048:
+            continue
+        try:
+            clean = _validate_clone_url(url, origin)
+        except ValueError:
+            logger.warning("project setup: dropped another clone URL for %s: it is not this project's remote",
+                           origin)
+            continue
+        if clean and clean != first and clean not in out:
+            out.append(clean)
+    return out
+
+
 def _registered_row(origin: str) -> Optional[Dict[str, Any]]:
     """This worker's project row for ``origin`` whose folder exists, else None."""
     from app.core.project_utils import get_project_working_dir_as_path
@@ -479,6 +558,7 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     if kind == "git":
         params["clone_url"] = _validate_clone_url(str(spec.get("clone_url") or ""), origin)
+        params["alternate_urls"] = _valid_alternates(spec.get("alternate_urls"), origin, params["clone_url"])
     stored, full = resolve_folder(str(spec.get("folder") or ""))
     if mode == "adopt" and not full.is_dir():
         raise ValueError(f"There is no folder at {full} to use")
@@ -968,6 +1048,45 @@ def _clone(job: _Job, clone_url: str, final_path: Path, *, network_only: bool = 
             job.temp_dir = None
 
 
+def remote_kind(url: Optional[str]) -> str:
+    """``SSH`` / ``HTTPS`` / … for a log line: which spelling, never the URL."""
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://", url or "")
+    if not match:
+        return "SSH" if re.match(r"^[^/\\]+:", url or "") else "a local path"
+    scheme = match.group(1).lower()
+    return "SSH" if "ssh" in scheme else scheme.upper()
+
+
+def retries_next_url(error: SetupError) -> bool:
+    """Whether a refused clone may try the project's next URL: sign-in or not
+    found, which another spelling (git@ vs https) can answer differently."""
+    return error.error_code in (GITHUB_AUTH, NOT_FOUND)
+
+
+def _clone_any(job: _Job, urls: List[str], final_path: Path, *, network_only: bool = False) -> str:
+    """:func:`_clone` from the first of ``urls`` that this worker may read.
+
+    Each is a spelling of the project's one repository; this worker may hold
+    credentials for only one of them, so a refused clone tries the next.
+    Any other failure (network, cancel, the folder) stops at once.
+    """
+    for index, url in enumerate(urls):
+        try:
+            _clone(job, url, final_path, network_only=network_only)
+        except SetupError as exc:
+            if index + 1 >= len(urls) or not retries_next_url(exc):
+                raise
+            logger.info("project setup: %s couldn't clone over %s (%s); trying another spelling",
+                        job.op_id, remote_kind(url), exc.error_code)
+            with job.lock:
+                job.finalizing = False  # the next clone can still be cancelled
+            continue
+        if index:
+            logger.info("project setup: %s cloned over %s", job.op_id, remote_kind(url))
+        return url
+    raise SetupError(INTERNAL, "The setup request has no clone URL")
+
+
 def _is_this_project(origin: str, row: Dict[str, Any]) -> bool:
     """Whether the request's identity is this worker's project ``row``: its
     current identity, or a remote-less placeholder this worker has PROVABLY
@@ -1074,6 +1193,10 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     kind = params.get("kind")
     mode = params.get("mode") or "auto"
     clone_url = params.get("clone_url")
+    # Other spellings to try if ``clone_url`` is refused: never for a new
+    # project (it clones exactly what the owner entered) or a pinned one.
+    alternates = [] if params.get("project_id") else _valid_alternates(params.get("alternate_urls"), origin,
+                                                                       clone_url)
     if kind == "git" and origin:
         from app.core.project_remote import pinned_remote
         from app.db import projects_v2
@@ -1081,6 +1204,8 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         # A request queued before the project moved to another repository
         # still carries the old URL: a new copy clones the current one.
         pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
+        if pinned:
+            alternates = []
         if pinned and params.get("project_id"):
             # A new project clones exactly the repository the owner entered.
             from app.core.project_links import same_remote
@@ -1126,14 +1251,14 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
             if _same_repo(path, clone_url, origin):
                 adopted = True
             elif mode == "auto" and _is_empty_dir(path):
-                _clone(job, clone_url, path, network_only=network_only)
+                _clone_any(job, [clone_url, *alternates], path, network_only=network_only)
             else:
                 raise SetupError(FOLDER_EXISTS, f"{path} already exists and isn't a copy of this project. "
                                                 "Choose another folder.")
         elif mode == "adopt":
             raise SetupError(NOT_FOUND, f"There is no folder at {path} to use.")
         else:
-            _clone(job, clone_url, path, network_only=network_only)
+            _clone_any(job, [clone_url, *alternates], path, network_only=network_only)
     elif kind == "folder":
         if path.exists() or path.is_symlink():
             if not path.is_dir() or path.is_symlink():
