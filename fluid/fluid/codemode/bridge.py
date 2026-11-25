@@ -191,12 +191,30 @@ class HostBridge:
         # Set once a hook's ``continue: false`` (PreToolUse or PostToolUse)
         # stops the turn: a bridge serves one cell, and nothing after the stop
         # in that cell runs, as nothing after it in a JSON-path batch does.
-        self._stopped = False
+        # Holds the hook event that stopped it; ``_skipped`` counts the host
+        # calls refused since.
+        self._stopped_by: str | None = None
+        self._skipped = 0
 
-    def _stop(self, reason: str) -> None:
-        self._stopped = True
+    def _stop(self, event: str, reason: str) -> None:
+        if self._stopped_by is None:
+            self._stopped_by = event
         if self._on_stop is not None:
             self._on_stop(reason)
+
+    def stop_notice(self) -> str | None:
+        """Host-authored note for the cell's result once a hook stopped it.
+
+        The cell may catch the refusals and finish normally, so the model must
+        learn from the result itself that calls after the stop never ran.
+        """
+        if self._stopped_by is None:
+            return None
+        return (
+            f"[host: a {self._stopped_by} hook stopped the turn during this "
+            f"cell; {self._skipped} later tool call(s) in it did not run and "
+            f'returned "{HOOK_STOP_SKIP}"]'
+        )
 
     def _tool_hook_payload(self, **fields: Any) -> dict[str, Any]:
         if self._hook_payload is None:
@@ -212,7 +230,8 @@ class HostBridge:
     ) -> HostReply:
         # A hook stopped the turn on an earlier call of this cell: no hook,
         # gate or dispatch for this one (the JSON path's skipped-call text).
-        if self._stopped:
+        if self._stopped_by is not None:
+            self._skipped += 1
             return HostReply(denied=True, message=HOOK_STOP_SKIP)
 
         # Session tool surface (ruling T9), ahead of the registry lookup so the
@@ -272,7 +291,7 @@ class HostBridge:
             if decision.action == "deny" or decision.stop:
                 reason = decision.note or ("stopped by hook" if decision.stop else "denied")
                 if decision.stop:
-                    self._stop(reason)
+                    self._stop(PRE_TOOL_USE, reason)
                 return HostReply(denied=True, message=f"blocked by hook: {reason}")
             if decision.action == "modify" and decision.replacement_input is not None:
                 tool_input = decision.replacement_input
@@ -413,7 +432,7 @@ class HostBridge:
             # turn once this cell returns.
             additions: list[str] = []
             if decision.stop:
-                self._stop(decision.note or "stopped by hook")
+                self._stop(POST_TOOL_USE, decision.note or "stopped by hook")
             elif decision.action == "deny":
                 additions.append(hook_reminder(
                     "PostToolUse hook feedback", decision.note or "blocked by hook",

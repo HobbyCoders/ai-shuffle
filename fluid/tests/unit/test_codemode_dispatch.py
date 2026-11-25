@@ -554,6 +554,9 @@ async def test_a_hook_stop_skips_the_rest_of_the_cell(tmp_path, stop_event: str)
     assert ran == ([1] if stop_event == "PostToolUse" else [])
     assert all(n == 1 for _event, n in hook_calls)  # no hook saw the second call
     assert stops == ["halt"]
+    notice = bridge.stop_notice()
+    assert notice is not None and f"a {stop_event} hook stopped the turn" in notice
+    assert "1 later tool call(s)" in notice
 
 
 async def test_host_bridge_without_payload_builder_sends_the_bare_payload(tmp_path) -> None:

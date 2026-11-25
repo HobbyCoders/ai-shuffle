@@ -170,7 +170,7 @@ starts with `{` and decodes as an object. Fields:
 
 | Field | Effect |
 |-------|--------|
-| `continue: false` | The turn ends once this hook has run. `stopReason` (or `reason`) is shown to the user. On `PreToolUse` the call is also denied; on `PostToolUse` the result is kept and no further model call is made; on `TurnEnd` the turn just ends, with no continuation. On either tool event, calls later in the same model response do not run, and neither do later tool calls in the same code-mode cell: each gets an error result saying a hook stopped the turn. |
+| `continue: false` | The turn ends once this hook has run. `stopReason` (or `reason`) is shown to the user. On `PreToolUse` the call is also denied; on `PostToolUse` the result is kept and no further model call is made; on `TurnEnd` the turn just ends, with no continuation. On either tool event, calls later in the same model response do not run, and neither do later tool calls in the same code-mode cell: each gets an error result saying a hook stopped the turn, and the cell's own result ends with a note naming the hook event even if the cell caught those errors. |
 | `stopReason` | The text surfaced with `continue: false`. |
 | `suppressOutput` | Accepted and ignored; fluid does not echo hook stdout. |
 | `systemMessage` | Shown to the user as a hook warning (`[hook] <message>` in the REPL). |

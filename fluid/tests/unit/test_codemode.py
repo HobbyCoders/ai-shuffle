@@ -388,6 +388,60 @@ async def test_in_kernel_tool_hooks_get_the_json_path_payload(tmp_path) -> None:
         await loop.aclose()
 
 
+async def test_a_hook_stop_is_told_even_when_the_cell_catches_it() -> None:
+    """A PostToolUse stop after the cell's first edit refuses the second; the
+    cell catches that and ends normally, yet the stored run_python result
+    still says the hook stopped the turn, beside the first edit's output."""
+    from fluid.hooks.bus import HOOK_STOP_SKIP, POST_TOOL_USE, HookBus, HookDecision
+    from fluid.messages import ToolResultBlock
+
+    edits: list[str] = []
+
+    @tool("edit", "Edit a record.", {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]})
+    async def edit(args: dict) -> dict:
+        edits.append(args["id"])
+        return {"content": [{"type": "text", "text": f"edited {args['id']}"}]}
+
+    hooks = HookBus()
+
+    async def stop_after_first_edit(_event: str, payload: dict):
+        if payload.get("name") == "mcp__db__edit":
+            return HookDecision(stop=True, note="enough edits")
+        return None
+
+    hooks.on(POST_TOOL_USE, stop_after_first_edit)
+    registry = ToolRegistry()
+    registry.register_inproc(create_inproc_server("db", [edit]))
+    code = (
+        "from tools.edit import edit\nprint(edit('a'))\n"
+        "try:\n    print(edit('b'))\nexcept Exception:\n    print('carried on')\n"
+    )
+    provider = ScriptedProvider([_run_python(code), _text("never reached")])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
+        registry=registry, codemode=CodeModeSession(registry),
+        permissions=PermissionEngine("never_ask"), hooks=hooks,
+    )
+    try:
+        await loop.submit(UserTurn(content="edit a and b"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=15)
+        assert edits == ["a"]
+        stored = next(
+            block for node in await store.load_path(sid)
+            for block in node.message.content
+            if isinstance(block, ToolResultBlock) and block.tool_use_id == "t1"
+        )
+        text = "\n".join(getattr(part, "text", "") for part in stored.content)
+        assert not stored.is_error
+        assert "edited a" in text and "carried on" in text
+        assert "a PostToolUse hook stopped the turn during this cell" in text
+        assert "1 later tool call(s)" in text and HOOK_STOP_SKIP in text
+    finally:
+        await loop.aclose()
+
+
 @pytest.mark.parametrize("decision,expect_error", [("allow", False), ("deny", True)])
 async def test_destructive_host_call_triggers_permission_request(
     decision, expect_error
