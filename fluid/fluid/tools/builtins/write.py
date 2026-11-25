@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.builtins._util import detect_newline, read_text_preserving, resolve, write_text_with_newline
+from fluid.tools.builtins._util import detect_newline, resolve, sniff_newline, write_text_with_newline
 from fluid.tools.fragments import NO_VERIFY_READBACK
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
@@ -121,10 +121,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # content uses (LF unless it is CRLF throughout). Never
         # platform-translate.
         if path.exists():
-            newline = read_text_preserving(path)[1]
+            newline = sniff_newline(path)
         else:
             newline = detect_newline(content)
         write_text_with_newline(path, content, newline)
+    except UnicodeEncodeError as exc:
+        return ToolOutcome(
+            text=(
+                f"cannot write {path}: content cannot be saved as UTF-8 "
+                f"({exc.reason}); nothing was written"
+            ),
+            is_error=True,
+        )
     except OSError as exc:
         return ToolOutcome(text=_write_failure(path, exc), is_error=True)
     # A freshly written file is known to the session (so a follow-up Edit works).

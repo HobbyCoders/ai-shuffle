@@ -10,14 +10,15 @@ from typing import List, Optional
 from pathlib import Path
 from threading import Lock
 
-from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
 from app.core.project_utils import enclosing_repo_root, get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
+from app.core import project_removal
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, require_admin, get_api_user_from_request
@@ -426,22 +427,55 @@ async def update_project(
     return updated
 
 
+def _owned_here(project: dict) -> bool:
+    """Whether this worker may remove the row (as ``update_project`` checks)."""
+    return project.get("instance_id") in (None, settings.effective_instance_id)
+
+
+def _require_own_project(project_id: str) -> dict:
+    existing = database.get_project(project_id)
+    if not existing or not _owned_here(existing):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}"
+        )
+    return existing
+
+
+@router.get("/{project_id}/removal")
+async def project_removal_preview(project_id: str, token: str = Depends(require_admin)):
+    """What ``DELETE /projects/{id}`` removes on this worker - Admin only.
+
+    ``chats``: how many chats are deleted. ``worktrees``: worktree folders whose
+    records go with the project while the folders stay on disk.
+    """
+    def _preview():
+        _require_own_project(project_id)
+        return project_removal.preview([project_id])
+
+    return {"project_id": project_id, **await run_sync(_preview)}
+
+
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: str, token: str = Depends(require_admin)):
-    """Delete a project (database record only, not files) - Admin only"""
-    def _delete():
-        # Read-decide-write kept atomic: existence probe + DELETE in one hop.
-        existing = database.get_project(project_id)
-        if not existing:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Project not found: {project_id}"
-            )
+async def delete_project(project_id: str, background_tasks: BackgroundTasks,
+                         token: str = Depends(require_admin)):
+    """Delete a project and its chats on this worker (not files) - Admin only.
 
-        database.delete_project(project_id)
-
-    await run_sync(_delete)
+    Ownership is checked before any chat goes, and again on the locked row
+    before it is deleted. A row another worker claimed in between stays, and
+    the reply is a 409. The chats on this worker that were already removed
+    still get their queued teardown.
+    """
+    await run_sync(_require_own_project, project_id)
+    result = await project_removal.remove_projects([project_id], background_tasks, owned=_owned_here)
     _announce_catalog_change()
+    if result.get("kept"):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "This project now belongs to another worker; "
+                               "its chats on this worker were removed."},
+            background=background_tasks,
+        )
 
 
 def _announce_catalog_change() -> None:

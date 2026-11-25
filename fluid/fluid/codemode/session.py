@@ -37,6 +37,7 @@ calls.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -50,6 +51,7 @@ from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
 from fluid.codemode.truncate import FULL_STDOUT_MAX
 from fluid.codemode.verify import verify_sources, verify_store
+from fluid.context.screening import clip_redacted, redact_text
 from fluid.events.model import HookEvent, ToolResult, ToolUse
 from fluid.permissions.engine import PermissionEngine
 from fluid.store.base import new_id
@@ -281,6 +283,8 @@ _JOURNAL_EVENT_CAP = 2000  # user/assistant conversation events
 # multi-kilobyte scripts filled the 1 MiB journal on their own. The
 # synthesizer reads code for its shape, not its bulk.
 _JOURNAL_CODE_CAP = 2000
+# The marker fluid.codemode.truncate.clip_part leaves where it cut a part.
+_KERNEL_CLIP_MARK = re.compile(r" …\[-[\d,]+ chars\]… ")
 
 
 def _cap_code(code: str) -> str:
@@ -765,6 +769,10 @@ class CodeModeSession:
         for call in called_tools:
             if call.get("shell_exit_code") is not None:
                 text += f"\nShell call {call['name']}: [exit code {call['shell_exit_code']}]"
+        # A hook stop is told here whether or not the cell caught the refusals.
+        stop_notice = bridge.stop_notice()
+        if stop_notice:
+            text += f"\n{stop_notice}"
         if result.notes:
             text = f"{result.notes}\n{text}"
         if result.error:
@@ -796,16 +804,24 @@ class CodeModeSession:
             self._friction_pending = []
             return
         try:
-            error_lines = (result.error or "").strip().splitlines()
+            # Everything is redacted before it is clipped (see
+            # SkillStore.journal_append), from the cell's whole text where the
+            # kernel already cut what it returned.
+            error_lines = (
+                getattr(result, "error_full", "") or result.error or "").strip().splitlines()
             # The kernel's one-line summary of the exception; a host-authored
-            # error (timeout, kernel death) has none and is short.
-            error = getattr(result, "error_summary", "") or (
-                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
+            # error (timeout, kernel death) has none and is short. A summary
+            # the kernel clipped is cut before any redaction could see it, so
+            # the whole error's last line stands in for it.
+            error = getattr(result, "error_summary", "") or None
+            if (error is None or _KERNEL_CLIP_MARK.search(error)) and error_lines:
+                error = clip_redacted(error_lines[-1], _JOURNAL_VALUE_CAP)
             self._skills.journal_append({
                 "kind": "cell",
-                "code": _cap_code(code),
-                "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
-                "value": result.value_repr[:_JOURNAL_VALUE_CAP],
+                "code": _cap_code(redact_text(code)),
+                "stdout": clip_redacted(
+                    getattr(result, "stdout_full", "") or result.stdout, _JOURNAL_STDOUT_CAP),
+                "value": clip_redacted(result.value_repr, _JOURNAL_VALUE_CAP),
                 "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),

@@ -168,7 +168,8 @@ async def test_fallback_withholds_credential_files_and_skips_big_or_binary(
     (tmp_path / "big.txt").write_text("needle\n" * 10)
     (tmp_path / "ok.txt").write_text("needle\n")
     monkeypatch.setattr(grep_mod, "MAX_FILE_BYTES", 20)
-    outcome = await _grep(tmp_path)
+    # no_ignore: .env is hidden, so a default search skips it like ripgrep.
+    outcome = await _grep(tmp_path, no_ignore=True)
     assert "ok.txt:1:needle" in outcome.text
     assert "secret" not in outcome.text and "bin.dat" not in outcome.text
     assert "big.txt" not in outcome.text

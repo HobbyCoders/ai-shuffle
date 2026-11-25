@@ -39,12 +39,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
+from fluid.context.screening import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +266,32 @@ def _safe_json(resp: httpx.Response) -> dict:
         return {}
 
 
+_SAFE_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+
+
+def _sanitized_refresh_error(
+    code: Any, message: Any, status: int, refresh_token: str,
+) -> tuple[str, str | None]:
+    """A refused refresh's ``(code, message)`` safe to log and store.
+
+    The server may echo the refresh token it rejected, in the description or
+    in the code itself (flat ``error`` or nested ``error.code``), and the
+    refresh worker logs ``e.code``. The known permanent codes pass unchanged
+    so the sign-in prompt still triggers. Any other code must be a short
+    plain identifier with no token in it, else it becomes ``http_<status>``;
+    the description is redacted against the token.
+    """
+    known = (refresh_token,)
+    # An exact substring check: redact_text keeps a short token found inside
+    # a word (``invalid_token_<token>``), and a code is never worth the risk.
+    plain = (isinstance(code, str) and _SAFE_ERROR_CODE.fullmatch(code) is not None
+             and not (refresh_token and refresh_token in code)
+             and redact_text(code, known) == code)
+    safe_code = code if code in PERMANENT_FAILURE_CODES or plain else f"http_{status}"
+    safe_message = None if message is None else redact_text(str(message), known)
+    return safe_code, safe_message
+
+
 def _error_code(body: dict) -> tuple[Optional[str], Optional[str]]:
     """Extract ``(code, message)`` from an upstream error body.
 
@@ -472,7 +500,8 @@ async def refresh_tokens(
     if resp.status_code >= 400:
         body = _safe_json(resp)
         code, message = _error_code(body)
-        raise CodexAuthError(code or f"http_{resp.status_code}", message)
+        raise CodexAuthError(*_sanitized_refresh_error(
+            code, message, resp.status_code, refresh_token))
     # When the response id_token is omitted the account id cannot be re-derived
     # here; the caller preserves the previously stored account id in that case.
     return _bundle_from_token_response(_safe_json(resp),

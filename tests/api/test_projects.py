@@ -15,7 +15,7 @@ Tests cover:
 import pytest
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -762,14 +762,15 @@ class TestDeleteProject:
     """Test DELETE /api/v1/projects/{project_id} endpoint."""
 
     def test_delete_project_success(self, client, mock_database, sample_project):
-        """Should delete project record."""
+        """Should remove the project and its chats on this worker."""
         mock_database.get_project.return_value = sample_project
-        mock_database.delete_project.return_value = True
 
-        response = client.delete("/api/v1/projects/test-project")
+        with patch("app.api.projects.project_removal.remove_projects", new_callable=AsyncMock) as remove:
+            remove.return_value = {"removed": ["test-project"], "kept": [], "chats_removed": 0}
+            response = client.delete("/api/v1/projects/test-project")
 
         assert response.status_code == 204
-        mock_database.delete_project.assert_called_with("test-project")
+        assert remove.await_args.args[0] == ["test-project"]
 
     def test_delete_project_not_found(self, client, mock_database):
         """Should return 404 for non-existent project."""
@@ -779,6 +780,32 @@ class TestDeleteProject:
 
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
+
+    def test_delete_refuses_another_workers_project(self, client, mock_database, sample_project):
+        """A row another instance owns on a shared database is not this worker's to delete."""
+        mock_database.get_project.return_value = {**sample_project, "instance_id": "another-instance"}
+
+        with patch("app.api.projects.project_removal.remove_projects", new_callable=AsyncMock) as remove, \
+             patch("app.api.projects.project_removal.preview") as count:
+            response = client.delete("/api/v1/projects/test-project")
+            preview = client.get("/api/v1/projects/test-project/removal")
+
+        assert response.status_code == 404
+        assert preview.status_code == 404
+        remove.assert_not_awaited()
+        count.assert_not_called()
+        mock_database.delete_project.assert_not_called()
+
+    def test_removal_preview_counts_this_workers_chats(self, client, mock_database, sample_project):
+        mock_database.get_project.return_value = sample_project
+        kept = {"chats": 4, "worktrees": ["/srv/projects/demo-topic"]}
+
+        with patch("app.api.projects.project_removal.preview", return_value=kept) as count:
+            response = client.get("/api/v1/projects/test-project/removal")
+
+        assert response.status_code == 200
+        assert response.json() == {"project_id": "test-project", **kept}
+        count.assert_called_once_with(["test-project"])
 
 
 # =============================================================================

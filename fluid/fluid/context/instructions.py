@@ -33,6 +33,7 @@ entries come first, followed by project entries from git root to cwd.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -42,6 +43,8 @@ from pathlib import Path
 from typing import Any
 
 from fluid.tools.child_env import scrub_child_env
+
+log = logging.getLogger(__name__)
 
 # Ordered per-directory candidates. Order fixes the order blocks appear within
 # a scope. ``AGENTS.local.md`` follows ``AGENTS.md`` so personal rules layer
@@ -142,6 +145,150 @@ def _read_opt(path: Path) -> str | None:
         return None
 
 
+# Bytes read per character of cap. UTF-8 is at most four bytes a character, so
+# a file inside its character cap is always read whole; the cap, not the read,
+# decides what an ordinary file keeps.
+_READ_BYTES_PER_CHAR = 4
+# The most bytes a skill's frontmatter scan reads. Discovery needs only the
+# name and description; the body is read when the skill is loaded.
+SKILL_FRONTMATTER_MAX_BYTES = 64 * 1024
+
+
+def _decode_cut(data: bytes, *, cut_start: bool = False, cut_end: bool = False) -> str | None:
+    """``data`` as UTF-8 text with newlines translated as ``read_text`` does.
+
+    A multi-byte character split by a cut edge is dropped, not a decode
+    failure. None when the rest is not UTF-8.
+    """
+    if cut_start:
+        skip = 0
+        while skip < min(3, len(data)) and data[skip] & 0xC0 == 0x80:
+            skip += 1  # continuation bytes of a character that began before
+        data = data[skip:]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if not cut_end or exc.start < len(data) - 3:
+            return None
+        try:
+            text = data[:exc.start].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _read_bounded(path: Path, max_bytes: int) -> tuple[str | None, int, bool] | None:
+    """At most ``max_bytes`` of ``path`` as ``(text, bytes read, truncated)``.
+
+    Reads ``max_bytes + 1`` bytes to learn whether more follows, so a huge file
+    costs no more than its budget. ``bytes read`` counts every byte inside the
+    budget, including a character cut by it (dropped from the text) and data
+    that is not UTF-8 (text None). None when the file cannot be read.
+    """
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(max(0, max_bytes) + 1)
+    except (OSError, ValueError):
+        return None
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return _decode_cut(data, cut_end=truncated), len(data), truncated
+
+
+def _read_note(path: Path, max_bytes: int) -> str:
+    return (f"\n\n[...{path} is larger than {max_bytes} bytes; only its start was "
+            f"read. Read {path} for the rest.]")
+
+
+def _read_gap_note(path: Path, max_bytes: int) -> str:
+    return (f"\n\n[...{path} is larger than {max_bytes} bytes; only its start and "
+            f"end were read. Read {path} for the middle.]\n\n")
+
+
+def _frontmatter_unclosed(text: str) -> bool:
+    """``text`` opens a ``---`` header whose closing line it does not hold.
+
+    The last line of a cut read may itself be cut, so it never closes one.
+    """
+    lines = text.split("\n")[:-1]
+    return bool(lines) and lines[0].strip() == "---" and not any(
+        line.strip() == "---" for line in lines[1:])
+
+
+def read_skill_frontmatter(path: Path) -> tuple[dict[str, Any], bool]:
+    """A skill file's frontmatter fields and whether the model may be offered it.
+
+    Discovery reads at most :data:`SKILL_FRONTMATTER_MAX_BYTES`. A header that
+    does not close within that read is incomplete: a field past the cut
+    (``disable-model-invocation``, ``name``) is unknown, so the skill is kept out
+    of the model's index with a warning. The Skill tool still loads it by name
+    from the whole file.
+    """
+    read = _read_bounded(path, SKILL_FRONTMATTER_MAX_BYTES)
+    text, _read_bytes, truncated = read if read is not None else ("", 0, False)
+    text = text or ""
+    fields, _ = parse_frontmatter(text)
+    if truncated and _frontmatter_unclosed(text):
+        log.warning(
+            "skill %s: frontmatter does not close within its first %d bytes; "
+            "left out of the model's skills index", path, SKILL_FRONTMATTER_MAX_BYTES,
+        )
+        return fields, False
+    return fields, model_invocable(fields)
+
+
+def _read_head_tail(path: Path, max_bytes: int) -> tuple[str, str | None] | None:
+    """``path`` read within ``max_bytes`` as ``(head, tail)``.
+
+    A file inside the budget is read whole, with tail None. A larger one keeps
+    its first three quarters of the budget and its last quarter, so a rule at
+    the end of an oversized file still reaches the prompt. The size is taken
+    first, so no more than ``max_bytes`` is ever read. Even at four bytes a
+    character, each slice holds more than the character cap keeps of it
+    (:data:`_CAP_HEAD_RATIO`, :data:`_CAP_TAIL_RATIO`). A character split at
+    either edge is dropped. None when the file cannot be read or is not UTF-8.
+    """
+    max_bytes = max(0, max_bytes)
+    tail_bytes = max_bytes // 4
+    head_bytes = max_bytes - tail_bytes
+    try:
+        with path.open("rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            if size <= max_bytes:
+                whole = _decode_cut(fh.read(size))
+                return None if whole is None else (whole, None)
+            data = fh.read(head_bytes)
+            fh.seek(size - tail_bytes)
+            end = fh.read(tail_bytes)
+    except (OSError, ValueError):
+        return None
+    head = _decode_cut(data, cut_end=True)
+    tail = _decode_cut(end, cut_start=True)
+    if head is None or tail is None:
+        return None
+    return head, tail
+
+
+def _read_instruction(path: Path, limit: int) -> str:
+    """An instruction file's text, read within ``limit``'s byte budget, with
+    imports expanded inside one budget of the same size.
+
+    The kept end of a cut file stays literal: it starts in the middle of the
+    file, where a code fence or a line may already be open, so an ``@`` there
+    cannot be told from an import.
+    """
+    max_bytes = limit * _READ_BYTES_PER_CHAR
+    read = _read_head_tail(path, max_bytes)
+    if read is None:
+        return ""
+    head, tail = read
+    expanded = expand_imports(head, path, max_bytes=max_bytes)
+    if tail is None:
+        return expanded
+    return expanded + _read_gap_note(path, max_bytes) + tail
+
+
 # ─── @-imports ───────────────────────────────────────────────────────────────
 
 # Claude Code's ``@path`` import token: at the start of a line or preceded by
@@ -175,8 +322,10 @@ def expand_imports(
     text: str,
     source_path: Path,
     *,
+    max_bytes: int = INSTRUCTION_FILE_MAX_CHARS * _READ_BYTES_PER_CHAR,
     _depth: int = 0,
     _seen: frozenset[Path] | None = None,
+    _budget: list[int] | None = None,
 ) -> str:
     """Expand Claude Code ``@path`` import tokens in ``text``.
 
@@ -190,16 +339,22 @@ def expand_imports(
     cannot be expanded — too deep, cyclic, missing, unreadable — keeps its
     literal token. This never raises: instruction assembly must not be able to
     fail on a stray ``@``.
+
+    Every file read, however many tokens name it, draws on one ``max_bytes``
+    budget shared by the whole expansion, so repeated or very large imports
+    cannot cost more than it. Once the budget is spent, further tokens stay
+    literal; an import cut by it ends with a note naming the file.
     """
     if "@" not in text:
         return text
 
     seen = _seen if _seen is not None else frozenset({_resolved(source_path)})
+    budget = _budget if _budget is not None else [max_bytes]
     source_dir = source_path.parent
 
     def _expand_token(match: re.Match[str]) -> str:
         literal = match.group(0)
-        if _depth >= MAX_IMPORT_DEPTH:
+        if _depth >= MAX_IMPORT_DEPTH or budget[0] <= 0:
             return literal
         target = _import_target(match.group(1), source_dir)
         resolved = _resolved(target)
@@ -207,15 +362,24 @@ def expand_imports(
             return literal
         if not target.is_file():
             return literal
-        content = _read_opt(target)
+        allowed = budget[0]
+        read = _read_bounded(target, allowed)
+        if read is None:
+            return literal
+        content, used, truncated = read
+        # Every byte read costs, even one decoding drops or rejects, so a
+        # repeated token cannot reread the same bytes for free.
+        budget[0] -= used
         if content is None:
             return literal
-        return expand_imports(
+        expanded = expand_imports(
             content,
             target,
             _depth=_depth + 1,
             _seen=seen | {resolved},
+            _budget=budget,
         ).rstrip("\n")
+        return expanded + _read_note(target, allowed) if truncated else expanded
 
     return _map_unfenced_lines(text, lambda line: _expand_outside_code_spans(line, _expand_token))
 
@@ -320,7 +484,7 @@ def _files_in_dir(directory: Path, scope: str) -> list[InstructionFile]:
     for rel in _agents_names_for(directory):
         p = directory / rel
         if p.is_file() and not is_global_instruction_path(p):
-            content = screen(expand_imports(_read(p), p), str(p))
+            content = screen(_read_instruction(p, limit), str(p))
             found.append(
                 InstructionFile(
                     path=str(p),
@@ -369,7 +533,7 @@ def discover_global_instruction_files() -> list[InstructionFile]:
     path = _global_fluid_path("AGENTS.md")
     if path is None or not path.is_file():
         return []
-    content = screen(expand_imports(_read(path), path), str(path))
+    content = screen(_read_instruction(path, INSTRUCTION_FILE_MAX_CHARS), str(path))
     return [
         InstructionFile(
             path=str(path),
@@ -618,7 +782,7 @@ def _skills_in(base: Path, scope: str) -> dict[str, Skill]:
     if not base.is_dir():
         return out
     for skill_md in sorted(base.glob("*/SKILL.md")):
-        fields, _ = parse_frontmatter(_read(skill_md))
+        fields, invocable = read_skill_frontmatter(skill_md)
         name = fields.get("name") or skill_md.parent.name
         out.setdefault(
             name,
@@ -628,7 +792,7 @@ def _skills_in(base: Path, scope: str) -> dict[str, Skill]:
                 path=str(skill_md),
                 scope=scope,
                 body_loaded=False,
-                model_invocable=model_invocable(fields),
+                model_invocable=invocable,
             ),
         )
     return out

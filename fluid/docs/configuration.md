@@ -142,7 +142,17 @@ file still layers after it.
 
 Each instruction file is capped at 24,000 characters (8,000 for a nested
 file); past that, the head and tail are kept and a marker names the file so
-the rest can be read on demand. Codex applies a 32 KiB budget to the whole
+the rest can be read on demand. Reading is bounded too: at most four bytes
+per character of that cap are read from a file (its start and its end, with
+a note naming the file between them, so the final rules of a huge file still
+arrive; `@` tokens in that kept end stay literal, never imported), and its
+`@` imports share one budget of the same size, counted in bytes read, so a
+huge file or many repeated imports cost no more. An import
+cut this way ends with a note naming it, and imports past the budget keep
+their literal `@path`. Skill discovery reads at most 64 KiB of each
+`SKILL.md` for its frontmatter; a skill whose frontmatter does not close
+within that is left out of the model's skills index with a warning, and the
+`Skill` tool still loads it by name. Codex applies a 32 KiB budget to the whole
 chain instead, so a chain that fits fluid can exceed Codex's limit.
 
 Skills (`<dir>/.fluid/skills/<name>/SKILL.md`, `<dir>/.agents/skills/...`,
@@ -174,7 +184,7 @@ non-destructively. Consumed keys:
 
 | Key | Effect |
 |---|---|
-| `permissions.allow` / `ask` / `deny` | `Tool(pattern)` entries become permission rules, evaluated before the `[[permission.rules]]` from `config.toml`, so under last-match-wins a TOML rule outranks a settings rule of the same shape and `deny` outranks `ask` outranks `allow` within the settings. |
+| `permissions.allow` / `ask` / `deny` | `Tool(pattern)` entries become permission rules, evaluated before the `[[permission.rules]]` from `config.toml`, so under last-match-wins a TOML rule outranks a settings rule of the same shape and `deny` outranks `ask` outranks `allow` within the settings. A pattern narrows only `Bash` (command), `Read`, `Write` and `Edit` (file path); for any other tool a patterned `ask`/`deny` covers the whole tool and a patterned `allow` is skipped with a warning. |
 | `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (a settings `deny` still wins), `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
 | `env` | Layered over the process environment for the `Bash` builtin's child processes and for each MCP stdio server's spawn (under the server's own `env`). `os.environ` itself is never changed. The same map feeds `${VAR}` expansion in `mcp.json`. |
 | `enabledPlugins` | Which plugins under `~/.fluid/plugins` load (below). |

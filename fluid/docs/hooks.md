@@ -170,13 +170,13 @@ starts with `{` and decodes as an object. Fields:
 
 | Field | Effect |
 |-------|--------|
-| `continue: false` | The turn ends once this hook has run. `stopReason` (or `reason`) is shown to the user. On `PreToolUse` the call is also denied; on `PostToolUse` the result is kept and no further model call is made; on `TurnEnd` the turn just ends, with no continuation. |
+| `continue: false` | The turn ends once this hook has run. `stopReason` (or `reason`) is shown to the user. On `PreToolUse` the call is also denied; on `PostToolUse` the result is kept and no further model call is made; on `TurnEnd` the turn just ends, with no continuation. On either tool event, calls later in the same model response do not run, and neither do later tool calls in the same code-mode cell: each gets an error result saying a hook stopped the turn, and the cell's own result ends with a note naming the hook event even if the cell caught those errors. |
 | `stopReason` | The text surfaced with `continue: false`. |
 | `suppressOutput` | Accepted and ignored; fluid does not echo hook stdout. |
 | `systemMessage` | Shown to the user as a hook warning (`[hook] <message>` in the REPL). |
 | `decision` | `block` or `deny`: a block, with `reason` as the reason. `approve` (`PreToolUse` only): the call runs without a permission prompt. |
 | `reason` | The reason for a block, and for `approve`. |
-| `hookSpecificOutput.permissionDecision` | `PreToolUse` only. `allow` skips the permission prompt; `deny` blocks; `ask` forces a permission prompt with `permissionDecisionReason` as the reason. |
+| `hookSpecificOutput.permissionDecision` | `PreToolUse` only. `allow` skips the permission prompt, including the one the repeated-call guard would raise, but a permission rule or mode that denies the call still denies it; `deny` blocks; `ask` forces a permission prompt with `permissionDecisionReason` as the reason. |
 | `hookSpecificOutput.permissionDecisionReason` | The reason for the permission decision. |
 | `hookSpecificOutput.updatedInput` | `PreToolUse` only: replaces the tool input. |
 | `hookSpecificOutput.additionalContext` | `TurnStart` and `SessionStart`: appended to the user message in a system-reminder block (SessionStart context rides the first prompt of the engine). `PostToolUse`: appended to the tool result the same way. |
@@ -187,7 +187,9 @@ injects is defanged first, so it cannot close a system-reminder block early or
 forge a steering marker.
 
 `PreToolUse` hooks run before the permission engine, so a hook denial never
-reaches a permission prompt and a hook `allow` skips it. The order of the full
+reaches a permission prompt and a hook `allow` skips it. A hook `allow` only
+answers the prompt: the permission rules are still evaluated, and a `deny` rule
+(or a mode that denies the call) refuses it as if no hook had run. The order of the full
 gate is: tool-surface check, hooks, permission rules, dispatch, then
 `PostToolUse` hooks. The same contract holds on the other two dispatch paths:
 a tool called from inside a code-mode cell, and a Fluid tool served to the

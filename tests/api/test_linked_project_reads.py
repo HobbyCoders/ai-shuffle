@@ -232,6 +232,39 @@ async def test_reused_legacy_id_does_not_expose_private_branch_to_new_origin_use
     assert original["id"] not in project_resolver.catalog_project_read_ids(current)
 
 
+@pytest.mark.parametrize("old_delete_without_provenance", [False, True])
+async def test_removing_a_reused_unlinked_id_keeps_the_earlier_projects_chat(
+    project, retained_branch, tmp_path, monkeypatch, old_delete_without_provenance
+):
+    from unittest.mock import AsyncMock
+
+    from fastapi import BackgroundTasks
+
+    from app.core import project_removal
+
+    monkeypatch.setattr("app.core.browser_runtime.close_session", AsyncMock())
+    original, folder = project
+    await link(original)
+    database.create_session("retained-private", "default", project_v2_id=original["id"],
+                            worktree_branch="topic/keep")
+    database.delete_project("late-link")
+    if old_delete_without_provenance:
+        from app.db.base import get_db
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM project_catalog_aliases WHERE original_id = %s", (original["id"],))
+    # The id comes back as an unlinked folder project: its local:late-link
+    # identity is the earlier project's, which the retained chat still carries.
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    database.create_project("late-link", "Replacement", None, str(replacement))
+    assert project_resolver.resolve_project_v2({"project_id": "late-link"})["id"] == original["id"]
+
+    assert project_removal.preview(["late-link"])["chats"] == 0
+    result = await project_removal.remove_projects(["late-link"], BackgroundTasks())
+    assert result == {"removed": ["late-link"], "kept": [], "chats_removed": 0}
+    assert database.get_session("retained-private")["project_v2_id"] == original["id"]
+
+
 async def test_historical_placeholder_without_provenance_fails_closed(project, retained_branch):
     from app.db.base import get_db
 

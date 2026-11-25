@@ -1992,7 +1992,7 @@ def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monk
     session_events.append_events(sid, [{"type": "system.note", "payload": {}}])
     # After the project's chat list is read, before any chat is deleted.
     barriers = _Barriers(monkeypatch, {"project": (
-        lambda sql, params: sql.startswith("SELECT id FROM sessions WHERE project_id"), False)})
+        lambda sql, params: sql.startswith("SELECT * FROM sessions WHERE") and "project_id IN" in sql, False)})
     cleanups = []
     monkeypatch.setattr(sessions, "_cleanup_working_set_ref", lambda s, row=None: cleanups.append(("ref", s)))
     monkeypatch.setattr(sessions, "_cleanup_pending_wakeups", lambda s: cleanups.append(("wake", s)))
@@ -2014,6 +2014,43 @@ def test_project_delete_keeps_a_chat_moved_to_another_project(private_pool, monk
         cur = conn.cursor()
         cur.execute("SELECT id FROM projects WHERE id IN (%s,%s) ORDER BY id", (old, new))
         assert [row["id"] for row in cur.fetchall()] == [new]
+
+
+def test_project_delete_keeps_a_row_claimed_before_its_lock(private_pool, monkeypatch):
+    """Another worker claims the project between the route's unlocked
+    ownership check and the delete's row lock (startup adoption, on a shared
+    database). The ownership rule runs on the locked row, so the claimed row
+    stays: before the fix the delete locked the claimed version and removed it."""
+    from app.api import projects as projects_api
+    from app.core.config import settings
+    from app.db import projects
+
+    pid = "claim-" + uuid4().hex
+    with base.get_db() as conn:
+        conn.cursor().execute("INSERT INTO projects (id,name,path,instance_id) VALUES (%s,'Claimed','/tmp/claim',%s)",
+                              (pid, settings.effective_instance_id))
+    # Right before the delete locks the row; the route's check has passed.
+    barriers = _Barriers(monkeypatch, {"project": (
+        lambda sql, params: sql.startswith("SELECT id, instance_id, link_group_id FROM projects WHERE id"), True)})
+
+    def route_order():
+        projects_api._require_own_project(pid)  # the unlocked check sees this worker
+        return projects.delete_project(pid, owned=projects_api._owned_here)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="project") as deleter:
+        deleting = deleter.submit(route_order)
+        try:
+            barriers.wait("project", deleting)
+            with base.get_db() as conn:
+                conn.cursor().execute("UPDATE projects SET instance_id = 'another-instance' WHERE id = %s", (pid,))
+        finally:
+            barriers.release_all()
+        with pytest.raises(projects.ProjectOwnerChanged):
+            deleting.result(timeout=10)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT instance_id FROM projects WHERE id = %s", (pid,))
+        assert cur.fetchone()["instance_id"] == "another-instance"
 
 
 # The owner's deletion fact (#1308): the owner's delete writes

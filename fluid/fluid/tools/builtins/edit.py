@@ -21,12 +21,13 @@ cause long out of view. See :func:`_syntax_rejection`.
 from __future__ import annotations
 
 import ast
+import bisect
 import re
 from pathlib import Path
 from typing import Any
 
 from fluid.tools import read_window
-from fluid.tools.builtins._util import read_text_preserving, resolve, write_text_with_newline
+from fluid.tools.builtins._util import detect_newline, read_raw_text, resolve, write_text_atomic
 from fluid.tools.fragments import NO_VERIFY_READBACK, READ_BEFORE_EDIT
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
@@ -420,15 +421,74 @@ def _span_at(content: str, idx: int, old: str) -> tuple[int, int]:
     return start, start + max(_line_count(old) - 1, 0)
 
 
-def _spans_of(content: str, old: str, replace_all: bool) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
+def _offsets_of(content: str, old: str, replace_all: bool) -> list[int]:
+    """Where ``str.replace`` would replace ``old``: left to right, no overlap."""
+    offsets: list[int] = []
     idx = content.find(old)
     while idx != -1:
-        spans.append(_span_at(content, idx, old))
+        offsets.append(idx)
         if not replace_all:
             break
         idx = content.find(old, idx + max(len(old), 1))
-    return spans
+    return offsets
+
+
+# ─── write-back that leaves untouched bytes alone ────────────────────────────
+# Matching runs on LF-normalized text. Writing that text back with one line
+# ending would rewrite every line of a mixed LF/CRLF file, so only the
+# replaced ranges are spliced into the file's raw text.
+
+
+def _splice(
+    content: str, raw: str, newline: str, edits: list[tuple[int, int, str]]
+) -> tuple[str, str]:
+    """Apply ``(start, end, replacement)`` edits, given in ``content`` offsets.
+
+    Returns the edited LF text and the edited raw text. Each replacement's line
+    breaks take the ending of the text it replaces, else that of the line it
+    sits on, else the file's dominant ``newline``.
+    """
+    crlf_at = [m.start() - k for k, m in enumerate(re.finditer("\r\n", raw))]
+
+    def raw_at(i: int) -> int:
+        return i + bisect.bisect_left(crlf_at, i)
+
+    lf_parts: list[str] = []
+    raw_parts: list[str] = []
+    lf_pos = raw_pos = 0
+    for start, end, repl in sorted(edits):
+        r_start, r_end = raw_at(start), raw_at(end)
+        replaced = raw[r_start:r_end]
+        if "\n" in replaced:
+            nl = detect_newline(replaced)
+        else:
+            nxt = raw.find("\n", r_end)
+            nl = newline if nxt == -1 else ("\r\n" if raw[nxt - 1:nxt] == "\r" else "\n")
+        lf_parts += [content[lf_pos:start], repl]
+        raw_parts += [raw[raw_pos:r_start], repl if nl == "\n" else repl.replace("\n", nl)]
+        lf_pos, raw_pos = end, r_end
+    lf_parts.append(content[lf_pos:])
+    raw_parts.append(raw[raw_pos:])
+    return "".join(lf_parts), "".join(raw_parts)
+
+
+def _write(path: Path, text: str) -> ToolOutcome | None:
+    """Write the edited file; an error outcome (file unchanged) on failure."""
+    try:
+        write_text_atomic(path, text)
+    except UnicodeEncodeError as exc:
+        return ToolOutcome(
+            text=(
+                f"edit REJECTED and nothing was written: new_string cannot be "
+                f"saved as UTF-8 ({exc.reason}). {path} is unchanged."
+            ),
+            is_error=True,
+        )
+    except OSError as exc:
+        return ToolOutcome(
+            text=f"cannot write {path}: {exc.strerror or exc}", is_error=True
+        )
+    return None
 
 
 def _window_rejection(
@@ -497,8 +557,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         )
     replace_all = bool(input.get("replace_all", False))
     # Match on LF-normalized text so a model quoting CRLF or LF both work,
-    # then write back with the file's own line ending and no translation.
-    content, newline = read_text_preserving(path)
+    # then splice the replacements into the raw text (see _splice).
+    raw = read_raw_text(path)
+    content, newline = raw.replace("\r\n", "\n"), detect_newline(raw)
     old = old.replace("\r\n", "\n")
     new = new.replace("\r\n", "\n")
     if not old and content:
@@ -521,15 +582,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 text=f"old_string is not unique ({count} matches); pass replace_all or add context",
                 is_error=True, soft_error=True,
             )
-        spans = _spans_of(content, old, replace_all)
+        offsets = _offsets_of(content, old, replace_all)
+        spans = [_span_at(content, idx, old) for idx in offsets]
         rejected = _window_rejection(ctx, path, spans)
         if rejected is not None:
             return rejected
-        updated = content.replace(old, new) if replace_all else content.replace(old, new, 1)
-        rejected = _syntax_rejection(path, content, updated)
+        updated, raw_updated = _splice(
+            content, raw, newline, [(idx, idx + len(old), new) for idx in offsets]
+        )
+        rejected = _syntax_rejection(path, content, updated) or _write(path, raw_updated)
         if rejected is not None:
             return rejected
-        write_text_with_newline(path, updated, newline)
         _shift_windows(ctx, path, spans, _line_count(new))
         return _result(path, count if replace_all else 1, "")
 
@@ -545,19 +608,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 )
             stripped_new = _strip_line_prefixes(new)
             repl = stripped_new if stripped_new is not None else new
-            spans = _spans_of(content, stripped_old, replace_all)
+            offsets = _offsets_of(content, stripped_old, replace_all)
+            spans = [_span_at(content, idx, stripped_old) for idx in offsets]
             rejected = _window_rejection(ctx, path, spans)
             if rejected is not None:
                 return rejected
-            updated = (
-                content.replace(stripped_old, repl)
-                if replace_all
-                else content.replace(stripped_old, repl, 1)
+            updated, raw_updated = _splice(
+                content, raw, newline,
+                [(idx, idx + len(stripped_old), repl) for idx in offsets],
             )
-            rejected = _syntax_rejection(path, content, updated)
+            rejected = _syntax_rejection(path, content, updated) or _write(path, raw_updated)
             if rejected is not None:
                 return rejected
-            write_text_with_newline(path, updated, newline)
             _shift_windows(ctx, path, spans, _line_count(repl))
             return _result(path, count if replace_all else 1, _FALLBACK_NOTE)
 
@@ -579,19 +641,32 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                 text=f"old_string is not unique ({len(runs)} matches); pass replace_all or add context",
                 is_error=True, soft_error=True,
             )
-        chosen = runs if replace_all else runs[:1]
         span = len(old_lines)
+        chosen = []
+        for run in runs if replace_all else runs[:1]:
+            # Runs can overlap ("a\na" in "a\na\na"); like str.replace, take
+            # them left to right without overlap.
+            if not chosen or run[0] >= chosen[-1][0] + span:
+                chosen.append(run)
         spans = [(start + 1, start + span) for start, _, _ in chosen]
         rejected = _window_rejection(ctx, path, spans)
         if rejected is not None:
             return rejected
-        for start, prefix, old_has_extra in reversed(chosen):
-            file_lines[start:start + span] = _apply_prefix(new_lines, prefix, old_has_extra)
-        updated = "\n".join(file_lines)
-        rejected = _syntax_rejection(path, content, updated)
+        # Character offsets of each line start, so a run of whole lines is a
+        # range of ``content`` (its last line's own newline stays outside).
+        starts = [0] + [m.end() for m in re.finditer("\n", content)]
+        edits = []
+        for start, prefix, old_has_extra in chosen:
+            stop = start + span
+            edits.append((
+                starts[start],
+                starts[stop] - 1 if stop < len(starts) else len(content),
+                "\n".join(_apply_prefix(new_lines, prefix, old_has_extra)),
+            ))
+        updated, raw_updated = _splice(content, raw, newline, edits)
+        rejected = _syntax_rejection(path, content, updated) or _write(path, raw_updated)
         if rejected is not None:
             return rejected
-        write_text_with_newline(path, updated, newline)
         _shift_windows(ctx, path, spans, len(new_lines))
         return _result(path, len(chosen), _FALLBACK_NOTE)
 

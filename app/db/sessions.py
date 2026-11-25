@@ -1899,7 +1899,8 @@ _SESSION_RUNTIME_TABLES = (
 )
 
 
-def delete_session(session_id: str, *, expected_project_id: Optional[str] = None) -> bool:
+def delete_session(session_id: str, *, expected_project_id: Optional[str] = None,
+                   matches: Optional[Callable[[dict], bool]] = None) -> bool:
     """Delete a session, its messages, and its session-scoped runtime rows.
 
     Three different lifetimes, deliberately:
@@ -1932,9 +1933,16 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
     session row is locked. A chat moved to another project meanwhile (a
     cross-device resume or worktree reopen) is left untouched and this returns
     False. Nothing outside the transaction runs before that check: the
-    wake and scratch-ref cleanup run after the delete commits.
+    wake and scratch-ref cleanup run after the delete commits. ``matches`` is
+    the general form: a predicate on the locked session row (project removal
+    passes its binding and owner check, ``app/db/projects.py``).
     """
-    conditional = expected_project_id is not None
+    if expected_project_id is not None:
+        inner = matches
+
+        def matches(row):  # noqa: F811 - narrows the caller's predicate
+            return row["project_id"] == expected_project_id and (inner is None or inner(row))
+    conditional = matches is not None
     if not conditional:
         # Best-effort scratch-ref cleanup before the row dies, so a
         # hard-deleted session leaves no dangling working-set ref on origin. Fully
@@ -1942,7 +1950,7 @@ def delete_session(session_id: str, *, expected_project_id: Optional[str] = None
         # commands, and any git failure never blocks the delete.
         _cleanup_working_set_ref(session_id)
         _cleanup_pending_wakeups(session_id)
-    deleted, remembered = _delete_session_rows(session_id, expected_project_id, _deleting_worker())
+    deleted, remembered = _delete_session_rows(session_id, matches, _deleting_worker())
     if conditional and deleted:
         _cleanup_working_set_ref(session_id, row=deleted)
         _cleanup_pending_wakeups(session_id)
@@ -2025,12 +2033,13 @@ def _publish_owner_deletion(session_id: str) -> None:
         logger.warning("Could not publish the deletion of session %s yet", session_id, exc_info=True)
 
 
-def _delete_session_rows(session_id: str, expected_project_id: Optional[str], worker: tuple):
+def _delete_session_rows(session_id: str, matches: Optional[Callable[[dict], bool]], worker: tuple):
     """The transaction of :func:`delete_session`.
 
     Returns ``(row, pending)``: the deleted row (for post-commit cleanup),
-    or None when the chat is gone or, conditional, now belongs to another
-    project; and whether the owner's tombstone waits to be published.
+    or None when the chat is gone or, conditional, no longer ``matches``
+    (it now belongs to another project or worker); and whether the owner's
+    tombstone waits to be published.
     """
     _ph = ph()
     with get_db() as conn:
@@ -2057,7 +2066,7 @@ def _delete_session_rows(session_id: str, expected_project_id: Optional[str], wo
         lock_handoff_history(cursor, session_id)
         locked = lock_session_runtimes(cursor, family)
         row = locked.get(session_id)
-        if expected_project_id is not None and (row is None or row["project_id"] != expected_project_id):
+        if matches is not None and (row is None or not matches(dict(row))):
             # Re-checked under the session lock: a chat moved to another
             # project after the caller listed it keeps its data (review S10).
             return None, False

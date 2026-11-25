@@ -44,6 +44,13 @@ MAX_LIMIT = 5000
 RG_TIMEOUT_S = 30.0
 FALLBACK_DEADLINE_S = 10.0
 _MAX_FILESIZE = "2M"
+# Bytes kept, not just matches: one match line can be a whole minified file,
+# so each line is cut for display and the kept lines share one budget. A line
+# off rg's pipe keeps at most _MAX_RAW_LINE_BYTES (room for the path before
+# its NUL) while the rest is read and dropped.
+MAX_LINE_CHARS = 2_000
+MAX_OUTPUT_CHARS = 1_000_000
+_MAX_RAW_LINE_BYTES = 64 * 1024
 
 def describe(tools: frozenset[str] | None = None) -> str:
     """Grep's description, specialized to the session's tool surface."""
@@ -160,7 +167,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if rg:
         outcome = await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
     else:
-        outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
+        outcome = await asyncio.to_thread(
+            _pure_python_grep, pattern, root, glob, limit, ctx, no_ignore
+        )
 
     # One choke point for repeat-search handling, so neither engine has to know
     # about it. The search still ran; when its result has the same lines as the
@@ -282,23 +291,42 @@ def _absolutize_line(line: str, run_dir: Path, target: str) -> str:
     return line
 
 
-async def _byte_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
+def _clip(line: str) -> str:
+    """One result line cut to :data:`MAX_LINE_CHARS`, marked like Read's."""
+    if len(line) > MAX_LINE_CHARS:
+        return line[:MAX_LINE_CHARS] + "… [line truncated]"
+    return line
+
+
+def _budget_note() -> str:
+    return (
+        f"[search truncated: output budget of {MAX_OUTPUT_CHARS} characters "
+        "reached — narrow the pattern or the path]"
+    )
+
+
+async def _byte_lines(
+    stream: asyncio.StreamReader, max_bytes: int = _MAX_RAW_LINE_BYTES,
+) -> AsyncIterator[bytes]:
     """Yield ``\\n``-separated lines from ``stream`` as they arrive.
 
     Reads fixed-size chunks rather than ``readline()``: a match in a minified
     file can be one line of up to ``--max-filesize``, past StreamReader's
-    64KB line limit.
+    64KB line limit. Each line keeps at most ``max_bytes``; the rest of a
+    longer one is read and dropped rather than held.
     """
     pending: list[bytes] = []
+    room = max_bytes  # bytes the current line may still keep
     while chunk := await stream.read(65536):
         *done, rest = chunk.split(b"\n")
-        if done:
-            done[0] = b"".join([*pending, done[0]])
+        for line in done:
+            pending.append(line[:room])
+            yield b"".join(pending)
             pending.clear()
-            for line in done:
-                yield line
-        if rest:
-            pending.append(rest)
+            room = max_bytes
+        if rest and room > 0:
+            pending.append(rest[:room])
+            room -= len(pending[-1])
     if pending:
         yield b"".join(pending)
 
@@ -378,8 +406,9 @@ async def _ripgrep(
     # stall before stdout reaches EOF.
     stderr_task = asyncio.ensure_future(proc.stderr.read())
     lines: list[str] = []
+    chars = 0
     dropped = 0
-    capped = False
+    capped = over_budget = False
     last_path: bytes | None = None
     last_sensitive = False
     try:
@@ -408,12 +437,17 @@ async def _ripgrep(
                     sensitive = last_sensitive
                 if sensitive:
                     dropped += 1
-                elif len(lines) < limit:
-                    lines.append(line)
-                else:
+                    continue
+                if len(lines) >= limit:
                     capped = True
                     break
-            if capped:
+                line = _clip(line)
+                chars += len(line) + 1
+                if chars > MAX_OUTPUT_CHARS:
+                    over_budget = True
+                    break
+                lines.append(line)
+            if capped or over_budget:
                 _kill(proc)
             await proc.wait()
             stderr = await stderr_task
@@ -432,7 +466,7 @@ async def _ripgrep(
     # rg: 0 = matches, 1 = no matches, >=2 = real error (bad regex, bad path).
     # A run stopped at the cap was killed by us, so its exit status says
     # nothing about the search.
-    if not capped and (proc.returncode or 0) >= 2:
+    if not (capped or over_budget) and (proc.returncode or 0) >= 2:
         detail = stderr.decode(errors="replace").strip() or f"rg exited {proc.returncode}"
         return ToolOutcome(text=f"{head}\nrg error: {truncate(detail, 4000)}", is_error=True)
 
@@ -442,6 +476,8 @@ async def _ripgrep(
             f"[search truncated: match cap {limit} reached — "
             "pass a higher limit or narrow the pattern]"
         )
+    if over_budget:
+        notes.append(_budget_note())
     text = truncate("\n".join(lines), ctx=ctx, tool="Grep").rstrip("\n")
     return ToolOutcome(text="\n".join([head, text or "(no matches)", *notes]))
 
@@ -453,10 +489,18 @@ def _kill(proc: asyncio.subprocess.Process) -> None:
 
 def _pure_python_grep(
     pattern: str, root: Path, glob: str | None, limit: int = MAX_MATCHES,
-    ctx: ToolCtx | None = None,
+    ctx: ToolCtx | None = None, no_ignore: bool = False,
 ) -> ToolOutcome:
-    """Bounded fallback used when ripgrep is not installed. Runs on a thread."""
-    head = _header("python-fallback", root) + " (ripgrep not found)"
+    """Bounded fallback used when ripgrep is not installed. Runs on a thread.
+
+    Like ripgrep it skips hidden files unless ``no_ignore``; it does not read
+    ignore files, and its header says so, so an ignored file in the results
+    is not mistaken for ripgrep's view of the tree.
+    """
+    head = _header("python-fallback", root) + (
+        " (ripgrep not found)" if no_ignore
+        else " (ripgrep not found; hidden files skipped, .gitignore not applied)"
+    )
     try:
         rx = re.compile(pattern)
     except re.error as exc:
@@ -474,9 +518,10 @@ def _pure_python_grep(
     except GlobSyntaxError as exc:
         return ToolOutcome(text=f"{head}\nunsupported glob {glob!r}: {exc}", is_error=True)
     out: list[str] = []
-    capped = False
+    chars = 0
+    capped = over_budget = False
     dropped = 0
-    for path in walk_files(root, state):
+    for path in walk_files(root, state, hidden=no_ignore):
         if glob_filter is not None and not _glob_hit(glob_filter, path, root):
             continue
         if is_sensitive_path(str(path)):
@@ -487,7 +532,14 @@ def _pure_python_grep(
         if hits and _is_sensitive_file(str(path), is_sensitive_path):
             dropped += 1
             continue
-        out.extend(hits)
+        for hit in hits:
+            chars += len(hit) + 1
+            if chars > MAX_OUTPUT_CHARS:
+                over_budget = True
+                break
+            out.append(hit)
+        if over_budget:
+            break
         if len(out) >= limit:
             capped = True
             break
@@ -498,6 +550,8 @@ def _pure_python_grep(
             f"[search truncated: match cap {limit} reached — "
             "pass a higher limit or narrow the pattern]"
         )
+    if over_budget:
+        notes.append(_budget_note())
     if state.deadline_hit:
         notes.append(
             f"[search truncated: deadline reached after {state.files_seen} files]"
@@ -528,7 +582,7 @@ def _search_file(path: Path, rx: re.Pattern[str], remaining: int) -> Iterator[st
             for lineno, raw in enumerate(fh, 1):
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if rx.search(line):
-                    yield f"{path}:{lineno}:{line}"
+                    yield _clip(f"{path}:{lineno}:{line}")
                     remaining -= 1
                     if remaining <= 0:
                         return

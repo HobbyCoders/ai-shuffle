@@ -49,6 +49,7 @@ from fluid.codemode.skills import (
     validate_skill,
 )
 from fluid.codemode.verify import verify_sources
+from fluid.context.screening import redact_secrets
 from fluid.messages.content import Message, Text
 from fluid.providers.base import ProviderRequest, WireState
 from fluid.providers.windows import context_window_for
@@ -1806,6 +1807,9 @@ class Synthesizer:
     @staticmethod
     def _render_entry(e: dict, cell_no: int) -> list[str]:
         """One journal entry as prompt lines (no session divider)."""
+        # Entries are redacted when written; a journal written before that
+        # still holds raw tool data, and it goes to the learner model.
+        e = redact_secrets(e)
         kind = e.get("kind", "cell")
         if kind in ("user", "assistant", "remember", "friction"):
             scope_hint = (
