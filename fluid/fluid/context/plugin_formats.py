@@ -53,6 +53,7 @@ from fluid.context.instructions import (
     _read,
     model_invocable,
     parse_frontmatter,
+    read_frontmatter_head,
 )
 from fluid.context.plugin_import import markdown_notes, normalize_agent_fields
 
@@ -365,7 +366,7 @@ def _command_notes(path: Path) -> str:
 def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[Skill]:
     out: list[Skill] = []
     for skill_md in _skill_files(root, manifest):
-        fields, _ = parse_frontmatter(_read(skill_md))
+        fields, _ = parse_frontmatter(read_frontmatter_head(skill_md))
         local = fields.get("name") or skill_md.parent.name
         out.append(
             Skill(

@@ -386,6 +386,46 @@ def test_expand_imports_ignores_mid_word_at_signs(tmp_path) -> None:
     assert expand_imports(text, src) == text
 
 
+def test_repeated_imports_share_one_byte_budget(tmp_path) -> None:
+    # Review finding (context #4): every token re-read and inlined its file in
+    # full before the cap, so 200 references to a 50 KB file built 10 MB.
+    (tmp_path / "big.md").write_text("x" * 50_000, encoding="utf-8")
+    src = tmp_path / "AGENTS.md"
+    out = expand_imports("@big.md\n" * 200, src, max_bytes=120_000)
+    assert out.count("x") == 120_000
+    assert "is larger than" in out  # the import the budget cut says so
+    assert out.count("@big.md") >= 197  # past the budget, tokens stay literal
+
+
+def test_instruction_and_skill_reads_are_bounded(tmp_path, monkeypatch) -> None:
+    from fluid.context import instructions
+
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("RULES-START\n" + "é" * 2_000_000 + "\nEND", encoding="utf-8")
+    skill = proj / ".fluid" / "skills" / "huge"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: huge\ndescription: Big body.\n---\n" + "body " * 400_000, encoding="utf-8"
+    )
+    real = Path.read_text
+
+    def no_whole_reads(self, *args, **kwargs):
+        assert self.name not in {"AGENTS.md", "SKILL.md"}, f"whole read of {self}"
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_whole_reads)
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("RULES-START")
+    assert "END" not in agents.content and len(agents.content) < 25_000
+    assert "is larger than" in agents.content  # the read cut is named, not silent
+    [found] = [s for s in discover_skills(proj, include_global=False, include_builtin=False)]
+    assert (found.name, found.description) == ("huge", "Big body.")
+
+    # A multi-byte character cut by the budget is dropped, not a decode failure.
+    text, used, truncated = instructions._read_bounded(proj / "AGENTS.md", 13)
+    assert (text, used, truncated) == ("RULES-START\n", 12, True)
+
+
 # ─── CLAUDE.local.md / AGENTS.override.md (CE3) ──────────────────────────────
 
 
