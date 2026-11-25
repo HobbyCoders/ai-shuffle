@@ -2430,6 +2430,7 @@ def reseed_delegated_cli_session(
     force: bool = False,
     context_window: Optional[int] = None,
     generation: Optional[int] = None,
+    before_node: Optional[str] = None,
 ) -> ReseedResult:
     """Re-seed the delegated CLI from fluid's (already rewound) context.
 
@@ -2454,6 +2455,9 @@ def reseed_delegated_cli_session(
     the caller, so with it every store write here is refused once a newer claim
     exists. Only a fork omits it: nothing else can reach its brand-new session.
 
+    ``before_node`` cuts the path just before that node: a delegated turn that
+    replays its own prompt on the new transcript must not find it there too.
+
     Never raises: a failed re-seed is a degraded rewind (the store is still
     correct, only the CLI's own history is stale), and the caller reports that
     to the user rather than failing an operation the user explicitly asked for.
@@ -2477,6 +2481,10 @@ def reseed_delegated_cli_session(
 
     try:
         path = load_fluid_path(sdk_session_id)
+        if before_node is not None:
+            cut = next((i for i, node in enumerate(path) if node.get("node_id") == before_node), None)
+            if cut is not None:
+                path = path[:cut]
         entries = [_node_to_entry(node, sdk_session_id) for node in path]
         try:
             nodes: Optional[List[Any]] = _session_nodes(path)

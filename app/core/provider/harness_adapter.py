@@ -76,6 +76,7 @@ The rest of fluid's settings.json stack is not wired into NativeLoop.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import inspect
 import json
@@ -159,7 +160,12 @@ from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import MANUAL_COMPACT_REASON, CompactionConfig
 from fluid.context.peer import PROMPT_BLOCK as PEER_MESSAGE_BLOCK
 from fluid.engine.native import NativeLoop
-from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop, register_recall_tools
+from fluid.engine.delegated import (
+    ClaudeCliMissingError,
+    DelegatedLoop,
+    ResumeRecovery,
+    register_recall_tools,
+)
 from fluid.hooks.bus import HookBus
 from fluid.events.model import NEEDS_COMPACTION
 from fluid.events.ops import (
@@ -916,6 +922,12 @@ class HarnessAdapter(ProviderAdapter):
                 # deferred behind its ToolSearch; AI_SHUFFLE_PERF_BRIDGE_DEFER=0
                 # defers none, and neither does the chat lane (no ToolSearch).
                 bridge_deferred=_delegated_bridge_deferral(options),
+                # A resume handle the CLI keeps exiting on: the connect-time
+                # transcript check, run again from this pooled connection.
+                recover_resume=(
+                    None if one_shot or not fluid_session_id
+                    else functools.partial(self._recover_cli_resume, fluid_session_id, options)
+                ),
             )
             # Only an owner chat's "not run yet" placeholder and a person's no
             # carry the owner's waiting message on a deny; a deny from Stop,
@@ -3641,10 +3653,58 @@ class HarnessAdapter(ProviderAdapter):
                 )
         return None
 
+    async def _recover_cli_resume(
+        self,
+        fluid_session_id: str,
+        options: SessionOptions,
+        handle: str,
+        before_node: str,
+    ) -> ResumeRecovery:
+        """DelegatedLoop's ``recover_resume``: the resumed CLI keeps exiting
+        before any frame, without saying it has no such conversation.
+
+        The connect-time check (``_cli_reseed_reason``) only runs when a chat
+        connects, and a pooled connection outlives a transcript removed after
+        it. So the same existence check runs again: a missing transcript is
+        re-seeded from the session's history before ``before_node`` (the turn
+        being replayed); a present one means the handle cannot be helped. A
+        failed check or re-seed answers ``unknown`` and keeps the handle.
+        """
+        from app.core.provider import fluid_transcript
+
+        try:
+            root = getattr(self, "_bound_cli_projects", None) or fluid_transcript.cli_projects_root(options.env)
+            transcript = await run_sync(
+                fluid_transcript.find_cli_transcript,
+                handle, root, options.cwd or os.getcwd(),
+            )
+            if transcript is not None:
+                return ResumeRecovery("present")
+            logger.info(
+                "[HarnessAdapter] re-seeding Claude Code for session %s: Claude "
+                "Code kept exiting on %s, whose transcript is gone",
+                fluid_session_id, handle,
+            )
+            reseeded = await self._reseed_cli_session(
+                fluid_session_id, options, before_node=before_node,
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] could not recover session %s's Claude Code "
+                "conversation %s", fluid_session_id, handle, exc_info=True,
+            )
+            return ResumeRecovery("unknown")
+        if not reseeded:
+            return ResumeRecovery("unknown")
+        return ResumeRecovery("reseeded", reseeded)
+
     async def _reseed_cli_session(
-        self, fluid_session_id: str, options: SessionOptions
+        self, fluid_session_id: str, options: SessionOptions,
+        *, before_node: Optional[str] = None,
     ) -> Optional[str]:
-        """Write fluid's path as a new CLI transcript; the new handle or None."""
+        """Write fluid's path as a new CLI transcript; the new handle or None.
+
+        ``before_node``: write only the path before that node."""
         from app.core.provider import fluid_transcript
 
         cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
@@ -3653,6 +3713,8 @@ class HarnessAdapter(ProviderAdapter):
         window = await run_sync(_delegated_context_window, options)
         # This thread outlives a timed-out connect, so its writes carry the claim.
         claimed = getattr(self._store, "claimed_generation", None)
+        # Only a recovery cuts the path (``_recover_cli_resume``).
+        cut = {"before_node": before_node} if before_node else {}
         result = await run_sync(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
@@ -3661,6 +3723,7 @@ class HarnessAdapter(ProviderAdapter):
             force=True,
             context_window=window,
             generation=claimed(fluid_session_id) if claimed is not None else None,
+            **cut,
         )
         if result.status != "reseeded" or not result.cli_session_id:
             logger.warning(

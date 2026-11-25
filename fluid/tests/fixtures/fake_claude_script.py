@@ -20,6 +20,8 @@ Script shape::
   {
     "version": "2.1.280 (Claude Code)",       # ``claude --version`` text
     "spawn_exit": {"code": 1, "stderr": "."}, # exit before any frame
+                                              # ("resume": "<id>": only when
+                                              # spawned with --resume <id>)
     "init": {"tools": [...], "model": "...", "session_id": "...",
              "claude_code_version": "...", "apiKeySource": "...",
              "drop_plugins": true},           # list no --plugin-dir plugin
@@ -463,7 +465,7 @@ class Fake:
         if not (self.script.get("init") or {}).get("drop_guard"):
             announce_tool_output_guard()
         spawn_exit = self.script.get("spawn_exit")
-        if spawn_exit:
+        if spawn_exit and spawn_exit.get("resume", _flag("--resume")) == _flag("--resume"):
             sys.stderr.write(spawn_exit.get("stderr", "") + "\n")
             return int(spawn_exit.get("code", 1))
         init = self.script.get("init") or {}

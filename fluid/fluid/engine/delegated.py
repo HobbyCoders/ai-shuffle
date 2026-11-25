@@ -79,7 +79,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fluid.engine import delegated_guard_policy as guard_policy
 from fluid.engine.background import BackgroundLifecycleMixin, await_cancelled_child
@@ -214,6 +214,33 @@ _STDERR_TAIL_BYTES = 16 * 1024
 _STDERR_SETTLE_S = 1.0
 # The turn's stdout ended without a result frame: the CLI exited or crashed.
 _STREAM_CLOSED = "claude stream closed before result"
+# A resumed CLI that exits before writing a single frame, without saying it
+# has no such conversation, may be refusing the handle silently (its
+# transcript went away after this loop connected). After this many such exits
+# in a row the host is asked whether the transcript is still there
+# (``DelegatedLoop.recover_resume``).
+_SILENT_RESUME_EXITS = 3
+# The turn's error when the handle's transcript is still on disk but the CLI
+# keeps exiting on it: retrying cannot help, so it says what to do instead.
+RESUME_UNRECOVERABLE_MESSAGE = (
+    "Claude Code could not resume this chat's saved conversation: it exited "
+    "without replying on each of the last {count} tries, although the "
+    "conversation's transcript is still on this computer. Start a new chat "
+    "to continue."
+)
+
+
+@dataclass(frozen=True)
+class ResumeRecovery:
+    """What the host found for a resume handle the CLI keeps exiting on.
+
+    ``reseeded``: the handle's transcript was gone, and the session's stored
+    history was written out as ``cli_session_id``'s transcript. ``present``:
+    the transcript is there. ``unknown``: the check or the re-seed failed.
+    """
+
+    status: Literal["reseeded", "present", "unknown"]
+    cli_session_id: str | None = None
 
 
 def _spawn_failure_message(exc: BaseException) -> str:
@@ -1004,6 +1031,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         fresh_context: Callable[[list[Any], tuple[int, int] | None], Awaitable[str | None]] | None = None,
         bridge_deferred: Callable[[str], bool] | None = None,
+        recover_resume: Callable[[str, str], Awaitable[ResumeRecovery]] | None = None,
         one_shot: bool = False,
     ) -> None:
         self.store = store
@@ -1073,6 +1101,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # name, schema loaded on demand, every one still callable. None loads
         # them all, as before tiering.
         self.bridge_deferred = bridge_deferred
+        # The host's answer to a resume handle the CLI keeps exiting on
+        # without a frame (``_SILENT_RESUME_EXITS`` in a row): called with the
+        # handle and the running turn's user node id, it checks the handle's
+        # transcript and, when it is gone, writes the session's history before
+        # that node out as a new one (:class:`ResumeRecovery`). None: such a
+        # turn just fails, retriable, as any crash does.
+        self.recover_resume = recover_resume
+        # Those exits in a row on this loop (reset by any frame the CLI
+        # writes), and whether this loop has re-seeded once already.
+        self._silent_resume_exits = 0
+        self._resume_reseeded = False
+        # Frames read from the live CLI (reset on every spawn).
+        self._proc_frames = 0
         # Parent-owned identity, keyed by the CLI's tool id (never model arguments).
         self._bridge_agents: dict[str, str | None] = {}
         # The main conversation is compacting: set by the CLI's
@@ -1122,8 +1163,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # so a CLI that honours them never asks again either way.
         self._always_allowed: dict[str, set[str] | None] = {}
         # The --resume handle the live process was spawned with, and how many
-        # turns it has completed. A first turn that fails before mapping a
-        # single frame on a resumed process means the handle is dead.
+        # turns it has completed (see _resume_handle_rejected and
+        # _silent_resume_exit for what a failed first turn says about it).
         self._spawn_resume: str | None = None
         self._proc_results = 0
         # The live CLI's running total_cost_usd after the last result this
@@ -2578,6 +2619,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             spawn_kwargs["start_new_session"] = True
         self._spawn_resume = self.cli_session_id
         self._proc_results = 0
+        self._proc_frames = 0
         self._cli_cost_total = None if self._spawn_resume else 0.0
         self._claude_mod_listed = None
         argv = self._build_argv()
@@ -2964,7 +3006,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         says it has no such conversation (:meth:`_resume_handle_rejected`),
         the handle is dropped (and cleared in the store), the process
         restarted without it, and the same user frame replayed into a fresh
-        CLI conversation.
+        CLI conversation. Or when the resumed CLI has exited without a frame
+        ``_SILENT_RESUME_EXITS`` times in a row and the host found the
+        handle's transcript gone and re-seeded it
+        (:meth:`_recover_silent_resume`): the frame is replayed on the new one.
         """
         mapper: StreamJsonMapper | None = None
         for attempt in (1, 2):
@@ -3047,6 +3092,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 )
                 await self._drop_resume_handle(sid)
                 continue
+            if attempt == 1 and self._silent_resume_exit(mapper, failure, crashed=crashed):
+                recovered = await self._recover_silent_resume(user_node)
+                if recovered:
+                    continue
+                if recovered is not None:
+                    failure = RESUME_UNRECOVERABLE_MESSAGE.format(count=self._silent_resume_exits)
+                    crashed = False  # the same handle would fail again
             if self._stdout_desynced:
                 # The CLI is still running the turn it could not report. End
                 # it now, not when the next turn comes: its tools must not run
@@ -3111,6 +3163,69 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if crashed:
             await self._settle_stderr()
         return _NO_CONVERSATION in self._stderr_text()
+
+    def _silent_resume_exit(
+        self, mapper: StreamJsonMapper, failure: str | None, *, crashed: bool,
+    ) -> bool:
+        """Count a resumed CLI that exited before writing any frame without
+        refusing its handle; True once ``_SILENT_RESUME_EXITS`` came in a row.
+
+        Exit counts alone never drop the handle or replay the turn: they only
+        make :meth:`_recover_silent_resume` ask the host about the transcript.
+        A usage limit is not one (the CLI refuses a turn at the limit before
+        any frame too).
+        """
+        if (not crashed or self._spawn_resume is None or self._proc_frames
+                or mapper.produced_nodes or self._stdout_desynced):
+            return False
+        if (mapper.failed_status == 429 or is_usage_limit_text(failure)
+                or is_usage_limit_text(self._stderr_text())):
+            return False
+        self._silent_resume_exits += 1
+        return self._silent_resume_exits >= _SILENT_RESUME_EXITS
+
+    async def _recover_silent_resume(self, user_node: SessionNode) -> bool | None:
+        """Ask the host about the handle the CLI keeps exiting on.
+
+        True: its transcript was gone and the host re-seeded it; this loop now
+        resumes the new handle (the store already holds it), on a fresh
+        process. False: the transcript is there, or this loop already
+        re-seeded once, so the same handle cannot work; the turn ends with
+        ``RESUME_UNRECOVERABLE_MESSAGE``. None: no answer (no host callback,
+        or the check failed); the turn fails as an ordinary crash.
+
+        The re-seed writes the history before ``user_node``, since the replay
+        sends that turn again.
+        """
+        handle = self._spawn_resume
+        if handle is None:
+            return None
+        if self._resume_reseeded:
+            return False
+        if self.recover_resume is None:
+            return None
+        try:
+            outcome = await self.recover_resume(handle, user_node.node_id)
+        except Exception:  # noqa: BLE001 — the turn still fails, retriable
+            logger.warning("checking claude's resume handle %s failed", handle, exc_info=True)
+            return None
+        if outcome.status == "present":
+            logger.warning(
+                "claude keeps exiting on --resume %s although its transcript is "
+                "there", handle,
+            )
+            return False
+        if outcome.status != "reseeded" or not outcome.cli_session_id:
+            return None
+        logger.warning(
+            "claude kept exiting on --resume %s and its transcript was gone; "
+            "resuming re-seeded %s", handle, outcome.cli_session_id,
+        )
+        self._resume_reseeded = True
+        self._silent_resume_exits = 0
+        self.cli_session_id = outcome.cli_session_id
+        await self._stop_process(grace=1.0)
+        return True
 
     def _start_stderr_tail(self, proc: asyncio.subprocess.Process) -> None:
         """Read the CLI's stderr for its whole life, keeping the newest
@@ -4774,7 +4889,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._stdout_desynced:
             return b""
         try:
-            return await stdout.readline()
+            line = await stdout.readline()
+            if line:
+                # The CLI got far enough to write: it is not refusing its
+                # resume handle silently (``_silent_resume_exit``).
+                self._proc_frames += 1
+                self._silent_resume_exits = 0
+            return line
         except ValueError:
             self._stdout_desynced = True
             logger.warning(

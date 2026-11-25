@@ -473,6 +473,100 @@ async def test_a_resumed_cli_that_exits_at_start_without_saying_why_keeps_the_ha
         await run.aclose()
 
 
+def _recorder(outcome: delegated_mod.ResumeRecovery) -> tuple[list, Callable]:
+    calls: list = []
+
+    async def recover(handle: str, before_node: str) -> delegated_mod.ResumeRecovery:
+        calls.append((handle, before_node))
+        return outcome
+
+    return calls, recover
+
+
+async def _user_node_text(run: Scripted, node_id: str) -> str:
+    path = await run.store.load_path(run.sid)
+    node = next(n for n in path if n.node_id == node_id)
+    return node.message.content[0].text
+
+
+async def test_a_handle_whose_transcript_went_away_is_reseeded_after_three_silent_exits(
+    tmp_path,
+) -> None:
+    """A pooled loop's resumed CLI exits before any frame on every turn and
+    never says why (its transcript was removed after the loop connected).
+    The first two turns fail as retriable crashes with the handle kept; the
+    third asks the host, which finds the transcript gone and re-seeds it once,
+    and the turn replays on the new handle."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("reseeded", "cli-new"))
+    run = Scripted(tmp_path, {
+        "spawn_exit": {"code": 1, "stderr": "", "resume": "cli-prev"},
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        for text in ("one", "two"):
+            error = (await run.turn(text))[-1]
+            assert isinstance(error, ErrorEvent) and error.retriable, error
+            assert run.loop.cli_session_id == "cli-prev"
+        assert calls == []
+
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert len(calls) == 1 and calls[0][0] == "cli-prev"
+        # The re-seed stops before the replayed turn's prompt.
+        assert await _user_node_text(run, calls[0][1]) == "three"
+        resumed = [s["argv"][s["argv"].index("--resume") + 1] for s in run.records("start")]
+        assert resumed == ["cli-prev", "cli-prev", "cli-prev", "cli-new"]
+        assert run.loop.cli_session_id == "cli-new"
+        assert "three" in json.dumps(run.stdin_frames("user")[-1])
+    finally:
+        await run.aclose()
+
+
+async def test_a_handle_whose_transcript_is_there_ends_the_third_silent_exit_clearly(
+    tmp_path,
+) -> None:
+    """The transcript is still there, yet the CLI keeps exiting on it: the
+    third turn ends with an error that says the saved conversation could not
+    be resumed, not retriable. Nothing is replayed and the handle stays."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("present"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        for text in ("one", "two"):
+            assert (await run.turn(text))[-1].retriable
+        error = (await run.turn("three"))[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "could not resume this chat's saved conversation" in error.message
+        assert not error.retriable
+        assert len(calls) == 1
+        assert len(run.records("start")) == 3
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_frame_from_the_cli_resets_the_silent_exit_count(tmp_path) -> None:
+    """Silent exits count only in a row: a turn the resumed CLI answered
+    between them starts the count again, so the host is not asked."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("present"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        await run.turn("one")
+        await run.turn("two")
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hi."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        assert isinstance((await run.turn("three"))[-1], TurnComplete)
+        await run.loop._stop_process(grace=1.0)  # the next turn spawns again
+        run.script_path.write_text(json.dumps({"spawn_exit": {"code": 1, "stderr": ""}}),
+                                   encoding="utf-8")
+        assert (await run.turn("four"))[-1].retriable
+        assert calls == []
+    finally:
+        await run.aclose()
+
+
 async def test_stop_before_the_turn_reaches_the_cli_keeps_it_from_running(tmp_path) -> None:
     """A Stop that lands while the CLI is still starting must not let the
     turn run its tools once the CLI is up (the native loop honours an early

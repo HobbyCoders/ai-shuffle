@@ -299,6 +299,36 @@ async def test_a_handle_whose_transcript_is_not_on_this_worker_is_reseeded(monke
 
 
 @pytest.mark.asyncio
+async def test_a_pooled_loop_rechecks_a_handle_the_cli_keeps_exiting_on(monkeypatch, tmp_path):
+    """The loop's ``recover_resume`` runs the connect-time existence check
+    again: a transcript still there is ``present`` (nothing written); one
+    removed after the connect is re-seeded from the history before the turn
+    being replayed."""
+    from fluid.engine.delegated import ResumeRecovery
+
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    transcript = _write_cli_jsonl(tmp_path, "cli-handle", [
+        _user([{"type": "text", "text": "My codename is PELICAN"}]),
+        _assistant("Noted: PELICAN"),
+    ])
+    _no_reseed(monkeypatch)
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    recover = captured["recover_resume"]
+
+    assert await recover("cli-handle", "n3") == ResumeRecovery("present")
+
+    transcript.unlink()
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+    assert await recover("cli-handle", "n3") == ResumeRecovery("reseeded", "new-uuid")
+    assert len(calls) == 1
+    assert calls[0][1]["before_node"] == "n3" and calls[0][1]["force"] is True
+
+    _fake_reseed(monkeypatch, ReseedResult(status="failed", error="disk full"))
+    assert await recover("cli-handle", "n3") == ResumeRecovery("unknown")
+
+
+@pytest.mark.asyncio
 async def test_a_current_transcript_is_resumed_as_is(monkeypatch, tmp_path):
     store = MemoryStore()
     await _seed(store, PELICAN, handle="cli-handle")
