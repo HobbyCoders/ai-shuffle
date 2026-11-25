@@ -419,7 +419,7 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     ``folder``), ``clone_url`` (git), ``folder``, ``mode`` (``auto``/``adopt``).
     A new project cloned from the New project dialog (``POST /projects/clone``)
     also passes ``project_id`` (the id the owner asked for); whether a failure
-    hides the identity again is the persisted ``PROVISIONAL_KEY`` token on it.
+    hides the identity again is the persisted ``PROVISIONAL_KEY`` mark on it.
     Raises ``ValueError`` for a request this worker refuses outright.
     """
     from app.db import git_ops as git_ops_db
@@ -973,59 +973,21 @@ def execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def dispatched_hold_seconds() -> float:
-    """How long a setup handed to a paired worker counts as still running: its
-    op lives in that worker's database, so only its age is known here (the
-    longest a clone may run, plus a stale op's age)."""
-    from app.db import git_ops as git_ops_db
-
-    return CLONE_DEADLINE_SECONDS + git_ops_db.STALE_RUNNING_SECONDS
-
-
-def device_revoked(device_id: Optional[str]) -> bool:
-    """Whether a paired worker is known to be removed from the network (a
-    revoked member is no approved worker any more, but stays a known member;
-    a worker this one has no record of is unknown, not removed)."""
-    from app.network import engine, membership
-
-    ctx = engine.context()
-    if ctx is None or not device_id or device_id == _own_device_id():
-        return False
-    member = ctx.member(device_id)
-    return member is not None and member.status == membership.STATUS_REVOKED
-
-
 def setup_holder(project_v2_ids: List[str]) -> Optional[Dict[str, Any]]:
-    """Where an ordinary setup (the Workers tab) of one of these identities is
-    waiting or running, as ``{runner_id}`` or ``{device_id}``; else None (sync).
+    """The runner on this database where an ordinary setup (the Workers tab)
+    of one of these identities is waiting or running, as ``{runner_id}``;
+    else None (sync).
 
-    Read from what this worker knows: every runner's ops on this database
-    (a stale running one is left out), and the requests it sent to paired
-    workers: one waiting for its worker, or one handed over recently enough
-    that it may still run there (:func:`dispatched_hold_seconds`), unless
-    that worker was removed from the network. A new project's first clone
-    is left out: its token says who owns it.
+    Only what this database holds: every runner's ops on it (a stale running
+    one is left out). A setup handed to a paired worker with its own
+    database is not known here. A new project's first clone is left out:
+    its provisional mark says which op it is.
     """
-    from datetime import datetime, timezone
-
     from app.db import git_ops as git_ops_db
-    from app.db import project_setup as setup_db
 
-    ids = [pid for pid in project_v2_ids if pid]
-    for row in git_ops_db.list_inflight_for_projects(SETUP_OP, ids):
+    for row in git_ops_db.list_inflight_for_projects(SETUP_OP, [pid for pid in project_v2_ids if pid]):
         if not (row.get("params") or {}).get("project_id"):
             return {"runner_id": row.get("runner_id")}
-    now = datetime.now(timezone.utc)
-    for pid in ids:
-        for row in setup_db.list_requests(project_v2_id=pid):
-            if device_revoked(row["target_id"]):
-                continue  # it will never run there
-            if row["status"] == setup_db.REQUEST_QUEUED_OFFLINE:
-                return {"device_id": row["target_id"]}
-            sent = git_ops_db._as_aware_utc(row.get("updated_at") or row.get("created_at"))
-            if row["status"] == setup_db.REQUEST_DISPATCHED and (
-                    sent is None or (now - sent).total_seconds() <= dispatched_hold_seconds()):
-                return {"device_id": row["target_id"]}
     return None
 
 
@@ -1035,12 +997,12 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     Every terminal path of a first-clone op calls this: the executor, a cancel
     before it ran (on this worker or, on a shared database, another's), the
     restart sweep, and a request refused while starting. The identity is
-    hidden only while this op still owns its provisional token
+    hidden only while this op's provisional mark is still on it
     (``projects_v2.settle_provisional``, one locked compare-and-set): never
-    once another attempt took it over, a worker registered a copy, or the
-    owner asked for it on a worker from the Workers tab (each clears the
-    token, and that write replicates). Best effort: the op's own failure is
-    what the caller needs.
+    once a later attempt replaced the mark or a copy was registered (which
+    clears it), nor while an ordinary setup of it (the Workers tab) waits or
+    runs on this database (:func:`setup_holder`). Best effort: the op's own
+    failure is what the caller needs.
     """
     from app.db import projects_v2
 
@@ -1049,6 +1011,8 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     if not params.get("project_id") or not origin or not op_row.get("id"):
         return
     try:
+        if setup_holder([projects_v2.project_v2_id_for_origin(origin)]) is not None:
+            return  # wanted on a worker: its setup registers it or shows its failure
         projects_v2.settle_provisional(origin, op_row.get("runner_id") or _me(), op_row["id"])
     except Exception:  # noqa: BLE001
         logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)
@@ -1530,12 +1494,6 @@ async def dispatch_once() -> None:
     if engine.context() is None:
         return None
     waiting = await run_sync(requests_db.list_requests, status=requests_db.REQUEST_QUEUED_OFFLINE)
-    for row in [row for row in waiting if device_revoked(row["target_id"])]:
-        # Its worker was removed from the network: withdraw it, so it is
-        # purged with the settled ones instead of waiting forever.
-        await run_sync(requests_db.set_request_status, row["id"], requests_db.REQUEST_CANCELLED,
-                       expect=requests_db.REQUEST_QUEUED_OFFLINE)
-        waiting.remove(row)
     _pending_targets = {row["target_id"] for row in waiting}
     online = transport.online_devices()
     for row in reversed(waiting):  # oldest first

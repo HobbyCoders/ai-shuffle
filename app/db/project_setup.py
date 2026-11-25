@@ -178,14 +178,6 @@ def forget_peer_project(device_id: str, project_v2_id: str) -> None:
         save_peer_catalog(device_id, [pid for pid in cached if pid != project_v2_id])
 
 
-def peer_catalog_reads() -> Dict[str, Any]:
-    """``{device_id: read_at}``: when each peer's cached catalog was read."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT device_id, read_at FROM project_peer_catalogs")
-        return {row["device_id"]: row["read_at"] for row in cursor.fetchall()}
-
-
 def peer_catalogs() -> Dict[str, List[str]]:
     """``{device_id: [project_v2_id, ...]}`` as last read from each peer."""
     with get_db() as conn:

@@ -262,16 +262,15 @@ def set_forgotten(origin: str, forgotten: bool) -> bool:
 
 
 #: Set while a project exists only as a new project's first clone (``POST
-#: /projects/clone``) that has not succeeded yet: the token of the attempt
-#: that owns it, ``{runner_id, device_id, op_id, started_at}``. Only that
-#: attempt hides it again when it fails (:func:`settle_provisional`); a
-#: registered copy on any worker, or a setup the owner asks for on a worker,
-#: clears it (:func:`mark_registered`).
+#: /projects/clone``) that has not succeeded yet: ``{runner_id, op_id}`` of
+#: the latest attempt. Only that attempt hides it again when it fails
+#: (:func:`settle_provisional`); a registered copy clears it
+#: (:func:`mark_registered`).
 PROVISIONAL_KEY = "provisional_clone"
 
 
 def provisional_token(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The owning first clone's token on a projects_v2 row, else None."""
+    """The first clone's provisional mark on a projects_v2 row, else None."""
     settings = (row or {}).get("settings")
     token = settings.get(PROVISIONAL_KEY) if isinstance(settings, dict) else None
     return token if isinstance(token, dict) and token.get("runner_id") and token.get("op_id") else None
@@ -307,9 +306,9 @@ def _swap_settings(origin: str, change, *, name: Optional[str] = None) -> bool:
 
 def claim_provisional(origin: str, token: Dict[str, Any], *, expect: Optional[Dict[str, Any]],
                       name: Optional[str] = None) -> bool:
-    """Make ``token`` the owner of ``origin``'s first clone (and show it again),
-    only while the current owner is still ``expect`` (None: no owner). With
-    ``name`` the project is renamed in the same write."""
+    """Mark ``origin`` as ``token``'s first clone (and show it again), only
+    while the current mark is still ``expect`` (None: no mark). With ``name``
+    the project is renamed in the same write."""
     def change(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not _same_token(provisional_token({"settings": settings}), expect):
             return None
@@ -322,9 +321,9 @@ def claim_provisional(origin: str, token: Dict[str, Any], *, expect: Optional[Di
 
 def settle_provisional(origin: str, runner_id: str, op_id: str) -> bool:
     """Hide ``origin`` after its first clone failed, only while that clone
-    (``runner_id``/``op_id``) still owns it: not if another attempt took it
-    over or a worker registered a copy since. The token stays, so its owner
-    can retry and anyone may take the settled attempt over."""
+    (``runner_id``/``op_id``) is still its mark: not if a later attempt
+    replaced it or a copy was registered since. The mark stays, so a retry
+    replaces it."""
     def change(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         owner = provisional_token({"settings": settings})
         if not _same_token(owner, {"runner_id": runner_id, "op_id": op_id}) or settings.get("forgotten") is True:
@@ -336,9 +335,8 @@ def settle_provisional(origin: str, runner_id: str, op_id: str) -> bool:
 
 
 def mark_registered(origin: str) -> bool:
-    """A worker registered a copy of ``origin``, or the owner asked for one on a
-    worker (``POST /projects/setup``): it is a listed project again (neither
-    hidden nor a first clone in progress). No write when already so."""
+    """A worker registered a copy of ``origin``: it is a listed project again
+    (neither hidden nor a first clone in progress). No write when already so."""
     row = get_project_v2_by_origin(origin)
     settings = (row or {}).get("settings") or {}
     if not row or (settings.get("forgotten") is not True and PROVISIONAL_KEY not in settings):
