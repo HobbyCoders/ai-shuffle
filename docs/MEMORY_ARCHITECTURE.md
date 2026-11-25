@@ -462,12 +462,19 @@ with `python -m app.maintenance.session_recall_projection --remove`.
 
 ### Claude Code CLI memory
 
-The delegated leg runs the claude CLI, which keeps its own native memory
-(`~/.claude/projects/<slug>/memory/`, CLAUDE.md, auto-memory). The app does
-not read, write, or sync those provider-owned files. The CLI leg is therefore the one place two memory systems coexist:
-the CLI's own, plus the app's via the MCP bridge. They do not overlap in
-storage; a fact Remembered through the bridge is app memory, a fact the CLI
-saves itself stays CLI memory.
+The delegated leg runs the claude CLI, which has its own native memory:
+CLAUDE.md and AGENTS.md instruction files, and auto-memory (`MEMORY.md` under
+`~/.claude/projects/<slug>/memory/`). The app spawns the CLI with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (`DELEGATED_CLI_ENV_DEFAULTS` in
+`app/core/environment.py`), so by default the CLI neither loads nor writes
+auto-memory on top of the app's `# Memory` snapshot. CLAUDE.md and AGENTS.md
+still load. The default is added only when neither the agent profile, the
+provider nor the worker's own environment sets the variable, so an owner can
+turn auto-memory back on (for example with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0`).
+The app does not read, write or sync the CLI's files, and existing
+auto-memory files stay on disk untouched. A fact Remembered through the MCP
+bridge is app memory; if auto-memory is turned back on, what the CLI saves
+itself stays CLI memory.
 
 ### `agent_memory_files` (legacy mirror)
 
