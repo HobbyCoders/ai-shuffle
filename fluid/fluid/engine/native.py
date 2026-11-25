@@ -2810,6 +2810,35 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return True
         return False
 
+    async def _park_on_human(
+        self, fut: asyncio.Future, notify: Awaitable[None], timeout: float | None,
+    ) -> str:
+        """Wait for a registered permission/question ``fut`` while ``notify`` runs.
+
+        The Notification hooks run beside the wait instead of in front of it,
+        so a slow hook neither delays the answer nor holds off a Stop. Returns
+        ``"answered"``, ``"interrupted"`` or ``"timeout"``. Once answered, the
+        notice already under way is let finish, as it always was; an interrupt,
+        a timeout or a cancellation ends it with the wait.
+        """
+        notifier = asyncio.ensure_future(notify)
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {fut, interrupt_wait}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if fut in done:
+                await notifier
+                return "answered"
+            return "interrupted" if interrupt_wait in done else "timeout"
+        finally:
+            interrupt_wait.cancel()
+            if not notifier.done():
+                notifier.cancel()
+            elif not notifier.cancelled() and notifier.exception() is not None:
+                log.debug("notification hooks failed", exc_info=notifier.exception())
+
     async def _turn_watchdog(self, limit: float) -> None:
         """Cancel the turn after ``limit`` seconds without any emitted event.
 
@@ -6771,27 +6800,22 @@ class NativeLoop(BackgroundLifecycleMixin):
         for server_req_id, descriptor in (marker.requests or {}).items():
             request_id = new_id("q")
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
-            self._pending_questions[request_id] = fut
             desc = descriptor if isinstance(descriptor, dict) else {}
-            await self._emit(QuestionRequest(
-                session_id=sid, turn_id=turn_id, request_id=request_id,
-                tool_use_id=tool_use_id, name=name,
-                message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
-                schema=desc.get("schema"),
-            ))
-            await self._notify_hooks(
-                sid, turn_id, "elicitation_dialog", f"{name} is waiting for an answer",
-                name=name, tool_use_id=tool_use_id,
-            )
-            interrupt_wait = asyncio.create_task(self._interrupted.wait())
+            # Cleanup starts at registration, as for a permission prompt.
+            self._pending_questions[request_id] = fut
             try:
-                done, _ = await asyncio.wait(
-                    {fut, interrupt_wait},
-                    timeout=self.question_timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if fut not in done:
-                    if interrupt_wait not in done:
+                await self._emit(QuestionRequest(
+                    session_id=sid, turn_id=turn_id, request_id=request_id,
+                    tool_use_id=tool_use_id, name=name,
+                    message=str(desc.get("message", "") or f"{marker.server} needs input for {name}"),
+                    schema=desc.get("schema"),
+                ))
+                ended = await self._park_on_human(fut, self._notify_hooks(
+                    sid, turn_id, "elicitation_dialog", f"{name} is waiting for an answer",
+                    name=name, tool_use_id=tool_use_id,
+                ), self.question_timeout)
+                if ended != "answered":
+                    if ended == "timeout":
                         log.warning(
                             "no answer to %s's question within the question "
                             "timeout; giving up on it", name,
@@ -6799,7 +6823,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return None
                 resp: RespondQuestion = fut.result()
             finally:
-                interrupt_wait.cancel()
                 self._pending_questions.pop(request_id, None)
             answers[server_req_id] = resp.answer
             user_answered = user_answered or bool(getattr(resp, "user_answered", False))
@@ -6940,25 +6963,23 @@ class NativeLoop(BackgroundLifecycleMixin):
         request_id = new_id("perm")
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending_permissions[request_id] = fut
-        await self._emit(PermissionRequest(
-            session_id=sid, turn_id=turn_id, request_id=request_id,
-            tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
-        ))
-        await self._notify_hooks(
-            sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
-            name=name, tool_use_id=tool_use_id,
-        )
         timeout = self.permission_timeout
-        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        # Registered and cleaned up under one try: a Stop that lands while the
+        # card is published or the hooks run must not leave a pending future,
+        # or the watchdog would take every later turn for a human wait.
+        self._pending_permissions[request_id] = fut
         try:
-            done, _ = await asyncio.wait(
-                {fut, interrupt_wait}, timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if fut not in done:
-                if interrupt_wait in done:
-                    return ("deny", "interrupted while awaiting permission", None)
+            await self._emit(PermissionRequest(
+                session_id=sid, turn_id=turn_id, request_id=request_id,
+                tool_use_id=tool_use_id, name=name, input=input, risk=risk, reason=reason,
+            ))
+            ended = await self._park_on_human(fut, self._notify_hooks(
+                sid, turn_id, "permission_prompt", f"{name} needs your permission to run",
+                name=name, tool_use_id=tool_use_id,
+            ), timeout)
+            if ended == "interrupted":
+                return ("deny", "interrupted while awaiting permission", None)
+            if ended == "timeout":
                 log.warning(
                     "no permission decision for %s within %.0fs; denying", name, timeout,
                 )
@@ -6970,7 +6991,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
             resp: RespondPermission = fut.result()
         finally:
-            interrupt_wait.cancel()
             self._pending_permissions.pop(request_id, None)
         allowed = resp.decision in ("allow", "allow_always")
         if resp.decision == "allow_always" and self.permissions is not None:
