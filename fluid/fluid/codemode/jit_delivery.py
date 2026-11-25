@@ -73,6 +73,13 @@ READ_TIMEOUT = 0.25
 ON_TIME, LATE = "on_time", "late"
 HEADING = "# Memory for this step"
 _OVERFLOW = "Also matching (Recall by id): "
+KILL_SWITCH = "FLUID_MEMORY_JIT"
+
+
+def switched_on() -> bool:
+    """False when the worker's ``FLUID_MEMORY_JIT`` is 0/false/off/no: a
+    temporary default-on rollback switch, read on every call."""
+    return os.environ.get(KILL_SWITCH, "").strip().lower() not in ("0", "false", "off", "no")
 
 
 @dataclass(frozen=True)

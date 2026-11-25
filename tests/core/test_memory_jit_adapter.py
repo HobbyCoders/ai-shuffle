@@ -12,7 +12,7 @@ from fluid.codemode import jit_delivery
 from fluid.codemode.skills import SkillStore
 from fluid.hooks.bus import POST_TOOL_USE, PRE_COMPACT, PRE_TOOL_USE, place_attachments
 
-from app.core.config import Settings, settings
+from app.core.config import Settings
 from app.core.provider.harness_adapter import HarnessAdapter
 from app.core.provider.types import SessionOptions
 
@@ -29,7 +29,7 @@ def jit_adapter(tmp_path, monkeypatch):
                       when="When releasing", triggers={"tools": ["Release"]})
     store.save_memory(OFFSITE, durable=True, when="When planning a team offsite dinner")
     monkeypatch.setattr("app.core.fluid_memory.session_memory", lambda sid, cwd=None: (store, None))
-    monkeypatch.setattr(settings, "fluid_memory_jit", True)
+    monkeypatch.delenv("FLUID_MEMORY_JIT", raising=False)
     return _adapter(tmp_path, monkeypatch), store
 
 
@@ -85,7 +85,7 @@ async def test_user_turn_note_carries_word_matches(jit_adapter):
 @pytest.mark.asyncio
 async def test_kill_switch_turns_both_paths_off(jit_adapter, monkeypatch):
     adapter, store = jit_adapter
-    monkeypatch.setattr(settings, "fluid_memory_jit", False)
+    monkeypatch.setenv("FLUID_MEMORY_JIT", "false")
     off = await adapter._hooks.emit(POST_TOOL_USE, {
         "name": "Bash", "input": {"command": "git push"}, "tool_use_id": "t1", "output": "ok"})
     assert PUSH not in _context(off)
@@ -127,8 +127,12 @@ async def test_only_a_placed_delivery_counts(jit_adapter):
     assert jit_delivery.counts(store)["totals"] == {"late": 1, "command": 1}
 
 
-def test_setting_defaults_on_and_reads_the_env(monkeypatch):
+def test_kill_switch_defaults_on_and_is_not_a_setting(monkeypatch):
     monkeypatch.delenv("FLUID_MEMORY_JIT", raising=False)
-    assert Settings(_env_file=None).fluid_memory_jit is True
-    monkeypatch.setenv("FLUID_MEMORY_JIT", "false")
-    assert Settings(_env_file=None).fluid_memory_jit is False
+    assert jit_delivery.switched_on()
+    for off in ("false", "0", " OFF ", "no"):
+        monkeypatch.setenv("FLUID_MEMORY_JIT", off)
+        assert not jit_delivery.switched_on()
+    monkeypatch.setenv("FLUID_MEMORY_JIT", "true")
+    assert jit_delivery.switched_on()
+    assert "fluid_memory_jit" not in Settings.model_fields

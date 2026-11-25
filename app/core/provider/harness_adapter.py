@@ -3065,10 +3065,10 @@ class HarnessAdapter(ProviderAdapter):
 
         The owner and project lookup reads the session row, so a tool call
         reuses the last one and only a user turn (``refresh``) looks again."""
-        from app.core.config import settings
+        from fluid.codemode.jit_delivery import SessionDelivery, switched_on
 
         extra = getattr(self._options, "extra", None) or {}
-        if (not settings.fluid_memory_jit or self._options is None
+        if (not switched_on() or self._options is None
                 or extra.get("assistant_proactive") is not None or extra.get("one_shot")):
             return None
         sid = self._resolve_app_session_id()
@@ -3077,7 +3077,6 @@ class HarnessAdapter(ProviderAdapter):
         if not refresh and self._jit is not None and self._jit.session_id == sid:
             return self._jit
         from app.core.fluid_memory import session_memory
-        from fluid.codemode.jit_delivery import SessionDelivery
         from fluid.codemode.skills import checkout_identity
 
         try:
@@ -3089,7 +3088,7 @@ class HarnessAdapter(ProviderAdapter):
         if (jit is None or jit.session_id != sid or jit.project != project
                 or jit.checkout != checkout or str(jit.store.root) != str(store.root)):
             jit = SessionDelivery(store, project, sid, checkout=checkout,
-                                  enabled=lambda: bool(settings.fluid_memory_jit))
+                                  enabled=switched_on)
             # A replacement adapter (idle eviction, resume, a new process)
             # takes up what the session already has since its last compaction.
             jit.restore()
