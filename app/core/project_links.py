@@ -53,9 +53,11 @@ def normalize_remote_url(url: Optional[str]) -> str:
 # A host name, or a bracketed IPv6 address (``[2001:db8::1]``).
 _HOST = r"(\[[0-9A-Za-z:.%]+\]|[^\s/:?#@\[\]\\]+)"
 _SCHEME_REMOTE_RE = re.compile(
-    r"^(https?|ssh|git\+ssh|ssh\+git|git)://(?:[^/?#\s]*@)?" + _HOST + r"(?::(\d*))?(/[^?#]*)?$",
+    r"^(https?|ssh|git\+ssh|ssh\+git|git)://(?:([^/?#\s]*)@)?" + _HOST + r"(?::(\d*))?(/[^?#]*)?$",
     re.IGNORECASE)
-_SCP_REMOTE_RE = re.compile(r"^(?:[^/\s]*@)?" + _HOST + r":(?!//)(.+)$")
+_SCP_REMOTE_RE = re.compile(r"^(?:([^/\s]*)@)?" + _HOST + r":(?!//)(.+)$")
+# The SSH login forges use: ``git@host:owner/repo`` is ``https://host/owner/repo``.
+_FORGE_LOGIN = "git"
 _USERINFO_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/?#\s]*@", re.IGNORECASE)
 # Each scheme's own default port: only that one is dropped.
 _DEFAULT_PORT = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}
@@ -67,14 +69,17 @@ def canonical_remote(url: Optional[str]) -> str:
     - HTTPS and HTTP become ``https://host[:port]/path``. A port is dropped
       only when it is the URL's own scheme default (443 for HTTPS, 80 for
       HTTP), so ``https://host:80/…`` stays its own remote.
-    - The common forge form, scp-style with a path relative to the login's
-      home (``git@host:owner/repo``), is the same repository as
-      ``https://host/owner/repo``.
-    - Any other SSH form keeps its own spelling: ``ssh://host[:port]/path``
-      for an absolute path (``git@host:/srv/repo`` and ``ssh://git@host/srv/repo``
-      alike), a non-default port, or a ``~`` path. ``git://`` stays ``git://``.
-    - The login (and any password) is always dropped; a bracketed IPv6 host
-      is read as one host.
+    - The forge form, scp-style with the login ``git`` and a relative path
+      (``git@host:owner/repo``, as GitHub, GitLab, Bitbucket, Gitea and
+      Forgejo use), is the same repository as ``https://host/owner/repo``.
+    - Any other SSH form keeps its own spelling, as ``ssh://`` with the scp
+      and URL forms agreeing. A path relative to the login's home (another
+      login, no login, or a ``~`` path) keeps the login, since it picks the
+      home: ``alice@host:repos/app`` is ``ssh://alice@host/~/repos/app``. An
+      absolute path (``git@host:/srv/repo``, ``ssh://git@host/srv/repo``)
+      drops it. A non-default port is kept. ``git://`` stays ``git://``.
+    - A password is always dropped, and the login everywhere but a home
+      path; a bracketed IPv6 host is read as one host.
 
     Then :func:`normalize_remote_url` applies. A plain HTTPS URL comes out
     exactly as :func:`normalize_remote_url` always made it, so its identity
@@ -85,21 +90,34 @@ def canonical_remote(url: Optional[str]) -> str:
         return ""
     match = _SCHEME_REMOTE_RE.match(text)
     if match:
-        scheme, host, port, path = match.groups()
+        scheme, userinfo, host, port, path = match.groups()
         scheme = scheme.lower()
         kind = "ssh" if "ssh" in scheme else scheme
         port = port or ""
         keep = f":{port}" if port and port != _DEFAULT_PORT[kind] else ""
+        path = path or ""
         if kind == "http":
             kind = "https"  # one repository whichever of the two it is fetched over
-        return normalize_remote_url(f"{kind}://{host}{keep}{path or ''}")
+        if kind == "ssh" and path.startswith("/~"):
+            return normalize_remote_url(f"ssh://{_login(userinfo)}{host}{keep}{path}")
+        return normalize_remote_url(f"{kind}://{host}{keep}{path}")
     scp = _SCP_REMOTE_RE.match(text)
-    if scp and len(scp.group(1)) > 1:  # never a Windows drive letter
-        host, path = scp.groups()
-        if path.startswith(("/", "~")):
-            return normalize_remote_url(f"ssh://{host}{'' if path.startswith('/') else '/'}{path}")
-        return normalize_remote_url(f"https://{host}/{path}")
+    if scp and len(scp.group(2)) > 1:  # never a Windows drive letter
+        userinfo, host, path = scp.groups()
+        if path.startswith("/"):
+            return normalize_remote_url(f"ssh://{host}{path}")
+        login = _login(userinfo)
+        if login == f"{_FORGE_LOGIN}@" and not path.startswith("~"):
+            return normalize_remote_url(f"https://{host}/{path}")
+        home = path if path.startswith("~") else f"~/{path}"
+        return normalize_remote_url(f"ssh://{login}{host}/{home}")
     return normalize_remote_url(_USERINFO_RE.sub(r"\1", text))
+
+
+def _login(userinfo: Optional[str]) -> str:
+    """``alice@`` from ``alice`` or ``alice:secret``; empty without a login."""
+    login = (userinfo or "").split(":", 1)[0]
+    return f"{login}@" if login else ""
 
 
 def _link_id(normalized: str) -> Optional[str]:
@@ -152,13 +170,16 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
     record is ensured): it no-ops when the project is missing, manually locked,
     has no usable remote, or already carries the derived id. Returns the
     project's effective link_group_id (possibly unchanged) or ``None``.
+
+    A project already linked to an identity that still names this remote (its
+    id in any spelling, or the remote the project was pointed at) keeps it:
+    another project's row for another spelling arriving later never moves the
+    checkout. It moves only when its identity was merged into another one
+    (**Change repository**) or a project was pointed at this exact remote, as
+    before. Choosing by spelling is for a project with no such identity yet.
     """
     from app.core.project_remote import identity_for_remote
 
-    found = identity_for_remote(remote_url)
-    if not found:
-        return None
-    group_id, pin = found
     try:
         project = database.get_project(project_id)
     except Exception:  # noqa: BLE001 — never break the caller's main flow
@@ -168,6 +189,10 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
         return None
     if is_link_locked(project):
         return project.get("link_group_id")
+    found = _kept_identity(project.get("link_group_id"), remote_url) or identity_for_remote(remote_url)
+    if not found:
+        return None
+    group_id, pin = found
     if project.get("link_group_id") == group_id:
         return group_id
     try:
@@ -182,6 +207,34 @@ def maybe_auto_link_project(project_id: str, remote_url: Optional[str]) -> Optio
         logger.debug("maybe_auto_link_project: set failed for %s", project_id, exc_info=True)
         return project.get("link_group_id")
     return group_id
+
+
+def _kept_identity(current: Optional[str], remote_url: Optional[str]) -> Optional[Tuple[str, bool]]:
+    """``(origin, locked)`` for a project already linked to ``current``, or None
+    to choose by the remote.
+
+    ``current`` is kept while it still names ``remote_url``; it gives way to a
+    project pointed at this exact remote, and an explicit merge of it is
+    followed.
+    """
+    from app.core.project_remote import merged_into, pinned_remote, remote_names_origin
+    from app.db import projects_v2
+
+    if not current or not remote_url:
+        return None
+    try:
+        if not remote_names_origin(remote_url, current):
+            return None
+        wanted = normalize_remote_url(remote_url)
+        for row in projects_v2.list_projects_v2():  # a project pointed at this remote, as before
+            pinned = pinned_remote(row)
+            if pinned and row["origin"] != current and normalize_remote_url(pinned) == wanted:
+                return None
+        target = merged_into(projects_v2.get_project_v2_by_origin(current))
+        return (target, True) if target else (current, False)
+    except Exception:  # noqa: BLE001 - fall back to choosing by the remote
+        logger.debug("maybe_auto_link_project: current identity check failed", exc_info=True)
+        return None
 
 
 def record_project_remote(project_id: str, remote_url: Optional[str],

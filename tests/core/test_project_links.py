@@ -92,7 +92,7 @@ _DEMO = "https://github.com/example-org/demo"
     "https://someone:pw-example@github.com/example-org/demo.git",
     "https://github.com:443/example-org/demo",
     "git@github.com:example-org/demo.git",
-    "github.com:example-org/demo",
+    "git@github.com:Example-Org/demo",
 ])
 def test_every_forge_spelling_of_a_remote_has_one_identity(spelling):
     assert project_links.canonical_remote(spelling) == _DEMO
@@ -115,6 +115,26 @@ def test_an_ssh_path_relative_to_the_login_is_not_the_absolute_one():
     assert not _same("ssh://git@git.example.test/repos/app", "https://git.example.test/repos/app")
     assert _same("git@git.example.test:~/repos/app", "ssh://git@git.example.test/~/repos/app")
     assert not _same("git@git.example.test:~/repos/app", absolute)
+
+
+def test_only_the_forge_login_makes_an_scp_path_the_web_repository():
+    web = "https://git.example.test/repos/app"
+    alice, bob, nobody = ("alice@git.example.test:repos/app.git", "bob@git.example.test:repos/app.git",
+                          "git.example.test:repos/app.git")
+    # Each login's home is its own: three repositories, none of them the web one.
+    ids = {auto_link_group_id(url) for url in (alice, bob, nobody, web)}
+    assert len(ids) == 4
+    assert project_links.canonical_remote(alice) == "ssh://alice@git.example.test/~/repos/app"
+    assert _same(alice, "ssh://alice@git.example.test/~/repos/app.git")
+    assert _same(alice, "alice@git.example.test:~/repos/app")
+    assert not _same("alice@git.example.test:/srv/app", "alice@git.example.test:srv/app")
+    # The forge login is the web repository; its home path is not.
+    assert _same("git@git.example.test:repos/app.git", web)
+    assert not _same("GIT@git.example.test:repos/app.git", web)
+    assert not _same("git@git.example.test:~/repos/app", web)
+    # A password in a URL form never reaches it; the login that picks the home does.
+    homed = project_links.canonical_remote("ssh://alice:pw-example@git.example.test/~/repos/app")
+    assert homed == "ssh://alice@git.example.test/~/repos/app"
 
 
 def test_only_the_schemes_own_default_port_is_dropped():

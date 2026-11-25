@@ -1607,11 +1607,13 @@ def _legacy_id(url: str) -> str:
     return legacy_link_group_id(url)
 
 
-def _legacy_project_here(ws: Path, remote: str = _SSH, project_id: str = "demo") -> tuple:
-    """A project this worker registered before the upgrade, keyed by its old SSH id."""
+def _legacy_project_here(ws: Path, remote: str = _SSH, project_id: str = "demo", *,
+                         origin: str | None = None) -> tuple:
+    """A project this worker registered before the upgrade, keyed by its old SSH id
+    (or by ``origin``)."""
     folder = init_repo(ws / project_id, files={"README.md": "demo\n"})
     git(folder, "remote", "add", "origin", remote)
-    origin = _legacy_id(remote)
+    origin = origin or _legacy_id(remote)
     database.create_project(project_id=project_id, name="Demo", description=None, path=project_id,
                             settings_dict={"keep": "me"}, link_group_id=origin)
     database.create_git_repository(f"repo-{project_id}", project_id, remote_url=remote)
@@ -1687,6 +1689,44 @@ def test_an_ssh_checkout_stays_put_when_the_https_project_moved_to_another_repos
     # A new SSH add with no SSH project in use does not join the moved project either.
     projects_v2.set_forgotten(legacy["origin"], True)
     assert project_remote.identity_for_remote(_SSH) == (legacy["origin"], False)
+
+
+def test_an_ssh_checkout_stays_put_when_an_older_ssh_project_arrives_late_and_moved(client, ws, test_db):
+    from app.core import project_remote
+    from app.core.project_links import LINK_LOCKED_KEY
+
+    # Offline, this upgraded worker added the repository over SSH: the one identity.
+    _here, mine = _legacy_project_here(ws, origin=auto_link_group_id(_SSH))
+    # Studio's older SSH project for it (the old SSH id) syncs in later, moved elsewhere.
+    late = _replicated(_SSH, origin=_legacy_id(_SSH))
+    projects_v2.pin_remote(late["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_SSH)
+
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never switched to the other repository
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    # An explicit merge of this identity (Change repository) is followed.
+    projects_v2.mark_merged(mine["origin"], late["origin"])
+    _refresh_git_record("demo", ws / "demo")
+    project = database.get_project("demo")
+    assert project["link_group_id"] == late["origin"]
+    assert project["settings"].get(LINK_LOCKED_KEY) is True
+
+
+def test_a_checkout_keeps_its_identity_when_its_remote_is_respelled(client, ws, test_db):
+    from app.core import project_remote
+
+    # Linked under the old SSH id while an HTTPS project of the repository exists.
+    _here, legacy = _legacy_project_here(ws)
+    _replicated(_HTTPS)
+    # The folder's remote is rewritten to HTTPS: still this project's repository.
+    git(ws / "demo", "remote", "set-url", "origin", _HTTPS)
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _HTTPS
 
 
 def test_an_existing_ssh_checkout_keeps_its_project_when_an_https_one_appears(client, ws, test_db):
