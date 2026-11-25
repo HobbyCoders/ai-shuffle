@@ -243,34 +243,27 @@ def _read_head_tail(path: Path, max_bytes: int) -> tuple[str, str | None] | None
 
     A file inside the budget is read whole, with tail None. A larger one keeps
     its first three quarters of the budget and its last quarter, so a rule at
-    the end of an oversized file still reaches the prompt. Even at four bytes a
+    the end of an oversized file still reaches the prompt. The size is taken
+    first, so no more than ``max_bytes`` is ever read. Even at four bytes a
     character, each slice holds more than the character cap keeps of it
-    (:data:`_CAP_HEAD_RATIO`, :data:`_CAP_TAIL_RATIO`). A character split
-    at either edge is dropped, and so is a line the tail starts inside, so a
-    cut word cannot read as an ``@`` import. None when the file cannot be read
-    or is not UTF-8.
+    (:data:`_CAP_HEAD_RATIO`, :data:`_CAP_TAIL_RATIO`). A character split at
+    either edge is dropped. None when the file cannot be read or is not UTF-8.
     """
-    tail_bytes = max(0, max_bytes) // 4
-    head_bytes = max(0, max_bytes) - tail_bytes
+    max_bytes = max(0, max_bytes)
+    tail_bytes = max_bytes // 4
+    head_bytes = max_bytes - tail_bytes
     try:
         with path.open("rb") as fh:
-            data = fh.read(max(0, max_bytes) + 1)
-            if len(data) <= max_bytes:
-                whole = _decode_cut(data)
+            size = os.fstat(fh.fileno()).st_size
+            if size <= max_bytes:
+                whole = _decode_cut(fh.read(size))
                 return None if whole is None else (whole, None)
-            size = fh.seek(0, os.SEEK_END)
-            # One byte before the tail tells whether it starts a line.
-            fh.seek(max(head_bytes, size - tail_bytes) - 1)
-            end = fh.read(tail_bytes + 1)
+            data = fh.read(head_bytes)
+            fh.seek(size - tail_bytes)
+            end = fh.read(tail_bytes)
     except (OSError, ValueError):
         return None
-    before, end = end[:1], end[1:]
-    if before not in (b"\n", b"\r"):
-        breaks = [i for i in (end.find(b"\n"), end.find(b"\r")) if i >= 0]
-        if breaks:
-            cut = min(breaks)
-            end = end[cut + (2 if end[cut:cut + 2] == b"\r\n" else 1):]
-    head = _decode_cut(data[:head_bytes], cut_end=True)
+    head = _decode_cut(data, cut_end=True)
     tail = _decode_cut(end, cut_start=True)
     if head is None or tail is None:
         return None
@@ -279,18 +272,21 @@ def _read_head_tail(path: Path, max_bytes: int) -> tuple[str, str | None] | None
 
 def _read_instruction(path: Path, limit: int) -> str:
     """An instruction file's text, read within ``limit``'s byte budget, with
-    imports expanded inside one budget of the same size."""
+    imports expanded inside one budget of the same size.
+
+    The kept end of a cut file stays literal: it starts in the middle of the
+    file, where a code fence or a line may already be open, so an ``@`` there
+    cannot be told from an import.
+    """
     max_bytes = limit * _READ_BYTES_PER_CHAR
     read = _read_head_tail(path, max_bytes)
     if read is None:
         return ""
     head, tail = read
-    budget = [max_bytes]
-    expanded = expand_imports(head, path, max_bytes=max_bytes, _budget=budget)
+    expanded = expand_imports(head, path, max_bytes=max_bytes)
     if tail is None:
         return expanded
-    return (expanded + _read_gap_note(path, max_bytes)
-            + expand_imports(tail, path, max_bytes=max_bytes, _budget=budget))
+    return expanded + _read_gap_note(path, max_bytes) + tail
 
 
 # ─── @-imports ───────────────────────────────────────────────────────────────

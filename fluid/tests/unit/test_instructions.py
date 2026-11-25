@@ -417,7 +417,7 @@ def test_instruction_and_skill_reads_are_bounded(tmp_path, monkeypatch) -> None:
     [agents] = discover_instruction_files(proj, include_global=False)
     assert agents.content.startswith("RULES-START")
     assert agents.content.endswith("\nEND") and len(agents.content) < 25_000  # the real tail
-    assert "only its start and end were read" in agents.content  # the read gap is named
+    assert f"Read {proj / 'AGENTS.md'}" in agents.content  # the cut is named, not silent
     [found] = [s for s in discover_skills(proj, include_global=False, include_builtin=False)]
     assert (found.name, found.description, found.model_invocable) == ("huge", "Big body.", True)
 
@@ -450,9 +450,72 @@ def test_head_and_tail_reads_never_split_a_character(tmp_path) -> None:
     head, tail = instructions._read_head_tail(path, 1_001)
     assert head == "ab" + "é" * 374  # 750 bytes: the next character would cross
     assert tail == "é" * 122 + "Z-END"  # the last 250 bytes, less the cut byte
-    # A tail that starts mid-line drops the cut line, so a cut word is no import.
-    path.write_text("x" * 2_000 + "y@x.md\nLAST\n", encoding="utf-8")
-    assert instructions._read_head_tail(path, 44)[1] == "LAST\n"  # not "@x.md\nLAST\n"
+
+
+def test_single_line_oversized_file_keeps_its_final_rule(tmp_path) -> None:
+    # Review finding: dropping the tail's partial first line lost the whole
+    # suffix of a one-line file that ends with a newline.
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("FIRST " + "x" * 120_000 + " FINAL-RULE: ship it.\n",
+                                    encoding="utf-8")
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("FIRST ")
+    assert agents.content.endswith("FINAL-RULE: ship it.\n")
+
+
+def test_head_and_tail_reads_stay_inside_the_byte_budget(tmp_path, monkeypatch) -> None:
+    from fluid.context import instructions
+
+    reads: dict[str, int] = {}
+    real_open = Path.open
+
+    class Counting:
+        def __init__(self, fh, name):
+            self.fh, self.name = fh, name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def read(self, size=-1):
+            data = self.fh.read(size)
+            reads[self.name] = reads.get(self.name, 0) + len(data)
+            return data
+
+        def __getattr__(self, attr):
+            return getattr(self.fh, attr)
+
+    def counting_open(self, *args, **kwargs):
+        return Counting(real_open(self, *args, **kwargs), self.name)
+
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("line\n" * 60_000, encoding="utf-8")
+    (proj / "small.md").write_text("a" * 1_000, encoding="utf-8")
+    monkeypatch.setattr(Path, "open", counting_open)
+    head, tail = instructions._read_head_tail(proj / "AGENTS.md", 1_000)
+    assert reads["AGENTS.md"] <= 1_000 and (len(head), len(tail)) == (750, 250)
+    assert instructions._read_head_tail(proj / "small.md", 1_000) == ("a" * 1_000, None)
+    assert reads["small.md"] == 1_000
+    reads.clear()
+    discover_instruction_files(proj, include_global=False)
+    assert reads["AGENTS.md"] <= instructions.INSTRUCTION_FILE_MAX_CHARS * 4
+
+
+def test_imports_in_the_kept_end_of_a_cut_file_stay_literal(tmp_path) -> None:
+    # Review finding: the detached tail began with a fresh fence state, so an
+    # ``@x.md`` inside a fence opened in the omitted middle was imported.
+    proj = _mk_project(tmp_path)
+    (proj / "head.md").write_text("HEAD-IMPORTED", encoding="utf-8")
+    (proj / "x.md").write_text("TAIL-IMPORTED", encoding="utf-8")
+    (proj / "AGENTS.md").write_text(
+        "@head.md\n" + "plain\n" * 20_000 + "```\n" + "plain\n" * 20_000
+        + "@x.md\n```\n@x.md\nEND\n", encoding="utf-8")
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("HEAD-IMPORTED")  # the head still imports
+    assert "TAIL-IMPORTED" not in agents.content
+    assert agents.content.endswith("@x.md\n```\n@x.md\nEND\n")
 
 
 def test_import_budget_is_debited_by_bytes_read(tmp_path) -> None:

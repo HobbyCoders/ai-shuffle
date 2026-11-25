@@ -145,8 +145,9 @@ file); past that, the head and tail are kept and a marker names the file so
 the rest can be read on demand. Reading is bounded too: at most four bytes
 per character of that cap are read from a file (its start and its end, with
 a note naming the file between them, so the final rules of a huge file still
-arrive), and its `@` imports share one budget of the same size, counted in
-bytes read, so a huge file or many repeated imports cost no more. An import
+arrive; `@` tokens in that kept end stay literal, never imported), and its
+`@` imports share one budget of the same size, counted in bytes read, so a
+huge file or many repeated imports cost no more. An import
 cut this way ends with a note naming it, and imports past the budget keep
 their literal `@path`. Skill discovery reads at most 64 KiB of each
 `SKILL.md` for its frontmatter; a skill whose frontmatter does not close
