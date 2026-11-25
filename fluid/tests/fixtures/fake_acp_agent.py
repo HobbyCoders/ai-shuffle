@@ -39,11 +39,17 @@ FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
 ``config_option_update`` before answering it).
 
 Failure knobs: FAKE_ACP_RESUME_ERROR (JSON ``{"code", "message"}`` that
-``session/resume`` fails with), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
-a turn runs is refused as busy), FAKE_ACP_SILENT_INIT=1 (``initialize`` is
+``session/resume`` fails with), FAKE_ACP_RESUME_EXIT=1 (the agent exits on
+``session/resume``), FAKE_ACP_REJECT_STEER=1 (a prompt sent while
+a turn runs is refused as busy), FAKE_ACP_HOLD_STEER=1 (such a prompt is
+taken into the turn but never answered), FAKE_ACP_SILENT_MODES (mode ids
+``session/set_mode`` never answers), FAKE_ACP_SILENT_CLOSE=1
+(``session/close`` is never answered), FAKE_ACP_SILENT_INIT=1 (``initialize`` is
 never answered), FAKE_ACP_CHILD_PIDFILE (start a long-sleeping child in the
 agent's process group and write its pid there), FAKE_ACP_IGNORE_EOF=1 (keep
-running after stdin closes, and ignore SIGTERM). Commands ``huge`` (the
+running after stdin closes, and ignore SIGTERM). Command ``failsteer``
+streams, waits for a steering prompt, then fails the turn's prompt with an
+RPC error. Commands ``huge`` (the
 prompt's reply is one line of FAKE_ACP_HUGE_BYTES, default 200000) and
 ``deaf`` (the agent stops reading its input for 30 s).
 
@@ -217,6 +223,8 @@ class Agent:
         if method == "session/resume":
             self.need_auth()
             sid = params.get("sessionId")
+            if os.environ.get("FAKE_ACP_RESUME_EXIT") == "1":
+                os._exit(3)
             if os.environ.get("FAKE_ACP_RESUME_ERROR"):
                 error = json.loads(os.environ["FAKE_ACP_RESUME_ERROR"])
                 raise RpcError(int(error["code"]), str(error["message"]))
@@ -240,11 +248,15 @@ class Agent:
                                                             "configOptions": config_options(config)})
             return {"configOptions": config_options(config)}
         if method == "session/set_mode":
+            if params.get("modeId") in (os.environ.get("FAKE_ACP_SILENT_MODES") or "").split(","):
+                await asyncio.Event().wait()
             rejected = (os.environ.get("FAKE_ACP_REJECT_MODES") or "").split(",")
             if params.get("modeId") in rejected or params.get("modeId") not in mode_ids():
                 raise RpcError(-32602, f"mode {params.get('modeId')} is not available")
             return {}
         if method == "session/close":
+            if os.environ.get("FAKE_ACP_SILENT_CLOSE") == "1":
+                await asyncio.Event().wait()
             self.sessions.pop(params.get("sessionId"), None)
             return {}
         if method == "session/list":
@@ -268,6 +280,8 @@ class Agent:
             if os.environ.get("FAKE_ACP_REJECT_STEER") == "1":
                 raise RpcError(-32603, "the agent is busy")
             self.turn["steers"].put_nowait(text)
+            if os.environ.get("FAKE_ACP_HOLD_STEER") == "1":
+                await asyncio.Event().wait()
             return {"stopReason": "end_turn"}
         self.turn = {"cancel": asyncio.Event(), "steers": asyncio.Queue()}
         try:
@@ -378,6 +392,11 @@ class Agent:
             if steer in done:
                 await self.say(sid, " steered:" + steer.result())
             return {"stopReason": "end_turn"}
+        if word == "failsteer":
+            await self.say(sid, "working")
+            assert self.turn is not None
+            await asyncio.wait_for(self.turn["steers"].get(), timeout=10)
+            raise RpcError(-32603, "the turn failed")
         if word == "ask":
             reply = await self.call("elicitation/create", {"sessionId": sid, "mode": "form",
                                     "message": "Which colour?", "requestedSchema": {
