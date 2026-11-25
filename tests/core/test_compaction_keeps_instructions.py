@@ -87,8 +87,11 @@ async def _history(adapter: ha.HarnessAdapter, reads: int = 3) -> None:
         await _turn(adapter, "[script:bulk-read] read the big file")
 
 
-def _seen(tmp_path: Path) -> str:
-    return fake_claude.context_path(tmp_path / "instance").read_text(encoding="utf-8")
+def _seen(tmp_path: Path, session: str | None = None) -> str:
+    """What CLI session ``session``'s newest model call could read (default:
+    the session of the instance's newest model call)."""
+    session = session or _calls(tmp_path)[-1]["session_id"]
+    return fake_claude.context_path(tmp_path / "instance", session).read_text(encoding="utf-8")
 
 
 def _calls(tmp_path: Path) -> list[dict]:
@@ -120,6 +123,27 @@ async def test_a_message_delivered_just_before_a_compaction_is_still_in_context(
         assert MESSAGE in _seen(tmp_path), "the delivered message is gone after the compaction"
     finally:
         await adapter.disconnect()
+
+
+async def test_another_cli_run_on_the_instance_keeps_the_chats_context(monkeypatch, tmp_path):
+    """The app runs other ``claude`` processes beside a chat's (the memory
+    learner's, after a turn). Their model calls come later and must not replace
+    what the chat's session could read (#1959, #1968)."""
+    chat = await _adapter(monkeypatch, tmp_path)
+    try:
+        await _history(chat, reads=1)
+        await _turn(chat, "[script:message-then-compact] carry on", peer=MESSAGE)
+        session = _calls(tmp_path)[-1]["session_id"]
+    finally:
+        await chat.disconnect()
+    other = await _adapter(monkeypatch, tmp_path)
+    try:
+        await _turn(other, "summarize what you learned")
+    finally:
+        await other.disconnect()
+    assert _calls(tmp_path)[-1]["session_id"] != session, "the second run reused the chat's session"
+    assert MESSAGE not in _seen(tmp_path)
+    assert MESSAGE in _seen(tmp_path, session)
 
 
 async def test_a_message_delivered_turns_ago_survives_folding(monkeypatch, tmp_path):

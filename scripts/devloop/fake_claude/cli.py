@@ -106,7 +106,10 @@ READ_ONLY = {"Read", "Glob", "Grep", "TodoWrite", "ToolSearch", "BashOutput"}
 PERSIST_OVER = 50_000
 PREVIEW_CHARS = 2_000
 HOOK_CONTEXT_INLINE_CHARS = 10_000  # Claude Code 2.1.316: longer hook context goes to a file
-CONTEXT_FILE = "fake-claude-context.txt"  # what the newest model call could read
+# What each CLI session's newest model call could read: <dir>/<session id>.txt.
+# Per session, because the app runs other ``claude`` processes on the same
+# instance (the memory learner, titles) whose model calls come later.
+CONTEXT_DIR = "fake-claude-context"
 HOOK_TIMEOUT = 120.0
 MCP_START_TIMEOUT = 20.0
 MCP_CALL_TIMEOUT = 300.0
@@ -132,6 +135,11 @@ def _now() -> str:
 
 def _new_uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _unsafe_sid(sid: str) -> bool:
+    """A session id (``--resume``'s, so the caller's) that is no file name."""
+    return not sid or any(c in sid for c in "/\\:") or ".." in sid
 
 
 def log(kind: str, **fields: Any) -> None:
@@ -416,7 +424,7 @@ class DevClaude(script.Fake):
         return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
     def _transcript_path(self) -> Path | None:
-        if any(c in self.sid for c in "/\\:") or ".." in self.sid:
+        if _unsafe_sid(self.sid):
             return None
         directory = (self._config_dir() / "projects"
                      / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
@@ -539,11 +547,13 @@ class DevClaude(script.Fake):
 
     def report_model_call(self) -> None:
         text = self.visible_context()
-        log("model_call", call=self.model_calls, context_chars=len(text),
+        log("model_call", session_id=self.sid, call=self.model_calls, context_chars=len(text),
             context_tokens=self.context_tokens())
         path = os.environ.get("FAKE_CLAUDE_LOG")
-        if path:
-            Path(path).with_name(CONTEXT_FILE).write_text(text, encoding="utf-8")
+        if path and not _unsafe_sid(self.sid):
+            directory = Path(path).with_name(CONTEXT_DIR)
+            directory.mkdir(mode=0o700, exist_ok=True)
+            (directory / f"{self.sid}.txt").write_text(text, encoding="utf-8")
 
     def hook_context(self, event: str, answers: list[dict]) -> list[dict]:
         """What a hook answer's ``additionalContext`` becomes: an attachment,

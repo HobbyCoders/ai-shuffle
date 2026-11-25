@@ -602,8 +602,9 @@ call, `"compact": true` (with `"summarizer": true` for no answer from the mod, a
 without `result` really runs on the bridge. Every run is logged with its argv,
 the names of its environment variables (never their values), hooks, tools,
 compactions and each model call's context size in `fake-claude.jsonl` in the
-scratch directory; `fake-claude-context.txt` beside it holds what the newest model
-call could read. Hook context is an attachment on the row before it, kept through
+scratch directory; `fake-claude-context/<session id>.txt` beside it holds what each
+CLI session's newest model call could read (per session: the app's other `claude`
+runs, such as the memory learner's, use the same fake). Hook context is an attachment on the row before it, kept through
 a compaction only with that row, and over 10,000 characters a 2 KB preview, as in
 Claude Code 2.1.316. What it cannot
 model: a real model's choices; built-in tools (Bash, Read and the rest) do not

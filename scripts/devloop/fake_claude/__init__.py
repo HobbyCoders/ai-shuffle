@@ -85,9 +85,10 @@ def log_path(directory: Path) -> Path:
     return Path(directory) / "fake-claude.jsonl"
 
 
-def context_path(directory: Path) -> Path:
-    """The conversation as the fake's newest model call could read it."""
-    return Path(directory) / "fake-claude-context.txt"
+def context_path(directory: Path, session_id: str) -> Path:
+    """The conversation as CLI session ``session_id``'s newest model call could
+    read it. Per session: the app's other ``claude`` runs share the fake."""
+    return Path(directory) / "fake-claude-context" / f"{session_id}.txt"
 
 
 def is_fake(path: str | os.PathLike) -> bool:
