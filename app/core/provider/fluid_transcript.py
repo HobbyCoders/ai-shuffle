@@ -1756,8 +1756,16 @@ def _checkpoint_entry(
     role = row["role"]
     blocks: List[Dict[str, Any]] = []
     text = row.get("text")
-    if isinstance(text, str) and text:
-        blocks.append({"type": "text", "text": text})
+    text_block = (
+        {"type": "text", "text": text} if isinstance(text, str) and text else None
+    )
+    # An assistant row says its text, then calls tools. A user row answers
+    # those calls first: the API refuses a text block ahead of the
+    # tool_result blocks for the calls before it (Claude Code's 400 "due to
+    # tool use concurrency issues"), and Claude Code itself appends text such
+    # as ToolSearch's "Tool loaded." after the result.
+    if text_block is not None and role == "assistant":
+        blocks.append(text_block)
     if role == "assistant":
         for use in row.get("toolUses") or []:
             if isinstance(use, dict) and use.get("tool_use_id"):
@@ -1773,6 +1781,8 @@ def _checkpoint_entry(
                     "content": str(result.get("text") or ""),
                     "is_error": bool(result.get("isError")),
                 })
+        if text_block is not None:
+            blocks.append(text_block)
     if not blocks:
         return None
     return {
