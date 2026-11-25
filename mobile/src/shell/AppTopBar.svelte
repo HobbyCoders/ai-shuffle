@@ -41,6 +41,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { unreadCount } from '$lib/stores/notifications';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
+	import { broadcastDialog } from '$lib/stores/broadcast-dialog.svelte';
 	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
 	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
 	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
@@ -134,6 +135,11 @@
 	let mounted = $state(false);
 	let hamburgerRef = $state<HTMLButtonElement | null>(null);
 	let drawerRef = $state<HTMLElement | null>(null);
+	// "Message all active chats" lives in the drawer's sidebar: mount it (still
+	// closed) when the command palette asks for the dialog before first use.
+	$effect(() => {
+		if (broadcastDialog.open) mounted = true;
+	});
 
 	// Opening moves focus into the drawer (it covers the whole screen), and a
 	// dismissal hands it back to the ☰ instead of dropping it on <body>.
