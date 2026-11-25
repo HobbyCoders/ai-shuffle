@@ -1684,8 +1684,14 @@ def _listed_ids(client) -> set:
 def test_paired_workers_adding_ssh_and_https_spellings_get_one_project(client, ws, test_db, network,
                                                                          monkeypatch):
     from app.core import project_remote
+    from app.core.git_service import git_service
 
     ssh = _https(monkeypatch, _bare_remote(ws), url=_SSH)
+    # ``_https`` reaches the local stand-in through an ``insteadOf`` rewrite, which
+    # ``git remote get-url`` applies. Read origin as stored, as a worker without that
+    # test-only rewrite sees it, so the checkout keeps the SSH spelling it was cloned with.
+    monkeypatch.setattr(git_service, "get_remote_url", lambda wd: (git_service._run_git(
+        wd, ["config", "--get", "remote.origin.url"], timeout=5).stdout.strip() or None))
     resp = _clone_new(client, ssh)
     assert resp.status_code == 202, resp.text
     assert network.calls == []  # the clone never asked the paired worker anything

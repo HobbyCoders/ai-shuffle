@@ -90,6 +90,6 @@ test('reads the launcher contract and the running launcher defensively', async (
     assert.equal(await runningLauncher(undefined, dir, build, 'linux'), 9);
     assert.equal(await runningLauncher(undefined, dir, path.join(dir, 'missing.json'), 'linux'), 0);
   } finally {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
