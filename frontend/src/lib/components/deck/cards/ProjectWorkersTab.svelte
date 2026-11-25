@@ -115,8 +115,13 @@
 	 * This worker's removal confirmation is open. Held here, above the
 	 * aside/phone-sheet switch, so resizing across the breakpoint keeps it open
 	 * (the removal row remounts); cleared with every other removal state.
+	 * Its running request and failure are held here too: a remount mid-DELETE
+	 * keeps Remove disabled, and the failure lands in the row on screen. The
+	 * request alone clears `localRemoving`, so nothing can send a second one.
 	 */
 	let localConfirming = $state(false);
+	let localRemoving = $state(false);
+	let localRemovalError = $state<string | null>(null);
 	/** Folder field per worker (seeded from the suggestion, then the owner's edits). */
 	let folders = $state<Record<string, string>>({});
 	/** Workers whose inspector is in "use a folder already there" mode. */
@@ -351,6 +356,7 @@
 		confirmingRemove = null;
 		removalCheck = null;
 		localConfirming = false;
+		localRemovalError = null;
 	}
 
 	async function remove(w: ProjectWorkerDetail) {
@@ -612,7 +618,7 @@
 		{#if has && $isAdmin && editing?.installId !== w.install_id && (w.is_self ? !!localProjectId : w.online)}
 			<RowGroup title="Remove">
 				{#if w.is_self && localProjectId}
-					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onAsked={() => (askLocal = 0)} bind:confirming={localConfirming} onRemoved={localRemoved} />
+					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onAsked={() => (askLocal = 0)} bind:confirming={localConfirming} bind:removing={localRemoving} bind:error={localRemovalError} onRemoved={localRemoved} />
 				{:else}
 					<SettingRow label="Remove project" wrapHint
 						hint={confirmingRemove !== w.install_id ? `Removes ${projectName} and its chats from ${w.device_name}. Files stay on disk.`

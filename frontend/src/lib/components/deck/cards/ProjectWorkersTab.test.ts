@@ -26,6 +26,7 @@ vi.mock('$lib/api/project-workers', async (importOriginal) => ({
 import ProjectWorkersTab from './ProjectWorkersTab.svelte';
 import { cancelProjectSetup, changeWorkerFolder, getProjectRemovalPreview, getProjectWorkers, startProjectSetup } from '$lib/api/project-workers';
 import { watchResources } from '$lib/services/watch-resources';
+import { appData } from '$lib/stores/app-data.svelte';
 
 const worker = (install_id: string, device_name: string, state: string, extra: Record<string, unknown> = {}) => ({
 	install_id, device_name, is_self: install_id === 'self', online: true, approved: true, state, setup: null,
@@ -329,7 +330,7 @@ describe('Project settings asks for this worker’s removal', () => {
 describe('This worker’s open removal confirmation across a layout switch', () => {
 	const self = () => response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]);
 	// clearAllMocks keeps queued once-answers; a failed test must not hand them to the next.
-	beforeEach(() => vi.mocked(getProjectRemovalPreview).mockReset());
+	beforeEach(() => { vi.mocked(getProjectRemovalPreview).mockReset(); vi.mocked(appData.deleteProject).mockReset(); });
 
 	it('stays open when the inspector moves into the phone sheet and back, re-counting each time behind a disabled Remove', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(self());
@@ -379,6 +380,37 @@ describe('This worker’s open removal confirmation across a layout switch', () 
 		expect(within(sheet).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
 		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
 		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+	});
+
+	it('keeps a running removal running across a layout switch: no second request, and its failure shows in the new row', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(self());
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		let fail: (e: unknown) => void = () => {};
+		vi.mocked(appData.deleteProject).mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Here');
+		const inspector = screen.getByRole('complementary', { name: 'Here details' });
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove' }));
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
+
+		// Desktop → phone while the DELETE runs: the sheet still shows it running.
+		await rerender({ stacked: true });
+		const sheet = await screen.findByRole('dialog', { name: 'Here' });
+		const running = await within(sheet).findByRole('button', { name: 'Removing…' });
+		expect((running as HTMLButtonElement).disabled).toBe(true);
+		expect((within(sheet).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
+		await fireEvent.click(running);
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
+
+		// The first request fails: the row the owner is looking at says so.
+		fail({ detail: 'The project is busy.' });
+		expect((await within(sheet).findByRole('alert')).textContent).toBe('The project is busy.');
+		expect((within(sheet).getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false);
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
 	});
 
 	it('forgets the open confirmation when the inspector closes', async () => {
