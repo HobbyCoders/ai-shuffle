@@ -360,11 +360,16 @@ class McpClient:
         return _map_call_result(result)
 
     def _timed_out(self, tool: str) -> dict[str, Any]:
+        # This client deadline (60 s by default) fires before the registry's,
+        # so it carries the same warning: the server got the request and may
+        # still act on it.
         return {
             "kind": "result",
             "text": (
                 f"MCP server {self.name!r} did not respond to {tool} within "
-                f"{self.call_timeout:g} s"
+                f"{self.call_timeout:g} s; whether it took effect is unknown. "
+                "The tool may have completed; retrying may repeat it. Check "
+                "its effect before any retry."
             ),
             "images": [],
             "is_error": True,

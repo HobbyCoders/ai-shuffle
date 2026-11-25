@@ -182,6 +182,8 @@ async def test_sdk_read_timeout_is_reported_as_a_tool_timeout_result() -> None:
     out = await client._do_call(_FakeSession(_SdkTimeout(408)), "slow", {})
     assert out["is_error"] and out["error_code"] == "tool_timeout"
     assert "did not respond to slow within 7 s" in out["text"]
+    # Fires before the registry's deadline, so it carries the same warning.
+    assert "may have completed; retrying may repeat it" in out["text"]
 
 
 async def test_other_session_errors_propagate_rather_than_masquerading_as_timeouts() -> None:
