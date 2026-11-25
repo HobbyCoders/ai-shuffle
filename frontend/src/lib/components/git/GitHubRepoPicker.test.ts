@@ -62,6 +62,19 @@ describe('GitHubRepoPicker', () => {
 		expect(list).toHaveBeenCalledWith({ q: '', page: 1, perPage: 30, refresh: false }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
 	});
 
+	it('marks a repo that is already a project and does not hand it over', async () => {
+		list.mockResolvedValue(pageOf([repo('acme/app'), repo('acme/api')]));
+		mount({ isAdded: (r: GitHubRepo) => r.full_name === 'acme/app' });
+		const added = (await screen.findByRole('button', { name: /^acme\/app, public, already added/ })) as HTMLButtonElement;
+		expect(added.textContent).toContain('Already added');
+		expect(added.disabled).toBe(true);
+		await fireEvent.click(added);
+		expect(onSelect).not.toHaveBeenCalled();
+		const free = repoButton(/^acme\/api,/) as HTMLButtonElement;
+		expect(free.textContent).not.toContain('Already added');
+		expect(free.disabled).toBe(false);
+	});
+
 	it('picking a repo hands it to the dialog and marks the selected one', async () => {
 		list.mockResolvedValue(pageOf([repo('acme/app'), repo('acme/api')]));
 		const view = mount();

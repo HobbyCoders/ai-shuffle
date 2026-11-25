@@ -7,6 +7,8 @@
  *   GET    /projects/overview                    every logical project, with every approved worker's state
  *   GET    /projects/workers?<ref>               one project's per-worker detail (Workers tab)
  *   POST   /projects/setup                       start a setup (202)
+ *   POST   /projects/clone                       create a project by cloning it here (202)
+ *   GET    /projects/setup/{op_id}               one setup on this worker (status, progress, project id)
  *   POST   /projects/setup/{op_id}/cancel        best-effort cancel (409 once finished)
  *   DELETE /projects/workers/{install_id}?<ref>  remove one worker's project record (files untouched)
  *   PUT    /projects/catalog/repository?<ref>    point the project at another repository on every worker
@@ -133,6 +135,26 @@ export function refQuery(ref: ProjectRef): string {
 		: `project_id=${encodeURIComponent(ref.project_id)}`;
 }
 
+/**
+ * A comparison key for a Git remote in any spelling (HTTPS, SSH `git@host:o/r`,
+ * with or without `.git`, credentials or a trailing slash): `host/owner/repo`
+ * lower-cased. Mirrors the server's `display_remote`, so it also matches an
+ * overview row's `remote`. Empty for a blank URL.
+ */
+export function remoteKey(url: string | null | undefined): string {
+	let text = (url ?? '').trim();
+	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(.*)$/.exec(text);
+	if (scheme) {
+		text = scheme[1].replace(/^[^@/]*@/, '');
+	} else {
+		const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.*)$/.exec(text);
+		if (scp && scp[1].length > 1) text = `${scp[1]}/${scp[2]}`;
+	}
+	text = text.replace(/\/+$/, '');
+	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
+	return text.toLowerCase();
+}
+
 /** True for an answer that means "this worker has no such route" (an older worker). */
 export function isUnsupported(error: unknown): boolean {
 	const status = (error as { status?: number } | null)?.status;
@@ -172,6 +194,42 @@ export function changeWorkerFolder(installId: string, ref: ProjectRef, folder: s
 
 export function startProjectSetup(ref: ProjectRef, request: SetupRequest): Promise<SetupResponse> {
 	return api.post<SetupResponse>('/projects/setup', { ...ref, mode: 'auto', ...request });
+}
+
+export interface CloneNewProjectRequest {
+	id: string;
+	name: string;
+	clone_url: string;
+	/** A folder name or path on this worker; omitted = `<workspace>/<id>`. */
+	folder?: string;
+}
+
+export interface CloneNewProjectResponse {
+	op_id: string;
+	project_v2_id: string;
+	/** The id the project gets once the clone succeeded. */
+	project_id: string;
+	status: string;
+}
+
+/** One setup on this worker; `project_id` is set once it is done. */
+export interface SetupStatus extends ProjectSetupInfo {
+	project_v2_id: string | null;
+	project_id: string | null;
+}
+
+/**
+ * Create a project by cloning a repository on this worker. The clone runs in
+ * the background (poll `getSetupStatus`); the project is registered only once
+ * it succeeded. 409 with `error_code: 'already_added'` (and `project_id`)
+ * when the repository is already a project here.
+ */
+export function cloneNewProject(request: CloneNewProjectRequest): Promise<CloneNewProjectResponse> {
+	return api.post<CloneNewProjectResponse>('/projects/clone', request);
+}
+
+export function getSetupStatus(opId: string): Promise<SetupStatus> {
+	return api.get<SetupStatus>(`/projects/setup/${encodeURIComponent(opId)}`);
 }
 
 export function cancelProjectSetup(opId: string): Promise<{ status: string }> {

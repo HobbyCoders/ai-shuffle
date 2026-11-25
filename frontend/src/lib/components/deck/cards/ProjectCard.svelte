@@ -221,6 +221,15 @@
 		confirmingRemove = false;
 	}
 
+	/** A project just created from this panel: open its detail (the row arrives with the refresh). */
+	function handleCreated(localId: string) {
+		void loadProjectsOverview();
+		selectedKey = localId;
+		activeTab = 'general';
+		focusInstallId = null;
+		confirmingRemove = false;
+	}
+
 	function handleBack() {
 		selectedKey = null;
 		focusInstallId = null;
@@ -372,7 +381,7 @@
 		{/if}
 	{/snippet}
 </ViewShell>
-<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={() => void loadProjectsOverview()} />
+<AddProjectModal open={showAddModal} onClose={() => (showAddModal = false)} onCreated={handleCreated} />
 
 <style>
 	/* The filter's space, held while the overview may still show it (filterGeometry). */
