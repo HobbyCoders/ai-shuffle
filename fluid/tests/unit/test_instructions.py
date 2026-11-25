@@ -4,6 +4,7 @@ Discovery walks up to the git root, so tests add a ``.git`` marker at the
 project root. Global tests isolate HOME from the developer's real settings.
 """
 
+import re
 from pathlib import Path
 
 from fluid.context.instructions import (
@@ -392,7 +393,10 @@ def test_repeated_imports_share_one_byte_budget(tmp_path) -> None:
     (tmp_path / "big.md").write_text("x" * 50_000, encoding="utf-8")
     src = tmp_path / "AGENTS.md"
     out = expand_imports("@big.md\n" * 200, src, max_bytes=120_000)
-    assert out.count("x") == 120_000
+    # Count the inlined bodies only: the truncation note names the temp path,
+    # which can itself contain an "x".
+    body = re.sub(r"\[\.\.\.[^\]]* is larger than [^\]]*\]", "", out)
+    assert body.count("x") == 120_000
     assert "is larger than" in out  # the import the budget cut says so
     assert out.count("@big.md") >= 197  # past the budget, tokens stay literal
 

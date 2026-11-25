@@ -96,6 +96,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fluid._filelock import file_lock
+from fluid.context.screening import redact_secrets
 
 _log = logging.getLogger(__name__)
 
@@ -1178,8 +1179,12 @@ class SkillStore:
         :class:`OSError` instead, so a Remember-style caller can report the
         loss rather than a receipt. Near the byte cap a reap is attempted
         first, so a full journal with a consumed prefix frees itself.
+
+        Credentials are redacted before the line is written: the journal is
+        learner evidence, sent to a model. Writers that clip a value redact
+        it before the clip too, so a cut cannot leave a partial credential.
         """
-        entry = dict(entry)
+        entry = redact_secrets(dict(entry))
         entry.setdefault("ts", time.time())
         for key, value in self._journal_tag.items():
             entry.setdefault(key, value)

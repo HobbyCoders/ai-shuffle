@@ -23,11 +23,12 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any, TypeVar
 
 import httpx
 
+from fluid.context.screening import credential_values, redact_secrets, redact_text
 from fluid.providers._retry import (
     BILLING_STATUS,
     RETRIABLE_STATUSES,
@@ -262,8 +263,13 @@ def usage_limit_summary(detail: str | None) -> str | None:
 
 def refusal_payload(
     status: int, text: str, retry_after: str | None = None,
+    *, secrets: Iterable[str] = (),
 ) -> dict[str, Any]:
     """The ``error`` chunk payload for a non-200 response.
+
+    ``text`` is redacted first (``secrets`` are the request's own credential
+    values; see fluid.context.screening.redact_text), before any clip could
+    cut a credential in half and leave a prefix no later pass recognises.
 
     Whether it is retried follows the status, except for a billing refusal:
     an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
@@ -273,6 +279,7 @@ def refusal_payload(
     is the response's Retry-After header) keeps its 429 but is never retried
     either: the turn stops on it and the user sees the limit.
     """
+    text = redact_text(text, secrets)
     summary = provider_error_summary(text)
     code = billing_error_code(text)
     if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
@@ -349,6 +356,46 @@ def is_usable_client(client: Any) -> bool:
     """True when an httpx client can still send. Unknown objects count as usable
     (test doubles and wrappers need not implement ``is_closed``)."""
     return client is not None and not getattr(client, "is_closed", False)
+
+
+# Request headers whose values are credentials.
+_CREDENTIAL_HEADER_RE = re.compile(r"auth|key|token|secret|cookie", re.IGNORECASE)
+
+
+def header_secrets(headers: Mapping[str, Any], placeholder: str | None = None) -> list[str]:
+    """The credential values a request carries in ``headers``: each whole
+    value and, for ``Bearer <token>``-style values, the bare token.
+    ``placeholder`` is a key the client chose itself because none was
+    configured (the local provider's ``local``): a header carrying exactly
+    that is no credential and is left out. A configured key is kept
+    whatever its spelling."""
+    out: list[str] = []
+    for name, value in headers.items():
+        if not isinstance(value, str) or not _CREDENTIAL_HEADER_RE.search(str(name)):
+            continue
+        _scheme, _, token = value.partition(" ")
+        token = token.strip()
+        if placeholder and placeholder in (value, token):
+            continue
+        out.extend(credential_values([value, token]))
+    return out
+
+
+async def redact_errors(chunks: AsyncIterator[Any], secrets: list[str]) -> AsyncIterator[Any]:
+    """``chunks`` with every ``error`` chunk's payload redacted.
+
+    An upstream error body, or an exception's text, can echo the request's
+    own credential (a proxy that quotes the Authorization header back). The
+    error becomes an event, a transcript row and CLI output, so the exact
+    values in ``secrets`` and the recognised credential shapes are removed
+    first. ``secrets`` is read at each error, so a caller may add a token it
+    fetched mid-call. The source is closed with this generator.
+    """
+    async with contextlib.aclosing(chunks) as source:
+        async for chunk in source:
+            if chunk.kind == "error":
+                chunk = type(chunk)("error", redact_secrets(chunk.payload, secrets))
+            yield chunk
 
 
 async def with_deadline(

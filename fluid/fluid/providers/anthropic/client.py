@@ -43,6 +43,7 @@ from fluid.providers._transport import (
     is_closed_client_error,
     is_usable_client,
     open_stream,
+    redact_errors,
     refusal_payload,
     truncated_stream_payload,
     with_deadline,
@@ -55,17 +56,6 @@ API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
 
 log = logging.getLogger(__name__)
-
-
-def _redact_key(value, key):
-    """Upstream auth errors sometimes echo the rejected key."""
-    if isinstance(value, str):
-        return value.replace(key, "[redacted]") if key else value
-    if isinstance(value, dict):
-        return {k: _redact_key(v, key) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_key(v, key) for v in value]
-    return value
 
 
 _PROMPT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
@@ -208,7 +198,12 @@ class AnthropicClient:
         assert owned is not None
         return owned, owned
 
-    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+    def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        # Upstream errors, and proxies in front of a compatible endpoint, can
+        # echo the key back; no error chunk carries it.
+        return redact_errors(self._stream(request), [self._api_key])
+
+    async def _stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         headers = {
             "x-api-key": self._api_key,
             "anthropic-version": API_VERSION,
@@ -251,10 +246,9 @@ class AnthropicClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
-                            if self._compatible_provider and self._api_key:
-                                text = text.replace(self._api_key, "[redacted]")
                             refusal = refusal_payload(
-                                resp.status_code, text, resp.headers.get("retry-after"))
+                                resp.status_code, text, resp.headers.get("retry-after"),
+                                secrets=[self._api_key])
                             if refusal["retriable"] and attempt < self._retry.max_retries:
                                 await asyncio.sleep(self._retry.delay(
                                     attempt, resp.headers.get("retry-after")))
@@ -286,8 +280,6 @@ class AnthropicClient:
                         )
                         async for event_name, data in events:
                             chunk = sse_to_chunk(event_name, data)
-                            if chunk is not None and chunk.kind == "error" and self._compatible_provider:
-                                chunk = StreamChunk("error", _redact_key(chunk.payload, self._api_key))
                             if chunk is None:
                                 continue
                             if chunk.kind == "usage" and self._compatible_provider:
