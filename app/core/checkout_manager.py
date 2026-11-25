@@ -575,8 +575,8 @@ def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = No
     ``origin`` (the replicated ``projects_v2`` row's stored remote first, which
     survives the last local record of the project going away, then legacy
     records, as the seed picked before), the origin's own spelling before the
-    other one (git@ vs https), then the other spelling of each on a public
-    forge. A URL names ``origin`` when ``origin`` is
+    other one (git@ vs https); after the first, only that same URL over the
+    other transport (known, or derived on a public forge). A URL names ``origin`` when ``origin`` is
     one of its ``remote_link_ids``: the same deterministic, install-independent
     hash the v60 collapse used to assign origins, so a match is a true
     identity, not a heuristic, and a fork linked into the group is never cloned

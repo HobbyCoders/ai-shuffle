@@ -366,6 +366,25 @@ def test_only_a_joined_remote_has_another_spelling(url, other):
     assert project_links.joined_counterpart(url) == other
 
 
+@pytest.mark.parametrize("first, url, same", [
+    ("git@github.com:example-org/demo", "https://github.com/example-org/demo", True),
+    ("https://github.com/example-org/demo.git", "git@github.com:example-org/demo", True),
+    ("https://GitHub.com/example-org/demo/", "git@github.com:example-org/demo.git", True),  # host: any case
+    ("https://tok@git.example.com/team/demo.git", "git@git.example.com:team/demo.git", True),
+    ("https://git.example.com/team/demo.git", "git@git.example.com:team/Demo.git", False),  # path: exactly
+    ("https://git.example.com/team/demo.git", "https://git.example.com/team/Demo.git", False),  # same transport
+    ("https://git.example.com/team/demo.git", "https://git.example.com/team/demo", False),
+    ("https://git.example.com/team/demo.git", "git@other.example.com:team/demo.git", False),
+    ("https://git.example.com/team/demo.git", "deploy@git.example.com:team/demo.git", False),
+    ("https://git.example.com:8443/team/demo.git", "git@git.example.com:team/demo.git", False),
+    ("https://git.example.com/team/demo.git", "ssh://git@git.example.com/team/demo.git", False),
+    (None, "git@git.example.com:team/demo.git", False),
+])
+def test_only_the_same_url_over_the_other_transport_is_tried_next(first, url, same):
+    assert project_links.other_transport_of(first, url) is same
+    assert project_links.other_transport_of(url, first) is same
+
+
 @pytest.mark.parametrize("url, safe", [
     ("https://user:pa'ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
     ("https://user:pa[ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),

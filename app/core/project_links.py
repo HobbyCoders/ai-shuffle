@@ -162,6 +162,33 @@ def joined_counterpart(url: Optional[str]) -> Optional[str]:
     return other if same_remote(other, text) else None
 
 
+def _transport_parts(url: Optional[str]) -> Optional[Tuple[str, str, str]]:
+    """``(transport, host, path)`` of a ``git@host:path`` or ``https://host/path``
+    remote (no credentials, no port), the path without one trailing ``/`` and
+    one ``.git``; else ``None``."""
+    text = strip_remote_userinfo(url) or ""
+    forge = _FORGE_SCP_RE.match(text)
+    https = None if forge else _FORGE_HTTPS_RE.match(text)
+    match = forge or https
+    if not match:
+        return None
+    path = match.group(2)
+    path = path[:-1] if path.endswith("/") else path
+    path = path[:-4] if path.endswith(".git") else path
+    return ("ssh" if forge else "https"), match.group(1).lower(), path
+
+
+def other_transport_of(first: Optional[str], url: Optional[str]) -> bool:
+    """Whether ``url`` is ``first`` over the other transport: one is
+    ``git@host:path`` and the other ``https://host/path``, the same host (any
+    case) and EXACTLY the same path (case kept; one trailing ``/`` and one
+    ``.git`` aside). Only such a URL may be tried when ``first`` is refused:
+    two URLs that merely share a project id (``team/demo`` and ``team/Demo``
+    on a case-sensitive server) may be two repositories."""
+    a, b = _transport_parts(first), _transport_parts(url)
+    return bool(a and b and a[0] != b[0] and a[1:] == b[1:])
+
+
 def _link_id(normalized: str) -> Optional[str]:
     if not normalized:
         return None

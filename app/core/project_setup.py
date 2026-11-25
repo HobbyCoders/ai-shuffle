@@ -250,24 +250,22 @@ def clone_candidates(origin: str, records: List[Dict[str, Any]],
     """The URLs to clone a ``git:`` ``origin`` from, in the order to try them.
 
     Each is ``{url, default_branch}``. A project the owner pointed at a
-    repository clones exactly that one (``[pin]``). Otherwise, with no exact
-    repeats:
+    repository clones exactly that one (``[pin]``). Otherwise the first is
+    what an install without alternates picks: among the known URLs naming the
+    origin, those in its own spelling (``legacy_link_group_id`` is the origin)
+    before those naming it through the other one (git@ vs https), each in the
+    order it picks from: the records in database order then the catalog row's
+    stored remote for Workers setup, the stored remote first for this
+    worker's own seed (``stored_first``). The first URL and its branch are
+    exactly what it picked.
 
-    1. the known URLs in the origin's own spelling (``legacy_link_group_id``
-       is the origin), in the order an install without alternates picks from:
-       the records in database order then the catalog row's stored remote for
-       Workers setup, the stored remote first for this worker's own seed
-       (``stored_first``). So the first URL and its branch are exactly what it
-       picked, and a same-id URL that differs (``Demo.git`` / ``demo.git``)
-       is kept after it, never folded in;
-    2. those that name the origin only through the other spelling (git@ vs
-       https), in the same order;
-    3. the other spelling (:func:`joined_counterpart`, public forges only) of
-       each of those, so a worker that can sign in over only one of them
-       still clones it.
-
-    A URL that does not name the origin (a fork linked into the group) is
-    never one, and which worker asks plays no part.
+    After it come only that URL over the other transport
+    (:func:`other_transport_of`): the known ones, then its derived other
+    spelling (:func:`joined_counterpart`, public forges only), with no exact
+    repeats. A worker that can sign in over only one transport still clones
+    it. Nothing else that shares the id is ever tried (``team/Demo`` and
+    ``team/demo`` may be two repositories), nor a fork linked into the group;
+    which worker asks plays no part.
 
     The first keeps the form a clone took before alternates existed (as
     stored for the seed, ``strip_url_userinfo`` when sent with
@@ -277,7 +275,7 @@ def clone_candidates(origin: str, records: List[Dict[str, Any]],
     their single URL (:func:`_repo_info_by_origin`).
     """
     from app.core.project_links import (
-        joined_counterpart, legacy_link_group_id, remote_link_ids, strip_remote_userinfo,
+        joined_counterpart, legacy_link_group_id, other_transport_of, remote_link_ids, strip_remote_userinfo,
     )
     from app.core.scrub import strip_url_userinfo
 
@@ -291,25 +289,24 @@ def clone_candidates(origin: str, records: List[Dict[str, Any]],
     naming = [entry for entry in known if origin in remote_link_ids(entry["url"])]
     ordered = ([entry for entry in naming if legacy_link_group_id(entry["url"]) == origin]
                + [entry for entry in naming if legacy_link_group_id(entry["url"]) != origin])
-    derived = []
+    first = None
     for entry in ordered:
-        other = joined_counterpart(strip_remote_userinfo(entry["url"]))
-        if other:
-            derived.append({"url": other, "default_branch": entry.get("default_branch")})
-    out: List[Dict[str, Any]] = []
-    seen = set()
-    for entry in ordered + derived:
-        if out:
-            url = strip_remote_userinfo(entry["url"])
-        else:
-            url = strip_url_userinfo(entry["url"]) if clean_first else entry["url"]
-        if not url:
+        url = strip_url_userinfo(entry["url"]) if clean_first else entry["url"]
+        if url:
+            first = {"url": url, "default_branch": entry.get("default_branch")}
+            break
+    if first is None:
+        return []
+    out = [first]
+    seen = {strip_remote_userinfo(first["url"]) or first["url"]}
+    derived = joined_counterpart(strip_remote_userinfo(first["url"]))
+    others = [entry["url"] for entry in ordered] + ([derived] if derived else [])
+    for raw in others:
+        url = strip_remote_userinfo(raw)
+        if not url or url in seen or not other_transport_of(first["url"], url):
             continue
-        key = strip_remote_userinfo(url) or url
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({"url": url, "default_branch": entry.get("default_branch")})
+        seen.add(url)
+        out.append({"url": url, "default_branch": first["default_branch"]})
     return out
 
 
@@ -515,8 +512,10 @@ def _valid_alternates(urls: Any, origin: str, first: Optional[str]) -> List[str]
     """The other spellings a setup may clone if ``first`` is refused, each
     checked as :func:`_validate_clone_url` checks ``first``; one it refuses
     (another repository, an unsafe source) is dropped, never cloned. Each is
-    queued without credentials (``strip_remote_userinfo``), or dropped."""
-    from app.core.project_links import strip_remote_userinfo
+    queued without credentials (``strip_remote_userinfo``), or dropped, and
+    must be ``first`` over the other transport (:func:`other_transport_of`):
+    a URL that only shares the project's id may be another repository."""
+    from app.core.project_links import other_transport_of, strip_remote_userinfo
 
     out: List[str] = []
     if not isinstance(urls, list):
@@ -534,6 +533,10 @@ def _valid_alternates(urls: Any, origin: str, first: Optional[str]) -> List[str]
         except ValueError:
             logger.warning("project setup: dropped another clone URL for %s: it is not this project's remote",
                            origin)
+            continue
+        if not other_transport_of(first, clean):
+            logger.warning("project setup: dropped another clone URL for %s: it is not the same repository "
+                           "over the other transport", origin)
             continue
         if clean and clean != first and clean not in out:
             out.append(clean)
@@ -1113,7 +1116,7 @@ def remote_kind(url: Optional[str]) -> str:
 # Never a bare "not found": a missing tool on this worker says that too.
 _RETRY_HINTS = _AUTH_HINTS + (
     "repository not found", "does not appear to be a git repository", "returned error: 404",
-    "could not be found or you don't have permission", "please make sure you have the correct access rights",
+    "could not be found or you don't have permission",
     "could not resolve host", "could not resolve hostname", "connection refused", "connection reset",
     "no route to host", "network is unreachable", "failed to connect", "couldn't connect to server",
     "connection closed by remote host", "gnutls_handshake() failed", "ssl_connect",
@@ -1124,16 +1127,18 @@ _SSH_CONNECT_RE = re.compile(r"\b(?:connect to host|connection closed by) \S+ po
 # The repository arrived and something on this worker failed after it
 # (a missing ``git-lfs``, the disk, the checkout): no spelling fixes that.
 _LOCAL_FAILURE_HINTS = ("checkout failed", "no space left on device", "disk quota exceeded",
-                        "read-only file system", "git-lfs: not found", "command not found")
+                        "read-only file system", "git-lfs: not found", "command not found",
+                        "ssh: not found", "ssh: command not found", "cannot run ssh")
 # A slow or silent network: the other spelling would wait the same way.
 _TIMEOUT_HINTS = ("timed out", "timeout was reached", "operation timed out")
 
 
 def clone_failure_retries(stderr: str) -> bool:
     """Whether a failed ``git clone`` (its stderr) may try the project's next
-    URL. A timeout, a cancel and a failure on this worker never do; those are
-    checked first, since git follows any failure to reach an SSH remote with
-    "Please make sure you have the correct access rights"."""
+    URL. A timeout, a cancel and a failure on this worker (no ``ssh`` to run)
+    never do; those are checked first. Git ends any failed SSH clone with
+    "Please make sure you have the correct access rights", so that footer
+    proves nothing: only the remote's own refusal above it counts."""
     text = (stderr or "").lower()
     if any(hint in text for hint in _LOCAL_FAILURE_HINTS):
         return False
