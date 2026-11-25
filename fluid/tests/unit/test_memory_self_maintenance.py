@@ -565,3 +565,24 @@ async def test_learner_insert_without_an_id_cannot_rewrite_a_superseded_value(tm
     # Forgetting the owner's replacement cannot bring back the learner's text.
     assert store.delete_memory(blair.id, explicit=True, expected_revision=blair.revision)
     assert "Casey" not in json.dumps([m.text for m in store.memories() + store.archived_memories()])
+
+
+def test_a_settled_contention_still_shields_older_facts_from_curation(tmp_path, monkeypatch):
+    import time as time_mod
+    from fluid.codemode import facts
+
+    a, b, c = (SkillStore(tmp_path / n) for n in "abc")
+    yarn = c.save_memory("Use yarn for frontend installs.", provenance="session", durable=True)
+    pnpm = a.save_memory("Use pnpm for frontend installs; it replaces yarn.", provenance="session",
+                         durable=True, key="frontend.installer")
+    b.save_memory("Use bun for frontend installs.", provenance="session", key="frontend.installer")
+    a._facts.merge(b._facts.export())  # the contention flags the survivor
+    a._facts.merge(c._facts.export())  # an older matching fact arrives meanwhile
+    real = time_mod.time
+    # The contender expires; the survivor and the older fact live on.
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    survivor = next(m for m in a.memories() if m.id == pnpm.id)
+    assert not survivor.conflicted  # back in prompts
+    a._facts.reconcile_supersessions()
+    assert {m.text for m in a.memories()} == {pnpm.text, yarn.text}
+    assert yarn.text not in {m.text for m in a.archived_memories()}

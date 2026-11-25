@@ -217,3 +217,57 @@ def test_a_scope_only_move_is_no_new_replacement_evidence(tmp_path):
     store._facts.reconcile_supersessions()
     assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
     assert not store.archived_memories()
+
+
+PNPM = "Use pnpm for frontend installs; it replaces yarn."
+YARN = "Use yarn for frontend installs."
+
+
+def _move(store, fact, scope):
+    return store.save_memory(fact.text, memory_id=fact.id, scope=scope, expected_revision=fact.revision)
+
+
+def test_a_move_beside_an_older_fact_gives_curation_no_replacement_evidence(tmp_path):
+    # Reverse order: the destination's fact exists before the replacement wording.
+    store = SkillStore(tmp_path)
+    yarn = store.save_memory(YARN, scope="project:beta")
+    pnpm = store.save_memory(PNPM, scope="project:alpha")
+    moved = _move(store, pnpm, "project:beta")
+    assert moved.scope == "project:beta" and moved.revision == pnpm.revision + 1
+    store._facts.reconcile_supersessions()
+    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
+    assert not store.archived_memories()
+
+
+def test_moving_the_older_fact_beside_its_replacement_archives_nothing(tmp_path):
+    store = SkillStore(tmp_path)
+    yarn = store.save_memory(YARN, scope="project:beta")
+    pnpm = store.save_memory(PNPM, scope="project:alpha")
+    _move(store, yarn, "project:alpha")
+    store._facts.reconcile_supersessions()
+    assert {m.id for m in store.memories()} == {pnpm.id, yarn.id}
+    assert not store.archived_memories()
+
+
+def test_rewording_a_moved_fact_still_replaces_what_it_names(tmp_path):
+    store = SkillStore(tmp_path)
+    yarn = store.save_memory(YARN, scope="project:beta")
+    moved = _move(store, store.save_memory(PNPM, scope="project:alpha"), "project:beta")
+    store.save_memory("Use pnpm for every frontend install; it replaces yarn.", memory_id=moved.id,
+                      expected_revision=moved.revision)
+    store._facts.reconcile_supersessions()
+    assert [m.id for m in store.memories()] == [moved.id]
+    assert yarn.id in {m.id for m in store.archived_memories()}
+
+
+def test_an_explicit_replacement_after_a_move_still_applies(tmp_path):
+    store = SkillStore(tmp_path)
+    yarn = store.save_memory(YARN, scope="project:beta", provenance="user", protected=True)
+    pnpm = store.save_memory(PNPM, scope="project:alpha", provenance="user", protected=True)
+    moved = store.save_memory(PNPM, memory_id=pnpm.id, scope="project:beta", provenance="user",
+                              protected=True, expected_revision=pnpm.revision)
+    store.save_memory(PNPM, memory_id=moved.id, provenance="user", protected=True,
+                      expected_revision=moved.revision, replaces=[yarn.id])
+    old = next(m for m in store.memories() + store.archived_memories() if m.id == yarn.id)
+    assert old.superseded_by and old.supersession_confirmed
+    assert [m.id for m in store.memories() if not m.superseded_by] == [pnpm.id]

@@ -472,3 +472,16 @@ def test_texts_that_differ_only_in_case_are_not_exact_duplicates(tmp_path):
     assert {m.text for m in store.memories()} == {"Settings are read from Config.toml.",
                                                    "Settings are read from config.toml."}
     assert not store.archived_memories()
+
+
+def test_a_fact_moved_beside_the_same_text_is_not_an_exact_duplicate(tmp_path):
+    store = SkillStore(tmp_path)
+    store.save_memory("Fixture builds run nightly.", scope="project:beta")
+    other = store.save_memory("Fixture builds run nightly.", scope="project:alpha")
+    store.save_memory(other.text, memory_id=other.id, scope="project:beta",
+                      expected_revision=other.revision)
+    live = store._facts.snapshot()["entries"]
+    assert len(live) == 2
+    assert not memory_health._exact_duplicate_groups(live)
+    memory_health.repair(store)
+    assert len(store.memories()) == 2 and not store.archived_memories()

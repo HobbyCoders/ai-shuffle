@@ -77,7 +77,7 @@ def _metadata_version(entry):
     # Usage counters are left out: a Recall must not make a form stale.
     state = [entry.get("when") or "", entry.get("when_basis"), bool(entry.get("always")),
              [facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS],
-             sorted((entry.get("clock") or {}).values()), bool(entry.get("conflicted")),
+             sorted((entry.get("clock") or {}).values()), facts.open_conflict(entry),
              sorted(entry.get("alternatives") or []), entry.get("superseded_by"),
              bool(entry.get("supersession_confirmed"))]
     return hashlib.sha256(repr(state).encode()).hexdigest()[:_VERSION_CHARS]
@@ -111,7 +111,7 @@ def _item(entry, status, project_names):
                         project_names.get(scope[8:], "Other project") if scope.startswith("project:")
                         else "Other project"),
         "always": facts.always_applies(entry),
-        "needs_review": bool(entry.get("conflicted") or (
+        "needs_review": bool(facts.open_conflict(entry) or (
             entry.get("superseded_by") and not facts.is_superseded(entry))),
         "this_worker_only": bool(entry.get("worker")),
         "created_at": entry.get("created_at") or None,

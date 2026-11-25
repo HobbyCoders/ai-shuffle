@@ -218,6 +218,28 @@ def is_superseded(entry: "dict | Any") -> bool:
                 or get("supersession_confirmed") or get("retired_reason") == "superseded"))
 
 
+def open_conflict(entry: "dict | Any") -> bool:
+    """Whether a fact is held back as conflicted: a merge flagged it and the
+    contention has not since gone (``conflict_settled``, which
+    :meth:`FactStore._settle_slot_conflicts` derives on every pass). For
+    prompts, listings and review badges. Curation and archival read the raw
+    ``conflicted`` flag, which stays until the owner answers, so a settled
+    contention never lets them archive what an unsettled one kept."""
+    get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
+    return bool(get("conflicted")) and not get("conflict_settled")
+
+
+def written_in_scope(old: dict, new: dict) -> bool:
+    """Whether ``new``'s wording was written while both facts held the scopes
+    they hold now. ``scope_since`` records when a fact entered its scope (a
+    move keeps its wording's time); a row without it predates the field and
+    counts as written in place. Automatic linking needs this, so a pair that
+    only a move put side by side is never read as replacement evidence;
+    rewording after the move, or an explicit ``replaces=``, still links."""
+    written = float(new.get("updated_at") or 0)
+    return all(written >= float(e.get("scope_since") or 0) for e in (old, new))
+
+
 def always_applies(entry: "dict | Any") -> bool:
     """An ALWAYS memory: owner-saved, flagged always, live and current."""
     get = entry.get if isinstance(entry, dict) else (lambda k: getattr(entry, k, None))
@@ -779,17 +801,22 @@ class FactStore:
 
     @classmethod
     def _settle_slot_conflicts(cls, doc):
-        """Clear the slot-contention flag a merge set once the contention is
+        """Mark a merge's slot-contention flag settled once the contention is
         gone (a candidate was forgotten, retired, superseded or expired), so
-        the survivor returns to prompts. A conflict between copies of one
-        record (its ``alternatives``, or a rule's ``contested`` wordings) is
-        not slot contention and keeps its flag until the owner answers.
+        the survivor returns to prompts (:func:`open_conflict`). The flag
+        itself stays until the owner answers: curation and archival keep
+        treating the fact as conflicted, exactly as before settling existed.
+        A conflict between copies of one record (its ``alternatives``, or a
+        rule's ``contested`` wordings) is not slot contention and never
+        settles. Derived on every pass, so a replicated marker is recomputed.
         Contention is flagged only by a merge (see :meth:`merge`)."""
         contended = {id(e) for e in cls._slot_contenders(doc)}
-        for e in doc["entries"]:
+        for e in doc["entries"] + doc["archived"]:
             if (e.get("conflicted") and id(e) not in contended
                     and not e.get("alternatives") and not _contested(e)):
-                e.pop("conflicted")
+                e["conflict_settled"] = True
+            else:
+                e.pop("conflict_settled", None)
 
     @staticmethod
     def _note_loss(doc, kind, gone, now):
@@ -1222,8 +1249,13 @@ class FactStore:
             # wording was written, so supersession, which treats only a later
             # wording as a replacement, does not read the move as fresh evidence.
             reworded = not old or old["text"] != text or not old.get("updated_at")
+            stamp = self._write_time(doc, now)
+            if old and old.get("scope", "global") != (scope or old.get("scope", "global")):
+                # When it entered this scope: automatic linking reads only
+                # wording written since as evidence here (written_in_scope).
+                entry["scope_since"] = stamp
             entry.update(clock=clock, alternatives=[], text=text,
-                         updated_at=self._write_time(doc, now) if reworded else old["updated_at"],
+                         updated_at=stamp if reworded else old["updated_at"],
                          revision=entry["revision"] + 1,
                          scope=scope or entry.get("scope", "global"),
                          provenance=provenance or entry.get("provenance", "session"),
@@ -1312,6 +1344,7 @@ class FactStore:
         allowed = {f.name for f in fields(MemoryEntry)}
         data = {k: v for k, v in entry.items() if k in allowed}
         data["when"] = written_when(entry)
+        data["conflicted"] = open_conflict(entry)
         return MemoryEntry(**data)
 
     @staticmethod
@@ -1350,7 +1383,7 @@ class FactStore:
                 continue
             for old in list(doc["entries"]):
                 if (old.get("conflicted") or (old.get("protected") and not new.get("protected"))
-                        or not replacement_evidence(old, new)):
+                        or not written_in_scope(old, new) or not replacement_evidence(old, new)):
                     continue
                 old["superseded_by"] = global_id(new)
                 # Both are owner-saved and the successor explicitly replaces
@@ -1607,7 +1640,8 @@ class FactStore:
             if old.get("protected") and not (protected_conflict and new.get("protected")):
                 return False
             if (old.get("conflicted") or new.get("conflicted") or new.get("superseded_by")
-                    or screen_findings(new["text"]) or not replacement_evidence(old, new, proposed=True)):
+                    or screen_findings(new["text"]) or not written_in_scope(old, new)
+                    or not replacement_evidence(old, new, proposed=True)):
                 return False
             old["superseded_by"] = global_id(new)
             old["supersession_confirmed"] = False
@@ -1856,6 +1890,11 @@ class FactStore:
                         old["supersession_confirmed"] = bool(old.get("supersession_confirmed") or entry.get("supersession_confirmed"))
                         old["conflicted"] = bool(old.get("conflicted") or entry.get("conflicted")) and not old["supersession_confirmed"]
                         old["alternatives"] = sorted(set(old.get("alternatives", []) + entry.get("alternatives", [])))[:2]
+                        # Two workers that moved it to the same scope: the
+                        # later entry is the stricter evidence bound.
+                        since = [float(e["scope_since"]) for e in (old, entry) if e.get("scope_since")]
+                        if since:
+                            old["scope_since"] = max(since)
                         continue
                     # A repair withdrawing unsupported metadata cannot defeat
                     # a concurrent explicit owner confirmation of the same fact.
