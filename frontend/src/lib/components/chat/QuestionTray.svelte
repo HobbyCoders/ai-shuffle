@@ -38,7 +38,7 @@
 		if (!body || !slot || !view || typeof ResizeObserver === 'undefined') return;
 		const measure = () => {
 			if (body.hidden) return;
-			room = Math.floor(view.clientHeight - (slot.getBoundingClientRect().height - body.getBoundingClientRect().height));
+			room = Math.max(0, Math.floor(view.clientHeight - (slot.getBoundingClientRect().height - body.getBoundingClientRect().height)));
 		};
 		const observer = new ResizeObserver(measure);
 		observer.observe(view);
@@ -93,7 +93,7 @@
 	   measured room, see the script); the header folds it away to read the
 	   chat. Phone-width windows keep the cap. */
 	@media (min-width: 640px) {
-		.tray-content { max-height: max(8rem, var(--tray-room, calc(var(--chat-surface-height, 100dvh) - 14rem))); }
+		.tray-content { max-height: var(--tray-room, max(8rem, calc(var(--chat-surface-height, 100dvh) - 14rem))); }
 	}
 	[hidden] { display: none !important; }
 	.request-tabs { display: flex; gap: 6px; padding: 0.625rem 0.75rem 0; flex-wrap: wrap; }
