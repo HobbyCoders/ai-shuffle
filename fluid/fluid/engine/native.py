@@ -198,6 +198,7 @@ from fluid.hooks.bus import (
     HookDecision,
     HookBus,
     hook_reminder,
+    place_attachments,
 )
 from fluid.messages import (
     Image,
@@ -7299,6 +7300,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 additions.append(
                     hook_reminder("PostToolUse hook context", decision.additional_context)
                 )
+            # Harness context (just-in-time memory) rides the result the model
+            # reads next, and is settled as placed.
+            additions.extend(place_attachments(decision.attachments))
             if additions:
                 # New text the tool never produced: drop the content id so
                 # code mode cannot collapse this result into an older ref.

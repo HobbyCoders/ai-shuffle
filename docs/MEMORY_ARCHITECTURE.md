@@ -43,6 +43,82 @@ render with a hint to confirm them with Remember. Recall exposes a conflict's
 ID and revision for an explicit correction, rather than presenting a guessed
 winner as fact. Saved text is data, not an instruction layer.
 
+## Just-in-time delivery
+
+The snapshot's `# Memory` index tells the model that a fact exists and when it
+applies. Just-in-time delivery (Memory v3 phase 1,
+`fluid/fluid/codemode/jit_delivery.py`) hands the model a fact's full text
+when its situation happens. It runs beside the index, which is unchanged.
+
+Triggers come from `fluid/fluid/codemode/triggers.py`. Each fact's are derived
+from its when-line, plus any explicit triggers saved with Remember: `command`
+(literal strings matched as whole words against the program that runs, never
+compiled as a regular expression), `paths` (globs) and `tools` (tool names,
+transport prefix ignored). Explicit triggers are stored on the fact as
+`triggers` and stamped `triggers_at`, like `when` and `always`. They replicate
+as per-field metadata and never bump the text revision. A worker from before
+this field keeps the key untouched in the entry it holds and merges as before.
+When a save gives no triggers and only word triggers can be derived, the
+receipt suggests correcting the fact to add `command` or `paths`.
+
+The app adapter (`app/core/provider/harness_adapter.py`) delivers on two
+events, for native and delegated sessions alike:
+
+- **User turn or delegation brief.** `match_turn` adds the matching facts' full
+  text to that turn's context note as a `# Memory for this step` block. A
+  spawned session's brief arrives as its first user turn. These deliveries
+  are recorded as on time.
+- **Tool call.** On PostToolUse, `match_tool` matches the call's input and
+  hands the facts to the gate as an attachment (`fluid.hooks.bus.Attachment`).
+  Every gate sends PostToolUse with the call's input and places the
+  attachment where the model reads it: on the call's result in the native
+  loop and the bundled MCP server, in the Claude Code CLI hook's
+  `additionalContext`, and in code mode on the enclosing cell's result,
+  outside its output fence, because a cell may never print an inner call's
+  result. A fact counts as delivered only once its gate settles the
+  attachment as placed; a dropped one is offered again with the next match. These deliveries are recorded as late. A
+  model reads added context only in its next request, after the call already
+  ran, on either leg. Context added at PreToolUse (which the CLI accepts as
+  `additionalContext`) arrives in that same request. Reading a fact before
+  its call executes would mean holding or denying the call, which delivery
+  never does.
+
+Only delivery candidates are delivered: not ALWAYS, identity, superseded,
+conflicted, behaviour-rule or Recall-only facts. Facts outside the session's
+scope (global plus its project), facts not `visible_on` this worker, and facts
+failing the injection screen are also left out, as are setup receipts for
+another checkout of the project (the index's own filter). Each event carries
+at most 3 facts, and the whole block, the line naming further matches
+included, stays within 1,500 characters; further matches are named by ID for
+Recall as far as they fit, then counted. Each fact is delivered once per
+session, and PreCompact re-arms the session, because the summary may have
+dropped the text. A replacement adapter for the same session (after idle
+eviction or a restart) takes up the session's deliveries since its last
+re-arm from the local log. Candidates come from the store's read-only
+snapshot, without the writer lock, and are prepared once per store file
+revision and checkout; a read that takes longer than a quarter second
+delivers nothing for that event. Proactive assistant and one-shot runs do
+not deliver.
+
+Each delivery is recorded only on this worker, in the append-only log
+`<store root>/jit_deliveries.jsonl`, which is never replicated. A record is
+one JSON line written in a single append, so concurrent processes do not lose
+each other's records, and no write waits on an fsync. It holds the fact ID,
+the trigger kind (command, path, tool or words), the session, the time, and
+whether it was on time or late; compaction re-arms are logged too. Past
+256 KB the log rotates to `jit_deliveries.1.jsonl`, so at most two files are
+kept; the size check and rename run under a short cross-process lock while
+appends stay lock-free, and a reader keeps a good record appended onto a torn
+one. Totals, per-fact counts (the 200 most recently delivered facts) and
+the last 200 deliveries are computed on read. Memory health reads the totals as its
+`delivery` signal, which is a count and never an attention. Set
+`FLUID_MEMORY_JIT=false` to turn delivery off; the index is unaffected.
+
+Two accepted limits: a stop that lands while a gate places the attachment can
+mark a fact delivered unseen until the next compaction (the index and Recall
+still have it), and a session idle across two log rotations can get a fact
+once more after resuming.
+
 ## Learning from Claude Code sessions
 
 Claude Code (delegated) sessions feed the same journal as native JSON-mode

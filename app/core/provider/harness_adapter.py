@@ -166,7 +166,7 @@ from fluid.engine.delegated import (
     ResumeRecovery,
     register_recall_tools,
 )
-from fluid.hooks.bus import HookBus
+from fluid.hooks.bus import POST_TOOL_USE, PRE_COMPACT, HookBus, HookDecision
 from fluid.events.model import NEEDS_COMPACTION
 from fluid.events.ops import (
     AgentMessage,
@@ -583,6 +583,12 @@ class HarnessAdapter(ProviderAdapter):
 
         for bus_event in BUS_EVENTS:
             self._hooks.on(bus_event, self._run_sdk_hooks)
+        # Just-in-time memory (fluid.codemode.jit_delivery): a matching fact's
+        # full text with the result of the tool call that matches it, on
+        # both legs, and with the user turn whose words match it.
+        self._jit: Optional[Any] = None
+        self._hooks.on(POST_TOOL_USE, self._jit_post_tool)
+        self._hooks.on(PRE_COMPACT, self._jit_rearm)
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -2482,14 +2488,17 @@ class HarnessAdapter(ProviderAdapter):
         ).get("one_shot"):
             return None
         if self._is_delegated:
-            blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
-                      self._away_note(), self._scratch_turn_note(), self._plan_note()]
+            blocks = [self._env_note(), self._memory_turn_note(query), self._memory_jit_note(query),
+                      self._working_record_note(), self._away_note(), self._scratch_turn_note(),
+                      self._plan_note()]
         else:
             # Memory then scratch close the note: one message has one pinned
             # range, and the engine extends it over its environment details
             # block, which it adds right after this note.
+            # Just-in-time facts are per turn, so they stay outside that range.
             blocks = [self._env_note(), self._working_record_note(), self._away_note(),
-                      self._memory_turn_note(query), self._native_scratch_note()]
+                      self._memory_jit_note(query), self._memory_turn_note(query),
+                      self._native_scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
@@ -3047,6 +3056,93 @@ class HarnessAdapter(ProviderAdapter):
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
             return None
+
+    # ─── Just-in-time memory ─────────────────────────────────────────────
+
+    def _jit_session(self, refresh: bool = False) -> Optional[Any]:
+        """This session's just-in-time delivery (one per app session and
+        store), or None: switched off, no app session, or an auxiliary run.
+
+        The owner and project lookup reads the session row, so a tool call
+        reuses the last one and only a user turn (``refresh``) looks again."""
+        from fluid.codemode.jit_delivery import SessionDelivery, switched_on
+
+        extra = getattr(self._options, "extra", None) or {}
+        if (not switched_on() or self._options is None
+                or extra.get("assistant_proactive") is not None or extra.get("one_shot")):
+            return None
+        sid = self._resolve_app_session_id()
+        if not sid:
+            return None
+        if not refresh and self._jit is not None and self._jit.session_id == sid:
+            return self._jit
+        from app.core.fluid_memory import session_memory
+        from fluid.codemode.skills import checkout_identity
+
+        try:
+            store, project = session_memory(sid, self._options.cwd)
+        except ValueError:
+            return None  # no session row (yet): nothing to deliver from
+        checkout = checkout_identity(self._options.cwd)
+        jit = self._jit
+        if (jit is None or jit.session_id != sid or jit.project != project
+                or jit.checkout != checkout or str(jit.store.root) != str(store.root)):
+            jit = SessionDelivery(store, project, sid, checkout=checkout,
+                                  enabled=switched_on)
+            # A replacement adapter (idle eviction, resume, a new process)
+            # takes up what the session already has since its last compaction.
+            jit.restore()
+            self._jit = jit
+        return jit
+
+    async def _jit_post_tool(self, event: str, payload: Dict[str, Any]) -> Optional[HookDecision]:
+        """Facts whose triggers the call's input matches, with its result.
+
+        Every gate (native loop, delegated CLI hook, code-mode bridge,
+        bundled tools) sends the call's input with PostToolUse. A model
+        reads new context only in its next request, which follows the
+        call; reading a fact before the call runs would mean holding the
+        call, so these deliveries are recorded as late. The delivery is an
+        attachment: it counts once the gate has put it where the model
+        reads it (in code mode, the cell's own result)."""
+        try:
+            from fluid.codemode.jit_delivery import LATE
+
+            def match() -> Optional[Any]:
+                jit = self._jit_session()
+                if jit is None:
+                    return None
+                return jit.on_tool(str(payload.get("name") or ""), payload.get("input"), timing=LATE)
+
+            delivery = await run_sync(match)
+            return HookDecision(attachments=(delivery.attachment(),)) if delivery else None
+        except Exception:  # noqa: BLE001 — delivery never fails a tool call
+            logger.warning("[HarnessAdapter] just-in-time memory failed", exc_info=True)
+            return None
+
+    async def _jit_rearm(self, event: str, payload: Dict[str, Any]) -> None:
+        """Compaction may summarise delivered facts away: deliver them again.
+        Logged even before this adapter delivered anything, so a later
+        replacement adapter does not restore what compaction dropped."""
+        try:
+            jit = await run_sync(self._jit_session)
+            if jit is not None:
+                await run_sync(jit.rearm)
+        except Exception:  # noqa: BLE001 — compaction never waits on memory
+            logger.warning("[HarnessAdapter] just-in-time memory re-arm failed", exc_info=True)
+
+    def _memory_jit_note(self, query: str) -> Optional[str]:
+        """Full text of facts whose words this user turn matches, or None.
+        Blocking (a store read on a cache miss); never raises."""
+        if not query:
+            return None
+        try:
+            jit = self._jit_session(refresh=True)
+            delivery = jit.on_turn(query) if jit is not None else None
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            logger.warning("[HarnessAdapter] just-in-time memory failed", exc_info=True)
+            return None
+        return f"<system-reminder>\n{delivery.text}\n</system-reminder>" if delivery else None
 
     def _memory_eligible_lines(self) -> list[str]:
         """Live candidates through the same owner/scope/safety screen as base."""

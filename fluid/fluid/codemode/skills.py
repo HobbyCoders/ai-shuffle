@@ -93,7 +93,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 
 from fluid._filelock import file_lock
@@ -815,6 +815,36 @@ class MemoryEntry:
     when: str | None = None
     # Owner-saved fact that renders in full in every session (ALWAYS_CHARS).
     always: bool = False
+    # Explicit just-in-time triggers ({"command": [...], "paths": [...],
+    # "tools": [...]}, see fluid.codemode.facts.validate_triggers), or None.
+    triggers: dict | None = dataclass_field(default=None, hash=False)
+
+
+def checkout_identity(checkout: str | None) -> str | None:
+    """The checkout a session runs in, as :func:`other_checkout_receipt`
+    compares it: the folder's leaf name, casefolded (None without one)."""
+    leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
+    return leaf.casefold() if leaf else None
+
+
+def other_checkout_receipt(text: str, provenance: str | None, key: str | None,
+                           checkout: str | None) -> bool:
+    """A setup receipt for a different checkout of the project, which the
+    ``# Memory`` snapshot and just-in-time delivery leave out.
+
+    Branch-prefixed setup receipts ("feat/x has a .venv") are volatile, not
+    general project knowledge. Only session/tool receipts are omitted, never
+    explicit user/profile facts; the entry stays in the store and Recall
+    finds it. ``checkout`` is :func:`checkout_identity`'s value."""
+    branch = re.match(r"^([\w.-]+/[\w./-]+)\b", text)
+    return bool(
+        checkout and branch
+        and provenance in {"session", "tool"}
+        and not (key or "").startswith("profile.")
+        and re.search(r"(?:\.venv\b|node_modules\b|npm (?:ci|dependencies)|requirements-dev\b)", text)
+        and re.search(r"\b(?:has|created|installed|passed|succeeded|verified)\b", text, re.I)
+        and re.sub(r"[^A-Za-z0-9._-]+", "-", branch.group(1)).strip("-.").casefold() != checkout
+    )
 
 
 def project_key_for(cwd: "str | Path | os.PathLike[str] | None") -> str:
@@ -2032,8 +2062,7 @@ class SkillStore:
         held = 0
         recall_only = 0
         other_checkout = 0
-        checkout_leaf = re.split(r"[/\\]+", checkout.rstrip("/\\"))[-1] if checkout else None
-        normalized_checkout = checkout_leaf.casefold() if checkout_leaf else None
+        normalized_checkout = checkout_identity(checkout)
         from fluid.codemode.relevance import query_terms, relevance
         terms = query_terms(task_query)
 
@@ -2104,20 +2133,7 @@ class SkillStore:
                     f"{self.memories_path}.]"
                 )))
                 continue
-            # Branch-prefixed setup receipts are volatile, not general
-            # project knowledge. Omit only session/tool receipts for a
-            # different checkout, never explicit user/profile facts. The
-            # entry stays in the store and remains available through Recall.
-            branch = re.match(r"^([\w.-]+/[\w./-]+)\b", entry.text)
-            if (
-                normalized_checkout and branch
-                and entry.provenance in {"session", "tool"}
-                and not (entry.key or "").startswith("profile.")
-                and re.search(r"(?:\.venv\b|node_modules\b|npm (?:ci|dependencies)|requirements-dev\b)", entry.text)
-                and re.search(r"\b(?:has|created|installed|passed|succeeded|verified)\b", entry.text, re.I)
-                and re.sub(r"[^A-Za-z0-9._-]+", "-", branch.group(1)).strip("-.").casefold()
-                != normalized_checkout
-            ):
+            if other_checkout_receipt(entry.text, entry.provenance, entry.key, normalized_checkout):
                 other_checkout += 1
                 continue
             label = f"[{entry.id} r{entry.revision}; {entry.provenance}]"

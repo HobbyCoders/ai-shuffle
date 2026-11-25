@@ -97,8 +97,15 @@ ALWAYS_CHARS = 3000
 # revision clock. A metadata edit therefore never bumps the revision, never
 # makes a concurrent text edit a conflict, and never loses another worker's
 # edit of the other field. A missing stamp (older stores and replicas) is
-# the oldest.
-METADATA_FIELDS = ("when", "always")
+# the oldest. ``triggers`` (explicit just-in-time triggers, see
+# validate_triggers) is a third such field; a worker that predates it keeps
+# the keys on the entry untouched and merges them with the text's winner.
+METADATA_FIELDS = ("when", "always", "triggers")
+# Explicit triggers: literal command strings (whole words, never a regex),
+# path globs and tool names; each list capped so a fact stays small.
+TRIGGER_KINDS = ("command", "paths", "tools")
+MAX_TRIGGERS_PER_KIND = 8
+MAX_TRIGGER_CHARS = 120
 _NO_STAMP = (0.0, "")
 INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
@@ -163,6 +170,47 @@ def when_line(entry: "dict | Any") -> str:
     if isinstance(entry, dict):
         return written_when(entry) or derived_when(entry.get("text"))
     return getattr(entry, "when", None) or derived_when(getattr(entry, "text", None))
+
+
+def validate_triggers(value: object) -> dict[str, list[str]]:
+    """Explicit triggers in canonical form: ``{"command": [...], "paths":
+    [...], "tools": [...]}`` with only non-empty kinds, each a de-duplicated
+    list of single-line strings. An empty result means "no explicit
+    triggers". Raises ValueError on anything else."""
+    from fluid.context.screening import looks_like_secret
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - set(TRIGGER_KINDS):
+        raise ValueError("triggers must be an object with command, paths and/or tools lists")
+    out: dict[str, list[str]] = {}
+    for kind in TRIGGER_KINDS:
+        raw = value.get(kind)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list) or len(raw) > MAX_TRIGGERS_PER_KIND:
+            raise ValueError(f"triggers.{kind} must be a list of at most {MAX_TRIGGERS_PER_KIND} strings")
+        items = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError(f"triggers.{kind} must contain strings")
+            item = " ".join(item.split())
+            if not item or len(item) > MAX_TRIGGER_CHARS:
+                raise ValueError(f"each trigger is 1-{MAX_TRIGGER_CHARS} characters on one line")
+            if kind == "command" and len(item) < 2:
+                raise ValueError("a command trigger needs at least two characters")
+            if kind == "tools" and not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", item):
+                raise ValueError("a tool trigger is a tool name such as Bash or Edit")
+            # Saves and replica imports both pass here: a token pasted into a
+            # command is refused, and never stored or passed on.
+            if looks_like_secret(item):
+                raise ValueError(f"triggers.{kind} contains a credential; name the command, not its token")
+            items.append(item)
+        items = list(dict.fromkeys(items))
+        if items:
+            out[kind] = items
+    return out
 
 
 def metadata_stamp(entry: dict, field: str) -> tuple[float, str]:
@@ -898,7 +946,8 @@ class FactStore:
     def save(self, text, memory_id=None, scope=None, provenance=None, *, protected=False,
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
-             when=None, always=None, require_when=False, automatic=False, _document=None):
+             when=None, always=None, require_when=False, automatic=False, triggers=None,
+             _document=None):
         """Save one fact in a tier.
 
         ``automatic`` marks background learning (the learner, consolidation).
@@ -928,6 +977,8 @@ class FactStore:
         ``always`` (None keeps the current flag) marks an ALWAYS memory; only
         a protected save may set it, and the in-scope ALWAYS_CHARS budget
         refuses one that would overflow it (:meth:`_check_always_budget`).
+        ``triggers`` (None keeps the current ones; ``{}`` clears them) are
+        explicit just-in-time triggers (:func:`validate_triggers`).
         """
         if isinstance(key, str) and key.startswith("memory.coexist.job."):
             # Keys of the retired word-matching questions name no rule pair.
@@ -939,6 +990,8 @@ class FactStore:
             when = validate_when(when)
         if always is not None and type(always) is not bool:
             raise ValueError("always must be true or false")
+        if triggers is not None:
+            triggers = validate_triggers(triggers)
         if always and not protected:
             raise ValueError("always is only for a memory the user asked to apply in every "
                              "chat (user_requested=true); nothing was saved")
@@ -1067,7 +1120,7 @@ class FactStore:
                 targets = []
             if old and old.get("protected") and not protected:
                 if (durable and not old.get("conflicted") and old["text"] == text
-                        and not self._metadata_differs(old, when, always)):
+                        and not self._metadata_differs(old, when, always, triggers)):
                     if targets:
                         self._supersede(doc, old, targets)
                         self._maintain(doc, keep=old["id"])
@@ -1118,14 +1171,14 @@ class FactStore:
             same_authority = not old or not protected or (
                 not old.get("worker") and (not provenance or old.get("provenance") == provenance))
             if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
-                    and not targets and self._metadata_differs(old, when, always)
+                    and not targets and self._metadata_differs(old, when, always, triggers)
                     and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
                 # Same live value, new when-line or always flag: a metadata edit.
                 # Archived saves must take the reactivation path below.
                 # Stamped per field (METADATA_FIELDS), not a new revision, so
                 # the revision, clock, updated_at and history stay as they are.
-                self._edit_metadata(doc, old, when, always, protected=protected,
+                self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers,
                                     expected_revision=expected_revision, exclude=())
                 self._maintain(doc, keep=old["id"])
                 if _document is None:
@@ -1149,10 +1202,10 @@ class FactStore:
                         raise ValueError(f"[{old['id']}] was itself replaced by "
                                          f"[{old['superseded_by']}]; correct that fact instead")
                     return self._entry(old)  # an observation cannot revive a known stale value
-                if self._metadata_differs(old, when, always):
+                if self._metadata_differs(old, when, always, triggers):
                     # Same text with replaces= and a new when-line or always
                     # flag: the metadata edit applies too (guarded as above).
-                    self._edit_metadata(doc, old, when, always, protected=protected,
+                    self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers,
                                         expected_revision=expected_revision,
                                         exclude={e["id"] for e in targets})
                 # Saving the same fact again is a use: renew a durable fact's
@@ -1276,6 +1329,8 @@ class FactStore:
                 _set_metadata(entry, "when", when, local)
             if always is not None and always != bool(entry.get("always")):
                 _set_metadata(entry, "always", always, local)
+            if triggers is not None and triggers != (entry.get("triggers") or {}):
+                _set_metadata(entry, "triggers", triggers, local)
             if not protected or not entry.get("always"):
                 entry.pop("always", None)  # only an owner-saved fact applies always
             elif (not old or not old.get("always") or not old.get("protected")
@@ -1440,13 +1495,15 @@ class FactStore:
         return [t["id"] for t in targets if t.get("superseded_by") == gid]
 
     @staticmethod
-    def _metadata_differs(old, when, always):
+    def _metadata_differs(old, when, always, triggers=None):
         # Against the line the fact is listed by: re-sending the line an agent
         # was shown is no change, and a stale backfill line counts as none.
         return ((when is not None and when != written_when(old))
-                or (always is not None and always != bool(old.get("always"))))
+                or (always is not None and always != bool(old.get("always")))
+                or (triggers is not None and triggers != (old.get("triggers") or {})))
 
-    def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude):
+    def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude,
+                       triggers=None):
         """Apply a Remember save's new when-line/always flag to ``old`` in
         place. An owner fact needs the revision Recall returned; the ALWAYS
         budget is checked before anything changes. Stamps, never bumps."""
@@ -1461,6 +1518,8 @@ class FactStore:
             _set_metadata(old, "when", when, doc["store_id"])
         if always is not None and always != bool(old.get("always")):
             _set_metadata(old, "always", always, doc["store_id"])
+        if triggers is not None and triggers != (old.get("triggers") or {}):
+            _set_metadata(old, "triggers", triggers, doc["store_id"])
 
     @staticmethod
     def _merge_metadata(target, local, incoming, prefer):
@@ -1486,7 +1545,9 @@ class FactStore:
             elif prefer is not None:
                 source = prefer
             else:
-                source = max((local, incoming), key=lambda e: str(e.get(field) or ""))
+                source = max((local, incoming), key=lambda e: (
+                    json.dumps(e.get(field) or {}, sort_keys=True) if field == "triggers"
+                    else str(e.get(field) or "")))
             if source is target:
                 continue
             for k in (field, field + "_at") + (("when_basis",) if field == "when" else ()):
@@ -1818,6 +1879,14 @@ class FactStore:
                         isinstance(contested, list) and len(contested) <= MAX_RULE_FENCES
                         and all(isinstance(f, str) and _FENCE.fullmatch(f) for f in contested)):
                     entry.pop("contested")
+                if entry.get("triggers") is not None:
+                    try:
+                        entry["triggers"] = validate_triggers(entry["triggers"])
+                    except ValueError:
+                        # Unreadable triggers: the derived ones still apply.
+                        entry["triggers"] = {}
+                    if not entry["triggers"]:
+                        entry.pop("triggers")
                 if type(entry.get("always", False)) is not bool:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):

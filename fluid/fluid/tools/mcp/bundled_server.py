@@ -472,7 +472,7 @@ async def _gate_call(
     ``on_input_required``: an ``input_required`` pause is resolved here, before
     PostToolUse, by re-running the same tool with the answers (fluid.tools.mrtr).
     """
-    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, hook_reminder, place_attachments
     from fluid.permissions.engine import non_interactive_denial
 
     # A pooled host can replace its Plan backend on the next turn. Snapshot
@@ -563,6 +563,9 @@ async def _gate_call(
             additions.append(hook_reminder(
                 "PostToolUse hook context", decision.additional_context,
             ))
+        # Harness context (just-in-time memory) rides this result to the CLI's
+        # model, settled as placed.
+        additions.extend(place_attachments(decision.attachments))
         if additions:
             outcome = replace(
                 outcome, text="\n\n".join([outcome.text, *additions]).strip(),

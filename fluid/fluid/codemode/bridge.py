@@ -404,6 +404,7 @@ class HostBridge:
             )
 
         salvage = current_host_call_salvage.get()
+        attachments: tuple = ()
         if self._hooks is not None:
             if salvage is not None:
                 # The tool is done and its output capped (and spilled); only the
@@ -446,8 +447,13 @@ class HostBridge:
                     outcome, text="\n\n".join([outcome.text, *additions]).strip(),
                     content_id=None, window_of=None,
                 )
+            attachments = decision.attachments
 
         reply = self._reply(spec, tool_name, tool_input, outcome)
+        if attachments:
+            # Not on this call's result, which the cell may never print: the
+            # session puts them on the cell's own result and settles them.
+            reply = replace(reply, attachments=tuple(attachments))
         if salvage is not None:
             # What is left after this (the host's own result event) must not
             # cost the cell its result either.

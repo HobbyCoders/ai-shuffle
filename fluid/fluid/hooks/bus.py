@@ -74,6 +74,53 @@ class HookDecision:
     # every hook that ran, so the engine can report them without changing the
     # decision.
     warnings: tuple[str, ...] = ()
+    # PostToolUse only: context the embedding harness adds for the model
+    # (just-in-time memory), as opposed to a configured hook's output. Each
+    # gate puts these where the model reads them and settles each one; see
+    # Attachment. ``emit`` collects them across hooks.
+    attachments: tuple["Attachment", ...] = ()
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """Harness context for the model whose producer must know whether it
+    reached the model.
+
+    A gate that puts ``text`` where the model reads it calls
+    ``settle(True)``: on the tool result (the native loop, the bundled
+    bridge), in the CLI hook's ``additionalContext`` (the delegated leg), or
+    on the enclosing cell's result outside its output fence (code mode,
+    since a cell's program may never print an inner call's result). A gate
+    that cannot place it calls ``settle(False)``. Settling never raises.
+    """
+    text: str
+    attached: Callable[[], None] | None = None
+    dropped: Callable[[], None] | None = None
+
+    def settle(self, placed: bool) -> None:
+        callback = self.attached if placed else self.dropped
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a tool call
+            log.warning("attachment settle callback raised", exc_info=True)
+
+
+def attachment_reminder(attachment: Attachment) -> str:
+    """An attachment as a system-reminder block, defanged like hook text."""
+    from fluid.tools.hardening import defang_harness_markers
+
+    return f"<system•reminder>\n{defang_harness_markers(attachment.text).strip()}\n</system•reminder>"
+
+
+def place_attachments(attachments: "tuple[Attachment, ...] | list[Attachment]") -> list[str]:
+    """Reminder blocks for ``attachments``, each settled as placed: for a
+    gate that appends the returned blocks to what the model reads now."""
+    blocks = [attachment_reminder(a) for a in attachments if a.text.strip()]
+    for a in attachments:
+        a.settle(bool(a.text.strip()))
+    return blocks
 
 
 HookCallback = Callable[[str, dict[str, Any]], Awaitable["HookDecision | None"]]
@@ -137,6 +184,7 @@ class HookBus:
         final = HookDecision(action="allow")
         warnings: list[str] = []
         contexts: list[str] = []
+        attachments: list[Attachment] = []
         messages: list[str] = []
         permission: str | None = None
         ask_note: str | None = None
@@ -151,12 +199,14 @@ class HookBus:
             if decision is None:
                 continue
             warnings.extend(decision.warnings)
+            attachments.extend(decision.attachments)
             if decision.system_message:
                 messages.append(decision.system_message)
             if decision.action == "deny" or decision.stop:
                 return replace(
                     decision,
                     warnings=tuple(warnings),
+                    attachments=tuple(attachments),
                     additional_context="\n\n".join(
                         c for c in [*contexts, decision.additional_context] if c
                     ) or None,
@@ -180,6 +230,7 @@ class HookBus:
         return replace(
             final,
             warnings=tuple(warnings),
+            attachments=tuple(attachments),
             permission_decision=permission,
             note=ask_note if permission == "ask" else final.note,
             additional_context="\n\n".join(contexts) or None,
