@@ -241,7 +241,10 @@ async def test_in_place_save_that_cannot_reserve_space_leaves_the_original(
     assert sorted(p.name for p in tmp_path.iterdir()) == ["mounted.txt"]
 
 
-@pytest.mark.parametrize("new", ["short\n", "a good deal longer than the old text\n"])
+@pytest.mark.parametrize(
+    "new", ["short\n", "a good deal longer than the old text\n", ""],
+    ids=["shrink", "grow", "empty"],
+)
 def test_busy_replace_overwrites_in_place_without_truncating(
     tmp_path: Path, monkeypatch, new: str
 ) -> None:
@@ -259,8 +262,90 @@ def test_busy_replace_overwrites_in_place_without_truncating(
     _util.write_text_atomic(target, new)
     assert target.read_bytes() == new.encode()
     assert target.stat().st_ino == before
-    assert reserved == [(0, max(len(old), len(new)))]
+    # Only what the new contents use: shrinking a sparse file under a quota
+    # needs no new blocks, and an empty file needs no reservation at all.
+    assert reserved == ([(0, len(new))] if new else [])
     assert sorted(p.name for p in tmp_path.iterdir()) == ["mounted.txt"]
+
+
+def _no_fallocate(*_a) -> None:
+    raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+
+def test_in_place_growth_is_fsynced_before_any_old_byte_changes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Delayed writeback (async NFS): ENOSPC first shows at fsync of the tail."""
+    old = b"0123456789\n"
+    target = tmp_path / "held.txt"
+    target.write_bytes(old)
+    held = target.stat().st_ino
+    real_fsync = _util.os.fsync
+
+    def late_enospc(fd: int) -> None:
+        if os.fstat(fd).st_ino == held:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_fsync(fd)
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", _no_fallocate, raising=False)
+    monkeypatch.setattr(_util.os, "fsync", late_enospc)
+    with pytest.raises(OSError):
+        _util.write_text_atomic(target, "y" * 40)
+    assert target.read_bytes() == old
+
+
+@pytest.mark.parametrize("fallocate_works", [False, True], ids=["tail-first", "fallocate"])
+def test_refused_first_overwrite_drops_the_growth(
+    tmp_path: Path, monkeypatch, fallocate_works: bool
+) -> None:
+    """A byte-range lock on the old contents refuses the head write outright."""
+    old = b"0123456789\n"
+    target = tmp_path / "locked.txt"
+    target.write_bytes(old)
+    real_write_at = _util._write_at
+
+    def extends(fd: int, _offset: int, length: int) -> None:
+        if length > os.fstat(fd).st_size:
+            os.ftruncate(fd, length)  # posix_fallocate grows the file
+
+    def locked_head(fd: int, data, offset: int) -> None:
+        if offset == 0:
+            raise PermissionError(errno.EACCES, "The process cannot access the file")
+        real_write_at(fd, data, offset)
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(
+        _util.os, "posix_fallocate", extends if fallocate_works else _no_fallocate,
+        raising=False,
+    )
+    monkeypatch.setattr(_util, "_write_at", locked_head)
+    with pytest.raises(PermissionError):
+        _util.write_text_atomic(target, "y" * 40)
+    assert target.read_bytes() == old
+
+
+def test_fallocate_ebadf_takes_the_tail_first_path(tmp_path: Path, monkeypatch) -> None:
+    """glibc's emulation (NFSv3) reads a byte, which a write-only fd may not."""
+    old = b"0123456789\n"
+    target = tmp_path / "nfs.txt"
+    target.write_bytes(old)
+    writes: list[int] = []
+    real_write_at = _util._write_at
+
+    def emulated(*_a) -> None:
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    def spy(fd: int, data, offset: int) -> None:
+        writes.append(offset)
+        real_write_at(fd, data, offset)
+
+    monkeypatch.setattr(_util.os, "replace", _busy)
+    monkeypatch.setattr(_util.os, "posix_fallocate", emulated, raising=False)
+    monkeypatch.setattr(_util, "_write_at", spy)
+    _util.write_text_atomic(target, "z" * 30)
+    assert target.read_bytes() == b"z" * 30
+    assert writes == [len(old), 0]
 
 
 @pytest.mark.parametrize("new", ["tiny\n", "x" * 50 + "\n"])

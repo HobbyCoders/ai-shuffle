@@ -648,12 +648,15 @@ _TEMP_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 _REPLACE_FALLBACK_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY})
 _POSIX_ACL_XATTR = "system.posix_acl_access"
 _SELINUX_XATTR = "security.selinux"
-# posix_fallocate errors meaning "this filesystem cannot preallocate".
+# posix_fallocate errors meaning "this filesystem cannot preallocate". EBADF
+# too: the descriptor is a validated write-only one, and glibc's emulation for
+# filesystems without fallocate (NFSv3) reads a byte, which it may not.
 _NO_FALLOCATE_ERRNOS = frozenset({
     errno.EOPNOTSUPP,
     getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
     errno.EINVAL,
     errno.ENOSYS,
+    errno.EBADF,
 })
 
 
@@ -804,18 +807,28 @@ def _write_at(fd: int, data: bytes | memoryview, offset: int) -> None:
         view = view[os.write(fd, view):]
 
 
+def _restore_length(fd: int, old_len: int) -> None:
+    """Cut away anything a failed save appended past the old end of file."""
+    with contextlib.suppress(OSError):
+        if os.fstat(fd).st_size != old_len:
+            os.ftruncate(fd, old_len)
+
+
 def _write_in_place(target: Path, data: bytes) -> None:
     """Overwrite a regular file's contents with ``data`` on the same inode.
 
     For files that must not be replaced (see ``write_text_atomic``). The file
     is never truncated first: the space the new contents need is reserved
     before any existing byte is overwritten, so a full disk or quota raises
-    with the original intact. ``posix_fallocate`` reserves it where it works;
-    elsewhere (Windows, macOS, filesystems that cannot preallocate) the part
-    of ``data`` past the old end is written first, which allocates it. If the
-    reservation fails, any growth is truncated away and the error raised.
-    Only then is ``data`` written from offset 0, fsynced, and the file cut to
-    its new length.
+    with the original intact. ``posix_fallocate(fd, 0, len(data))`` reserves
+    it where it works; elsewhere (Windows, macOS, filesystems that cannot
+    preallocate) the part of ``data`` past the old end is written first and
+    fsynced, so space that only runs out at writeback (an async NFS mount)
+    fails there too. If the reservation fails, or the first write over the
+    old bytes is refused outright (a byte-range lock on Windows), any growth
+    is truncated away and the error raised with the original intact. Then
+    ``data`` is written from offset 0, fsynced, and the file cut to its new
+    length.
 
     Remaining risk: an I/O error part-way through the overwrite, or a
     copy-on-write filesystem (btrfs, ZFS) that needs new blocks to overwrite
@@ -829,22 +842,33 @@ def _write_in_place(target: Path, data: bytes) -> None:
         try:
             reserved = False
             fallocate = getattr(os, "posix_fallocate", None)
-            if fallocate is not None and max(old_len, new_len) > 0:
+            # Shrinking reserves only what the new contents use: reserving
+            # the old length too could hit a quota on a sparse file although
+            # the save needs no new blocks.
+            if fallocate is not None and new_len > 0:
                 try:
-                    fallocate(fd, 0, max(old_len, new_len))
+                    fallocate(fd, 0, new_len)
                     reserved = True
                 except OSError as exc:
                     if exc.errno not in _NO_FALLOCATE_ERRNOS:
                         raise
             if not reserved and new_len > old_len:
                 _write_at(fd, memoryview(data)[old_len:], old_len)
+                os.fsync(fd)
                 head_len = old_len
         except BaseException:
-            with contextlib.suppress(OSError):
-                if os.fstat(fd).st_size != old_len:
-                    os.ftruncate(fd, old_len)
+            _restore_length(fd, old_len)
             raise
-        _write_at(fd, memoryview(data)[:head_len], 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            _write_at(fd, memoryview(data)[:head_len], 0)
+        except BaseException:
+            # Refused before a single old byte changed: drop the growth so
+            # the file is exactly the original again.
+            with contextlib.suppress(OSError):
+                if os.lseek(fd, 0, os.SEEK_CUR) == 0:
+                    _restore_length(fd, old_len)
+            raise
         os.fsync(fd)
         if new_len < old_len:
             os.ftruncate(fd, new_len)
