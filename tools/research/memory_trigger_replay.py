@@ -19,7 +19,19 @@ working directory (``<dir>/*/*.jsonl``). Each transcript file is one session.
 Facts are scoped like the snapshot: global facts plus the facts of the
 session's project, found from the git remote of the transcript's working
 directory. A session whose project cannot be mapped gets global facts only
-(``--unscoped all`` gives it every fact) and is counted as unscoped.
+(``--unscoped all`` gives it every fact) and is counted as unscoped. The
+remote hash cannot resolve a project whose remote changed after it was
+linked (the project keeps its old ID): such sessions get the wrong scope or
+none, unless ``--project-map`` names the scope of their directory. Facts
+another worker owns (``worker`` set to a different ``store_id``, such as
+its interpreter paths) are left out, as that store's snapshot leaves them.
+
+Each transcript is read like app/core/cli_sessions: lines that are not JSON
+objects are skipped; sidechain, meta (``isMeta``) and compaction summary
+(``isCompactSummary``) records are not turns; and a rewound transcript is
+read along its active ``parentUuid`` chain (through compaction boundaries),
+so abandoned branches are not replayed. --json and --out refuse to write
+over an input or into the transcript directory.
 
 The labelling sample (--sample N --out FILE) holds the fact id, its
 when-line, the trigger kind and terms, and at most 200 characters of the
@@ -43,6 +55,7 @@ import argparse
 import configparser
 import hashlib
 import json
+import os
 import random
 import re
 import statistics
@@ -54,12 +67,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "fluid"))
 
+from fluid.codemode.facts import visible_on  # noqa: E402
 from fluid.codemode.triggers import (  # noqa: E402
     TriggerFact,
     command_text,
+    find_command,
     match_tool,
     match_turn,
     prepare,
+    split_commands,
 )
 
 _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
@@ -114,6 +130,14 @@ def _git_origin_scope(cwd: str, cache: dict[str, str | None]) -> str | None:
     return scope
 
 
+def _mapped_scope(cwd: str, project_map: dict[str, str]) -> str | None:
+    """The scope --project-map gives the longest directory prefix of ``cwd``."""
+    path = Path(cwd)
+    best = max((d for d in project_map if path == Path(d) or Path(d) in path.parents),
+               key=len, default=None)
+    return project_map[best] if best else None
+
+
 def _user_texts(content: object) -> list[str]:
     if isinstance(content, str):
         return [content]
@@ -126,7 +150,8 @@ def _user_texts(content: object) -> list[str]:
         elif block.get("type") == "tool_result":
             inner = block.get("content")
             texts = [inner] if isinstance(inner, str) else [
-                str(b.get("text") or "") for b in inner or [] if isinstance(b, dict)]
+                str(b.get("text") or "") for b in (inner if isinstance(inner, list) else [])
+                if isinstance(b, dict) and b.get("type") == "text"]
             for text in texts:
                 out.extend(_INTERJECTION.findall(text))
     return out
@@ -140,36 +165,82 @@ def clean_turn(text: str) -> str:
     return _AGENT_MARK.sub("", text).strip()
 
 
-def load_session(path: Path) -> Session:
-    session = Session(path)
-    seen_tools: set[str] = set()
+def _records(path: Path) -> list[dict]:
+    """The JSON objects of a transcript; other lines (blank, truncated, a
+    bare null or list) are skipped, and sidechain records left out."""
+    out = []
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            kind = record.get("type")
-            if kind not in ("user", "assistant"):
+            if isinstance(record, dict) and not record.get("isSidechain"):
+                out.append(record)
+    return out
+
+
+def _active_chain(records: list[dict]) -> list[dict]:
+    """The conversation records on the active branch, oldest first.
+
+    Like app/core/cli_sessions._messages: a rewound or forked transcript
+    keeps abandoned siblings, so walk ``parentUuid`` back from the last
+    message through every record. A compaction boundary has no parent but
+    names its ``logicalParentUuid``; following it keeps the turns before
+    the compaction, which the session did run. That record is often not in
+    the file (three boundaries in four, on the corpus measured), and a
+    resumed session can parent its next message on a metadata record the
+    app appended (no parent of its own). From any such non-message record
+    whose parent cannot be found, the walk continues with the record just
+    before it in the file. Without this the walk lost two thirds of the
+    corpus's messages."""
+    conversation = [r for r in records if r.get("type") in ("user", "assistant")
+                    and isinstance(r.get("message"), dict)]
+    if not conversation or not any(r.get("parentUuid") for r in conversation):
+        return conversation
+    by_id = {r["uuid"]: r for r in records if isinstance(r.get("uuid"), str)}
+    position = {id(r): i for i, r in enumerate(records)}
+    chain: list[dict] = []
+    seen: set[int] = set()
+    entry: dict | None = conversation[-1]
+    while entry is not None and id(entry) not in seen:
+        chain.append(entry)
+        seen.add(id(entry))
+        parent = entry.get("parentUuid") or entry.get("logicalParentUuid")
+        found = by_id.get(parent) if isinstance(parent, str) else None
+        if found is None and entry.get("type") not in ("user", "assistant") and position[id(entry)]:
+            found = records[position[id(entry)] - 1]
+        entry = found
+    return [r for r in reversed(chain) if r.get("type") in ("user", "assistant")
+            and isinstance(r.get("message"), dict)]
+
+
+def load_session(path: Path) -> Session:
+    session = Session(path)
+    seen_tools: set[str] = set()
+    for record in _active_chain(_records(path)):
+        if not session.cwd and isinstance(record.get("cwd"), str):
+            session.cwd = record["cwd"]
+        if record.get("isMeta") or record.get("isCompactSummary"):
+            continue  # harness-injected text, not a turn
+        message = record["message"]
+        content = message.get("content")
+        if record["type"] == "user":
+            for text in _user_texts(content):
+                text = clean_turn(text)
+                if text:
+                    session.events.append(("turn", text))
+            continue
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
-            if not session.cwd and record.get("cwd"):
-                session.cwd = str(record["cwd"])
-            message = record.get("message")
-            if not isinstance(message, dict):
+            tool_id = str(block.get("id") or "")
+            if tool_id and tool_id in seen_tools:
                 continue
-            if kind == "user":
-                for text in _user_texts(message.get("content")):
-                    text = clean_turn(text)
-                    if text:
-                        session.events.append(("turn", text))
-            else:
-                for block in message.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        tool_id = str(block.get("id") or "")
-                        if tool_id and tool_id in seen_tools:
-                            continue
-                        seen_tools.add(tool_id)
-                        session.events.append(("tool", (str(block.get("name") or ""), block.get("input") or {})))
+            seen_tools.add(tool_id)
+            tool_input = block.get("input")
+            session.events.append(("tool", (str(block.get("name") or ""),
+                                            tool_input if isinstance(tool_input, dict) else {})))
     return session
 
 
@@ -180,20 +251,18 @@ def _snippet(event: tuple[str, object], terms: tuple[str, ...]) -> str:
     else:
         name, tool_input = event[1]  # type: ignore[misc]
         prefix = name.rsplit("__", 1)[-1] + ": "
-        tool_input = tool_input or {}
-        # The text the matcher saw: a command without its heredocs and long
-        # quoted strings, else every string field.
+        commands = split_commands(tool_input)
+        hit = next((found for term in terms if (found := find_command(term, commands))), None)
+        if hit is not None:  # the simple command the trigger matched
+            return (prefix + hit.text)[:SNIPPET_CHARS]
+        # The text the matcher saw: the commands without the text they
+        # carry, else every string field.
         text = command_text(tool_input) or " ".join(
             v for v in tool_input.values() if isinstance(v, str))
     text = " ".join(text.split())
     folded = text.casefold()
     positions = []
     for term in terms:
-        if term.startswith("re:"):
-            found = re.search(term[3:], folded)
-            if found:
-                positions.append(found.start())
-            continue
         needle = term.strip("*/").split("/")[0] if "/" in term else term.split()[0]
         if needle and needle in folded:
             positions.append(folded.find(needle))
@@ -217,9 +286,13 @@ def _word_source(event: tuple[str, object]) -> str:
 def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "global",
            per_event: int = 3, cap_chars: int = 1500, sample: int = 0, seed: int = 7,
            sample_kinds: frozenset[str] = frozenset(),
-           word_turn_chars: int = 0):
+           word_turn_chars: int = 0, project_map: dict[str, str] | None = None):
     document = json.loads(facts_path.read_text(encoding="utf-8"))
-    entries = [e for e in document.get("entries", []) if isinstance(e, dict)]
+    store_id = document.get("store_id") if isinstance(document, dict) else None
+    # Facts this worker sees: another worker's environment facts (its
+    # interpreter paths, its browser host) are shown only there.
+    entries = [e for e in (document.get("entries") if isinstance(document, dict) else None) or []
+               if isinstance(e, dict) and visible_on(e, store_id)]
     scope_of = {str(e.get("id")): str(e.get("scope") or "global") for e in entries}
     candidates = prepare(entries)
     by_id = {f.id: f for f in candidates}
@@ -242,7 +315,8 @@ def replay(facts_path: Path, transcripts: Path, days: int, *, unscoped: str = "g
         if not session.events:
             empty_sessions += 1
             continue
-        project = _git_origin_scope(session.cwd, cache) if session.cwd else None
+        project = (_mapped_scope(session.cwd, project_map or {})
+                   or _git_origin_scope(session.cwd, cache)) if session.cwd else None
         if project is None:
             unscoped_sessions += 1
         allowed: list[TriggerFact] = [
@@ -371,6 +445,23 @@ def _table(result: dict) -> str:
     return "\n".join(f"{name.ljust(width)}  {value}" for name, value in rows)
 
 
+def _overwrites_input(output: Path, inputs: list[Path], transcripts: Path) -> bool:
+    """Whether writing ``output`` would replace an input file (the same file
+    through any link) or land inside the transcript directory."""
+    target = output.expanduser().resolve()
+    for source in inputs:
+        source = source.expanduser()
+        if target == source.resolve():
+            return True
+        try:
+            if target.exists() and os.path.samefile(target, source):
+                return True
+        except OSError:
+            pass
+    root = transcripts.resolve()
+    return target == root or root in target.parents
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--facts", type=Path, required=True, help="memories.json (read only)")
@@ -389,13 +480,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--word-turn-chars", type=int, default=0,
                         help="ignore word matches on user turns longer than this (0: no limit)")
+    parser.add_argument("--project-map", type=Path,
+                        help='JSON {"<working directory>": "project:pv2-..."} for projects whose '
+                             "remote changed (read only)")
     args = parser.parse_args(argv)
     if args.sample and not args.out:
         parser.error("--sample needs --out")
+    args.transcripts = args.transcripts.expanduser()
+    inputs = [p for p in (args.facts, args.project_map) if p]
+    for output in (args.json, args.out):
+        if output and _overwrites_input(output, inputs, args.transcripts):
+            parser.error(f"refusing to write {output}: it is an input")
+    project_map = None
+    if args.project_map:
+        project_map = json.loads(args.project_map.read_text(encoding="utf-8"))
+        if not isinstance(project_map, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in project_map.items()):
+            parser.error("--project-map must be a JSON object of directory: scope strings")
     if args.word_threshold:
         import fluid.codemode.triggers as triggers
         triggers.WORD_THRESHOLD = args.word_threshold
-    result, picked = replay(args.facts, args.transcripts.expanduser(), args.days,
+    result, picked = replay(args.facts, args.transcripts, args.days, project_map=project_map,
                             unscoped=args.unscoped, per_event=args.per_event,
                             cap_chars=args.cap_chars, sample=args.sample, seed=args.seed,
                             sample_kinds=frozenset(filter(None, args.sample_kinds.split(","))),

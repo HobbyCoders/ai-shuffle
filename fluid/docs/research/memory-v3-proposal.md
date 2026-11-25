@@ -166,7 +166,7 @@ Net: about 5k lines removed and about 1.5–2k added. Fewer moving parts means f
 
 ## 9. Phase 0 results: offline trigger replay (2026-11-25)
 
-Triggers were derived from the live when-lines with `fluid/codemode/triggers.py` (no model call) and replayed over the Claude Code CLI transcripts of the owner's main worker for the last 30 days with `tools/research/memory_trigger_replay.py`. Nothing user-visible changed. Facts are scoped like the snapshot: global facts plus the session's project, mapped from the git remote of the transcript's working directory; 269 sessions with no mappable project got global facts only.
+Triggers were derived from the live when-lines with `fluid/codemode/triggers.py` (no model call) and replayed over the Claude Code CLI transcripts of the owner's main worker for the last 30 days with `tools/research/memory_trigger_replay.py`. Nothing user-visible changed. Facts are scoped like the snapshot: global facts plus the session's project, mapped from the git remote of the transcript's working directory; 269 sessions with no mappable project got global facts only, and facts another worker owns are left out. Transcripts are read like the app's CLI session reader: along the active `parentUuid` chain (so rewound branches are not replayed), without sidechain, meta or compaction summary records. A project whose remote changed after it was linked cannot be mapped from the remote; `--project-map` names such directories.
 
 ### Replay
 
@@ -185,15 +185,16 @@ The library carries only generic command rules (git, gh, curl, pytest, psql, doc
 
 | Measure | Value |
 |---|---|
-| Sessions replayed | 2,063 (5,843 user turns, 196,983 tool calls) |
-| Candidate facts (live, not ALWAYS, identity, behaviour rule or pair answer) | 89 of 102 live; 77 in scope of at least one replayed session |
+| Sessions replayed | 2,063 (5,662 user turns, 197,404 tool calls) |
+| Candidate facts (live, not ALWAYS, identity, behaviour rule, pair answer or conflicted) | 89 of 102 live; 77 in scope of at least one replayed session |
 | Facts delivered at least once | 44 (49% of candidates, 57% of those in scope) |
 | Coverage by trigger shape, in scope | command 12 of 12, path 1 of 1, tool 1 of 1, words only 30 of 63 |
 | Deliveries per session, mean / p50 / p90 | 2.6 / 0 / 8 |
-| Characters per session if each delivery carried full text (1,500 cap per event), mean / p90 | 1,100 / 3,196 |
-| Deliveries by kind | command 4,826 (91%), words 324, tool 113, path 24 |
-| Word deliveries by source | delegation brief 201, long user turn (usually a parent's brief opening a subagent) 113, short user turn 10 |
-| Command facts matched before their first matching command | 14 of 4,948 session-fact pairs (0.3%) |
+| Characters per session if each delivery carried full text (1,500 cap per event), mean / p90 | 1,145 / 3,254 |
+| Deliveries by kind | command 4,972 (91%), words 323, tool 114, path 26 |
+| Word deliveries by source | delegation brief 203, long user turn (usually a parent's brief opening a subagent) 110, short user turn 10 |
+| Events with more than 3 fresh matches (the per-event cap) | 214 |
+| Command facts matched before their first matching command | 10 of 5,082 session-fact pairs (0.2%) |
 
 The five most-delivered facts are all commit and push rules. Several of them fire on the same `git commit` or `git push`, which is what the per-event cap is for.
 
@@ -201,15 +202,16 @@ The five most-delivered facts are all commit and push rules. Several of them fir
 
 Deliveries were labelled by hand: relevant if a careful agent would want that fact at that moment.
 
-| Sample (final rules unless noted) | Relevant |
+| Sample | Relevant |
 |---|---|
-| 60 drawn from all deliveries | 59 (98%) |
-| 40 command deliveries | 39 (98%) |
-| 60 word, tool and path deliveries | 49 (82%) |
-| 60 word deliveries, same word rules, earlier command rules | 48 (80%) |
-| 60 word deliveries with a word threshold of 2 (rejected) | 15 (25%) |
+| 60 drawn from all deliveries, final rules | 58 (97%): command 52 of 52, tool 2 of 2, words 4 of 6 |
+| Earlier command rules: 60 drawn from all deliveries | 59 (98%) |
+| Earlier command rules: 40 command deliveries | 39 (98%) |
+| Earlier command rules: 60 word, tool and path deliveries | 49 (82%) |
+| Earlier command rules: 60 word deliveries (same word rules as final) | 48 (80%) |
+| Earlier rules: 60 word deliveries with a word threshold of 2 (rejected) | 15 (25%) |
 
-The first and third samples were labelled before program names were limited to command position. That change only removes `curl`, `pytest` and `psql` matches in which the program is an argument, and the 40-command sample was drawn after it. Delivery-weighted precision is therefore about 97%. Word triggers on their own sit at the 80% gate.
+The final rules split a command into simple commands and match the built-in rules only against the program that runs, so they can only remove matches the earlier rules made inside arguments or quoted text, and add matches the earlier heredoc stripping hid. The word rules did not change, so the word samples still stand: word triggers on their own sit at the 80% gate. The two misses in the final sample are both word deliveries on delegation briefs (a review-only brief about a journeys PR, and a brief that touches both Claude legs).
 
 ### What it took
 
@@ -222,13 +224,15 @@ The first and third samples were labelled before program names were limited to c
 | Words must sit within 12 content words and cover more than half of one alternative of the when-line; heredoc bodies and long quoted strings are not searched; paths fire only on edits | 68% | 3.9 (word precision 25% at threshold 2) |
 | Word threshold 3 (a phrase counts 2, a strong word 1) | 52% | 3.0 |
 | Multi-word proper names count once; mutating-curl and nightly rules need the method or script; program names only at command position | 49% | 2.7 |
+| Repository-specific command rules removed (their facts fall back to words) | 49% | 2.6 |
+| Review fixes: one linear shell scan splits simple commands (exact heredoc delimiters, quoted messages and comments skipped, input capped at 16 KB); built-in rules match only the program that runs; triggers from prose are literals; transcripts read along the active chain | 49% | 2.6 |
 
 Long briefs were the main source of noise: a brief that opens a subagent mentions most project topics once, so word matching has to be local (a window) and has to cover the when-line, not just touch it.
 
 ### What phase 0 says for phase 1
 
-- **Enable command, path and tool triggers.** They are 94% of deliveries, about 98% precise, and they reach every fact that has one.
-- **Delivery has to land before the tool runs.** For 99.7% of session-fact pairs the matching command is the first signal, so delivery on the tool result arrives one call late, after the commit or push has already happened. User-turn matching does not close that gap. The delegated leg needs a pre-tool injection point; without one, command-triggered facts arrive late and phase 1 should say so rather than count them as delivered in time.
+- **Enable command, path and tool triggers.** They are 94% of deliveries, 54 of 54 relevant in the final sample (and 98% under the earlier rules), and they reach every fact that has one.
+- **Delivery has to land before the tool runs.** For 99.8% of session-fact pairs the matching command is the first signal, so delivery on the tool result arrives one call late, after the commit or push has already happened. User-turn matching does not close that gap. The delegated leg needs a pre-tool injection point; without one, command-triggered facts arrive late and phase 1 should say so rather than count them as delivered in time.
 - **Enable word triggers with the final rules (window 12, threshold 3, clause coverage), on user turns and delegation briefs.** They are 6% of deliveries and 80–82% precise. Log their deliveries so the thresholds can be retuned on real data.
-- **Coverage is the gap.** Words-only facts reach 46% (28 of 61), so overall coverage is 57% of in-scope facts, short of the 70% target in section 6. Most undelivered facts describe a judgement situation ("when deciding whether …") with no command and no distinctive words. Phase 1 should have Remember ask the saving agent for explicit `command` or `paths` triggers, and keep the index and Recall for facts without one.
-- **Caps:** at most 3 facts and about 1,500 characters per event, once per fact per session. With these rules the p90 session would carry about 3.5k characters of delivered memory, less than today's 9k index.
+- **Coverage is the gap.** Words-only facts reach 48% (30 of 63), so overall coverage is 57% of in-scope facts, short of the 70% target in section 6. Most undelivered facts describe a judgement situation ("when deciding whether …") with no command and no distinctive words. Phase 1 should have Remember ask the saving agent for explicit `command` or `paths` triggers, and keep the index and Recall for facts without one.
+- **Caps:** at most 3 facts and about 1,500 characters per event, once per fact per session. With these rules the p90 session would carry about 3.3k characters of delivered memory, less than today's 9k index.

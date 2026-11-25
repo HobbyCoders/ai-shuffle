@@ -13,10 +13,12 @@ matches them against a user turn (or a delegation brief) and a tool call:
 - ``tools``: tool names (MCP prefixes stripped: ``mcp__x__Task`` is
   ``Task``). A tool trigger needs a word match in the tool's input too,
   unless the fact has no words.
-- ``command``: whole-word substrings of a tool's command text (``gh pr
-  create``), or anchored patterns written ``re:<regex>`` (``git push -u``
-  for a first push). Heredoc bodies and long quoted strings are not
-  searched: a commit message that mentions ``git push`` is not a push.
+- ``command``: matched against the simple commands a call runs
+  (split_commands). Built-in patterns (``re:...`` from _COMMAND_RULES, such
+  as a first push) and ``run:<program>`` match only the program that runs;
+  everything derived from prose is a literal, matched as whole words.
+  Heredoc bodies, quoted messages and comments are not searched: a commit
+  message that mentions ``git push`` is not a push.
 - ``paths``: globs matched against file-tool paths; when the when-line is
   about changing files, only editing tools match.
 
@@ -94,44 +96,49 @@ DELEGATION_TOOLS = frozenset({"Task", "Agent", "StartSession", "SendMessage", "M
 # the situation it names; briefs open with exactly such lists.
 _NEGATION = re.compile(r"\b(?:not|never|no|nor|don't|dont|doesn't|without|avoid)\b", re.I)
 
-# Where a program runs: the start of a command (after a separator and any
-# VAR=value prefixes), after a directory, or after a launcher word. Not as
-# an argument ("grep pytest", "cat curl.log").
-_RUNS = (r"(?:(?:^|[;&|(]\s*)(?:\w+=\S*\s+)*|/"
-         r"|(?<!\S)(?:-m|run|exec|sudo|time|xargs)\s+)")
-
 # Situation words in a when-line that imply a command the agent will run.
-# (when-line pattern, commands). Checked on the casefolded line. A command
-# is a whole-word substring of the call's command text, or, written
-# "re:<pattern>", a regular expression searched in it.
+# (when-line pattern, commands). Checked on the casefolded line. Each
+# command is a built-in pattern, written "re:<regex>", matched at the start
+# of one simple command's head (see split_commands): the program that runs,
+# after VAR=value prefixes, launchers (sudo, env, python -m, uv run ...) and
+# git's global options. So "grep pytest", a commit message that mentions
+# git push, and a heredoc body never match. Only the patterns listed here
+# are ever compiled as regular expressions (_BUILTIN_PATTERNS); a command
+# trigger derived from prose (a backticked command, an identifier) is a
+# literal, whatever it looks like.
 _COMMAND_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
     (re.compile(pattern), commands) for pattern, commands in (
         (r"\b(?:open|opening|opens|create|creating|file|filing)\b[^,;]*\b(?:prs?|pull requests?)\b",
-         ("gh pr create",)),
+         (r"re:^gh pr create\b",)),
         (r"\bmerg(?:e|es|ed|ing)\b[^,;]*\b(?:prs?|pull requests?)\b"
-         r"|\b(?:prs?|pull requests?)\b[^,;]*\bmerg(?:e|es|ed|ing)\b", ("gh pr merge",)),
+         r"|\b(?:prs?|pull requests?)\b[^,;]*\bmerg(?:e|es|ed|ing)\b", (r"re:^gh pr merge\b",)),
         # A first push sets the upstream; later pushes are another situation.
-        (r"\bfirst push\b", (r"re:\bgit push\b[^|;&]*(?:\s-u\b|--set-upstream)",)),
-        (r"(?<!first )\bpush(?:es|ed|ing)?\b", (r"re:\bgit push\b(?![^|;&]*\s(?:--delete|-d)\b)",)),
+        (r"\bfirst push\b", (r"re:^git push\b.*\s(?:-u|--set-upstream)(?:\s|$)",)),
+        (r"(?<!first )\bpush(?:es|ed|ing)?\b", (r"re:^git push\b(?!.*\s(?:--delete|-d)(?:\s|$))",)),
         (r"\bcommit (?:messages?|trailers?)\b|\bpr commits?\b|\bcommitting\b|\bdco\b|\btrailers?\b",
-         ("git commit",)),
+         (r"re:^git commit\b",)),
         (r"\b(?:creat\w*|cut\w*|nam\w*)\b[^,;]*\bbranch(?:es)?\b",
-         ("git checkout -b", "git switch -c")),
-        # A bare program name counts only where it runs (after a separator or
-        # a path), not inside a grep pattern or a file name. A mutating call
-        # is the situation, not a read: it needs a method or body flag.
+         (r"re:^git (?:checkout -b|switch -c)\b",)),
+        # A mutating call is the situation, not a read: it needs a method or
+        # body flag (the head is casefolded, so -X is -x).
         (r"\bmutat\w*\b[^,;]*\bcurl\b|\bcurl\b[^,;]*\bmutat\w*",
-         ("re:" + _RUNS + r"curl\s[^|;&]*(?:-x\s*(?:post|put|patch|delete)\b|--request\s"
-          r"|--data|--json\s|\s-d\s*['\"{@$])",)),
-        (r"^(?!.*\bmutat).*\bcurl\b", ("re:" + _RUNS + r"curl\s",)),
-        (r"\bpytest\b|\bpython tests?\b", ("re:" + _RUNS + r"pytest(?:\s|$)",)),
-        (r"\bdelet\w*\b[^,;]*\bworktrees?\b|\bworktrees?\b[^,;]*\bdelet\w*", ("git worktree remove",)),
+         (r"re:^curl\s.*(?:\s-x\s*(?:post|put|patch|delete)\b|\s--request\s|\s--data|\s--json\s"
+          r"|\s-d\b)",)),
+        (r"^(?!.*\bmutat).*\bcurl\b", (r"re:^curl(?:\s|$)",)),
+        (r"\bpytest\b|\bpython tests?\b", (r"re:^pytest(?:\s|$)",)),
+        (r"\bdelet\w*\b[^,;]*\bworktrees?\b|\bworktrees?\b[^,;]*\bdelet\w*",
+         (r"re:^git worktree remove\b",)),
         (r"\b(?:job|actions?|ci) logs?\b|\blogs? (?:of|from) (?:a |the )?(?:ci|github actions)\b",
-         (r"re:\bgh run view\b[^|;&]*--log", r"re:\bgh api\b[^|;&]*/logs\b")),
-        (r"\bissue bod(?:y|ies)\b|\bview\w* (?:an |the )?\w* ?issue\b", ("gh issue view",)),
-        (r"\bdocker image\b", ("docker build",)),
-        (r"\bpostgres(?:ql)?\b", ("re:" + _RUNS + r"psql\s+[-\"'$]",)),
+         (r"re:^gh run view\b.*\s--log", r"re:^gh api\b.*/logs\b")),
+        (r"\bissue bod(?:y|ies)\b|\bview\w* (?:an |the )?\w* ?issue\b", (r"re:^gh issue view\b",)),
+        (r"\bdocker image\b", (r"re:^docker (?:buildx )?build\b",)),
+        (r"\bpostgres(?:ql)?\b", (r"re:^psql(?:\s|$)",)),
     ))
+_BUILTIN_PATTERNS: dict[str, re.Pattern[str]] = {
+    command: re.compile(command[3:]) for _, commands in _COMMAND_RULES for command in commands}
+# A program an env.<program> fact describes: "run:<program>" matches a
+# command whose head starts with that program (compared as text).
+RUN = "run:"
 # A when-line that names where it applies (another checkout or fork, a
 # platform or machine) keeps only word triggers, and they need that name in
 # the turn: a command, path or common word cannot tell which checkout or
@@ -277,7 +284,11 @@ def derive_triggers(when: str | None, text: str | None = None, key: str | None =
     paths: list[str] = []
     tools: list[str] = []
     for quoted in _BACKTICK.findall(body):
-        (paths if "/" in quoted and " " not in quoted else command).append(quoted.strip())
+        quoted = quoted.strip()
+        if "/" in quoted and " " not in quoted:
+            paths.append(_glob(quoted.removeprefix("./")))
+        else:
+            command.append(quoted)  # a literal, never a pattern
     for ident in _IDENTIFIER.findall(folded):
         command.append(ident)
     # A question ("the owner asks why ...") or a negated situation ("has not
@@ -297,8 +308,7 @@ def derive_triggers(when: str | None, text: str | None = None, key: str | None =
         if token in KNOWN_TOOLS:
             tools.append(token)
     if key and key.startswith("env."):
-        program = key.removeprefix("env.").replace("_", " ")
-        command.append("re:" + _RUNS + re.escape(program) + r"(?:\s|$)")
+        command.append(RUN + key.removeprefix("env.").replace("_", " "))
     words: list[str] = []
     place = _PLACE.search(body)
     if place:
@@ -331,7 +341,7 @@ def derive_triggers(when: str | None, text: str | None = None, key: str | None =
     return Triggers(
         words=tuple(dict.fromkeys(words)),
         tools=tuple(dict.fromkeys(tools)),
-        command=tuple(dict.fromkeys(c if c.startswith("re:") else c.casefold() for c in command)),
+        command=tuple(dict.fromkeys(" ".join(c.casefold().split()) for c in command)),
         paths=tuple(dict.fromkeys(paths)),
         clauses=tuple(clauses),
         names=tuple(dict.fromkeys(names)),
@@ -340,10 +350,13 @@ def derive_triggers(when: str | None, text: str | None = None, key: str | None =
 
 
 def is_candidate(entry: Mapping[str, Any]) -> bool:
-    """A fact delivery can add something to: live, current, and not already
-    in every snapshot (ALWAYS, identity, behaviour rules) or Recall-only."""
+    """A fact delivery can add something to: live, current, settled, and not
+    already in every snapshot (ALWAYS, identity, behaviour rules) or
+    Recall-only. A conflicted fact (an unresolved sync conflict) stays out,
+    as it does in the snapshot."""
     key = str(entry.get("key") or "")
-    return not (always_applies(entry) or is_superseded(entry) or key in IDENTITY_KEYS
+    return not (always_applies(entry) or is_superseded(entry) or entry.get("conflicted")
+                or key in IDENTITY_KEYS
                 or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX))
 
 
@@ -459,20 +472,171 @@ def match_turn(text: str, facts: Iterable[TriggerFact]) -> list[Match]:
     return sorted(matches, key=lambda m: -m.score)
 
 
-# Text a command carries rather than runs: a heredoc body, a long quoted
-# string (a commit message, an inline script, a brief written to a file).
-_HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?[^\n]*\n.*?(?:\n\1\b|\Z)", re.S)
-_LONG_QUOTED = re.compile(r"'[^']{120,}'|\"(?:[^\"\\]|\\.){120,}\"", re.S)
+# Commands are read from at most this much of a call's input: phase 1 runs
+# this on every tool call, so the cost stays bounded and linear.
+MAX_COMMAND_CHARS = 16_384
+
+# One shell token per match, each pattern consuming what it matches with no
+# backtracking across tokens: one pass over the text. An unterminated quote
+# runs to the end of the input.
+_TOKEN = re.compile(r"""
+    (?P<space>[^\S\n]+)
+  | (?P<cont>\\\n)
+  | (?P<nl>\n)
+  | (?P<heredoc><<(?!<)(?P<dash>-)?[ \t]*(?P<delim>(?:'[^'\n]*'|"[^"\n]*"|\\?[^\s;&|<>()'"]+)+))
+  | (?P<op>&&|\|\||<<<|[;&|()])
+  | (?P<sq>'(?P<sqbody>[^']*)'?)
+  | (?P<dq>"(?P<dqbody>(?:[^"\\]|\\.)*)"?)
+  | (?P<esc>\\.)
+  | (?P<word>[^\s'"\\;&|()]+|\\)
+""", re.X | re.S)
+_QUOTE_CHARS = re.compile(r"[\\'\"]")
+_ASSIGN = re.compile(r"[A-Za-z_]\w*=")
+_PYTHON = re.compile(r"python[\d.]*")
+# Words that run the next word as the program (their own flags skipped).
+_LAUNCHERS = frozenset("sudo doas env time nohup exec command builtin xargs nice stdbuf".split())
+_RUNNERS = frozenset("uv poetry pipenv pdm hatch".split())  # "<runner> run <program>"
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+
+@dataclass(frozen=True)
+class Command:
+    """One simple command of a call: its words (``text``) and its ``head``,
+    the casefolded words from the program that runs (``python -m pytest -q``
+    has the head ``pytest -q``). A quoted word with whitespace in it (a
+    message, an inline script) reads as ``""``: it is carried, not run."""
+    text: str
+    head: str
+
+
+def _quoted(content: str) -> str:
+    return '""' if any(c.isspace() for c in content) else content
+
+
+def _skip_heredoc(text: str, pos: int, delimiter: str, strip_tabs: bool) -> int:
+    """Position after a heredoc body that starts at ``pos``: the line that
+    is exactly ``delimiter`` (after leading tabs for ``<<-``) ends it."""
+    size = len(text)
+    while pos < size:
+        newline = text.find("\n", pos)
+        end = size if newline < 0 else newline
+        line = text[pos:end].rstrip("\r")
+        pos = end + 1
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            break
+    return min(pos, size)
+
+
+def _head(words: list[str]) -> str:
+    i, size = 0, len(words)
+    while i < size:
+        program = words[i].rsplit("/", 1)[-1]
+        if _ASSIGN.match(words[i]):
+            i += 1
+        elif program in _LAUNCHERS or program == "timeout":
+            i += 1
+            while i < size and words[i].startswith("-"):
+                i += 1
+            i += program == "timeout"  # its duration
+        elif _PYTHON.fullmatch(program) and i + 2 < size and words[i + 1] == "-m":
+            i += 2
+            break
+        elif program in _RUNNERS and i + 2 < size and words[i + 1] == "run":
+            i += 2
+        elif program in ("npx", "bunx") and i + 1 < size:
+            i += 1
+        else:
+            break
+    rest = words[i:]
+    if not rest:
+        return ""
+    program = rest[0].rsplit("/", 1)[-1]
+    j = 1
+    if program == "git":  # global options sit before the subcommand
+        while j < len(rest) and rest[j].startswith("-"):
+            j += 2 if rest[j] in _GIT_VALUE_OPTIONS else 1
+    return " ".join([program, *rest[j:]]).casefold()
+
+
+def split_commands(tool_input: Mapping[str, Any]) -> list[Command]:
+    """The simple commands a call runs, in one linear pass over at most
+    MAX_COMMAND_CHARS of its command fields. Separators (``;``, ``&&``,
+    ``|``, a parenthesis, a line break) end a command; a backslash before a
+    line break continues one; heredoc bodies (``<<EOF``, ``<<-EOF``, quoted
+    delimiters, ended only by the exact delimiter line) and comments are
+    skipped."""
+    parts = [tool_input[k] for k in ("command", "cmd", "script", "code") if isinstance(tool_input.get(k), str)]
+    text = "\n".join(parts)[:MAX_COMMAND_CHARS]
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word: list[str] = []
+    heredocs: list[tuple[str, bool]] = []
+    pos, size = 0, len(text)
+    while pos < size:
+        match = _TOKEN.match(text, pos)
+        if match is None:  # not reachable: some alternative matches any character
+            pos += 1
+            continue
+        kind, value, pos = match.lastgroup, match.group(), match.end()
+        if kind == "word":
+            if value.startswith("#") and not word:  # a comment, to the end of the line
+                newline = text.find("\n", pos)
+                pos = size if newline < 0 else newline
+            elif value != "\\":
+                word.append(value)
+            continue
+        if kind == "esc":
+            word.append(value[1])
+            continue
+        if kind == "sq":
+            word.append(_quoted(match.group("sqbody")))
+            continue
+        if kind == "dq":
+            word.append(_quoted(match.group("dqbody").replace('\\"', '"')))
+            continue
+        if word:
+            words.append("".join(word))
+            word = []
+        if kind in ("space", "cont"):
+            continue
+        if kind == "heredoc":
+            heredocs.append((_QUOTE_CHARS.sub("", match.group("delim")), bool(match.group("dash"))))
+            continue
+        if kind == "op" and value == "<<<":
+            continue  # a here-string: the next word is its text, an argument
+        if words:
+            commands.append(words)
+            words = []
+        if kind == "nl":
+            for delimiter, strip_tabs in heredocs:
+                pos = _skip_heredoc(text, pos, delimiter, strip_tabs)
+            heredocs = []
+    if word:
+        words.append("".join(word))
+    if words:
+        commands.append(words)
+    return [Command(" ".join(ws).casefold(), _head(ws)) for ws in commands]
 
 
 def command_text(tool_input: Mapping[str, Any]) -> str:
-    """The casefolded command a call runs, without the text it carries."""
-    parts = [str(tool_input.get(k)) for k in ("command", "cmd", "script", "code")
-             if isinstance(tool_input.get(k), str)]
-    text = _LONG_QUOTED.sub(" ", _HEREDOC.sub(" ", "\n".join(parts)))
-    # A line break separates commands; a backslash before it continues one.
-    text = text.replace("\\\n", " ").replace("\n", " ; ")
-    return " ".join(text.casefold().split())
+    """The casefolded commands a call runs, ``" ; "``-joined, without the
+    text they carry (heredoc bodies, quoted messages, comments)."""
+    return " ; ".join(c.text for c in split_commands(tool_input))
+
+
+def find_command(needle: str, commands: Iterable[Command]) -> Command | None:
+    """The first command a command trigger matches. A built-in pattern
+    (_COMMAND_RULES) matches the start of a head; ``run:<program>`` a head
+    that starts with that program; anything else is a literal, matched as
+    whole words anywhere in a command's text."""
+    builtin = _BUILTIN_PATTERNS.get(needle)
+    if builtin is not None:
+        return next((c for c in commands if builtin.match(c.head)), None)
+    if needle.startswith(RUN):
+        program = needle[len(RUN):]
+        return next((c for c in commands if c.head == program or c.head.startswith(program + " ")), None)
+    pattern = _literal_pattern(needle)
+    return next((c for c in commands if pattern.search(c.text)), None)
 
 
 def _paths(tool_input: Mapping[str, Any]) -> list[str]:
@@ -485,9 +649,7 @@ def _paths(tool_input: Mapping[str, Any]) -> list[str]:
 
 
 @lru_cache(maxsize=1024)
-def _edge_pattern(needle: str) -> re.Pattern[str]:
-    if needle.startswith("re:"):
-        return re.compile(needle[3:])
+def _literal_pattern(needle: str) -> re.Pattern[str]:
     left = r"(?<![\w-])" if needle[:1].isalnum() or needle[:1] == "_" else ""
     right = r"(?![\w-])" if needle[-1:].isalnum() or needle[-1:] == "_" else ""
     return re.compile(left + re.escape(needle) + right)
@@ -521,14 +683,14 @@ def match_tool(name: str, tool_input: Mapping[str, Any] | None,
     tool call, best first. ``tool_input`` is the call's argument mapping."""
     tool = normalize_tool(name)
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
-    command = command_text(tool_input)
+    commands = split_commands(tool_input)
     paths = _paths(tool_input) if tool in FILE_TOOLS else []
     brief = _Text(_input_text(tool_input)) if tool in DELEGATION_TOOLS else None
     input_text: _Text | None = None
     matches = []
     for fact in facts:
         t = fact.triggers
-        hit = next((c for c in t.command if command and _edge_pattern(c).search(command)), None)
+        hit = next((c for c in t.command if commands and find_command(c, commands)), None)
         if hit:
             matches.append(Match(fact.id, "command", 3, (hit,)))
             continue

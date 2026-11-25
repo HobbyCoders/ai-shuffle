@@ -4,14 +4,18 @@ Every fixture is invented. The matchers are precision first: a fact must not
 fire on one shared topic word, a negated instruction, text a command only
 carries, or a place the session is not in.
 """
+import time
+
 from fluid.codemode.triggers import (
     TriggerFact,
+    command_text,
     derive_triggers,
     is_candidate,
     match_tool,
     match_turn,
     normalize_tool,
     prepare,
+    split_commands,
 )
 
 
@@ -27,7 +31,7 @@ def fired(matches):
 
 def test_open_pr_when_line_derives_a_command_and_words():
     t = derive_triggers("When opening a pull request for the example service")
-    assert "gh pr create" in t.command
+    assert r"re:^gh pr create\b" in t.command
     assert "exampl servic" in t.words
     assert not t.tools and not t.paths
 
@@ -43,6 +47,13 @@ def test_known_tool_and_paths_are_recognised():
     assert t.tools == ("Task",)
     assert t.paths == ("**/docs/guides/**",)
     assert t.edit_paths
+
+
+def test_backticked_mixed_case_path_matches_absolute_paths():
+    f = [fact("When editing `Docs/Guide.md` or `./Tools/build.sh`")]
+    assert fired(match_tool("Edit", {"file_path": "/abs/repo/Docs/Guide.md"}, f)) == [("f1", "path")]
+    assert fired(match_tool("Write", {"file_path": "/abs/repo/Tools/build.sh"}, f)) == [("f1", "path")]
+    assert match_tool("Edit", {"file_path": "/abs/repo/Docs/Other.md"}, f) == []
 
 
 def test_prose_slash_words_are_not_paths():
@@ -79,7 +90,7 @@ def test_normalize_tool_strips_mcp_prefixes():
 
 # --- candidates --------------------------------------------------------------
 
-def test_always_identity_rules_superseded_and_pair_answers_are_not_candidates():
+def test_always_identity_rules_superseded_conflicted_and_pair_answers_are_not_candidates():
     base = {"when": "When exporting widgets", "text": "Use the gizmo flag."}
     entries = [
         dict(base, id="keep"),
@@ -88,6 +99,7 @@ def test_always_identity_rules_superseded_and_pair_answers_are_not_candidates():
         dict(base, id="rule", key="behavior.all.example"),
         dict(base, id="pair", key="memory.coexist.v2.a.b"),
         dict(base, id="old", superseded_by="keep"),
+        dict(base, id="disputed", conflicted=True),
     ]
     assert [e["id"] for e in entries if is_candidate(e)] == ["keep"]
     assert [f.id for f in prepare(entries)] == ["keep"]
@@ -154,6 +166,54 @@ def test_text_a_command_carries_is_not_searched():
     assert match_tool("Bash", {"command": heredoc}, every) == []
     message = "git commit -m '" + "Explain why git push was skipped here. " * 5 + "'"
     assert match_tool("Bash", {"command": message}, every) == []
+
+
+def test_heredoc_bodies_end_only_at_the_exact_delimiter_line():
+    every = [fact("Before every push")]
+    empty = "cat > notes.md <<EOF\nEOF\ngit push origin topic"
+    assert fired(match_tool("Bash", {"command": empty}, every)) == [("f1", "command")]
+    leaky = "cat > notes.md <<EOF\nEOF is not the delimiter here\ngit push origin topic\nEOF\nwc -l notes.md"
+    assert match_tool("Bash", {"command": leaky}, every) == []
+    tabbed = "cat <<-'END' > notes.md\n\tgit push origin topic\n\tEND\ngit push origin topic"
+    assert command_text({"command": tabbed}) == "cat > notes.md ; git push origin topic"
+    quoted = 'cat <<"EOF" > a.md && echo done\ngit push here\nEOF'
+    assert command_text({"command": quoted}) == "cat > a.md ; echo done"
+
+
+def test_built_in_rules_match_the_program_not_its_arguments():
+    every = [fact("Before every push")]
+    for carried in ('git commit -m "then git push"', "echo git push", "grep -rn 'git push' docs",
+                    "gh pr create --body 'run git push first'"):
+        assert match_tool("Bash", {"command": carried}, every) == [], carried
+    for runs in ("git -C svc push origin topic", "cd svc && git push", "sudo -E git push",
+                 "(cd svc; git push)"):
+        assert fired(match_tool("Bash", {"command": runs}, every)) == [("f1", "command")], runs
+
+
+def test_split_commands_reads_heads_after_launchers():
+    heads = [c.head for c in split_commands(
+        {"command": "CI=1 uv run pytest -q | tee out.log && timeout 30 python3 -m pytest x # pytest"})]
+    assert heads == ["pytest -q", "tee out.log", "pytest x"]
+
+
+def test_prose_command_triggers_are_literals_never_patterns():
+    t = derive_triggers("When a check prints `re:[` or `(a+)+$` in the widget log")
+    assert "re:[" in t.command and "(a+)+$" in t.command
+    f = [TriggerFact("f1", "x", t)]
+    assert match_tool("Bash", {"command": "ls -la"}, f) == []
+    assert fired(match_tool("Bash", {"command": "echo re:["}, f)) == [("f1", "command")]
+    assert match_tool("Bash", {"command": "echo " + "a" * 40 + "!"}, f) == []
+
+
+def test_command_scan_is_linear_and_bounded():
+    adversarial = ['"' + '\\"' * 4096, "'" * 8192, "<<EOF\n" * 1365, "a\\ " * 2730,
+                   '"x' * 4096, "x" * 8192 + "<<", "git push " + '"\\' * 4096]
+    for text in adversarial:
+        started = time.perf_counter()
+        split_commands({"command": text})
+        assert time.perf_counter() - started < 0.05, text[:20]
+    huge = "echo x; " * 10_000 + "git push origin topic"
+    assert match_tool("Bash", {"command": huge}, [fact("Before every push")]) == []  # past MAX_COMMAND_CHARS
 
 
 def test_program_names_fire_only_where_they_run():
