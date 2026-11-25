@@ -1061,10 +1061,13 @@ class FactStore:
                 # match: only the owner's answer settles which value holds.
                 raise ValueError("Memory is disputed between workers until the owner resolves it; "
                                  "nothing was saved")
-            if automatic and old is not None and not addressed and (old["text"] != text or rekey):
-                # A save without an ID found the slot or text it matches: it
-                # may repeat that value, but replacing it needs the ID and
-                # revision this pass was shown, or a newer value is lost.
+            if (automatic and old is not None and not addressed and not archived_old
+                    and (old["text"] != text or rekey)):
+                # A save without an ID found the live slot or text it
+                # matches: it may repeat that value, but replacing it needs
+                # the ID and revision this pass was shown, or a newer value
+                # is lost. An archived value is not listed to the learner and
+                # is no longer current, so a new observation may replace it.
                 raise ValueError(f"[{old['id']}] already holds another value; background learning "
                                  "replaces it only by its listed ID; nothing was saved")
             # A revision guards a rewrite. A key-addressed correction must have

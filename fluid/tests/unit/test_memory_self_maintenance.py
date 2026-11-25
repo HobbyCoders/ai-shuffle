@@ -520,3 +520,8 @@ async def test_learner_insert_without_an_id_never_overwrites_a_keyed_value(tmp_p
     assert await synth._apply("<memory>The user's preferred name is Blair.</memory>") == [
         f"memory:{newer.id}"]
     assert [m.revision for m in store.memories()] == [newer.revision]
+    # An archived value is no longer current: a new observation may take the slot.
+    assert store.retire_memory(newer.id, reason="test")
+    assert await synth._apply("<memory>The user's preferred name is Avery.</memory>") == [
+        f"memory:{newer.id}"]
+    assert [m.text for m in store.memories()] == ["The user's preferred name is Avery."]
