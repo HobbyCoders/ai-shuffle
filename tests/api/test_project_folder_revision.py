@@ -69,6 +69,51 @@ def test_a_save_from_an_editor_opened_before_another_save_is_refused(setup):
     assert database.get_project("p1")["path"] == "c"
 
 
+def test_a_guarded_rename_rechecks_the_revision_under_the_write_lock(setup, monkeypatch):
+    client, _, _ = setup
+    opened = _revision(client)
+    snapshot = database.get_project
+    reads = []
+
+    def read_then_another_window_renames(project_id):
+        # The PUT reads the row, then another window's rename commits before
+        # this request takes the write lock.
+        row = snapshot(project_id)
+        if not reads:
+            reads.append(row)
+            database.update_project(project_id, name="Other window")
+        return row
+
+    monkeypatch.setattr(database, "get_project", read_then_another_window_renames)
+    lost = client.put("/api/v1/projects/p1", json={"name": "Mine", "expected_revision": opened})
+    monkeypatch.setattr(database, "get_project", snapshot)
+
+    assert lost.status_code == 409, lost.text
+    assert lost.json()["detail"] == STALE_FOLDER
+    assert database.get_project("p1")["name"] == "Other window"
+    # A rename without a revision keeps the old behaviour: last write wins.
+    assert client.put("/api/v1/projects/p1", json={"name": "Mine"}).status_code == 200
+    assert database.get_project("p1")["name"] == "Mine"
+
+
+def test_the_listing_hands_out_the_revision_of_the_row_its_backfill_wrote(setup, monkeypatch):
+    client, _, _ = setup
+    # A recorded Git remote and no link group yet: listing derives the group and
+    # writes it (touching updated_at). The shim cannot run ANY(...), so the
+    # remote lookup is stubbed; the write is real.
+    monkeypatch.setattr(database, "get_remote_urls_for_projects",
+                        lambda ids: {i: "https://github.com/example/demo.git" for i in ids})
+    assert database.get_project("p1")["link_group_id"] is None
+
+    listed = next(p for p in client.get("/api/v1/projects").json() if p["id"] == "p1")
+    assert database.get_project("p1")["link_group_id"] == listed["link_group_id"]
+    assert listed["folder_revision"] == client.get("/api/v1/projects/p1").json()["folder_revision"]
+
+    saved = client.put("/api/v1/projects/p1", json={"name": "Renamed", "expected_revision": listed["folder_revision"]})
+    assert saved.status_code == 200, saved.text
+    assert database.get_project("p1")["name"] == "Renamed"
+
+
 def test_an_invalid_revision_is_a_validation_error(setup):
     client, _, _ = setup
     assert client.put("/api/v1/projects/p1", json={"path": "b", "expected_revision": "short"}).status_code == 422

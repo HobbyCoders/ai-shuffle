@@ -241,9 +241,14 @@ def update_project(
     name: Optional[str] = None,
     description: Optional[str] = None,
     path: Optional[str] = None,
-    settings_dict: Optional[Dict[str, Any]] = None
+    settings_dict: Optional[Dict[str, Any]] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
 ) -> Optional[ProjectRow]:
-    """Update a project"""
+    """Update a project.
+
+    With ``snapshot`` (the row an editor's revision was checked against), write
+    only if the locked row still equals it; otherwise raise ``FolderConflict``.
+    """
     updates = []
     values = []
     if name is not None:
@@ -272,6 +277,8 @@ def update_project(
             existing = row_to_dict(cursor.fetchone())
             if not existing:
                 return None
+            if snapshot is not None and _parse_project_row(dict(existing)) != snapshot:
+                raise FolderConflict('The project folder changed. Close this editor and reopen it.')
             cursor.execute(
                 f"UPDATE projects SET {', '.join(updates)} WHERE id = %s",
                 values

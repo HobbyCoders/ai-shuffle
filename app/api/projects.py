@@ -84,8 +84,12 @@ def _backfill_link_groups(projects: List[dict]) -> None:
         for project in pending:
             group_id = (identity_for_remote(remotes.get(project["id"])) or (None,))[0]
             if group_id:
-                database.set_project_link_group(project["id"], group_id)
+                written = database.set_project_link_group(project["id"], group_id)
                 project["link_group_id"] = group_id
+                # The write touched updated_at: the listing's folder_revision
+                # must come from the row as written, not the one read before.
+                if written:
+                    project.update(written)
     except Exception:  # noqa: BLE001 — listing must never fail on the backfill
         logger.debug("link_group_id backfill failed", exc_info=True)
 
@@ -433,6 +437,7 @@ async def update_project(
 ):
     """Update a project - Admin only"""
     from app.core.project_folders import STALE_FOLDER, retarget, revision
+    from app.db import projects as projects_db
 
     def _update():
         existing = database.get_project(project_id)
@@ -453,7 +458,13 @@ async def update_project(
         # exists. Actual moves share the Workers endpoint's safety checks.
         if request.path and request.path != existing.get("path"):
             return retarget(existing, request.path, expected or revision(existing), **metadata), True
-        return database.update_project(project_id=project_id, **metadata), False
+        try:
+            # The revision was checked before the write lock: recheck it there.
+            return database.update_project(
+                project_id=project_id, snapshot=existing if expected is not None else None, **metadata
+            ), False
+        except projects_db.FolderConflict as exc:
+            raise HTTPException(status_code=409, detail=STALE_FOLDER) from exc
 
     updated, moved = await run_sync(_update)
     if moved:
