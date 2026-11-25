@@ -192,3 +192,18 @@ async def test_key_correction_stale_protected_forgotten_and_new_default(tmp_path
     assert not (await handler({"when": "When testing memory", "text": "Fixture new convention.", "key": "fixture.new"}, ctx)).is_error
     assert store.memories()[0].scope == "global"
 
+
+def test_a_scope_only_save_with_unchanged_wording_writes_no_revision(tmp_path):
+    # As before: a move does not replicate, so a peer that would read it as
+    # replacement or duplicate evidence never receives it.
+    store = SkillStore(tmp_path / "source")
+    store.save_memory("Use yarn for frontend installs.", scope="project:beta")
+    first = store.save_memory("Use pnpm for frontend installs; it replaces yarn.", scope="project:alpha")
+    before = store._facts.export()
+    moved = store.save_memory(first.text, memory_id=first.id, scope="project:beta",
+                              expected_revision=first.revision)
+    assert moved.revision == first.revision and moved.scope == "project:alpha"
+    assert store._facts.export() == before  # nothing new for sync to publish
+    store._facts.reconcile_supersessions()
+    assert len(store.memories()) == 2 and not store.archived_memories()
+

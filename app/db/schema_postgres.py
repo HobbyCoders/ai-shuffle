@@ -1050,6 +1050,8 @@ def create_postgres_schema(cursor: Any) -> None:
     # recall on it. NULL = unknown (legacy session), never "another project".
     # writer_generation: bumped by each engine taking the session over, and checked
     # by that engine's writes, so a replaced engine's late commit is refused.
+    # cli_resume_recovery: JSON for a cli_session_id a recovery re-seed minted
+    # (fluid.store.base.SessionMeta.cli_resume_recovery); NULL otherwise.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS fluid_sessions (
             session_id TEXT PRIMARY KEY,
@@ -1057,7 +1059,8 @@ def create_postgres_schema(cursor: Any) -> None:
             created_at DOUBLE PRECISION NOT NULL,
             cli_session_id TEXT,
             project_root TEXT,
-            writer_generation BIGINT NOT NULL DEFAULT 0
+            writer_generation BIGINT NOT NULL DEFAULT 0,
+            cli_resume_recovery TEXT
         )
     """)
     cursor.execute("""

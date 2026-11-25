@@ -169,7 +169,7 @@ def _rule_item(entry, project_names, now) -> dict[str, Any]:
         "scope_label": ("All projects" if scope == "global" else
                         project_names.get(scope[8:], "Other project") if scope.startswith("project:")
                         else "Other project"),
-        "needs_review": bool(entry.get("conflicted")),
+        "needs_review": facts.open_conflict(entry),
         "created_at": entry.get("created_at") or None,
         "updated_at": entry.get("updated_at") or None,
         "expires_at": None if kept else entry.get("expires_at") or None,

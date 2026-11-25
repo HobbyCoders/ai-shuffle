@@ -146,12 +146,17 @@ def _load_session_sync(session_id: str, *, include_nodes: bool = True) -> Option
         cur = conn.cursor()
         cur.execute(
             "SELECT session_id, head_node_id, created_at, cli_session_id, "
-            "project_root FROM fluid_sessions WHERE session_id = %s", (session_id,),
+            "project_root, cli_resume_recovery FROM fluid_sessions WHERE session_id = %s",
+            (session_id,),
         )
         row = cur.fetchone()
         if row is None:
             return None
-        meta = SessionMeta(**dict(row))
+        fields = dict(row)
+        fields["cli_resume_recovery"] = resume_recovery_from_column(
+            fields.get("cli_resume_recovery")
+        )
+        meta = SessionMeta(**fields)
         if not include_nodes:
             return {"meta": meta, "nodes": {}, "node_sizes": {}}
         transcript_decode_timeouts(cur)
@@ -520,6 +525,32 @@ def _set_cli_session_id_sync(
         cur.execute(
             f"UPDATE fluid_sessions SET cli_session_id = %s WHERE session_id = %s{check}",
             (cli_session_id, session_id, *params),
+        )
+        return generation is None or cur.rowcount > 0
+
+
+def resume_recovery_from_column(value: Any) -> Optional[Dict[str, Any]]:
+    """``fluid_sessions.cli_resume_recovery`` as a dict; None for NULL or for
+    anything that is not a JSON object with a handle."""
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if not isinstance(value, dict) or not isinstance(value.get("handle"), str):
+        return None
+    return value
+
+
+def _set_cli_resume_recovery_sync(
+    session_id: str, recovery: Optional[Dict[str, Any]], *, generation: Optional[int] = None,
+) -> bool:
+    check, params = _owner_check(generation)
+    with get_turn_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE fluid_sessions SET cli_resume_recovery = %s WHERE session_id = %s{check}",
+            (json.dumps(recovery) if recovery else None, session_id, *params),
         )
         return generation is None or cur.rowcount > 0
 
@@ -2089,6 +2120,22 @@ class PgFluidStore:
                 meta.cli_session_id = cli_session_id
             if not await run_sync(
                 _set_cli_session_id_sync, session_id, cli_session_id,
+                generation=self._generations.get(session_id),
+            ):
+                self._note_replaced(session_id)
+
+    async def set_cli_resume_recovery(
+        self, session_id: str, recovery: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist what a delegated recovery re-seed left owing on its handle
+        (``SessionMeta.cli_resume_recovery``), so a new adapter knows it too."""
+        async with self._handle_lock:
+            await self._ensure_loaded(session_id)
+            meta = self._sessions.get(session_id)
+            if meta is not None:
+                meta.cli_resume_recovery = dict(recovery) if recovery else None
+            if not await run_sync(
+                _set_cli_resume_recovery_sync, session_id, recovery,
                 generation=self._generations.get(session_id),
             ):
                 self._note_replaced(session_id)

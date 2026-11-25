@@ -22,6 +22,36 @@
 	const selected = $derived(open.find(request => request.request_id === selectedId) ?? open[0]);
 	const count = $derived(open.reduce((total, request) => total + request.questions.length, 0));
 	const status = $derived(!connected ? 'Reconnect to answer' : selected?.nonblocking && working ? 'Still working' : selected?.nonblocking ? 'Answer to continue' : 'Waiting for your answer');
+
+	// The room the question body has on a desktop-sized window: the chat's
+	// height minus everything else docked with it (the composer with its
+	// draft, the tray header, the Vault and call rows). Measured, because a
+	// tall draft can outgrow any fixed reserve and push the composer's
+	// controls out of the chat. The rest of the slot does not depend on the
+	// body's height, so the measurement settles in one pass.
+	let content = $state<HTMLDivElement | null>(null);
+	let room = $state<number | null>(null);
+	// No room at all on a desktop-sized window: the body is clipped to
+	// nothing, so take it out of the tab order too (it stays mounted and
+	// measured, and comes back as soon as the draft or window gives room).
+	let starved = $state(false);
+	$effect(() => {
+		const body = content;
+		const slot = body?.closest('.input-slot');
+		const view = body?.closest('.chat-view');
+		if (!body || !slot || !view || typeof ResizeObserver === 'undefined') return;
+		const wide = window.matchMedia('(min-width: 640px)');
+		const measure = () => {
+			if (body.hidden) return;
+			room = Math.max(0, Math.floor(view.clientHeight - (slot.getBoundingClientRect().height - body.getBoundingClientRect().height)));
+			starved = wide.matches && room === 0;
+		};
+		const observer = new ResizeObserver(measure);
+		observer.observe(view);
+		observer.observe(slot);
+		measure();
+		return () => observer.disconnect();
+	});
 </script>
 
 {#if requests.length > 0}
@@ -32,7 +62,7 @@
 				<span class="status">{status}</span><ChevronDown size={14} class={expanded ? 'expanded' : ''} />
 			</button>
 			<!-- Hide rather than unmount: collapse and request switching retain drafts. -->
-			<div id={`${id}-content`} hidden={!expanded} class="tray-content">
+			<div id={`${id}-content`} hidden={!expanded} class="tray-content" bind:this={content} inert={starved} style:--tray-room={room === null ? undefined : `${room}px`}>
 				{#if open.length > 1}
 					<div class="request-tabs" role="group" aria-label="Pending requests">
 						{#each open as request, index (request.request_id)}
@@ -64,6 +94,13 @@
 	.tray-toggle :global(svg) { flex-shrink: 0; }
 	.tray-toggle :global(.expanded) { transform: rotate(180deg); }
 	.tray-content { border-top: 1px solid var(--border); max-height: min(40dvh, 22rem); overflow-y: auto; overscroll-behavior: contain; }
+	/* A desktop-sized window shows the whole question, with no fixed cap. It
+	   only stops where it would push the composer out of the chat (the
+	   measured room, see the script); the header folds it away to read the
+	   chat. Phone-width windows keep the cap. */
+	@media (min-width: 640px) {
+		.tray-content { max-height: var(--tray-room, max(8rem, calc(var(--chat-surface-height, 100dvh) - 14rem))); }
+	}
 	[hidden] { display: none !important; }
 	.request-tabs { display: flex; gap: 6px; padding: 0.625rem 0.75rem 0; flex-wrap: wrap; }
 	.request-tabs button { border: 1px solid transparent; border-radius: 4px; padding: 4px 7px; background: none; color: var(--muted-foreground); font: inherit; font-size: 0.6875rem; cursor: pointer; }
