@@ -614,7 +614,8 @@ def _clone_new_spec(body: CloneNewRequest) -> Dict[str, Any]:
     if existing is not None:
         raise HTTPException(status_code=409, detail={
             "error_code": ALREADY_ADDED, "project_id": existing.get("id"),
-            "error": f"This repository is already the project {existing.get('name') or existing.get('id')}."})
+            "error": existing.get("message")
+            or f"This repository is already the project {existing.get('name') or existing.get('id')}."})
     pv2 = projects_v2.get_project_v2_by_origin(origin)
     pinned = pinned_remote(pv2)
     if pinned and normalize_remote_url(pinned) != normalize_remote_url(clean):
@@ -683,7 +684,10 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     for origin in matches:
         pv2 = identities.get(origin)
         if _is_listed(pv2):
-            return {"id": None, "name": pv2.get("name")}
+            name = pv2.get("name") or "another project"
+            return {"id": None, "name": name,
+                    "message": f"This repository is already the project {name} on another worker. "
+                               "Set it up here from its page in Projects."}
     return None
 
 

@@ -1214,6 +1214,7 @@ def test_clone_new_refuses_the_same_repository_by_another_spelling(client, ws, t
     assert elsewhere.status_code == 409, elsewhere.text
     assert elsewhere.json()["detail"]["error_code"] == "already_added"
     assert elsewhere.json()["detail"]["project_id"] is None
+    assert "Tool on another worker" in elsewhere.json()["detail"]["error"]
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
 
 
