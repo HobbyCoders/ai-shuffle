@@ -1555,6 +1555,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Only one handoff runs at a time.
         self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
+        # The side model input ``_pending_summary`` was built from: a
+        # checkpoint that does not save is remembered against it.
+        self._pending_summary_source: str | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
         self._checkpoint_latched = False
@@ -3198,6 +3201,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
                 if region is not None:
                     self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    self._pending_summary_source = region[2]
                     if self._pending_summary is None:
                         self._compactor.reject_summary_region(region)
             except Exception as exc:
@@ -3228,6 +3232,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         return self._compactor.apply_summary(
             nodes, pending, overhead_tokens=overhead,
             decision_reason="summary_cold" if cold else "summary_batch",
+            source=self._pending_summary_source,
         )
 
     async def _checkpoint_for_compaction(
@@ -3261,7 +3266,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if region is None or self._interrupted.is_set():
                 return None
             pending = self._pending_summary
+            source = self._pending_summary_source
             if pending is None or pending[:2] != region[:2]:
+                source = region[2]
                 self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
                 try:
                     pending = await self._manual_summary_task
@@ -3279,6 +3286,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return self._compactor.apply_summary(
                 nodes, pending, overhead_tokens=overhead,
                 decision_reason="manual" if manual else "summary_batch",
+                source=source,
             )
         finally:
             if not manual:

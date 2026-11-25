@@ -3467,8 +3467,16 @@ class Compactor:
     def apply_summary(
         self, nodes: list[SessionNode], pending: tuple[str, str, str], *,
         overhead_tokens: int = 0, decision_reason: str = "summary_batch",
+        source: str | None = None,
     ) -> Promotion | None:
-        """Commit persisted text only on its original path and only if it saves."""
+        """Commit persisted text only on its original path and only if it saves.
+
+        ``source`` is the side model input the text was built from (the
+        :meth:`summary_region` text). A checkpoint that does not save is
+        remembered against that input, not the prefix as rendered now: the
+        ladder may have changed the prefix since, and that new input has never
+        been tried. Without it, the prefix as rendered now is recorded.
+        """
         if not self.config.enabled or not self.config.summary_enabled:
             return None
         start, end, text = pending
@@ -3488,8 +3496,9 @@ class Compactor:
         after = self._estimate(nodes, overhead_tokens)
         if after >= before:
             restore()
-            self.reject_summary_region(
-                (start, end, self._summary_input(nodes[index[start]:index[end] + 1])))
+            if source is None:
+                source = self._summary_input(nodes[index[start]:index[end] + 1])
+            self.reject_summary_region((start, end, source))
             return None
         self._rejected_regions.pop((start, end), None)
         return Promotion(tier=4, reason="summary", summary_text=text, summary_pin=pin,

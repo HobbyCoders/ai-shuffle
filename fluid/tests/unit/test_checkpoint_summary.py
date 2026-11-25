@@ -132,6 +132,22 @@ def test_failed_or_non_shrinking_region_is_not_rebuilt_until_it_changes():
     assert len(c._rejected_regions) <= 8
 
 
+def test_rejection_records_the_input_the_checkpoint_was_built_from():
+    # Review finding: the rejection hashed the prefix as rendered at apply
+    # time. When the ladder folded those turns into an epoch after the side
+    # call started, the new, never-tried input was the one marked rejected.
+    c, path = compacted()
+    region = c.summary_region(path)
+    c.config = replace(c.config, max_resident_span_digests=2)
+    c.escalate(path, overhead_tokens=0, context_window=None, output_reserve_tokens=0)
+    assert set(c._digested.values()) == {"epoch"}
+    folded = c.summary_region(path)
+    assert folded[:2] == region[:2] and folded[2] != region[2]
+    assert c.apply_summary(path, (*region[:2], "s" * 2_000_000), source=region[2]) is None
+    assert c._rejected_regions[region[:2]] == hash(region[2])
+    assert c.summary_region(path) == folded  # the epoch input can still build
+
+
 def test_region_tail_due_cap_and_no_recall():
     c, path = compacted()
     assert c.summary_region(path, due_only=True) is None  # unknown window
@@ -195,9 +211,9 @@ async def test_pending_apply_boundaries(tmp_path, boundary, gap, size, batch, ap
 
 
 class LoopProvider(Provider):
-    def __init__(self, *, fail=False, gate=None):
+    def __init__(self, *, fail=False, gate=None, checkpoint="stable checkpoint text"):
         super().__init__()
-        self.fail, self.gate = fail, gate
+        self.fail, self.gate, self.checkpoint = fail, gate, checkpoint
         self.started = asyncio.Event()
 
     async def stream(self, request):
@@ -205,7 +221,7 @@ class LoopProvider(Provider):
             self.started.set()
             if self.gate:
                 await self.gate.wait()
-            response = Provider(text="stable checkpoint text", error=self.fail)
+            response = Provider(text=self.checkpoint, error=self.fail)
         else:
             response = Provider(text="done " * 1000)
         self.requests.append(request)
@@ -310,6 +326,30 @@ async def test_failed_background_build_is_not_retried_every_turn(tmp_path):
     loop._schedule_checkpoint(loop.session_id, "next-turn")
     await asyncio.wait_for(loop._summary_task, 3)
     assert side_calls() == 1
+    await loop.aclose()
+
+
+async def test_pending_checkpoint_rejected_after_prefix_changes_keeps_its_input(tmp_path):
+    provider = LoopProvider(checkpoint="s" * 2_000_000)
+    loop = NativeLoop(provider=provider, store=JsonlStore(tmp_path), model="fixture",
+                      context_window=40_000, compaction=config(trigger_tokens=10_000_000))
+    await start_checkpoint(loop, provider)
+    await asyncio.wait_for(loop._summary_task, 3)
+    pending, sent = loop._pending_summary, provider.requests[-1]
+    assert pending is not None and sent.system == CHECKPOINT_SYSTEM
+    c = loop._compactor
+    path = await loop._context_path(loop.session_id)
+    built_from = c.summary_region(path)
+    assert built_from[:2] == pending[:2] and built_from[2] in sent.messages[0].text()
+    # Before the checkpoint is applied, the ladder folds its turns into an epoch.
+    c.config = replace(c.config, max_resident_span_digests=2)
+    c.escalate(path, overhead_tokens=0, context_window=None, output_reserve_tokens=0)
+    folded = c.summary_region(path)
+    assert folded[:2] == pending[:2] and folded[2] != built_from[2]
+    assert loop._apply_pending_checkpoint(path, cache=None, turn_boundary=False, measured=None,
+                                          overhead=0, batch_due=True) is None
+    assert c._rejected_regions[pending[:2]] == hash(built_from[2])
+    assert c.summary_region(path) == folded
     await loop.aclose()
 
 
