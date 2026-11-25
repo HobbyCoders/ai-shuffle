@@ -1191,7 +1191,7 @@ def test_clone_new_takes_network_remotes_only(client, ws, test_db):
     for remote in ("https://github.com/example-org/demo.git", "ssh://git@github.com/example-org/demo.git",
                    "git@github.com:example-org/demo.git"):
         assert project_workers._clone_new_spec(project_workers.CloneNewRequest(
-            id="demo", name="Demo", clone_url=remote))["clone_url"] == remote
+            id="demo", name="Demo", clone_url=remote), project_setup.new_op_id())["clone_url"] == remote
 
 
 def test_a_new_project_clone_never_reads_a_local_repository(client, ws, test_db, monkeypatch):
@@ -1252,24 +1252,18 @@ def test_a_project_a_paired_worker_holds_is_never_duplicated_renamed_or_hidden(c
     # Another spelling of the same repository is refused the same way.
     assert _clone_new(client, "git@github.com:example-org/held.git", id="held-ssh").status_code == 409
 
-    # A failed first clone that left the identity provisional never hides it
-    # while the peer holds it.
-    projects_v2.set_provisional(origin, True)
+    # A failed first clone that no longer owns the identity (the peer's
+    # registration cleared its token) never hides it.
     project_setup.hide_failed_first_clone({"id": "psetup-" + "1" * 32,
                                            "params": {"origin": origin, "project_id": "held"}})
     assert projects_v2.get_project_v2(pv2["id"])["settings"].get("forgotten") is not True
     assert _clone_new(client, remote, id="held-again", name="Renamed").status_code == 409
     assert projects_v2.get_project_v2(pv2["id"])["name"] == "Held"
 
-    # A peer that is online but never answered is unknown: refuse, never hide.
+    # A peer that is online but never answered is unknown: refuse.
     test_db.execute("DELETE FROM project_peer_catalogs")
     test_db.commit()
-    projects_v2.set_provisional(origin, False)
     assert _clone_new(client, remote, id="held-unknown").status_code == 409
-    projects_v2.set_provisional(origin, True)
-    project_setup.hide_failed_first_clone({"id": "psetup-" + "2" * 32,
-                                           "params": {"origin": origin, "project_id": "held"}})
-    assert projects_v2.get_project_v2(pv2["id"])["settings"].get("forgotten") is not True
 
 
 def test_a_first_clone_ended_outside_the_executor_is_hidden_again(client, ws, test_db, monkeypatch):
@@ -1331,23 +1325,111 @@ def test_a_first_clone_that_could_not_be_hidden_can_still_be_retried(client, ws,
     assert projects_v2.get_project_v2_by_origin(origin)["name"] == "Demo again"
 
 
-def test_a_failed_first_clone_never_hides_a_project_another_worker_holds(client, ws, test_db, monkeypatch):
+def _token(runner_id: str, *, device_id: str | None = None, op_id: str | None = None) -> dict:
+    return {"runner_id": runner_id, "device_id": device_id or runner_id,
+            "op_id": op_id or project_setup.new_op_id(), "started_at": "2026-01-01T00:00:00+00:00"}
+
+
+def test_a_failed_first_clone_never_hides_an_identity_it_no_longer_owns(client, ws, test_db, monkeypatch):
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
     missing = _https(monkeypatch, _local_remote(ws / "_remotes" / "demo.git"))
     origin = auto_link_group_id(missing)
-    # Another worker has a setup under way for the same identity (a peer's runner).
+    # Another worker took the first clone over while this one's waited.
     first = _clone_new(client, missing).json()
-    git_ops_db.insert_op(PEER, project_setup.SETUP_OP, project_v2_id=first["project_v2_id"],
-                         params={"origin": origin}, op_id=project_setup.new_op_id())
+    mine = projects_v2.provisional_token(projects_v2.get_project_v2_by_origin(origin))
+    assert mine["runner_id"] == ME and mine["op_id"] == first["op_id"]
+    theirs = _token(PEER)
+    assert projects_v2.claim_provisional(origin, theirs, expect=mine)
     _run_setups()
     assert git_ops_db.get_op(first["op_id"])["status"] == "error"
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert row["settings"].get("forgotten") is not True
+    assert projects_v2.provisional_token(row)["op_id"] == theirs["op_id"]
+
+    # A worker registered a copy since (which clears the token): not hidden either.
+    assert projects_v2.claim_provisional(origin, mine, expect=theirs)
+    projects_v2.mark_registered(origin)
+    project_setup.hide_failed_first_clone({"id": first["op_id"], "runner_id": ME,
+                                           "params": {"origin": origin, "project_id": "demo"}})
     assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
 
-    # Another worker registered a copy while this one's clone failed.
-    projects_v2.set_provisional(origin, True)
-    _peer_project(test_db, "demo-there", "Demo", remote=missing)
-    op = {"id": "psetup-" + "0" * 32, "params": {"origin": origin, "project_id": "demo"}}
-    project_setup.hide_failed_first_clone(op)
-    assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
+
+def test_a_peers_first_clone_in_progress_is_refused_until_its_worker_is_gone(client, ws, test_db, network,
+                                                                            monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
+    remote = "https://github.com/example-org/fresh.git"
+    origin = auto_link_group_id(remote)
+    projects_v2.upsert_project(origin, name="Fresh")
+    theirs = _token("peer-instance", device_id=PEER)
+    assert projects_v2.claim_provisional(origin, theirs, expect=None)  # replicated from the peer
+
+    async def peer(device_id, action, body):
+        return {"project_ids": [], "workspace": "/data/ws", "ops": [], "projects": {}}
+
+    network.state["handler"] = peer
+    client.get("/api/v1/projects/overview")  # caches the peer's catalog: no checkout yet
+    refused = _clone_new(client, remote, id="fresh", name="Mine")
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail["error_code"] == "being_set_up" and detail["worker"] == "Studio"
+    assert detail["error"] == "Studio is cloning this repository; wait for it or cancel it there."
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert row["name"] == "Fresh" and projects_v2.provisional_token(row)["op_id"] == theirs["op_id"]
+    assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+    # Offline for less than a stale op's age: maybe still cloning, so refused.
+    network.peer["online"] = False
+    network.peer["last_seen"] = datetime.now(timezone.utc).isoformat()
+    assert _clone_new(client, remote, id="fresh", name="Mine").status_code == 409
+
+    # Offline for longer: provably gone, so the clone takes it over and names it.
+    network.peer["last_seen"] = (datetime.now(timezone.utc) - timedelta(
+        seconds=git_ops_db.STALE_RUNNING_SECONDS + 60)).isoformat()
+    taken = _clone_new(client, remote, id="fresh", name="Mine")
+    assert taken.status_code == 202, taken.text
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert row["name"] == "Mine" and projects_v2.provisional_token(row)["op_id"] == taken.json()["op_id"]
+
+
+def test_a_stale_empty_peer_catalog_never_admits_a_duplicate(client, ws, test_db, network):
+    remote = "https://github.com/example-org/settled.git"
+    origin = auto_link_group_id(remote)
+    projects_v2.upsert_project(origin, name="Settled")
+    setup_db.save_peer_catalog(PEER, [])  # read before the peer registered it
+    test_db.execute("UPDATE project_peer_catalogs SET read_at = '2026-01-01 00:00:00+00:00'")
+    test_db.commit()
+    # The peer's first clone succeeded: its registration cleared the token, and that replicated.
+    assert projects_v2.claim_provisional(origin, _token("peer-instance", device_id=PEER), expect=None)
+    projects_v2.mark_registered(origin)
+    refused = _clone_new(client, remote, id="settled", name="Mine")
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error_code"] == "already_added"
+    assert projects_v2.get_project_v2_by_origin(origin)["name"] == "Settled"
+
+
+def test_a_dead_runners_first_clone_neither_blocks_nor_keeps_a_card(client, ws, test_db, monkeypatch):
+    remote = _https(monkeypatch, _bare_remote(ws))
+    origin = auto_link_group_id(remote)
+    pv2 = projects_v2.upsert_project(origin, name="Theirs")
+    # Another runner on this database started the first clone and stopped mid-clone.
+    dead = git_ops_db.insert_op(PEER, project_setup.SETUP_OP, project_v2_id=pv2["id"],
+                                params={"origin": origin, "project_id": "demo"}, op_id=project_setup.new_op_id())
+    assert git_ops_db.claim_op(dead["id"], PEER)
+    test_db.execute("UPDATE git_ops SET updated_at = '2026-01-01 00:00:00+00:00' WHERE id = ?", (dead["id"],))
+    test_db.commit()
+    assert projects_v2.claim_provisional(origin, _token(PEER, op_id=dead["id"]), expect=None)
+    assert not _listed(client, pv2["id"])  # a dead op never reads as setting up
+
+    taken = _clone_new(client, remote, name="Demo mine")
+    assert taken.status_code == 202, taken.text
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert row["name"] == "Demo mine" and projects_v2.provisional_token(row)["op_id"] == taken.json()["op_id"]
+    _run_setups()
+    assert client.get(f"/api/v1/projects/setup/{taken.json()['op_id']}").json()["status"] == "done"
+    assert database.get_project("demo")["name"] == "Demo mine"
+    assert _listed(client, pv2["id"])
 
 
 def test_any_local_registration_makes_a_hidden_or_provisional_identity_listed(ws, test_db):
@@ -1359,7 +1441,7 @@ def test_any_local_registration_makes_a_hidden_or_provisional_identity_listed(ws
     git(ws / "folder", "remote", "add", "origin", remote)
     origin = auto_link_group_id(remote)
     projects_v2.upsert_project(origin, name="Folder")
-    projects_v2.set_provisional(origin, True)
+    projects_v2.claim_provisional(origin, _token(ME), expect=None)
     projects_v2.set_forgotten(origin, True)
     create_project_record_sync(ProjectCreate(id="folder", name="Folder", path="folder"))  # the Folder flow
     settings_after = projects_v2.get_project_v2_by_origin(origin)["settings"]
@@ -1474,7 +1556,7 @@ def test_a_retry_renames_a_first_clone_but_never_a_listed_project(client, ws, te
     # earlier failed first clone left its identity marked provisional.
     other = _https(monkeypatch, _bare_remote(ws, "other"), "other")
     listed = _held_by_peer(_peer_project(test_db, "other-there", "Other", origin=auto_link_group_id(other)))
-    projects_v2.set_provisional(listed["origin"], True)
+    projects_v2.claim_provisional(listed["origin"], _token(ME), expect=None)
     refused = _clone_new(client, other, id="other", name="Mine")
     assert refused.status_code == 409 and refused.json()["detail"]["error_code"] == "already_added", refused.text
     assert projects_v2.get_project_v2(listed["id"])["name"] == "Other"

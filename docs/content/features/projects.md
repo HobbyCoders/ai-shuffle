@@ -14,7 +14,7 @@ A project is a folder on your worker, usually a code repository. Chats started i
 2. Choose **Add Project**.
 3. Choose where it comes from:
    - **Folder on** this worker: pick the folder, or type its path.
-   - **Clone from GitHub**: pick one of your repositories, or paste a clone URL. The dialog shows where the clone goes (your workspace, in a folder named after the project ID). Repositories that are already a project are marked **Already added**; open that project instead of adding it twice.
+   - **Clone from GitHub**: pick one of your repositories, or paste a clone URL. The dialog shows where the clone goes (your workspace, in a folder named after the project ID). Repositories that are already a project are marked **Already added**; open that project instead of adding it twice. If another worker is already cloning the same repository as a new project, the dialog names that worker; wait for it to finish, or cancel it there.
 4. Give it a display name (up to 100 characters). The project ID is made from the name; to change it, open **Advanced** (lowercase letters, numbers and hyphens, up to 50).
 5. If you have other workers, tick them under **Set it up on** to set the project up there as well. Offline workers are set up when they come back. Until you change a tick, a repository starts with every online worker ticked and a plain folder with none.
 6. Choose **Add Project** (or **Clone project**, or **Create on N workers**).

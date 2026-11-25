@@ -222,7 +222,9 @@ export interface SetupStatus extends ProjectSetupInfo {
  * Create a project by cloning a repository on this worker. The clone runs in
  * the background (poll `getSetupStatus`); the project is registered only once
  * it succeeded. 409 with `error_code: 'already_added'` (and `project_id`)
- * when the repository is already a project here.
+ * when the repository is already a project here; 409 with
+ * `error_code: 'being_set_up'` (and `worker`) while another worker is
+ * cloning it as a new project.
  */
 export function cloneNewProject(request: CloneNewProjectRequest): Promise<CloneNewProjectResponse> {
 	return api.post<CloneNewProjectResponse>('/projects/clone', request);

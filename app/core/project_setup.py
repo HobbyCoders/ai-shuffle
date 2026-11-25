@@ -419,7 +419,7 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
     ``folder``), ``clone_url`` (git), ``folder``, ``mode`` (``auto``/``adopt``).
     A new project cloned from the New project dialog (``POST /projects/clone``)
     also passes ``project_id`` (the id the owner asked for); whether a failure
-    hides the identity again is the persisted ``PROVISIONAL_KEY`` on it.
+    hides the identity again is the persisted ``PROVISIONAL_KEY`` token on it.
     Raises ``ValueError`` for a request this worker refuses outright.
     """
     from app.db import git_ops as git_ops_db
@@ -521,13 +521,20 @@ def _summarize_op(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def latest_ops(runner_id: str) -> Dict[str, Dict[str, Any]]:
-    """Newest non-cancelled setup op per project on ``runner_id``."""
+    """Newest non-cancelled setup op per project on ``runner_id``.
+
+    A ``running`` op whose heartbeat went stale (its runner stopped; its own
+    restart sweep settles it) reads as no op: it never shows as setting up.
+    """
     from app.db import git_ops as git_ops_db
 
     out: Dict[str, Dict[str, Any]] = {}
     for row in git_ops_db.list_ops_for_runner(runner_id, SETUP_OP):
         pv2 = row.get("project_v2_id")
         if not pv2 or pv2 in out:
+            continue
+        if git_ops_db._is_stale_running(row):
+            out[pv2] = {}
             continue
         summary = _summarize_op(row)
         if summary["error_code"] == CANCELLED:
@@ -970,28 +977,21 @@ def hide_failed_first_clone(op_row: Dict[str, Any]) -> None:
     """Hide a new project's identity again after its first clone ended without a project.
 
     Every terminal path of a first-clone op calls this: the executor, a cancel
-    before it ran, the restart sweep, and a request refused while starting.
-    Only an identity still marked provisional (``projects_v2.PROVISIONAL_KEY``,
-    set by ``POST /projects/clone`` for one that was not a listed project) is
-    hidden, and only while nothing apart from this op would give it a card in
-    the Projects overview (``project_workers.would_list``: a copy or a setup on
-    any worker, peers included; a peer it cannot judge keeps it). Best effort:
-    the op's own failure is what the caller needs.
+    before it ran (on this worker or, on a shared database, another's), the
+    restart sweep, and a request refused while starting. The identity is
+    hidden only while this op still owns its provisional token
+    (``projects_v2.settle_provisional``, one locked compare-and-set): never
+    once another attempt took it over or a worker registered a copy. Best
+    effort: the op's own failure is what the caller needs.
     """
-    from app.api.project_workers import would_list
     from app.db import projects_v2
 
     params = op_row.get("params") or {}
     origin = params.get("origin")
-    if not params.get("project_id") or not origin:
+    if not params.get("project_id") or not origin or not op_row.get("id"):
         return
     try:
-        pv2 = projects_v2.get_project_v2_by_origin(origin)
-        if not pv2 or (pv2.get("settings") or {}).get(projects_v2.PROVISIONAL_KEY) is not True:
-            return
-        if would_list(origin, exclude_op_id=op_row.get("id"), settling=True):
-            return  # a copy exists or another attempt is under way; that settles it
-        projects_v2.set_forgotten(origin, True)
+        projects_v2.settle_provisional(origin, op_row.get("runner_id") or _me(), op_row["id"])
     except Exception:  # noqa: BLE001
         logger.warning("project setup: could not hide failed new project %s", op_row.get("id"), exc_info=True)
 

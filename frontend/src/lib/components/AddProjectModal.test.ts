@@ -256,6 +256,23 @@ describe('AddProjectModal create flow', () => {
 		expect(screen.getByRole('button', { name: 'Clone project' })).toBeTruthy();
 	});
 
+	it('says which worker is already cloning the repository, with no Retry', async () => {
+		m.overview.mockResolvedValue([]);
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
+		const message = 'Studio is cloning this repository; wait for it or cancel it there.';
+		m.cloneNew.mockRejectedValueOnce({ detail: message, status: 409,
+			body: { detail: { error_code: 'being_set_up', worker: 'Studio', error: message } } });
+		const onCreated = vi.fn();
+		await openClone({ onCreated });
+		await fireEvent.input(urlInput(), { target: { value: 'https://github.com/acme/busy.git' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Clone project' }));
+
+		expect(await screen.findByText(message)).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+		expect(onCreated).not.toHaveBeenCalled();
+		expect(m.setupStatus).not.toHaveBeenCalled();
+	});
+
 	it('names a worker that refused to start its setup', async () => {
 		const { notify } = await import('$lib/stores/notifications');
 		const warning = vi.spyOn(notify, 'warning').mockReturnValue('n1');

@@ -313,6 +313,9 @@
 			const existing = (e as { body?: { detail?: { project_id?: unknown } } }).body?.detail?.project_id;
 			return new RunError(reason, null, typeof existing === 'string' ? existing : null);
 		}
+		// Another worker is cloning this repository as a new project: the message
+		// names it; trying again here would not help until it finishes there.
+		if (code === 'being_set_up') return new RunError(reason, null);
 		if (code === 'folder_exists' || /already exists/i.test(reason)) return new RunError(reason, 'advanced');
 		const status = (e as { status?: number } | null)?.status;
 		// A 4xx is the request itself (fix the form); anything else may pass on a retry.
