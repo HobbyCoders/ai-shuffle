@@ -15,9 +15,11 @@ Verification runs at two moments:
   changed since last verdict, e.g. edited on disk) are re-verified; broken
   ones are excluded from the kernel mount and flagged in ``list_tools``.
 
-Verdicts are cached in the store's meta by file mtime, so an unchanged skill
-is verified once, not per session. Failure to start the kernel propagates
-without recording a verdict; skills stay stale until a pass whose kernel starts.
+Verdicts are cached in the store's meta by the digest of the exact source
+verified, so an unchanged skill is verified once, not per session, and a file
+replaced during verification is not covered by the old bytes' verdict.
+Failure to start the kernel propagates without recording a verdict; skills
+stay stale until a pass whose kernel starts.
 
 A mount pays at most ``MOUNT_VERIFY_BUDGET`` seconds of verification: skills
 not reached inside it stay unverified (and unmounted) until the next mount,
@@ -125,5 +127,6 @@ async def verify_store(
         sources, stale, config=config, timeout=timeout, budget=budget,
     )
     for name, error in verdicts.items():
-        store.mark_verified(name, error)
+        # Bound to the bytes that ran, not to whatever the file holds now.
+        store.mark_verified(name, error, source=sources[name])
     return verdicts

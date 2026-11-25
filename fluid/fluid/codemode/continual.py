@@ -1684,7 +1684,8 @@ class Synthesizer:
             if match.group(1) not in revisions:
                 continue
             try:
-                if self._store.retire_memory(match.group(1), reason="consolidation"):
+                if self._store.retire_memory(match.group(1), reason="consolidation",
+                                             expected_revision=revisions[match.group(1)]):
                     changed.append(f"-memory:{match.group(1)}")
             except ValueError as exc:
                 errors.append(f"memory {match.group(1)}: {exc}")
@@ -2173,11 +2174,14 @@ Never claim a workflow is installed because it was proposed."""
                 digest = str(old.key).rsplit(".", 1)[-1]
                 key = f"{behavior.KEY_PREFIX}{applies_to}.{digest}"
             try:
+                # A rewrite applies only to the revision this pass listed: a
+                # newer save or sync during inference wins over this proposal.
                 saved = self._store.save_memory(
                     body, memory_id=rule_id if old is not None else None,
                     scope=self._resolve_scope(attrs.get("scope")), provenance="user",
                     durable=True, key=key, source_session=session,
                     when="When working with the owner (learned behaviour rule)",
+                    expected_revision=old.revision if old is not None else None,
                 )
             except ValueError as exc:
                 errors.append(f"{label}: {exc}")
@@ -2228,18 +2232,25 @@ Never claim a workflow is installed because it was proposed."""
                     errors.append(f"{name}: verification failed: {verdict}")
                     continue
                 self._store.save(name, source)
-                self._store.mark_verified(name)
+                self._store.mark_verified(name, source=source)
                 changed.append(name)
         for match in _DELETE_RE.finditer(text or ""):
             if self._store.delete(match.group(1)):
                 changed.append(f"-{match.group(1)}")
         rule_ids = {m.id for m in self._store.memories() if is_rule_key(m.key)}
+        # Revisions of the facts this pass listed (_memory_lines). A rewrite or
+        # retirement applies only to the revision the model was shown, so a
+        # save or sync that lands during inference is never overwritten.
+        listed = getattr(self, "_supersession_revisions", {})
         for memory_id, scope_attr, memory_text, problem in _memory_tags(text):
             if problem:
                 errors.append(problem)
                 continue
             if memory_id in rule_ids:
                 errors.append(f"memory {memory_id}: a behaviour rule is rewritten with <rule id=...>")
+                continue
+            if memory_id and memory_id not in listed:
+                errors.append(f"memory {memory_id}: not a fact listed this pass")
                 continue
             provenance = (
                 memory_provenance(memory_text, entries) if entries is not None else None
@@ -2250,6 +2261,7 @@ Never claim a workflow is installed because it was proposed."""
                     memory_id=memory_id,
                     scope=self._resolve_scope(scope_attr),
                     provenance=provenance,
+                    expected_revision=listed[memory_id] if memory_id else None,
                 )
             except ValueError as exc:
                 errors.append(f"memory: {exc}")
@@ -2262,8 +2274,12 @@ Never claim a workflow is installed because it was proposed."""
             # The learner retires into the archive. A deletion barrier here
             # used to stop every later save of the same text, agent saves
             # included, and Recall could no longer find the fact.
+            if match.group(1) not in listed:
+                errors.append(f"memory {match.group(1)}: not a fact listed this pass")
+                continue
             try:
-                if self._store.retire_memory(match.group(1), reason="learner"):
+                if self._store.retire_memory(match.group(1), reason="learner",
+                                             expected_revision=listed[match.group(1)]):
                     changed.append(f"-memory:{match.group(1)}")
             except ValueError as exc:
                 errors.append(f"memory {match.group(1)}: {exc}")

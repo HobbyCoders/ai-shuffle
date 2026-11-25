@@ -30,6 +30,7 @@ async def test_learner_delete_archives_without_a_deletion_barrier(tmp_path):
     store = SkillStore(tmp_path)
     fact = store.save_memory("The staging box is called Atlas.")
     synth = Synthesizer(provider=None, model="m", store=store)
+    synth._memory_lines()  # the pass lists the facts it may retire
     assert await synth._apply(f'<delete-memory id="{fact.id}"/>') == [f"-memory:{fact.id}"]
     assert fact.id not in {m.id for m in store.memories()}
     assert fact.id in archived_ids(store)
@@ -42,6 +43,33 @@ async def test_learner_delete_archives_without_a_deletion_barrier(tmp_path):
     assert fact.id in {m.id for m in store.memories()}
     raw = next(e for e in store._facts.snapshot()["entries"] if e["id"] == fact.id)
     assert "retired_at" not in raw
+
+
+@pytest.mark.asyncio
+async def test_learner_edits_apply_only_to_the_revision_it_listed(tmp_path):
+    store = SkillStore(tmp_path)
+    renamed = store.save_memory("The staging box is called Atlas.", durable=True)
+    moved = store.save_memory("The deploy window is Friday.", durable=True)
+    synth = Synthesizer(provider=None, model="m", store=store)
+    synth._memory_lines()
+    # A foreground save (or a sync) lands while the learner's model is answering.
+    store.save_memory("The staging box is called Borealis.", memory_id=renamed.id,
+                      expected_revision=renamed.revision, durable=True)
+    store.save_memory("The deploy window is Thursday.", memory_id=moved.id,
+                      expected_revision=moved.revision, durable=True)
+    late = store.save_memory("The release notes live in CHANGES.md.", durable=True)
+    changed = await synth._apply(
+        f'<memory id="{renamed.id}">The staging box is called Atlas-2.</memory>\n'
+        f'<delete-memory id="{moved.id}"/>\n'
+        f'<delete-memory id="{late.id}"/>'  # never listed to this pass
+    )
+    assert changed == []
+    assert {m.id: m.text for m in store.memories()} == {
+        renamed.id: "The staging box is called Borealis.",
+        moved.id: "The deploy window is Thursday.",
+        late.id: "The release notes live in CHANGES.md.",
+    }
+    assert not archived_ids(store)
 
 
 @pytest.mark.asyncio

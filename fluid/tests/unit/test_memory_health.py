@@ -182,6 +182,21 @@ def test_duplicate_repair_never_retires_a_user_saved_copy(tmp_path):
     assert len(both.memories()) == 2
 
 
+def test_duplicate_repair_keeps_a_shared_fact_beside_a_worker_only_copy(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    text = "The build cache lives in the cache folder."
+    local = b.save_memory(text, per_worker=True)
+    shared = a.save_memory(text)
+    b._facts.merge(a._facts.export())
+    ids = {m.id for m in b.memories()}
+    assert local.id in ids and len(ids) == 2
+    memory_health.repair(b)
+    # Neither is a duplicate: retiring the shared copy would take the fact
+    # from every other worker, retiring the local one changes nothing here.
+    assert {m.id for m in b.memories()} == ids
+    assert not b.archived_memories()
+
+
 def test_near_duplicate_groups_are_reported_not_merged(tmp_path):
     store = SkillStore(tmp_path)
     for i in range(memory_health.NEAR_DUPLICATE_GROUPS):

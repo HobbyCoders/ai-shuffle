@@ -4,7 +4,7 @@ The three "not yet" items from docs/agent-experience.md made real:
 
 1. **Skill verification** — import + ``_selftest()`` in a throwaway no-tools
    kernel; on save (rejected if failing) and on mount (broken skills excluded
-   and flagged); verdicts cached by mtime.
+   and flagged); verdicts cached by the digest of the source verified.
 2. **Episodic memory** — user/assistant conversation events journaled next to
    cells and rendered into the synthesis prompt.
 3. **Namespace checkpointing** — kernel death (timeout/OOM) restores picklable
@@ -316,7 +316,7 @@ async def test_mount_excludes_skills_the_budget_did_not_reach(tmp_path, monkeypa
     store = SkillStore(tmp_path)
     store.save("pending", '"""Pending."""\n')
     store.save("done", '"""Done."""\n')
-    store.mark_verified("done")
+    store.mark_verified("done", source=store.get("done").source)
 
     async def out_of_time(store, **kwargs):
         return {}
@@ -378,3 +378,104 @@ async def test_verifier_exception_withholds_skills_and_reports_degraded_mode(
         )
     finally:
         await session.aclose()
+
+
+async def test_a_skill_verified_in_a_later_cell_reaches_the_mounted_kernel(
+    tmp_path, monkeypatch
+) -> None:
+    import fluid.codemode.session as session_mod
+
+    store = SkillStore(tmp_path)
+    store.save("late", '"""Late."""\nvalue = 1\n')
+    mounts: list[set[str]] = []
+
+    class _Kernel:
+        def __init__(self, config) -> None:
+            pass
+
+        async def start(self) -> None:
+            pass
+
+        async def set_vfs(self, sources, skills) -> None:
+            mounts.append(set(skills))
+
+    budget_left = False
+
+    async def verify(store, **kwargs):
+        if not budget_left:
+            return {}  # the first cell's budget ran out before "late"
+        store.mark_verified("late", source=store.get("late").source)
+        return {"late": None}
+
+    monkeypatch.setattr(session_mod, "SubprocessKernel", _Kernel)
+    monkeypatch.setattr(session_mod, "verify_store", verify)
+    session = CodeModeSession(ToolRegistry(), skills=store)
+    await session._ensure_kernel()
+    budget_left = True
+    await session._ensure_kernel()  # no file changed, only the verdict
+    assert mounts == [set(), {"late"}]
+
+
+async def test_a_skill_replaced_during_verification_inherits_no_verdict(
+    tmp_path, monkeypatch
+) -> None:
+    import fluid.codemode.verify as verify_mod
+
+    store = SkillStore(tmp_path)
+    original = '"""Original."""\nvalue = 1\n'
+    store.save("swap", original)
+
+    async def verify_then_replace(sources, names, **kwargs):
+        # A sync or an edit lands while the old bytes are being verified.
+        store._path("swap").write_text('"""Replaced."""\nvalue = 2\n', encoding="utf-8")
+        return {name: None for name in names}
+
+    monkeypatch.setattr(verify_mod, "verify_sources", verify_then_replace)
+    assert await verify_store(store) == {"swap": None}
+    assert store.needs_verification("swap")
+    assert "swap" not in store.verified_sources()
+    # The verdict belongs to the bytes that ran: they pass again unchanged.
+    store._path("swap").write_text(original, encoding="utf-8")
+    assert not store.needs_verification("swap")
+    assert store.verified_sources() == {"swap": original}
+
+
+def test_a_verdict_recorded_by_mtime_holds_until_the_file_changes(tmp_path) -> None:
+    store = SkillStore(tmp_path)
+    store.save("legacy", '"""Legacy."""\nvalue = 1\n')
+    meta = store._load_meta()
+    meta["skills"]["legacy"]["verified_mtime"] = store._mtime_ns("legacy")
+    store._save_meta(meta)
+    assert not store.needs_verification("legacy")
+    assert set(store.verified_sources()) == {"legacy"}
+    store.save("legacy", '"""Legacy."""\nvalue = 2\n')
+    assert store.needs_verification("legacy")
+
+
+def test_skill_descriptions_are_bounded_and_a_tool_name_reads_the_tool(tmp_path) -> None:
+    from fluid.tools.registry import ToolOutcome, ToolSpec
+
+    async def _ran(_input: dict, _ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(text="ran")
+
+    registry = ToolRegistry()
+    registry.register_builtin(
+        ToolSpec(name="greet", description="Greet a user.",
+                 input_schema={"type": "object", "properties": {}}, source="builtin"),
+        _ran,
+    )
+    store = SkillStore(tmp_path)
+    long = "Greets " + "very " * 100 + "politely."
+    source = f'"""{long}"""\n\ndef hello():\n    return "hi"\n'
+    store.save("greet", source)
+    session = CodeModeSession(registry, skills=store)
+
+    skill_line = next(line for line in session.render_list().splitlines() if "[used" in line)
+    assert skill_line.startswith("- greet: Greets very") and long not in skill_line
+    assert len(skill_line) < 220
+    found = session.render_search("politely")
+    assert "skills.greet" in found and long not in found
+    # The unqualified name is the tool; the saved skill is one qualified name away.
+    docs = session.render_docs("greet")
+    assert "def greet(" in docs and long not in docs and "skills.greet" in docs
+    assert session.render_docs("skills.greet") == source

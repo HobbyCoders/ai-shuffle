@@ -707,6 +707,7 @@ class FactStore:
             doc["archived"] = [e for e in doc["archived"] if id(e) not in gone]
             self._note_loss(doc, "expired_archived", [e for e in ended if e["id"] not in arrived], now)
         self._repair_supersession_links(doc)
+        self._settle_slot_conflicts(doc)
         live = doc["entries"]
         inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
         ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
@@ -733,6 +734,38 @@ class FactStore:
         # Compact deletion bodies; the monotonic barrier survives compaction.
         doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
         return before != json.dumps(doc, sort_keys=True)
+
+    @staticmethod
+    def _slot_contenders(doc):
+        """Live facts that contend for one slot: different facts (separate
+        IDs, saved on workers offline from each other) holding one (scope,
+        key, worker) with different texts. A copy capacity trimming moved to
+        the archive still contends (every merge brings it back to compete for
+        room); a retired one does not."""
+        slots = {}
+        now = time.time()
+        for e in doc["entries"] + [a for a in doc["archived"] if not a.get("retired_at")]:
+            # An expired copy is on its way back to the archive (see
+            # _maintain), so it does not contend for its old slot.
+            expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
+            if e.get("key") and not e.get("superseded_by") and not expired:
+                # Each worker's copy of an environment fact is its own slot.
+                slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
+        return [e for group in slots.values() if len({e["text"] for e in group}) > 1 for e in group]
+
+    @classmethod
+    def _settle_slot_conflicts(cls, doc):
+        """Clear the slot-contention flag a merge set once the contention is
+        gone (a candidate was forgotten, retired, superseded or expired), so
+        the survivor returns to prompts. A conflict between copies of one
+        record (its ``alternatives``, or a rule's ``contested`` wordings) is
+        not slot contention and keeps its flag until the owner answers.
+        Contention is flagged only by a merge (see :meth:`merge`)."""
+        contended = {id(e) for e in cls._slot_contenders(doc)}
+        for e in doc["entries"]:
+            if (e.get("conflicted") and id(e) not in contended
+                    and not e.get("alternatives") and not _contested(e)):
+                e.pop("conflicted")
 
     @staticmethod
     def _note_loss(doc, kind, gone, now):
@@ -1793,20 +1826,9 @@ class FactStore:
             doc["entries"] = [e for e in kept if not e.get("retired_at")]
             doc["archived"] = [e for e in kept if e.get("retired_at")]
             self._repair_supersession_links(doc)
-            slots = {}
-            now = time.time()
-            for e in doc["entries"]:
-                # An expired copy is on its way back to the archive (see
-                # _maintain), so it does not contend for its old slot. A copy
-                # that capacity trimming would archive still does: which value
-                # holds a slot is a conflict, not a question of room.
-                expired = not e.get("protected") and e.get("expires_at", now + 1) <= now
-                if e.get("key") and not e.get("superseded_by") and not expired:
-                    # Each worker's copy of an environment fact is its own slot.
-                    slots.setdefault((e.get("scope", "global"), e["key"], e.get("worker") or ""), []).append(e)
-            for group in slots.values():
-                if len({e["text"] for e in group}) > 1:
-                    for e in group:
-                        e["conflicted"] = True
+            # A copy that capacity trimming would archive still contends:
+            # which value holds a slot is a conflict, not a question of room.
+            for e in self._slot_contenders(doc):
+                e["conflicted"] = True
             self._maintain(doc, arrived={e["id"] for e in kept} - held)
             self._write(doc)

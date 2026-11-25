@@ -71,7 +71,7 @@ async def test_a_recorded_sandbox_refusal_is_ignored_and_reverified(tmp_path, pa
         else:
             assert "AssertionError" in verdict
         # Replaying an old host result must not overwrite the real verdict.
-        store.mark_verified("adder", refusal)
+        store.mark_verified("adder", refusal, source=store.get("adder").source)
         assert store.get("adder").broken == verdict
         assert store._load_meta()["skills"]["adder"].get("broken") == verdict
     finally:

@@ -532,6 +532,73 @@ def test_keyed_facts_that_disagree_are_flagged_even_when_one_is_trimmed_for_room
     assert len(copies) == 2 and all(e.get("conflicted") for e in copies)
 
 
+def test_slot_contention_clears_once_a_candidate_is_retired(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
+    a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name")
+    a._facts.merge(b._facts.export())
+    b._facts.merge(a._facts.export())
+
+    def slot(store):
+        return sorted((m.text, m.conflicted) for m in store.memories() if m.key == "profile.name")
+
+    assert slot(a) == slot(b) == [("The owner's name is Avery.", True),
+                                  ("The owner's name is Blair.", True)]
+    blair = next(m for m in a.memories() if m.text == "The owner's name is Blair.")
+    assert a.retire_memory(blair.id, reason="duplicate")
+    assert slot(a) == [("The owner's name is Avery.", False)]
+    # The other worker settles too; its stale flag does not bring the conflict back.
+    b._facts.merge(a._facts.export())
+    a._facts.merge(b._facts.export())
+    assert slot(a) == slot(b) == [("The owner's name is Avery.", False)]
+
+
+def test_a_concurrent_edit_of_one_fact_stays_flagged_through_maintenance(tmp_path):
+    a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
+    first = a.save_memory("Deploys go to staging.", provenance="session")
+    b._facts.merge(a._facts.export())
+    peer = next(m.id for m in b.memories() if m.text == "Deploys go to staging.")
+    a.save_memory("Deploys go to prod.", memory_id=first.id, provenance="session")
+    b.save_memory("Deploys go to canary.", memory_id=peer, provenance="session")
+    a._facts.merge(b._facts.export())
+    a.save_memory("The build cache is warm.", provenance="session")  # maintenance runs
+    assert [m.conflicted for m in a.memories() if m.text.startswith("Deploys")] == [True]
+
+
+class _SavesDuringInference(Answer):
+    """A foreground save lands while the learner's model is answering."""
+
+    def __init__(self, text: str, during) -> None:
+        super().__init__(text)
+        self.during = during
+
+    async def stream(self, request):
+        self.during()
+        async for chunk in super().stream(request):
+            yield chunk
+
+
+async def test_a_rule_rewrite_skips_a_rule_changed_during_inference(tmp_path):
+    store = SkillStore(tmp_path)
+    learned = store.save_memory("When opening a pull request: open a real PR.", provenance="user",
+                                durable=True, key=behavior.rule_key("all", "pr"), when=OWNER_WHEN)
+    _correction(store)
+    newer = "When opening a pull request: open a real PR and link the issue."
+
+    def foreground():
+        store.save_memory(newer, memory_id=learned.id, expected_revision=learned.revision,
+                          provenance="user", durable=True, key=learned.key)
+
+    answer = (f'<rule id="{learned.id}" applies_to="all" quote="real PRs only">When opening a '
+              'pull request: never open a draft.</rule>')
+    synth = Synthesizer(_SavesDuringInference(answer, foreground), "gpt-test", store,
+                        min_new_entries=1)
+    await synth.run()
+    [rule] = rules(store)
+    assert rule.text == newer
+    assert "changed since it was read" in (synth.last_error or "")
+
+
 def test_an_expired_copy_does_not_hide_a_rule_moved_into_its_slot(tmp_path, monkeypatch):
     import time as time_mod
     from fluid.codemode import facts

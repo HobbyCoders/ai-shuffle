@@ -60,6 +60,15 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 CODE_MODE_SOURCE = "codemode"
 SKILLS_SOURCE = "skills"
+# A saved skill's description in list_tools/search_tools: its docstring's
+# first line, which nothing else bounds. read_tool_docs shows the whole source.
+SKILL_DESCRIPTION_CHARS = 160
+
+
+def _brief(description: str) -> str:
+    if len(description) <= SKILL_DESCRIPTION_CHARS:
+        return description
+    return description[:SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
 
 _RUN_PYTHON_DESC = (
     "Execute Python in a persistent per-session kernel: names you bind stay "
@@ -442,7 +451,7 @@ class CodeModeSession:
                 lines.append("Saved skills, import via `from skills import <name>`:")
                 for s in saved:
                     flag = f" [BROKEN, not mounted: {s.broken}]" if s.broken else ""
-                    lines.append(f"- {s.name}: {s.description} [used {s.uses}x]{flag}")
+                    lines.append(f"- {s.name}: {_brief(s.description)} [used {s.uses}x]{flag}")
         return "\n".join(lines) if lines else "No tools available."
 
     def render_search(self, query: str) -> str:
@@ -452,19 +461,24 @@ class CodeModeSession:
             for s in self._skills.list():
                 hay = f"skills.{s.name} {s.description}".lower()
                 if any(t in hay for t in tokens) or (not tokens and query.lower() in hay):
-                    hits.append((f"skills.{s.name}", s.description))
+                    hits.append((f"skills.{s.name}", _brief(s.description)))
         if not hits:
             return f"No tools match {query!r}."
         return "\n".join(f"- {leaf}: {one}" for leaf, one in hits)
 
     def render_docs(self, name: str) -> str:
-        if self._skills is not None:
-            skill = self._skills.get(name.removeprefix("skills."))
+        # ``skills.<name>`` names a saved skill. An unqualified name is a tool
+        # first, so a skill that shares a tool's name cannot hide its docs.
+        qualified = name.startswith("skills.")
+        skill = (self._skills.get(name.removeprefix("skills."))
+                 if self._skills is not None else None)
+        src = None if qualified else self._projection().docs(name)
+        if src is None:
             if skill is not None:
                 return skill.source
-        src = self._projection().docs(name)
-        if src is None:
             return f"No such tool: {name!r}. Try list_tools or search_tools."
+        if skill is not None:
+            src += f"\n\n(A saved skill is also named {name}; read skills.{name} for its source.)"
         # A repeat fetch returns the docs anyway — a compaction may have taken
         # them — but tells the model it is probably already holding them.
         if name in self._docs_served:
@@ -500,19 +514,15 @@ class CodeModeSession:
             return {}
         self._verification_degraded = None
         self._verification_degraded_reported = False
-        return {
-            s.name: s.source for s in self._skills.list()
-            if s.broken is None and s.source
-            and not self._skills.needs_verification(s.name)
-        }
+        return self._skills.verified_sources()
 
     async def _ensure_kernel(self) -> SubprocessKernel:
         sources = self._projection().sources()
         skills = await self._mountable_skills()
-        signature = (
-            tuple(sorted(sources.items())),
-            self._skills.signature() if self._skills is not None else (),
-        )
+        # Keyed on the verified sources actually mounted, not the directory:
+        # a skill verified in a later cell (the budget ran out earlier, or a
+        # verification pass failed) changes the mount with no file change.
+        signature = (tuple(sorted(sources.items())), tuple(sorted(skills.items())))
         if self._kernel is None:
             self._kernel = SubprocessKernel(self._config)
             await self._kernel.start()
@@ -1096,7 +1106,7 @@ def register_code_mode_tools(
                     "changes."
                 )
             )
-        store.mark_verified(name)
+        store.mark_verified(name, source=source)
         return ToolOutcome(
             text=(
                 f"skill {skill.name!r} saved and verified — import with "
