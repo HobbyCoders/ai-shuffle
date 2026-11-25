@@ -72,6 +72,8 @@ CLONE_DEADLINE_SECONDS = 3600.0
 # overrides every protocol.* setting in any gitconfig, and applies to the URL
 # after insteadOf rewrites). No ``file``: a local folder is added with Folder.
 NEW_PROJECT_PROTOCOLS = "https:http:ssh"
+# Other spellings of a project's remote a setup may fall back to (git@ vs https).
+MAX_ALTERNATE_URLS = 4
 
 # Stable error codes (the UI keys its actions off these).
 GITHUB_AUTH = "github_auth"
@@ -92,6 +94,10 @@ _UNKNOWN_ACTION = "Unknown control action"
 
 class SetupError(RuntimeError):
     """A setup failure with a stable code; ``str()`` is the plain-English message."""
+
+    # Whether another spelling of the remote may answer differently
+    # (:func:`clone_failure_retries`); only a refused clone sets it.
+    tries_next_url = False
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -208,14 +214,10 @@ def _superseded_local_origins(rows: List[Dict[str, Any]]) -> set:
     return out
 
 
-def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
-    """``{origin: {clone_url, default_branch}}`` from git records this DB holds,
-    then the remotes stored on the replicated ``projects_v2`` rows (which still
-    know a project no local record has any more)."""
-    from app.core.project_links import auto_link_group_id
-    from app.core.scrub import strip_url_userinfo
-    from app.db import projects_v2
-    from app.db.base import get_db, parse_jsonb
+def clone_records() -> List[Dict[str, Any]]:
+    """Every git record this database holds, as stored (credentials and all),
+    for :func:`clone_candidates`: ``{url, default_branch, linked}``."""
+    from app.db.base import get_db
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -226,30 +228,137 @@ def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
             "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''"
         )
         rows = cursor.fetchall()
-        cursor.execute("SELECT origin, settings FROM projects_v2")
-        stored_rows = cursor.fetchall()
-    out: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        url = strip_url_userinfo(row["remote_url"])
-        if not url:
+    return [{"url": row["remote_url"], "default_branch": row["default_branch"] or None,
+             "linked": row["link_group_id"] or ("local:" + str(row["id"]))} for row in rows]
+
+
+def stored_candidate(pv2: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The remote stored on a ``projects_v2`` row, as stored, for :func:`clone_candidates`."""
+    from app.db import projects_v2
+
+    url, branch = projects_v2.stored_remote(pv2)
+    if not url:
+        return None
+    settings_ = (pv2 or {}).get("settings") or {}
+    pinned = isinstance(settings_, dict) and settings_.get(projects_v2.PINNED_KEY) is True
+    return {"url": url, "default_branch": branch, "pinned": pinned}
+
+
+def clone_candidates(origin: str, records: List[Dict[str, Any]],
+                     stored: Optional[Dict[str, Any]], *, clean_first: bool,
+                     stored_first: bool) -> List[Dict[str, Any]]:
+    """The URLs to clone a ``git:`` ``origin`` from, in the order to try them.
+
+    Each is ``{url, default_branch}``. A project the owner pointed at a
+    repository clones exactly that one (``[pin]``). Otherwise the first is
+    what an install without alternates picks: among the known URLs naming the
+    origin, those in its own spelling (``legacy_link_group_id`` is the origin)
+    before those naming it through the other one (git@ vs https), each in the
+    order it picks from: the records in database order then the catalog row's
+    stored remote for Workers setup, the stored remote first for this
+    worker's own seed (``stored_first``). The first URL and its branch are
+    exactly what it picked.
+
+    After it come only that URL over the other transport
+    (:func:`other_transport_of`): the known ones, then its derived other
+    spelling (:func:`joined_counterpart`, public forges only), with no exact
+    repeats. A worker that can sign in over only one transport still clones
+    it. Nothing else that shares the id is ever tried (``team/Demo`` and
+    ``team/demo`` may be two repositories), nor a fork linked into the group;
+    which worker asks plays no part.
+
+    The first keeps the form a clone took before alternates existed (as
+    stored for the seed, ``strip_url_userinfo`` when sent with
+    ``clean_first``). Every other is :func:`strip_remote_userinfo`'d, and
+    dropped when that can't be done, so no credential is ever sent or queued
+    with it. ``local:`` and ``manual:`` origins have no candidates: they keep
+    their single URL (:func:`_repo_info_by_origin`).
+    """
+    from app.core.project_links import (
+        joined_counterpart, legacy_link_group_id, other_transport_of, remote_link_ids, strip_remote_userinfo,
+    )
+    from app.core.scrub import strip_url_userinfo
+
+    if not origin.startswith("git:"):
+        return []
+    if stored and stored.get("pinned"):
+        url = strip_url_userinfo(stored["url"]) if clean_first else stored["url"]
+        return [{"url": url, "default_branch": stored.get("default_branch")}] if url else []
+    stored_list = [stored] if stored else []
+    known = stored_list + list(records) if stored_first else list(records) + stored_list
+    naming = [entry for entry in known if origin in remote_link_ids(entry["url"])]
+    ordered = ([entry for entry in naming if legacy_link_group_id(entry["url"]) == origin]
+               + [entry for entry in naming if legacy_link_group_id(entry["url"]) != origin])
+    first = None
+    for entry in ordered:
+        url = strip_url_userinfo(entry["url"]) if clean_first else entry["url"]
+        if url:
+            first = {"url": url, "default_branch": entry.get("default_branch")}
+            break
+    if first is None:
+        return []
+    out = [first]
+    seen = {strip_remote_userinfo(first["url"]) or first["url"]}
+    derived = joined_counterpart(strip_remote_userinfo(first["url"]))
+    others = [entry["url"] for entry in ordered] + ([derived] if derived else [])
+    for raw in others:
+        url = strip_remote_userinfo(raw)
+        if not url or url in seen or not other_transport_of(first["url"], url):
             continue
-        info = {"clone_url": url, "default_branch": row["default_branch"] or None}
-        out.setdefault(row["link_group_id"] or ("local:" + str(row["id"])), info)
-        derived = auto_link_group_id(url)
-        if derived:
-            out.setdefault(derived, info)
-    for row in stored_rows:
-        url, branch = projects_v2.stored_remote({"settings": parse_jsonb(row["settings"])})
-        url = strip_url_userinfo(url) if url else None
-        origin = row["origin"]
-        if url and parse_jsonb(row["settings"]).get(projects_v2.PINNED_KEY) is True:
+        seen.add(url)
+        out.append({"url": url, "default_branch": first["default_branch"]})
+    return out
+
+
+def _repo_info_by_origin() -> Dict[str, Dict[str, Any]]:
+    """``{origin: {clone_url, default_branch, alternate_urls}}`` from git
+    records this DB holds and the remotes stored on the replicated
+    ``projects_v2`` rows (which still know a project no local record has any
+    more).
+
+    A ``git:`` origin: ``clone_url`` is the first of :func:`clone_candidates`,
+    ``alternate_urls`` the rest, tried in order when a clone is refused. Any
+    other origin keeps one URL and no alternates: its pin, else the first
+    record linked to it, else its stored remote.
+    """
+    from app.core.project_links import remote_link_ids
+    from app.core.scrub import strip_url_userinfo
+    from app.db.base import get_db, parse_jsonb
+
+    records = clone_records()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT origin, settings FROM projects_v2")
+        stored = {row["origin"]: stored_candidate({"settings": parse_jsonb(row["settings"])})
+                  for row in cursor.fetchall()}
+    out: Dict[str, Dict[str, Any]] = {}
+    git_origins = {origin for origin in stored if origin.startswith("git:")}
+    for record in records:
+        git_origins.update(remote_link_ids(record["url"]))
+        if record["linked"].startswith("git:"):
+            continue
+        url = strip_url_userinfo(record["url"])
+        if url:
+            out.setdefault(record["linked"], {"clone_url": url, "default_branch": record["default_branch"],
+                                              "alternate_urls": []})
+    for origin, candidate in stored.items():
+        url = strip_url_userinfo(candidate["url"]) if candidate else None
+        if origin.startswith("git:") or not url:
+            continue
+        info = {"clone_url": url, "default_branch": candidate["default_branch"], "alternate_urls": []}
+        if candidate["pinned"]:
             # The owner pointed this project at a repository: that beats what a
             # worker that has not applied it yet still records.
-            out[origin] = {"clone_url": url, "default_branch": branch}
-            continue
-        if not url or (origin.startswith("git:") and auto_link_group_id(url) != origin):
-            continue
-        out.setdefault(origin, {"clone_url": url, "default_branch": branch})
+            out[origin] = info
+        else:
+            out.setdefault(origin, info)
+    for origin in git_origins:
+        candidates = clone_candidates(origin, records, stored.get(origin), clean_first=True,
+                                      stored_first=False)
+        if candidates:
+            out[origin] = {"clone_url": candidates[0]["url"],
+                           "default_branch": candidates[0]["default_branch"],
+                           "alternate_urls": [c["url"] for c in candidates[1:]]}
     return out
 
 
@@ -354,7 +463,7 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     that remote. Any other origin can only name one through the remote stored
     on its replicated ``projects_v2`` row.
     """
-    from app.core.project_links import normalize_remote_url
+    from app.core.project_links import same_remote
     from app.db import projects_v2
 
     from app.core.project_remote import remote_names_origin
@@ -362,7 +471,7 @@ def _is_recorded_remote(clean: str, origin: str) -> bool:
     if origin.startswith("git:"):
         return remote_names_origin(clean, origin)
     stored, _branch = projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(origin))
-    return bool(stored) and normalize_remote_url(stored) == normalize_remote_url(clean)
+    return bool(stored) and same_remote(stored, clean)
 
 
 def _validate_clone_url(url: str, origin: str) -> str:
@@ -397,6 +506,41 @@ def _validate_clone_url(url: str, origin: str) -> str:
     if origin.startswith("git:") and not remote_names_origin(clean, origin):
         raise ValueError("The remote does not match this project")
     return clean
+
+
+def _valid_alternates(urls: Any, origin: str, first: Optional[str]) -> List[str]:
+    """The other spellings a setup may clone if ``first`` is refused, each
+    checked as :func:`_validate_clone_url` checks ``first``; one it refuses
+    (another repository, an unsafe source) is dropped, never cloned. Each is
+    queued without credentials (``strip_remote_userinfo``), or dropped, and
+    must be ``first`` over the other transport (:func:`other_transport_of`):
+    a URL that only shares the project's id may be another repository."""
+    from app.core.project_links import other_transport_of, strip_remote_userinfo
+
+    out: List[str] = []
+    if not isinstance(urls, list):
+        return out
+    for url in urls[:MAX_ALTERNATE_URLS]:
+        if not isinstance(url, str) or len(url) > 2048:
+            continue
+        safe = strip_remote_userinfo(url)
+        if not safe:
+            logger.warning("project setup: dropped another clone URL for %s: it can't be sent without "
+                           "credentials", origin)
+            continue
+        try:
+            clean = _validate_clone_url(safe, origin)
+        except ValueError:
+            logger.warning("project setup: dropped another clone URL for %s: it is not this project's remote",
+                           origin)
+            continue
+        if not other_transport_of(first, clean):
+            logger.warning("project setup: dropped another clone URL for %s: it is not the same repository "
+                           "over the other transport", origin)
+            continue
+        if clean and clean != first and clean not in out:
+            out.append(clean)
+    return out
 
 
 def _registered_row(origin: str) -> Optional[Dict[str, Any]]:
@@ -467,6 +611,7 @@ def start_local(spec: Dict[str, Any], *, op_id: str, requested_by: Optional[str]
 
     if kind == "git":
         params["clone_url"] = _validate_clone_url(str(spec.get("clone_url") or ""), origin)
+        params["alternate_urls"] = _valid_alternates(spec.get("alternate_urls"), origin, params["clone_url"])
     stored, full = resolve_folder(str(spec.get("folder") or ""))
     if mode == "adopt" and not full.is_dir():
         raise ValueError(f"There is no folder at {full} to use")
@@ -729,7 +874,7 @@ async def remove_local(project_v2_id: str) -> Dict[str, Any]:
 
 def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
     from app.core.git_service import git_service
-    from app.core.project_links import normalize_remote_url
+    from app.core.project_links import same_remote
 
     if not path.is_dir() or not git_service.is_git_repo(str(path)):
         return False
@@ -740,7 +885,7 @@ def _same_repo(path: Path, clone_url: Optional[str], origin: str) -> bool:
         from app.core.project_remote import remote_names_origin
 
         return remote_names_origin(remote, origin)
-    return bool(clone_url) and normalize_remote_url(remote) == normalize_remote_url(clone_url)
+    return bool(clone_url) and same_remote(remote, clone_url)
 
 
 def _is_empty_dir(path: Path) -> bool:
@@ -940,7 +1085,9 @@ def _clone(job: _Job, clone_url: str, final_path: Path, *, network_only: bool = 
                                       "minutes, so it was stopped. Check this worker's network connection "
                                       "and try again.")
         if returncode != 0:
-            raise classify_clone_failure("\n".join(tail), clone_url)
+            error = classify_clone_failure("\n".join(tail), clone_url)
+            error.tries_next_url = clone_failure_retries("\n".join(tail))
+            raise error
         git_service.invalidate_status_cache(temp)
         if final_path.exists() or final_path.is_symlink():
             if not _is_empty_dir(final_path):
@@ -954,6 +1101,79 @@ def _clone(job: _Job, clone_url: str, final_path: Path, *, network_only: bool = 
         with job.lock:
             job.proc = None
             job.temp_dir = None
+
+
+def remote_kind(url: Optional[str]) -> str:
+    """``SSH`` / ``HTTPS`` / … for a log line: which spelling, never the URL."""
+    match = re.match(r"^([A-Za-z][A-Za-z0-9+.\-]*)://", url or "")
+    if not match:
+        return "SSH" if re.match(r"^[^/\\]+:", url or "") else "a local path"
+    scheme = match.group(1).lower()
+    return "SSH" if "ssh" in scheme else scheme.upper()
+
+
+# A refusal another spelling of the remote (git@ vs https) can answer
+# differently: sign-in, a remote saying there is no such repository (or none
+# this key may see), or a connection the network refused or the remote cut
+# (an SSH port blocked where HTTPS is open, a TLS handshake the remote ended).
+# Never a bare "not found": a missing tool on this worker says that too.
+_RETRY_HINTS = _AUTH_HINTS + (
+    "repository not found", "does not appear to be a git repository", "returned error: 404",
+    "could not be found or you don't have permission",
+    "could not resolve host", "could not resolve hostname", "connection refused", "connection reset",
+    "no route to host", "network is unreachable", "failed to connect", "couldn't connect to server",
+    "connection closed by remote host", "gnutls_handshake() failed", "ssl_connect",
+    "tls connection was non-properly terminated")
+# ``ssh: connect to host <host> port 22: ...`` (whatever follows, the port was
+# not reachable) and ``Connection closed by <host> port 22``.
+_SSH_CONNECT_RE = re.compile(r"\b(?:connect to host|connection closed by) \S+ port \d+")
+# The repository arrived and something on this worker failed after it
+# (a missing ``git-lfs``, the disk, the checkout): no spelling fixes that.
+_LOCAL_FAILURE_HINTS = ("checkout failed", "no space left on device", "disk quota exceeded",
+                        "read-only file system", "git-lfs: not found", "command not found",
+                        "ssh: not found", "ssh: command not found", "cannot run ssh")
+# A slow or silent network: the other spelling would wait the same way.
+_TIMEOUT_HINTS = ("timed out", "timeout was reached", "operation timed out")
+
+
+def clone_failure_retries(stderr: str) -> bool:
+    """Whether a failed ``git clone`` (its stderr) may try the project's next
+    URL. A timeout, a cancel and a failure on this worker (no ``ssh`` to run)
+    never do; those are checked first. Git ends any failed SSH clone with
+    "Please make sure you have the correct access rights", so that footer
+    proves nothing: only the remote's own refusal above it counts."""
+    text = (stderr or "").lower()
+    if any(hint in text for hint in _LOCAL_FAILURE_HINTS):
+        return False
+    if any(hint in text for hint in _TIMEOUT_HINTS):
+        return False
+    return any(hint in text for hint in _RETRY_HINTS) or bool(_SSH_CONNECT_RE.search(text))
+
+
+def _clone_any(job: _Job, urls: List[str], final_path: Path, *, network_only: bool = False) -> str:
+    """:func:`_clone` from the first of ``urls`` that this worker may read.
+
+    Each is a spelling of the project's one repository; this worker may hold
+    credentials for, or reach, only one of them, so a refused clone tries the
+    next (:func:`clone_failure_retries`). Any other failure (a timeout, a
+    cancel, the folder, this worker's disk or tools) stops at once. A failed
+    try leaves nothing behind: :func:`_clone` removes its temporary folder.
+    """
+    for index, url in enumerate(urls):
+        try:
+            _clone(job, url, final_path, network_only=network_only)
+        except SetupError as exc:
+            if index + 1 >= len(urls) or not exc.tries_next_url:
+                raise
+            logger.info("project setup: %s couldn't clone over %s (%s); trying another spelling",
+                        job.op_id, remote_kind(url), exc.error_code)
+            with job.lock:
+                job.finalizing = False  # the next clone can still be cancelled
+            continue
+        if index:
+            logger.info("project setup: %s cloned over %s", job.op_id, remote_kind(url))
+        return url
+    raise SetupError(INTERNAL, "The setup request has no clone URL")
 
 
 def _is_this_project(origin: str, row: Dict[str, Any]) -> bool:
@@ -1062,6 +1282,10 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
     kind = params.get("kind")
     mode = params.get("mode") or "auto"
     clone_url = params.get("clone_url")
+    # Other spellings to try if ``clone_url`` is refused: never for a new
+    # project (it clones exactly what the owner entered) or a pinned one.
+    alternates = [] if params.get("project_id") else _valid_alternates(params.get("alternate_urls"), origin,
+                                                                       clone_url)
     if kind == "git" and origin:
         from app.core.project_remote import pinned_remote
         from app.db import projects_v2
@@ -1069,11 +1293,13 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
         # A request queued before the project moved to another repository
         # still carries the old URL: a new copy clones the current one.
         pinned = pinned_remote(projects_v2.get_project_v2_by_origin(origin))
+        if pinned:
+            alternates = []
         if pinned and params.get("project_id"):
             # A new project clones exactly the repository the owner entered.
-            from app.core.project_links import normalize_remote_url
+            from app.core.project_links import same_remote
 
-            if normalize_remote_url(pinned) != normalize_remote_url(clone_url):
+            if not same_remote(pinned, clone_url):
                 raise SetupError(MOVED, moved_message(pinned))
         elif pinned:
             try:
@@ -1114,14 +1340,14 @@ def _execute_setup(op_row: Dict[str, Any]) -> Dict[str, Any]:
             if _same_repo(path, clone_url, origin):
                 adopted = True
             elif mode == "auto" and _is_empty_dir(path):
-                _clone(job, clone_url, path, network_only=network_only)
+                _clone_any(job, [clone_url, *alternates], path, network_only=network_only)
             else:
                 raise SetupError(FOLDER_EXISTS, f"{path} already exists and isn't a copy of this project. "
                                                 "Choose another folder.")
         elif mode == "adopt":
             raise SetupError(NOT_FOUND, f"There is no folder at {path} to use.")
         else:
-            _clone(job, clone_url, path, network_only=network_only)
+            _clone_any(job, [clone_url, *alternates], path, network_only=network_only)
     elif kind == "folder":
         if path.exists() or path.is_symlink():
             if not path.is_dir() or path.is_symlink():

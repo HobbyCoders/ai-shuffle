@@ -76,6 +76,8 @@ export interface ProjectOverviewRow {
 	kind: ProjectKind;
 	/** Display form (no credentials), e.g. github.com/owner/repo. */
 	remote: string | null;
+	/** The repository's comparison key (no credentials): equal to `remoteKey()` of any URL of it. */
+	remote_key?: string | null;
 	default_branch: string | null;
 	session_count: number;
 	workers: ProjectWorker[];
@@ -143,23 +145,67 @@ export function refQuery(ref: ProjectRef): string {
 }
 
 /**
- * A comparison key for a Git remote in any spelling (HTTPS, SSH `git@host:o/r`,
- * with or without `.git`, credentials or a trailing slash): `host/owner/repo`
- * lower-cased. Mirrors the server's `display_remote`, so it also matches an
- * overview row's `remote`. Empty for a blank URL.
+ * A Git remote's comparison key, equal to an overview row's `remote_key` for the
+ * same repository (the server's `remote_key`). In a `scheme://` URL the authority
+ * (up to the first `/`) loses everything up to its last `@`, except an SSH login
+ * with no `:`; what is left must be a host and port, with no `@` after it, else
+ * the key is empty (no marker; the server still refuses a duplicate). Then, as
+ * the server's `canonical_remote`, it is normalized first (trailing slashes and
+ * one `.git` removed, lower-cased) and only then `git@host:owner/repo` on
+ * github.com, gitlab.com, bitbucket.org or codeberg.org (plain path segments,
+ * two of them, GitLab two or more: the server's `joined_pair`) is read as
+ * `https://host/owner/repo`. So two URLs one project on the server always have
+ * one key here. Every other spelling, a self-hosted server's `git@` included,
+ * stays as normalized, so two SSH logins on one host stay apart. Empty for a
+ * blank URL.
  */
 export function remoteKey(url: string | null | undefined): string {
 	let text = (url ?? '').trim();
-	const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/(.*)$/.exec(text);
+	const scheme = /^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/]*)([\s\S]*)$/.exec(text);
 	if (scheme) {
-		text = scheme[1].replace(/^[^@/]*@/, '');
-	} else {
-		const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/)(.*)$/.exec(text);
-		if (scp && scp[1].length > 1) text = `${scp[1]}/${scp[2]}`;
+		const [, prefix, whole, rest] = scheme;
+		let authority = whole;
+		let login = '';
+		const at = authority.lastIndexOf('@');
+		if (at >= 0) {
+			const info = authority.slice(0, at);
+			authority = authority.slice(at + 1);
+			if (/^(?:git\+)?ssh(?:\+git)?:\/\/$/i.test(prefix) && /^[^\s@:/[\]]+$/.test(info)) login = `${info}@`;
+		}
+		if ((authority && !/^(?:\[[0-9A-Fa-f:.%]+\]|[^\s@:/[\]]+)(?::\d*)?$/.test(authority)) || rest.includes('@')) return '';
+		text = `${prefix}${login}${authority}${rest}`;
+	} else if (text.includes('@') && text.split('@', 1)[0].includes(':')) {
+		return '';
 	}
-	text = text.replace(/\/+$/, '');
+	const normalized = normalizeRemote(text);
+	const forge = /^git@([^\s/:@[\]\\]+):(?![/~])(\S+)$/.exec(normalized);
+	return forge && isPublicForgePath(forge[1], forge[2]) ? normalizeRemote(`https://${forge[1]}/${forge[2]}`) : normalized;
+}
+
+/** The server's `normalize_remote_url`: trailing slashes, then one `.git`, removed; lower-cased. */
+function normalizeRemote(url: string): string {
+	let text = url.trim().replace(/\/+$/, '');
 	if (text.toLowerCase().endsWith('.git')) text = text.slice(0, -4);
 	return text.toLowerCase();
+}
+
+/** Path segments a repository has on each public forge whose `git@` and HTTPS spellings are joined. */
+const PUBLIC_FORGE_DEPTH: Record<string, [number, number | null]> = {
+	'github.com': [2, 2],
+	'gitlab.com': [2, null],
+	'bitbucket.org': [2, 2],
+	'codeberg.org': [2, 2]
+};
+
+/** Whether `git@host:path` names the same repository as `https://host/path` (the server's `joined_pair`). */
+function isPublicForgePath(host: string, path: string): boolean {
+	const depth = Object.hasOwn(PUBLIC_FORGE_DEPTH, host) ? PUBLIC_FORGE_DEPTH[host] : undefined;
+	if (!depth) return false;
+	let core = path.endsWith('/') ? path.slice(0, -1) : path;
+	if (core.endsWith('.git')) core = core.slice(0, -4);
+	const segments = core.split('/');
+	if (segments.length < depth[0] || (depth[1] !== null && segments.length > depth[1])) return false;
+	return segments.every((s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== '.' && s !== '..');
 }
 
 /** True for an answer that means "this worker has no such route" (an older worker). */

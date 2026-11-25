@@ -209,7 +209,7 @@
 	const existingByRemote = $derived.by(() => {
 		const map = new Map<string, { name: string; localId: string | null }>();
 		for (const row of $projectsOverview) {
-			const key = remoteKey(row.remote);
+			const key = row.remote_key;
 			if (key) map.set(key, { name: row.name, localId: row.local_project_id });
 		}
 		return map;

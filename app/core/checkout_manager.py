@@ -56,7 +56,6 @@ from app.core.git_worktree_ops import (
     repo_worktree_lock,
     worktree_error_detail,
 )
-from app.core.project_links import auto_link_group_id
 from app.core.worktree_manager import (
     WorktreeError,
     resolve_rebound_branch_plan,
@@ -559,65 +558,68 @@ def _branch_plan(
 
 
 def _resolve_clone_url(origin: str, project_v2_row: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """Recover a cloneable remote URL for a project_v2 ``origin``.
+    """The first URL :func:`_clone_candidates` would try, else ``None``."""
+    candidates = _clone_candidates(origin, project_v2_row)
+    return candidates[0] if candidates else None
+
+
+def _clone_candidates(origin: str, project_v2_row: Optional[Dict[str, Any]] = None) -> List[str]:
+    """The remote URLs to clone a project_v2 ``origin`` from, in order.
 
     Consumed by ``_seed_base_checkout`` to clone a base checkout on demand when a
-    pinned runner has no local materialization.
+    pinned runner has no local materialization: it tries them in order and moves
+    on only when a clone is refused (``project_setup.clone_failure_retries``).
 
-    The remote stored on the replicated ``projects_v2`` row
-    (``settings.remote_url``, see ``app.db.projects_v2.record_remote``) wins when
-    it reproduces ``origin``: it survives the last local record of the project
-    going away, which the legacy scan below does not.
+    The list is ``project_setup.clone_candidates``, as Workers setup builds
+    it: a pinned project clones its pin only; otherwise the URLs that name
+    ``origin`` (the replicated ``projects_v2`` row's stored remote first, which
+    survives the last local record of the project going away, then legacy
+    records, as the seed picked before), the origin's own spelling before the
+    other one (git@ vs https); after the first, only that same URL over the
+    other transport (known, or derived on a public forge). A URL names ``origin`` when ``origin`` is
+    one of its ``remote_link_ids``: the same deterministic, install-independent
+    hash the v60 collapse used to assign origins, so a match is a true
+    identity, not a heuristic, and a fork linked into the group is never cloned
+    for it. The first URL is as stored, as before; the others carry no
+    credentials.
 
-    A v2 ``origin`` is the collapse key ``project_resolver.origin_for_legacy_project``
-    seeds: the legacy ``link_group_id`` (a ``git:…`` / ``manual:…`` token) or a synth
-    ``'local:' + id`` for remote-less rows. Only a ``git:…`` origin can ever name a
-    remote, so ``local:`` / ``manual:`` origins are hard-fail excluded up front
-    with no DB lookup. For the rest we scan legacy ``projects`` ->
-    ``git_repositories.remote_url`` and return the first URL whose
-    ``auto_link_group_id(remote_url)`` reproduces this exact ``origin`` — the same
-    deterministic, install-independent hash the v60 collapse used to assign origins,
-    so a match is a true identity, not a heuristic.
-
-    Every no-match path returns ``None`` explicitly (never an ``or``-fallback chain —
-    a standing repo rule from a past production bug). Best-effort: a DB error logs
-    and returns ``None`` so a caller degrades to today's "not on this device" error.
+    Only a ``git:…`` origin can ever name a remote, so ``local:`` / ``manual:``
+    origins are hard-fail excluded up front with no DB lookup. Every no-match
+    path returns an empty list explicitly. Best-effort: a DB error logs and
+    leaves only the stored remote, so a caller degrades to today's "not on this
+    device" error.
     """
     if not origin:
-        return None
+        return []
     if origin.startswith("local:") or origin.startswith("manual:"):
-        return None
-    from app.core.project_remote import pinned_remote
-    from app.db.projects_v2 import stored_remote
+        return []
+    from app.core import project_setup
 
-    pinned = pinned_remote(project_v2_row)
-    if pinned is not None and (project_v2_row or {}).get("origin") == origin:
-        return pinned  # the owner pointed this project at another repository
-    stored_url, _stored_branch = stored_remote(project_v2_row)
-    if stored_url is not None and (project_v2_row or {}).get("origin") == origin \
-            and auto_link_group_id(stored_url) == origin:
-        return stored_url
+    stored = None
+    if (project_v2_row or {}).get("origin") == origin:
+        stored = project_setup.stored_candidate(project_v2_row)
     try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT gr.remote_url AS remote_url "
-                "FROM git_repositories gr "
-                "JOIN projects p ON p.id = gr.project_id "
-                "WHERE gr.remote_url IS NOT NULL AND gr.remote_url <> ''",
-            )
-            candidates = cursor.fetchall()
+        records = project_setup.clone_records()
     except Exception as e:  # pragma: no cover - defensive; resolution is best-effort
         logger.warning(
             "checkout_manager: clone-url lookup failed for origin %r: %s", origin, e
         )
-        return None
+        records = []
+    return [c["url"] for c in project_setup.clone_candidates(
+        origin, records, stored, clean_first=False, stored_first=True)]
 
-    for cand in candidates:
-        remote_url = cand["remote_url"]
-        if auto_link_group_id(remote_url) == origin:
-            return remote_url
-    return None
+
+def _remote_kind(url: str) -> str:
+    from app.core.project_setup import remote_kind
+
+    return remote_kind(url)
+
+
+def _retry_with_next_url(err: Optional[str]) -> bool:
+    """Whether a refused clone may try the project's next URL."""
+    from app.core import project_setup
+
+    return project_setup.clone_failure_retries(err or "")
 
 
 def _project_self_seed_enabled(project_v2_row: Dict[str, Any]) -> bool:
@@ -676,8 +678,8 @@ def _seed_base_checkout(
         return None
 
     origin = project_v2_row.get("origin")
-    clone_url = _resolve_clone_url(origin, project_v2_row) if origin else None
-    if clone_url is None:
+    clone_urls = _clone_candidates(origin, project_v2_row) if origin else []
+    if not clone_urls:
         logger.warning(
             "checkout_manager: cannot self-seed base checkout for project %s "
             "(origin %r): no cloneable remote URL resolved; leaving unmaterialized",
@@ -709,24 +711,40 @@ def _seed_base_checkout(
         logger.warning("checkout_manager: cannot create slug dir %s: %s", slug_dir, e)
         return None
 
-    try:
-        temp_dir = tempfile.mkdtemp(prefix=f"{_BASE_DIR_NAME}.seed-", dir=str(slug_dir))
-    except OSError as e:  # pragma: no cover - defensive
-        logger.warning(
-            "checkout_manager: cannot create temp seed dir under %s: %s", slug_dir, e
-        )
-        return None
+    # Each URL is one spelling of the project's repository (git@ vs https):
+    # this runner may hold the credentials for, or reach, only one of them, so
+    # a refused clone tries the next. A pin is the only URL. A failed try's
+    # temp dir is removed before the next.
+    for index, clone_url in enumerate(clone_urls):
+        try:
+            temp_dir = tempfile.mkdtemp(prefix=f"{_BASE_DIR_NAME}.seed-", dir=str(slug_dir))
+        except OSError as e:  # pragma: no cover - defensive
+            logger.warning(
+                "checkout_manager: cannot create temp seed dir under %s: %s", slug_dir, e
+            )
+            return None
 
-    success, err = git_service.clone_repo(temp_dir, clone_url)
-    if not success:
-        logger.warning(
-            "checkout_manager: self-seed clone failed for project %s from %s: %s",
-            project_id,
-            clone_url,
-            err,
-        )
+        success, err = git_service.clone_repo(temp_dir, clone_url)
+        if success:
+            if index:
+                logger.info(
+                    "checkout_manager: self-seed for project %s cloned over %s after "
+                    "another spelling of its remote was refused",
+                    project_id,
+                    _remote_kind(clone_url),
+                )
+            break
         _rmtree_quiet(temp_dir)
-        return None
+        retry = index + 1 < len(clone_urls) and _retry_with_next_url(err)
+        logger.warning(
+            "checkout_manager: self-seed clone failed for project %s over %s: %s%s",
+            project_id,
+            _remote_kind(clone_url),
+            err,
+            "; trying another spelling of its remote" if retry else "",
+        )
+        if not retry:
+            return None
 
     try:
         os.rename(temp_dir, base_str)

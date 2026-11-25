@@ -76,6 +76,172 @@ def test_auto_link_group_id_none_without_remote():
 
 
 # ---------------------------------------------------------------------------
+# One identity for the HTTPS and git@ spellings of a remote
+# ---------------------------------------------------------------------------
+
+_DEMO = "https://github.com/example-org/demo"
+
+
+@pytest.mark.parametrize("spelling", [
+    "https://github.com/example-org/demo.git",
+    "https://github.com/Example-Org/Demo/",
+    "HTTPS://GitHub.com/example-org/demo",
+    "git@github.com:example-org/demo.git",
+    "git@github.com:Example-Org/demo",
+    " git@github.com:example-org/demo/ ",
+    # Main gave these the git@ spelling's identity: they keep sharing it.
+    "GIT@github.com:example-org/demo",
+    "git@GitHub.com:example-org/demo.git",
+    "GIT@GITHUB.COM:Example-Org/Demo.GIT",
+])
+def test_the_https_and_git_at_spellings_have_one_identity(spelling):
+    assert project_links.canonical_remote(spelling) == _DEMO
+    assert auto_link_group_id(spelling) == auto_link_group_id(_DEMO)
+
+
+@pytest.mark.parametrize("spelling", [
+    # Only scp ``git@host:path`` with a relative path is rewritten; everything
+    # else hashes exactly as it always did (``normalize_remote_url``).
+    "http://github.com/example-org/demo.git",
+    "https://github.com:443/example-org/demo",
+    "https://someone:pw-example@github.com/example-org/demo.git",
+    "ssh://git@github.com/example-org/demo.git",
+    "ssh://git@github.com:22/example-org/demo",
+    "git+ssh://git@github.com/example-org/demo",
+    "git://github.com/example-org/demo",
+    "alice@code.example.test:repos/app.git",
+    "bob@code.example.test:repos/app.git",
+    "code.example.test:repos/app.git",
+    "git@code.example.test:/srv/repos/app.git",
+    "git@code.example.test:~/repos/app.git",
+    "git@[2001:db8::1]:org/app.git",
+    # A self-hosted server's git@ keeps its own identity: it may serve HTTPS
+    # under a prefix, so ``https://host/team/demo`` may be another repository.
+    "git@forge.example:code/team/demo.git",
+    "git@git.example.com:example-org/demo.git",
+    "git@github.com:example-org/sub/demo.git",  # nesting is GitLab's only
+    "git@github.com:example-org/%64emo.git",
+    "https://[2001:db8::1]/org/app.git",
+    "/srv/repos/demo.git",
+    "file:///srv/repos/demo.git",
+    "C:/repos/demo.git",
+    "C:\\repos\\demo.git",
+    "../demo.git",
+])
+def test_every_other_spelling_keeps_the_identity_it_always_had(spelling):
+    assert project_links.canonical_remote(spelling) == normalize_remote_url(spelling)
+    assert auto_link_group_id(spelling) == project_links.legacy_link_group_id(spelling)
+    assert project_links.remote_link_ids(spelling) == {project_links.legacy_link_group_id(spelling)}
+
+
+def test_two_ssh_logins_on_one_host_are_two_repositories():
+    alice, bob = "alice@code.example.test:repos/app.git", "bob@code.example.test:repos/app.git"
+    assert auto_link_group_id(alice) != auto_link_group_id(bob)
+    assert project_links.remote_key(alice) != project_links.remote_key(bob)
+    assert not project_links.same_remote(alice, bob)
+    assert not project_links.same_remote("git@code.example.test:repos/app.git", "https://code.example.test/repos/app")
+    assert project_links.same_remote("git@github.com:example-org/demo.git", "https://github.com/example-org/demo")
+
+
+_MAIN_ONE_PROJECT_PAIRS = [
+    # Case, ``.git`` and trailing slashes: one project on main, on any host.
+    ("git@github.com:team/demo.git", "git@GitHub.com:team/demo.git"),
+    ("git@github.com:team/demo", "GIT@GITHUB.COM:Team/Demo.GIT"),
+    ("git@github.com:team/demo", "git@github.com:team/demo//"),
+    ("git@gitlab.com:team/sub/demo", "git@GitLab.com:Team/Sub/Demo.git/"),
+    ("https://github.com/team/demo", "HTTPS://GitHub.com/Team/Demo.git"),
+    ("git@forge.example:code/team/demo", "git@Forge.Example:Code/Team/Demo.git"),
+    ("https://forge.example/code/team/demo", "https://FORGE.example/code/team/demo/"),
+    ("alice@code.example.test:repos/app", "ALICE@code.example.test:repos/app.git"),
+    ("ssh://git@github.com/team/demo", "SSH://git@GitHub.com/team/demo.git"),
+    ("git@github.com:team/sub/demo", "git@GitHub.com:team/sub/demo.git"),  # not joined, still one
+    ("git@github.com:team/%64emo", "git@GITHUB.com:team/%64emo"),
+    ("/srv/repos/demo.git", "/SRV/repos/demo"),
+    # Not one project on main: nothing below may assume they join.
+    ("alice@code.example.test:repos/app", "bob@code.example.test:repos/app"),
+    ("git@forge.example:code/team/demo", "https://forge.example/code/team/demo"),
+    ("git@github.com:team/demo", "https://github.com/team/demo"),
+]
+
+
+@pytest.mark.parametrize("a, b", _MAIN_ONE_PROJECT_PAIRS)
+def test_remotes_main_gave_one_identity_always_share_it(a, b):
+    # canonical_remote is a function of main's normalize_remote_url, so equal
+    # main ids imply equal ids, keys and id sets here; nothing main kept as one
+    # project can split.
+    assert project_links.canonical_remote(a) == project_links.canonical_remote(normalize_remote_url(a))
+    if project_links.legacy_link_group_id(a) == project_links.legacy_link_group_id(b):
+        assert auto_link_group_id(a) == auto_link_group_id(b)
+        assert project_links.remote_key(a) == project_links.remote_key(b)
+        assert project_links.remote_link_ids(a) == project_links.remote_link_ids(b)
+        assert project_links.same_remote(a, b)
+
+
+def test_a_self_hosted_servers_two_transports_are_two_identities():
+    # A GitLab under /code serves git@forge.example:team/demo at
+    # https://forge.example/code/team/demo, so these two may be two repositories.
+    https, ssh = "https://forge.example/code/team/demo", "git@forge.example:code/team/demo"
+    assert auto_link_group_id(https) != auto_link_group_id(ssh)
+    assert project_links.remote_link_ids(https).isdisjoint(project_links.remote_link_ids(ssh))
+    assert project_links.remote_key(https) != project_links.remote_key(ssh)
+    assert not project_links.other_transport_of(https, ssh)
+    assert project_links.joined_counterpart(https) is None and project_links.joined_counterpart(ssh) is None
+    assert project_links.joined_pair(https) is None and project_links.joined_pair(ssh) is None
+    assert project_links.joined_pair("git@gitlab.com:team/sub/demo.git") == ("ssh", "gitlab.com", "team/sub/demo.git")
+
+
+def test_a_remote_key_never_holds_a_credential():
+    key = project_links.remote_key("https://someone:pw-example@github.com/example-org/demo.git")
+    assert key == _DEMO
+    assert project_links.remote_key("ssh://alice:pw-example@code.example.test/repos/app") == \
+        "ssh://code.example.test/repos/app"
+    # An SSH login is not a credential: it stays and keeps two logins apart.
+    assert project_links.remote_key("ssh://alice@code.example.test/repos/app") == \
+        "ssh://alice@code.example.test/repos/app"
+    assert project_links.remote_key("git@github.com:example-org/demo.git") == _DEMO
+    assert project_links.remote_key(None) == ""
+
+
+@pytest.mark.parametrize("url, key", [
+    # Git reads a password with a literal ``[`` that a URL parser rejects.
+    ("https://user:pa[ss-example@git.example.com/o/r.git", "https://git.example.com/o/r"),
+    ("https://user:pa[ss@example@git.example.com/o/r", "https://git.example.com/o/r"),
+    ("ssh://alice:pa[ss-example@code.example.test/repos/app", "ssh://code.example.test/repos/app"),
+    ("https://user:pw-example@[2001:db8::1]:8443/o/r", "https://[2001:db8::1]:8443/o/r"),
+    # No safe key: no marker in the dialog (the server's own check still refuses).
+    ("https://user:pa/ss-example@git.example.com/o/r", ""),
+    ("https://user:12/ss-example@git.example.com/o/r", ""),
+    ("user:pa[ss-example@git.example.com:o/r", ""),
+])
+def test_a_remote_key_drops_any_password_or_has_no_key(url, key):
+    assert project_links.remote_key(url) == key
+    assert "pa[ss" not in project_links.remote_key(url) and "ss-example" not in project_links.remote_key(url)
+
+
+def test_an_https_identity_is_the_one_it_always_had():
+    # Plain HTTPS rows keep their origin (and projects_v2 id): only other
+    # spellings move. sha256("https://github.com/example-org/demo")[:16].
+    assert auto_link_group_id("https://github.com/Example-Org/demo.git") == "git:7f0224ffa6b6d980"
+    assert project_links.legacy_link_group_id("https://github.com/example-org/demo") == "git:7f0224ffa6b6d980"
+
+
+def test_spellings_that_are_other_repositories_stay_apart():
+    assert auto_link_group_id("git@github.com:example-org/demo") != auto_link_group_id(
+        "git@github.com:example-org/other")
+    assert auto_link_group_id("git@git.example.com:example-org/demo") != auto_link_group_id(
+        "git@github.com:example-org/demo")
+
+
+def test_a_remote_names_its_canonical_and_its_old_identity():
+    ssh = "git@github.com:example-org/demo.git"
+    ids = project_links.remote_link_ids(ssh)
+    assert ids == {auto_link_group_id(_DEMO), project_links.legacy_link_group_id(ssh)}
+    assert len(ids) == 2
+    assert project_links.remote_link_ids(_DEMO) == {auto_link_group_id(_DEMO)}
+    assert project_links.remote_link_ids("") == set()
+
+
+# ---------------------------------------------------------------------------
 # is_link_locked
 # ---------------------------------------------------------------------------
 
@@ -226,3 +392,75 @@ class TestResolveRunnableLocalProject:
         stored, local = resolve_runnable_local_project("proj-A")
         assert stored == mine
         assert local is None
+
+
+@pytest.mark.parametrize("url, other", [
+    ("git@github.com:example-org/demo.git", "https://github.com/example-org/demo.git"),
+    ("https://github.com/example-org/demo", "git@github.com:example-org/demo"),
+    ("https://github.com/Example-Org/demo", "git@github.com:Example-Org/demo"),
+    ("git@codeberg.org:example-org/demo", "https://codeberg.org/example-org/demo"),
+    ("https://bitbucket.org/example-org/demo.git", "git@bitbucket.org:example-org/demo.git"),
+    ("git@gitlab.com:example-org/sub-group/demo.git", "https://gitlab.com/example-org/sub-group/demo.git"),
+    # Only a public forge: a self-hosted one may serve HTTPS under a prefix.
+    ("https://forge.example/code/team/demo.git", None),
+    ("git@git.example.com:example-org/demo.git", None),
+    ("https://GitHub.com/example-org/demo", "git@github.com:example-org/demo"),  # the host in any case
+    ("https://github.com/example-org/sub/demo", None),  # nesting is GitLab's only
+    ("https://github.com/demo", None),
+    ("https://github.com/example-org/%64emo.git", None),  # HTTP decodes it, scp doesn't
+    ("https://github.com/example-org//demo", None),
+    ("https://github.com/example-org/../demo", None),
+    ("https://github.com:8443/example-org/demo", None),  # a port: not a joined form
+    ("https://user@github.com/example-org/demo", None),  # userinfo: strip it first
+    ("git@github.com:/srv/demo.git", None),
+    ("git@github.com:~/demo.git", None),
+    ("ssh://git@github.com/example-org/demo.git", None),
+    ("deploy@github.com:example-org/demo.git", None),
+    ("http://github.com/example-org/demo", None),
+    (None, None),
+])
+def test_only_a_joined_remote_has_another_spelling(url, other):
+    assert project_links.joined_counterpart(url) == other
+
+
+@pytest.mark.parametrize("first, url, same", [
+    ("git@github.com:example-org/demo", "https://github.com/example-org/demo", True),
+    ("https://github.com/example-org/demo.git", "git@github.com:example-org/demo", True),
+    ("https://github.com/example-org/demo/", "git@github.com:example-org/demo.git", True),
+    ("https://tok@github.com/team/demo.git", "git@github.com:team/demo.git", True),
+    ("git@gitlab.com:team/sub/demo.git", "https://gitlab.com/team/sub/demo", True),
+    ("https://github.com/team/demo.git", "git@github.com:team/Demo.git", False),  # path: exactly
+    ("https://github.com/team/demo.git", "https://github.com/team/Demo.git", False),  # same transport
+    ("https://github.com/team/demo.git", "https://github.com/team/demo", False),
+    ("https://github.com/team/demo.git", "git@gitlab.com:team/demo.git", False),
+    ("https://github.com/team/demo.git", "deploy@github.com:team/demo.git", False),
+    ("https://github.com:8443/team/demo.git", "git@github.com:team/demo.git", False),
+    ("https://github.com/team/demo.git", "ssh://git@github.com/team/demo.git", False),
+    ("https://GitHub.com/team/demo.git", "git@github.com:team/demo.git", True),  # the host in any case
+    ("git@GitHub.com:team/demo.git", "https://github.com/team/demo", True),
+    ("GIT@github.com:team/demo.git", "https://github.com/team/demo", False),  # the login exactly
+    # Only on a public forge: a self-hosted one may serve HTTPS under a prefix.
+    ("https://git.example.com/team/demo.git", "git@git.example.com:team/demo.git", False),
+    ("https://forge.example/code/team/demo", "git@forge.example:code/team/demo", False),
+    ("https://forge.example/code/team/demo", "git@forge.example:team/demo", False),
+    (None, "git@github.com:team/demo.git", False),
+])
+def test_only_the_same_url_over_the_other_transport_is_tried_next(first, url, same):
+    assert project_links.other_transport_of(first, url) is same
+    assert project_links.other_transport_of(url, first) is same
+
+
+@pytest.mark.parametrize("url, safe", [
+    ("https://user:pa'ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("https://user:pa[ss@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("https://tok@en@git.example.com/example-org/demo.git", "https://git.example.com/example-org/demo.git"),
+    ("ssh://git@git.example.com/example-org/demo.git", "ssh://git@git.example.com/example-org/demo.git"),
+    ("ssh://git:secret@git.example.com/example-org/demo.git", "ssh://git.example.com/example-org/demo.git"),
+    ("git@git.example.com:example-org/demo.git", "git@git.example.com:example-org/demo.git"),
+    ("user:secret@git.example.com:example-org/demo.git", None),
+    ("https://git.example.com/example-org/demo@main", None),
+    ("", None),
+])
+def test_a_remote_is_sent_without_credentials_or_not_at_all(url, safe):
+    assert project_links.strip_remote_userinfo(url) == safe
+

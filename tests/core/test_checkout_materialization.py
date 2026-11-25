@@ -868,9 +868,10 @@ def test_seed_clone_failure_cleans_temp_and_no_upsert(seedable, workspace_root, 
 
     assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) is None
 
-    # Clone was attempted, but the temp dir was cleaned up — no partial checkout,
-    # and the base path never came into existence.
-    assert len(calls) == 1
+    # Clone was attempted (the remote, then its other spelling, git@ vs https,
+    # after the sign-in refusal), but each temp dir was cleaned up — no
+    # partial checkout, and the base path never came into existence.
+    assert len(set(calls)) == 2
     slug_dir = checkout_manager._checkout_root() / checkout_manager._project_slug(proj)
     if slug_dir.exists():
         assert list(slug_dir.iterdir()) == []

@@ -8,7 +8,9 @@ setup itself always runs through the real git-ops claim pass.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+import sys
 from pathlib import Path, PurePath, PureWindowsPath
 from types import SimpleNamespace
 
@@ -1054,9 +1056,10 @@ def test_importing_a_git_folder_from_provider_settings_leaves_no_local_twin(ws, 
 # A new project cloned from the New project dialog (POST /projects/clone)
 # ---------------------------------------------------------------------------
 
-def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = True) -> str:
-    """An https:// URL that git reaches as the local repository ``local``
-    (``POST /projects/clone`` takes network remotes only).
+def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = True,
+           url: str | None = None) -> str:
+    """An https:// URL (or the given ``url``) that git reaches as the local
+    repository ``local`` (``POST /projects/clone`` takes network remotes only).
 
     Test-only: ``allow_file`` lets a new project's clone use the file
     transport, which the production ``NEW_PROJECT_PROTOCOLS`` refuses (see
@@ -1065,7 +1068,7 @@ def _https(monkeypatch, local: str, name: str = "demo", *, allow_file: bool = Tr
 
     if allow_file:
         monkeypatch.setattr(project_setup, "NEW_PROJECT_PROTOCOLS", "https:http:ssh:file")
-    url = f"https://git.example.com/example-org/{name}.git"
+    url = url or f"https://git.example.com/example-org/{name}.git"
     count = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
     monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", f"url.{local}.insteadOf")
     monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", url)
@@ -1377,7 +1380,7 @@ def test_a_workers_tab_setup_keeps_a_first_clone_from_being_hidden_or_duplicated
     # Shared database: this worker re-clones a remembered project, and the
     # owner also asks for it on Studio (offline) from the Workers tab.
     monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
-    remote = _https(monkeypatch, _bare_remote(ws))
+    remote = _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
     origin = auto_link_group_id(remote)
     pv2 = projects_v2.upsert_project(origin, name="Demo")
     projects_v2.record_remote(origin, remote)
@@ -1394,28 +1397,30 @@ def test_a_workers_tab_setup_keeps_a_first_clone_from_being_hidden_or_duplicated
     assert projects_v2.get_project_v2_by_origin(origin)["settings"].get("forgotten") is not True
 
     # No spelling of it becomes a second project while Studio's setup waits.
-    for url in (remote, "git@git.example.com:example-org/demo.git"):
+    for url in (remote, "git@github.com:example-org/demo.git"):
         refused = _clone_new(client, url, id="demo-two", name="Two")
         assert refused.status_code == 409, refused.text
         detail = refused.json()["detail"]
         assert detail["error_code"] == "being_set_up"
         assert detail["error"] == "Studio is setting up this repository; wait for it or cancel it there."
     assert projects_v2.get_project_v2_by_origin(origin)["name"] == "Demo"
-    assert projects_v2.get_project_v2_by_origin(auto_link_group_id("git@git.example.com:example-org/demo.git")) \
-        is None
+    # Every spelling is the one identity: no row under the SSH spelling's own id.
+    assert auto_link_group_id("git@github.com:example-org/demo.git") == origin
+    assert projects_v2.get_project_v2_by_origin(_legacy_id("git@github.com:example-org/demo.git")) is None
 
 
 def test_another_spelling_of_a_first_clone_in_progress_is_refused(client, ws, test_db, monkeypatch):
     monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
-    remote = _https(monkeypatch, _bare_remote(ws))
+    remote = _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
     first = _clone_new(client, remote)  # a brand-new identity: no remote known before
     assert first.status_code == 202, first.text
-    ssh = "git@git.example.com:example-org/demo.git"
+    ssh = "git@github.com:example-org/demo.git"
     refused = _clone_new(client, ssh, id="demo-ssh", name="Demo SSH")
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["error_code"] == "being_set_up"
     assert refused.json()["detail"]["worker"] == "This worker"
-    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(ssh)) is None
+    assert auto_link_group_id(ssh) == auto_link_group_id(remote)  # one identity for both
+    assert projects_v2.get_project_v2_by_origin(_legacy_id(ssh)) is None
 
 
 def test_cancelling_another_runners_queued_first_clone_hides_it_again(client, ws, test_db):
@@ -1559,12 +1564,30 @@ def test_clone_new_refuses_the_same_repository_by_another_spelling(client, ws, t
     assert elsewhere.json()["detail"]["project_id"] is None
     assert "Tool on another worker" in elsewhere.json()["detail"]["error"]
 
-    # The scheme form of SSH (with its login) is the same repository too.
+    # Only git@host:owner/repo is joined with HTTPS: the scheme form of SSH is
+    # compared as written (its own identity), like every other spelling.
     _held_by_peer(_peer_project(test_db, "kit", "Kit", remote="ssh://git@github.com/example-org/kit.git"))
-    scheme = client.post("/api/v1/projects/clone", json={
-        "id": "kit", "name": "Kit here", "clone_url": "https://github.com/example-org/kit"})
-    assert scheme.status_code == 409 and scheme.json()["detail"]["error_code"] == "already_added", scheme.text
+    assert project_workers._same_repository_origins("https://github.com/example-org/kit") == set()
     assert git_ops_db.list_ops_for_runner(ME, project_setup.SETUP_OP) == []
+
+
+def test_two_ssh_logins_on_one_host_are_two_projects_and_git_at_is_still_https(client, ws, test_db,
+                                                                               monkeypatch):
+    alice, bob = "alice@code.example.test:repos/app.git", "bob@code.example.test:repos/app.git"
+    _held_by_peer(_peer_project(test_db, "app", "App", remote=alice))
+    # The dialog compares the overview's key, which keeps the login and no credential.
+    keys = {p["name"]: p.get("remote_key") for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert keys["App"] == "alice@code.example.test:repos/app"
+    # Bob's home is another repository: it clones.
+    resp = _clone_new(client, _https(monkeypatch, _bare_remote(ws), url=bob))
+    assert resp.status_code == 202, resp.text
+    # git@ and HTTPS are still one repository.
+    _held_by_peer(_peer_project(test_db, "site", "Site", remote="git@github.com:example-org/site.git"))
+    again = client.post("/api/v1/projects/clone", json={
+        "id": "site", "name": "Site here", "clone_url": "https://github.com/example-org/site"})
+    assert again.status_code == 409 and again.json()["detail"]["error_code"] == "already_added", again.text
+    keys = {p["name"]: p.get("remote_key") for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert keys["Site"] == "https://github.com/example-org/site"
 
 
 def test_a_remembered_identity_with_no_copy_does_not_block_a_new_clone(client, ws, test_db):
@@ -1612,3 +1635,827 @@ def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test
     status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
     assert status["error_code"] == "github_auth" and "secret" not in (status["error"] or "")
     assert database.get_project("private") is None
+
+
+# ---------------------------------------------------------------------------
+# New adds of one repository get one project in any URL spelling (no peer
+# call, no hold, no refusal); an existing checkout keeps the identity it has
+# ---------------------------------------------------------------------------
+
+_SSH = "git@github.com:example-org/demo.git"
+_HTTPS = "https://github.com/example-org/demo.git"
+
+
+def _legacy_id(url: str) -> str:
+    """The identity a worker from before this change derived from ``url``."""
+    from app.core.project_links import legacy_link_group_id
+
+    return legacy_link_group_id(url)
+
+
+def _legacy_project_here(ws: Path, remote: str = _SSH, project_id: str = "demo", *,
+                         origin: str | None = None) -> tuple:
+    """A project this worker registered before the upgrade, keyed by its old SSH id
+    (or by ``origin``)."""
+    folder = init_repo(ws / project_id, files={"README.md": "demo\n"})
+    git(folder, "remote", "add", "origin", remote)
+    origin = origin or _legacy_id(remote)
+    database.create_project(project_id=project_id, name="Demo", description=None, path=project_id,
+                            settings_dict={"keep": "me"}, link_group_id=origin)
+    database.create_git_repository(f"repo-{project_id}", project_id, remote_url=remote)
+    assert projects_v2.record_remote(origin, remote, "main")
+    return database.get_project(project_id), projects_v2.get_project_v2_by_origin(origin)
+
+
+def _replicated(remote: str, *, origin: str | None = None, name: str = "Demo", held: bool = True) -> dict:
+    """A project Studio (its own database) added: only its identity and remote replicate here."""
+    origin = origin or auto_link_group_id(remote)
+    pv2 = projects_v2.upsert_project(origin, name=name)
+    projects_v2.record_remote(origin, remote, "main")
+    if held:
+        checkouts_db.upsert_checkout(pv2["id"], PEER, f"/peer/code/{pv2['id']}")
+    return projects_v2.get_project_v2(pv2["id"])
+
+
+def _listed_ids(client) -> set:
+    return {p["project_v2_id"] for p in client.get("/api/v1/projects/overview").json()["projects"]}
+
+
+def test_paired_workers_adding_ssh_and_https_spellings_get_one_project(client, ws, test_db, network,
+                                                                         monkeypatch):
+    from app.core import project_remote
+
+    ssh = _https(monkeypatch, _bare_remote(ws), url=_SSH)
+    resp = _clone_new(client, ssh)
+    assert resp.status_code == 202, resp.text
+    assert network.calls == []  # the clone never asked the paired worker anything
+    _run_setups()
+    assert client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()["status"] == "done"
+
+    # Meanwhile Studio, with its own database, added the HTTPS spelling.
+    # Both derive one identity, so replication merges them into one row.
+    theirs = _replicated(_HTTPS)
+    assert theirs["id"] == resp.json()["project_v2_id"]
+    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
+    assert [row["id"] for row in projects_v2.list_projects_v2()] == [theirs["id"]]
+    assert project_remote.reconcile_local() == 0  # nothing to fold
+    assert _listed_ids(client) == {theirs["id"]}
+
+
+_MOVED_TO = "https://github.com/example-org/other.git"
+
+
+def _remote_of(folder: Path) -> str:
+    # The configured URL as written (``remote get-url`` applies the tests' insteadOf rewrites).
+    return git(folder, "config", "--get", "remote.origin.url").strip()
+
+
+def _refresh_git_record(project_id: str, folder: Path) -> None:
+    """What opening the project does: re-read its remote into the Git record."""
+    from app.api import git_helpers
+
+    git_helpers._repo_record_cache.pop(project_id, None)
+    git_helpers.ensure_git_repository_record(project_id, str(folder))
+
+
+def test_an_ssh_checkout_stays_put_when_the_https_project_moved_to_another_repository(client, ws, test_db):
+    from app.core import project_remote
+
+    # This worker added the repository over SSH before the upgrade (the old SSH id).
+    _here, legacy = _legacy_project_here(ws)
+    # Studio added it over HTTPS, then changed that project's repository.
+    theirs = _replicated(_HTTPS)
+    projects_v2.pin_remote(theirs["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_HTTPS)
+
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never switched to the other repository
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    # A new SSH add with no SSH project in use does not join the moved project either.
+    projects_v2.set_forgotten(legacy["origin"], True)
+    assert project_remote.identity_for_remote(_SSH) == (legacy["origin"], False)
+
+
+def test_a_checkout_never_follows_a_stale_merge_of_the_other_spelling(client, ws, test_db):
+    from app.core import project_remote
+
+    # T used repository S. Changing T to R (HTTPS) merged R's HTTPS project into T.
+    t = _replicated(_MOVED_TO, name="T")
+    r = _replicated(_HTTPS, name="R")
+    projects_v2.pin_remote(t["origin"], _HTTPS, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_MOVED_TO)
+    projects_v2.mark_merged(r["origin"], t["origin"])
+    assert project_remote.identity_for_remote(_SSH) == (t["origin"], True)  # T uses R: join it
+    # Then T was changed back to S.
+    projects_v2.pin_remote(t["origin"], _MOVED_TO, default_branch="main", generation=2,
+                           keep_upstream=False, previous=_HTTPS)
+    # An unrelated, unlocked checkout is pointed at R's git@ URL.
+    tool = "https://git.example.com/example-org/tool.git"
+    _legacy_project_here(ws, remote=tool, project_id="tool", origin=auto_link_group_id(tool))
+    git(ws / "tool", "remote", "set-url", "origin", _SSH)
+    _refresh_git_record("tool", ws / "tool")
+    # It takes the git@ URL's own id (as before the spellings were joined), never T.
+    assert database.get_project("tool")["link_group_id"] == _legacy_id(_SSH)
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "tool") == _SSH  # never pointed at S
+    assert database.get_project("tool")["link_group_id"] == _legacy_id(_SSH)
+
+
+def test_changing_a_repository_never_merges_the_other_spellings_project(client, ws, test_db, monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(project_remote, "_probe", lambda url: "main")
+    t = _replicated(_MOVED_TO, name="T")
+    r = _replicated(_HTTPS, name="R")
+    # T is changed from S to R's git@ URL, then back to S.
+    project_remote.prepare_change(t["id"], _SSH, keep_upstream=False)
+    project_remote.prepare_change(t["id"], _MOVED_TO, keep_upstream=False)
+    assert project_remote.merged_into(projects_v2.get_project_v2(r["id"])) is None
+    # A later HTTPS add of R stays on R, and so does a checkout pointed at it.
+    assert project_remote.identity_for_remote(_HTTPS) == (r["origin"], False)
+    tool = "https://git.example.com/example-org/tool.git"
+    _legacy_project_here(ws, remote=tool, project_id="tool", origin=auto_link_group_id(tool))
+    git(ws / "tool", "remote", "set-url", "origin", _HTTPS)
+    _refresh_git_record("tool", ws / "tool")
+    assert database.get_project("tool")["link_group_id"] == r["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "tool") == _HTTPS  # never pointed at S
+
+
+def test_an_https_projects_setup_clones_its_own_url_when_an_ssh_project_is_read_first(ws, test_db):
+    # Existing projects of one repository: legacy git@ (registered first, so
+    # read first) and HTTPS, each with its own record here.
+    _legacy_project_here(ws, remote=_SSH, project_id="old")
+    _here, https = _legacy_project_here(ws, remote=_HTTPS, project_id="new",
+                                        origin=auto_link_group_id(_HTTPS))
+    info = project_setup._repo_info_by_origin()
+    assert info[https["origin"]]["clone_url"] == _HTTPS
+    assert info[_legacy_id(_SSH)]["clone_url"] == _SSH
+    from app.core import checkout_manager
+
+    assert checkout_manager._resolve_clone_url(https["origin"], https) == _HTTPS
+    # With no remote stored on the row, the records alone still pick the HTTPS one.
+    assert checkout_manager._resolve_clone_url(https["origin"]) == _HTTPS
+
+
+def test_changing_a_repository_never_merges_a_project_a_git_at_add_created(client, ws, test_db, monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(project_remote, "_probe", lambda url: "main")
+    # This worker added R over git@: the HTTPS id, storing the SSH URL.
+    _here, mine = _legacy_project_here(ws, remote=_SSH, origin=auto_link_group_id(_SSH))
+    t = _replicated(_MOVED_TO, name="T")
+    # Elsewhere, T is changed from S to R's HTTPS URL, then back to S.
+    plan = project_remote.prepare_change(t["id"], _HTTPS, keep_upstream=False)
+    assert plan["merged_origin"] is None
+    project_remote.prepare_change(t["id"], _MOVED_TO, keep_upstream=False)
+    assert project_remote.merged_into(projects_v2.get_project_v2(mine["id"])) is None
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never pointed at S
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+
+
+def _record_only(project_id: str, remote: str, origin: str) -> None:
+    """A local project record for ``remote`` linked to ``origin``, storing nothing on the catalog row."""
+    database.create_project(project_id=project_id, name="Demo", description=None, path=project_id,
+                            link_group_id=origin)
+    database.create_git_repository(f"repo-{project_id}", project_id, remote_url=remote)
+
+
+def test_a_git_at_add_never_shadows_an_https_url_this_runner_can_clone(ws, test_db):
+    from app.core import checkout_manager
+
+    canonical = auto_link_group_id(_HTTPS)
+    # A git@ add made the HTTPS id and stored the SSH URL on it.
+    projects_v2.upsert_project(canonical, name="Demo")
+    assert projects_v2.record_remote(canonical, _SSH, "main")
+    row = projects_v2.get_project_v2_by_origin(canonical)
+    # Only the SSH URL known: that one, as before.
+    assert checkout_manager._resolve_clone_url(canonical, row) == _SSH
+    assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _SSH
+    # A git@ record linked to it (read first), then an exact HTTPS record.
+    _record_only("viassh", _SSH, canonical)
+    _record_only("viahttps", _HTTPS, canonical)
+    assert checkout_manager._resolve_clone_url(canonical, row) == _HTTPS
+    assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _HTTPS  # what setup sends
+    # A legacy SSH project still gets its own SSH URL.
+    legacy = _legacy_id(_SSH)
+    projects_v2.upsert_project(legacy, name="Old")
+    assert projects_v2.record_remote(legacy, _SSH, "main")
+    assert checkout_manager._resolve_clone_url(legacy, projects_v2.get_project_v2_by_origin(legacy)) == _SSH
+    assert project_setup._repo_info_by_origin()[legacy]["clone_url"] == _SSH
+
+
+def test_the_overview_never_returns_a_password_git_reads_but_a_url_parser_does_not(client, ws, test_db):
+    secret = "https://user:pa[ss-example@git.example.com/example-org/demo.git"
+    _legacy_project_here(ws, remote=secret, project_id="demo", origin=auto_link_group_id(secret))
+    resp = client.get("/api/v1/projects/overview")
+    assert resp.status_code == 200, resp.text
+    assert "pa[ss" not in resp.text and "ss-example" not in resp.text
+    [row] = resp.json()["projects"]
+    assert row["remote_key"] == "https://git.example.com/example-org/demo"
+
+
+def test_a_respelled_checkout_never_joins_a_project_that_moved_to_another_repository(client, ws, test_db):
+    from app.core import project_remote
+
+    # Three older projects of one repository: explicit-port HTTPS (this worker's
+    # copy), plain HTTPS, and git@ SSH (the old SSH id).
+    port_https = "https://git.example.com:443/example-org/demo.git"
+    _here, mine = _legacy_project_here(ws, remote=port_https)
+    plain = _replicated(_HTTPS)
+    legacy = _replicated(_SSH, origin=_legacy_id(_SSH))
+    # The SSH project moved to another repository; the HTTPS one was pointed at the SSH URL.
+    projects_v2.pin_remote(legacy["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_SSH)
+    projects_v2.pin_remote(plain["origin"], _SSH, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_HTTPS)
+    # This copy's remote becomes that SSH URL.
+    git(ws / "demo", "remote", "set-url", "origin", _SSH)
+    _refresh_git_record("demo", ws / "demo")
+    linked = database.get_project("demo")["link_group_id"]
+    assert linked in (mine["origin"], plain["origin"]) and linked != legacy["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never pointed at the other repository
+    assert database.get_project("demo")["link_group_id"] != legacy["origin"]
+
+
+def test_an_ssh_checkout_stays_put_when_an_older_ssh_project_arrives_late_and_moved(client, ws, test_db):
+    from app.core import project_remote
+    from app.core.project_links import LINK_LOCKED_KEY
+
+    # Offline, this upgraded worker added the repository over SSH: the one identity.
+    _here, mine = _legacy_project_here(ws, origin=auto_link_group_id(_SSH))
+    # Studio's older SSH project for it (the old SSH id) syncs in later, moved elsewhere.
+    late = _replicated(_SSH, origin=_legacy_id(_SSH))
+    projects_v2.pin_remote(late["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_SSH)
+
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never switched to the other repository
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+    # An explicit merge of this identity (Change repository) is followed.
+    projects_v2.mark_merged(mine["origin"], late["origin"])
+    _refresh_git_record("demo", ws / "demo")
+    project = database.get_project("demo")
+    assert project["link_group_id"] == late["origin"]
+    assert project["settings"].get(LINK_LOCKED_KEY) is True
+
+
+def test_a_checkout_keeps_its_identity_when_its_remote_is_respelled(client, ws, test_db):
+    from app.core import project_remote
+
+    # Linked under the old SSH id while an HTTPS project of the repository exists.
+    _here, legacy = _legacy_project_here(ws)
+    _replicated(_HTTPS)
+    # The folder's remote is rewritten to HTTPS: still this project's repository.
+    git(ws / "demo", "remote", "set-url", "origin", _HTTPS)
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _HTTPS
+
+
+_SSH_UPPER_HOST = "git@GitHub.com:example-org/demo.git"  # one project with _SSH on main
+
+
+def test_setup_adopts_a_copy_whose_ssh_host_is_spelled_in_another_case(client, ws, test_db, monkeypatch):
+    pv2 = _peer_project(test_db, "demo", "Demo", remote=_SSH)
+    git(ws, "clone", "-q", _bare_remote(ws), "demo")
+    git(ws / "demo", "remote", "set-url", "origin", _SSH_UPPER_HOST)
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=_SSH)  # nothing is cloned
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done" and op["result"]["adopted"] is True, op
+
+
+def test_a_checkout_keeps_its_link_group_when_its_ssh_host_is_respelled(client, ws, test_db):
+    from app.core import project_remote
+
+    _here, pv2 = _legacy_project_here(ws, _SSH, origin=auto_link_group_id(_SSH))
+    git(ws / "demo", "remote", "set-url", "origin", _SSH_UPPER_HOST)
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == pv2["origin"]
+    project_remote.reconcile_local()
+    assert database.get_project("demo")["link_group_id"] == pv2["origin"]
+    assert _remote_of(ws / "demo") == _SSH_UPPER_HOST  # the owner's spelling is left alone
+
+
+def test_an_existing_ssh_checkout_keeps_its_project_when_an_https_one_appears(client, ws, test_db):
+    from app.core import project_remote
+
+    _here, legacy = _legacy_project_here(ws)
+    theirs = _replicated(_HTTPS)
+    _refresh_git_record("demo", ws / "demo")
+    project_remote.reconcile_local()
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    assert project_remote.merged_into(projects_v2.get_project_v2(legacy["id"])) is None
+    # Both stay listed: an existing duplicate is the user's to remove.
+    assert _listed_ids(client) == {legacy["id"], theirs["id"]}
+
+
+def test_a_fresh_ssh_add_gets_the_repositorys_one_identity(test_db):
+    from app.core import project_remote
+
+    canonical = auto_link_group_id(_HTTPS)
+    assert canonical != _legacy_id(_SSH)
+    assert project_remote.identity_for_remote(_SSH) == (canonical, False)
+    # A forgotten old SSH project is not an identity in use.
+    projects_v2.upsert_project(_legacy_id(_SSH), name="Demo")
+    projects_v2.set_forgotten(_legacy_id(_SSH), True)
+    assert project_remote.identity_for_remote(_SSH) == (canonical, False)
+
+
+def test_pins_and_merges_still_win_over_the_spelling(test_db):
+    from app.core import project_remote
+
+    legacy, canonical = _legacy_id(_SSH), auto_link_group_id(_HTTPS)
+    pointed = _replicated("https://git.example.com/example-org/earlier.git", name="Pointed", held=False)
+    projects_v2.pin_remote(pointed["origin"], _HTTPS, default_branch="main", generation=1,
+                           keep_upstream=False, previous=None)
+    # Pointed at this repository in another spelling: a new SSH add joins it.
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    # An SSH project already here keeps its checkouts.
+    projects_v2.upsert_project(legacy, name="Demo")
+    assert project_remote.identity_for_remote(_SSH) == (legacy, False)
+    # A merge of that project wins, as before.
+    projects_v2.mark_merged(legacy, pointed["origin"])
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    # Pointed at this exact spelling: that project, as before.
+    projects_v2.pin_remote(pointed["origin"], _SSH, default_branch="main", generation=2,
+                           keep_upstream=False, previous=_HTTPS)
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    assert project_remote.identity_for_remote(_HTTPS) == (pointed["origin"], True)
+    assert canonical not in {row["origin"] for row in projects_v2.list_projects_v2()}
+
+
+def test_an_old_spelling_still_names_its_own_project(ws, test_db):
+    from app.core import checkout_manager, project_remote
+
+    origin = _legacy_id(_SSH)
+    assert origin != auto_link_group_id(_SSH)
+    projects_v2.upsert_project(origin, name="Demo")
+    assert projects_v2.record_remote(origin, _SSH, "main")
+    row = projects_v2.get_project_v2_by_origin(origin)
+    assert checkout_manager._resolve_clone_url(origin, row) == _SSH
+    assert project_remote.remote_names_origin(_SSH, origin)
+    assert project_remote.remote_names_origin(_HTTPS, origin)
+    assert project_setup._repo_info_by_origin()[origin]["clone_url"] == _SSH
+    # An SSH checkout of it keeps that identity.
+    assert project_remote.identity_for_remote(_SSH) == (origin, False)
+
+
+# ---------------------------------------------------------------------------
+# A project's remote is a list of spellings to try: a runner may hold the
+# credentials for only one of them (git@ vs https)
+# ---------------------------------------------------------------------------
+
+_FORK = "https://github.com/someone-else/demo-fork.git"
+_REFUSED = {
+    "https": "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    "ssh": "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+}
+
+
+def _seed_clones(monkeypatch, refused: set) -> list:
+    """Fake ``git clone`` for the self-seed: each URL in ``refused`` fails as a
+    runner without that spelling's credentials does; any other one clones."""
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def fake(working_dir, clone_url, timeout=120):
+        calls.append(clone_url)
+        if clone_url in refused:
+            return False, _REFUSED["https" if clone_url.startswith("https") else "ssh"]
+        (Path(working_dir) / ".git").mkdir()
+        return True, None
+
+    monkeypatch.setattr(git_service, "clone_repo", fake)
+    return calls
+
+
+def _seed(pv2: dict):
+    from app.core import checkout_manager
+
+    row = projects_v2.get_project_v2(pv2["id"])
+    return checkout_manager._seed_base_checkout(row, row["id"], ME)
+
+
+def _both_spellings_recorded(test_db, stored: str) -> dict:
+    """A shared database where two other workers hold R, one over each spelling,
+    under the repository's one id, whose row stores ``stored``."""
+    canonical = auto_link_group_id(_HTTPS)
+    first, second = (_HTTPS, _SSH) if stored == _HTTPS else (_SSH, _HTTPS)
+    _peer_project(test_db, "theirs-1", "Demo", remote=first, origin=canonical)
+    _peer_project(test_db, "theirs-2", "Demo", remote=second, origin=canonical, instance="peer-install-2")
+    assert projects_v2.record_remote(canonical, stored, "main")
+    return projects_v2.get_project_v2_by_origin(canonical)
+
+
+def test_an_ssh_only_runner_seeds_over_ssh_when_https_is_refused(ws, test_db, monkeypatch, caplog):
+    pv2 = _both_spellings_recorded(test_db, stored=_HTTPS)
+    calls = _seed_clones(monkeypatch, refused={_HTTPS})
+    with caplog.at_level("INFO", logger="app.core.checkout_manager"):
+        assert _seed(pv2) is not None
+    assert calls == [_HTTPS, _SSH]
+    assert any("cloned over SSH" in r.getMessage() for r in caplog.records)
+    assert _HTTPS not in caplog.text and _SSH not in caplog.text  # which spelling, never the URL
+
+
+def test_an_ssh_only_worker_sets_up_over_ssh_when_https_is_refused(client, ws, test_db, monkeypatch):
+    pv2 = _both_spellings_recorded(test_db, stored=_HTTPS)
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=_HTTPS)  # no HTTPS credentials here
+    _https(monkeypatch, _bare_remote(ws), url=_SSH)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert op["params"]["clone_url"] == _HTTPS and op["params"]["alternate_urls"] == [_SSH]
+    assert _remote_of(ws / "demo") == _SSH
+    assert database.get_project(op["result"]["project_id"])["link_group_id"] == pv2["origin"]
+
+
+def test_an_https_only_runner_seeds_over_https_when_the_row_stores_ssh(ws, test_db, monkeypatch):
+    pv2 = _both_spellings_recorded(test_db, stored=_SSH)  # a git@ add made the row
+    info = project_setup._repo_info_by_origin()[pv2["origin"]]
+    # The id's own spelling (HTTPS) first, though the row stores SSH.
+    assert (info["clone_url"], info["alternate_urls"]) == (_HTTPS, [_SSH])  # what setup sends
+    calls = _seed_clones(monkeypatch, refused={_SSH})
+    assert _seed(pv2) is not None
+    assert calls == [_HTTPS]
+
+
+def test_a_pinned_project_clones_only_its_pin(client, ws, test_db, monkeypatch):
+    from app.core import checkout_manager
+
+    pv2 = _both_spellings_recorded(test_db, stored=_HTTPS)
+    projects_v2.pin_remote(pv2["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_HTTPS)
+    row = projects_v2.get_project_v2(pv2["id"])
+    assert checkout_manager._clone_candidates(row["origin"], row) == [_MOVED_TO]
+    assert project_setup._repo_info_by_origin()[row["origin"]]["alternate_urls"] == []
+    calls = _seed_clones(monkeypatch, refused={_MOVED_TO})
+    assert _seed(row) is None
+    assert calls == [_MOVED_TO]  # never another spelling of the old repository
+    # A setup request still carrying another spelling never clones it either.
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=_MOVED_TO)
+    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    project_setup.start_local({"project_v2_id": row["id"], "origin": row["origin"], "name": "Demo",
+                               "kind": "git", "clone_url": _MOVED_TO, "alternate_urls": [_HTTPS],
+                               "folder": "demo"}, op_id="psetup-" + "1" * 32, requested_by=None)
+    _run_setups()
+    assert git_ops_db.get_op("psetup-" + "1" * 32)["status"] == "error"
+    assert not (ws / "demo" / ".git").exists()
+
+
+def test_a_fork_linked_into_a_git_group_is_never_a_clone_candidate(ws, test_db):
+    from app.core import checkout_manager
+
+    canonical = auto_link_group_id(_HTTPS)
+    # A fork manually linked into R's group, read first; then R added over git@.
+    _record_only("fork", _FORK, canonical)
+    _legacy_project_here(ws, remote=_SSH, origin=canonical)
+    row = projects_v2.get_project_v2_by_origin(canonical)
+    assert checkout_manager._resolve_clone_url(canonical, row) == _SSH
+    assert project_setup._repo_info_by_origin()[canonical]["clone_url"] == _SSH
+    # Never the fork: only R over the other transport.
+    assert checkout_manager._clone_candidates(canonical, row) == [_SSH, _HTTPS]
+    assert project_setup._repo_info_by_origin()[canonical]["alternate_urls"] == [_HTTPS]
+
+
+def test_the_setup_destination_tries_other_spellings_and_drops_another_repository(ws, test_db, monkeypatch,
+                                                                                    caplog):
+    canonical = auto_link_group_id(_HTTPS)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=_SSH)  # no SSH key here
+    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo",
+                               "kind": "git", "clone_url": _SSH, "alternate_urls": [_FORK, _HTTPS],
+                               "folder": "demo"}, op_id="psetup-" + "2" * 32, requested_by=PEER)
+    op = git_ops_db.get_op("psetup-" + "2" * 32)
+    assert op["params"]["alternate_urls"] == [_HTTPS]  # the fork is another repository: dropped
+    with caplog.at_level("INFO", logger="app.core.project_setup"):
+        _run_setups()
+    op = git_ops_db.get_op("psetup-" + "2" * 32)
+    assert op["status"] == "done", op
+    assert _remote_of(ws / "demo") == _HTTPS
+    assert "cloned over HTTPS" in caplog.text
+    assert _HTTPS not in caplog.text and _SSH not in caplog.text  # which spelling, never the URL
+
+
+def test_changing_a_repository_never_merges_on_another_projects_record(client, ws, test_db, monkeypatch):
+    from app.core import project_remote
+
+    monkeypatch.setattr(project_remote, "_probe", lambda url: "main")
+    # This worker added R over git@: the HTTPS id, storing the SSH URL.
+    _here, mine = _legacy_project_here(ws, remote=_SSH, origin=auto_link_group_id(_SSH))
+    # Another worker's HTTPS checkout of R is linked to a different project.
+    _record_only("elsewhere", _HTTPS, "manual:another-project")
+    t = _replicated(_MOVED_TO, name="T")
+    plan = project_remote.prepare_change(t["id"], _HTTPS, keep_upstream=False)
+    assert plan["merged_origin"] is None
+    project_remote.prepare_change(t["id"], _MOVED_TO, keep_upstream=False)
+    assert project_remote.merged_into(projects_v2.get_project_v2(mine["id"])) is None
+    _refresh_git_record("demo", ws / "demo")
+    project_remote.reconcile_local()
+    assert _remote_of(ws / "demo") == _SSH  # never pointed at S
+    assert database.get_project("demo")["link_group_id"] == mine["origin"]
+
+
+# ---------------------------------------------------------------------------
+# One list for every worker: the id's own spelling, the other one, then each
+# one's derived other spelling; alternates never carry a credential, and
+# local:/manual: projects keep their single URL
+# ---------------------------------------------------------------------------
+
+_SSH_REFUSED_PORT = ("ssh: connect to host git.example.com port 22: Connection refused\n"
+                     "fatal: Could not read from remote repository.")
+_LFS_MISSING = ("git-lfs filter-process: git-lfs: not found\nfatal: the remote end hung up unexpectedly\n"
+                "warning: Clone succeeded, but checkout failed.")
+
+
+def _git_fails_for(monkeypatch, url: str, stderr: str) -> None:
+    """Workers setup's ``git clone`` of ``url`` fails with ``stderr``, as git
+    prints it; every other URL clones for real."""
+    real = project_setup._clone_command
+
+    def fake(clone_url, temp, *, network_only=False):
+        if clone_url == url:
+            return [sys.executable, "-c", "import sys; sys.stderr.write(sys.argv[1]); sys.exit(128)", stderr]
+        return real(clone_url, temp, network_only=network_only)
+
+    monkeypatch.setattr(project_setup, "_clone_command", fake)
+
+
+def _setup_leftovers(ws: Path) -> list:
+    return [p.name for p in ws.iterdir() if ".setup-" in p.name]
+
+
+def test_setup_sends_the_projects_own_spelling_first_whoever_asks(client, ws, test_db):
+    canonical = auto_link_group_id(_HTTPS)
+    # The requesting worker (this one) holds the SSH copy; another holds HTTPS.
+    _legacy_project_here(ws, remote=_SSH, project_id="mine", origin=canonical)
+    _peer_project(test_db, "theirs", "Demo", remote=_HTTPS, origin=canonical, instance="peer-install-2")
+    pv2 = projects_v2.get_project_v2_by_origin(canonical)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = git_ops_db.get_op(resp.json()["op_id"])["params"]  # shared database: queued for Studio
+    assert (params["clone_url"], params["alternate_urls"]) == (_HTTPS, [_SSH])
+    from app.core import checkout_manager
+
+    assert checkout_manager._clone_candidates(canonical, pv2) == [_HTTPS, _SSH]  # the seed's list too
+
+
+def test_a_manual_project_queues_one_url_and_no_password(client, ws, test_db):
+    with_password = "https://user:pa'ss@git.example.com/example-org/demo-mirror.git"
+    group = "manual:demo-group"
+    _peer_project(test_db, "first", "Demo", remote=_HTTPS, origin=group, instance="peer-install-2")
+    pv2 = _peer_project(test_db, "second", "Demo", remote=with_password, origin=group, instance="peer-install-3")
+    info = project_setup._repo_info_by_origin()[group]
+    assert (info["clone_url"], info["alternate_urls"]) == (_HTTPS, [])
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": PEER})
+    assert resp.status_code == 202, resp.text
+    params = git_ops_db.get_op(resp.json()["op_id"])["params"]
+    assert (params["clone_url"], params["alternate_urls"]) == (_HTTPS, [])
+    assert "pa'ss" not in json.dumps(params)
+
+
+def test_a_git_alternate_never_carries_a_password(ws, test_db):
+    # Alternates are stripped by the remote_key rule (the scrub regex keeps ``pa'ss``).
+    keyed_by = "https://user:pa'ss@github.com/example-org/demo"
+    origin = _legacy_id(keyed_by)
+    _record_only("first", keyed_by, origin)
+    _record_only("second", "https://user:pa'ss@github.com/example-org/demo.git", origin)
+    alternates = project_setup._repo_info_by_origin()[origin]["alternate_urls"]
+    assert alternates == ["git@github.com:example-org/demo"]  # the first over SSH, no password
+    # And the destination queues a received one without its password.
+    canonical = auto_link_group_id(_HTTPS)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo", "kind": "git",
+                               "clone_url": _SSH, "folder": "demo",
+                               "alternate_urls": ["https://user:pa'ss@github.com/example-org/demo.git"]},
+                              op_id="psetup-" + "3" * 32, requested_by=PEER)
+    params = git_ops_db.get_op("psetup-" + "3" * 32)["params"]
+    assert params["alternate_urls"] == [_HTTPS]
+    assert "pa'ss" not in json.dumps(params)
+
+
+def test_a_manual_project_whose_record_moved_clones_the_record(client, ws, test_db, monkeypatch):
+    old, moved = _HTTPS, _MOVED_TO
+    group = "manual:demo-group"
+    pv2 = _peer_project(test_db, "theirs", "Demo", remote=moved, origin=group, instance="peer-install-2")
+    projects_v2.record_remote(group, old, "main")  # stored before the checkout moved
+    assert projects_v2.stored_remote(projects_v2.get_project_v2_by_origin(group))[0] == old
+    info = project_setup._repo_info_by_origin()[group]
+    assert (info["clone_url"], info["alternate_urls"]) == (moved, [])
+    _https(monkeypatch, _bare_remote(ws, name="old"), url=old)  # both answer: only the order decides
+    _https(monkeypatch, _bare_remote(ws, name="other"), url=moved)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert _remote_of(ws / op["params"]["folder"]) == moved
+
+
+_FORGE_SSH = "git@github.com:example-org/demo.git"  # a public forge: one repository either way
+_FORGE_HTTPS = "https://github.com/example-org/demo.git"
+_GITLAB_REFUSED = ("remote: ERROR: The project you were looking for could not be found or you don't have "
+                   "permission to view it.\nfatal: Could not read from remote repository.\n\nPlease make sure "
+                   "you have the correct access rights\nand the repository exists.")
+
+
+@pytest.mark.parametrize("known, other, refusal", [
+    (_FORGE_SSH, _FORGE_HTTPS, _REFUSED["ssh"]), (_FORGE_SSH, _FORGE_HTTPS, _SSH_REFUSED_PORT),
+    (_FORGE_SSH, _FORGE_HTTPS, _GITLAB_REFUSED), (_FORGE_HTTPS, _FORGE_SSH, _REFUSED["https"]),
+], ids=["sign-in", "port", "no-access", "https-first"])
+def test_a_worker_that_knows_one_transport_tries_the_other_too(client, ws, test_db, monkeypatch, known, other,
+                                                                refusal):
+    pv2 = _replicated(known)  # the catalog row stores only one spelling; no record here
+    info = project_setup._repo_info_by_origin()[pv2["origin"]]
+    assert (info["clone_url"], info["alternate_urls"]) == (known, [other])
+    _git_fails_for(monkeypatch, known, refusal)
+    _https(monkeypatch, _bare_remote(ws), url=other)
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "done", op
+    assert _remote_of(ws / "demo") == other
+    assert _setup_leftovers(ws) == []  # the refused try left nothing behind
+    # The self-seed gets the same list.
+    calls = _seed_clones(monkeypatch, refused={known})
+    assert _seed(pv2) is not None
+    assert calls == [known, other]
+
+
+@pytest.mark.parametrize("known", ["https://forge.example/code/team/demo.git",
+                                   "git@forge.example:team/demo.git",
+                                   "https://github.com/example-org/%64emo.git"])
+def test_another_spelling_is_never_guessed_off_a_public_forge(ws, test_db, monkeypatch, known):
+    # A self-hosted forge may serve HTTPS under /code/ and SSH without it, and
+    # HTTP decodes %64 where scp doesn't: only the known URL is ever cloned.
+    from app.core import checkout_manager
+
+    pv2 = _replicated(known)
+    assert checkout_manager._clone_candidates(pv2["origin"], pv2) == [known]
+    assert project_setup._repo_info_by_origin()[pv2["origin"]]["alternate_urls"] == []
+    calls = _seed_clones(monkeypatch, refused={known})
+    assert _seed(pv2) is None
+    assert calls == [known]
+
+
+def test_setup_clones_only_the_record_a_moved_checkout_confirmed(client, ws, test_db, monkeypatch):
+    # The checkout moved from team/Demo.git to team/demo.git on a case-sensitive
+    # server (one id, as on main): the catalog still stores the old URL and
+    # branch, the record the new ones. Setup clones what main cloned, with its
+    # branch, and never falls back to the old one: it may be another
+    # repository, so a refused demo.git ends the setup, as on main.
+    old, moved = "https://git.example.com/team/Demo.git", "https://git.example.com/team/demo.git"
+    canonical = auto_link_group_id(moved)
+    assert auto_link_group_id(old) == canonical
+    _peer_project(test_db, "theirs", "Demo", origin=canonical, instance="peer-install-2")
+    database.create_git_repository("repo-theirs", "theirs", remote_url=moved, default_branch="develop")
+    projects_v2.record_remote(canonical, old, "main")
+    pv2 = _held_by_peer(projects_v2.get_project_v2_by_origin(canonical))
+    info = project_setup._repo_info_by_origin()[canonical]
+    assert (info["clone_url"], info["default_branch"], info["alternate_urls"]) == (moved, "develop", [])
+    listed = {p["project_v2_id"]: p for p in client.get("/api/v1/projects/overview").json()["projects"]}
+    assert listed[pv2["id"]]["default_branch"] == "develop"  # the card shows the confirmed branch
+    _https(monkeypatch, _bare_remote(ws, name="old"), url=old)  # this worker can read Demo.git...
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=moved)  # ...and demo.git isn't there
+    resp = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME})
+    assert resp.status_code == 202, resp.text
+    _run_setups()
+    op = git_ops_db.get_op(resp.json()["op_id"])
+    assert op["status"] == "error", op
+    assert not (ws / op["params"]["folder"] / ".git").exists() and _setup_leftovers(ws) == []
+    # The self-seed keeps its own first choice from before (the stored remote), alone.
+    from app.core import checkout_manager
+
+    assert checkout_manager._clone_candidates(canonical, pv2) == [old]
+
+
+def test_a_self_hosted_servers_other_transport_is_never_tried(client, ws, test_db, monkeypatch):
+    # A GitLab under /code: https://forge.example/code/team/demo is team/demo,
+    # git@forge.example:code/team/demo is code/team/demo, another repository.
+    https, ssh = "https://forge.example/code/team/demo.git", "git@forge.example:code/team/demo.git"
+    assert auto_link_group_id(https) != auto_link_group_id(ssh)  # two projects, as on main
+    pv2 = _replicated(https)
+    _record_only("other", ssh, pv2["origin"])  # even linked into its group by hand
+    # Sender: no alternate.
+    info = project_setup._repo_info_by_origin()[pv2["origin"]]
+    assert (info["clone_url"], info["alternate_urls"]) == (https, [])
+    # Self-seed: the same list.
+    calls = _seed_clones(monkeypatch, refused={https})
+    assert _seed(pv2) is None
+    assert calls == [https]
+    # Receiver: drops it when an older or other sender sends it anyway.
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=https)
+    _https(monkeypatch, _bare_remote(ws), url=ssh)
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": pv2["origin"], "name": "Demo",
+                               "kind": "git", "clone_url": https, "folder": "demo", "alternate_urls": [ssh]},
+                              op_id="psetup-" + "6" * 32, requested_by=PEER)
+    assert git_ops_db.get_op("psetup-" + "6" * 32)["params"]["alternate_urls"] == []
+    _run_setups()
+    assert git_ops_db.get_op("psetup-" + "6" * 32)["status"] == "error"
+    assert not (ws / "demo" / ".git").exists()
+
+
+def test_the_setup_destination_drops_an_alternate_that_only_shares_the_id(ws, test_db, monkeypatch):
+    primary = "https://github.com/team/demo.git"
+    canonical = auto_link_group_id(primary)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url=primary)
+    _https(monkeypatch, _bare_remote(ws, name="old"), url="https://github.com/team/Demo.git")
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo", "kind": "git",
+                               "clone_url": primary, "folder": "demo",
+                               "alternate_urls": ["https://github.com/team/Demo.git",
+                                                  "git@github.com:team/Demo.git",
+                                                  "git@github.com:team/demo.git"]},
+                              op_id="psetup-" + "5" * 32, requested_by=PEER)
+    # Only the primary over the other transport, path exactly the same.
+    assert git_ops_db.get_op("psetup-" + "5" * 32)["params"]["alternate_urls"] == [
+        "git@github.com:team/demo.git"]
+    _https(monkeypatch, str(ws.parent / "no-such-remote.git"), url="git@github.com:team/demo.git")
+    _run_setups()
+    assert git_ops_db.get_op("psetup-" + "5" * 32)["status"] == "error"  # never Demo.git
+    assert not (ws / "demo" / ".git").exists()
+
+
+def test_a_failure_on_this_worker_never_tries_another_spelling(ws, test_db, monkeypatch):
+    canonical = auto_link_group_id(_HTTPS)
+    pv2 = projects_v2.upsert_project(canonical, name="Demo")
+    _git_fails_for(monkeypatch, _SSH, _LFS_MISSING)
+    _https(monkeypatch, _bare_remote(ws), url=_HTTPS)
+    project_setup.start_local({"project_v2_id": pv2["id"], "origin": canonical, "name": "Demo", "kind": "git",
+                               "clone_url": _SSH, "alternate_urls": [_HTTPS], "folder": "demo"},
+                              op_id="psetup-" + "4" * 32, requested_by=PEER)
+    _run_setups()
+    assert git_ops_db.get_op("psetup-" + "4" * 32)["status"] == "error"
+    assert not (ws / "demo" / ".git").exists() and _setup_leftovers(ws) == []
+    # The self-seed doesn't either.
+    from app.core.git_service import git_service
+
+    calls = []
+
+    def lfs_missing(working_dir, clone_url, timeout=120):
+        calls.append(clone_url)
+        return False, _LFS_MISSING
+
+    monkeypatch.setattr(git_service, "clone_repo", lfs_missing)
+    projects_v2.record_remote(canonical, _HTTPS, "main")
+    assert _seed(pv2) is None
+    assert calls == [_HTTPS]
+
+
+# How git ends any failure to read an SSH remote.
+_SSH_NOTICE = "{}\n\nPlease make sure you have the correct access rights\nand the repository exists."
+
+
+@pytest.mark.parametrize("stderr, retries", [
+    (_REFUSED["https"], True), (_REFUSED["ssh"], True), (_SSH_REFUSED_PORT, True),
+    ("remote: Repository not found.\nfatal: repository 'https://git.example.com/o/r/' not found", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': The requested URL returned error: 404", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Could not resolve host: git.example.com", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Failed to connect to git.example.com port 443", True),
+    # A remote refusing what this key or account may see (GitLab, then GitHub over SSH).
+    (_SSH_NOTICE.format("remote: ERROR: The project you were looking for could not be found or you don't have "
+                        "permission to view it.\nfatal: Could not read from remote repository."), True),
+    (_SSH_NOTICE.format("ERROR: Repository not found.\nfatal: Could not read from remote repository."), True),
+    # Git's footer alone proves nothing: no remote may have answered at all.
+    (_SSH_NOTICE.format("fatal: Could not read from remote repository."), False),
+    (_SSH_NOTICE.format("ssh: not found\nfatal: Could not read from remote repository."), False),
+    (_SSH_NOTICE.format("error: cannot run ssh: No such file or directory\n"
+                        "fatal: unable to fork"), False),
+    ("git@git.example.com: Permission denied (publickey).", True),
+    # A TLS handshake the remote ended.
+    ("fatal: unable to access 'https://git.example.com/o/r/': gnutls_handshake() failed: an unexpected TLS "
+     "packet was received.", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': OpenSSL SSL_connect: SSL_ERROR_SYSCALL in "
+     "connection to git.example.com:443", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': TLS connection was non-properly terminated.", True),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Recv failure: Connection reset by peer", True),
+    # A timeout never moves on, though git adds its access-rights notice to it.
+    (_SSH_NOTICE.format("ssh: connect to host git.example.com port 22: Connection timed out\n"
+                        "fatal: Could not read from remote repository."), False),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Failed to connect to git.example.com port 443 "
+     "after 130000 ms: Timeout was reached", False),
+    ("fatal: unable to access 'https://git.example.com/o/r/': Operation timed out after 300000 milliseconds", False),
+    (_LFS_MISSING, False),
+    ("error: RPC failed; curl 28 Operation timed out\nfatal: early EOF", False),
+    ("fatal: could not create work tree dir 'demo': No space left on device", False),
+    ("Clone timed out after 120s", False),
+])
+def test_only_a_refusal_another_spelling_can_answer_tries_the_next_url(stderr, retries):
+    assert project_setup.clone_failure_retries(stderr) is retries

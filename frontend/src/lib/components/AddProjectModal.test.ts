@@ -170,8 +170,8 @@ describe('AddProjectModal create flow', () => {
 		const promise = new Promise<T>((r) => (resolve = r));
 		return { promise, resolve };
 	};
-	const row = (name: string, remote: string, local: string | null) => ({
-		project_v2_id: `pv2-${name}`, local_project_id: local, name, kind: 'git', remote, default_branch: 'main',
+	const row = (name: string, remote: string, local: string | null, remote_key: string | null = null) => ({
+		project_v2_id: `pv2-${name}`, local_project_id: local, name, kind: 'git', remote, remote_key, default_branch: 'main',
 		session_count: 0, workers: []
 	});
 
@@ -311,7 +311,7 @@ describe('AddProjectModal create flow', () => {
 	});
 
 	it('marks a pasted repository that is already a project and offers to open it', async () => {
-		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site')]);
+		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site', 'https://github.com/acme/site')]);
 		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
 		const onCreated = vi.fn();
 		await openClone({ onCreated });
@@ -322,6 +322,16 @@ describe('AddProjectModal create flow', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Open it' }));
 		expect(onCreated).toHaveBeenCalledWith('site');
 		expect(m.cloneNew).not.toHaveBeenCalled();
+	});
+
+	it('marks the SSH spelling with the host in another case, as the server refuses it', async () => {
+		// A project added as git@github.com:acme/site: its server key is the HTTPS form.
+		m.overview.mockResolvedValue([row('Site', 'github.com/acme/site', 'site', 'https://github.com/acme/site')]);
+		m.installs.mockResolvedValue({ installs: [inst('self', 'Home server', { is_self: true })], self_instance_id: 'self' });
+		await openClone();
+		await fireEvent.input(urlInput(), { target: { value: 'git@GitHub.com:acme/site.git' } });
+		expect((await screen.findByTestId('already-added')).textContent).toContain('Already added as Site');
+		expect((screen.getByRole('button', { name: 'Clone project' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('keeps the Project ID under Advanced and checks the server rules inline', async () => {
@@ -351,13 +361,45 @@ describe('AddProjectModal create flow', () => {
 });
 
 describe('remoteKey', () => {
-	it('matches the same repository in any spelling', async () => {
+	it('matches the HTTPS and git@ spellings of one repository', async () => {
 		const { remoteKey } = await import('$lib/api/project-workers');
-		const want = 'github.com/acme/site';
+		const want = 'https://github.com/acme/site';
 		for (const url of ['https://github.com/Acme/site.git', 'https://token@github.com/acme/site/', 'git@github.com:acme/site.git',
-			'ssh://git@github.com/acme/site', 'github.com/acme/site']) {
+			' https://user:pw-example@github.com/acme/site ']) {
 			expect(remoteKey(url)).toBe(want);
 		}
 		expect(remoteKey('')).toBe('');
+	});
+
+	it('keeps every other spelling as written, so SSH logins on one host stay apart', async () => {
+		const { remoteKey } = await import('$lib/api/project-workers');
+		const alice = remoteKey('alice@code.example.test:repos/app.git');
+		const bob = remoteKey('bob@code.example.test:repos/app.git');
+		expect(alice).toBe('alice@code.example.test:repos/app');
+		expect(new Set([alice, bob, remoteKey('https://code.example.test/repos/app')]).size).toBe(3);
+		expect(remoteKey('ssh://git@github.com/acme/site')).toBe('ssh://git@github.com/acme/site');
+		expect(remoteKey('git@github.com:/srv/site')).toBe('git@github.com:/srv/site');
+		// Only a public forge joins git@ and HTTPS: a self-hosted server may serve HTTPS under a prefix.
+		expect(remoteKey('git@forge.example:code/team/demo.git')).toBe('git@forge.example:code/team/demo');
+		expect(remoteKey('git@forge.example:code/team/demo')).not.toBe(remoteKey('https://forge.example/code/team/demo'));
+		expect(remoteKey('git@gitlab.com:team/sub/demo.git')).toBe('https://gitlab.com/team/sub/demo');
+		expect(remoteKey('git@github.com:acme/sub/site')).toBe('git@github.com:acme/sub/site');
+		// Normalized first, as the server's canonical_remote: main's one project is one key.
+		expect(remoteKey('git@GitHub.com:acme/site')).toBe('https://github.com/acme/site');
+		expect(remoteKey('GIT@GITHUB.COM:Acme/Site.GIT/')).toBe('https://github.com/acme/site');
+		expect(remoteKey('git@Forge.Example:Code/Team/Demo.git')).toBe(remoteKey('git@forge.example:code/team/demo'));
+		expect(remoteKey('ssh://alice:pw-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
+	});
+
+	it('drops a password a URL parser would reject, or gives no key', async () => {
+		const { remoteKey } = await import('$lib/api/project-workers');
+		expect(remoteKey('https://user:pa[ss-example@git.example.com/o/r.git')).toBe('https://git.example.com/o/r');
+		expect(remoteKey('https://user:pa[ss@example@git.example.com/o/r')).toBe('https://git.example.com/o/r');
+		expect(remoteKey('ssh://alice:pa[ss-example@code.example.test/repos/app')).toBe('ssh://code.example.test/repos/app');
+		expect(remoteKey('https://user:pw-example@[2001:db8::1]:8443/o/r')).toBe('https://[2001:db8::1]:8443/o/r');
+		for (const unsafe of ['https://user:pa/ss-example@git.example.com/o/r', 'https://user:12/ss-example@git.example.com/o/r',
+			'user:pa[ss-example@git.example.com:o/r']) {
+			expect(remoteKey(unsafe)).toBe('');
+		}
 	});
 });
