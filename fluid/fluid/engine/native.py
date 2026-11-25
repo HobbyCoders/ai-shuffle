@@ -62,7 +62,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -5868,6 +5868,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         effort: str | None = None,
     ) -> _CallResult:
         self._stream_usage: dict[str, Any] = {}
+        self._live_chunks: AsyncGenerator[Any, None] | None = None
         try:
             return await self._stream_once_inner(
                 sid, turn_id, history, sticky=sticky, effort=effort
@@ -5892,6 +5893,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
         finally:
             self._stream_usage = {}
+            chunks, self._live_chunks = self._live_chunks, None
+            if chunks is not None:
+                await chunks.aclose()
 
     async def _stream_once_inner(
         self, sid: str, turn_id: str, history: list[Message], *, sticky: bool = True,
@@ -5918,7 +5922,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         arg_abort: tuple[int, str] | None = None
         alive_published = False
 
-        async for chunk in self._provider_chunks_interruptible(request):
+        # _stream_once closes it on every exit: a ``break``, an early return
+        # or an exception would otherwise leave the generator (and the
+        # provider's HTTP stream) open until garbage collection, while the
+        # caller may retry at once.
+        chunks = self._live_chunks = self._provider_chunks_interruptible(request)
+        async for chunk in chunks:
             if self._interrupted.is_set():
                 interrupted = True
                 break
@@ -6357,7 +6366,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _provider_chunks_interruptible(
         self, request: ProviderRequest
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Race every provider read against Interrupt and close it before return.
 
         This guarantees a corrective/new turn cannot overlap a still-running
