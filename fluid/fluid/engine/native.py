@@ -186,6 +186,7 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.hooks.bus import (
+    HOOK_STOP_SKIP,
     NOTIFICATION,
     POST_TOOL_USE,
     PRE_COMPACT,
@@ -5003,9 +5004,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         # batch: nothing after it runs, but every published
                         # ToolUse still gets its result.
                         blocks.append(await self._skip_tool(
-                            sid, turn_id, tu,
-                            "Tool not executed: a hook stopped the turn "
-                            "before this call ran.",
+                            sid, turn_id, tu, HOOK_STOP_SKIP,
                         ))
                         continue
                     if tu.get("arg_error"):
@@ -6605,7 +6604,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._nested_injected = {
             path: (carrier, block)
             for path, (carrier, block) in self._nested_injected.items()
-            if carrier in shown and block in shown[carrier]
+            if block and carrier in shown and block in shown[carrier]
         }
 
     def _nested_instruction_reminder(
@@ -6647,13 +6646,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                     if (is_global_instruction_path(f.path)
                             or directory in covered or f.path in self._nested_injected):
                         continue
-                    block = (
-                        f"# From: {f.path}\n{f.content.rstrip()}"
-                        if f.content.strip() else ""
-                    )
+                    # An empty file carries nothing, so nothing is recorded:
+                    # once it gains content, the next visit delivers it.
+                    if not f.content.strip():
+                        continue
+                    block = f"# From: {f.path}\n{f.content.rstrip()}"
                     self._nested_injected[f.path] = (carrier_id, block)
-                    if block:
-                        blocks.append(block)
+                    blocks.append(block)
             except OSError:
                 continue
         if not blocks:

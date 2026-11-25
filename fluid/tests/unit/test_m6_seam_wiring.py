@@ -186,6 +186,40 @@ async def test_denied_or_failed_calls_never_pull_nested_instructions(tmp_path) -
     assert results["t3"].count("Nested rule: use tabs.") == 1
 
 
+async def test_an_empty_nested_file_is_delivered_once_it_has_content(tmp_path) -> None:
+    """An empty AGENTS.md carries nothing, so visiting it records nothing:
+    when the file gains content, the next visit delivers it."""
+    project, nested = _nested_project(tmp_path)
+    agents = nested / "AGENTS.md"
+    agents.write_text("   \n")
+
+    class FillingProvider(ScriptedProvider):
+        async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+            if self.calls == 1:  # after t1 ran on the empty file
+                agents.write_text("Nested rule: use tabs.")
+            async for chunk in super().stream(request):
+                yield chunk
+
+    provider = FillingProvider([
+        _tool_call("t1", "Read", json.dumps({"file_path": str(nested / "f.txt")})),
+        _tool_call("t2", "Read", json.dumps({"file_path": str(nested / "f.txt")})),
+        _text("done"),
+    ])
+    registry = ToolRegistry()
+    register_builtins(registry)
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", session_id=sid, registry=registry,
+        ctx=ToolCtx(cwd=str(project)), permissions=PermissionEngine("never_ask"),
+    )
+    await loop.submit(UserTurn(content="go"))
+    await loop.wait_turn()
+    results = _result_texts(await store.load_path(sid))
+    assert "Instructions apply" not in results["t1"]
+    assert results["t2"].count("Nested rule: use tabs.") == 1
+
+
 async def test_nested_instructions_respect_setting_sources(tmp_path) -> None:
     """A session whose setting_sources leave out "project" never loads
     project-scope instructions, nested ones included."""

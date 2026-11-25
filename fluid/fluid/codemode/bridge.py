@@ -35,7 +35,13 @@ from typing import Any
 from dataclasses import dataclass, replace
 
 from fluid.codemode.kernel import HostReply, current_host_call_salvage
-from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, hook_reminder
+from fluid.hooks.bus import (
+    HOOK_STOP_SKIP,
+    POST_TOOL_USE,
+    PRE_TOOL_USE,
+    HookBus,
+    hook_reminder,
+)
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
     PermissionEngine,
@@ -182,6 +188,15 @@ class HostBridge:
         # from "the kernel has this" — see ToolCtx.read_delivered.
         if result_budget is not None:
             self._ctx.result_budget = result_budget
+        # Set once a hook's ``continue: false`` (PreToolUse or PostToolUse)
+        # stops the turn: a bridge serves one cell, and nothing after the stop
+        # in that cell runs, as nothing after it in a JSON-path batch does.
+        self._stopped = False
+
+    def _stop(self, reason: str) -> None:
+        self._stopped = True
+        if self._on_stop is not None:
+            self._on_stop(reason)
 
     def _tool_hook_payload(self, **fields: Any) -> dict[str, Any]:
         if self._hook_payload is None:
@@ -195,6 +210,11 @@ class HostBridge:
         self, tool_name: str, kwargs: dict[str, Any], *,
         tool_use_id: str | None = None,
     ) -> HostReply:
+        # A hook stopped the turn on an earlier call of this cell: no hook,
+        # gate or dispatch for this one (the JSON path's skipped-call text).
+        if self._stopped:
+            return HostReply(denied=True, message=HOOK_STOP_SKIP)
+
         # Session tool surface (ruling T9), ahead of the registry lookup so the
         # answer does not depend on whether the filtered name happens to exist.
         # The stub was never projected, so the model should not be able to reach
@@ -251,20 +271,21 @@ class HostBridge:
             )
             if decision.action == "deny" or decision.stop:
                 reason = decision.note or ("stopped by hook" if decision.stop else "denied")
-                if decision.stop and self._on_stop is not None:
-                    self._on_stop(reason)
+                if decision.stop:
+                    self._stop(reason)
                 return HostReply(denied=True, message=f"blocked by hook: {reason}")
             if decision.action == "modify" and decision.replacement_input is not None:
                 tool_input = decision.replacement_input
             hook_permission = decision.permission_decision
 
         # PermissionEngine: allow / deny / ask, plus the doom-loop guard. A
-        # hook's allow answers the prompt, never a configured deny.
+        # hook's allow answers the prompt, never a configured deny; as on the
+        # native gate it also answers the repeat guard's prompt.
         decided = self._permissions.decide(spec, tool_input, cwd=self._ctx.cwd)
         verdict = decided.decision
         if hook_permission == "allow" and verdict != "deny":
             verdict = "allow"
-        if verdict != "deny" and self._doom_loop:
+        elif verdict != "deny" and self._doom_loop:
             if self._permissions.note_execution(tool_name, tool_input):
                 # Match the native gate: Bypass must not park on an approval
                 # when the repeat guard trips. Refuse this call with feedback.
@@ -392,8 +413,7 @@ class HostBridge:
             # turn once this cell returns.
             additions: list[str] = []
             if decision.stop:
-                if self._on_stop is not None:
-                    self._on_stop(decision.note or "stopped by hook")
+                self._stop(decision.note or "stopped by hook")
             elif decision.action == "deny":
                 additions.append(hook_reminder(
                     "PostToolUse hook feedback", decision.note or "blocked by hook",

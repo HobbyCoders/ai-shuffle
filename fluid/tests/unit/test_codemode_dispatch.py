@@ -514,6 +514,48 @@ async def test_host_bridge_honours_hook_stop_and_permission_decisions(tmp_path) 
     assert stops == ["halt", "done"]
 
 
+@pytest.mark.parametrize("stop_event", ["PreToolUse", "PostToolUse"])
+async def test_a_hook_stop_skips_the_rest_of_the_cell(tmp_path, stop_event: str) -> None:
+    """A hook's ``continue: false`` on one host call stops the turn, so no
+    later host call of the same cell runs: no hooks, no gate, no dispatch,
+    just the JSON path's skipped-call result."""
+    from fluid.codemode.bridge import HostBridge
+    from fluid.hooks.bus import HOOK_STOP_SKIP, HookBus, HookDecision
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.inproc import create_inproc_server, tool
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    ran: list[int] = []
+
+    @tool("touch", "Touch", {"type": "object", "properties": {"n": {"type": "integer"}}})
+    async def touch(args: dict) -> dict:
+        ran.append(args["n"])
+        return {"content": [{"type": "text", "text": "touched"}]}
+
+    reg = ToolRegistry()
+    reg.register_inproc(create_inproc_server("m", [touch]))
+    hook_calls: list[tuple[str, int]] = []
+
+    async def stop_once(event: str, payload: dict):
+        hook_calls.append((event, payload["input"]["n"]))
+        return HookDecision(stop=True, note="halt") if event == stop_event else None
+
+    bus = HookBus()
+    bus.on("PreToolUse", stop_once)
+    bus.on("PostToolUse", stop_once)
+    stops: list[str] = []
+    bridge = HostBridge(
+        reg, PermissionEngine("never_ask"), hooks=bus, ctx=ToolCtx(cwd=str(tmp_path)),
+        on_stop=stops.append,
+    )
+    await bridge.on_host_call("mcp__m__touch", {"n": 1})
+    second = await bridge.on_host_call("mcp__m__touch", {"n": 2})
+    assert second.denied and second.message == HOOK_STOP_SKIP
+    assert ran == ([1] if stop_event == "PostToolUse" else [])
+    assert all(n == 1 for _event, n in hook_calls)  # no hook saw the second call
+    assert stops == ["halt"]
+
+
 async def test_host_bridge_without_payload_builder_sends_the_bare_payload(tmp_path) -> None:
     """With no engine payload builder, PreToolUse gets exactly ``{name,
     input}`` and PostToolUse ``{name, input, output, result, is_error}``:

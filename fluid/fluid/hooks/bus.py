@@ -45,6 +45,11 @@ PRE_COMPACT = "PreCompact"
 SUBAGENT_STOP = "SubagentStop"
 NOTIFICATION = "Notification"
 
+# The result of a call a hook's ``continue: false`` kept from running: a later
+# call of the same JSON-path batch, or a later host call of the same code-mode
+# cell.
+HOOK_STOP_SKIP = "Tool not executed: a hook stopped the turn before this call ran."
+
 
 @dataclass(frozen=True, kw_only=True)
 class HookDecision:

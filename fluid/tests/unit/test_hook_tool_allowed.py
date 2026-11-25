@@ -181,7 +181,39 @@ async def test_code_mode_hook_allow_never_overrides_a_deny_rule() -> None:
     assert seen == [] and ran == []
 
 
+async def test_code_mode_hook_allow_also_answers_the_repeat_guard() -> None:
+    """As on the native gate, a hook that approved a call has answered its
+    prompt, the repeat guard's included: three identical approved calls in
+    an interactive session run without a permission request."""
+    bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
+    asked: list[dict] = []
+
+    async def on_permission(_spec, tool_input: dict) -> bool:
+        asked.append(tool_input)
+        return True
+
+    bridge = HostBridge(
+        registry, PermissionEngine("on_write"), hooks=bus, ctx=ToolCtx(session_id="ses_cm"),
+        on_permission=on_permission,
+    )
+    for _ in range(3):
+        assert not (await bridge.on_host_call(TOOL, {"n": 2})).denied
+    assert asked == []
+    assert len(ran) == 3
+
+
 # ─── the delegated leg's bundled bridge ─────────────────────────────────────
+
+
+async def test_bundled_bridge_hook_allow_also_answers_the_repeat_guard() -> None:
+    bus, registry, seen, ran = _recording_bus(hook=HookDecision(permission_decision="allow"))
+    call = {"op": "call", "name": TOOL, "arguments": {"n": 3}}
+    permissions = PermissionEngine("on_write")
+    for _ in range(3):
+        answered = await _answer(registry, ToolCtx(session_id="ses_dl"), call,
+                                 permissions=permissions, hooks=bus)
+        assert answered["is_error"] is False
+    assert len(ran) == 3
 
 
 @pytest.mark.parametrize("ctx_extra", [{}, {"agent_id": None}, {"agent_id": "cli-agent-559"}])
