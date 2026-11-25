@@ -31,14 +31,20 @@
 	// body's height, so the measurement settles in one pass.
 	let content = $state<HTMLDivElement | null>(null);
 	let room = $state<number | null>(null);
+	// No room at all on a desktop-sized window: the body is clipped to
+	// nothing, so take it out of the tab order too (it stays mounted and
+	// measured, and comes back as soon as the draft or window gives room).
+	let starved = $state(false);
 	$effect(() => {
 		const body = content;
 		const slot = body?.closest('.input-slot');
 		const view = body?.closest('.chat-view');
 		if (!body || !slot || !view || typeof ResizeObserver === 'undefined') return;
+		const wide = window.matchMedia('(min-width: 640px)');
 		const measure = () => {
 			if (body.hidden) return;
 			room = Math.max(0, Math.floor(view.clientHeight - (slot.getBoundingClientRect().height - body.getBoundingClientRect().height)));
+			starved = wide.matches && room === 0;
 		};
 		const observer = new ResizeObserver(measure);
 		observer.observe(view);
@@ -56,7 +62,7 @@
 				<span class="status">{status}</span><ChevronDown size={14} class={expanded ? 'expanded' : ''} />
 			</button>
 			<!-- Hide rather than unmount: collapse and request switching retain drafts. -->
-			<div id={`${id}-content`} hidden={!expanded} class="tray-content" bind:this={content} style:--tray-room={room === null ? undefined : `${room}px`}>
+			<div id={`${id}-content`} hidden={!expanded} class="tray-content" bind:this={content} inert={starved} style:--tray-room={room === null ? undefined : `${room}px`}>
 				{#if open.length > 1}
 					<div class="request-tabs" role="group" aria-label="Pending requests">
 						{#each open as request, index (request.request_id)}
