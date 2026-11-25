@@ -260,6 +260,14 @@ class SessionMeta:
     # sessions stored before the field existed — recall treats those as
     # "unknown project", never as "some other project".
     project_root: str | None = None
+    # Set with a ``cli_session_id`` that a delegated recovery re-seed minted
+    # (DelegatedLoop._recover_silent_resume): ``{"handle": <that id>,
+    # "pending": <node id of the prompt the replacement transcript does not
+    # hold yet, or None>, "prompt": <a key of that prompt's text>}``. It holds
+    # only while ``handle`` is still the stored ``cli_session_id``: a handle
+    # re-seeded once is never re-seeded that way again, and the pending prompt
+    # is restored before a different one is sent.
+    cli_resume_recovery: dict[str, Any] | None = None
 
 
 @dataclass
@@ -425,6 +433,9 @@ class SessionStore(Protocol):
     async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:
         """Persist the delegated backend's resume handle on the session meta."""
         ...
+    # Optional, so not declared here: ``set_cli_resume_recovery(session_id,
+    # recovery)`` persists ``SessionMeta.cli_resume_recovery``. A store
+    # without it keeps that state for the engine object's life only.
     async def append_event(self, session_id: str, event: Event) -> None:
         """Persist a sequenced event for durable, cross-restart replay."""
         ...
@@ -546,6 +557,13 @@ class MemoryStore:
         meta = self._sessions.get(session_id)
         if meta is not None:
             meta.cli_session_id = cli_session_id
+
+    async def set_cli_resume_recovery(
+        self, session_id: str, recovery: dict[str, Any] | None,
+    ) -> None:
+        meta = self._sessions.get(session_id)
+        if meta is not None:
+            meta.cli_resume_recovery = dict(recovery) if recovery else None
 
     async def append_event(self, session_id: str, event: Event) -> None:
         self._events.setdefault(session_id, []).append(event)

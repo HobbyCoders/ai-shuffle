@@ -1655,6 +1655,17 @@ def _run_column_migrations(cursor: Any) -> None:
         )
         migrations_applied.append("fluid_sessions.writer_generation")
 
+    # fluid_sessions.cli_resume_recovery. What a delegated recovery re-seed left
+    # owing on the handle it minted (the prompt to replay, and that the handle
+    # was re-seeded once), so a reconnect or a new adapter still knows. NULL on
+    # every existing row. Additive and nullable; no SCHEMA_VERSION bump, as for
+    # writer_generation above.
+    if table_exists(cursor, "fluid_sessions") and not column_exists(
+        cursor, "fluid_sessions", "cli_resume_recovery"
+    ):
+        cursor.execute("ALTER TABLE fluid_sessions ADD COLUMN cli_resume_recovery TEXT")
+        migrations_applied.append("fluid_sessions.cli_resume_recovery")
+
     # Raw transcript trigram indexes are deliberately not built at startup.
     # The background projection provides indexed recall after backfill; until
     # then legacy substring queries remain correct without a GIN.

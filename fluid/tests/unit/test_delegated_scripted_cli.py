@@ -23,6 +23,7 @@ from fluid.events import (
     ErrorEvent,
     PermissionRequest,
     RespondPermission,
+    RespondQuestion,
     TextDelta,
     ToolResult,
     ToolUse,
@@ -32,6 +33,7 @@ from fluid.events import (
 )
 from fluid.events.model import Interrupted, RateLimit
 from fluid.events.ops import Interrupt, SetModel, SetPermissionMode
+from fluid.messages import Image, Text
 from fluid.store.base import MemoryStore
 
 FAKE = Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py"
@@ -73,10 +75,13 @@ class Scripted:
         return frames
 
     async def turn(
-        self, text: str, *, on_permission: Responder | None = None,
+        self, text: Any, *, on_permission: Responder | None = None,
         on_event: Callable[[Any], Awaitable[None]] | None = None,
+        submitted_prompt: str | None = None, source: str = "user",
     ) -> list:
-        """Run one user turn; the events it produced, terminal last."""
+        """Run one user turn; the events it produced, terminal last.
+        ``submitted_prompt`` is what the host sets when ``text`` carries a
+        note it rendered around the prompt."""
         if self.sid is None:
             self.sid = (await self.store.create_session()).session_id
             self.loop._session_id = self.sid
@@ -95,7 +100,8 @@ class Scripted:
 
         watcher = asyncio.create_task(watch())
         await asyncio.sleep(0)  # subscribed before the turn can publish
-        await self.loop.submit(UserTurn(content=text))
+        await self.loop.submit(UserTurn(content=text, submitted_prompt=submitted_prompt,
+                                        source=source))
         await asyncio.wait_for(watcher, TURN_BUDGET)
         await asyncio.wait_for(self.loop.wait_turn(), TURN_BUDGET)
         return seen
@@ -369,6 +375,466 @@ async def test_a_usage_limit_on_a_resumed_cli_is_not_replayed(tmp_path, status) 
         await run.aclose()
 
 
+async def test_a_transient_provider_error_on_a_resumed_cli_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI whose first turn fails with a 503 before any reply has
+    not refused its --resume handle: the turn reports the error, and the CLI
+    conversation it would have thrown away stays saved for the next turn."""
+    outage = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": "API Error: 503 upstream connect error", "api_error_status": 503,
+              "num_turns": 1, "total_cost_usd": 0.0, "usage": {}}
+    run = Scripted(tmp_path, {"turns": [[{"op": "frame", "frame": outage}]]},
+                   cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.status == 503
+        assert len(run.records("start")) == 1  # no fresh CLI
+        assert len(run.stdin_frames("user")) == 1  # not replayed elsewhere
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_the_cli_saying_no_conversation_found_replaces_the_handle(tmp_path) -> None:
+    """CLI 2.1.331 refuses an unknown --resume id with a failed result whose
+    ``errors`` say so (and no init frame): the handle is dropped and the turn
+    replays on a fresh CLI conversation."""
+    refused = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+               "num_turns": 0, "total_cost_usd": 0, "usage": {},
+               "errors": ["No conversation found with session ID: cli-prev"]}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[{"op": "frame", "frame": refused}]],
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        starts = run.records("start")
+        assert len(starts) == 2
+        assert "--resume" not in starts[-1]["argv"]
+        assert run.loop.cli_session_id != "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_an_older_cli_saying_no_conversation_on_stderr_replaces_the_handle(tmp_path) -> None:
+    """Older CLIs print the refusal on stderr and exit instead of writing a
+    result frame: that diagnostic is evidence too, and the turn replays on a
+    fresh CLI conversation."""
+    refusal = {"op": "exit", "code": 1, "stderr": "No conversation found with session ID: cli-prev"}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[refusal]],
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        starts = run.records("start")
+        assert len(starts) == 2
+        assert "--resume" not in starts[-1]["argv"]
+        assert run.loop.cli_session_id != "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_resumed_cli_that_crashes_after_a_failed_turn_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI proved its handle good (init, then a 503 result), then
+    crashed on the next turn before writing a frame, saying nothing about the
+    conversation. A crash is not a refusal: the turn fails as retriable and
+    the handle stays saved for the next turn's fresh CLI."""
+    outage = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": "API Error: 503 upstream connect error", "api_error_status": 503,
+              "num_turns": 1, "total_cost_usd": 0.0, "usage": {}}
+    run = Scripted(tmp_path, {
+        "resume_turns": [[{"op": "frame", "frame": outage}],
+                         [{"op": "exit", "code": 1, "stderr": "Segmentation fault"}]],
+    }, cli_session_id="cli-prev")
+    try:
+        first = await run.turn("hello again")
+        assert isinstance(first[-1], ErrorEvent) and first[-1].status == 503
+        events = await run.turn("and again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.retriable
+        assert len(run.records("start")) == 1  # not replayed into a fresh conversation
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_resumed_cli_that_exits_at_start_without_saying_why_keeps_the_handle(tmp_path) -> None:
+    """A resumed CLI that dies before its first frame for any other reason
+    has not refused the handle either: the turn fails, the handle stays."""
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": "Segmentation fault"}},
+                   cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert error.retriable
+        assert len(run.records("start")) == 1
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+def _recorder(outcome: delegated_mod.ResumeRecovery) -> tuple[list, Callable]:
+    calls: list = []
+
+    async def recover(handle: str, before_node: str, **kw: Any) -> delegated_mod.ResumeRecovery:
+        calls.append((handle, before_node))
+        return outcome
+
+    return calls, recover
+
+
+async def _user_node_text(run: Scripted, node_id: str) -> str:
+    path = await run.store.load_path(run.sid)
+    node = next(n for n in path if n.node_id == node_id)
+    return node.message.content[0].text
+
+
+async def test_a_handle_whose_transcript_went_away_is_reseeded_after_three_silent_exits(
+    tmp_path,
+) -> None:
+    """A pooled loop's resumed CLI exits before any frame on every turn and
+    never says why (its transcript was removed after the loop connected).
+    The first two turns fail as retriable crashes with the handle kept; the
+    third asks the host, which finds the transcript gone and re-seeds it once,
+    and the turn replays on the new handle."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("reseeded", "cli-new"))
+    run = Scripted(tmp_path, {
+        "spawn_exit": {"code": 1, "stderr": "", "resume": "cli-prev"},
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        for text in ("one", "two"):
+            error = (await run.turn(text))[-1]
+            assert isinstance(error, ErrorEvent) and error.retriable, error
+            assert run.loop.cli_session_id == "cli-prev"
+        assert calls == []
+
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert len(calls) == 1 and calls[0][0] == "cli-prev"
+        # The re-seed stops before the replayed turn's prompt.
+        assert await _user_node_text(run, calls[0][1]) == "three"
+        resumed = [s["argv"][s["argv"].index("--resume") + 1] for s in run.records("start")]
+        assert resumed == ["cli-prev", "cli-prev", "cli-prev", "cli-new"]
+        assert run.loop.cli_session_id == "cli-new"
+        assert "three" in json.dumps(run.stdin_frames("user")[-1])
+    finally:
+        await run.aclose()
+
+
+async def test_a_handle_whose_transcript_is_there_ends_the_third_silent_exit_clearly(
+    tmp_path,
+) -> None:
+    """The transcript is still there, yet the CLI keeps exiting on it: the
+    third turn ends with an error that says the saved conversation could not
+    be resumed, not retriable. Nothing is replayed and the handle stays."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("present"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        for text in ("one", "two"):
+            assert (await run.turn(text))[-1].retriable
+        error = (await run.turn("three"))[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "could not resume this chat's saved conversation" in error.message
+        assert not error.retriable
+        assert len(calls) == 1
+        assert len(run.records("start")) == 3
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
+async def test_a_frame_from_the_cli_resets_the_silent_exit_count(tmp_path) -> None:
+    """Silent exits count only in a row: a turn the resumed CLI answered
+    between them starts the count again, so the host is not asked."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("present"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-prev", recover_resume=recover)
+    try:
+        await run.turn("one")
+        await run.turn("two")
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hi."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        assert isinstance((await run.turn("three"))[-1], TurnComplete)
+        await run.loop._stop_process(grace=1.0)  # the next turn spawns again
+        run.script_path.write_text(json.dumps({"spawn_exit": {"code": 1, "stderr": ""}}),
+                                   encoding="utf-8")
+        assert (await run.turn("four"))[-1].retriable
+        assert calls == []
+    finally:
+        await run.aclose()
+
+
+class _Host:
+    """The host's ``recover_resume``: the silent-exit check re-seeds
+    ``cli-new``; a restore re-seeds ``cli-restored``. Each re-seed keeps the
+    prompts it would write (the stored path before ``before_node``) and stores
+    ``recovery`` with the new handle, as the real one does in one row update."""
+
+    def __init__(self, run: Scripted) -> None:
+        self.run = run
+        self.calls: list[dict] = []
+        self.fail_restore = False  # writing the restored transcript fails
+
+    async def __call__(self, handle: str, before_node: str, *, recovery: dict | None = None,
+                       restore: bool = False) -> delegated_mod.ResumeRecovery:
+        path = await self.run.store.load_path(self.run.sid)
+        cut = next(i for i, n in enumerate(path) if n.node_id == before_node)
+        users = [n.message for n in path[:cut] if n.message.role == "user"]
+        written = [m.content[0].text for m in users]
+        new = "cli-restored" if restore else "cli-new"
+        self.calls.append({"handle": handle, "restore": restore, "written": written,
+                           "text": "\n".join(m.text() for m in users)})
+        if restore and self.fail_restore:
+            raise OSError("disk full")
+        await self.run.store.set_cli_session_id(self.run.sid, new)
+        await self.run.store.set_cli_resume_recovery(self.run.sid, {**(recovery or {}), "handle": new})
+        return delegated_mod.ResumeRecovery("reseeded", new)
+
+
+async def _replay_never_recorded(
+    tmp_path, third: Any = "three", *, submitted: str | None = None, source: str = "user",
+    prepare: Callable[[Scripted], Awaitable[None]] | None = None,
+) -> tuple[Scripted, _Host]:
+    """Three silent exits on ``cli-prev``; the host re-seeds ``cli-new`` and
+    the replay of the third prompt exits on it too, before the CLI records
+    it. ``third``/``submitted``/``source`` are that turn's; ``prepare`` runs
+    just before it."""
+    run = Scripted(tmp_path, {
+        "spawn_exit": {"code": 1, "stderr": "", "resume": ["cli-prev", "cli-new"]},
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+    }, cli_session_id="cli-prev")
+    host = _Host(run)
+    run.loop.recover_resume = host
+    for i, (text, prompt, kind) in enumerate((("one", None, "user"), ("two", None, "user"),
+                                              (third, submitted, source))):
+        if i == 2 and prepare is not None:
+            await prepare(run)
+        error = (await run.turn(text, submitted_prompt=prompt, source=kind))[-1]
+        assert isinstance(error, ErrorEvent) and error.retriable, error
+    assert [c["restore"] for c in host.calls] == [False]
+    assert run.loop.cli_session_id == "cli-new"
+    meta = await run.store.get_session(run.sid)
+    assert meta.cli_resume_recovery["handle"] == "cli-new"
+    assert meta.cli_resume_recovery["pending"]
+    assert run.stdin_frames("user") == []  # no CLI read a prompt
+    return run, host
+
+
+def _prompts_sent(run: Scripted) -> list[str]:
+    return [json.dumps(f) for f in run.stdin_frames("user")]
+
+
+async def test_a_replay_the_cli_never_recorded_is_restored_before_a_new_prompt(tmp_path) -> None:
+    """The re-seeded handle's replay died before the CLI recorded "three".
+    The next, different prompt must not resume a conversation without it:
+    the history through "three" is written out again first, and "three"
+    reaches the CLI exactly once (in that history, not also as input)."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        events = await run.turn("four")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        restore = host.calls[1]
+        assert restore["handle"] == "cli-new"
+        assert restore["written"].count("three") == 1
+        sent = _prompts_sent(run)
+        assert sum("three" in frame for frame in sent) == 0
+        assert len(sent) == 1 and "four" in sent[0]
+        resumed = [s["argv"][s["argv"].index("--resume") + 1] for s in run.records("start")]
+        assert resumed[-1] == "cli-restored"
+        # The CLI recorded "four": nothing is owed, the handle stays marked.
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-restored"
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_retry_of_a_replay_the_cli_never_recorded_is_sent_once(tmp_path) -> None:
+    """The next send retries "three" itself (a resubmitted wake): it goes to
+    the CLI once, as the turn's input, and is not written back first."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        events = await run.turn("three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "three" in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-new"
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+def _clock(stamp: str) -> str:
+    return f"<system-reminder>\nCurrent time: {stamp}\n</system-reminder>"
+
+
+async def test_a_retried_wake_with_a_fresh_clock_note_is_still_a_retry(tmp_path) -> None:
+    """The host renders a fresh clock note around every send, so a wake the
+    scheduler retries a minute later has different content but the same
+    submitted prompt. It is the owed prompt's retry: sent once, with only
+    the new note, and the old wake is not written back first."""
+    run, host = await _replay_never_recorded(
+        tmp_path, f"three\n\n{_clock('10:00')}", submitted="three")
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]],
+        }), encoding="utf-8")
+        events = await run.turn(f"three\n\n{_clock('10:01')}", submitted_prompt="three")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "three" in sent[0]
+        assert "10:01" in sent[0] and "10:00" not in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_failed_restore_keeps_the_prompt_owed(tmp_path) -> None:
+    """Writing the restored transcript fails, so "four" runs on the handle
+    that still lacks "three". Its result must not settle the marker: the
+    next send restores the history through "three" after all."""
+    run, host = await _replay_never_recorded(tmp_path)
+    try:
+        run.script_path.write_text(json.dumps({
+            "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]] * 2,
+        }), encoding="utf-8")
+        host.fail_restore = True
+        events = await run.turn("four")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "four" in sent[0]
+        assert run.loop.cli_session_id == "cli-new"
+        meta = await run.store.get_session(run.sid)
+        assert meta.cli_resume_recovery["handle"] == "cli-new"
+        assert meta.cli_resume_recovery["pending"]
+        assert meta.cli_resume_recovery["prompt"] == delegated_mod._prompt_key("three")
+
+        host.fail_restore = False
+        events = await run.turn("five")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True, True]
+        assert host.calls[2]["written"].count("three") == 1
+        assert run.loop.cli_session_id == "cli-restored"
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+def _answered(question: str) -> Callable[[Scripted], Awaitable[None]]:
+    """Post an AskUser ``question`` and answer it, leaving the answer for the
+    next turn to carry (``wake=False``: the test sends that turn itself)."""
+    async def prepare(run: Scripted) -> None:
+        [rid] = await run.loop.ctx.extra["post_questions"](
+            [{"question": question, "options": [{"label": "9000"}, {"label": "8080"}]}],
+            tool_use_id=f"ask-{len(question)}")
+        await run.loop.submit(RespondQuestion(request_id=rid, answer="1",
+                                              user_answered=True, wake=False))
+    return prepare
+
+
+def _normal_cli(run: Scripted) -> None:
+    run.script_path.write_text(json.dumps({
+        "turns": [[{"op": "text", "text": "Hello."}, {"op": "result", "cost": 0.0}]] * 2,
+    }), encoding="utf-8")
+
+
+async def test_a_second_question_wake_does_not_settle_an_owed_one(tmp_path) -> None:
+    """A question wake (empty content, the answer appended once and marked
+    delivered) is owed on the re-seeded handle. The next question wake also
+    has empty content, but carries a different answer: it is not a retry,
+    so the first answer is restored before it rather than lost."""
+    run, host = await _replay_never_recorded(
+        tmp_path, [], source="unpark", prepare=_answered("Which port?"))
+    try:
+        assert not await run.loop.pending_question_answers()  # delivered once
+        _normal_cli(run)
+        await _answered("Which host name?")(run)
+        events = await run.turn([], source="unpark")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        assert host.calls[1]["text"].count("Which port?") == 1
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "Which host name?" in sent[0] and "Which port?" not in sent[0]
+        assert run.loop.cli_session_id == "cli-restored"
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+async def test_a_retry_without_the_answer_an_owed_turn_carried_restores_it(tmp_path) -> None:
+    """"continue" carried a buffered answer and was left owed. A retry of
+    "continue" no longer carries it (it was delivered), so it is not the same
+    turn: the history through the answer is restored before the retry."""
+    run, host = await _replay_never_recorded(
+        tmp_path, "continue", prepare=_answered("Which port?"))
+    try:
+        _normal_cli(run)
+        events = await run.turn("continue")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert [c["restore"] for c in host.calls] == [False, True]
+        assert host.calls[1]["text"].count("Which port?") == 1
+        sent = _prompts_sent(run)
+        assert len(sent) == 1 and "continue" in sent[0] and "Which port?" not in sent[0]
+        meta = await run.store.get_session(run.sid)
+        assert not meta.cli_resume_recovery["pending"]
+    finally:
+        await run.aclose()
+
+
+def test_an_image_only_prompt_has_its_own_key() -> None:
+    image = Image(media_type="image/png", data="aGVsbG8=")
+    other = Image(media_type="image/png", data="d29ybGQ=")
+    keys = {delegated_mod._prompt_key(c) for c in ([], [image], [other])}
+    assert len(keys) == 3
+    assert delegated_mod._prompt_key("three") == delegated_mod._prompt_key([Text("three")])
+
+
+async def test_a_new_loop_does_not_reseed_a_handle_a_recovery_already_made(tmp_path) -> None:
+    """The adapter is recreated after a recovery re-seed: the new loop reads
+    the stored marker, so three more silent exits on that handle end with
+    the clear error instead of a second re-seed."""
+    calls, recover = _recorder(delegated_mod.ResumeRecovery("reseeded", "cli-other"))
+    run = Scripted(tmp_path, {"spawn_exit": {"code": 1, "stderr": ""}},
+                   cli_session_id="cli-new", recover_resume=recover)
+    try:
+        run.sid = (await run.store.create_session()).session_id
+        run.loop._session_id = run.sid
+        await run.store.set_cli_session_id(run.sid, "cli-new")
+        await run.store.set_cli_resume_recovery(
+            run.sid, {"handle": "cli-new", "pending": None, "prompt": None})
+        for text in ("one", "two"):
+            assert (await run.turn(text))[-1].retriable
+        error = (await run.turn("three"))[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "could not resume this chat's saved conversation" in error.message
+        assert calls == []
+        assert run.loop.cli_session_id == "cli-new"
+    finally:
+        await run.aclose()
+
+
 async def test_stop_before_the_turn_reaches_the_cli_keeps_it_from_running(tmp_path) -> None:
     """A Stop that lands while the CLI is still starting must not let the
     turn run its tools once the CLI is up (the native loop honours an early
@@ -436,6 +902,83 @@ async def test_a_wake_between_turns_is_drained_and_its_prompt_denied(tmp_path) -
         assert "between turns" in decision["response"]["message"]
         path = await run.store.load_path(run.sid)
         assert all("WAKE" not in n.message.text() for n in path)
+    finally:
+        await run.aclose()
+
+
+async def test_a_wake_still_running_past_the_drain_bound_gets_a_fresh_cli(tmp_path, monkeypatch) -> None:
+    """A wake whose result comes after the drain gave up must not end the
+    next turn: that turn runs on a fresh CLI resumed from the saved handle,
+    not on the stream the wake is still writing to."""
+    monkeypatch.setattr(delegated_mod, "_WAKE_DRAIN_TIMEOUT", 0.3)
+    first = [
+        {"op": "text", "text": "first answer"}, {"op": "result"},
+        {"op": "sleep", "s": 0.05},
+        {"op": "text", "text": "WAKE text"},
+        {"op": "sleep", "s": 2.0},  # past the drain's bound
+        {"op": "text", "text": "LATE wake text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first], "resume_turns": [second]})
+    try:
+        await run.turn("one")
+        await asyncio.sleep(0.3)
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        starts = run.records("start")
+        assert len(starts) == 2
+        argv = starts[-1]["argv"]
+        assert argv[argv.index("--resume") + 1] == "cli-sess-1"
+    finally:
+        await run.aclose()
+
+
+async def test_an_oversized_frame_ends_the_cli_and_the_next_turn_resumes(tmp_path, monkeypatch) -> None:
+    """A stdout line over the stream limit fails its turn and ends that CLI at
+    once: what it writes next is never read as the next turn's reply, which
+    runs on a fresh CLI resumed from the saved handle."""
+    monkeypatch.setattr(delegated_mod, "STREAM_LINE_LIMIT", 64 * 1024)
+    first = [
+        {"op": "tool_use", "id": "toolu_big", "name": "Read", "input": {"file_path": "big.txt"}},
+        {"op": "tool_result", "tool_use_id": "toolu_big", "content": "x" * 200_000},
+        {"op": "sleep", "s": 1.0},
+        {"op": "text", "text": "LATE text"}, {"op": "result"},
+    ]
+    second = [{"op": "text", "text": "second answer"}, {"op": "result"}]
+    run = Scripted(tmp_path, {"turns": [first], "resume_turns": [second]},
+                   permission_mode="bypassPermissions")
+    try:
+        events = await run.turn("one")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "limit" in error.message
+        assert run.loop._proc is None  # ended now, not at the next turn
+        events = await run.turn("two")
+        assert isinstance(events[-1], TurnComplete), events[-1]
+        assert "".join(e.text for e in _of(events, TextDelta)) == "second answer"
+        starts = run.records("start")
+        assert len(starts) == 2
+        argv = starts[-1]["argv"]
+        assert argv[argv.index("--resume") + 1] == "cli-sess-1"
+    finally:
+        await run.aclose()
+
+
+async def test_an_oversized_startup_frame_never_gets_the_turn(tmp_path, monkeypatch) -> None:
+    """A frame over the stream limit while the CLI registers its hooks puts
+    that CLI out of step before any turn: it is ended and the turn fails
+    without the user frame ever being written to it."""
+    monkeypatch.setattr(delegated_mod, "STREAM_LINE_LIMIT", 64 * 1024)
+    run = Scripted(tmp_path, {"init": {"tools": ["Bash", "x" * 200_000]}})
+    try:
+        events = await run.turn("one")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "startup frame" in error.message
+        assert run.loop._proc is None
+        assert run.stdin_frames("control_request", "initialize")  # it got that far
+        assert not run.stdin_frames("user")
     finally:
         await run.aclose()
 

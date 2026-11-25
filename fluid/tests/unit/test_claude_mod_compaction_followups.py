@@ -246,8 +246,131 @@ def test_nothing_is_filtered_before_a_compaction_was_answered():
     filter_.note(message)
     frame = _frame(project(message), 'u-1')
     assert not filter_.is_replay(frame)
-    filter_.seed([])
+    # The answer seeds from the stored path, which holds the message.
+    filter_.seed([SessionNode('node_1', None, message)])
     assert filter_.is_replay(frame)
+
+
+def test_replay_tracking_records_nothing_until_a_compaction_is_answered():
+    """A leg whose compaction mod is off never answers one, so the filter it
+    never turns on records no tool id however long the chat runs."""
+    filter_ = ReplayFilter()
+    for n in range(50):
+        filter_.note(Message('assistant', [ToolUseBlock(f't-{n}', 'Bash', {})],
+                             provider_meta={'claude_uuid': f'u-{n}'}))
+        filter_.note(Message('user', [ToolResultBlock(f't-{n}', 'ok')]))
+    assert not (filter_._calls or filter_._results or filter_._uuids)
+
+
+async def test_a_refused_manual_compaction_does_not_turn_replay_tracking_on():
+    """A manual /compact Fluid refuses (a 400: the posted rows end in a call
+    with no result) is left as it is by the mod, so Claude Code compacts
+    nothing and has nothing to replay: the filter stays off, and records
+    nothing for the rest of the CLI's life. An automatic one refused the same
+    way goes to Claude Code's summarizer, whose kept rows can come back."""
+    chat = Chat()
+    chat.grow(6)
+    chat.add(Message('assistant', [ToolUseBlock('t-open', 'Bash', {'command': 'still running'})]))
+    loop, _sid = await _loop_with(chat)
+    try:
+        status, _ = await _request(loop, {'v': 1, 'trigger': 'manual', 'messages': chat.cli})
+        assert status == 400
+        assert not loop._replay_filter.active
+        loop._replay_filter.note(Message('assistant', [ToolUseBlock('t-later', 'Bash', {})]))
+        assert not loop._replay_filter._calls
+
+        status, _ = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 400
+        assert loop._replay_filter.active
+        assert 't0-0' in loop._replay_filter._calls
+    finally:
+        await loop.aclose()
+
+
+async def test_rows_reprinted_while_a_slow_automatic_compaction_runs_are_not_stored_again(monkeypatch):
+    """The chat's first automatic compaction: Fluid's work outlasts the mod's
+    wait, so Claude Code's summarizer compacts meanwhile and reprints the tool
+    rows it kept. Replay tracking was on from the request, so none of them is
+    stored again."""
+    import threading
+
+    from fluid.engine import delegated
+
+    chat = Chat()
+    chat.grow(8)
+    loop, sid = await _loop_with(chat)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_compaction(*args: Any, **kwargs: Any) -> list:
+        started.set()
+        release.wait(30)
+        return compact_messages(*args, **kwargs)
+
+    monkeypatch.setattr(delegated, 'compact_messages', slow_compaction)
+    monkeypatch.setattr(delegated, 'MOD_COMPACT_WAIT_S', -1.0)  # the mod gave up
+    monkeypatch.setattr(loop, '_read_compaction_summary', lambda _f: asyncio.sleep(0, 'summary'))
+    try:
+        request = asyncio.create_task(
+            _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli}))
+        assert await asyncio.to_thread(started.wait, 30)
+        stored_before = len(await loop.store.load_path(sid))
+        kept = [row for row in chat.cli[-8:] if row.get('toolUses') or row.get('toolResults')]
+        assert kept, 'the summarizer must keep tool rows for the test to mean anything'
+        uuids = (f'reprint-{n}' for n in itertools.count())
+        await _read(loop, sid, [COMPACTING, _boundary(chat.cli[-1]['handle']),
+                                *(_frame(row, next(uuids)) for row in kept)])
+        path = await loop.store.load_path(sid)
+        assert len(path) == stored_before
+        calls = [b.id for n in path for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert len(calls) == len(set(calls))
+    finally:
+        release.set()
+        await request
+        await loop.aclose()
+
+
+async def test_a_late_answer_does_not_hide_the_next_model_reply_that_matches_it(monkeypatch):
+    """The mod gave up waiting, Claude Code's summarizer compacted and the
+    next model call started before Fluid's answer was ready. No boundary will
+    apply that answer, so a fresh reply with the same words as one of its rows
+    is the model's and is stored."""
+    from fluid.engine import delegated
+
+    chat = Chat()
+    chat.grow(24)
+    loop, sid = await _loop_with(chat)
+    monkeypatch.setattr(delegated, 'MOD_COMPACT_WAIT_S', -1.0)  # the mod gave up
+    try:
+        await _read(loop, sid, [{'type': 'stream_event', 'event': {'type': 'message_start'}}])
+        status, body = await _request(loop, {'v': 1, 'trigger': 'auto', 'messages': chat.cli})
+        assert status == 200
+        replies = [row for row in body['messages']
+                   if row['role'] == 'assistant' and row['text'] and not row['toolUses']]
+        assert replies, 'the answer must carry a text reply for the test to mean anything'
+        stored_before = len(await loop.store.load_path(sid))
+        await _read(loop, sid, [_frame(replies[-1], 'fresh-reply')])
+        path = await loop.store.load_path(sid)
+        assert len(path) == stored_before + 1
+        assert path[-1].message.provider_meta.get('claude_uuid') == 'fresh-reply'
+    finally:
+        await loop.aclose()
+
+
+async def test_replay_tracking_goes_with_the_cli_process():
+    """A fresh CLI has compacted nothing, so it has nothing to replay: the
+    ids the last one could replay are not kept past its process."""
+    loop = DelegatedLoop(store=MemoryStore(), model='claude-x', claude_mod_compaction=True)
+    try:
+        message = Message('assistant', [ToolUseBlock('t-1', 'Bash', {})])
+        loop._replay_filter.seed([SessionNode('node_1', None, message)])
+        frame = _frame(project(message), 'u-1')
+        assert loop._replay_filter.is_replay(frame)
+        await loop._stop_process()
+        assert not loop._replay_filter.active
+        assert not loop._replay_filter._calls
+        assert not loop._replay_filter.is_replay(frame)
+    finally:
+        await loop.aclose()
 
 
 # ─── #727: archive once; bounded archive reads ───────────────────────────────

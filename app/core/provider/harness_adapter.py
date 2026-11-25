@@ -76,6 +76,7 @@ The rest of fluid's settings.json stack is not wired into NativeLoop.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import inspect
 import json
@@ -159,7 +160,12 @@ from fluid.codemode.subprocess_kernel import KernelConfig
 from fluid.context.compaction import MANUAL_COMPACT_REASON, CompactionConfig
 from fluid.context.peer import PROMPT_BLOCK as PEER_MESSAGE_BLOCK
 from fluid.engine.native import NativeLoop
-from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop, register_recall_tools
+from fluid.engine.delegated import (
+    ClaudeCliMissingError,
+    DelegatedLoop,
+    ResumeRecovery,
+    register_recall_tools,
+)
 from fluid.hooks.bus import HookBus
 from fluid.events.model import NEEDS_COMPACTION
 from fluid.events.ops import (
@@ -617,7 +623,27 @@ class HarnessAdapter(ProviderAdapter):
     # ─── Connection Lifecycle ─────────────────────────────────────────
 
     async def connect(self, options: SessionOptions) -> None:
-        """Build the fluid engine from SessionOptions and prime its session."""
+        """Build the fluid engine from SessionOptions and prime its session.
+
+        All or nothing: a setup that raises or is cancelled part way (a later
+        MCP server stalls past the caller's deadline, hydration fails) closes
+        what it already started (MCP servers, the engine, the provider client)
+        before the error goes on. The caller gets no adapter to tear down, so
+        without this every retry would leak those servers.
+        """
+        try:
+            await self._connect(options)
+        except BaseException:
+            await self._undo_connect()
+            raise
+
+    async def _undo_connect(self) -> None:
+        """Close what a failed or cancelled connect started (transport only:
+        the app session's Task and Swarm jobs are not this connect's).
+        Shielded, so a second cancel cannot cut the cleanup short."""
+        await asyncio.shield(self.disconnect_transport())
+
+    async def _connect(self, options: SessionOptions) -> None:
         from fluid.tools.child_env import scrub_claude_auth_env
 
         options.env = scrub_claude_auth_env(options.env or {})
@@ -900,6 +926,12 @@ class HarnessAdapter(ProviderAdapter):
                 # deferred behind its ToolSearch; AI_SHUFFLE_PERF_BRIDGE_DEFER=0
                 # defers none, and neither does the chat lane (no ToolSearch).
                 bridge_deferred=_delegated_bridge_deferral(options),
+                # A resume handle the CLI keeps exiting on: the connect-time
+                # transcript check, run again from this pooled connection.
+                recover_resume=(
+                    None if one_shot or not fluid_session_id
+                    else functools.partial(self._recover_cli_resume, fluid_session_id, options)
+                ),
             )
             # Only an owner chat's "not run yet" placeholder and a person's no
             # carry the owner's waiting message on a deny; a deny from Stop,
@@ -1529,27 +1561,33 @@ class HarnessAdapter(ProviderAdapter):
         from app.db.turns import entry_state
         self._connect_turn_person_entered = entry_state(getattr(sdk_options, "aih_turn_person_entered", None))
         await self.connect(opts)
-        await self.prepare_background_completions(
-            getattr(sdk_options, "aih_background_task_completions", None)
-        )
-        await self.reconcile_user_questions()
-        # Rehydrate reconcile. Fluid rebuilds its pending
-        # set from the SubagentEvent log alone, so a completion that never
-        # reached the engine is re-created as a phantom on every resume and
-        # listed on every later park. Ask the freshly rehydrated engine what it
-        # still counts pending and retire whatever the app can prove is over.
-        # Best-effort: never fails a connect.
         try:
-            from app.core import pending_reconcile
+            await self.prepare_background_completions(
+                getattr(sdk_options, "aih_background_task_completions", None)
+            )
+            await self.reconcile_user_questions()
+            # Rehydrate reconcile. Fluid rebuilds its pending
+            # set from the SubagentEvent log alone, so a completion that never
+            # reached the engine is re-created as a phantom on every resume and
+            # listed on every later park. Ask the freshly rehydrated engine what it
+            # still counts pending and retire whatever the app can prove is over.
+            # Best-effort: an ordinary failure never fails a connect, but a
+            # cancel (the caller's deadline) still undoes it below.
+            try:
+                from app.core import pending_reconcile
 
-            await pending_reconcile.reconcile_engine_pending(
-                str(app_session_id or self._resolve_app_session_id() or ""),
-                adapter=self,
-            )
-        except Exception:  # noqa: BLE001 — bookkeeping never blocks a connect.
-            logger.debug(
-                "[HarnessAdapter] engine pending reconcile failed", exc_info=True
-            )
+                await pending_reconcile.reconcile_engine_pending(
+                    str(app_session_id or self._resolve_app_session_id() or ""),
+                    adapter=self,
+                )
+            except Exception:  # noqa: BLE001 — bookkeeping never blocks a connect.
+                logger.debug(
+                    "[HarnessAdapter] engine pending reconcile failed", exc_info=True
+                )
+        except BaseException:
+            # Same rule as connect(): the caller gets no adapter to close.
+            await self._undo_connect()
+            raise
 
     async def disconnect(
         self,
@@ -3560,8 +3598,15 @@ class HarnessAdapter(ProviderAdapter):
         fluid_session_id: str,
         handle: Optional[str],
         options: SessionOptions,
+        *,
+        owed_replay: bool = False,
     ) -> Optional[str]:
         """Why the CLI must get a fresh copy of fluid's path, or None.
+
+        ``owed_replay``: the handle is a recovery re-seed that still owes its
+        replayed prompt (``SessionMeta.cli_resume_recovery``). Only a missing
+        transcript counts then: the loop restores that prompt itself, and a
+        re-seed here would hand it to the CLI ahead of its retry.
 
         The delegated CLI only ever receives the new user frame; its history is
         whatever ``--resume <handle>`` loads. That is wrong in three cases:
@@ -3589,6 +3634,8 @@ class HarnessAdapter(ProviderAdapter):
             return (
                 f"Claude Code would not find transcript {handle}.jsonl under {root}"
             )
+        if owed_replay:
+            return None
         cli_prompts, complete = await run_sync(
             fluid_transcript.cli_transcript_prompt_tail, transcript
         )
@@ -3619,10 +3666,86 @@ class HarnessAdapter(ProviderAdapter):
                 )
         return None
 
+    async def _recover_cli_resume(
+        self,
+        fluid_session_id: str,
+        options: SessionOptions,
+        handle: str,
+        before_node: str,
+        *,
+        recovery: Optional[Dict[str, Any]] = None,
+        restore: bool = False,
+    ) -> ResumeRecovery:
+        """DelegatedLoop's ``recover_resume``: the resumed CLI keeps exiting
+        before any frame, without saying it has no such conversation.
+
+        The connect-time check (``_cli_reseed_reason``) only runs when a chat
+        connects, and a pooled connection outlives a transcript removed after
+        it. So the same existence check runs again: a missing transcript is
+        re-seeded from the session's history before ``before_node`` (the turn
+        being replayed); a present one means the handle cannot be helped. A
+        failed check or re-seed answers ``unknown`` and keeps the handle.
+
+        ``restore``: no check; the handle's replay was never recorded, so the
+        history before ``before_node`` (which holds it) is written out again.
+        ``recovery`` is stored with the new handle, in the same row update
+        (``SessionMeta.cli_resume_recovery``).
+        """
+        from app.core.provider import fluid_transcript
+
+        try:
+            if not restore:
+                root = getattr(self, "_bound_cli_projects", None) or fluid_transcript.cli_projects_root(options.env)
+                transcript = await run_sync(
+                    fluid_transcript.find_cli_transcript,
+                    handle, root, options.cwd or os.getcwd(),
+                )
+                if transcript is not None:
+                    return ResumeRecovery("present")
+            logger.info(
+                "[HarnessAdapter] re-seeding Claude Code for session %s: %s",
+                fluid_session_id,
+                f"Claude Code never recorded the prompt replayed on {handle}" if restore
+                else f"Claude Code kept exiting on {handle}, whose transcript is gone",
+            )
+            reseeded = await self._reseed_cli_session(
+                fluid_session_id, options, before_node=before_node,
+                recovery=dict(recovery or {}),
+            )
+        except Exception:
+            logger.warning(
+                "[HarnessAdapter] could not recover session %s's Claude Code "
+                "conversation %s", fluid_session_id, handle, exc_info=True,
+            )
+            return ResumeRecovery("unknown")
+        if not reseeded:
+            return ResumeRecovery("unknown")
+        await self._cache_cli_handle(fluid_session_id, reseeded, recovery)
+        return ResumeRecovery("reseeded", reseeded)
+
+    async def _cache_cli_handle(
+        self, fluid_session_id: str, handle: str, recovery: Optional[Dict[str, Any]],
+    ) -> None:
+        """Bring the store's cached meta up to the row a re-seed wrote."""
+        try:
+            meta = await self._store.get_session(fluid_session_id) if self._store else None
+            if meta is not None:
+                meta.cli_session_id = handle
+                meta.cli_resume_recovery = (
+                    {**recovery, "handle": handle} if recovery is not None else None
+                )
+        except Exception:  # noqa: BLE001 — a frozen meta only misses the cache update
+            pass
+
     async def _reseed_cli_session(
-        self, fluid_session_id: str, options: SessionOptions
+        self, fluid_session_id: str, options: SessionOptions,
+        *, before_node: Optional[str] = None,
+        recovery: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        """Write fluid's path as a new CLI transcript; the new handle or None."""
+        """Write fluid's path as a new CLI transcript; the new handle or None.
+
+        ``before_node``: write only the path before that node. ``recovery``:
+        stored with the new handle (``SessionMeta.cli_resume_recovery``)."""
         from app.core.provider import fluid_transcript
 
         cwd = os.path.abspath(options.cwd) if options.cwd else os.getcwd()
@@ -3631,6 +3754,10 @@ class HarnessAdapter(ProviderAdapter):
         window = await run_sync(_delegated_context_window, options)
         # This thread outlives a timed-out connect, so its writes carry the claim.
         claimed = getattr(self._store, "claimed_generation", None)
+        # Only a recovery cuts the path (``_recover_cli_resume``) or marks it.
+        cut = {"before_node": before_node} if before_node else {}
+        if recovery is not None:
+            cut["recovery"] = recovery
         result = await run_sync(
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
@@ -3639,6 +3766,7 @@ class HarnessAdapter(ProviderAdapter):
             force=True,
             context_window=window,
             generation=claimed(fluid_session_id) if claimed is not None else None,
+            **cut,
         )
         if result.status != "reseeded" or not result.cli_session_id:
             logger.warning(
@@ -3685,8 +3813,17 @@ class HarnessAdapter(ProviderAdapter):
         if meta is None:
             return None
         handle = getattr(meta, "cli_session_id", None)
+        # A recovery re-seed's replay the CLI never recorded: the loop writes
+        # it back before its next turn (or sends it, if that turn is a retry
+        # of it), so a transcript that only lacks it is not stale here.
+        owed = getattr(meta, "cli_resume_recovery", None)
+        if not (isinstance(owed, dict) and handle and owed.get("handle") == handle
+                and owed.get("pending")):
+            owed = None
         try:
-            reason = await self._cli_reseed_reason(fluid_session_id, handle, options)
+            reason = await self._cli_reseed_reason(
+                fluid_session_id, handle, options, owed_replay=owed is not None,
+            )
         except Exception:
             logger.warning(
                 "[HarnessAdapter] could not check session %s's Claude Code "
@@ -3700,8 +3837,14 @@ class HarnessAdapter(ProviderAdapter):
             "[HarnessAdapter] re-seeding Claude Code for session %s: %s",
             fluid_session_id, reason,
         )
+        # Still owed: write the history before it, and keep it owed.
+        carried = (
+            {"before_node": owed["pending"], "recovery": {
+                "pending": owed["pending"], "prompt": owed.get("prompt")}}
+            if owed is not None else {}
+        )
         try:
-            reseeded = await self._reseed_cli_session(fluid_session_id, options)
+            reseeded = await self._reseed_cli_session(fluid_session_id, options, **carried)
         except Exception:
             logger.warning(
                 "[HarnessAdapter] re-seeding Claude Code for session %s failed; "
@@ -3710,11 +3853,8 @@ class HarnessAdapter(ProviderAdapter):
             return handle
         if reseeded is None:
             return handle
-        try:
-            # The store's cached meta, so it agrees with the row the re-seed wrote.
-            meta.cli_session_id = reseeded
-        except Exception:  # noqa: BLE001 — a frozen meta only misses the cache update
-            pass
+        # The store's cached meta, so it agrees with the row the re-seed wrote.
+        await self._cache_cli_handle(fluid_session_id, reseeded, carried.get("recovery"))
         return reseeded
 
     async def _recover_compaction_cards(self, session_id: str) -> None:
@@ -5908,6 +6048,10 @@ class HarnessAdapter(ProviderAdapter):
         )
 
         registry = ToolRegistry(**_registry_bound_kwargs())
+        # Owned by the adapter from here, before any MCP server connects: a
+        # connect that fails or is cancelled part way closes ``self._registry``
+        # (see connect), and with it every server already started.
+        self._registry = registry
         # Constraint: native legs (anthropic / openai_responses / openrouter)
         # get fluid's builtin file/shell tools as first-class tools. Delegated
         # sessions keep the CLI's copies. Search is the exception where the CLI
