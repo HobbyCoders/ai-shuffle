@@ -200,15 +200,52 @@ describe('Worker table', () => {
 
 		const list = await screen.findByRole('list', { name: 'Workers' });
 		const row = within(list).getByText('Home server').closest('button')!;
+		// Closing the sheet on its own still hands focus back to the row.
+		row.focus();
 		await fireEvent.click(row);
-		const sheet = await screen.findByRole('dialog', { name: 'Home server' });
+		let sheet = await screen.findByRole('dialog', { name: 'Home server' });
+		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
+		await fireEvent.click(within(sheet).getByRole('button', { name: 'Close Home server' }));
+		await waitFor(() => expect(document.activeElement).toBe(row));
+
+		await fireEvent.click(row);
+		sheet = await screen.findByRole('dialog', { name: 'Home server' });
+		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
 		await fireEvent.click(within(sheet).getByRole('button', { name: 'New chat here' }));
 
 		expect(layout.openChat).toHaveBeenCalledWith(null);
 		await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Home server' })).toBeNull());
-		// The new chat keeps focus: the row that opened the sheet doesn't take it back.
+		// The new chat keeps focus: the focused row that opened the sheet doesn't take it back.
 		await new Promise((r) => setTimeout(r, 0));
 		expect(document.activeElement).not.toBe(row);
+	});
+
+	it('closes the phone sheet before This worker’s GitHub sign-in opens Settings; a remote worker’s help stays in its sheet', async () => {
+		const githubFailed = (id: string, name: string) => worker(id, name, 'failed', { setup: { op_id: `op-${id}`, status: 'error', progress: null, error: null, error_code: 'github_auth' } });
+		vi.mocked(getProjectWorkers).mockResolvedValue(response([githubFailed('self', 'Home server'), githubFailed('desk', 'Desktop')]));
+		const { layout } = await import('$lib/stores/layout.svelte');
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+
+		const list = await screen.findByRole('list', { name: 'Workers' });
+		const row = within(list).getByText('Home server').closest('button')!;
+		row.focus();
+		await fireEvent.click(row);
+		const sheet = await screen.findByRole('dialog', { name: 'Home server' });
+		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
+		await fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to GitHub on Home server' }));
+
+		expect(layout.openFeaturePage).toHaveBeenCalledWith('settings', 'category=integrations&item=github');
+		await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Home server' })).toBeNull());
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.activeElement).not.toBe(row);
+
+		// Another worker's sign-in can't be done from here: its help shows inside its sheet.
+		await fireEvent.click(within(list).getByText('Desktop').closest('button')!);
+		const remote = await screen.findByRole('dialog', { name: 'Desktop' });
+		await fireEvent.click(within(remote).getByRole('button', { name: 'Sign in to GitHub on Desktop' }));
+		expect(within(remote).getByText(/On Desktop, open AI Shuffle, go to Settings → Integrations → GitHub/)).toBeTruthy();
+		expect(screen.getByRole('dialog', { name: 'Desktop' })).toBe(remote);
+		expect(layout.openFeaturePage).toHaveBeenCalledTimes(1);
 	});
 
 	it('shows a failed Retry inside the phone sheet, not on the page behind its scrim', async () => {

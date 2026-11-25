@@ -23,12 +23,15 @@
 		steady?: boolean;
 		/** Focused when it opens; defaults to the first control. */
 		initial?: string;
+		/** Asked as it closes: false when it closed to open something else, so
+		 *  focus is not sent back to the control that opened it. */
+		returnFocus?: () => boolean;
 		onClose: () => void;
 		children: Snippet;
 		footer?: Snippet;
 	}
 
-	let { title, subtitle, side = false, steady = false, initial, onClose, children, footer }: Props = $props();
+	let { title, subtitle, side = false, steady = false, initial, returnFocus, onClose, children, footer }: Props = $props();
 	const uid = $props.id();
 
 	function portal(node: HTMLElement) {
@@ -50,7 +53,7 @@
 
 <div class="settings-shell project-sheet-host" use:portal>
 	<div class="ui-overlay ui-surface project-sheet" class:side class:steady role="dialog" aria-modal="true" aria-labelledby="{uid}-title" tabindex="-1"
-		use:focusTrap={initial ? { initial } : {}} onkeydown={onKeydown}>
+		use:focusTrap={{ initial, returnFocus }} onkeydown={onKeydown}>
 		<button class="ui-scrim" tabindex="-1" aria-label="Close" onclick={onClose}></button>
 		<div class="ui-dialog project-sheet-panel">
 			<header class="ui-dialog-header">

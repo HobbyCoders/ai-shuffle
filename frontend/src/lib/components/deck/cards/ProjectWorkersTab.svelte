@@ -263,6 +263,7 @@
 		editing = null;
 		askLocal = 0;
 		cancelRemove();
+		if (id) leftSheet = false;
 		selectedInstallId = id;
 		// Closing the inspector hands focus back to the row that opened it.
 		if (!id && previous) void tick().then(() => document.getElementById(`pw-row-${previous}`)?.focus());
@@ -412,15 +413,24 @@
 		data = { ...data, workers: data.workers.map((w) => (w.install_id === id ? { ...w, ...patch } : w)) };
 	}
 
+	/**
+	 * Before an inspector action opens something outside the Projects page: on a
+	 * phone the inspector is a sheet above everything, so close it, or what opens
+	 * sits behind it. Focus goes with what opens, not back to the row (unlike select).
+	 */
+	let leftSheet = false;
+	const sheetReturnsFocus = () => !leftSheet;
+	function leaveSheet() {
+		if (!stacked) return;
+		leftSheet = true;
+		editing = null;
+		askLocal = 0;
+		cancelRemove();
+		selectedInstallId = null;
+	}
+
 	function newChatHere(w: ProjectWorkerDetail) {
-		// On a phone the inspector is a sheet above everything: close it, or the new
-		// chat opens behind it. Focus stays with the chat, not the row (unlike select).
-		if (stacked) {
-			editing = null;
-			askLocal = 0;
-			cancelRemove();
-			selectedInstallId = null;
-		}
+		leaveSheet();
 		activeSession.newChat();
 		activeSession.setProject(localProjectId ?? '', data?.project_v2_id ?? null, { user: true });
 		activeSession.setDeviceIntent(w.is_self ? null : { id: w.install_id, name: w.device_name });
@@ -437,8 +447,10 @@
 		const action = errorAction(w.setup?.error_code, w.device_name);
 		if (!action) return;
 		if (action.kind === 'folder') return focusFolder(w.install_id);
-		if (w.is_self) layout.openFeaturePage('settings', 'category=integrations&item=github');
-		else githubHelp = githubHelp === w.install_id ? null : w.install_id;
+		if (w.is_self) {
+			leaveSheet();
+			layout.openFeaturePage('settings', 'category=integrations&item=github');
+		} else githubHelp = githubHelp === w.install_id ? null : w.install_id;
 	}
 
 	/** A row's own action (Retry, Set up): it opens the inspector too, so the result shows there. */
@@ -644,7 +656,7 @@
 				{/each}
 			</ul>
 			{#if selected}
-				<ProjectSheet steady title={selected.device_name} subtitle={presence(selected)} initial=".pw-card" onClose={() => select(null)}>
+				<ProjectSheet steady title={selected.device_name} subtitle={presence(selected)} initial=".pw-card" returnFocus={sheetReturnsFocus} onClose={() => select(null)}>
 					{@render inspector(selected)}
 				</ProjectSheet>
 			{/if}
