@@ -143,45 +143,57 @@ def is_credential_name(name: str) -> bool:
     return bool(_CREDENTIAL_NAME.search(norm))
 
 
-# Placeholder keys that local servers accept and ignore (the local provider's
-# own default, ``EMPTY`` from the vLLM docs). Never treated as known secrets:
-# replacing ``local`` everywhere would garble the text and protect nothing.
-DUMMY_KEYS = frozenset({"local", "empty", "dummy", "none", "ollama"})
-
-
 def credential_values(values: Iterable[Any]) -> list[str]:
-    """The real credentials among ``values``: strings that are neither blank
-    nor a :data:`DUMMY_KEYS` placeholder."""
-    return [v for v in values
-            if isinstance(v, str) and v.strip() and v.strip().lower() not in DUMMY_KEYS]
+    """The credentials among ``values``: every non-blank string. A value is
+    never exempted by its spelling: a configured key of ``local`` is as
+    secret as any other. Only the caller knows that a value is a placeholder
+    it chose itself (the local provider's default key) and leaves it out."""
+    return [v for v in values if isinstance(v, str) and v.strip()]
 
 
-# A line break as plain text or as a JSON/repr escape (then any indent), or
-# the single space a key pasted onto one line uses. No two of these can match
-# the same characters, and no pattern below has a trailing ``[ \t]*`` that a
-# following break could share, so a run of spaces is never re-split.
-_PEM_BREAK = r"(?:(?:\r?\n|\\r\\n|\\n)[ \t]*| )"
+# A private-key block, one of two unambiguous shapes. Every quantifier is
+# possessive and no two adjacent parts can match the same characters, so
+# nothing is ever re-split (a malformed block costs one pass).
+#
+# Multi-line: line breaks as plain text or as JSON/repr escapes, then any
+# indent. Optional ``Name: value`` header lines (Proc-Type, DEK-Info) each
+# start after a break, their value ends at the next break, then an optional
+# blank line. Then whole base64 lines of at least 16 chars: a line must end
+# at a break, a closing quote, a clip mark or the end of the text, so the
+# identifier at the start of the line after a clipped block
+# (``ABCDEFGHIJKLMNOPQRSTUV = 1``) is never taken for one. A short last line
+# goes only before the END line or at the very end of the text.
+_PEM_NL = r"(?:\r?\n|\\r\\n|\\n)"
+_PEM_LINE_END = rf"(?=[ \t]*+(?:{_PEM_NL}|[\"'…]|\Z))"
+_PEM_SHORT_END = r"(?=[ \t]*+(?:[\"'…]|\Z))"
+_PEM_B64_LINE = r"[A-Za-z0-9+/]{16,}+={0,2}+"
+_PEM_B64_SHORT = r"[A-Za-z0-9+/]{1,15}+={0,2}+"
+_PEM_END = r"-----END \1PRIVATE KEY-----"
+_PEM_MULTILINE = (
+    rf"(?:{_PEM_NL}[ \t]*+[A-Za-z][A-Za-z0-9-]*+:[ \t][^\r\n\\]*+)*+"
+    rf"(?:{_PEM_NL}[ \t]*+(?={_PEM_NL}))?"
+    rf"(?:{_PEM_NL}[ \t]*+{_PEM_B64_LINE}{_PEM_LINE_END})++"
+    rf"(?:(?:{_PEM_NL}[ \t]*+{_PEM_B64_SHORT})?(?:{_PEM_NL}[ \t]*+)?{_PEM_END}"
+    rf"|{_PEM_NL}[ \t]*+{_PEM_B64_SHORT}{_PEM_SHORT_END})?"
+)
+# One line (a key pasted with spaces for breaks): single-space separated
+# base64 words, then the END line or the end of the text. No header lines.
+_PEM_ONE_LINE = (
+    rf" {_PEM_B64_LINE}(?: [A-Za-z0-9+/]++={{0,2}}+)*+"
+    rf"(?: {_PEM_END}|{_PEM_SHORT_END})"
+)
 
 # Shapes redacted in place, on top of the vendor prefixes above. Each keeps
 # its label (the header scheme, the URL's user and host) so a redacted
 # diagnostic still says what it was about.
 _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # A private key only when key material follows the BEGIN line (optional
-    # Proc-Type/DEK-Info headers, then base64 lines): a lone marker, such as
-    # a quoted header constant in source, stays. The END line goes with it
-    # when present; without one (a clipped block) only the base64 lines go,
-    # never the text after them.
+    # A private key only when key material follows the BEGIN line (see
+    # _PEM_MULTILINE): a lone marker, such as a quoted header constant in
+    # source, stays. The END line goes with it when present; without one (a
+    # clipped block) only the base64 lines go, never the text after them.
     (
         re.compile(
-            r"-----BEGIN ([A-Z ]*)PRIVATE KEY-----"
-            rf"(?:{_PEM_BREAK}[A-Za-z-]+: [^\r\n\\]*)*"
-            rf"{_PEM_BREAK}?"
-            rf"(?:{_PEM_BREAK}[A-Za-z0-9+/=]{{16,}})+"
-            # A short last line counts only before the END line, or at the
-            # very end of a clipped text.
-            rf"(?:(?:{_PEM_BREAK}[A-Za-z0-9+/=]{{1,15}})?{_PEM_BREAK}?"
-            rf"-----END \1PRIVATE KEY-----"
-            rf"|{_PEM_BREAK}[A-Za-z0-9+/=]{{1,15}}\Z)?"
+            rf"-----BEGIN ([A-Z ]*)PRIVATE KEY-----(?:{_PEM_MULTILINE}|{_PEM_ONE_LINE})"
         ),
         REDACTED,
     ),
@@ -209,13 +221,29 @@ _ASSIGNMENT_HEAD = re.compile(
     r"(?<![A-Za-z0-9_-])(?P<name>-*+[A-Za-z_][A-Za-z0-9_-]*+)"
     r"(?P<sep>(?:\\?[\"'])?[ \t]*[:=](?![=:])[ \t]*)"
 )
-# A quoted literal (also JSON-escaped, ``\"…\"``) or a bare run, plus the
-# ``(``/``[`` that makes a bare run a call or subscript.
+# A quoted literal, whole: escapes inside it (``"a\"b"``) are part of the
+# value, and a JSON-escaped literal (``\"…\"``, as in a tool's serialized
+# arguments) is read as the original text's escapes re-escaped once. A
+# Python string prefix (r, b, f, u, rb, br, fr, rf, any case) may lead.
+# A quote still open at the end of the text (a clipped value) is read to
+# the end, so a cut never saves a credential's first half. Otherwise a bare
+# run, plus the ``(``/``[`` that makes it a call or subscript. Each token
+# kind starts with a different character, so the possessive loops never
+# re-split.
 _ASSIGNMENT_VALUE = re.compile(
-    r"\\?\"(?P<dq>[^\"\\\r\n]*)\\?\""
-    r"|\\?'(?P<sq>[^'\\\r\n]*)\\?'"
+    r"(?P<prefix>[rR][bBfF]|[bBfF][rR]|[rRbBfFuU])?(?:"
+    r"\\\"(?P<edq>(?:[^\"\\\r\n]|\\[^\"\\]|\\\\(?:\\\\|\\\"|[^\"\\]))*+)\\\""
+    r"|\"(?P<dq>(?:[^\"\\\r\n]|\\.)*+)\""
+    r"|\\'(?P<esq>(?:[^'\\\r\n]|\\[^'])*+)\\'"
+    r"|'(?P<sq>(?:[^'\\\r\n]|\\.)*+)'"
+    r"|\\?[\"'](?P<open>[^\r\n]*+)\Z"
+    r")"
     r"|(?P<bare>[^\s\"'`<>,;(){}\[\]&|\\]++)(?P<call>[(\[]?)"
 )
+_QUOTED_GROUPS = ("edq", "dq", "esq", "sq", "open")
+# Tokenizer special tokens (``</s>``, ``<|endoftext|>``, ``[CLS]``): a
+# ``token = "</s>"`` in model code names a delimiter, not a credential.
+_SPECIAL_TOKEN = re.compile(r"<\|[^\s|<>]*\|>|</?[A-Za-z0-9_.:-]+>|\[[A-Z][A-Z0-9_]*\]")
 _SHELL_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _DOTTED_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 _PLAIN_NAME_CHARS = re.compile(r"[A-Za-z0-9_.]*")
@@ -249,16 +277,34 @@ def _literal_span(head: re.Match[str], value: re.Match[str]) -> tuple[int, int] 
     """The span of the credential literal in a credential-named assignment,
     or None when its value is empty, already redacted, a reference or an
     expression."""
-    group = "dq" if value["dq"] is not None else "sq" if value["sq"] is not None else None
+    group = next((g for g in _QUOTED_GROUPS if value[g] is not None), None)
     if group is not None:
         quoted = value[group]
         if not quoted or quoted == REDACTED or quoted.startswith("$"):
             return None
+        if _SPECIAL_TOKEN.fullmatch(quoted):
+            return None
+        if "f" in (value["prefix"] or "").lower() and "{" in quoted:
+            return None  # an f-string that builds the value: an expression
         return value.span(group)
     if value["call"]:  # ``get_key(...)``, ``os.environ[...]``
         return None
+    bare = value["bare"]
+    if _query_param(head):
+        # ``?api_key=…`` / ``&token=…``: a URL query has no identifiers or
+        # attribute paths, so any value but a reference is the credential.
+        return None if bare == REDACTED or bare.startswith("$") else value.span("bare")
     shell = head["sep"] == "=" and bool(_SHELL_NAME.fullmatch(head["name"]))
-    return value.span("bare") if _bare_is_literal(value["bare"], shell) else None
+    return value.span("bare") if _bare_is_literal(bare, shell) else None
+
+
+def _query_param(head: re.Match[str]) -> bool:
+    """Whether ``head`` is a URL query parameter: ``?name=`` or ``&name=``
+    (after a name character, so not a shell's ``&& NAME=``)."""
+    start, text = head.start(), head.string
+    if head["sep"] != "=" or start == 0 or text[start - 1] not in "?&":
+        return False
+    return text[start - 1] == "?" or (start >= 2 and text[start - 2] not in "& \t")
 
 
 def _redact_assignments(text: str) -> str:
@@ -292,8 +338,9 @@ def redact_text(text: str, known: Iterable[str] = ()) -> str:
     """``text`` with credentials replaced by ``[redacted]``.
 
     ``known`` are exact values to remove wherever they appear, at any length
-    (the key or token a request actually carried; blanks and DUMMY_KEYS
-    placeholders are skipped). A known value's prefix at the very end of
+    (the key or token a request actually carried; blanks are skipped, and a
+    caller leaves out a placeholder it chose itself). A known value's prefix
+    at the very end of
     ``text`` goes too (a clip, with or without its ``…``, that cut the value
     in half). Then the recognised shapes: vendor key prefixes, private-key
     blocks, ``Bearer``/``Basic`` tokens, URL passwords, and literal values
@@ -316,23 +363,34 @@ def redact_text(text: str, known: Iterable[str] = ()) -> str:
     return _redact_assignments(text)
 
 
-# How far past a clip point text is redacted before the clip: a credential
-# that straddles the cut is redacted whole as long as it starts within this.
-_CLIP_MARGIN = 4096
+# The most text clip_redacted redacts before taking its preview. Larger
+# input (a kernel's 2 MiB stdout) is cut here first, and the redacted text
+# within _CLIP_TAIL of that cut is dropped: a credential the cut split may
+# not be recognised there, and earlier redactions can shift it towards the
+# preview.
+_REDACT_MAX = 256 * 1024
+_CLIP_TAIL = 4096
 
 
 def clip_redacted(text: str, cap: int, known: Iterable[str] = (), mark: str = "") -> str:
     """``text`` redacted, then cut to ``cap`` chars (``mark`` appended when
-    cut). Redacting first means a cut can never leave half a credential
-    that no later pass recognises (a URL password without its ``@host``)."""
-    text = redact_text((text or "")[: cap + _CLIP_MARGIN], known)
-    return text if len(text) <= cap else text[:cap] + mark
+    cut). The whole text is redacted before the cut, so a cut can never
+    leave half a credential that no pass recognises (a URL password without
+    its ``@host``, a JSON token without its closing quote). Past
+    _REDACT_MAX it fails closed instead (see there)."""
+    text = text or ""
+    if len(text) <= _REDACT_MAX:
+        text = redact_text(text, known)
+        return text if len(text) <= cap else text[:cap] + mark
+    text = redact_text(text[:_REDACT_MAX], known)
+    return text[: min(cap, max(0, len(text) - _CLIP_TAIL))] + mark
 
 
 def redact_argv(args: Iterable[Any]) -> list[Any]:
     """A command line safe to print: the value of a credential-named flag
-    goes, split (``--api-key VALUE``) or joined (``--api-key=VALUE``), and
-    every other argument passes through :func:`redact_text`."""
+    goes, split (``--api-key VALUE``, even a value that starts with ``-``)
+    or joined (``--api-key=VALUE``), and every other argument passes
+    through :func:`redact_text`."""
     out: list[Any] = []
     mask_next = False
     for arg in args:
@@ -340,7 +398,7 @@ def redact_argv(args: Iterable[Any]) -> list[Any]:
             out.append(arg)
             mask_next = False
             continue
-        if mask_next and not arg.startswith("-"):
+        if mask_next:
             out.append(REDACTED)
             mask_next = False
             continue

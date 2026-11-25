@@ -588,13 +588,17 @@ def stream_chat_completions(
     url: str,
     body: dict[str, Any],
     headers: dict[str, str],
+    *,
+    placeholder_key: str | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[StreamChunk]:
     """POST ``body`` to ``url`` and normalize the SSE response into StreamChunks
     (see :func:`_stream_chat_completions`). Error chunks never carry the
-    credential values in ``headers``, which a proxy can echo back.
+    credential values in ``headers``, which a proxy can echo back, except
+    ``placeholder_key``: a key the caller substituted because none was
+    configured (see header_secrets).
     """
-    secrets = header_secrets(headers)
+    secrets = header_secrets(headers, placeholder_key)
     return redact_errors(
         _stream_chat_completions(url, body, headers, secrets=secrets, **kwargs), secrets,
     )

@@ -365,6 +365,43 @@ class TestRefresh:
         assert ei.value.code == "invalid_grant"
         assert ei.value.is_permanent is False
 
+    @pytest.mark.parametrize("body", [
+        {"error": "rt-opaque-refresh-0001",
+         "error_description": "token rt-opaque-refresh-0001 rejected"},
+        {"error": {"code": "bad rt-opaque-refresh-0001",
+                   "message": "token rt-opaque-refresh-0001 rejected"}},
+        {"error": {"code": "x" * 65, "message": None}},
+    ])
+    async def test_refusal_echoing_the_refresh_token_is_sanitized(self, body):
+        # The refresh worker logs e.code: an upstream code or description
+        # that echoes the submitted refresh token must not carry it.
+        refresh = "rt-opaque-refresh-0001"
+
+        def handler(request):
+            return httpx.Response(400, json=body)
+
+        async with mock_transport_client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.refresh_tokens(refresh, client=c)
+        assert ei.value.code == "http_400"
+        assert refresh not in str(ei.value)
+        assert ei.value.is_permanent is False
+
+    async def test_permanent_code_kept_when_the_description_echoes_the_token(self):
+        refresh = "rt-opaque-refresh-0001"
+
+        def handler(request):
+            return httpx.Response(400, json={"error": {
+                "code": "refresh_token_reused",
+                "message": f"refresh token {refresh} was already used"}})
+
+        async with mock_transport_client(handler) as c:
+            with pytest.raises(codex_oauth.CodexAuthError) as ei:
+                await codex_oauth.refresh_tokens(refresh, client=c)
+        assert ei.value.code == "refresh_token_reused"
+        assert ei.value.is_permanent is True  # the sign-in prompt still triggers
+        assert refresh not in str(ei.value) and "[redacted]" in str(ei.value)
+
 
 # ---------------------------------------------------------------------------
 # CodexAuthError.is_permanent hardening

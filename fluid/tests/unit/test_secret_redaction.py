@@ -42,8 +42,7 @@ def test_redact_text_known_values_shapes_and_clipped_prefix():
     # A clip that cut the key in half leaves no prefix of it.
     assert redact_text("bad key " + KEY[:15] + "…", [KEY]) == "bad key [redacted]…"
     assert redact_text("bad key " + KEY[:12], [KEY]) == "bad key [redacted]"
-    # A short local placeholder key is not a credential and garbles nothing.
-    assert redact_text("local model loaded", ["local"]) == "local model loaded"
+    assert redact_text("local model loaded", []) == "local model loaded"
 
 
 def _refusing(status, body):
@@ -238,13 +237,13 @@ def test_private_key_block_needs_key_material():
     assert "QUJD" not in redact_text(escaped) and '"x": 1' in redact_text(escaped)
 
 
-def test_short_configured_key_redacted_but_dummy_keys_ignored():
-    """S6: an exact configured credential goes at any length; a placeholder a
-    local server ignores is not a credential."""
+def test_short_configured_key_redacted_but_the_clients_own_placeholder_ignored():
+    """S6: an exact configured credential goes at any length, whatever its
+    spelling; only the placeholder the client chose itself is exempt."""
     assert redact_text("gateway rejected sk-1234 here", ["sk-1234"]) == "gateway rejected [redacted] here"
-    assert redact_text("local model loaded, EMPTY reply", ["local", "EMPTY", ""]) == (
-        "local model loaded, EMPTY reply")
-    assert header_secrets({"Authorization": "Bearer local"}) == []
+    assert redact_text("blank keys garble nothing", ["", "  "]) == "blank keys garble nothing"
+    assert header_secrets({"Authorization": "Bearer local"}, placeholder="local") == []
+    assert header_secrets({"Authorization": "Bearer local"}) == ["Bearer local", "local"]
     assert header_secrets({"Authorization": "Bearer sk-1234"}) == ["Bearer sk-1234", "sk-1234"]
 
 
@@ -371,3 +370,129 @@ def test_redaction_stays_linear_on_large_adversarial_input():
         started = time.perf_counter()
         redact_text(probe, ["abcdefghZ" * 3])
         assert time.perf_counter() - started < 5, probe[:20]
+
+
+# ── review round 2 ───────────────────────────────────────────────────────────
+
+ADVERSARIAL_PEM = [
+    # Header lines whose value spaces could also start the next header.
+    PEM_BEGIN + " a: a" * 800,
+    PEM_BEGIN + ("\nA: " + "b " * 20) * 40 + "!",
+    PEM_BEGIN + "\nProc-Type: " + " " * 4000 + "!",
+    PEM_BEGIN + "\\nProc-Type: 4 \\n " * 200,
+    # Base64-looking runs that are not whole lines.
+    PEM_BEGIN + ("\n" + "A" * 16 + " !") * 200,
+    PEM_BEGIN + " " + "A " * 2000 + "!",
+    PEM_BEGIN + " " + "A" * 4000 + " !",
+]
+
+
+@pytest.mark.parametrize("probe", ADVERSARIAL_PEM, ids=range(len(ADVERSARIAL_PEM)))
+def test_malformed_private_key_headers_stay_fast(probe):
+    """S7: a 4 KiB malformed block costs one pass, not a re-split of every
+    space between header values and the next header."""
+    redact_text(probe)  # warm the pattern cache
+    started = time.perf_counter()
+    assert redact_text(probe) == probe  # no key material: nothing to mask
+    assert time.perf_counter() - started < 0.1
+
+
+def test_private_key_with_headers_goes_and_the_line_after_a_clipped_block_stays():
+    """S7: Proc-Type/DEK-Info headers belong to the block; a base64-looking
+    identifier on the line after a clipped block is not key material."""
+    begin = "-----BEGIN RSA " + "PRIVATE KEY-----"
+    end = "-----END RSA " + "PRIVATE KEY-----"
+    encrypted = (f"x\n{begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123ABCD\n\n"
+                 f"{PEM_BODY}\n{end}\ny")
+    assert redact_text(encrypted) == "x\n[redacted]\ny"
+    lines = ("QUJD" * 16 + "\n") * 2
+    for after in ("ABCDEFGHIJKLMNOPQRSTUVWX = 1", "ABCDEFGHIJKLMNOPQRSTUVWX=1",
+                  "QUJDQUJDQUJDQUJDQUJD(x)", "done\nnext = 2"):
+        assert redact_text(f"{PEM_BEGIN}\n{lines}{after}") == f"[redacted]\n{after}", after
+    # A key pasted onto one line, closed or clipped.
+    one_line = PEM_BODY.replace("\n", " ")
+    assert redact_text(f"k={PEM_BEGIN} {one_line} {PEM_END}!") == "k=[redacted]!"
+    assert redact_text(f"k {PEM_BEGIN} {one_line}") == "k [redacted]"
+
+
+def test_escaped_quotes_and_query_parameters():
+    """S1: a quote escaped inside a value is part of it; a URL query
+    credential goes whatever its letters; code identifiers stay."""
+    cases = {
+        json.dumps({"password": 'pa"ss tail-of-secret'}): '{"password": "[redacted]"}',
+        json.dumps({"command": 'export X_TOKEN="ab\\"cd tail-of-secret"'}):
+            '{"command": "export X_TOKEN=\\"[redacted]\\""}',
+        "password = 'it\\'s tail-of-secret'": "password = '[redacted]'",
+        "GET /v1?api_key=ABCDEFGHIJKLMNOPQRST&page=2": "GET /v1?api_key=[redacted]&page=2",
+        "https://cb.example.com/done?state=1&access_token=onlyletters&x=1":
+            "https://cb.example.com/done?state=1&access_token=[redacted]&x=1",
+        "/v1/items?token=abc": "/v1/items?token=[redacted]",
+    }
+    for text, expected in cases.items():
+        assert redact_text(text) == expected, text
+    code = "call(api_key=provider_key, token=auth_token)\nok && TOKEN=$TOKEN run\n"
+    assert redact_text(code) == code
+
+
+def test_large_token_is_redacted_before_the_preview_is_cut(tmp_path):
+    """S2: a 6 KiB token keeps its closing quote because the whole text is
+    redacted first; past the redaction limit an open value fails closed."""
+    from fluid.context.screening import clip_redacted
+
+    token = ("tok3nAbCdEfGh" * 600)[:6144]
+    body = json.dumps({"access_token": token, "token_type": "bearer", "expires_in": 3600})
+    assert token[:16] not in clip_redacted(body, 200)
+    store = SkillStore(tmp_path / "skills")
+    ToolJournal(store).record_tool("Bash", {"command": "curl https://auth.example.com"}, body, False)
+    assert token[:16] not in store._journal_path.read_text(encoding="utf-8")
+    huge = '{"access_token": "' + "Z" * (300 * 1024) + '"}'
+    assert "ZZZZ" not in clip_redacted(huge, 200, mark="…")
+
+
+def test_credential_flag_value_starting_with_a_dash_is_masked():
+    """S3: ``--api-key -opaqueKey123`` passes the key to a parser that
+    accepts it; the printed view must not."""
+    shown = _redacted_config(HarnessConfig.from_dict({"mcp": {"tracker": {
+        "command": "tracker-mcp", "args": ["--api-key", "-opaqueKey123", "--verbose"]}}}).to_dict())
+    assert shown["mcp"]["tracker"]["args"] == ["--api-key", "[redacted]", "--verbose"]
+
+
+def test_python_string_prefixes_masked_and_tokenizer_tokens_kept(tmp_path):
+    """S4: a raw/bytes literal key goes from the journal write and the
+    learner rendering; tokenizer special tokens and f-string expressions
+    stay."""
+    from types import SimpleNamespace
+
+    from fluid.codemode.kernel import KernelResult
+    from fluid.codemode.session import CodeModeSession
+
+    raw = "rawliteralkey0123456789"
+    code = (f'api_key = r"{raw}"\nTOKEN = Rb\'{raw}\'\nsecret = u"{raw}"\n'
+            'tok = Tokenizer(token="</s>", pad_token="[PAD]", bos_token="<|endoftext|>",'
+            ' cls_token="<s>")\n'
+            'api_key = f"{prefix}-{suffix}"\npassword_field = "password"\n')
+    store = SkillStore(tmp_path / "skills")
+    host = SimpleNamespace(_skills=store, _friction_pending=[], _synthesizer=None)
+    CodeModeSession._record_cell(host, code, KernelResult(stdout="ok"), [])
+    written = json.loads(store._journal_path.read_text(encoding="utf-8").splitlines()[-1])["code"]
+    rendered = "\n".join(Synthesizer._render_entry({"kind": "cell", "code": code}, 0))
+    for text in (written, rendered):
+        assert raw not in text
+        for kept in ('token="</s>"', 'pad_token="[PAD]"', 'bos_token="<|endoftext|>"',
+                     'cls_token="<s>"', 'api_key = f"{prefix}-{suffix}"',
+                     'password_field = "password"'):
+            assert kept in text, kept
+
+
+async def test_configured_key_spelled_like_a_placeholder_is_redacted():
+    """S6: a gateway whose real key is ``local`` echoes it; only the key the
+    local client substitutes when none is configured is exempt."""
+    from fluid.providers.local.client import LocalClient
+
+    async def refusal(api_key):
+        async with _refusing(401, "invalid API key local") as http:
+            client = LocalClient(api_key, base_url=URL, http_client=http, retry=NO_RETRY)
+            return _errors_text([c async for c in client.stream(REQUEST)])
+
+    assert "invalid API key local" not in await refusal("local")
+    assert "invalid API key local" in await refusal(None)

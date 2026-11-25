@@ -362,18 +362,20 @@ def is_usable_client(client: Any) -> bool:
 _CREDENTIAL_HEADER_RE = re.compile(r"auth|key|token|secret|cookie", re.IGNORECASE)
 
 
-def header_secrets(headers: Mapping[str, Any]) -> list[str]:
+def header_secrets(headers: Mapping[str, Any], placeholder: str | None = None) -> list[str]:
     """The credential values a request carries in ``headers``: each whole
-    value and, for ``Bearer <token>``-style values, the bare token. A
-    placeholder a local server ignores (``Bearer local``; see
-    fluid.context.screening.DUMMY_KEYS) is no credential and is left out."""
+    value and, for ``Bearer <token>``-style values, the bare token.
+    ``placeholder`` is a key the client chose itself because none was
+    configured (the local provider's ``local``): a header carrying exactly
+    that is no credential and is left out. A configured key is kept
+    whatever its spelling."""
     out: list[str] = []
     for name, value in headers.items():
         if not isinstance(value, str) or not _CREDENTIAL_HEADER_RE.search(str(name)):
             continue
         _scheme, _, token = value.partition(" ")
         token = token.strip()
-        if token and not credential_values([token]):
+        if placeholder and placeholder in (value, token):
             continue
         out.extend(credential_values([value, token]))
     return out
