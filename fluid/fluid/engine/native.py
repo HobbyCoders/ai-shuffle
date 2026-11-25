@@ -1873,11 +1873,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         return decision
 
     async def _stop_hook_continuation(
-        self, sid: str, turn_id: str, result: _CallResult, continuations: int
+        self, sid: str, turn_id: str, result: _CallResult, continuations: int,
+        *, budget_left: bool = True,
     ) -> str | None:
         """Run the TurnEnd hooks on a finished reply. Returns the reason the
         model should keep going, or None to end the turn. A block past
-        MAX_STOP_HOOK_CONTINUATIONS is reported and ignored; a hook's
+        MAX_STOP_HOOK_CONTINUATIONS, or once the turn has used its model-call
+        budget (``budget_left`` False), is reported and ignored; a hook's
         ``continue: false`` always ends the turn."""
         decision = await self._emit_turn_end_hook(
             sid, turn_id, text=_plain_text(result.message.content),
@@ -1901,6 +1903,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 message=(
                     f"Stop hook asked to continue ({reason}) but the turn already "
                     f"continued {continuations} times; ending it"
+                ),
+                hook_event=TURN_END,
+            ))
+            return None
+        if not budget_left:
+            await self._emit(HookEvent(
+                session_id=sid, turn_id=turn_id, level="warning",
+                message=(
+                    f"Stop hook asked to continue ({reason}) but the turn "
+                    "reached its model-call limit; ending it"
                 ),
                 hook_event=TURN_END,
             ))
@@ -2801,6 +2813,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         task, self._watchdog_task = self._watchdog_task, None
         if task is not None and not task.done():
             task.cancel()
+
+    def _model_call_budget_left(self, num_calls: int) -> bool:
+        """Whether this turn may send another model request."""
+        cap = self.max_model_calls_per_turn
+        return cap is None or num_calls < cap
 
     def _human_wait_pending(self) -> bool:
         """A permission or question is out to the user: silence is not a hang."""
@@ -4202,6 +4219,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         drop_retry_effort: str | None = None  # lowered effort for the next call only
 
         while True:
+            if num_calls and not self._model_call_budget_left(num_calls):
+                # The cap holds for every provider dispatch: an empty-response
+                # or dropped-stream retry, a max_tokens or Stop-hook
+                # continuation each count as one call (any of them can bill),
+                # so a turn capped at N never sends request N+1.
+                final_stop = "max_calls"
+                break
             nodes = await self._context_path(sid, parent.node_id)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid, nodes)
@@ -4440,6 +4464,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Set after the dud call's own probe fields: the call
                     # that follows is the first without the key.
                     self._sticky_drop_unreported = True
+                if not self._model_call_budget_left(num_calls):
+                    # A retry is a model call too: at the cap, no backoff
+                    # and no retry notice for a request that never goes out.
+                    final_stop = "max_calls"
+                    break
                 attempt = truncated_retries if truncated else empty_retries
                 delay = _empty_retry_delay(attempt)
                 await self._emit(ProviderRetry(
@@ -4984,7 +5013,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._peer_delivery_sealed = True
                 final_stop = result.stop_reason
                 reason = await self._stop_hook_continuation(
-                    sid, turn_id, result, stop_hook_continuations
+                    sid, turn_id, result, stop_hook_continuations,
+                    budget_left=can_continue,
                 )
                 if reason is not None:
                     # A Stop hook blocked the end of the turn: the reason goes
