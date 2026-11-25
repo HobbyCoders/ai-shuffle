@@ -87,20 +87,69 @@ _DEMO = "https://github.com/example-org/demo"
     "https://github.com/Example-Org/Demo/",
     "HTTPS://GitHub.com/example-org/demo",
     "http://github.com/example-org/demo.git",
+    "http://github.com:80/example-org/demo",
     "https://someone@github.com/example-org/demo.git",
-    "https://someone:hunter2@github.com/example-org/demo.git",
+    "https://someone:pw-example@github.com/example-org/demo.git",
     "https://github.com:443/example-org/demo",
     "git@github.com:example-org/demo.git",
-    "git@github.com:/example-org/demo.git",
     "github.com:example-org/demo",
-    "ssh://git@github.com/example-org/demo.git",
-    "ssh://git@github.com:22/example-org/demo.git",
-    "git+ssh://git@github.com/example-org/demo",
-    "git://github.com/example-org/demo.git",
 ])
-def test_every_network_spelling_of_a_remote_has_one_identity(spelling):
+def test_every_forge_spelling_of_a_remote_has_one_identity(spelling):
     assert project_links.canonical_remote(spelling) == _DEMO
     assert auto_link_group_id(spelling) == auto_link_group_id(_DEMO)
+
+
+def _same(a, b):
+    return auto_link_group_id(a) == auto_link_group_id(b)
+
+
+def test_an_ssh_path_relative_to_the_login_is_not_the_absolute_one():
+    relative, absolute = "git@git.example.test:repos/app.git", "git@git.example.test:/repos/app.git"
+    assert not _same(relative, absolute)
+    assert _same(relative, "https://git.example.test/repos/app")
+    # An absolute path is the same whichever SSH form names it, and not the web one.
+    assert project_links.canonical_remote(absolute) == "ssh://git.example.test/repos/app"
+    for spelling in ("ssh://git@git.example.test/repos/app.git", "ssh://git@git.example.test:22/repos/app",
+                     "git+ssh://git@git.example.test/repos/app", "ssh+git://git.example.test/repos/app"):
+        assert _same(spelling, absolute), spelling
+    assert not _same("ssh://git@git.example.test/repos/app", "https://git.example.test/repos/app")
+    assert _same("git@git.example.test:~/repos/app", "ssh://git@git.example.test/~/repos/app")
+    assert not _same("git@git.example.test:~/repos/app", absolute)
+
+
+def test_only_the_schemes_own_default_port_is_dropped():
+    web = "https://git.example.test/org/app"
+    assert not _same("https://git.example.test:80/org/app", web)
+    assert not _same("http://git.example.test:443/org/app", web)
+    assert _same("https://git.example.test:443/org/app", web)
+    assert _same("http://git.example.test:80/org/app", web)
+    assert not _same("ssh://git@git.example.test:2222/org/app", "ssh://git@git.example.test/org/app")
+    assert not _same("ssh://git@git.example.test:2222/org/app", "git@git.example.test:org/app")
+    assert _same("git://git.example.test:9418/org/app", "git://git.example.test/org/app")
+    assert not _same("git://git.example.test/org/app", web)
+
+
+def test_a_bracketed_ipv6_host_is_one_host():
+    web = "https://[2001:db8::1]/org/app"
+    assert project_links.canonical_remote("https://[2001:db8::1]/org/app.git") == web
+    assert project_links.canonical_remote("git@[2001:db8::1]:org/app.git") == web
+    assert project_links.canonical_remote("ssh://git@[2001:db8::1]/org/app.git") == "ssh://[2001:db8::1]/org/app"
+    assert _same("ssh://git@[2001:db8::1]/org/app.git", "git@[2001:db8::1]:/org/app")
+    assert project_links.canonical_remote("https://[2001:db8::1]:8443/org/app") == "https://[2001:db8::1]:8443/org/app"
+    assert _same("https://user:pw-example@[2001:db8::1]/org/app", web)
+
+
+@pytest.mark.parametrize("spelling", [
+    "https://user:pw-example@git.example.test/org/app",
+    "https://user:pw@example@git.example.test/org/app",
+    "https://user:pw-example@[2001:db8::1]/org/app",
+    "ssh://user:pw-example@git.example.test/org/app",
+    "ssh://user:pw-example@[2001:db8::1]:2222/org/app",
+    "https://user:pw-example@git.example.test/org/app?ref=main",
+])
+def test_no_login_reaches_the_identity(spelling):
+    canonical = project_links.canonical_remote(spelling)
+    assert "pw" not in canonical and "user" not in canonical and "@" not in canonical
 
 
 def test_an_https_identity_is_the_one_it_always_had():

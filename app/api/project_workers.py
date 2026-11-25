@@ -791,8 +791,7 @@ def _project_with_remote(clean: str) -> Optional[Dict[str, Any]]:
     remote is ``clean`` in any spelling, as the repository picker marks "Already added".
 
     One repository's identity is the same for every spelling, but a project an
-    older version added over SSH is still keyed by that spelling until
-    ``project_remote.converge_spellings`` merges it. Listed means
+    older version added over SSH stays keyed by that spelling. Listed means
     :func:`_listed_elsewhere`; an identity only remembered from a removed
     project does not block a new clone.
     """

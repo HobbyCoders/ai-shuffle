@@ -1592,12 +1592,11 @@ def test_clone_new_never_stores_credentials_from_the_pasted_url(client, ws, test
 
 
 # ---------------------------------------------------------------------------
-# Paired workers with their own databases converge on one project per
-# repository, in any URL spelling (no peer call, no hold, no refusal)
+# New adds of one repository get one project in any URL spelling (no peer
+# call, no hold, no refusal); an existing checkout keeps the identity it has
 # ---------------------------------------------------------------------------
 
 _SSH = "git@git.example.com:example-org/demo.git"
-_SSH_SCHEME = "ssh://git@git.example.com/example-org/demo.git"
 _HTTPS = "https://git.example.com/example-org/demo.git"
 
 
@@ -1630,12 +1629,6 @@ def _replicated(remote: str, *, origin: str | None = None, name: str = "Demo", h
     return projects_v2.get_project_v2(pv2["id"])
 
 
-def _merged(pv2: dict):
-    from app.core import project_remote
-
-    return project_remote.merged_into(projects_v2.get_project_v2(pv2["id"]))
-
-
 def _listed_ids(client) -> set:
     return {p["project_v2_id"] for p in client.get("/api/v1/projects/overview").json()["projects"]}
 
@@ -1657,137 +1650,91 @@ def test_paired_workers_adding_ssh_and_https_spellings_get_one_project(client, w
     assert theirs["id"] == resp.json()["project_v2_id"]
     assert database.get_project("demo")["link_group_id"] == theirs["origin"]
     assert [row["id"] for row in projects_v2.list_projects_v2()] == [theirs["id"]]
-    assert project_remote.reconcile_local() == 0  # nothing left to fold
+    assert project_remote.reconcile_local() == 0  # nothing to fold
     assert _listed_ids(client) == {theirs["id"]}
 
 
-def test_a_legacy_ssh_project_folds_into_the_https_project_a_peer_added(client, ws, test_db, network, caplog):
-    import logging
+_MOVED_TO = "https://git.example.com/example-org/other.git"
 
+
+def _remote_of(folder: Path) -> str:
+    return git(folder, "remote", "get-url", "origin").strip()
+
+
+def _refresh_git_record(project_id: str, folder: Path) -> None:
+    """What opening the project does: re-read its remote into the Git record."""
+    from app.api import git_helpers
+
+    git_helpers._repo_record_cache.pop(project_id, None)
+    git_helpers.ensure_git_repository_record(project_id, str(folder))
+
+
+def test_an_ssh_checkout_stays_put_when_the_https_project_moved_to_another_repository(client, ws, test_db):
     from app.core import project_remote
-    from app.core.project_resolver import resolve_project_v2
 
-    here, legacy = _legacy_project_here(ws)
-    database.create_session("chat-on-old", "default", project_id="demo", project_v2_id=legacy["id"])
+    # This worker added the repository over SSH before the upgrade (the old SSH id).
+    _here, legacy = _legacy_project_here(ws)
+    # Studio added it over HTTPS, then changed that project's repository.
     theirs = _replicated(_HTTPS)
-    assert theirs["id"] != legacy["id"]
+    projects_v2.pin_remote(theirs["origin"], _MOVED_TO, default_branch="main", generation=1,
+                           keep_upstream=False, previous=_HTTPS)
 
-    with caplog.at_level(logging.INFO, logger="app.core.project_remote"):
-        assert project_remote.reconcile_local() >= 1
-    assert _merged(legacy) == theirs["origin"]
-    relinked = database.get_project("demo")
-    assert relinked["link_group_id"] == theirs["origin"]
-    assert relinked["settings"]["link_group_locked"] is True and relinked["settings"]["keep"] == "me"
-    assert relinked["path"] == here["path"] and (ws / "demo" / "README.md").is_file()
-    # The chat bound to the old identity still resolves to it (nothing lost).
-    assert resolve_project_v2(database.get_session("chat-on-old"))["id"] == legacy["id"]
-    assert _listed_ids(client) == {theirs["id"]}
-    merges = [r.getMessage() for r in caplog.records if "merged" in r.getMessage()]
-    assert len(merges) == 1
-    assert legacy["id"] in merges[0] and theirs["id"] in merges[0]
-    assert "git.example.com/example-org/demo" in merges[0] and "@" not in merges[0]
-
-    assert project_remote.reconcile_local() == 0  # idempotent
-    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
-
-
-def test_an_offline_peers_legacy_ssh_project_folds_into_this_workers_project(client, ws, test_db, network,
-                                                                              monkeypatch):
-    from app.core import project_remote
-
-    monkeypatch.setattr(git_ops_runner, "kick", lambda: None)
-    resp = _clone_new(client, _https(monkeypatch, _bare_remote(ws)))
-    _run_setups()
-    mine = projects_v2.get_project_v2(resp.json()["project_v2_id"])
-    # Studio, offline until now and not upgraded yet, added the SSH spelling under its old id.
-    theirs = _replicated(_SSH, origin=_legacy_id(_SSH))
-    assert theirs["id"] != mine["id"]
-
+    _refresh_git_record("demo", ws / "demo")
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
     project_remote.reconcile_local()
-    assert _merged(theirs) == mine["origin"]
-    assert _merged(mine) is None
-    assert database.get_project("demo")["link_group_id"] == mine["origin"]
-    assert project_remote.identity_for_remote(_SSH) == (mine["origin"], False)
-    assert _listed_ids(client) == {mine["id"]}
+    assert _remote_of(ws / "demo") == _SSH  # never switched to the other repository
+    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
+    # A new SSH add with no SSH project in use does not join the moved project either.
+    projects_v2.set_forgotten(legacy["origin"], True)
+    assert project_remote.identity_for_remote(_SSH) == (legacy["origin"], False)
 
 
-def test_spellings_wait_while_any_of_them_is_being_cloned_or_set_up(client, ws, test_db):
+def test_an_existing_ssh_checkout_keeps_its_project_when_an_https_one_appears(client, ws, test_db):
     from app.core import project_remote
 
     _here, legacy = _legacy_project_here(ws)
-    theirs = _replicated(_HTTPS, held=False)
-    # Studio's first clone of it is running (its op is in Studio's database).
-    assert projects_v2.claim_provisional(theirs["origin"], _token(PEER), expect=None)
+    theirs = _replicated(_HTTPS)
+    _refresh_git_record("demo", ws / "demo")
     project_remote.reconcile_local()
-    assert _merged(legacy) is None
     assert database.get_project("demo")["link_group_id"] == legacy["origin"]
-
-    projects_v2.mark_registered(theirs["origin"])  # Studio's clone finished
-    # A setup of the old identity waits on this worker: still left alone.
-    op = git_ops_db.insert_op(ME, project_setup.SETUP_OP, project_v2_id=legacy["id"],
-                              params={"origin": legacy["origin"]}, op_id=project_setup.new_op_id())
-    project_remote.reconcile_local()
-    assert _merged(legacy) is None
-
-    git_ops_db.complete_op(op["id"])
-    project_remote.reconcile_local()
-    assert _merged(legacy) == theirs["origin"]
-    assert database.get_project("demo")["link_group_id"] == theirs["origin"]
+    assert project_remote.merged_into(projects_v2.get_project_v2(legacy["id"])) is None
+    # Both stay listed: an existing duplicate is the user's to remove.
+    assert _listed_ids(client) == {legacy["id"], theirs["id"]}
 
 
-def test_a_lone_spelling_is_left_alone_and_a_forgotten_project_returns_only_for_two(client, ws, test_db):
+def test_a_fresh_ssh_add_gets_the_repositorys_one_identity(test_db):
     from app.core import project_remote
 
     canonical = auto_link_group_id(_HTTPS)
-    _here, legacy = _legacy_project_here(ws)
-    project_remote.reconcile_local()
-    assert projects_v2.get_project_v2_by_origin(canonical) is None  # a lone old spelling: no new row
-    assert _merged(legacy) is None
-
-    # The owner forgot the HTTPS project earlier: one live old spelling never brings it back.
-    projects_v2.upsert_project(canonical, name="Demo (https)")
-    projects_v2.record_remote(canonical, _HTTPS)
-    projects_v2.set_forgotten(canonical, True)
-    project_remote.reconcile_local()
-    assert projects_v2.get_project_v2_by_origin(canonical)["settings"].get("forgotten") is True
-    assert _merged(legacy) is None
-    assert database.get_project("demo")["link_group_id"] == legacy["origin"]
-
-    # A second live spelling needs one project to join: the canonical one returns.
-    second = _replicated(_SSH_SCHEME, origin=_legacy_id(_SSH_SCHEME), name="Demo two")
-    project_remote.reconcile_local()
-    kept = projects_v2.get_project_v2_by_origin(canonical)
-    assert kept["settings"].get("forgotten") is not True
-    assert _merged(legacy) == canonical and _merged(second) == canonical
-    assert database.get_project("demo")["link_group_id"] == canonical
+    assert canonical != _legacy_id(_SSH)
+    assert project_remote.identity_for_remote(_SSH) == (canonical, False)
+    # A forgotten old SSH project is not an identity in use.
+    projects_v2.upsert_project(_legacy_id(_SSH), name="Demo")
+    projects_v2.set_forgotten(_legacy_id(_SSH), True)
+    assert project_remote.identity_for_remote(_SSH) == (canonical, False)
 
 
-def test_two_old_spellings_with_no_canonical_project_converge_on_a_new_one(client, ws, test_db):
-    from app.core import project_remote
-    from app.db.projects_v2 import stored_remote
-
-    _here, legacy = _legacy_project_here(ws)
-    second = _replicated(_SSH_SCHEME, origin=_legacy_id(_SSH_SCHEME), name="Demo two")
-    project_remote.reconcile_local()
-    kept = projects_v2.get_project_v2_by_origin(auto_link_group_id(_HTTPS))
-    assert kept is not None and kept["name"] in {"Demo", "Demo two"}
-    assert stored_remote(kept)[0] in {_SSH, _SSH_SCHEME}  # a new copy elsewhere can clone it
-    assert _merged(legacy) == kept["origin"] and _merged(second) == kept["origin"]
-    assert database.get_project("demo")["link_group_id"] == kept["origin"]
-    assert _listed_ids(client) == {kept["id"]}
-
-
-def test_an_old_spelling_folds_into_the_project_pointed_at_that_repository(client, ws, test_db):
+def test_pins_and_merges_still_win_over_the_spelling(test_db):
     from app.core import project_remote
 
-    pinned = _replicated("https://git.example.com/example-org/demo-old.git", name="Demo")
-    projects_v2.pin_remote(pinned["origin"], _HTTPS, default_branch="main", generation=1,
+    legacy, canonical = _legacy_id(_SSH), auto_link_group_id(_HTTPS)
+    pointed = _replicated("https://git.example.com/example-org/earlier.git", name="Pointed", held=False)
+    projects_v2.pin_remote(pointed["origin"], _HTTPS, default_branch="main", generation=1,
                            keep_upstream=False, previous=None)
-    _here, legacy = _legacy_project_here(ws)
-    project_remote.reconcile_local()
-    assert _merged(legacy) == pinned["origin"]
-    assert projects_v2.get_project_v2_by_origin(auto_link_group_id(_HTTPS)) is None
-    assert database.get_project("demo")["link_group_id"] == pinned["origin"]
+    # Pointed at this repository in another spelling: a new SSH add joins it.
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    # An SSH project already here keeps its checkouts.
+    projects_v2.upsert_project(legacy, name="Demo")
+    assert project_remote.identity_for_remote(_SSH) == (legacy, False)
+    # A merge of that project wins, as before.
+    projects_v2.mark_merged(legacy, pointed["origin"])
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    # Pointed at this exact spelling: that project, as before.
+    projects_v2.pin_remote(pointed["origin"], _SSH, default_branch="main", generation=2,
+                           keep_upstream=False, previous=_HTTPS)
+    assert project_remote.identity_for_remote(_SSH) == (pointed["origin"], True)
+    assert project_remote.identity_for_remote(_HTTPS) == (pointed["origin"], True)
+    assert canonical not in {row["origin"] for row in projects_v2.list_projects_v2()}
 
 
 def test_an_old_spelling_still_names_its_own_project(ws, test_db):
@@ -1802,5 +1749,5 @@ def test_an_old_spelling_still_names_its_own_project(ws, test_db):
     assert project_remote.remote_names_origin(_SSH, origin)
     assert project_remote.remote_names_origin(_HTTPS, origin)
     assert project_setup._repo_info_by_origin()[origin]["clone_url"] == _SSH
-    # Until another spelling of it exists, a checkout of it keeps that identity.
-    assert project_remote.identity_for_remote(_HTTPS) == (origin, False)
+    # An SSH checkout of it keeps that identity.
+    assert project_remote.identity_for_remote(_SSH) == (origin, False)

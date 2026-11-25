@@ -50,21 +50,35 @@ def normalize_remote_url(url: Optional[str]) -> str:
     return normalized.lower()
 
 
+# A host name, or a bracketed IPv6 address (``[2001:db8::1]``).
+_HOST = r"(\[[0-9A-Za-z:.%]+\]|[^\s/:?#@\[\]\\]+)"
 _SCHEME_REMOTE_RE = re.compile(
-    r"^(https?|ssh|git|git\+ssh|ssh\+git)://(?:[^@/]*@)?([^/:?#]+)(?::(\d*))?(/[^?#]*)?$", re.IGNORECASE)
-_SCP_REMOTE_RE = re.compile(r"^(?:[^@/\s]+@)?([^:/\\\s]+):(?!//)(.+)$")
-_DEFAULT_WEB_PORTS = {"", "80", "443"}
+    r"^(https?|ssh|git\+ssh|ssh\+git|git)://(?:[^/?#\s]*@)?" + _HOST + r"(?::(\d*))?(/[^?#]*)?$",
+    re.IGNORECASE)
+_SCP_REMOTE_RE = re.compile(r"^(?:[^/\s]*@)?" + _HOST + r":(?!//)(.+)$")
+_USERINFO_RE = re.compile(r"^([a-z][a-z0-9+.-]*://)[^/?#\s]*@", re.IGNORECASE)
+# Each scheme's own default port: only that one is dropped.
+_DEFAULT_PORT = {"https": "443", "http": "80", "ssh": "22", "git": "9418"}
 
 
 def canonical_remote(url: Optional[str]) -> str:
-    """One spelling for every way of writing a network remote.
+    """One spelling for the ways of writing one network remote.
 
-    HTTPS, HTTP, ``ssh://``, ``git://`` and scp-style (``git@host:owner/repo``)
-    URLs of one repository all become ``https://host/owner/repo``: the login,
-    any SSH port and a default web port are dropped, then
-    :func:`normalize_remote_url` applies. A plain HTTPS URL comes out exactly
-    as :func:`normalize_remote_url` always made it, so its identity never
-    changes. Local paths and ``file://`` URLs are only normalized.
+    - HTTPS and HTTP become ``https://host[:port]/path``. A port is dropped
+      only when it is the URL's own scheme default (443 for HTTPS, 80 for
+      HTTP), so ``https://host:80/…`` stays its own remote.
+    - The common forge form, scp-style with a path relative to the login's
+      home (``git@host:owner/repo``), is the same repository as
+      ``https://host/owner/repo``.
+    - Any other SSH form keeps its own spelling: ``ssh://host[:port]/path``
+      for an absolute path (``git@host:/srv/repo`` and ``ssh://git@host/srv/repo``
+      alike), a non-default port, or a ``~`` path. ``git://`` stays ``git://``.
+    - The login (and any password) is always dropped; a bracketed IPv6 host
+      is read as one host.
+
+    Then :func:`normalize_remote_url` applies. A plain HTTPS URL comes out
+    exactly as :func:`normalize_remote_url` always made it, so its identity
+    never changes. Local paths and ``file://`` URLs are only normalized.
     """
     text = (url or "").strip()
     if not text:
@@ -72,12 +86,20 @@ def canonical_remote(url: Optional[str]) -> str:
     match = _SCHEME_REMOTE_RE.match(text)
     if match:
         scheme, host, port, path = match.groups()
-        keep_port = scheme.lower() in ("http", "https") and (port or "") not in _DEFAULT_WEB_PORTS
-        return normalize_remote_url(f"https://{host}{':' + port if keep_port else ''}{path or ''}")
+        scheme = scheme.lower()
+        kind = "ssh" if "ssh" in scheme else scheme
+        port = port or ""
+        keep = f":{port}" if port and port != _DEFAULT_PORT[kind] else ""
+        if kind == "http":
+            kind = "https"  # one repository whichever of the two it is fetched over
+        return normalize_remote_url(f"{kind}://{host}{keep}{path or ''}")
     scp = _SCP_REMOTE_RE.match(text)
     if scp and len(scp.group(1)) > 1:  # never a Windows drive letter
-        return normalize_remote_url(f"https://{scp.group(1)}/{scp.group(2).lstrip('/')}")
-    return normalize_remote_url(text)
+        host, path = scp.groups()
+        if path.startswith(("/", "~")):
+            return normalize_remote_url(f"ssh://{host}{'' if path.startswith('/') else '/'}{path}")
+        return normalize_remote_url(f"https://{host}/{path}")
+    return normalize_remote_url(_USERINFO_RE.sub(r"\1", text))
 
 
 def _link_id(normalized: str) -> Optional[str]:
