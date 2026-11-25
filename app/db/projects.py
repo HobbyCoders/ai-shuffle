@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, Dict, Any, Callable, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list, logger
 from app.db.compat import phs
@@ -549,11 +549,20 @@ def project_removal_plan(project_ids) -> Optional[Dict[str, Any]]:
                 "worktrees": _removal_worktrees(cursor, binding["project_ids"])}
 
 
-def delete_project(project_id: str) -> bool:
+class ProjectOwnerChanged(Exception):
+    """The locked project row no longer passes the caller's ownership rule."""
+
+
+def delete_project(project_id: str, owned: Optional[Callable[[Dict[str, Any]], bool]] = None) -> bool:
     """Delete a project and its chats on this worker (see ``chat_in_removal``); files stay.
 
     The API removes the chats first through the ordinary chat delete
     (``app/core/project_removal.py``); this sweep covers the rest.
+
+    ``owned`` is the caller's ownership rule, checked on the row as locked
+    for the delete: a row another worker claimed after the caller's earlier
+    read raises :class:`ProjectOwnerChanged` and stays as it is (aliases,
+    catalog entry and row untouched).
     """
     from app.db import project_catalog_aliases
     from app.db.sessions import delete_session
@@ -574,6 +583,8 @@ def delete_project(project_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT id, instance_id, link_group_id FROM projects WHERE id = %s FOR UPDATE", (project_id,))
         project = row_to_dict(cursor.fetchone())
+        if project and owned is not None and not owned(project):
+            raise ProjectOwnerChanged(project_id)
         if project:
             project_catalog_aliases.revoke(cursor, project_id)
             _retire_from_catalog(cursor, project)

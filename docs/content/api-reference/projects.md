@@ -62,6 +62,8 @@ Delete a project from the database (does not delete files). This worker's chats 
 
 Returns `404` when the project does not exist or belongs to another worker on a shared database.
 
+Returns `409` when another worker claims the project while it is being removed: the project stays, and this worker's chats in it that were already removed stay removed.
+
 **Auth:** Owner only
 
 ### GET /api/v1/projects/{project_id}/removal
@@ -105,6 +107,8 @@ Cancel a queued or running setup. A partly cloned folder is removed.
 ### DELETE /api/v1/projects/workers/{install_id}
 
 Remove one worker's record of the project. Pass `project_v2_id` or `project_id`. Its files stay on that worker.
+
+Returns `removed` (the project records deleted) and `kept` (records another worker claimed during the removal, left in place).
 
 **Auth:** Owner only
 

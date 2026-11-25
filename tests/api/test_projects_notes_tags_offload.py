@@ -331,41 +331,51 @@ class TestProjectsOffload:
         self, projects_client, sample_project
     ):
         """The route checks ownership before any chat goes (one hop), then
-        deletes the chats, then the row. The ownership read that decides the
-        row delete must share the row delete's hop: deciding on the first read
-        would let a row claimed by another worker in between be deleted."""
+        deletes the chats, then the row. The row delete decides again with the
+        route's ownership rule, which ``delete_project`` applies to the row it
+        locks. Deciding on the first read would let a row another worker
+        claimed in between be deleted (the PostgreSQL interleaving is
+        tests/db/test_session_delete_lock_order_postgres.py)."""
         client, mock_db = projects_client
         reads: list[int] = []
         writes: list[int] = []
+        rules = []
         mock_db.get_project.side_effect = recorder(reads, sample_project)
-        mock_db.delete_project.side_effect = recorder(writes, True)
+
+        def delete(project_id, owned=None):
+            writes.append(threading.get_ident())
+            rules.append(owned)
+            return True
 
         with patch("app.db.projects.project_removal_plan", return_value=None), \
+             patch("app.db.database.delete_project", side_effect=delete), \
              OffloadTracker(project_removal_module) as removal, \
              OffloadTracker(projects_module) as tracker:
             response = client.delete("/api/v1/projects/test-project")
 
         assert response.status_code == 204
         tracker.assert_single_hop()  # the early check, before any chat is touched
-        assert len(removal.calls) == 2 and removal.calls[-1] == "_delete_own_project"  # plan, then row
-        assert len(reads) == 2 and writes == reads[-1:]
+        assert len(removal.calls) == 2  # the plan, then the row delete
+        assert rules == [projects_module._owned_here]
+        assert len(reads) == 1 and len(writes) == 1
         assert set(reads + writes).isdisjoint(tracker.loop_threads + removal.loop_threads)
 
-    def test_delete_project_keeps_a_row_claimed_after_the_check(
+    def test_delete_project_answers_409_for_a_row_claimed_during_removal(
         self, projects_client, sample_project
     ):
-        """Another worker claims the row after the early check: it stays."""
+        """The locked row belongs to another worker by then: it stays, 409."""
+        from app.db.projects import ProjectOwnerChanged
+
         client, mock_db = projects_client
-        claimed = dict(sample_project, instance_id="another-instance")
-        mock_db.get_project.side_effect = [sample_project, claimed]
+        mock_db.get_project.return_value = sample_project
 
         with patch("app.db.projects.project_removal_plan", return_value=None), \
-             patch("app.db.database.delete_project") as unchecked_delete:
+             patch("app.db.database.delete_project", side_effect=ProjectOwnerChanged("test-project")):
             response = client.delete("/api/v1/projects/test-project")
 
-        assert response.status_code == 204
+        assert response.status_code == 409
+        assert "belongs to another worker" in response.json()["detail"]
         mock_db.delete_project.assert_not_called()
-        unchecked_delete.assert_not_called()
 
     def test_link_project_keeps_both_reads_and_all_writes_in_one_hop(
         self, projects_client, sample_project

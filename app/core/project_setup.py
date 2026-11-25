@@ -638,18 +638,22 @@ def _local_removal_ids(project_v2_id: str) -> List[str]:
     pv2 = projects_v2.get_project_v2(project_v2_id)
     if pv2 is None:
         raise LookupError("Unknown project")
-    me = _me()
-    ids = []
-    for row in _own_project_rows():
-        if _origin_of(row) != pv2.get("origin"):
-            continue
-        # An unowned legacy row is every worker's on a shared database.
-        if row.get("instance_id") != me and engine.context() is None:
-            continue
-        ids.append(row["id"])
+    ids = [row["id"] for row in _own_project_rows()
+           if _origin_of(row) == pv2.get("origin") and _removable_here(row, engine.context())]
     if not ids:
         raise LookupError("This worker has no record of the project")
     return ids
+
+
+def _removable_here(row: Dict[str, Any], network_context: Any) -> bool:
+    """The Workers tab's rule for removing a project row on this worker.
+
+    The row must belong to this worker; an unowned legacy row counts only
+    while networked (``_local_removal_ids``). The removal checks it again on
+    the locked row before deleting it.
+    """
+    owner = row.get("instance_id")
+    return owner == _me() or (owner is None and network_context is not None)
 
 
 def local_removal_preview(project_v2_id: str) -> Optional[Dict[str, Any]]:
@@ -671,9 +675,11 @@ async def remove_local(project_v2_id: str) -> Dict[str, Any]:
     """
     from app.core.project_removal import remove_projects
     from app.db.async_database import run_sync
+    from app.network import engine
 
     ids = await run_sync(_local_removal_ids, project_v2_id)
-    return await remove_projects(ids)
+    networked = engine.context()
+    return await remove_projects(ids, owned=lambda row: _removable_here(row, networked))
 
 
 # ---------------------------------------------------------------------------

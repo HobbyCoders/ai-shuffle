@@ -261,7 +261,7 @@ async def test_removing_a_reused_unlinked_id_keeps_the_earlier_projects_chat(
 
     assert project_removal.preview(["late-link"])["chats"] == 0
     result = await project_removal.remove_projects(["late-link"], BackgroundTasks())
-    assert result == {"removed": ["late-link"], "chats_removed": 0}
+    assert result == {"removed": ["late-link"], "kept": [], "chats_removed": 0}
     assert database.get_session("retained-private")["project_v2_id"] == original["id"]
 
 

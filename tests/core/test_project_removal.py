@@ -66,7 +66,7 @@ async def test_removal_deletes_this_workers_chats_bound_to_the_project(project, 
     tasks = BackgroundTasks()
     result = await project_removal.remove_projects(["proj"], tasks)
 
-    assert result == {"removed": ["proj"], "chats_removed": 2}
+    assert result == {"removed": ["proj"], "kept": [], "chats_removed": 2}
     assert database.get_project("proj") is None
     for gone in ("legacy", "in-worktree"):
         assert database.get_session(gone) is None
@@ -228,6 +228,76 @@ async def test_unlinked_folder_project_keeps_shared_id_only_chats(mock_db, tmp_p
     assert (await project_removal.remove_projects(["folder"], BackgroundTasks()))["chats_removed"] == 1
     assert database.get_session("legacy") is None
     assert database.get_session("shared-only")["project_v2_id"] == local
+
+
+def _claim_after_the_plan(monkeypatch, project_id):
+    """Another worker claims the project row once its chats are planned."""
+    from app.db import projects
+
+    original = projects.project_removal_plan
+
+    def plan_then_claim(ids):
+        result = original(ids)
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE projects SET instance_id = 'another-instance' WHERE id = %s",
+                                  (project_id,))
+        return result
+
+    monkeypatch.setattr(projects, "project_removal_plan", plan_then_claim)
+
+
+def _spy_teardown(monkeypatch):
+    """Record each chat whose queued teardown actually ran."""
+    original, ran = sessions_api._delete_session, []
+
+    async def spy(row, tasks, matches=None):
+        tasks.add_task(ran.append, row["id"])
+        return await original(row, tasks, matches=matches)
+
+    monkeypatch.setattr(sessions_api, "_delete_session", spy)
+    return ran
+
+
+def test_project_page_delete_keeps_a_row_claimed_during_removal(project, monkeypatch):
+    """The ownership rule is checked again on the row the delete locks: a
+    claim after the early check keeps the row and answers 409, and the chats
+    already removed on this worker still get their teardown."""
+    database.create_session("legacy", "default", project_id="proj")
+    _claim_after_the_plan(monkeypatch, "proj")
+    ran = _spy_teardown(monkeypatch)
+
+    with _owner_client(monkeypatch) as client:
+        response = client.delete("/api/v1/projects/proj")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == ("This project now belongs to another worker; "
+                                         "its chats on this worker were removed.")
+    assert database.get_project("proj")["instance_id"] == "another-instance"
+    assert database.get_session("legacy") is None
+    assert ran == ["legacy"]
+
+
+async def test_peer_remove_action_keeps_a_row_claimed_during_removal(project, monkeypatch):
+    from app.core import project_setup
+
+    _as_enrolled_worker(monkeypatch)
+    _, current, _ = project
+    _claim_after_the_plan(monkeypatch, "proj")
+
+    result = await project_setup.handle_control({"action": "remove", "project_v2_id": current}, "dev-requester")
+
+    assert result["removed"] == [] and result["kept"] == ["proj"]
+    assert database.get_project("proj")["instance_id"] == "another-instance"
+
+
+def test_workers_tab_rule_takes_only_this_workers_rows():
+    from app.core import project_setup
+
+    networked = object()
+    assert project_setup._removable_here({"instance_id": ME}, None)
+    assert project_setup._removable_here({"instance_id": None}, networked)
+    assert not project_setup._removable_here({"instance_id": None}, None)
+    assert not project_setup._removable_here({"instance_id": "another-instance"}, networked)
 
 
 async def test_chat_moved_after_the_plan_is_left_alone(project, monkeypatch):

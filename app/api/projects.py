@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import Lock
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, status, UploadFile, File, Request, Query, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
@@ -427,33 +427,19 @@ async def update_project(
     return updated
 
 
-def _own_project(project_id: str) -> Optional[dict]:
-    """The project row, when this worker may remove it (as ``update_project`` checks)."""
-    existing = database.get_project(project_id)
-    if not existing or existing.get("instance_id") not in (None, settings.effective_instance_id):
-        return None
-    return existing
+def _owned_here(project: dict) -> bool:
+    """Whether this worker may remove the row (as ``update_project`` checks)."""
+    return project.get("instance_id") in (None, settings.effective_instance_id)
 
 
 def _require_own_project(project_id: str) -> dict:
-    existing = _own_project(project_id)
-    if existing is None:
+    existing = database.get_project(project_id)
+    if not existing or not _owned_here(existing):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project not found: {project_id}"
         )
     return existing
-
-
-def _delete_own_project(project_id: str) -> bool:
-    """Re-check ownership and delete the row in the same hop.
-
-    The DELETE route checks first, before any chat goes, but the row delete
-    happens after the chats, so it decides again here rather than trusting
-    the earlier read. It returns False instead of raising, so the chat
-    teardown already queued on the response's background tasks still runs.
-    """
-    return _own_project(project_id) is not None and database.delete_project(project_id)
 
 
 @router.get("/{project_id}/removal")
@@ -473,10 +459,23 @@ async def project_removal_preview(project_id: str, token: str = Depends(require_
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: str, background_tasks: BackgroundTasks,
                          token: str = Depends(require_admin)):
-    """Delete a project and its chats on this worker (not files) - Admin only"""
+    """Delete a project and its chats on this worker (not files) - Admin only.
+
+    Ownership is checked before any chat goes, and again on the locked row
+    before it is deleted. A row another worker claimed in between stays, and
+    the reply is a 409. The chats on this worker that were already removed
+    still get their queued teardown.
+    """
     await run_sync(_require_own_project, project_id)
-    await project_removal.remove_projects([project_id], background_tasks, delete_row=_delete_own_project)
+    result = await project_removal.remove_projects([project_id], background_tasks, owned=_owned_here)
     _announce_catalog_change()
+    if result.get("kept"):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "This project now belongs to another worker; "
+                               "its chats on this worker were removed."},
+            background=background_tasks,
+        )
 
 
 def _announce_catalog_change() -> None:

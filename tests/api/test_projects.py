@@ -766,7 +766,7 @@ class TestDeleteProject:
         mock_database.get_project.return_value = sample_project
 
         with patch("app.api.projects.project_removal.remove_projects", new_callable=AsyncMock) as remove:
-            remove.return_value = {"removed": ["test-project"], "chats_removed": 0}
+            remove.return_value = {"removed": ["test-project"], "kept": [], "chats_removed": 0}
             response = client.delete("/api/v1/projects/test-project")
 
         assert response.status_code == 204

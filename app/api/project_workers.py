@@ -792,4 +792,6 @@ async def remove_from_worker(
         await run_sync(setup_db.forget_peer_project, target_id, pv2["id"])
         setup.emit_changed()
     await run_sync(setup_db.delete_requests_for, pv2["id"], target_id)
-    return {"ok": True, "install_id": target_id, "removed": result.get("removed", [])}
+    # ``kept``: rows another worker claimed during the removal (left as they are).
+    return {"ok": True, "install_id": target_id, "removed": result.get("removed", []),
+            "kept": result.get("kept", [])}

@@ -46,17 +46,21 @@ def preview(project_ids: Iterable[str]) -> Dict[str, Any]:
 
 async def remove_projects(project_ids: Iterable[str],
                           background_tasks: Optional[BackgroundTasks] = None,
-                          delete_row: Optional[Callable[[str], bool]] = None) -> Dict[str, Any]:
-    """Delete the chats, then the project rows. Returns removed ids and chat count.
+                          owned: Optional[Callable[[Dict[str, Any]], bool]] = None) -> Dict[str, Any]:
+    """Delete the chats, then the project rows.
+
+    Returns ``{"removed", "kept", "chats_removed"}``. ``owned`` is the
+    caller's ownership rule, checked again on each row under the delete's row
+    lock (``database.delete_project``). A row that fails it there, because
+    another worker claimed it after the caller's read, is listed in ``kept``
+    and left untouched. Its chats on this worker were already removed.
 
     Without ``background_tasks`` the slow per-chat teardown runs in a task of
     its own, after the rows are gone, as it does behind a DELETE response.
-    ``delete_row`` (sync, one hop per row) replaces ``database.delete_project``
-    when the caller must re-check something, such as ownership, before the row goes.
     """
     from app.api.sessions import _delete_session
     from app.db import database
-    from app.db.projects import chat_in_removal, project_removal_plan
+    from app.db.projects import ProjectOwnerChanged, chat_in_removal, project_removal_plan
 
     ids = list(dict.fromkeys(project_ids))
     plan = await run_sync(project_removal_plan, ids)
@@ -72,11 +76,16 @@ async def remove_projects(project_ids: Iterable[str],
             for row in plan["chats"]:
                 if await _delete_session(row, tasks, matches=still_ours):
                     chats += 1
-        delete = delete_row or database.delete_project
-        removed = [pid for pid in ids if await run_sync(delete, pid)]
+        removed, kept = [], []
+        for pid in ids:
+            try:
+                if await run_sync(database.delete_project, pid, owned=owned):
+                    removed.append(pid)
+            except ProjectOwnerChanged:
+                kept.append(pid)
     finally:
         if background_tasks is None and tasks.tasks:
             task = asyncio.create_task(tasks())
             _tasks.add(task)
             task.add_done_callback(_tasks.discard)
-    return {"removed": removed, "chats_removed": chats}
+    return {"removed": removed, "kept": kept, "chats_removed": chats}
