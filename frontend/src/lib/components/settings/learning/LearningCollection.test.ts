@@ -58,8 +58,7 @@ function fresh(): LearnerOverview {
 			daily_cap: 48,
 			cap_source: 'metered_default',
 			calls_today: 3,
-			model: 'claude-haiku-4-5',
-			provider: 'Anthropic API',
+			model: 'claude-opus-4-8',
 			billing: 'metered',
 			pass_chars: 32_000
 		},
@@ -156,9 +155,11 @@ describe('setup', () => {
 		expect(await screen.findAllByText(/no learning calls/)).not.toHaveLength(0);
 	});
 
-	it('shows the model, today’s calls and the per-pass cap', async () => {
+	it('shows the chat’s own model, the last pass’s model, today’s calls and the per-pass cap', async () => {
 		await show('setup');
-		expect(await screen.findByText('claude-haiku-4-5')).toBeTruthy();
+		expect(await screen.findByText('Each chat’s model')).toBeTruthy();
+		expect(screen.getByText(/Same model and effort as the chat it learns from · Last pass: claude-opus-4-8/)).toBeTruthy();
+		expect(screen.queryByText(/Text generation/)).toBeNull();
 		expect(screen.getByText('Up to ~8k tokens')).toBeTruthy();
 		expect(screen.getByRole('meter', { name: 'Learning calls used today' }).getAttribute('aria-valuenow')).toBe('3');
 	});

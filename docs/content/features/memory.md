@@ -32,7 +32,7 @@ The learner runs when a chat goes quiet, and sooner when you sound frustrated: s
 
 ### Cost
 
-The learner runs on your **Text generation** model (**Settings → Models → Text tasks**), on any provider. It reads compact excerpts of new activity, never a whole chat, and it skips routine file reads. On a pay-per-use provider each pass reads at most about 32,000 characters. Larger excerpts are used only on a flat-rate subscription.
+The learner runs on the same model, provider and effort as the chat it learns from, so a chat on a strong model gets lessons written by that model. Each pass is billed like a message in that chat. It reads compact excerpts of new activity, never a whole chat, and it skips routine file reads. On a pay-per-use provider each pass reads at most about 32,000 characters. Larger excerpts are used only on a flat-rate subscription.
 
 **Setup** on the Learned behaviour page shows today's calls against the daily limit. By default the limit is 48 calls a day on a pay-per-use provider and 200 on a flat-rate subscription. Set **Daily learning calls** to choose your own (0 picks the default). Turn off **Learn from chats** to stop the learner completely. While it's off it makes no model calls, and when you turn it back on it picks up from where it stopped. **Recent activity** lists the latest passes and what each one saved, and **Built-in guidance** shows the instructions that ship with AI Shuffle for each model family. They can't be edited.
 

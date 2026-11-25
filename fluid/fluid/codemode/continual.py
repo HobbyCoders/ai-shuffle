@@ -657,7 +657,7 @@ class Synthesizer:
         min_new_entries: int = MIN_NEW_ENTRIES,
         max_entries: int = MAX_ENTRIES_PER_PASS,
         max_tokens: int = SYNTH_MAX_TOKENS,
-        effort: str | None = SYNTH_EFFORT,
+        effort: str | Callable[[], str | None] | None = SYNTH_EFFORT,
         pass_timeout: float = 180.0,
         close_timeout: float = 90.0,
         session_model: str | None = None,
@@ -710,6 +710,8 @@ class Synthesizer:
         # The limit the window gave; a pass re-derives it while it is still
         # in force (see _size_request), never over a value set on purpose.
         self._window_limit = self._prompt_limit
+        # A level, or a callable read when each request is built (a host
+        # whose learner follows the session's effort, changed mid-chat).
         self._effort = effort
         self._task: asyncio.Task | None = None
         # UTC day (time // 86400) on which the daily budget was found spent.
@@ -904,6 +906,14 @@ class Synthesizer:
             # A fresh read may have raised the cap: a spent latch re-checks.
             self._latch_checked = False
         return self._resolved_budget
+
+    def retarget(self, model: str, context_window: int | None = None) -> None:
+        """Run later passes on ``model``: a host whose learner follows the
+        session's model calls this when the chat switches models. A pass
+        already in flight keeps its model; the next one is sized for the new
+        window (:meth:`_size_request`) unless a limit was set on purpose."""
+        self._model = model
+        self._window = context_window or context_window_for(model)
 
     def _size_request(self) -> None:
         """Size this pass's request. With no known window a learner billed
@@ -2073,7 +2083,7 @@ Never claim a workflow is installed because it was proposed."""
             system=system,
             tools=[],
             max_tokens=self._max_tokens,
-            effort=self._effort,
+            effort=self._effort() if callable(self._effort) else self._effort,
             extra=extra,
             wire_state=wire_state,
             session_id=wire_state.session_id if wire_state else self._session_id,

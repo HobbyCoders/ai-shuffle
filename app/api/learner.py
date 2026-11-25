@@ -82,10 +82,32 @@ class RuleVersion(BaseModel):
 
 
 # ── status ───────────────────────────────────────────────────────────────
+def _last_pass(store) -> dict:
+    """The newest pass that called a model, from the store's pass log: its
+    model and the daily budget it ran under. Empty when none has run."""
+    try:
+        lines = (Path(store.root) / ".synthesis-log.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("ran") is not False and row.get("model"):
+            return row
+    return {}
+
+
 def _setup(store) -> dict[str, Any]:
-    """The learner's switch, budget, today's calls and the model it uses."""
-    from app.core.fluid_memory import learner_billing, learner_daily_calls, learner_enabled
+    """The learner's switch, budget, today's calls and the model it last ran on.
+
+    Passes run on each chat's own model and effort, so there is no single
+    learner model to show: ``model`` is the latest pass's, and the budget and
+    request size follow how that pass was billed."""
+    from app.core.fluid_memory import learner_daily_calls, learner_enabled
     from fluid.codemode.continual import (
+        BILLING_METERED,
         BILLING_SUBSCRIPTION,
         METERED_PROMPT_CHAR_LIMIT,
         SUBSCRIPTION_ASSUMED_WINDOW,
@@ -94,46 +116,26 @@ def _setup(store) -> dict[str, Any]:
         prompt_char_limit,
     )
 
-    model = provider = billing = window = None
-    try:
-        from app.core.provider.harness_adapter import (
-            SessionOptions,
-            _learner_target,
-            _lookup_provider_row,
-            _lookup_provider_row_shape,
-        )
-
-        target = _learner_target(SessionOptions(model=""), "local")
-        if target is not None:
-            model = target.model
-            window = target.context_window
-            provider_id = target.options.extra.get("provider_id")
-            if provider_id:
-                row = _lookup_provider_row(str(provider_id)) or {}
-                provider = row.get("name") or None
-                billing = learner_billing(*_lookup_provider_row_shape(str(provider_id))[:2])
-            else:
-                # No row: the Claude Code CLI leg, billed by Claude's auth mode.
-                billing = learner_billing(None, None)
-    except Exception as exc:  # noqa: BLE001 — setup reads are best-effort
-        logger.warning("Could not resolve the learner model (%s)", type(exc).__name__)
+    last = _last_pass(store)
+    source = (last.get("budget") or {}).get("source") if isinstance(last.get("budget"), dict) else None
+    billing = (BILLING_SUBSCRIPTION if source == "subscription_default"
+               else BILLING_METERED if source == "metered_default" else None)
     setting = learner_daily_calls()
     budget = learner_budget(setting, billing)
     spent = store._facts.inference_budget()
     today = int(time.time() // 86400)
     # The most journal text one pass may send (Synthesizer._size_request).
     if billing == BILLING_SUBSCRIPTION:
-        pass_chars = prompt_char_limit(window or SUBSCRIPTION_ASSUMED_WINDOW, SYNTH_MAX_TOKENS)
+        pass_chars = prompt_char_limit(SUBSCRIPTION_ASSUMED_WINDOW, SYNTH_MAX_TOKENS)
     else:
-        pass_chars = min(prompt_char_limit(window, SYNTH_MAX_TOKENS), METERED_PROMPT_CHAR_LIMIT)
+        pass_chars = min(prompt_char_limit(None, SYNTH_MAX_TOKENS), METERED_PROMPT_CHAR_LIMIT)
     return {
         "enabled": bool(learner_enabled()),
         "daily_calls_setting": int(setting or 0),
         "daily_cap": budget.daily,
         "cap_source": budget.source,
         "calls_today": int(spent.get("calls") or 0) if spent.get("day") == today else 0,
-        "model": model,
-        "provider": provider,
+        "model": str(last["model"]) if last.get("model") else None,
         "billing": billing or "metered",
         "pass_chars": pass_chars,
     }
