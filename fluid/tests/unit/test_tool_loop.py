@@ -1451,3 +1451,36 @@ async def test_max_tokens_continuations_are_bounded() -> None:
     done = next(e for e in loop.bus.log(loop.session_id) if isinstance(e, TurnComplete))
     assert done.stop_reason == "max_tokens"
     assert done.num_model_calls == 3
+
+
+async def test_continuation_nudges_never_let_compaction_digest_the_brief() -> None:
+    # Review finding (context #5): the output-limit nudge was a plain user
+    # message, so compaction counted each one as a new turn and could digest
+    # the still-open request whole once enough cut-off text followed it.
+    from fluid.context.compaction import Compactor, is_turn_start
+
+    brief = "Write the report. " + "context " * 1500 + "LATE-CONSTRAINT: never touch prod.yml"
+    cut = [_cut_off("part " * 600) for _ in range(6)]
+    provider = ScriptedProvider([*cut, _text("done")])
+    store = MemoryStore()
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5",
+        registry=ToolRegistry(), permissions=PermissionEngine("never_ask"),
+        max_continuations_per_turn=6,
+    )
+    await loop.submit(UserTurn(content=brief))
+    await loop.wait_turn()
+
+    nodes = await store.load_path(loop.session_id)
+    starts = [n for n in nodes if is_turn_start(n)]
+    assert len(starts) == 1 and brief in starts[0].message.text()
+    assert sum("cut off" in n.message.text() for n in nodes if n.message.role == "user") == 6
+
+    compactor = Compactor(config=CompactionConfig(
+        trigger_tokens=2_000, target_ratio=0.3, keep_recent_turns=1,
+        trim=TrimConfig(enabled=False),
+    ))
+    for end in range(2, len(nodes) + 1):
+        rendered, _ = compactor.apply(nodes[:end], turn_boundary=False, context_window=8_000)
+    assert any(brief in m.text() for m in rendered)
+    assert not any(start == starts[0].node_id for start, _ in compactor._digested)

@@ -836,6 +836,10 @@ class ToolResultTrimmer:
         unknown window and the trim-only contract get.
         """
         found: list[tuple[str, str, int, bool]] = []
+        # Only the caller's explicit keep_recent=0 (overflow recovery) waives
+        # the traceback hold below; the tail slice's computed 0 must not.
+        waive_hold = keep_recent == 0
+        timeline = nodes
         if protected_from is not None and keep_recent is None:
             nodes = nodes[:max(0, protected_from)]
             keep_recent = 0
@@ -866,11 +870,12 @@ class ToolResultTrimmer:
         )
         candidates = found[:-keep] if keep else found
         # A traceback printed by a successful call stays one extra turn: it is
-        # held until two turn starts follow it. Overflow recovery's explicit
-        # keep_recent=0 waives the hold.
+        # held until two turn starts follow it, counted on the whole timeline
+        # (the recency tail's turn starts count too). Overflow recovery's
+        # explicit keep_recent=0 waives the hold.
         held: set[tuple[str, str]] = set()
         starts = 0
-        for node in reversed(nodes) if keep_recent != 0 else ():
+        for node in reversed(timeline) if not waive_hold else ():
             if starts < 2 and node.message.role == "user":
                 held.update(
                     (node.node_id, b.tool_use_id) for b in node.message.content

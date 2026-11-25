@@ -156,6 +156,22 @@ def test_missing_manifest_falls_back_to_the_install_name(tmp_path: Path) -> None
     assert [s.name for s in record.skills] == ["plain:a"]
 
 
+def test_skill_header_cut_by_the_discovery_read_is_not_offered_to_the_model(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review finding: a header past the 64 KiB read was parsed as complete, so
+    # a later ``disable-model-invocation: true`` was lost.
+    root = tmp_path / "1.0.0"
+    _write(root / "skills" / "long" / "SKILL.md",
+           "---\nname: long\ndescription: " + "d" * 70_000
+           + "\ndisable-model-invocation: true\n---\nbody")
+    _write(root / "skills" / "short" / "SKILL.md", "---\nname: short\ndescription: s\n---\n" + "b" * 70_000)
+    record = read_plugin(root, name="plain")
+    invocable = {s.name: s.model_invocable for s in record.skills}
+    assert invocable == {"plain:long": False, "plain:short": True}
+    assert "frontmatter does not close" in caplog.text
+
+
 def test_malformed_manifest_reads_as_empty(tmp_path: Path) -> None:
     root = tmp_path / "p"
     _write(root / ".claude-plugin" / "plugin.json", "{nope")

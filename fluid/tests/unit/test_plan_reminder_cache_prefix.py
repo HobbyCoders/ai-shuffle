@@ -420,3 +420,8 @@ def test_the_plan_check_matches_the_stored_revision_not_rendered_text() -> None:
     assert not _plan_in_view([summary], plan_text, "r2")
     # The plan a turn's own request carries counts, newer than any note.
     assert _plan_in_view([stored, request], plan_text, "r9")
+    # A harness note that is not a plan note (the output-limit continuation
+    # nudge) never decides, so the plan is not restated after every nudge.
+    nudge = Message(role="user", content=[Text("Your previous reply was cut off.")],
+                    provider_meta={HARNESS_NOTE_META_KEY: True})
+    assert _plan_in_view([stored, nudge], plan_text, "r2")

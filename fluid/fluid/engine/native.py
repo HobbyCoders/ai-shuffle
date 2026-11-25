@@ -996,7 +996,7 @@ def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) 
     is matched on its text.
     """
     for message in reversed(history):
-        if is_harness_note(message):
+        if is_harness_note(message) and PLAN_REVISION_META_KEY in message.provider_meta:
             return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
         if plan_note in message.text():
             return True
@@ -1563,6 +1563,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # Only one handoff runs at a time.
         self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
+        # The side model input ``_pending_summary`` was built from: a
+        # checkpoint that does not save is remembered against it.
+        self._pending_summary_source: str | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
         self._checkpoint_latched = False
@@ -3128,7 +3131,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 pass
         self._summary_task = None
+        self._clear_pending_checkpoint()
+
+    def _clear_pending_checkpoint(self) -> None:
+        """Drop the pending checkpoint and the input it was built from together."""
         self._pending_summary = None
+        self._pending_summary_source = None
 
     async def _build_checkpoint(self, sid: str, turn_id: str,
                                 region: tuple[str, str, str], *,
@@ -3205,7 +3213,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                     scale=self._summary_scale(nodes, measured), due_only=True,
                 )
                 if region is not None:
-                    self._pending_summary = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    built = await self._build_checkpoint(sid, turn_id, region, background=True)
+                    if built is None:
+                        self._compactor.reject_summary_region(region)
+                    else:
+                        self._pending_summary, self._pending_summary_source = built, region[2]
             except Exception as exc:
                 log.warning("checkpoint scheduling dropped (%s)", type(exc).__name__)
 
@@ -3220,7 +3232,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return None
         ids = {n.node_id for n in nodes}
         if pending[0] not in ids or pending[1] not in ids:
-            self._pending_summary = None  # fork/rewind: never install another path's summary
+            self._clear_pending_checkpoint()  # fork/rewind: never install another path's summary
             return None
         threshold = self._compactor._threshold(
             self._compactor.config.trigger_tokens, self.context_window,
@@ -3230,10 +3242,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         cold = turn_boundary and cache is not None and cache.cold_now
         if not (cold or batch_due or size >= threshold):
             return None
-        self._pending_summary = None
+        source = self._pending_summary_source
+        self._clear_pending_checkpoint()
         return self._compactor.apply_summary(
             nodes, pending, overhead_tokens=overhead,
             decision_reason="summary_cold" if cold else "summary_batch",
+            source=source,
         )
 
     async def _checkpoint_for_compaction(
@@ -3262,11 +3276,14 @@ class NativeLoop(BackgroundLifecycleMixin):
             region = self._compactor.summary_region(
                 nodes, context_window=self.context_window, scale=scale,
                 for_target=target is not None and self._compactor.estimate_view_tokens(nodes, overhead) > target,
+                retry_rejected=manual,
             )
             if region is None or self._interrupted.is_set():
                 return None
             pending = self._pending_summary
+            source = self._pending_summary_source
             if pending is None or pending[:2] != region[:2]:
+                source = region[2]
                 self._manual_summary_task = asyncio.create_task(self._build_checkpoint(sid, turn_id, region))
                 try:
                     pending = await self._manual_summary_task
@@ -3277,12 +3294,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     return None  # Stop cancelled the side call, not the ladder.
                 finally:
                     self._manual_summary_task = None
-            self._pending_summary = None
+            self._clear_pending_checkpoint()
             if pending is None:
+                self._compactor.reject_summary_region(region)
                 return None
             return self._compactor.apply_summary(
                 nodes, pending, overhead_tokens=overhead,
                 decision_reason="manual" if manual else "summary_batch",
+                source=source,
             )
         finally:
             if not manual:
@@ -4936,10 +4955,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # The model ran out of output budget mid-answer (reasoning-
                 # heavy models do this routinely). Ending the turn here would
                 # abandon the work, so ask it to pick up where it stopped.
+                # A harness note, never a turn start: compaction must keep
+                # the real request as this turn's first message rather than
+                # digest it as a finished turn behind the nudge.
                 continuations += 1
                 nudge = SessionNode(
                     node_id=new_id("node"), parent_id=parent.node_id,
-                    message=Message(role="user", content=[Text(_CONTINUE_NUDGE)]),
+                    message=Message(
+                        role="user", content=[Text(_CONTINUE_NUDGE)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
+                    ),
                 )
                 await self._append_node(sid, nudge)
                 parent = nudge

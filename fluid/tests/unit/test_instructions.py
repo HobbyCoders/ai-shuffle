@@ -386,6 +386,174 @@ def test_expand_imports_ignores_mid_word_at_signs(tmp_path) -> None:
     assert expand_imports(text, src) == text
 
 
+def test_repeated_imports_share_one_byte_budget(tmp_path) -> None:
+    # Review finding (context #4): every token re-read and inlined its file in
+    # full before the cap, so 200 references to a 50 KB file built 10 MB.
+    (tmp_path / "big.md").write_text("x" * 50_000, encoding="utf-8")
+    src = tmp_path / "AGENTS.md"
+    out = expand_imports("@big.md\n" * 200, src, max_bytes=120_000)
+    assert out.count("x") == 120_000
+    assert "is larger than" in out  # the import the budget cut says so
+    assert out.count("@big.md") >= 197  # past the budget, tokens stay literal
+
+
+def test_instruction_and_skill_reads_are_bounded(tmp_path, monkeypatch) -> None:
+    from fluid.context import instructions
+
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("RULES-START\n" + "é" * 2_000_000 + "\nEND", encoding="utf-8")
+    skill = proj / ".fluid" / "skills" / "huge"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: huge\ndescription: Big body.\n---\n" + "body " * 400_000, encoding="utf-8"
+    )
+    real = Path.read_text
+
+    def no_whole_reads(self, *args, **kwargs):
+        assert self.name not in {"AGENTS.md", "SKILL.md"}, f"whole read of {self}"
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_whole_reads)
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("RULES-START")
+    assert agents.content.endswith("\nEND") and len(agents.content) < 25_000  # the real tail
+    assert f"Read {proj / 'AGENTS.md'}" in agents.content  # the cut is named, not silent
+    [found] = [s for s in discover_skills(proj, include_global=False, include_builtin=False)]
+    assert (found.name, found.description, found.model_invocable) == ("huge", "Big body.", True)
+
+    # A multi-byte character cut by the budget is dropped, not a decode
+    # failure, and its byte still counts as read.
+    text, used, truncated = instructions._read_bounded(proj / "AGENTS.md", 13)
+    assert (text, used, truncated) == ("RULES-START\n", 13, True)
+
+
+def test_oversized_instruction_file_keeps_its_final_rule(tmp_path) -> None:
+    # Review finding: the byte cap made the "tail" the end of the first
+    # 96,000 bytes, so the last rule of a 100 KiB AGENTS.md was lost.
+    proj = _mk_project(tmp_path)
+    lines = [f"rule {i}: keep the build green." for i in range(3_400)]
+    (proj / "AGENTS.md").write_text("FIRST-RULE\n" + "\n".join(lines) + "\nFINAL-RULE: ship it.\n",
+                                    encoding="utf-8")
+    assert (proj / "AGENTS.md").stat().st_size > 100 * 1024
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("FIRST-RULE")
+    assert agents.content.rstrip().endswith("FINAL-RULE: ship it.")
+    assert "instruction file truncated" in agents.content and len(agents.content) < 25_000
+
+
+def test_head_and_tail_reads_never_split_a_character(tmp_path) -> None:
+    from fluid.context import instructions
+
+    path = tmp_path / "AGENTS.md"
+    # One line, so the tail starts inside a two-byte character.
+    path.write_bytes(("ab" + "é" * 60_000 + "Z-END").encode("utf-8"))
+    head, tail = instructions._read_head_tail(path, 1_001)
+    assert head == "ab" + "é" * 374  # 750 bytes: the next character would cross
+    assert tail == "é" * 122 + "Z-END"  # the last 250 bytes, less the cut byte
+
+
+def test_single_line_oversized_file_keeps_its_final_rule(tmp_path) -> None:
+    # Review finding: dropping the tail's partial first line lost the whole
+    # suffix of a one-line file that ends with a newline.
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("FIRST " + "x" * 120_000 + " FINAL-RULE: ship it.\n",
+                                    encoding="utf-8")
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("FIRST ")
+    assert agents.content.endswith("FINAL-RULE: ship it.\n")
+
+
+def test_head_and_tail_reads_stay_inside_the_byte_budget(tmp_path, monkeypatch) -> None:
+    from fluid.context import instructions
+
+    reads: dict[str, int] = {}
+    real_open = Path.open
+
+    class Counting:
+        def __init__(self, fh, name):
+            self.fh, self.name = fh, name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.fh.close()
+
+        def read(self, size=-1):
+            data = self.fh.read(size)
+            reads[self.name] = reads.get(self.name, 0) + len(data)
+            return data
+
+        def __getattr__(self, attr):
+            return getattr(self.fh, attr)
+
+    def counting_open(self, *args, **kwargs):
+        return Counting(real_open(self, *args, **kwargs), self.name)
+
+    proj = _mk_project(tmp_path)
+    (proj / "AGENTS.md").write_text("line\n" * 60_000, encoding="utf-8")
+    (proj / "small.md").write_text("a" * 1_000, encoding="utf-8")
+    monkeypatch.setattr(Path, "open", counting_open)
+    head, tail = instructions._read_head_tail(proj / "AGENTS.md", 1_000)
+    assert reads["AGENTS.md"] <= 1_000 and (len(head), len(tail)) == (750, 250)
+    assert instructions._read_head_tail(proj / "small.md", 1_000) == ("a" * 1_000, None)
+    assert reads["small.md"] == 1_000
+    reads.clear()
+    discover_instruction_files(proj, include_global=False)
+    assert reads["AGENTS.md"] <= instructions.INSTRUCTION_FILE_MAX_CHARS * 4
+
+
+def test_imports_in_the_kept_end_of_a_cut_file_stay_literal(tmp_path) -> None:
+    # Review finding: the detached tail began with a fresh fence state, so an
+    # ``@x.md`` inside a fence opened in the omitted middle was imported.
+    proj = _mk_project(tmp_path)
+    (proj / "head.md").write_text("HEAD-IMPORTED", encoding="utf-8")
+    (proj / "x.md").write_text("TAIL-IMPORTED", encoding="utf-8")
+    (proj / "AGENTS.md").write_text(
+        "@head.md\n" + "plain\n" * 20_000 + "```\n" + "plain\n" * 20_000
+        + "@x.md\n```\n@x.md\nEND\n", encoding="utf-8")
+    [agents] = discover_instruction_files(proj, include_global=False)
+    assert agents.content.startswith("HEAD-IMPORTED")  # the head still imports
+    assert "TAIL-IMPORTED" not in agents.content
+    assert agents.content.endswith("@x.md\n```\n@x.md\nEND\n")
+
+
+def test_import_budget_is_debited_by_bytes_read(tmp_path) -> None:
+    # Review finding: the budget charged decoded bytes. With one byte left, an
+    # import starting with a two-byte character decoded to nothing and left
+    # the budget unchanged, so every repeat was reread and cut again.
+    (tmp_path / "accent.md").write_text("é" * 10, encoding="utf-8")
+    src = tmp_path / "AGENTS.md"
+    out = expand_imports("@accent.md\n@accent.md\n@accent.md", src, max_bytes=1)
+    assert out.count("is larger than") == 1 and out.count("@accent.md") == 2
+    # Bytes that are not UTF-8 are read too: they cost, and their token stays.
+    (tmp_path / "bad.md").write_bytes(b"\xff\xfe" * 10)
+    (tmp_path / "good.md").write_text("ok", encoding="utf-8")
+    assert expand_imports("@bad.md\n@good.md", src, max_bytes=20) == "@bad.md\n@good.md"
+    assert expand_imports("@bad.md\n@good.md", src, max_bytes=22) == "@bad.md\nok"
+
+
+def test_skill_header_cut_by_the_discovery_read_is_not_offered_to_the_model(
+    tmp_path, caplog
+) -> None:
+    # Review finding: a header past the 64 KiB read was parsed as complete, so
+    # a later ``disable-model-invocation: true`` was lost and the skill was
+    # offered to the model.
+    proj = _mk_project(tmp_path)
+    skills = proj / ".fluid" / "skills"
+    (skills / "long").mkdir(parents=True)
+    (skills / "long" / "SKILL.md").write_text(
+        "---\nname: long\ndescription: " + "d" * 70_000
+        + "\ndisable-model-invocation: true\n---\nbody", encoding="utf-8")
+    (skills / "short").mkdir()
+    (skills / "short" / "SKILL.md").write_text(
+        "---\nname: short\ndescription: s\n---\n" + "b" * 70_000, encoding="utf-8")
+    found = {s.name: s.model_invocable
+             for s in discover_skills(proj, include_global=False, include_builtin=False)}
+    assert found == {"long": False, "short": True}
+    assert "frontmatter does not close" in caplog.text
+
+
 # ─── CLAUDE.local.md / AGENTS.override.md (CE3) ──────────────────────────────
 
 
