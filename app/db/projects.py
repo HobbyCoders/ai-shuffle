@@ -486,6 +486,13 @@ def get_all_project_session_counts() -> Dict[str, int]:
 #     that identity (that clone still hosts the chat). Chats bound only to a
 #     first-link alias are detached history and keep their binding.
 #
+#     Only a linked origin (``link_group_id``, e.g. a Git remote) proves the
+#     binding. A folder project's ``local:<id>`` identity is keyed by the row
+#     id, which a later project can reuse: the identity then still carries the
+#     earlier generation's detached chats (its first-link alias is revoked,
+#     or predates the provenance table). Removal fails closed there and keeps
+#     shared-id-only chats of an unlinked project, uncounted; it never guesses.
+#
 # Either way a chat another device executes (``owner_device_id`` set to it,
 # e.g. a mirror) is not this worker's to delete.
 
@@ -499,7 +506,9 @@ def _removal_binding(cursor, project_ids) -> Optional[Dict[str, Any]]:
         return None
     identities = set()
     for row in rows:
-        origin = _catalog_origin(row)
+        origin = row.get("link_group_id")
+        if not origin or origin.startswith("local:"):
+            continue  # a reusable folder identity proves nothing (see above)
         identity = _catalog_project_v2_id(cursor, origin)
         if identity and not _origin_claimed_locally(cursor, origin, removing):
             identities.add(identity)

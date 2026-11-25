@@ -1,9 +1,12 @@
 /** Copy and counts for deleting a project group (General tab). */
 
-/** How many of these projects are in `group`; assignments of projects no longer listed don't count. */
-export function groupMemberCount(assignments: Record<string, string> | undefined, group: string, projectIds: Iterable<string>): number {
-	const listed = new Set(projectIds);
-	return Object.entries(assignments ?? {}).filter(([id, name]) => name === group && listed.has(id)).length;
+/**
+ * How many assignments deleting `group` clears (``groups.deleteGroup``). The
+ * assignments are a synced preference, so this counts projects listed only on
+ * another worker too: the number matches what the delete ungroups.
+ */
+export function groupMemberCount(assignments: Record<string, string> | undefined, group: string): number {
+	return Object.values(assignments ?? {}).filter((name) => name === group).length;
 }
 
 /** "Delete the group "Work"? 3 projects become ungrouped. No project is removed." */

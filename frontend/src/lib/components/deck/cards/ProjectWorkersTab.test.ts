@@ -90,6 +90,41 @@ describe('Change repository', () => {
 	});
 });
 
+describe('Remove project and chats from a worker', () => {
+	const stale = response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready', { removal_chats: 0, removal_worktree_count: 0, removal_worktrees: [] })]);
+	const removeButton = () => screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement;
+
+	it('waits for a fresh count before it offers Remove, never showing the cached one', async () => {
+		let answer!: (value: ReturnType<typeof response>) => void;
+		vi.mocked(getProjectWorkers)
+			.mockResolvedValueOnce(stale)
+			.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
+		expect(screen.getByText('Counting the chats this removes…')).toBeTruthy();
+		expect(screen.queryByText(/It has no chats/)).toBeNull();
+		expect(removeButton().disabled).toBe(true);
+
+		// A chat was created on Tower since the cached read.
+		answer(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready', { removal_chats: 1, removal_worktree_count: 0, removal_worktrees: [] })]));
+		await screen.findByText(/Remove Demo from Tower and its 1 chat\?/);
+		expect(removeButton().disabled).toBe(false);
+	});
+
+	it('shows a failed refresh and keeps Remove disabled instead of using the cached count', async () => {
+		vi.mocked(getProjectWorkers)
+			.mockResolvedValueOnce(stale)
+			.mockRejectedValueOnce({ status: 502, detail: 'Tower did not answer' });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remove project and chats from Tower' }));
+		expect((await screen.findByRole('alert')).textContent).toContain('Tower did not answer');
+		expect(screen.queryByText(/It has no chats/)).toBeNull();
+		expect(removeButton().disabled).toBe(true);
+	});
+});
+
 describe('Remove from list', () => {
 	it('offers it only when no worker holds a copy, then hands the project back', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(response([

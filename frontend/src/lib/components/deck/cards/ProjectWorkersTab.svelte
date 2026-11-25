@@ -87,6 +87,13 @@
 	let busy = $state<Record<string, boolean>>({});
 	let editing = $state<{ installId: string; revision: string; folder: string; error: string | null; browsing: boolean } | null>(null);
 	let confirmingRemove = $state<string | null>(null);
+	/**
+	 * The open removal confirmation's own fresh read of that worker. Never the
+	 * cached detail: a chat created since would make its count wrong, so the
+	 * count stays hidden and Remove disabled until this answers.
+	 */
+	let removalCheck = $state<{ installId: string; detail: ProjectWorkerDetail | null; error: string | null } | null>(null);
+	let removalAsk = 0;
 	let githubHelp = $state<string | null>(null);
 	/** The "Change repository" form while it is open. */
 	let repoDraft = $state<{ url: string; keepUpstream: boolean; error: string | null } | null>(null);
@@ -165,7 +172,7 @@
 			lastSignature = '';
 			editing = null;
 			busy = {};
-			confirmingRemove = null;
+			cancelRemove();
 			repoDraft = null;
 			repoResult = null;
 			void load();
@@ -246,12 +253,36 @@
 		}
 	}
 
+	async function askRemove(w: ProjectWorkerDetail) {
+		const ask = ++removalAsk;
+		const installId = w.install_id;
+		confirmingRemove = installId;
+		removalCheck = { installId, detail: null, error: null };
+		try {
+			const res = await getProjectWorkers(projectRef);
+			if (ask !== removalAsk || destroyed) return;
+			const fresh = res.workers.find((x) => x.install_id === installId) ?? null;
+			removalCheck = fresh
+				? { installId, detail: fresh, error: null }
+				: { installId, detail: null, error: `${w.device_name} no longer lists this project.` };
+		} catch (e) {
+			if (ask !== removalAsk || destroyed) return;
+			removalCheck = { installId, detail: null, error: `Couldn't count the chats this removes on ${w.device_name}: ${errMessage(e, 'unknown error')}` };
+		}
+	}
+
+	function cancelRemove() {
+		removalAsk++;
+		confirmingRemove = null;
+		removalCheck = null;
+	}
+
 	async function remove(w: ProjectWorkerDetail) {
 		busy = { ...busy, [w.install_id]: true };
 		actionError = null;
 		try {
 			await removeProjectFromWorker(w.install_id, projectRef);
-			confirmingRemove = null;
+			cancelRemove();
 			if (w.is_self) await appData.loadProjectCatalog(performance.now());
 			onChanged?.();
 			void load();
@@ -264,7 +295,7 @@
 
 	function openFolderEditor(w: ProjectWorkerDetail) {
 		if (!w.folder_revision || !w.folder || !w.online || loadError) return;
-		confirmingRemove = null;
+		cancelRemove();
 		editing = { installId: w.install_id, revision: w.folder_revision, folder: w.folder, error: null, browsing: false };
 		void tick().then(() => {
 			const input = document.querySelector<HTMLInputElement>(`#${CSS.escape(`pw-card-${w.install_id}`)} [data-change-folder-input] input`);
@@ -453,17 +484,22 @@
 				{@const has = hasProject(w.state)}
 				{@const failed = w.state === 'failed'}
 				{@const action = failed ? errorAction(w.setup?.error_code, w.device_name) : null}
+				{@const check = confirmingRemove === w.install_id && removalCheck?.installId === w.install_id ? removalCheck : null}
+				{@const fresh = check?.detail ?? null}
 				<article id="pw-card-{w.install_id}" tabindex="-1" aria-label={w.device_name} data-worker-state={w.state}>
 					{#snippet statusDetail()}
 						{#if w.state === 'queued_offline'}<p class="project-muted">It sets up when {w.device_name} comes back online.</p>
 						{:else if w.state === 'unknown'}<p class="project-muted">{w.device_name} is online but didn't answer. It may still have this project.</p>
 						{:else if failed}<p class="project-error">{failureReason(w)}</p>{/if}
 					{/snippet}
-					{#snippet keptWorktrees()}
-						<details class="kept-worktrees" data-kept-worktrees>
-							<summary>Worktree folders that stay on disk on {w.device_name}</summary>
-							<ul>{#each w.removal_worktrees ?? [] as path (path)}<li class="st-mono">{path}</li>{/each}</ul>
-						</details>
+					{#snippet removalDetail()}
+						{#if check?.error}<p class="project-error" role="alert">{check.error}</p>
+						{:else if fresh?.removal_worktrees?.length}
+							<details class="kept-worktrees" data-kept-worktrees>
+								<summary>Worktree folders that stay on disk on {w.device_name}</summary>
+								<ul>{#each fresh.removal_worktrees as path (path)}<li class="st-mono">{path}</li>{/each}</ul>
+							</details>
+						{/if}
 					{/snippet}
 					<RowGroup title={w.device_name}>
 						<SettingRow label="Status" hint={[w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')} expanded={w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
@@ -514,8 +550,10 @@
 							</SettingRow>
 						{/if}
 						<SettingRow label="Actions" wrapHint={confirmingRemove === w.install_id}
-							hint={confirmingRemove === w.install_id ? removalConfirmText(projectName, w.device_name, { chats: w.removal_chats ?? null, worktrees: w.removal_worktree_count ?? null }) : undefined}
-							expanded={confirmingRemove === w.install_id && w.removal_worktrees?.length ? keptWorktrees : undefined}>
+							hint={confirmingRemove !== w.install_id ? undefined
+								: fresh ? removalConfirmText(projectName, w.device_name, { chats: fresh.removal_chats ?? null, worktrees: fresh.removal_worktree_count ?? null })
+								: check?.error ? `Remove ${projectName} from ${w.device_name}?` : 'Counting the chats this removes…'}
+							expanded={check?.error || fresh?.removal_worktrees?.length ? removalDetail : undefined}>
 							{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel</button>
 							{:else if has}
 								{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)} disabled={busy[w.install_id]}><MessageSquarePlus />New chat here</button>{/if}
@@ -523,8 +561,8 @@
 									<button id={`pw-change-${w.install_id}`} class="st-btn" disabled={!!editing || !w.online || !w.folder_revision || busy[w.install_id] || !!loadError} onclick={() => openFolderEditor(w)}>Change folder</button>
 								{/if}
 								{#if $isAdmin && !w.is_self && w.online && editing?.installId !== w.install_id}
-									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={() => (confirmingRemove = null)} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id]}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
-									{:else}<button class="st-btn danger" onclick={() => { confirmingRemove = w.install_id; void load(); }}>Remove project and chats from {w.device_name}</button>{/if}
+									{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={cancelRemove} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id] || !fresh}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
+									{:else}<button class="st-btn danger" onclick={() => askRemove(w)}>Remove project and chats from {w.device_name}</button>{/if}
 								{/if}
 							{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
 							{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>

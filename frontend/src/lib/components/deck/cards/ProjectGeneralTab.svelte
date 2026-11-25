@@ -143,7 +143,7 @@
 	function askDeleteCurrentGroup() {
 		const name = groups?.projects?.assignments?.[projectId];
 		if (!name) return;
-		pendingGroupDelete = { name, members: groupMemberCount(groups.projects.assignments, name, $projects.map(p => p.id)) };
+		pendingGroupDelete = { name, members: groupMemberCount(groups.projects.assignments, name) };
 	}
 
 	function confirmGroupDelete() {

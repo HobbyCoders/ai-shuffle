@@ -66,7 +66,23 @@ beforeEach(() => {
 });
 
 describe('appData.deleteProject', () => {
-	it('removes the project chats from sidebar state and resets an open deleted chat', async () => {
+	it('takes the chat list from the server, keeping another worker\'s chat of the same project', async () => {
+		// peer-legacy carries the same legacy project id but runs on another
+		// worker: the server keeps it, so the client must not drop or leave it.
+		const before = [...sessions, { id: 'peer-legacy', project_id: 'project-a' }];
+		const after = [before[2], before[3]];
+		let deleted = false;
+		mocks.delete.mockImplementation(async () => { deleted = true; });
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.startsWith('/sessions/cursor')) {
+				const items = deleted ? after : before;
+				return { items, total: items.length, next_cursor: null, next_cursor_id: null, has_more: false };
+			}
+			if (url === '/projects') return deleted ? [projects[1]] : projects;
+			if (url === '/cluster/projects') return { projects: [] };
+			return [];
+		});
+		mocks.activeState.sessionId = 'peer-legacy';
 		await appData.loadSessions();
 		await appData.loadProjects();
 
@@ -74,9 +90,9 @@ describe('appData.deleteProject', () => {
 
 		expect(mocks.delete).toHaveBeenCalledWith('/projects/project-a');
 		expect(appData.current.projects.map((project) => project.id)).toEqual(['project-b']);
-		expect(appData.current.sessions.map((session) => session.id)).toEqual(['session-c']);
-		expect(appData.current.sessionsTotal).toBe(1);
-		expect(mocks.newChat).toHaveBeenCalledOnce();
+		expect(appData.current.sessions.map((session) => session.id).sort()).toEqual(['peer-legacy', 'session-c']);
+		// Leaving a deleted open chat is the per-chat deletion broadcast's job.
+		expect(mocks.newChat).not.toHaveBeenCalled();
 		// The new compose is reconciled once the reloaded catalog is in.
 		expect(mocks.dropMissingProject).toHaveBeenCalled();
 	});

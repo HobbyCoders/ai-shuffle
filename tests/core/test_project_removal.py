@@ -95,6 +95,81 @@ async def test_shared_id_chat_stays_while_another_local_clone_claims_it(project,
     assert database.get_session("shared") is None
 
 
+def test_project_page_delete_route_removes_exactly_this_workers_chats(project, monkeypatch):
+    """``DELETE /api/v1/projects/{id}`` as the project page calls it, owner auth."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import projects as projects_api
+    from app.api.auth import require_admin
+
+    _, current, _ = project
+    monkeypatch.setattr(projects_api, "_announce_catalog_change", lambda: None)
+    database.create_session("legacy", "default", project_id="proj")
+    database.create_session("shared", "default", project_v2_id=current)
+    database.create_session("peer-legacy", "default", project_id="proj")
+    _set("peer-legacy", instance_id="other-worker")
+    database.create_session("peer", "default", project_v2_id=current)
+    _set("peer", instance_id="other-worker")
+
+    app = FastAPI()
+    app.include_router(projects_api.router)
+    app.dependency_overrides[require_admin] = lambda: "owner-token"
+    with TestClient(app) as client:
+        assert client.get("/api/v1/projects/proj/removal").json() == {
+            "project_id": "proj", "chats": 2, "worktrees": []}
+        assert client.delete("/api/v1/projects/proj").status_code == 204
+        assert client.delete("/api/v1/projects/proj").status_code == 404
+
+    assert database.get_session("legacy") is None and database.get_session("shared") is None
+    assert database.get_session("peer") is not None
+    assert database.get_session("peer-legacy")["project_id"] is None
+
+
+async def test_peer_remove_action_removes_exactly_this_workers_chats(project, monkeypatch):
+    """A peer's 'Remove project and chats from <worker>' reaches this worker as the
+    ``project-setup`` control action ``remove``; it uses the same removal core."""
+    from types import SimpleNamespace
+
+    from app.core import project_setup
+    from app.network import engine, git as network_git
+
+    me = SimpleNamespace(device_id="dev-me")
+    monkeypatch.setattr(engine, "context", lambda: me)
+    monkeypatch.setattr(engine, "_context", me)  # the chat delete's owner check reads it
+    # This worker's runner is device dev-me (as an enrolled worker sees itself).
+    monkeypatch.setattr(network_git, "device_id", lambda runner_id: "dev-me" if runner_id == ME else runner_id)
+    _, current, _ = project
+    database.create_session("legacy", "default", project_id="proj")
+    database.create_session("shared", "default", project_v2_id=current)
+    database.create_session("peer", "default", project_v2_id=current)
+    _set("peer", instance_id="other-worker")
+
+    status = await project_setup.handle_control({"action": "status", "project_v2_id": current}, "dev-requester")
+    assert status["detail"]["removal_chats"] == 2
+    assert (await project_setup.handle_control(
+        {"action": "remove", "project_v2_id": current}, "dev-requester"))["removed"]
+
+    assert database.get_session("legacy") is None and database.get_session("shared") is None
+    assert database.get_session("peer") is not None
+    assert database.get_project("proj") is None
+
+
+async def test_unlinked_folder_project_keeps_shared_id_only_chats(mock_db, tmp_path, monkeypatch):
+    # A folder project's local:<id> identity can be an earlier project's
+    # (same id reused), so a chat bound only by it is kept and not counted.
+    monkeypatch.setattr("app.core.browser_runtime.close_session", AsyncMock())
+    database.create_project("folder", "Folder", None, str(tmp_path))
+    local = projects_v2.get_project_v2_by_origin("local:folder")["id"]
+    database.create_session("legacy", "default", project_id="folder")
+    database.create_session("shared-only", "default", project_v2_id=local)
+
+    assert project_removal.preview(["folder"])["chats"] == 1
+    assert (await project_removal.remove_projects(["folder"], BackgroundTasks()))["chats_removed"] == 1
+    assert database.get_session("legacy") is None
+    assert database.get_session("shared-only")["project_v2_id"] == local
+
+
 async def test_chat_moved_after_the_plan_is_left_alone(project, monkeypatch):
     from app.db import projects
 

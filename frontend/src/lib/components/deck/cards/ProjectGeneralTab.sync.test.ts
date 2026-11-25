@@ -63,12 +63,14 @@ describe('project general remote fields', () => {
 	});
 	it('asks before deleting a group, naming it and how many projects become ungrouped', async () => {
 		list.set([{id:'project',name:'One',path:'/one'},{id:'other',name:'Two',path:'/two'},{id:'third',name:'Three',path:'/three'}]);
-		(groupsStore as unknown as Writable<any>).set({ projects: { groups: [{name:'Work',collapsed:true}], assignments: { project: 'Work', other: 'Work', third: 'Home' } } });
+		// The assignments are synced: 'on-peer' is listed only on another worker,
+		// and deleting the group clears it too, so it counts.
+		(groupsStore as unknown as Writable<any>).set({ projects: { groups: [{name:'Work',collapsed:true}], assignments: { project: 'Work', other: 'Work', third: 'Home', 'on-peer': 'Work' } } });
 		render(ProjectGeneralTab, {projectId:'project'});
 		await fireEvent.click(screen.getByRole('button', {name:'Delete group'}));
 		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
 		const dialog = await screen.findByRole('dialog');
-		expect(dialog.textContent).toContain('Delete the group "Work"? 2 projects become ungrouped.');
+		expect(dialog.textContent).toContain('Delete the group "Work"? 3 projects become ungrouped.');
 		await fireEvent.click(within(dialog).getAllByRole('button', {name:'Cancel'}).at(-1)!);
 		await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 		expect(groupsStore.deleteGroup).not.toHaveBeenCalled();
