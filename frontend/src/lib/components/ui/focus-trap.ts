@@ -5,7 +5,8 @@
  * into the node: the first element matching `initial` if given, else the first
  * focusable descendant, else the node itself. While mounted, Tab / Shift+Tab
  * wrap inside the node so keyboard focus cannot wander to the page behind the
- * modal. On destroy it returns focus to the opener if it is still in the page.
+ * modal. On destroy it returns focus to the opener if it is still in the page,
+ * unless `returnFocus` says the modal closed to open something else.
  *
  * Usage: `<div role="dialog" aria-modal="true" tabindex="-1" use:focusTrap>`
  */
@@ -24,6 +25,9 @@ const FOCUSABLE = [
 export interface FocusTrapOptions {
 	/** Selector (inside the node) for the element to focus first. */
 	initial?: string;
+	/** Asked on destroy: false when the modal closed to open something else
+	 *  (that view takes focus), so focus is not sent back to the opener. */
+	returnFocus?: () => boolean;
 }
 
 /** The summary that opens and closes `details`: its first `summary` child. */
@@ -79,6 +83,7 @@ export function wrapTabWithin(node: HTMLElement, event: KeyboardEvent) {
 export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
 	const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	let initial = options.initial;
+	let returnFocus = options.returnFocus;
 
 	function focusInitial() {
 		if (!node.isConnected || node.contains(document.activeElement)) return;
@@ -99,10 +104,11 @@ export function focusTrap(node: HTMLElement, options: FocusTrapOptions = {}) {
 	return {
 		update(next: FocusTrapOptions = {}) {
 			initial = next.initial;
+			returnFocus = next.returnFocus;
 		},
 		destroy() {
 			node.removeEventListener('keydown', onKeydown);
-			if (opener?.isConnected) opener.focus({ preventScroll: true });
+			if (opener?.isConnected && (returnFocus?.() ?? true)) opener.focus({ preventScroll: true });
 		}
 	};
 }

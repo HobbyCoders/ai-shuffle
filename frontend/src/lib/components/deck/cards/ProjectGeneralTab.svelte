@@ -1,29 +1,38 @@
 <script lang="ts">
-	/** Project identity, location and grouping, using Settings rows. */
+	/**
+	 * Project identity (Project settings): name, id, version control and where
+	 * its folders are. Each worker has its own folder, changed from that
+	 * worker's row; the group is the chip beside the project's name.
+	 */
 	import { tick, untrack } from 'svelte';
 	import { getGitStatus } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
 	import { appData, projects } from '$lib/stores/app-data.svelte';
-	import { groups as groupsStore } from '$lib/stores/groups.svelte';
-	import { FolderGit2, Check, Plus, Trash2, Loader2 } from 'lucide-svelte';
-	import { RowGroup, SettingRow, SelectField, InlineBanner } from '$lib/components/layout/view';
+	import { Check, Copy } from 'lucide-svelte';
+	import { RowGroup, SettingRow, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
-	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
-	import { groupDeleteMessage, groupMemberCount } from './project-groups';
+	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
+		/** Open this worker's row in the worker table; without it the folder is shown here. */
+		onOpenFolders?: () => void;
+		/**
+		 * No worker table can show this project (no overview row, or this worker's
+		 * Workers API is unavailable): its folder is changed here, through the
+		 * local update, which the server checks like the Workers endpoint.
+		 */
+		editFolderHere?: boolean;
+		selfName?: string;
 	}
 
-	let { projectId }: Props = $props();
+	let { projectId, onOpenFolders, editFolderHere = false, selfName = 'this worker' }: Props = $props();
 
 	// Get current project data
 	const project = $derived($projects.find(p => p.id === projectId));
-
-	// Groups data
-	const groups = $derived($groupsStore);
 
 	// Initialization belongs to project management, not the chat's Git header.
 	let canInitialize = $state(false);
@@ -50,16 +59,6 @@
 	let nameError = $state<string | null>(null);
 	let nameDirty = $derived(editName !== (project?.name ?? ''));
 
-	// Path editing state
-	let editPath = $state('');
-	let pathLoading = $state(false);
-	let pathError = $state<string | null>(null);
-	let pathDirty = $derived(editPath !== (project?.path ?? ''));
-
-	// Group creation state
-	let creatingGroup = $state(false);
-	let newGroupName = $state('');
-
 	let previousProject: typeof project;
 	let remoteChange = $state('');
 	$effect(() => {
@@ -67,12 +66,10 @@
 		untrack(() => {
 			const previous = previousProject;
 			const nameClean = !nameLoading && editName === (previous?.name ?? '');
-			const pathClean = !pathLoading && editPath === (previous?.path ?? '');
 			if (fresh) {
 				if (!previous || nameClean) editName = fresh.name;
-				if (!previous || pathClean) editPath = fresh.path;
-				if (previous && ((!nameClean && fresh.name !== previous.name) || (!pathClean && fresh.path !== previous.path))) remoteChange = 'This project changed elsewhere. Your unsaved fields are kept here.';
-			} else if (previous) remoteChange = 'This project was deleted elsewhere. Your unsaved fields are kept below.';
+				if (previous && !nameClean && fresh.name !== previous.name) remoteChange = 'This project changed elsewhere. Your unsaved name is kept here.';
+			} else if (previous) remoteChange = 'This project was deleted elsewhere. Your unsaved name is kept below.';
 			previousProject = fresh;
 		});
 	});
@@ -91,109 +88,103 @@
 		}
 	}
 
-	async function handleSavePath() {
-		if (!pathDirty || pathLoading || !editPath.trim()) return;
-		pathLoading = true;
-		pathError = null;
+	// Folder fallback (editFolderHere): the folder it opened on, so a change made
+	// elsewhere meanwhile blocks the save instead of being overwritten.
+	let folderDraft = $state<{ opened: string; folder: string; browsing: boolean; saving: boolean; error: string | null } | null>(null);
+	const folderStale = $derived(!!folderDraft && !!project && project.path !== folderDraft.opened);
+	let folderForm = $state<HTMLFormElement | null>(null);
+	function openFolderDraft() {
+		if (!project) return;
+		folderDraft = { opened: project.path, folder: project.path, browsing: false, saving: false, error: null };
+	}
+	async function saveFolderDraft() {
+		const draft = folderDraft;
+		if (!draft || !project || draft.saving || folderStale) return;
+		const next = draft.folder.trim();
+		if (!next || next === project.path) return;
+		draft.saving = true;
+		draft.error = null;
 		try {
-			await appData.updateProject(projectId, { path: editPath.trim() });
+			await appData.updateProject(projectId, { path: next });
+			if (folderDraft === draft) folderDraft = null;
 		} catch (e: unknown) {
-			const err = e as { detail?: string; message?: string };
-			pathError = err.detail || err.message || 'Failed to update path';
+			const err = e as { detail?: unknown; message?: string };
+			draft.error = typeof err.detail === 'string' ? err.detail : err.message || "Couldn't change the folder. Check the current folder before retrying.";
+			// Saving disabled the focused control; put the keyboard back on the field
+			// (inside Settings, so Escape still closes it) to correct the folder.
+			draft.saving = false;
+			await tick();
+			if (folderDraft === draft) folderForm?.querySelector<HTMLInputElement>('input')?.focus();
 		} finally {
-			pathLoading = false;
+			draft.saving = false;
 		}
 	}
 
-	// Group handlers
-	function handleGroupChange(v: string) {
-		if (v) {
-			groupsStore.assignToGroup('projects', projectId, v);
-		} else {
-			groupsStore.removeFromGroup('projects', projectId);
-		}
-	}
-
-	async function startGroupCreate() {
-		creatingGroup = true;
-		newGroupName = '';
-		await tick();
-		document.querySelector<HTMLInputElement>('input[aria-label="Group name"]')?.focus();
-	}
-
-	function confirmGroupCreate() {
-		const name = newGroupName.trim();
-		if (name) {
-			groupsStore.createGroup('projects', name);
-			groupsStore.assignToGroup('projects', projectId, name);
-		}
-		creatingGroup = false;
-		newGroupName = '';
-	}
-
-	function cancelGroupCreate() {
-		creatingGroup = false;
-		newGroupName = '';
-	}
-
-	// Deleting the group ungroups every project in it, so it asks first. "No group"
-	// in the dropdown takes just this project out.
-	let pendingGroupDelete = $state<{ name: string; members: number } | null>(null);
-
-	function askDeleteCurrentGroup() {
-		const name = groups?.projects?.assignments?.[projectId];
-		if (!name) return;
-		pendingGroupDelete = { name, members: groupMemberCount(groups.projects.assignments, name) };
-	}
-
-	function confirmGroupDelete() {
-		const pending = pendingGroupDelete;
-		pendingGroupDelete = null;
-		if (pending) groupsStore.deleteGroup('projects', pending.name);
+	let copied = $state(false);
+	async function copyId() {
+		if (!project) return;
+		try {
+			await navigator.clipboard.writeText(project.id);
+			copied = true;
+			setTimeout(() => (copied = false), 1500);
+		} catch { /* The id stays selectable. */ }
 	}
 </script>
-<ConfirmDialog open={!!pendingGroupDelete} title="Delete group" message={pendingGroupDelete ? groupDeleteMessage(pendingGroupDelete.name, pendingGroupDelete.members) : ''}
-	confirmLabel="Delete group" danger onConfirm={confirmGroupDelete} onCancel={() => (pendingGroupDelete = null)} />
 {#if showInitRepoModal}
 	<InitRepoModal open={showInitRepoModal} {projectId} projectName={project?.name ?? ''} onClose={() => (showInitRepoModal = false)} onInitialized={repositoryInitialized} />
 {/if}
 {#if remoteChange}<InlineBanner>{remoteChange}</InlineBanner>{/if}
 {#if project || remoteChange}
 	<RowGroup title="Identity">
-		{#if canInitialize}
-			<SettingRow label="Version control" hint="This folder is not a Git repository."><button class="st-btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></SettingRow>
-		{/if}
 		<SettingRow label={project ? 'Name' : 'Unsaved name'} hint="Display name shown across the app.">
 			<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSaveName(); }}>
-				<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveName(); } }} bind:value={editName} oninput={(value) => (editName = value)} placeholder="Project name" />
+				<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSaveName(); } }} bind:value={editName} oninput={(value) => (editName = value)} placeholder="Project name" label="Project name" />
 				{#if nameDirty && project}<button class="st-btn icon" disabled={nameLoading || !editName.trim()} title="Save name" aria-label="Save name"><Check /></button>{/if}
 			</form>
 			{#if nameError}<span class="project-error" role="alert">{nameError}</span>{/if}
 		</SettingRow>
-		{#if project}<SettingRow label="Project ID" hint="Unique identifier (read-only)."><span class="project-muted">{project.id}</span></SettingRow>{/if}
-		<SettingRow label={project ? 'Path' : 'Unsaved path'} wrapHint hint="Folder on this worker. Changing it does not move files. New chats and the next turn in chats without worktrees use the new folder. Keep the original checkout for any existing worktrees.">
-			{#snippet expanded()}
-				<form class="project-controls" onsubmit={(e) => { e.preventDefault(); handleSavePath(); }}>
-					<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleSavePath(); } }} bind:value={editPath} oninput={(value) => (editPath = value)} placeholder="Project path" mono pathDisplay width="full" label="Project path" />
-					{#if pathDirty && project}<button class="st-btn icon" disabled={pathLoading || !editPath.trim()} title="Save path" aria-label="Save path"><Check /></button>{/if}
-				</form>
-				{#if pathError}<span class="project-error" role="alert">{pathError}</span>{/if}
-			{/snippet}
-		</SettingRow>
 		{#if project}
-			<SettingRow label="Group" hint="Organize related projects together.">
-				<SelectField value={groups?.projects?.assignments?.[projectId] ?? ''} options={[{ value: '', label: 'No group' }, ...(groups?.projects?.groups ?? []).map(g => ({ value: g.name, label: g.name }))]} onchange={handleGroupChange} />
-				{#if creatingGroup}
-					<form class="project-controls" onsubmit={(e) => { e.preventDefault(); confirmGroupCreate(); }}>
-						<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); confirmGroupCreate(); } else if (e.key === 'Escape') { e.preventDefault(); cancelGroupCreate(); } }} bind:value={newGroupName} oninput={(v) => (newGroupName = v)} placeholder="Group name…" label="Group name" />
-						<button class="st-btn icon" title="Create" aria-label="Create"><Check /></button>
-						<button type="button" class="st-btn" onclick={cancelGroupCreate}>Cancel</button>
-					</form>
-				{:else}
-					<button class="st-btn icon" onclick={startGroupCreate} title="New group" aria-label="New group"><Plus /></button>
-					{#if groups?.projects?.assignments?.[projectId]}<button class="st-btn icon danger" onclick={askDeleteCurrentGroup} title={`Delete the group "${groups.projects.assignments[projectId]}"`} aria-label="Delete group"><Trash2 /></button>{/if}
-				{/if}
+			<SettingRow label="Project ID" hint={project.id} hintMono>
+				<button class="st-btn icon" onclick={copyId} title={copied ? 'Copied' : 'Copy project ID'} aria-label={copied ? 'Copied' : 'Copy project ID'}>{#if copied}<Check />{:else}<Copy />{/if}</button>
 			</SettingRow>
+		{/if}
+		{#if canInitialize}
+			<SettingRow label="Version control" hint="This folder is not a Git repository."><button class="st-btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></SettingRow>
+		{/if}
+		{#if project}
+			{#if onOpenFolders}
+				<SettingRow label="Folders" wrapHint hint="Each worker has its own. Change one from its row in Workers.">
+					<button class="st-btn" onclick={onOpenFolders}>Open {selfName}</button>
+				</SettingRow>
+			{:else if editFolderHere && $isAdmin}
+				<SettingRow label="Folder on {selfName}" hint={project.path} hintMono wrapHint>
+					{#if !folderDraft}<button class="st-btn" onclick={openFolderDraft}>Change folder</button>{/if}
+				</SettingRow>
+				{#if folderDraft}
+					{@const draft = folderDraft}
+					<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${selfName}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
+						{#snippet expanded()}
+							<form class="flex flex-col gap-2" data-local-folder-editor bind:this={folderForm} onsubmit={(e) => { e.preventDefault(); void saveFolderDraft(); }}>
+								<div class="project-controls">
+									<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${selfName}`} disabled={draft.saving || folderStale} />
+									<button type="button" class="st-btn" disabled={draft.saving || folderStale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>
+								</div>
+								{#if draft.browsing && !folderStale && !draft.saving}
+									<DirectoryBrowser selectedPath={draft.folder} onSelect={(path) => { draft.folder = path; draft.browsing = false; }} />
+								{/if}
+								{#if folderStale}<p class="project-error" role="alert">The folder changed elsewhere. Cancel and reopen to edit the current folder.</p>{/if}
+								{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
+								<div class="project-controls">
+									<button type="button" class="st-btn" disabled={draft.saving} onclick={() => (folderDraft = null)}>Cancel</button>
+									<button type="submit" class="st-btn primary" disabled={draft.saving || folderStale || !draft.folder.trim() || draft.folder.trim() === project.path}>{draft.saving ? 'Saving…' : 'Save folder'}</button>
+								</div>
+							</form>
+						{/snippet}
+					</SettingRow>
+				{/if}
+			{:else}
+				<SettingRow label="Folder on {selfName}" hint={project.path} hintMono wrapHint />
+			{/if}
 		{/if}
 	</RowGroup>
 {/if}

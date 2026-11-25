@@ -342,22 +342,20 @@ await runJourney({
    await workspace.getByRole('button',{name:'Projects',exact:true}).click();
    await page.getByRole('button',{name:'Open Dev sandbox',exact:true}).click();
    await page.getByRole('tab',{name:'Workers',exact:true}).click();
-   await page.locator('article[data-worker-state="ready"]').waitFor();
+   await page.locator('tr[data-worker-state="ready"], li[data-worker-state="ready"]').first().waitFor();
   },
   async act({page,mark}) {
-   await mark('ready worker status follows the standard row rhythm');
-   const article=page.locator('article[data-worker-state="ready"]').first();
-   const status=article.locator('.st-row').filter({has:page.getByText('Status',{exact:true})});
-   const folder=article.locator('.st-row').filter({has:page.getByText('Branch',{exact:true})});
-   const s=await status.boundingBox(),f=await folder.boundingBox();
-   expect(Math.abs(s.height-f.height)<1.1,'S4: ready Status has normal row height');
-   expect(!await article.locator('.st-rowx').count(),'S4: ready Status has no empty expansion');
+   await mark('each worker is one compact row');
+   const rows=page.locator('tr[data-worker-state], li[data-worker-state]');
+   const heights=await rows.evaluateAll(els=>els.map(el=>el.getBoundingClientRect().height));
+   expect(heights.length>0&&heights.every(h=>h>0&&h<=72),'S4: worker rows stay compact '+JSON.stringify(heights));
+   await mark('this worker\'s inspector carries its one removal');
+   await rows.filter({hasText:'This worker'}).first().locator('button[id^="pw-row-"]').click();
+   const card=page.locator('.pw-card');
+   await card.waitFor();
    await page.getByRole('button',{name:'Remove project and chats',exact:true}).waitFor();
    expect(await page.getByRole('button',{name:'Remove project and chats',exact:true}).count()===1,'S4: one removal for this worker');
-   expect(!await article.getByRole('button',{name:/^Remove project and chats from/}).count(),'S4: no duplicate self-worker removal');
-   const foot=await page.locator('.st-footnote').boundingBox();
-   const card=await article.locator('.st-card').boundingBox();
-   expect(Math.abs(foot.y-card.y-card.height-12)<1,'S4: footnote is 12px below its card');
+   expect(!await card.getByRole('button',{name:/^Remove project and chats from/}).count(),'S4: no duplicate self-worker removal');
   }
  }]
 });

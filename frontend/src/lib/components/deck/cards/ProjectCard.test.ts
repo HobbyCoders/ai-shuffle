@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { page } from '$app/state';
 import { writable, type Writable } from 'svelte/store';
@@ -26,15 +26,21 @@ vi.mock('$lib/api/git', () => ({ getGitStatus: vi.fn().mockResolvedValue({ is_gi
 vi.mock('$lib/components/git/InitRepoModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/stores/groups.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn() }) };
+ return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn(), removeFromGroup: vi.fn(), deleteGroup: vi.fn() }) };
 });
-vi.mock('./ProjectWorkersTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+// A stub that records its props, so a test can read the worker table's project and answer for it.
+vi.mock('./ProjectWorkersTab.svelte', async () => {
+ const Empty = (await import('$lib/test-stubs/EmptyRouteDependency.svelte')).default as unknown as (...args: unknown[]) => unknown;
+ return { default: vi.fn((...args: unknown[]) => Empty(...args)) };
+});
 vi.mock('./ProjectMcpTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectAgentsTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectHooksTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectMemoryTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+vi.mock('$lib/api/project-workers', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api/project-workers')>()), getProjectRemovalPreview: vi.fn(), changeProjectRepository: vi.fn() }));
 vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProjectCard from './ProjectCard.svelte';
+import ProjectWorkersTab from './ProjectWorkersTab.svelte';
 import { appData, projects } from '$lib/stores/app-data.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
@@ -53,25 +59,31 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('Projects master/detail', () => {
- it('keeps the path only in its full-width field and makes removal copy wrap', async () => {
-  const { container } = render(ProjectCard);
-  const path = await screen.findByPlaceholderText('Project path');
-  expect(container.querySelector('.st-dhs')?.textContent).not.toContain('/one');
-  expect(path.style.getPropertyValue('--st-text-width')).toBe('100%');
-  const removal = screen.getByText('Files stay on disk.', { exact: false }).closest('.st-row');
+ it('has no raw path box, puts the one danger zone in Project settings and offers New chat', async () => {
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect(screen.queryByPlaceholderText('Project path')).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Danger zone' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'New chat' })).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  expect(within(drawer).getAllByRole('heading', { name: 'Danger zone' })).toHaveLength(1);
+  expect(within(drawer).queryByPlaceholderText('Project path')).toBeNull();
+  const removal = within(drawer).getByText('Files stay on disk.', { exact: false }).closest('.st-row');
   expect(removal?.classList.contains('st-wrap-hint')).toBe(true);
  });
- it('discards A’s dirty name and path when switching to B, but preserves same-project refreshes', async () => {
+ it('discards A’s dirty name when switching to B, but preserves same-project refreshes', async () => {
   render(ProjectCard);
-  const name = await screen.findByPlaceholderText('Project name');
+  await fireEvent.click(await screen.findByRole('button', { name: 'Project settings' }));
+  const name = screen.getByPlaceholderText('Project name');
   await fireEvent.input(name, { target: { value: 'Unsaved A' } });
-  await fireEvent.input(screen.getByPlaceholderText('Project path'), { target: { value: '/unsaved-a' } });
   list.set([{ id: 'one', name: 'Refreshed A', path: '/refreshed-a' }, { id: 'two', name: 'Two', path: '/two' }]);
   await tick();
   expect(screen.getByDisplayValue('Unsaved A')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
+  expect(screen.queryByRole('dialog', { name: 'Project settings' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
   expect((screen.getByPlaceholderText('Project name') as HTMLInputElement).value).toBe('Two');
-  expect((screen.getByPlaceholderText('Project path') as HTMLInputElement).value).toBe('/two');
   await fireEvent.input(screen.getByPlaceholderText('Project name'), { target: { value: 'Saved B' } });
   await fireEvent.keyDown(screen.getByPlaceholderText('Project name'), { key: 'Enter' });
   expect(appData.updateProject).toHaveBeenCalledWith('two', { name: 'Saved B' });
@@ -105,24 +117,118 @@ describe('Projects master/detail', () => {
   list.set([{ id: 'two', name: 'Two', path: '/two' }]);
   expect(await screen.findByRole('heading', { level: 2, name: 'Two' })).toBeTruthy();
  });
- it('opens remote projects on Workers with disabled local tabs and here/all filtering', async () => {
+ it('opens remote projects on Workers, says how to set them up here, and keeps here/all filtering', async () => {
   supported.set(true);
-  overview.set([{ project_v2_id: 'remote', local_project_id: null, name: 'Remote', kind: 'git', remote: 'example/remote', workers: [
+  overview.set([{ project_v2_id: 'remote', local_project_id: null, name: 'Remote', kind: 'git', remote: 'github.com/example/remote', workers: [
    { install_id: 'self', device_name: 'Here', is_self: true, online: true, state: 'missing' },
    { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
   ] }]);
   render(ProjectCard);
   expect(await screen.findByRole('heading', { level: 2, name: 'Remote' })).toBeTruthy();
   expect(screen.getByRole('tab', { name: /^Workers/ }).getAttribute('aria-selected')).toBe('true');
-  expect(screen.queryByText('has it')).toBeNull();
-  expect(screen.queryByText('click to set up')).toBeNull();
-  expect(screen.queryByText('failed — open for why')).toBeNull();
-  expect((screen.getByRole('tab', { name: 'General' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole('tab', { name: /^Workers/ }).textContent).toContain('1 missing');
+  expect(screen.queryByRole('tab', { name: 'General' })).toBeNull();
+  // The Workers tab says it once (ProjectWorkersTab.test); Resources offers the setup too.
+  await fireEvent.click(screen.getByRole('tab', { name: 'Resources' }));
+  expect(screen.getByText(/Remote isn't on Here yet/)).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Set up here' }));
+  expect(screen.getByRole('tab', { name: /^Workers/ }).getAttribute('aria-selected')).toBe('true');
+  // The chat starts where the project is: Peer.
+  expect(screen.getByRole('button', { name: 'New chat on Peer' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Repository github.com/example/remote. Change it on all workers' })).toBeTruthy();
   expect(screen.queryByRole('heading', { name: 'Danger zone' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'On Here' }));
   expect(screen.queryByRole('button', { name: 'Open Remote (not on Here)' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'All workers' }));
   expect(screen.getByRole('button', { name: 'Open Remote (not on Here)' })).toBeTruthy();
+ });
+ it('offers Change repository for a Git project whose repository is not reported', async () => {
+  supported.set(true);
+  overview.set([{ project_v2_id: 'bare', local_project_id: null, name: 'Bare', kind: 'git', remote: null, workers: [
+   { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
+  ] }]);
+  render(ProjectCard);
+  const chip = await screen.findByRole('button', { name: 'Repository not reported. Set it on all workers' });
+  expect(chip.textContent).toContain('Repository not reported');
+  await fireEvent.click(chip);
+  const dialog = screen.getByRole('dialog', { name: 'Change repository on all workers' });
+  expect(dialog.textContent).toContain('None');
+ });
+ it('shows a local project the overview has not listed in the worker table by its local id', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect(screen.getByRole('tab', { name: /^Workers/ })).toBeTruthy();
+  const props = workersTab.mock.calls.at(-1)![1] as { projectRef: unknown };
+  expect(props.projectRef).toEqual({ project_id: 'one' });
+  // The one folder editor is the worker table's: Settings sends folder changes there.
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).queryByRole('button', { name: 'Change folder' })).toBeNull();
+ });
+ it('changes the folder in Project settings when this worker has no worker list for a local project', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  const props = workersTab.mock.calls.at(-1)![1] as { onUnavailable?: () => void };
+  props.onUnavailable?.();
+  await tick();
+  expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
+  await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/one-moved' } });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
+  expect(appData.updateProject).toHaveBeenCalledWith('one', { path: '/workspace/example/one-moved' });
+ });
+ it('changes a second local checkout of one origin in Project settings, never through the first one’s workers', async () => {
+  supported.set(true);
+  // One and Two are both clones of github.com/example/one on this worker; the
+  // overview lists the logical project once, under One.
+  overview.set([{ project_v2_id: 'pv2-one', local_project_id: 'one', name: 'One', kind: 'git', remote: 'github.com/example/one', workers: [
+   { install_id: 'self', device_name: 'Here', is_self: true, online: true, state: 'ready' }
+  ] }]);
+  vi.mocked(appData.updateProject).mockClear().mockResolvedValue(undefined as never);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect((workersTab.mock.calls.at(-1)![1] as { expectLocalId?: string | null }).expectLocalId).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
+  const props = workersTab.mock.calls.at(-1)![1] as { projectRef: unknown; expectLocalId?: string | null; onUnavailable?: () => void };
+  expect(props.projectRef).toEqual({ project_id: 'two' });
+  // The worker list must name Two; the stub answers as the real tab does for One's list.
+  expect(props.expectLocalId).toBe('two');
+  props.onUnavailable?.();
+  await tick();
+  expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
+  await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/two-moved' } });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
+  expect(appData.updateProject).toHaveBeenCalledWith('two', { path: '/workspace/example/two-moved' });
+  expect(appData.updateProject).not.toHaveBeenCalledWith('one', expect.anything());
+ });
+ it('changes the folder in Project settings when the overview is unavailable', async () => {
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).getByRole('button', { name: 'Change folder' })).toBeTruthy();
+ });
+ it('opens Change repository as one dialog for every worker', async () => {
+  supported.set(true);
+  overview.set([{ project_v2_id: 'remote', local_project_id: null, name: 'Remote', kind: 'git', remote: 'github.com/example/remote', workers: [
+   { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
+  ] }]);
+  render(ProjectCard);
+  await fireEvent.click(await screen.findByRole('button', { name: /^Repository github.com\/example\/remote/ }));
+  expect(screen.getByRole('dialog', { name: 'Change repository on all workers' })).toBeTruthy();
  });
  it('closes the detail of a project with no copy here once it leaves the list (a failed first clone)', async () => {
   supported.set(true); list.set([]);

@@ -20,3 +20,123 @@
 .kept-worktrees summary { cursor: pointer; }
 .kept-worktrees ul { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow-y: auto; }
 .kept-worktrees li { overflow-wrap: anywhere; font-size: 11.5px; }
+
+/* ── Project identity line: repository and group chips above the worker chips. ── */
+.project-idline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; min-width: 0; }
+/* The worker chips take their own line: a live setup label ("· cloning 40%")
+   grows and shrinks, and sharing the line would re-wrap it and move the tabs. */
+.project-idline > .wchips { flex-basis: 100%; }
+.project-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 8px; border: 1px solid var(--st-border); border-radius: var(--st-radius-sm); background: transparent; color: var(--st-mfg); font: inherit; font-size: 12.5px; cursor: pointer; }
+.project-chip.static { cursor: default; }
+.project-chip:not(.static):hover { color: var(--st-fg); background: var(--st-hover); }
+.project-chip:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 2px; }
+.project-chip :is(svg) { width: 14px; height: 14px; flex: 0 0 auto; }
+.project-chip-label { color: var(--st-mfg); }
+.project-chip-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--st-fg); }
+
+/* ── Popovers (group picker, "Start a chat on"). ── */
+.project-pop { z-index: 60; min-width: 220px; max-width: min(320px, calc(100vw - 16px)); padding: 6px; border: 1px solid var(--st-border); border-radius: var(--st-radius-md); background: var(--st-popover); color: var(--st-fg); box-shadow: var(--st-shadow); font-size: 13px; }
+/* The popover borrows .settings-shell for its tokens, not its page grid. */
+.settings-shell.project-pop { display: block; height: auto; container-type: normal; max-height: min(420px, calc(100vh - 16px)); overflow-y: auto; }
+.project-pop-title { padding: 6px 8px 4px; color: var(--st-mfg); font-size: 12px; overflow-wrap: anywhere; }
+.project-pop hr { margin: 6px 0; border: 0; border-top: 1px solid var(--st-line); }
+.project-pop-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 4px 8px; border: 0; border-radius: var(--st-radius-sm); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.project-pop-item:hover, .project-pop-item:focus-visible { background: var(--st-hover); outline: none; }
+.project-pop-item.danger { color: var(--st-destructive); }
+.project-pop-check { display: inline-flex; width: 16px; flex: 0 0 16px; }
+.project-pop-check :is(svg) { width: 14px; height: 14px; }
+.project-pop-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-pop-sub { color: var(--st-mfg); font-size: 12px; }
+.project-pop-form { display: flex; align-items: center; gap: 6px; padding: 4px; }
+
+/* "New chat" with its worker menu: one control in two halves. */
+.project-split { display: inline-flex; align-items: stretch; }
+.project-split > .st-btn:first-child:not(:last-child) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.project-split > .project-split-caret { margin-left: 1px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+/* Phone: the split goes full width under the name, so "New chat on <worker>"
+   never squeezes the name, repository and worker chips into a narrow column. */
+@media (max-width: 600px) {
+	.settings-shell .st-dh.phone-inline:has(> .st-dha .project-split) { grid-template-columns: minmax(0, 1fr); }
+	.settings-shell .st-dh.phone-inline > .st-dha:has(.project-split) { grid-column: 1 / -1; }
+	.settings-shell .st-dha .project-split { width: 100%; }
+	.settings-shell .st-dha .project-split > .st-btn:first-child { flex: 1; min-height: 44px; }
+	.settings-shell .st-dha .project-split > .project-split-caret { width: 48px; min-height: 44px; }
+}
+
+/* "Change repository on all workers". */
+.project-repo-form { display: flex; flex-direction: column; gap: 12px; }
+.project-repo-current { display: flex; flex-direction: column; gap: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.project-repo-upstream { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 13px; }
+.project-repo-result { margin: 0; font-size: 13px; }
+
+/* ── Worker table ── */
+.pw-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.pw-layout.inspecting { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); }
+.pw-table-wrap { min-width: 0; }
+.pw-table { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--st-border); border-radius: var(--st-radius); background: var(--st-card); font-size: 13px; table-layout: auto; }
+.pw-table th { padding: 8px 12px; border-bottom: 1px solid var(--st-line); color: var(--st-mfg); font-size: 12px; font-weight: 500; text-align: left; white-space: nowrap; }
+.pw-table td { padding: 10px 12px; border-bottom: 1px solid var(--st-line); vertical-align: middle; }
+.pw-table tbody tr:last-child td { border-bottom: 0; }
+.pw-table tbody tr { cursor: pointer; }
+.pw-table tbody tr:hover td { background: var(--st-hover); }
+.pw-table tbody tr.selected td { background: var(--st-accent); }
+.pw-table tbody tr:last-child td:first-child { border-bottom-left-radius: var(--st-radius); }
+.pw-table tbody tr:last-child td:last-child { border-bottom-right-radius: var(--st-radius); }
+.pw-row-btn { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--st-fg); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+.pw-row-btn:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 2px; border-radius: 2px; }
+.pw-row-name { overflow-wrap: anywhere; }
+.pw-row-sub { display: block; color: var(--st-mfg); font-size: 12px; }
+.pw-cell-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.pw-cell-folder { max-width: 0; width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--st-mfg); font-size: 12px; }
+.pw-cell-branch, .pw-cell-seen { color: var(--st-mfg); white-space: nowrap; }
+
+/* Status: a dot whose shape, not only its colour, tells the state, and the words beside it. */
+.pw-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pw-dot { display: inline-block; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--st-mfg); }
+.pw-status--ready .pw-dot { background: var(--st-success); }
+.pw-status--failed { color: var(--st-destructive); }
+.pw-status--failed .pw-dot { background: var(--st-destructive); border-radius: 2px; }
+.pw-status--missing .pw-dot, .pw-status--queued .pw-dot { background: transparent; border: 1.5px dashed var(--st-mfg); }
+.pw-status--busy .pw-dot { width: 10px; height: 10px; background: transparent; border: 2px solid var(--st-primary); border-right-color: transparent; animation: pw-spin 0.8s linear infinite; }
+.pw-status--offline, .pw-status--unknown { color: var(--st-mfg); }
+@keyframes pw-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pw-status--busy .pw-dot { animation: none; } }
+.pw-tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: var(--st-radius-sm); background: var(--st-muted); color: var(--st-mfg); font-size: 11px; font-weight: 500; vertical-align: 1px; }
+
+/* The selected worker's inspector, beside the table. */
+.pw-inspector { position: sticky; top: 8px; min-width: 0; padding: 12px 14px 4px; border: 1px solid var(--st-border); border-radius: var(--st-radius); background: var(--st-card); }
+.pw-inspector-head { display: flex; align-items: flex-start; gap: 10px; }
+.pw-inspector-head > svg { width: 18px; height: 18px; margin-top: 2px; color: var(--st-mfg); flex: 0 0 auto; }
+.pw-inspector-title { flex: 1; min-width: 0; }
+.pw-inspector-title h3 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.pw-inspector-title p { margin: 2px 0 0; }
+.pw-card:focus { outline: none; }
+.pw-card:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 2px; border-radius: var(--st-radius-sm); }
+.pw-inspector .project-progress, .project-sheet .project-progress { width: 100%; }
+
+/* Phone: workers (and resources) as a list of rows; a row opens its sheet. */
+.pw-list { margin: 0; padding: 0; list-style: none; border: 1px solid var(--st-border); border-radius: var(--st-radius); background: var(--st-card); overflow: hidden; }
+.pw-list li + li { border-top: 1px solid var(--st-line); }
+.pw-list-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 56px; padding: 10px 12px; border: 0; background: transparent; color: var(--st-fg); font: inherit; text-align: left; cursor: pointer; }
+.pw-list-row:active, .pw-list-row:hover { background: var(--st-hover); }
+.pw-list-row:focus-visible { outline: 2px solid var(--st-primary); outline-offset: -2px; }
+.pw-list-row > .pw-list-icon { width: 18px; height: 18px; color: var(--st-mfg); flex: 0 0 auto; }
+.pw-list-row > .pw-list-chev { width: 16px; height: 16px; color: var(--st-mfg); flex: 0 0 auto; }
+.pw-list-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.pw-list-name { font-weight: 500; overflow-wrap: anywhere; }
+.pw-list-sub { color: var(--st-mfg); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pw-list-row .pw-status { font-size: 12px; }
+
+/* ── Resources: a side nav beside the open resource (a drill-in list on a phone). ── */
+.pr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+.pr.with-nav { grid-template-columns: 180px minmax(0, 1fr); gap: 20px; }
+.pr-nav { position: sticky; top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.pr-nav button { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 10px; border: 0; border-radius: var(--st-radius-sm); background: transparent; color: var(--st-mfg); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.pr-nav button :is(svg) { width: 15px; height: 15px; }
+.pr-nav button:hover { background: var(--st-hover); color: var(--st-fg); }
+.pr-nav button[aria-current='page'] { background: var(--st-accent); color: var(--st-fg); font-weight: 500; }
+.pr-nav button:focus-visible { outline: 2px solid var(--st-primary); outline-offset: 2px; }
+.pr-main { min-width: 0; }
+.pr-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.pr-top h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.pr-back { justify-self: start; }

@@ -12,7 +12,7 @@ Only the owner can add, change or remove servers.
 
 ## Add a server
 
-1. Open **Settings → MCP servers** for a server every project can use. For a server only one project uses, open the project's **MCP Servers** tab instead.
+1. Open **Settings → MCP servers** for a server every project can use. For a server only one project uses, open the project's **Resources** tab and choose **MCP servers** instead.
 2. Choose **Add server**.
 3. Give it a name and pick its type:
    - **Command (stdio):** AI Shuffle runs a program on your worker, for example `npx -y @modelcontextprotocol/server-filesystem /workspace/docs`. Add any environment variables it needs, such as an access token.
@@ -79,7 +79,7 @@ An MCP server's tools are named `mcp__<server>__<tool>`, for example `mcp__githu
 
 This is separate from the device tools in the AI Shuffle Android app. Those ask you on the phone before each action. mobile-mcp does not: its tools act on the device directly.
 
-**Add it to one project.** On the project's **MCP Servers** tab, add a server just for you:
+**Add it to one project.** On the project's **Resources** tab, under **MCP servers**, add a server just for you:
 
 ```json
 {

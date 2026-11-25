@@ -4,20 +4,21 @@
 //
 // The dev instance is one worker, so the other workers and their states are
 // simulated in the page (`simulateWorkers`): the installs list gains three
-// peers (Studio, pop-os, an offline Laptop) and /projects/overview,
+// peers (Studio, Desktop, an offline Laptop) and /projects/overview,
 // /projects/workers, /projects/setup and its cancel answer from an in-page
-// model that moves a setup forward on every read. In the page, not
+// model that moves a setup forward on reads, at most one step per 0.7 s. In the page, not
 // page.route: the built app's service worker makes the requests page.route
 // would see (see withoutSavedAgentPick in lib/app.mjs).
 //
 // Cases:
 //   fail-open           an older worker (the overview answers 404): the plain
 //                       list it always was, no chips, no filter.
-//   chip-sets-up        the dashed pop-os chip on "Dev sandbox" starts a setup
-//                       there; the chip spins, then reads ready.
+//   chip-sets-up        the dashed Desktop chip on "Dev sandbox" opens that
+//                       worker's inspector, whose Set up starts a setup there;
+//                       the chip spins, then reads ready.
 //   remote-only-detail  "couch-cash" is on other workers only: still listed,
-//                       opens on the Workers tab with the local tabs disabled;
-//                       "Set up on all missing" sets it up here.
+//                       opens on the Workers tab and says it isn't here yet;
+//                       its one "Set up here" sets it up here.
 //   filter-before-overview  the overview answers late (it asks every online
 //                       peer): the worker filter is already above the list
 //                       when the Projects page shows, so the list does not
@@ -28,7 +29,7 @@
 //                       the same rule through a slow or failing registry, an
 //                       older worker, a worker with no projects of its own, a
 //                       revisit and stalled requests (#1210 review).
-//   new-chat-fails      a new chat on pop-os: the Runs-on row says "not set up
+//   new-chat-fails      a new chat on Desktop: the Runs-on row says "not set up
 //                       · set up" (selectable), offline Laptop is blocked; the
 //                       callout shows, Send reads "Set up & send", the setup
 //                       fails and the reason shows with the draft kept.
@@ -82,7 +83,7 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 			let selfId = null;
 			const peers = [
 				{ install_id: 'studio', device_name: 'Studio', online: true },
-				{ install_id: 'pop-os', device_name: 'pop-os', online: true },
+				{ install_id: 'Desktop', device_name: 'Desktop', online: true },
 				{ install_id: 'laptop', device_name: 'Laptop', online: false }
 			];
 			const workers = () => [
@@ -91,22 +92,28 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 			];
 			const P = [
 				{ id: 'pv2-sandbox', local: 'dev-sandbox', name: 'Dev sandbox', kind: 'git', remote: 'github.com/example/dev-sandbox',
-					st: { self: 'ready', studio: 'ready', 'pop-os': 'missing', laptop: 'offline_missing' } },
+					st: { self: 'ready', studio: 'ready', 'Desktop': 'missing', laptop: 'offline_missing' } },
 				{ id: 'pv2-couch', local: null, name: 'couch-cash', kind: 'git', remote: 'github.com/example/couch-cash',
-					st: { self: 'missing', studio: 'ready', 'pop-os': 'failed', laptop: 'offline_has' } }
+					st: { self: 'missing', studio: 'ready', 'Desktop': 'failed', laptop: 'offline_has' } }
 			];
 			if (noLocalProjects) for (const p of P) { p.local = null; p.st.self = 'missing'; }
-			const setup = { 'pv2-couch:pop-os': { op_id: 'op-0', status: 'error', progress: null, error_code: 'network', error: "pop-os couldn't reach the repository." } };
+			const setup = { 'pv2-couch:Desktop': { op_id: 'op-0', status: 'error', progress: null, error_code: 'network', error: "Desktop couldn't reach the repository." } };
 			let ops = 0;
 			window.__projectSetups = [];
 			const overviewGate = new Promise((resolve) => { window.__releaseOverview = resolve; });
 			const installsGate = new Promise((resolve) => { window.__releaseInstalls = resolve; });
 			const key = (id) => (id === selfId ? 'self' : id);
+			// A running setup moves at most one step per STEP_MS, however often the
+			// page reads (one action can read the overview and the list several times).
+			const STEP_MS = 700;
 			const advance = () => {
+				const now = Date.now();
 				for (const p of P) for (const id of Object.keys(p.st)) {
 					const s = setup[`${p.id}:${id}`];
 					if (!s || p.st[id] !== 'setting_up') continue;
-					if (s.status === 'queued') { s.status = 'running'; s.progress = 0; continue; }
+					if (s.status === 'queued') { s.status = 'running'; s.progress = 0; s.at = now; continue; }
+					if (now - (s.at ?? 0) < STEP_MS) continue;
+					s.at = now;
 					const fail = failOn[`${p.id}:${id === 'self' ? 'self' : id}`];
 					if (fail) { p.st[id] = 'failed'; Object.assign(s, { status: 'error', progress: null, error_code: fail[0], error: fail[1] }); continue; }
 					s.progress = Math.min(100, s.progress + 50);
@@ -165,6 +172,9 @@ async function simulateWorkers(page, { overview404 = false, failOn = {}, holdOve
 					const id = url.searchParams.get('project_v2_id');
 					const lid = url.searchParams.get('project_id');
 					const p = P.find((x) => x.id === id || (lid && x.local === lid));
+					// A local project the simulated overview leaves out (the seed's other
+					// project): this worker answers by its local id, as a real one does.
+					if (!p && lid) return original(input, init);
 					if (!p) return json({ detail: 'Project not found' }, 404);
 					return json({ project_v2_id: p.id, name: p.name, kind: p.kind, remote: p.remote, default_folder: p.name, workers: workers().map((w) => row(p, w, true)) });
 				}
@@ -252,8 +262,10 @@ await runJourney({
 				}
 				await projectRow(page, PROJECT).click();
 				await page.getByRole('heading', { level: 2, name: PROJECT, exact: true }).waitFor();
-				await mark('open Memory and create or edit project instructions');
-				await page.getByRole('tab', { name: 'Memory', exact: true }).click();
+				await mark('open Resources > Memory and create or edit project instructions');
+				await page.getByRole('tab', { name: 'Resources', exact: true }).click();
+				// A side nav on desktop, a drill-in list on a phone: both name the resource first.
+				await page.locator('[data-ui-project-resources]').getByRole('button', { name: /^Memory( |$)/ }).click();
 				const memory = page.getByRole('region', { name: 'Project memory', exact: true });
 				await memory.waitFor();
 				const create = memory.getByRole('button', { name: 'Create', exact: true });
@@ -309,13 +321,16 @@ await runJourney({
 				await chips.getByRole('button', { name: /^Studio: / }).waitFor();
 				if (!isPhone(variant)) expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
 
-				await mark('click the dashed pop-os chip');
-				await chips.getByRole('button', { name: `pop-os: not set up — set ${PROJECT} up on pop-os` }).click();
-				await chips.getByRole('button', { name: /^pop-os · cloning/ }).waitFor({ timeout: 10_000 });
+				await mark('the dashed Desktop chip opens its worker; Set up there');
+				await chips.getByRole('button', { name: /^Desktop\b/ }).click();
+				const card = page.locator('#pw-card-Desktop');
+				await card.waitFor();
+				await card.getByRole('button', { name: /^Set up / }).first().click();
+				await chips.getByRole('button', { name: /^Desktop · cloning/ }).waitFor({ timeout: 10_000 });
 				const started = await page.evaluate(() => window.__projectSetups.map((s) => s.install_id));
-				expect(started.length === 1 && started[0] === 'pop-os', `one setup started on pop-os, got ${JSON.stringify(started)}`);
+				expect(started.length === 1 && started[0] === 'Desktop', `one setup started on Desktop, got ${JSON.stringify(started)}`);
 				// The 2 s poll carries it to ready.
-				await chips.getByRole('button', { name: 'pop-os: pop-os has this project' }).waitFor({ timeout: 20_000 });
+				await chips.getByRole('button', { name: 'Desktop: Desktop has this project' }).waitFor({ timeout: 20_000 });
 				await page.waitForTimeout(1500);
 			}
 		},
@@ -364,13 +379,28 @@ await runJourney({
 				const workersTab = page.getByRole('tab', { name: /^Workers/ });
 				await workersTab.waitFor({ timeout: 20_000 });
 				expect((await workersTab.getAttribute('aria-selected')) === 'true', 'it opens on the Workers tab');
-				expect((await page.getByRole('tab', { name: 'General' }).getAttribute('aria-disabled')) === 'true', 'the local tabs are disabled');
+				await page.getByText(/^couch-cash isn't on .+ yet\./).first().waitFor();
 				await page.locator('[data-ui-project-workers="ready"]').waitFor({ timeout: 20_000 });
-				await page.getByRole('button', { name: 'Retry' }).waitFor();
+				if (isPhone(variant)) {
+					// The phone list has no row actions: Retry lives in the failed worker's sheet.
+					await mark('open the failed worker');
+					await page.locator('li[data-worker-state="failed"]').getByRole('button').click();
+					const sheet = page.getByRole('dialog', { name: 'Desktop' });
+					await sheet.getByRole('button', { name: 'Retry' }).waitFor();
+					await sheet.getByRole('button', { name: 'Close Desktop' }).click();
+					await sheet.waitFor({ state: 'detached' });
+				} else {
+					await page.locator('tr[data-worker-state="failed"]').getByRole('button', { name: 'Retry' }).waitFor();
+				}
 
-				await mark('Set up on all missing');
-				await page.getByRole('button', { name: 'Set up on all missing' }).click();
-				await page.locator('article[data-worker-state="ready"]', { has: page.getByText('This worker · Online', { exact: true }) }).waitFor({ timeout: 20_000 });
+				// The Workers tab says it once; with only this worker missing, its action is "Set up here".
+				expect(await page.getByText(/have this project yet/).count() === 0, 'no second "not here" callout');
+				await mark('Set up here');
+				await page.getByRole('button', { name: 'Set up here', exact: true }).click();
+				await page.locator('tr[data-worker-state="ready"], li[data-worker-state="ready"]').filter({ hasText: 'This worker' }).waitFor({ timeout: 20_000 });
+				await mark('Resources offers the setup while it is not here, and the resources once it is');
+				await page.getByRole('tab', { name: 'Resources', exact: true }).click();
+				await page.locator('[data-ui-project-resources]').waitFor();
 				await page.waitForTimeout(1500);
 			}
 		},
@@ -624,7 +654,7 @@ await runJourney({
 		{
 			name: 'new-chat-fails',
 			async setup(ctx) {
-				await simulateWorkers(ctx.page, { failOn: { 'pv2-sandbox:pop-os': ['network', "pop-os couldn't reach the repository."] } });
+				await simulateWorkers(ctx.page, { failOn: { 'pv2-sandbox:Desktop': ['network', "Desktop couldn't reach the repository."] } });
 				await openNewChat(ctx, { project: PROJECT });
 			},
 			async act({ page, mark }) {
@@ -634,12 +664,12 @@ await runJourney({
 					// With a project, Chat controls uses the runner chip's name for the same control.
 					await hero.getByRole('button', { name: /^(Runs on |Runner: )/ }).click();
 					const menu = page.getByRole('menu', { name: /^(Where this session runs|Runner selection)$/ });
-					const pop = menu.getByRole('menuitemradio', { name: 'pop-os not set up · set up' });
+					const pop = menu.getByRole('menuitemradio', { name: 'Desktop not set up · set up' });
 					await pop.waitFor({ timeout: 20_000 });
 					expect(!(await pop.isDisabled()), 'a worker without the project stays selectable');
 					expect(await menu.getByRole('menuitemradio', { name: 'Laptop offline' }).isDisabled(), 'an offline worker is blocked');
 
-					await mark('pick pop-os');
+					await mark('pick Desktop');
 					await pop.click();
 					await page.locator('[data-ui-setup="needed"]').waitFor({ state: 'attached', timeout: 20_000 });
 				});
@@ -651,7 +681,7 @@ await runJourney({
 				await mark('Set up & send');
 				await page.getByRole('button', { name: 'Set up & send' }).click();
 				await page.locator('[data-ui-setup="failed"]').waitFor({ timeout: 20_000 });
-				await page.getByText("pop-os couldn't reach the repository.").waitFor();
+				await page.getByText("Desktop couldn't reach the repository.").waitFor();
 				await waitChat(page, { surface: 'new' });
 				const kept = (await box.innerText()).trim();
 				expect(kept === text, `the draft is kept after a failed setup, got ${JSON.stringify(kept)}`);
