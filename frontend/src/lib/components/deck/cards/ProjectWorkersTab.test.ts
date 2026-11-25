@@ -24,7 +24,7 @@ vi.mock('$lib/api/project-workers', async (importOriginal) => ({
 	getProjectRemovalPreview: vi.fn()
 }));
 import ProjectWorkersTab from './ProjectWorkersTab.svelte';
-import { cancelProjectSetup, changeWorkerFolder, getProjectWorkers, startProjectSetup } from '$lib/api/project-workers';
+import { cancelProjectSetup, changeWorkerFolder, getProjectRemovalPreview, getProjectWorkers, startProjectSetup } from '$lib/api/project-workers';
 import { watchResources } from '$lib/services/watch-resources';
 
 const worker = (install_id: string, device_name: string, state: string, extra: Record<string, unknown> = {}) => ({
@@ -191,6 +191,47 @@ describe('Worker table', () => {
 		await fireEvent.click(within(list).getByText('Laptop').closest('button')!);
 		const sheet = await screen.findByRole('dialog', { name: 'Laptop' });
 		expect(within(sheet).getByRole('button', { name: 'Retry' })).toBeTruthy();
+	});
+
+	it('shows a failed Retry inside the phone sheet, not on the page behind its scrim', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
+		vi.mocked(startProjectSetup).mockRejectedValue({ status: 409, detail: 'Folder exists.' });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+
+		const list = await screen.findByRole('list', { name: 'Workers' });
+		await fireEvent.click(within(list).getByText('Laptop').closest('button')!);
+		const sheet = await screen.findByRole('dialog', { name: 'Laptop' });
+		await fireEvent.click(within(sheet).getByRole('button', { name: 'Retry' }));
+
+		expect(await within(sheet).findByText(/Couldn't start the setup on Laptop: Folder exists\./)).toBeTruthy();
+		expect(screen.getAllByText(/Couldn't start the setup on Laptop/)).toHaveLength(1);
+	});
+
+	it('keeps the page banner for a failure the page started (Set up on all missing)', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Home server', 'ready'), worker('spare', 'Spare', 'missing'), worker('desk', 'Desktop', 'missing')]));
+		vi.mocked(startProjectSetup).mockImplementation(async (_ref, opts) => {
+			if (opts.install_id === 'spare') throw { status: 502, detail: 'Spare did not answer' };
+			return { op_id: 'op-9', status: 'running' } as never;
+		});
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Set up on all missing' }));
+		const message = await screen.findByText(/Couldn't start the setup on Spare: Spare did not answer/);
+		expect(message.closest('[role="dialog"]')).toBeNull();
+	});
+});
+
+describe('Project settings asks for this worker’s removal', () => {
+	it('opens this worker’s inspector with its removal already counting, once', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]));
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		const onSelfRemovalAsked = vi.fn();
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true, onSelfRemovalAsked });
+
+		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
+		expect(await within(inspector).findByRole('button', { name: 'Remove' })).toBeTruthy();
+		expect(getProjectRemovalPreview).toHaveBeenCalledWith('demo');
+		expect(onSelfRemovalAsked).toHaveBeenCalledOnce();
 	});
 });
 

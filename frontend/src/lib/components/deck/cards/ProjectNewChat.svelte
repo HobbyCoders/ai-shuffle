@@ -72,7 +72,11 @@
 		open = !open;
 		if (!open) return;
 		await tick();
-		menu?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')?.focus();
+		// The first worker that can start a chat; with none, the first row (greyed
+		// rows stay focusable and say why), so the keyboard always lands in the menu.
+		const target = menu?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')
+			?? menu?.querySelector<HTMLElement>('[role="menuitem"]') ?? menu;
+		target?.focus();
 	}
 
 	function onWindowPointer(e: PointerEvent) {

@@ -1,6 +1,6 @@
 /** "New chat" on the project page: the default worker, and the menu of every worker. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openChat: vi.fn() } }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: { newChat: vi.fn(), setProject: vi.fn(), setDeviceIntent: vi.fn() } }));
 import ProjectNewChat, { defaultChatWorker } from './ProjectNewChat.svelte';
@@ -32,6 +32,20 @@ describe('ProjectNewChat', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Choose a worker' }));
 		const items = screen.getAllByRole('menuitem');
 		expect(items.map((i) => i.getAttribute('aria-disabled') === 'true')).toEqual([false, true, true]);
+	});
+
+	it('moves keyboard focus into the menu even when no worker can start a chat', async () => {
+		render(ProjectNewChat, { workers: [w('self', 'Home server', 'missing'), w('off', 'Laptop', 'offline_has', false)], kind: 'git', localProjectId: null, projectV2Id: 'pv2' });
+		const caret = screen.getByRole('button', { name: 'Choose a worker' });
+		caret.focus();
+		await fireEvent.click(caret);
+		const items = await screen.findAllByRole('menuitem');
+		expect(items.every((i) => i.getAttribute('aria-disabled') === 'true')).toBe(true);
+		await waitFor(() => expect(document.activeElement).toBe(items[0]));
+		// Arrow keys still walk the greyed rows, which say why they are unavailable.
+		await fireEvent.keyDown(items[0], { key: 'ArrowDown' });
+		expect(document.activeElement).toBe(items[1]);
+		expect(activeSession.newChat).not.toHaveBeenCalled();
 	});
 
 	it('is disabled until some worker has the project', () => {

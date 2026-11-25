@@ -372,7 +372,17 @@ await runJourney({
 				expect((await workersTab.getAttribute('aria-selected')) === 'true', 'it opens on the Workers tab');
 				await page.getByText(/^couch-cash isn't on .+ yet\./).first().waitFor();
 				await page.locator('[data-ui-project-workers="ready"]').waitFor({ timeout: 20_000 });
-				await page.getByRole('button', { name: 'Retry' }).waitFor();
+				if (isPhone(variant)) {
+					// The phone list has no row actions: Retry lives in the failed worker's sheet.
+					await mark('open the failed worker');
+					await page.locator('li[data-worker-state="failed"]').getByRole('button').click();
+					const sheet = page.getByRole('dialog', { name: 'Desktop' });
+					await sheet.getByRole('button', { name: 'Retry' }).waitFor();
+					await sheet.getByRole('button', { name: 'Close Desktop' }).click();
+					await sheet.waitFor({ state: 'detached' });
+				} else {
+					await page.locator('tr[data-worker-state="failed"]').getByRole('button', { name: 'Retry' }).waitFor();
+				}
 
 				// The Workers tab says it once; with only this worker missing, its action is "Set up here".
 				expect(await page.getByText(/have this project yet/).count() === 0, 'no second "not here" callout');

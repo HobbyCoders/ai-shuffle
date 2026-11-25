@@ -28,7 +28,11 @@ vi.mock('$lib/stores/groups.svelte', async () => {
  const { writable } = await import('svelte/store');
  return { groups: Object.assign(writable({ projects: { groups: [], assignments: {} } }), { createGroup: vi.fn(), assignToGroup: vi.fn(), removeFromGroup: vi.fn(), deleteGroup: vi.fn() }) };
 });
-vi.mock('./ProjectWorkersTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
+// A stub that records its props, so a test can read the worker table's project and answer for it.
+vi.mock('./ProjectWorkersTab.svelte', async () => {
+ const Empty = (await import('$lib/test-stubs/EmptyRouteDependency.svelte')).default as unknown as (...args: unknown[]) => unknown;
+ return { default: vi.fn((...args: unknown[]) => Empty(...args)) };
+});
 vi.mock('./ProjectMcpTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectAgentsTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('./ProjectHooksTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
@@ -36,6 +40,7 @@ vi.mock('./ProjectMemoryTab.svelte', () => import('$lib/test-stubs/EmptyRouteDep
 vi.mock('$lib/api/project-workers', async (importOriginal) => ({ ...(await importOriginal<typeof import('$lib/api/project-workers')>()), getProjectRemovalPreview: vi.fn(), changeProjectRepository: vi.fn() }));
 vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProjectCard from './ProjectCard.svelte';
+import ProjectWorkersTab from './ProjectWorkersTab.svelte';
 import { appData, projects } from '$lib/stores/app-data.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
@@ -136,6 +141,56 @@ describe('Projects master/detail', () => {
   expect(screen.queryByRole('button', { name: 'Open Remote (not on Here)' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'All workers' }));
   expect(screen.getByRole('button', { name: 'Open Remote (not on Here)' })).toBeTruthy();
+ });
+ it('offers Change repository for a Git project whose repository is not reported', async () => {
+  supported.set(true);
+  overview.set([{ project_v2_id: 'bare', local_project_id: null, name: 'Bare', kind: 'git', remote: null, workers: [
+   { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
+  ] }]);
+  render(ProjectCard);
+  const chip = await screen.findByRole('button', { name: 'Repository not reported. Set it on all workers' });
+  expect(chip.textContent).toContain('Repository not reported');
+  await fireEvent.click(chip);
+  const dialog = screen.getByRole('dialog', { name: 'Change repository on all workers' });
+  expect(dialog.textContent).toContain('None');
+ });
+ it('shows a local project the overview has not listed in the worker table by its local id', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect(screen.getByRole('tab', { name: /^Workers/ })).toBeTruthy();
+  const props = workersTab.mock.calls.at(-1)![1] as { projectRef: unknown };
+  expect(props.projectRef).toEqual({ project_id: 'one' });
+  // The one folder editor is the worker table's: Settings sends folder changes there.
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).queryByRole('button', { name: 'Change folder' })).toBeNull();
+ });
+ it('changes the folder in Project settings when this worker has no worker list for a local project', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  const props = workersTab.mock.calls.at(-1)![1] as { onUnavailable?: () => void };
+  props.onUnavailable?.();
+  await tick();
+  expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
+  await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/one-moved' } });
+  await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
+  expect(appData.updateProject).toHaveBeenCalledWith('one', { path: '/workspace/example/one-moved' });
+ });
+ it('changes the folder in Project settings when the overview is unavailable', async () => {
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).getByRole('button', { name: 'Change folder' })).toBeTruthy();
  });
  it('opens Change repository as one dialog for every worker', async () => {
   supported.set(true);

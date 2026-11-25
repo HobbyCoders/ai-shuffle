@@ -16,9 +16,9 @@
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
-	import type { ProjectKind, ProjectOverviewRow, ProjectWorker } from '$lib/api/project-workers';
+	import type { ProjectKind, ProjectOverviewRow, ProjectRef, ProjectWorker, ProjectWorkersResponse } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { heldByNoWorker, isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
+	import { hasProject, heldByNoWorker, isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
@@ -189,10 +189,33 @@
 	const selectedProject = $derived(selectedRow?.local);
 	/** The selected project is not on this worker (no local tabs). */
 	const remoteOnly = $derived(!!selectedRow && !selectedRow.localId);
-	const showWorkersTab = $derived(overviewOn && !!selectedRow?.projectV2Id);
+	/**
+	 * The worker table's project: its logical id, or (a project of this worker
+	 * the overview has not listed) its local id, so its folder still changes in
+	 * the one safe editor. When the Workers API has no answer for that local id
+	 * (an older worker), Project settings changes the folder instead.
+	 */
+	const workersRef = $derived.by((): ProjectRef | null => {
+		if (!overviewOn || !selectedRow) return null;
+		if (selectedRow.projectV2Id) return { project_v2_id: selectedRow.projectV2Id };
+		return selectedRow.localId ? { project_id: selectedRow.localId } : null;
+	});
+	let noWorkersFor = $state<string | null>(null);
+	const showWorkersTab = $derived(!!workersRef && noWorkersFor !== selectedRow?.key);
 	const detailMissing = $derived(selectedRow ? missingCount(selectedRow.workers) : 0);
 
-	const selfInstallId = $derived(selectedRow ? (selfWorker(selectedRow.workers)?.install_id ?? null) : null);
+	/** This worker's row as the worker table last read it (rows the overview has not listed have no workers). */
+	let tableSelf = $state<{ key: string; installId: string; has: boolean } | null>(null);
+	function tableLoaded(key: string, res: ProjectWorkersResponse) {
+		const self = res.workers.find((w) => w.is_self);
+		tableSelf = self ? { key, installId: self.install_id, has: hasProject(self.state) } : null;
+	}
+	const overviewSelf = $derived(selectedRow ? selfWorker(selectedRow.workers) : null);
+	const selfInstallId = $derived(overviewSelf?.install_id ?? (tableSelf && tableSelf.key === selectedRow?.key ? tableSelf.installId : null));
+	/** This worker's inspector can remove its copy (it holds the project, and the page has a worker table). */
+	const selfRowRemoves = $derived(showWorkersTab && !!selectedRow?.localId && !!selfInstallId
+		&& (overviewSelf ? hasProject(overviewSelf.state) : !!tableSelf?.has));
+	let askSelfRemoval = $state(false);
 	const orphaned = $derived(!!selectedRow && heldByNoWorker(selectedRow.workers));
 	const isGit = $derived(selectedRow?.kind === 'git' || (!!selectedRow?.remote && selectedRow.kind !== 'folder'));
 
@@ -207,6 +230,7 @@
 		resourceSection = null;
 		showSettings = false;
 		showRepoDialog = false;
+		askSelfRemoval = false;
 	}
 
 	function handleBack() {
@@ -221,6 +245,12 @@
 	function openSelf() {
 		activeTab = 'workers';
 		selectedInstallId = selfInstallId;
+	}
+
+	/** Settings' "Remove from <this worker>": its inspector opens with the removal asking. */
+	function removeSelf() {
+		openSelf();
+		askSelfRemoval = true;
 	}
 
 	function projectGone() {
@@ -298,12 +328,14 @@
 				tabs={detailTabs} tab={shownTab} onTabChange={(tab) => { activeTab = tab as DetailTab; }} phonePrimary="inline" phoneMenu={settingsButton}>
 				{#snippet subtitle()}
 					<span class="project-idline" data-ui-project-identity>
-						{#if isGit && row.remote}
+						{#if isGit}
+							<!-- Every Git project offers the change, a missing remote too (it takes a URL). -->
+							{@const repoLabel = row.remote || 'Repository not reported'}
 							{#if $isAdmin && ref}
-								<button type="button" class="project-chip" aria-label="Repository {row.remote}. Change it on all workers" title="Change the repository on all workers" onclick={() => (showRepoDialog = true)}>
-									<GitBranch aria-hidden="true" /><span class="project-chip-value st-mono">{row.remote}</span>
+								<button type="button" class="project-chip" aria-label={row.remote ? `Repository ${row.remote}. Change it on all workers` : 'Repository not reported. Set it on all workers'} title="Change the repository on all workers" onclick={() => (showRepoDialog = true)}>
+									<GitBranch aria-hidden="true" /><span class="project-chip-value" class:st-mono={!!row.remote}>{repoLabel}</span>
 								</button>
-							{:else}<span class="project-chip static"><GitBranch aria-hidden="true" /><span class="project-chip-value st-mono">{row.remote}</span></span>{/if}
+							{:else}<span class="project-chip static"><GitBranch aria-hidden="true" /><span class="project-chip-value" class:st-mono={!!row.remote}>{repoLabel}</span></span>{/if}
 						{/if}
 						{#if selectedProject}<ProjectGroupChip projectId={selectedProject.id} projectName={row.name} />{/if}
 						{#if row.workers.length}<ProjectWorkerChips workers={row.workers} kind={row.kind} projectName={row.name}
@@ -318,8 +350,12 @@
 					{#if row.localId && !liveRow}<InlineBanner>This project was deleted elsewhere. Any unsaved fields remain available in Project settings until you leave.</InlineBanner>{/if}
 				{/snippet}
 				{#key row.key}
-				{#if shownTab === 'workers' && row.projectV2Id}
-					<ProjectWorkersTab projectRef={{ project_v2_id: row.projectV2Id }} projectName={row.name} localProjectId={row.localId} {stacked} bind:selectedInstallId onChanged={() => void loadProjectsOverview()} />
+				{#if shownTab === 'workers' && workersRef}
+					{@const key = row.key}
+					<ProjectWorkersTab projectRef={workersRef} projectName={row.name} localProjectId={row.localId} {stacked} bind:selectedInstallId
+						onChanged={() => void loadProjectsOverview()} onLoaded={(res) => tableLoaded(key, res)}
+						onUnavailable={row.projectV2Id ? undefined : () => { noWorkersFor = key; }}
+						{askSelfRemoval} onSelfRemovalAsked={() => { askSelfRemoval = false; }} />
 				{:else}
 					<ProjectResourcesTab projectId={selectedProject?.id ?? null} projectName={row.name} {selfName} {stacked} bind:section={resourceSection} onSetUpHere={showWorkersTab && selfInstallId ? openSelf : undefined} />
 				{/if}
@@ -327,7 +363,8 @@
 			</DetailPane>
 			{#if showSettings}
 				<ProjectSettingsDrawer projectName={row.name} localProjectId={selectedProject?.id ?? null} projectRef={ref} kind={row.kind} {selfName} {orphaned}
-					onOpenSelf={showWorkersTab && selfInstallId ? openSelf : undefined} onRemoved={projectGone} onClose={() => (showSettings = false)} />
+					workerTable={showWorkersTab} onOpenSelf={showWorkersTab && selfInstallId ? openSelf : undefined}
+					onRemoveSelf={selfRowRemoves ? removeSelf : undefined} onRemoved={projectGone} onClose={() => (showSettings = false)} />
 			{/if}
 			{#if showRepoDialog && ref}
 				<ProjectRepositoryDialog projectRef={ref} remote={row.remote} onClose={() => (showRepoDialog = false)} onChanged={() => void loadProjectsOverview()} />

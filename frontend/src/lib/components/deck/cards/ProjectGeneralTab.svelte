@@ -12,16 +12,24 @@
 	import { Check, Copy } from 'lucide-svelte';
 	import { RowGroup, SettingRow, InlineBanner } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
+	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
+	import { isAdmin } from '$lib/stores/auth.svelte';
 	import './project-tabs.css';
 
 	interface Props {
 		projectId: string;
 		/** Open this worker's row in the worker table; without it the folder is shown here. */
 		onOpenFolders?: () => void;
+		/**
+		 * No worker table can show this project (no overview row, or this worker's
+		 * Workers API is unavailable): its folder is changed here, through the
+		 * local update, which the server checks like the Workers endpoint.
+		 */
+		editFolderHere?: boolean;
 		selfName?: string;
 	}
 
-	let { projectId, onOpenFolders, selfName = 'this worker' }: Props = $props();
+	let { projectId, onOpenFolders, editFolderHere = false, selfName = 'this worker' }: Props = $props();
 
 	// Get current project data
 	const project = $derived($projects.find(p => p.id === projectId));
@@ -80,6 +88,32 @@
 		}
 	}
 
+	// Folder fallback (editFolderHere): the folder it opened on, so a change made
+	// elsewhere meanwhile blocks the save instead of being overwritten.
+	let folderDraft = $state<{ opened: string; folder: string; browsing: boolean; saving: boolean; error: string | null } | null>(null);
+	const folderStale = $derived(!!folderDraft && !!project && project.path !== folderDraft.opened);
+	function openFolderDraft() {
+		if (!project) return;
+		folderDraft = { opened: project.path, folder: project.path, browsing: false, saving: false, error: null };
+	}
+	async function saveFolderDraft() {
+		const draft = folderDraft;
+		if (!draft || !project || draft.saving || folderStale) return;
+		const next = draft.folder.trim();
+		if (!next || next === project.path) return;
+		draft.saving = true;
+		draft.error = null;
+		try {
+			await appData.updateProject(projectId, { path: next });
+			if (folderDraft === draft) folderDraft = null;
+		} catch (e: unknown) {
+			const err = e as { detail?: unknown; message?: string };
+			draft.error = typeof err.detail === 'string' ? err.detail : err.message || "Couldn't change the folder. Check the current folder before retrying.";
+		} finally {
+			draft.saving = false;
+		}
+	}
+
 	let copied = $state(false);
 	async function copyId() {
 		if (!project) return;
@@ -116,6 +150,32 @@
 				<SettingRow label="Folders" wrapHint hint="Each worker has its own. Change one from its row in Workers.">
 					<button class="st-btn" onclick={onOpenFolders}>Open {selfName}</button>
 				</SettingRow>
+			{:else if editFolderHere && $isAdmin}
+				<SettingRow label="Folder on {selfName}" hint={project.path} hintMono wrapHint>
+					{#if !folderDraft}<button class="st-btn" onclick={openFolderDraft}>Change folder</button>{/if}
+				</SettingRow>
+				{#if folderDraft}
+					{@const draft = folderDraft}
+					<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${selfName}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
+						{#snippet expanded()}
+							<form class="flex flex-col gap-2" data-local-folder-editor onsubmit={(e) => { e.preventDefault(); void saveFolderDraft(); }}>
+								<div class="project-controls">
+									<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${selfName}`} disabled={draft.saving || folderStale} />
+									<button type="button" class="st-btn" disabled={draft.saving || folderStale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>
+								</div>
+								{#if draft.browsing && !folderStale && !draft.saving}
+									<DirectoryBrowser selectedPath={draft.folder} onSelect={(path) => { draft.folder = path; draft.browsing = false; }} />
+								{/if}
+								{#if folderStale}<p class="project-error" role="alert">The folder changed elsewhere. Cancel and reopen to edit the current folder.</p>{/if}
+								{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
+								<div class="project-controls">
+									<button type="button" class="st-btn" disabled={draft.saving} onclick={() => (folderDraft = null)}>Cancel</button>
+									<button type="submit" class="st-btn primary" disabled={draft.saving || folderStale || !draft.folder.trim() || draft.folder.trim() === project.path}>{draft.saving ? 'Saving…' : 'Save folder'}</button>
+								</div>
+							</form>
+						{/snippet}
+					</SettingRow>
+				{/if}
 			{:else}
 				<SettingRow label="Folder on {selfName}" hint={project.path} hintMono wrapHint />
 			{/if}

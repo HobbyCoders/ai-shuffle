@@ -37,6 +37,7 @@
 		cancelProjectSetup,
 		changeWorkerFolder,
 		getProjectWorkers,
+		isUnsupported,
 		removeProjectFromWorker,
 		startProjectSetup,
 		type ProjectRef,
@@ -72,14 +73,29 @@
 		stacked?: boolean;
 		/** The project's workers changed (a setup started, finished or was removed). */
 		onChanged?: () => void;
+		/** Each answer of the worker list (the parent learns this worker's row from it). */
+		onLoaded?: (res: ProjectWorkersResponse) => void;
+		/** The first read found no worker list for this project (an older worker, or no shared identity yet). */
+		onUnavailable?: () => void;
+		/** Project settings sent the owner here: open this worker's removal confirmation in its inspector. */
+		askSelfRemoval?: boolean;
+		/** The request above was taken (so a later remount does not ask again). */
+		onSelfRemovalAsked?: () => void;
 	}
 
-	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), stacked = false, onChanged }: Props = $props();
+	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), stacked = false, onChanged, onLoaded, onUnavailable, askSelfRemoval = false, onSelfRemovalAsked }: Props = $props();
 
 	let data = $state<ProjectWorkersResponse | null>(null);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
-	let actionError = $state<string | null>(null);
+	/**
+	 * The last action's failure. One started from a worker's inspector names that
+	 * worker and shows there (on a phone the page banner sits behind its sheet);
+	 * one started from the page (Set up on all missing) has no worker and shows on the page.
+	 */
+	let actionError = $state<{ installId: string | null; message: string } | null>(null);
+	/** Project settings sent the owner to this worker's removal: its confirmation opens at once. */
+	let askLocal = $state(false);
 	/** Folder field per worker (seeded from the suggestion, then the owner's edits). */
 	let folders = $state<Record<string, string>>({});
 	/** Workers whose inspector is in "use a folder already there" mode. */
@@ -128,6 +144,7 @@
 			const selfArrived = !!data && selfWas !== 'ready' && selfNow === 'ready';
 			data = res;
 			loadError = null;
+			onLoaded?.(res);
 			if (selfArrived) void appData.loadProjectCatalog(performance.now());
 			// Keep the list/hero chips in step with what this tab sees.
 			const signature = res.workers.map((w) => `${w.install_id}:${w.state}:${w.setup?.status ?? ''}`).join('|');
@@ -142,6 +159,8 @@
 			folders = next;
 		} catch (e) {
 			if (mine !== seq || destroyed) return;
+			// No list at all for this project: the parent offers its own fallback instead.
+			if (!data && onUnavailable && isUnsupported(e)) { onUnavailable(); return; }
 			const err = e as { detail?: string; message?: string };
 			loadError = err.detail || err.message || "Couldn't load this project's workers.";
 		} finally {
@@ -202,10 +221,26 @@
 		});
 	});
 
+	// Settings' "Remove from <this worker>": once the list is here, open this
+	// worker's inspector with its removal confirmation already asking.
+	$effect(() => {
+		if (!askSelfRemoval || !data) return;
+		const self = data.workers.find((w) => w.is_self);
+		untrack(() => {
+			onSelfRemovalAsked?.();
+			if (!self) return;
+			editing = null;
+			cancelRemove();
+			selectedInstallId = self.install_id;
+			askLocal = true;
+		});
+	});
+
 	function select(id: string | null) {
 		if (id === selectedInstallId) return;
 		const previous = selectedInstallId;
 		editing = null;
+		askLocal = false;
 		cancelRemove();
 		selectedInstallId = id;
 		// Closing the inspector hands focus back to the row that opened it.
@@ -217,7 +252,12 @@
 		return typeof err.detail === 'string' ? err.detail : err.message || fallback;
 	}
 
-	async function setUp(w: ProjectWorkerDetail, mode: 'auto' | 'adopt' = 'auto') {
+	/** Record a failed action: on its worker's inspector, or on the page when the page started it. */
+	function failed(installId: string | null, message: string) {
+		actionError = { installId, message };
+	}
+
+	async function setUp(w: ProjectWorkerDetail, mode: 'auto' | 'adopt' = 'auto', fromPage = false) {
 		busy = { ...busy, [w.install_id]: true };
 		actionError = null;
 		try {
@@ -234,14 +274,14 @@
 			onChanged?.();
 			void load();
 		} catch (e) {
-			actionError = `Couldn't start the setup on ${w.device_name}: ${errMessage(e, 'unknown error')}`;
+			failed(fromPage ? null : w.install_id, `Couldn't start the setup on ${w.device_name}: ${errMessage(e, 'unknown error')}`);
 		} finally {
 			busy = { ...busy, [w.install_id]: false };
 		}
 	}
 
 	async function setUpAllMissing() {
-		await Promise.all(missingOnline.map((w) => setUp(w)));
+		await Promise.all(missingOnline.map((w) => setUp(w, 'auto', true)));
 	}
 
 	async function cancel(w: ProjectWorkerDetail) {
@@ -253,7 +293,7 @@
 			await cancelProjectSetup(opId);
 		} catch (e) {
 			// 409: it already finished; the reload shows how.
-			if ((e as { status?: number }).status !== 409) actionError = errMessage(e, "Couldn't cancel it.");
+			if ((e as { status?: number }).status !== 409) failed(w.install_id, `Couldn't cancel it on ${w.device_name}: ${errMessage(e, 'unknown error')}`);
 		} finally {
 			busy = { ...busy, [w.install_id]: false };
 			onChanged?.();
@@ -294,7 +334,7 @@
 			onChanged?.();
 			void load();
 		} catch (e) {
-			actionError = `Couldn't remove it from ${w.device_name}: ${errMessage(e, 'unknown error')}`;
+			failed(w.install_id, `Couldn't remove it from ${w.device_name}: ${errMessage(e, 'unknown error')}`);
 		} finally {
 			busy = { ...busy, [w.install_id]: false };
 		}
@@ -454,6 +494,9 @@
 				</details>
 			{/if}
 		{/snippet}
+		{#if actionError && actionError.installId === w.install_id}
+			<InlineBanner>{actionError.message}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>
+		{/if}
 		<RowGroup title="Status">
 			<SettingRow label={running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}
 				hint={presence(w)} wrapHint expanded={running || w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
@@ -521,7 +564,7 @@
 		{#if has && $isAdmin && editing?.installId !== w.install_id && (w.is_self ? !!localProjectId : w.online)}
 			<RowGroup title="Remove">
 				{#if w.is_self && localProjectId}
-					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} onRemoved={localRemoved} />
+					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onRemoved={localRemoved} />
 				{:else}
 					<SettingRow label="Remove project" wrapHint
 						hint={confirmingRemove !== w.install_id ? `Removes ${projectName} and its chats from ${w.device_name}. Files stay on disk.`
@@ -542,7 +585,8 @@
 	{:else if loadError && !data}
 		<InlineBanner>{loadError}{#snippet actions()}<button class="st-btn" onclick={() => { loading = true; void load(); }}>Try again</button>{/snippet}</InlineBanner>
 	{:else if data}
-		{#if actionError}<InlineBanner>{actionError}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
+		<!-- A worker's own failure shows in its open inspector (on a phone the page sits behind its sheet). -->
+		{#if actionError && !(actionError.installId && actionError.installId === selected?.install_id)}<InlineBanner>{actionError.message}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 		{#if $isAdmin && orphaned}
 			<InlineBanner tone="info">No worker has this project any more. You can take it off the Projects list from Project settings; its chats keep it and nothing on disk is touched.</InlineBanner>
 		{/if}

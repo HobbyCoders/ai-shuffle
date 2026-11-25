@@ -24,14 +24,21 @@
 		selfName: string;
 		/** No worker holds a copy any more. */
 		orphaned: boolean;
+		/** A worker table shows this project; without one, this worker's folder is changed here. */
+		workerTable?: boolean;
 		/** Open this worker's row in the worker table (folders are changed there). */
 		onOpenSelf?: () => void;
+		/**
+		 * This worker's row in the worker table can remove its copy: the danger
+		 * zone sends the owner there instead of offering a second removal.
+		 */
+		onRemoveSelf?: () => void;
 		/** The project left the list or this worker. */
 		onRemoved: () => void;
 		onClose: () => void;
 	}
 
-	let { projectName, localProjectId, projectRef, kind, selfName, orphaned, onOpenSelf, onRemoved, onClose }: Props = $props();
+	let { projectName, localProjectId, projectRef, kind, selfName, orphaned, workerTable = false, onOpenSelf, onRemoveSelf, onRemoved, onClose }: Props = $props();
 
 	let forgetBusy = $state(false);
 	let forgetError = $state<string | null>(null);
@@ -55,7 +62,7 @@
 <ProjectSheet side title="Project settings" subtitle={projectName} {onClose}>
 	<div data-ui-project-settings>
 		{#if localProjectId}
-			<ProjectGeneralTab projectId={localProjectId} {selfName} onOpenFolders={onOpenSelf ? () => { onClose(); onOpenSelf?.(); } : undefined} />
+			<ProjectGeneralTab projectId={localProjectId} {selfName} editFolderHere={!workerTable} onOpenFolders={workerTable && onOpenSelf ? () => { onClose(); onOpenSelf?.(); } : undefined} />
 		{:else}
 			<RowGroup title="Identity">
 				<SettingRow label="Name" hint={projectName} />
@@ -69,7 +76,11 @@
 		{/if}
 		{#if $isAdmin && (localProjectId || projectRef)}
 			<RowGroup title="Danger zone" tone="danger">
-				{#if localProjectId}
+				{#if localProjectId && onRemoveSelf}
+					<SettingRow label="Remove project" wrapHint hint={`Removal is done per worker and leaves files on disk. Remove it from ${selfName} in its row in Workers, where the chats it removes are counted first.`}>
+						<button class="st-btn danger" onclick={() => { onClose(); onRemoveSelf?.(); }}>Remove from {selfName}…</button>
+					</SettingRow>
+				{:else if localProjectId}
 					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={projectRef ? selfName : null} onRemoved={onRemoved} />
 					{#if projectRef}<p class="st-footnote">Removal is done per worker and leaves files on disk. Remove it from another worker from that worker's row.</p>{/if}
 				{/if}

@@ -35,6 +35,10 @@
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key !== 'Escape' || e.defaultPrevented) return;
+		// The topmost dialog owns Escape: one opened inside this sheet (Set up Git)
+		// closes itself and hands focus back, and this sheet stays open.
+		const owner = e.target instanceof Element ? e.target.closest('[aria-modal="true"]') : null;
+		if (owner && owner !== e.currentTarget) return;
 		e.preventDefault();
 		e.stopPropagation();
 		onClose();
