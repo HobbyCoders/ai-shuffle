@@ -7,7 +7,7 @@
 	 * stay on disk. It lives in this worker's row of the worker table, or in
 	 * Project settings when the page has no worker table.
 	 */
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { SettingRow } from '$lib/components/layout/view';
 	import { appData } from '$lib/stores/app-data.svelte';
 	import { getProjectRemovalPreview, type ProjectRemovalPreview } from '$lib/api/project-workers';
@@ -24,10 +24,12 @@
 		 * the confirmation with a fresh count (a second request after Cancel asks again).
 		 */
 		ask?: number;
+		/** The request was taken: clear it so a remount (desktop ↔ phone) does not ask again. */
+		onAsked?: () => void;
 		onRemoved?: () => void;
 	}
 
-	let { projectId, projectName, where, ask = 0, onRemoved }: Props = $props();
+	let { projectId, projectName, where, ask = 0, onAsked, onRemoved }: Props = $props();
 
 	let confirming = $state(false);
 	let preview = $state<ProjectRemovalPreview | null>(null);
@@ -79,7 +81,7 @@
 
 	let asked = 0;
 	$effect(() => {
-		if (ask && ask !== asked) { asked = ask; void askRemove(); }
+		if (ask && ask !== asked) { asked = ask; void askRemove(); untrack(() => onAsked?.()); }
 	});
 
 	const hint = $derived(!confirming

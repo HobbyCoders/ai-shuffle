@@ -252,6 +252,23 @@ describe('Project settings asks for this worker’s removal', () => {
 		expect(await within(inspector).findByText(/its 3 chats\?/)).toBeTruthy();
 		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(2);
 	});
+
+	it('does not ask again after Cancel when the inspector moves into the phone sheet', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]));
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true });
+
+		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
+		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
+
+		// Desktop → phone remounts the inspector inside a sheet.
+		await rerender({ askSelfRemoval: false, stacked: true });
+		const sheet = await screen.findByRole('dialog', { name: 'Here' });
+		expect(within(sheet).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
+		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+	});
 });
 
 describe('Another local checkout of the same origin', () => {

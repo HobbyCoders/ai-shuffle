@@ -585,7 +585,7 @@
 		{#if has && $isAdmin && editing?.installId !== w.install_id && (w.is_self ? !!localProjectId : w.online)}
 			<RowGroup title="Remove">
 				{#if w.is_self && localProjectId}
-					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onRemoved={localRemoved} />
+					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onAsked={() => (askLocal = 0)} onRemoved={localRemoved} />
 				{:else}
 					<SettingRow label="Remove project" wrapHint
 						hint={confirmingRemove !== w.install_id ? `Removes ${projectName} and its chats from ${w.device_name}. Files stay on disk.`
