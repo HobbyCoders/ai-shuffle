@@ -239,6 +239,24 @@ async def test_a_429_is_a_usage_limit_only_on_the_clis_verdict(tmp_path, window,
     assert error.usage_limit is expected
 
 
+@pytest.mark.parametrize("result,expected", [
+    ("Temporary usage limit on requests per minute", False),
+    ("You've hit your session limit · resets 11:10pm (America/New_York)", True),
+    ("You've hit your weekly limit · resets Mon 9:00am (America/New_York)", True),
+])
+async def test_only_the_clis_own_limit_lines_type_a_usage_limit(tmp_path, result, expected) -> None:
+    """S4: with no rejected window, a CLI 429 is typed a usage limit only by
+    the CLI's own plan-limit lines, never by a generic "usage limit" phrase."""
+    turn = [_failed_frame(api_error_status=429, result=result)]
+    run = Scripted(tmp_path, {"turns": [turn]})
+    try:
+        error = await run.turn("hi")
+    finally:
+        await run.aclose()
+    assert isinstance(error, ErrorEvent) and error.status == 429
+    assert error.usage_limit is expected
+
+
 async def test_an_auth_failure_carries_401(tmp_path) -> None:
     turn = [_failed_frame(api_error_status=401, result="Invalid API key · Please run /login")]
     run = Scripted(tmp_path, {"turns": [turn]})

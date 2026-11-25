@@ -1773,9 +1773,7 @@ async def test_a_true_rate_limit_is_still_retried_and_reported_as_429(server, ki
     # ChatGPT/Codex backend: the allowance is spent until its window resets.
     ({"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached",
                 "plan_type": "plus", "resets_in_seconds": 9000}}, "0"),
-    # Claude-style session limit, said only in words.
-    ({"error": {"type": "rate_limit_error",
-                "message": "You've hit your session limit · resets 11:10pm (America/New_York)"}}, "0"),
+    ({"error": {"code": "usage_not_included", "message": "Your plan does not include this"}}, "0"),
 ])
 async def test_a_usage_limit_stops_the_turn_without_a_retry(server, kind, body, retry_after):
     """Once a provider says a usage limit is hit, the turn stops: no backoff
@@ -1853,31 +1851,24 @@ async def test_the_words_of_a_throttle_never_type_it_a_usage_limit(server, kind,
     assert message in error.provider_message
 
 
-@pytest.mark.parametrize("status,body,retry_after,expected", [
-    # Usage limits.
-    (429, {"error": {"code": "usage_limit_reached"}}, None, True),
-    (None, {"code": "usage_limit_reached", "message": "x"}, None, True),
-    (429, "Claude AI usage limit reached|1790812800", None, True),
-    (429, {"error": {"message": "You've hit your limit · resets 3pm"}}, None, True),
-    (429, {"error": {"message": "Weekly limit reached"}}, None, True),
-    (429, {"error": {"message": "slow down", "resets_in_seconds": 7200}}, None, True),
-    (429, {"error": {"message": "slow down"}}, "86400", True),
-    # Transient: a per-minute rate limit, a short wait, any other status.
-    (429, {"error": {"message": "Rate limit reached for gpt-5 in organization org-x on "
-                                "tokens per min (TPM). Please try again in 1.8s.",
-                     "code": "rate_limit_exceeded"}}, None, False),
-    (429, {"error": {"message": "This request would exceed your account's rate limit."}}, "30", False),
-    (429, {"error": {"message": "slow down"}}, "600", False),
-    (429, {"error": {"message": "You have hit your rate limit. Retry in 2s."}}, None, False),
-    (429, {"detail": "You have hit your request limit for this minute"}, None, False),
-    (429, {"error": {"message": "You've hit your Opus limit · resets 3pm"}}, None, True),
-    (503, {"error": {"message": "usage limit"}}, None, False),
-    (500, "Internal error", None, False),
-])
-def test_usage_limits_are_told_apart_from_transient_429s(status, body, retry_after, expected):
-    from fluid.providers._retry import is_usage_limit
+@pytest.mark.parametrize("kind", DIALECTS)
+async def test_a_short_throttle_worded_as_a_usage_limit_is_retried(server, kind):
+    """S16: a pre-output 429 "Temporary usage limit on requests per minute"
+    with ``Retry-After: 1`` has no structured usage-limit evidence, so the
+    client resends it after the wait and the turn completes."""
+    body = {"error": {"type": "rate_limit_error",
+                      "message": "Temporary usage limit on requests per minute"}}
+    server.script(fps.error_reply(429, body=body, retry_after="1"), text_reply(kind, "ok"))
+    # A wait budget (max_delay) the 1 s Retry-After fits in, as the default 30 s does.
+    retry = RetryPolicy(max_retries=2, base_delay=0.01, max_delay=5.0, jitter=0)
+    run = Harness(server, kind, client_kwargs={"retry": retry})
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
 
-    assert is_usage_limit(status, body, retry_after) is expected
+    assert isinstance(_terminal(events), TurnComplete)
+    assert len(server.requests) == 2
 
 
 @pytest.mark.parametrize("status,body,expected", [

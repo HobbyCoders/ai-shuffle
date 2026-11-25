@@ -37,23 +37,16 @@ BILLING_ERROR_CODES = frozenset((
     "billing_error",               # Anthropic error type
 ))
 
-# A usage limit, not a rate limit: a subscription's session, 5-hour, weekly or
-# plan allowance is spent ("You've hit your session limit · resets 11:10pm",
-# Codex's ``usage_limit_reached``). It arrives as HTTP 429 like a per-minute
-# rate limit, but no backoff clears it, so it is never retried: the turn stops
-# and the user sees the limit. A per-minute 429 ("Rate limit reached ... try
-# again in 1.8s", a Retry-After of seconds) is still a blip and retried.
-#
-# Told apart by, in order: an error code naming a usage limit; a wait the
-# provider asks for (Retry-After header or ``resets_in_seconds``) longer than
-# USAGE_LIMIT_MIN_WAIT_SECONDS; the provider's own words.
+# A usage limit, not a rate limit: a subscription's or plan's allowance is
+# spent (Codex's ``usage_limit_reached``, a Gemini per-day quota). It arrives
+# as HTTP 429 like a per-minute rate limit, but no backoff clears it, so it is
+# never retried: the turn stops and the user sees the limit. Only structured
+# fields tell it apart (:func:`usage_limit_evidence`); any other 429 follows
+# the retry policy, its Retry-After honoured.
 USAGE_LIMIT_ERROR_CODES = frozenset((
     "usage_limit_reached",  # ChatGPT/Codex backend
     "usage_not_included",   # ChatGPT/Codex: the plan has no allowance at all
 ))
-#: A 429 that asks for a longer wait than this is a spent allowance, not a
-#: blip. Matches the ceiling task re-dispatch already treats as "not a retry".
-USAGE_LIMIT_MIN_WAIT_SECONDS = 600.0
 _USAGE_LIMIT_TEXT = re.compile(
     r"usage[ _-]limit"
     r"|session limit"
@@ -91,6 +84,26 @@ def is_usage_limit_text(text: object) -> bool:
     return isinstance(text, str) and bool(_USAGE_LIMIT_TEXT.search(text))
 
 
+# The result lines the Claude Code CLI itself writes at a plan limit: "You've
+# hit your session limit · resets 11:10pm (America/New_York)", the weekly,
+# 5-hour and model variants, and the older "Claude AI usage limit
+# reached|<reset epoch>". Each names a reset; a provider's generic "usage
+# limit on requests per minute" names none and is a rate limit.
+_CLI_USAGE_LIMIT = re.compile(
+    r"\b(?:session|weekly|(?:5|five)[ -]hour) limit\b[^\n]*?\bresets?\b"
+    r"|hit your (?!(?:rate|request|requests|token|tokens)[ -])(?:[a-z0-9-]+ )?limit\b[^\n]*?\bresets?\b"
+    r"|usage limit reached\s*\|\s*\d{9,13}",
+    re.IGNORECASE,
+)
+
+
+def is_cli_usage_limit_text(text: object) -> bool:
+    """True when ``text`` is one of the Claude Code CLI's plan-limit lines."""
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    return isinstance(text, str) and bool(_CLI_USAGE_LIMIT.search(text))
+
+
 # A google.rpc quota violation naming a per-day quota ("quotaId":
 # "GenerateRequestsPerDayPerProjectPerModel-FreeTier"): structured evidence
 # that a daily allowance is spent, unlike a per-minute RESOURCE_EXHAUSTED.
@@ -119,8 +132,9 @@ def _per_day_quota(obj: dict) -> bool:
 def usage_limit_evidence(status: object, body: object = None) -> bool:
     """True when a refusal's STRUCTURED fields say an allowance is spent.
 
-    The typed verdict a host acts on (``ErrorEvent.usage_limit``: the usage
-    banner, the resume after the reset, no Task re-dispatch). Only an error
+    Decides both whether the client resends the request (never, for a usage
+    limit) and the typed verdict a host acts on (``ErrorEvent.usage_limit``:
+    the usage banner, the resume after the reset, no Task re-dispatch). Only an error
     code naming a usage limit (:data:`USAGE_LIMIT_ERROR_CODES`) or a per-day
     quota violation in ``error.details`` counts. The provider's wording and
     the length of the wait it asks for never do: a "usage limit on requests
@@ -139,44 +153,6 @@ def usage_limit_evidence(status: object, body: object = None) -> bool:
                 return True
         if _per_day_quota(obj):
             return True
-    return False
-
-
-def is_usage_limit(
-    status: object, body: object = None, retry_after: str | None = None,
-) -> bool:
-    """True when a provider refusal is a usage limit (never retried).
-
-    ``status`` is the HTTP status or in-stream code (None when the error gave
-    none: an in-stream ``usage_limit_reached`` still counts). ``body`` is the
-    response body, its text, or an error object; ``retry_after`` the header.
-    A status other than 429 is never a usage limit.
-
-    This decides only whether the client retries; the typed verdict a host
-    acts on is :func:`usage_limit_evidence`, which reads no wording or wait.
-    """
-    if usage_limit_evidence(status, body):
-        return True
-    code = coerce_status(status)
-    if code is not None and code != 429:
-        return False
-    objects = _error_objects(body)
-    if code is None:
-        return False
-    wait = parse_retry_after(retry_after)
-    if wait is not None and wait > USAGE_LIMIT_MIN_WAIT_SECONDS:
-        return True
-    for obj in objects:
-        resets_in = obj.get("resets_in_seconds")
-        if (
-            isinstance(resets_in, (int, float)) and not isinstance(resets_in, bool)
-            and resets_in > USAGE_LIMIT_MIN_WAIT_SECONDS
-        ):
-            return True
-        if is_usage_limit_text(obj.get("message")) or is_usage_limit_text(obj.get("detail")):
-            return True
-    if isinstance(body, (str, bytes)) and not objects:
-        return is_usage_limit_text(body)
     return False
 
 

@@ -161,7 +161,7 @@ from fluid.hooks.bus import (
 )
 from fluid.messages import Image, Message, Text
 from fluid.messages.content import SteerDelivery, ToolResultBlock
-from fluid.providers._retry import is_usage_limit_text
+from fluid.providers._retry import is_cli_usage_limit_text, is_usage_limit_text
 from fluid.store.base import (
     SessionMeta,
     SessionNode,
@@ -3030,13 +3030,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     @staticmethod
     def _is_usage_limit_failure(mapper: StreamJsonMapper, failure: str | None) -> bool:
         """Whether a failed turn's 429 is a spent usage allowance: the CLI
-        rejected a rate-limit window this turn, or its error says so."""
+        rejected a rate-limit window this turn, or its result is one of the
+        CLI's own plan-limit lines ("You've hit your session limit · resets
+        …"). A provider's generic "usage limit on requests per minute" is a
+        rate limit."""
         if mapper.failed_status != 429:
             return False
         return (
             mapper.limit_rejected
-            or is_usage_limit_text(failure)
-            or is_usage_limit_text(mapper.failed_provider_message)
+            or is_cli_usage_limit_text(failure)
+            or is_cli_usage_limit_text(mapper.failed_provider_message)
         )
 
     def _resume_handle_rejected(self, mapper: StreamJsonMapper, failure: str | None = None) -> bool:

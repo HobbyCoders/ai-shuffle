@@ -51,7 +51,6 @@ from fluid.providers._retry import (
     billing_error_code,
     coerce_status,
     is_retriable_status,
-    is_usage_limit,
     usage_limit_evidence,
 )
 from fluid.providers._sse import KEEPALIVE_EVENT
@@ -422,7 +421,7 @@ def classify_error(err: Any) -> ErrorClass:
     ``drop_sticky`` is always False.
     """
     code, etype, status = _error_fields(err)
-    if is_usage_limit(status if status is not None else code, err):
+    if usage_limit_evidence(status if status is not None else code, err):
         # A spent allowance: no backoff clears it, so the turn stops on it.
         return ErrorClass(retriable=False, code=code)
     if code == OVERLOAD_CODE:
@@ -836,7 +835,7 @@ class ResponsesStreamNormalizer:
                 "message": str(err), "retriable": classify_error(err).retriable,
             }
             code, etype, status = _error_fields(err)
-            usage_limit = is_usage_limit(status if status is not None else code, err)
+            usage_limit = usage_limit_evidence(status if status is not None else code, err)
             if code is not None:
                 payload["code"] = code
             if etype is not None:
@@ -856,9 +855,7 @@ class ResponsesStreamNormalizer:
                 # ``insufficient_quota`` 429: a 402, never a rate limit.
                 status = BILLING_STATUS
                 summary = billing_summary(billing, summary)
-            elif usage_limit and usage_limit_evidence(
-                status if status is not None else code, err,
-            ):
+            elif usage_limit:
                 # The typed verdict a host reads (``ErrorEvent.usage_limit``):
                 # structured fields only, never the wording or the wait.
                 summary = usage_limit_summary(summary)

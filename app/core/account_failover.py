@@ -114,12 +114,12 @@ USAGE_LIMIT_MESSAGE = (
 RATE_LIMIT_MESSAGE = (
     "Rate limited by the provider (HTTP 429); try again shortly."
 )
-#: The provider's Retry-After was longer than the client waits, so it was not
-#: retried at all (the turn's typed ``retry_after_seconds``/``retry_at``).
+#: The turn carries the provider's typed wait (``retry_after_seconds`` /
+#: ``retry_at``): the notice reports it, without claiming why the client
+#: stopped.
 RATE_LIMIT_NOT_RETRIED_MESSAGE = (
-    "Rate limited by the provider (HTTP 429). It asked to wait {wait}s, longer "
-    "than the client waits, so the request was not retried; try again after "
-    "{at}."
+    "Rate limited by the provider (HTTP 429). It asked to wait {wait}s; try "
+    "again after {at}."
 )
 
 

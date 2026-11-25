@@ -159,6 +159,18 @@ class TestApiKey429IsNotAUsageWindow:
             wait=60, at=time.strftime("%H:%M:%S UTC", time.gmtime(1795651260.0)))
         assert "wait 60s" in message
 
+    async def test_a_timed_notice_reports_the_deadline_without_a_reason(self):
+        """S13: a typed ``Retry-After: 1`` is not "longer than the client
+        waits": the notice reports the wait and the time, and no cause."""
+        retry_at = 1795651201.0
+        message = await self._notice(
+            {"provider_id": None}, None, claude_mode="api_key",
+            metadata={"api_error_status": 429, "retry_after_seconds": 1.0, "retry_at": retry_at},
+        )
+        assert "longer than" not in message and "not retried" not in message
+        assert "wait 1s" in message
+        assert time.strftime("%H:%M:%S UTC", time.gmtime(retry_at)) in message
+
     async def test_provider_text_never_changes_the_notice(self):
         """A provider body that reads like a wait note is still provider text:
         without the typed fields the notice keeps its ordinary wording."""
