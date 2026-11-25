@@ -1046,8 +1046,18 @@ def _swarm_stop_harness(agents, monkeypatch, sid):
             dict(id="a", agent="helper", prompt="do " + title)]},
             ToolCtx(extra={"task_dispatch": dispatch})))
 
+    from app.core import session_runtime
+
+    def go_live(order):
+        """A queued turn's runtime takes the session, as SessionRuntime does."""
+        task_registry.note_turn_live(sid, order)
+        monkeypatch.setitem(session_runtime._live_runtimes, sid, SimpleNamespace(_owns_admission=lambda: True))
+
+    def end_turn():
+        session_runtime._live_runtimes.pop(sid, None)
+
     return SimpleNamespace(held=held, release=release, prompts=prompts, wakes=wakes, start=start,
-                           ending=ending)
+                           ending=ending, go_live=go_live, end_turn=end_turn)
 
 
 async def _settled(sid):
@@ -1080,7 +1090,7 @@ async def test_a_stop_the_receipt_guard_overrules_still_ends_the_stopped_inputs_
     lease = runs.claim_run(sid, "original-runner", 60)
     stopped = turns.enqueue_turn(sid, "user", prompt="start a swarm")
     assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
-    task_registry.note_turn_live(sid, stopped["insert_order"])
+    h.go_live(stopped["insert_order"])
     old = h.start("old", hold=True)
     await asyncio.wait_for(h.held["old"].wait(), 5)
 
@@ -1092,7 +1102,7 @@ async def test_a_stop_the_receipt_guard_overrules_still_ends_the_stopped_inputs_
         owner = runs.claim_run(sid, "replacement-runner", 60)
         nxt = turns.enqueue_turn(sid, "user", prompt="next words")
         assert turns.start_turn(nxt["id"], owner["id"], "replacement-runner")
-        task_registry.note_turn_live(sid, nxt["insert_order"])
+        h.go_live(nxt["insert_order"])
         new = h.start("new")
         for _ in range(100):  # its write queues behind the held one
             if len(swarm.coordinators[sid].active_ids()) == 2:
@@ -1138,7 +1148,7 @@ async def test_a_swarm_the_stopped_input_registers_after_the_stop_is_ended_too(a
     lease = runs.claim_run(sid, "original-runner", 60)
     stopped = turns.enqueue_turn(sid, "user", prompt="start swarms")
     assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
-    task_registry.note_turn_live(sid, stopped["insert_order"])
+    h.go_live(stopped["insert_order"])
     first = await asyncio.wait_for(h.start("first"), 5)
     first_key = first.background_task.task_id
     await asyncio.wait_for(swarm.coordinators[sid].jobs[first_key], 5)
@@ -1175,7 +1185,7 @@ async def test_a_first_swarm_still_in_its_session_lookup_is_ended_by_the_stop(ag
     lease = runs.claim_run(sid, "original-runner", 60)
     stopped = turns.enqueue_turn(sid, "user", prompt="start a swarm")
     assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
-    task_registry.note_turn_live(sid, stopped["insert_order"])
+    h.go_live(stopped["insert_order"])
     entered, release = threading.Event(), threading.Event()
     real_lookup = database.get_session
 
@@ -1193,7 +1203,7 @@ async def test_a_first_swarm_still_in_its_session_lookup_is_ended_by_the_stop(ag
     nxt = turns.enqueue_turn(sid, "queue", prompt="next words")
     await lifecycle._begin_captured_user_stop(sid, receipt)
     assert not task_registry.is_user_stopped(sid)
-    task_registry.note_turn_live(sid, nxt["insert_order"])
+    h.go_live(nxt["insert_order"])
     release.set()
     await asyncio.wait_for(first, 5)
     by_title = await _settled(sid)
@@ -1231,7 +1241,7 @@ async def test_a_park_on_a_swarm_the_stop_ended_is_settled(agents, monkeypatch, 
     lease = runs.claim_run(sid, "original-runner", 60)
     stopped = turns.enqueue_turn(sid, "user", prompt="start a swarm")
     assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
-    task_registry.note_turn_live(sid, stopped["insert_order"])
+    h.go_live(stopped["insert_order"])
     old = h.start("old", hold=True)
     await asyncio.wait_for(h.held["old"].wait(), 5)
     receipt = turns.read_stop_receipt(sid)
@@ -1240,7 +1250,7 @@ async def test_a_park_on_a_swarm_the_stop_ended_is_settled(agents, monkeypatch, 
     owner = runs.claim_run(sid, "replacement-runner", 60)
     nxt = turns.enqueue_turn(sid, "user", prompt="next words")
     assert turns.start_turn(nxt["id"], owner["id"], "replacement-runner")
-    task_registry.note_turn_live(sid, nxt["insert_order"])
+    h.go_live(nxt["insert_order"])
     await lifecycle._begin_captured_user_stop(sid, receipt)
 
     ending = h.ending["old"] = (asyncio.Event(), asyncio.Event())
@@ -1261,3 +1271,77 @@ async def test_a_park_on_a_swarm_the_stop_ended_is_settled(agents, monkeypatch, 
     assert turns.get_turn(nxt["id"])["state"] == "completed"
     assert [f["task_id"] for call in retire.await_args_list for f in call.args[1]] == [old_key]
     assert (old_key, True) in h.wakes
+
+
+@pytest.mark.asyncio
+async def test_closing_the_session_still_ends_a_stop_latched_swarm_as_stopped(agents, monkeypatch):
+    """Stop latches the stopped input's swarm while its first write is still
+    held, and a follow-up keeps the session latch off. The session then
+    closes (Stop escalation, session clear or pool eviction) before the swarm
+    unwinds: the end that close drains still carries the user-stop reason, a
+    suppressed wake and a retired engine receipt."""
+    from app.core import query_session_lifecycle as lifecycle, turn_scheduler
+    from app.core.task_registry import USER_STOP_REASON, task_registry
+    from app.db import runs, turns
+
+    sid = "swarm-stop-close"
+    h = _swarm_stop_harness(agents, monkeypatch, sid)
+    retire = AsyncMock(wraps=turn_scheduler.retire_task_terminals)
+    monkeypatch.setattr(turn_scheduler, "retire_task_terminals", retire)
+    lease = runs.claim_run(sid, "original-runner", 60)
+    stopped = turns.enqueue_turn(sid, "user", prompt="start a swarm")
+    assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
+    h.go_live(stopped["insert_order"])
+    old = h.start("old", hold=True)
+    await asyncio.wait_for(h.held["old"].wait(), 5)
+    receipt = turns.read_stop_receipt(sid)
+    turns.enqueue_turn(sid, "queue", prompt="next words")
+    await lifecycle._begin_captured_user_stop(sid, receipt)
+    assert not task_registry.is_user_stopped(sid)
+    coordinator = swarm.coordinators[sid]
+
+    closing = asyncio.create_task(swarm.close(sid))
+    await asyncio.sleep(0)  # close is draining the held admission
+    assert not closing.done()
+    h.release.set()
+    await asyncio.wait_for(closing, 5)
+    key = (await asyncio.wait_for(old, 5)).background_task.task_id
+    assert coordinator.snapshot(key)["status"] == "cancelled" and h.prompts == []
+    record = task_registry.get_task(sid, key)
+    assert record["status"] == "killed" and record.get("reason") == USER_STOP_REASON
+    assert (key, True) in h.wakes
+    assert [f["task_id"] for call in retire.await_args_list for f in call.args[1]] == [key]
+    assert sid not in swarm.stopped_through and sid not in swarm.coordinators
+
+
+@pytest.mark.asyncio
+async def test_a_direct_api_turn_after_a_stop_can_start_a_swarm(agents, monkeypatch):
+    """A queued turn is stopped and ends. The next turn comes through the
+    direct API (/conversation/stream or /start), which runs outside the turn
+    queue: it registers no runtime, so the session's input order still names
+    the stopped turn. A Swarm it starts is not that Stop's, and runs."""
+    from app.core import query_session_lifecycle as lifecycle
+    from app.core.task_registry import USER_STOP_REASON, task_registry
+    from app.db import runs, turns
+
+    sid = "swarm-stop-direct"
+    h = _swarm_stop_harness(agents, monkeypatch, sid)
+    lease = runs.claim_run(sid, "original-runner", 60)
+    stopped = turns.enqueue_turn(sid, "user", prompt="no swarm here")
+    assert turns.start_turn(stopped["id"], lease["id"], "original-runner")
+    h.go_live(stopped["insert_order"])
+    await lifecycle._begin_captured_user_stop(sid, turns.read_stop_receipt(sid))
+    assert turns.settle_turn(stopped["id"], "aborted", "user_stop", run_id=lease["id"])
+    h.end_turn()
+    task_registry.clear_user_stop(sid)  # the direct-API input is new input
+    assert swarm.stopped_through[sid] == stopped["insert_order"]
+    assert task_registry.current_input_order(sid) == stopped["insert_order"]  # never advanced
+
+    for title in ("direct", "again"):  # and on every later direct-API turn
+        result = await asyncio.wait_for(h.start(title), 5)
+        key = result.background_task.task_id
+        by_title = await _settled(sid)
+        assert by_title[title]["status"] == "completed"
+        assert (key, False) in h.wakes
+        assert task_registry.get_task(sid, key).get("reason") != USER_STOP_REASON
+    assert h.prompts == ["do direct", "do again"]

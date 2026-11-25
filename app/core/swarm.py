@@ -193,6 +193,25 @@ def latch_started_by(session_id, input_cutoff):
     return older
 
 
+def _queued_turn_order(session_id):
+    """The input a workflow started now belongs to, or None when none can say.
+
+    Only a queued turn has an input order a Stop's cutoff can place, and only
+    while its runtime is live and still holds the session. A direct-API turn
+    (``/conversation/stream`` or ``/start``) registers no runtime and leaves
+    ``current_input_order`` naming the last queued turn; what it starts gets
+    no origin and is never caught by an older Stop's cutoff.
+    """
+    from app.core.session_runtime import get_live_runtime
+    from app.core.task_registry import task_registry
+
+    runtime = get_live_runtime(session_id)
+    owns = getattr(runtime, "_owns_admission", None)
+    if owns is None or not owns():
+        return None
+    return task_registry.current_input_order(session_id)
+
+
 def stopped_by_scope(session_id, key):
     """True when a captured Stop's cutoff covers the input ``key`` started under."""
     cutoff = stopped_through.get(session_id)
@@ -212,14 +231,18 @@ async def cancel_all(session_id):
 
 async def close(session_id, *, deadline=None):
     """Close the session's workflows; ``deadline`` is event-loop time (shutdown's)."""
-    stopped_through.pop(session_id, None)
     coordinator = coordinators.get(session_id)
-    if coordinator:
-        await coordinator.aclose(deadline=deadline)
-        coordinators.pop(session_id, None)
-        for key, launch in list(workers.items()):
-            if launch.coordinator is coordinator:
-                workers.pop(key, None)
+    try:
+        if coordinator:
+            await coordinator.aclose(deadline=deadline)
+            coordinators.pop(session_id, None)
+            for key, launch in list(workers.items()):
+                if launch.coordinator is coordinator:
+                    workers.pop(key, None)
+    finally:
+        # Only now: a Stop-latched workflow drained by the close above must
+        # still end as stopped (reason, suppressed wake, retired receipt).
+        stopped_through.pop(session_id, None)
 
 
 def _owns_recovery_lease(session_id, run_id, fence_token):
@@ -755,12 +778,11 @@ def make_handler(session_id_supplier):
         try:
             if data.get("action") == "start":
                 from app.core.agent_provider_models import caller_subagents_refusal
-                from app.core.task_registry import task_registry as registry
                 from app.db import database
 
                 # The input this start came from, read before any await: a
                 # Stop of it, or a newer turn going live, may land meanwhile.
-                origin = registry.current_input_order(session_id)
+                origin = _queued_turn_order(session_id)
                 caller = await asyncio.to_thread(database.get_session, session_id)
                 refusal = caller_subagents_refusal((caller or {}).get("profile_id"))
                 if refusal is not None:
@@ -804,7 +826,7 @@ def make_handler(session_id_supplier):
                         session_id, ctx.extra["task_dispatch"], cancel_worker, publish, finished,
                         # The turn each workflow starts under, which a Stop's
                         # ``input_cutoff`` places (``latch_started_by``).
-                        origin=lambda: task_registry.current_input_order(session_id))
+                        origin=lambda: _queued_turn_order(session_id))
                     coordinators[session_id] = coordinator
                 snapshot, receipt = await coordinator.start(data, ctx, origin=origin)
                 return ToolOutcome(text=json.dumps({"swarm": snapshot}), ui={"swarm": snapshot}, background_task=receipt)
