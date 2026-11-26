@@ -10243,11 +10243,18 @@ def _learner_route(session_id: str, owner: str) -> Optional[Any]:
             context_window=window,
             session_model=model,
             billing=learner_billing(*shape),
-            destination=f"{target.kind}:{provider_id or ''}",
+            destination=_learner_destination(target.kind, target.options),
         )
     except Exception:  # noqa: BLE001 — no route: those entries are never sent elsewhere
         logger.warning("[HarnessAdapter] learner route lookup failed", exc_info=True)
         return None
+
+
+def _learner_destination(kind: str, binding: SessionOptions) -> str:
+    """Where a learner client's calls go: its kind and provider row (empty
+    for native Anthropic through the CLI). The learner compares it to keep
+    one chat's text off another chat's provider (LearnerRoute.destination)."""
+    return f"{kind}:{binding.extra.get('provider_id') or ''}"
 
 
 def _provider_row_window(provider_id: str, model: str) -> Optional[int]:
@@ -10308,11 +10315,22 @@ class _LearnerProvider:
         self._client: Any = None
         self._http: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
+        # The binding a built native client was made with: it keeps that row
+        # after a model switch replaces ``_options`` (see destination).
+        self._built: Optional[SessionOptions] = None
+
+    @property
+    def destination(self) -> str:
+        """Where this client's next call goes (_learner_destination): the row
+        a built native client was made with, else the current binding."""
+        return _learner_destination(self._kind, self._built or self._options)
 
     async def _ensure(self) -> Any:
         async with self._lock:
             if self._client is None:
-                self._client, self._http = await _build_provider_client(self._kind, self._options)
+                options = self._options
+                self._client, self._http = await _build_provider_client(self._kind, options)
+                self._built = options
             return self._client
 
     async def stream(self, request: Any) -> AsyncIterator[Any]:

@@ -540,6 +540,26 @@ async def test_the_learner_client_is_closed_with_the_session(monkeypatch, tmp_pa
     assert closed == [True] and run.adapter._learner_provider is None
 
 
+@pytest.mark.asyncio
+async def test_the_learner_reports_the_row_its_client_was_built_for(monkeypatch):
+    """A chat switches rows while its learner already holds a client: the
+    learner still reports the old row, where its calls actually go, so
+    another chat's text kept for the new row is not sent through it."""
+    async def build(kind, options):
+        return FakeInference(_reply("NO_CHANGES")), None
+
+    monkeypatch.setattr(ha, "_build_provider_client", build)
+    provider = ha._LearnerProvider("openai_responses",
+                                   SessionOptions(model="m", extra={"provider_id": "row-x"}))
+    assert provider.destination == "openai_responses:row-x"
+    provider._options = SessionOptions(model="m", extra={"provider_id": "row-y"})
+    assert provider.destination == "openai_responses:row-y", "nothing built yet: the new row"
+    await provider._ensure()
+    provider._options = SessionOptions(model="m2", extra={"provider_id": "row-z"})
+    assert provider.destination == "openai_responses:row-y", "the built client's row"
+    assert ha._learner_destination("openai_responses", provider._options) == "openai_responses:row-z"
+
+
 def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
     from types import SimpleNamespace
 

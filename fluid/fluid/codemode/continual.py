@@ -534,8 +534,9 @@ class LearnerRoute(NamedTuple):
     session_model: str | None = None
     #: How the route's provider bills a call (BILLING_SUBSCRIPTION, metered).
     billing: str | None = None
-    #: Where the text goes (provider kind and row): retained workflow evidence
-    #: from another chat is shown only to a call with the same destination.
+    #: Where the text goes (provider kind and row). Retained workflow evidence
+    #: from another chat is shown only to a call on the same row and model;
+    #: a failure backs off this row's model, not every row serving that id.
     destination: str | None = None
 
 
@@ -701,9 +702,9 @@ class Synthesizer:
         self._route = route
         # The foreign route of the group being called, or None (this chat).
         self._active_route: LearnerRoute | None = None
-        # Each chat's destination (LearnerRoute.destination) seen this pass,
-        # for filtering retained workflow evidence (see _synthesis_input).
-        self._destinations: dict[str, str | None] = {}
+        # Each chat's route target (provider row, model) seen this pass, for
+        # filtering retained workflow evidence (see _evidence_allowed).
+        self._destinations: dict[str, tuple[str | None, str] | None] = {}
         # (model, billing, prompt limit) of a call made since the last
         # pass-log row (see _complete): the row records a call that ran.
         self._last_call: tuple[str, Any, int] | None = None
@@ -887,7 +888,7 @@ class Synthesizer:
             # The model the next pass will run on: a chat that switched away
             # from a failing model is not held to that model's backoff.
             pending = self._pending_target
-            backoff = self._store.learner_backoff(pending[0] if pending else self._model)
+            backoff = self._store.learner_backoff(self.backoff_key(pending[0] if pending else None))
         except Exception:
             backoff = {}
         if backoff and time.time() < float(backoff.get("until", 0.0)):
@@ -1062,6 +1063,19 @@ class Synthesizer:
         budget = self._budget()
         return None if budget.source == "metered_default" else budget.daily
 
+    def _starter_has_calls(self) -> bool:
+        """Whether this chat's own synthesis share has a call left today
+        (read only; the claim itself decides). False when unreadable."""
+        try:
+            state = self._store._facts.inference_budget()
+            budget = self._budget()
+            limit = self._claim_limit()
+        except Exception:  # noqa: BLE001 — unknown: treat the day as spent
+            return False
+        calls = int(state.get("calls") or 0) if state.get("day") == int(time.time() // 86400) else 0
+        cap = MAX_INFERENCE_CALLS_PER_DAY if limit is None else int(limit)
+        return calls < cap - max(0, budget.reserved)
+
     def _paced(self, now: float | None = None) -> bool:
         """True when the day's spread of calls leaves room for a pass now
         (see PACE_BURST_CALLS). A pass held back here leaves no log row."""
@@ -1218,17 +1232,42 @@ class Synthesizer:
                 ran=False,
             )
 
-    def _note_failure(self, error: str, model: str | None = None) -> float:
+    def _provider_destination(self) -> str | None:
+        """Where the current provider client sends a call (its kind and
+        provider row; LearnerRoute.destination), or None when it does not
+        say. Read from the client itself, so a chat that switched rows but
+        still holds its old client is judged by the old one."""
+        try:
+            destination = getattr(self._provider, "destination", None)
+        except Exception:  # noqa: BLE001 — unknown is the safe answer
+            return None
+        return destination if isinstance(destination, str) else None
+
+    @staticmethod
+    def _backoff_key(model: str, destination: str | None) -> str:
+        """The shared backoff's key: a model on one provider row, so a row
+        with broken credentials does not back off (or get cleared by) another
+        row serving the same model id."""
+        return f"{model}@{destination}" if destination else model
+
+    def backoff_key(self, model: str | None = None) -> str:
+        """This learner's backoff key for ``model`` (default: its own)."""
+        return self._backoff_key(model or self._model, self._provider_destination())
+
+    def _note_failure(self, error: str, route: LearnerRoute | None = None) -> float:
         """Record a failed pass in the store's shared backoff; returns the
         seconds until this model's next attempt (0 when it could not be
-        recorded). ``model`` is a foreign route's model: its failure backs
-        that model off without failing this chat's pass."""
-        if model is None:
+        recorded). ``route`` is another chat's: its failure backs that
+        chat's model and row off without failing this chat's pass."""
+        if route is None:
             self.last_pass_failed = True
+            key = self.backoff_key()
+        else:
+            key = self._backoff_key(route.model, route.destination)
         now = time.time()
         try:
             entry = self._store.note_learner_failure(
-                model or self._model, error, now=now,
+                key, error, now=now,
                 base=FAILURE_BACKOFF_BASE, cap=FAILURE_BACKOFF_MAX,
             )
         except Exception:
@@ -1385,12 +1424,18 @@ class Synthesizer:
             if key is None or key in routes:
                 continue
             route = await self._lookup_route(key)
-            self._destinations[key] = route.destination if route else None
-            if route is not None and self._backing_off(route.model):
+            self._destinations[key] = self._route_target(route)
+            if route is not None and self._backing_off(self._backoff_key(route.model, route.destination)):
                 await self._close_routes({key: route})
                 route = None
             routes[key] = route
         return routes
+
+    @staticmethod
+    def _route_target(route: LearnerRoute | None) -> tuple[str | None, str] | None:
+        """Where a chat's own text goes (provider row, model), or None when
+        it has no learner or its row is unknown."""
+        return (route.destination, route.model) if route and route.destination else None
 
     async def _lookup_route(self, session: str) -> LearnerRoute | None:
         try:
@@ -1406,7 +1451,7 @@ class Synthesizer:
             if session in self._destinations:
                 continue
             route = await self._lookup_route(session)
-            self._destinations[session] = route.destination if route else None
+            self._destinations[session] = self._route_target(route)
             await self._close_routes({session: route})
 
     async def _learn_evidence_destinations(self, fitted: list[tuple[int, dict]]) -> None:
@@ -1426,15 +1471,14 @@ class Synthesizer:
             return
         sessions = sorted({str(e["session"]) for e in retained
                            if e.get("session") and e.get("project") in projects})
-        if self._own_session:
-            sessions.insert(0, self._own_session)
         await self._learn_destinations(sessions)
 
     def _evidence_allowed(self, entry: dict, group_session: str | None) -> bool:
         """Whether a retained entry may be shown to the call being built for
-        ``group_session``'s entries: the same chat, or another chat whose text
-        goes to the same destination. Unstamped entries have no known origin
-        and are left out."""
+        ``group_session``'s entries: the same chat, or another chat whose own
+        route is the provider row and model this call actually goes to (read
+        from the client making it, not a chat's saved row). Unstamped entries
+        and an unknown destination leave other chats' text out."""
         if self._route is None:
             return True
         session = entry.get("session")
@@ -1443,14 +1487,14 @@ class Synthesizer:
         if group_session and session == group_session:
             return True
         if self._active_route is not None:
-            dest = self._active_route.destination
+            outgoing = (self._active_route.destination, self._active_route.model)
         else:
-            dest = self._destinations.get(self._own_session) if self._own_session else None
-        return dest is not None and self._destinations.get(str(session)) == dest
+            outgoing = (self._provider_destination(), self._model)
+        return outgoing[0] is not None and self._destinations.get(str(session)) == outgoing
 
-    def _backing_off(self, model: str) -> bool:
+    def _backing_off(self, key: str) -> bool:
         try:
-            backoff = self._store.learner_backoff(model)
+            backoff = self._store.learner_backoff(key)
         except Exception:  # noqa: BLE001
             return False
         return bool(backoff) and time.time() < float(backoff.get("until", 0.0))
@@ -1558,12 +1602,23 @@ class Synthesizer:
                         # consumed unlearned so one chat's provider cannot
                         # hold up the others' learning; its model backs off.
                         routed[route.model] = str(exc)
-                        self._note_failure(str(exc), model=route.model)
+                        self._note_failure(str(exc), route=route)
                         done.add((route_key, project))
                         continue
                     stop = exc
                     break
                 except InferenceBudgetExhausted as exc:
+                    if route is not None and self._starter_has_calls():
+                        # Another chat's call was refused at the cap its own
+                        # billing sets (a metered chat past the metered
+                        # default) while this chat still has calls. Like its
+                        # failed call, its entries are consumed unlearned, so
+                        # they cannot hold up the chats behind them; no
+                        # backoff (not a fault). When the shared day is spent
+                        # too, they stay for tomorrow like everyone's.
+                        routed[route.model] = str(exc)
+                        done.add((route_key, project))
+                        continue
                     if not done:
                         raise  # no call made: _run_safe logs the skip
                     stop = exc
@@ -1577,7 +1632,8 @@ class Synthesizer:
                 if route is not None:
                     routed.setdefault(route.model, None)
                     try:
-                        self._store.clear_learner_backoff(route.model)
+                        self._store.clear_learner_backoff(
+                            self._backoff_key(route.model, route.destination))
                     except Exception:
                         pass
                 done.add((route_key, project))
@@ -1629,7 +1685,7 @@ class Synthesizer:
             retry = self._note_failure(self.last_error)
         else:
             try:
-                self._store.clear_learner_backoff(self._model)
+                self._store.clear_learner_backoff(self.backoff_key())
             except Exception:
                 pass
         # Consumed entries have no reader left: drop the ones past the
