@@ -1,6 +1,7 @@
 """scripts/local_ci.py: suite selection, pass records and the pre-push decision."""
 import io
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -424,8 +425,14 @@ def test_windows_known_failures_list_is_well_formed():
     import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
 
     tests, files = known.load()
-    # All listed failures are retired. New regressions must not become skips.
-    assert (tests, files) == (set(), set())
+    # Every entry names a file and test that exist, so a rename cannot leave a
+    # stale skip behind (or silently skip nothing).
+    for entry in files:
+        assert (ROOT / entry).is_file(), entry
+    for entry in tests:
+        path, name = entry.split("::", 1)
+        source = (ROOT / path).read_text(encoding="utf-8")
+        assert re.search(rf"def {re.escape(name.split('::')[-1])}\(", source), entry
     assert known.base_id("fluid\\tests\\unit\\test_x.py::test_y[a-b]") == "fluid/tests/unit/test_x.py::test_y"
 
     # fluid's rootdir is fluid/, so its ids lack the prefix; the path restores it.

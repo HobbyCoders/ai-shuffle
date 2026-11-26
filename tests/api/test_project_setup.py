@@ -1212,11 +1212,11 @@ def test_a_new_project_clone_never_reads_a_local_repository(client, ws, test_db,
     assert not (ws / "secret").exists()
     assert not _listed(client, resp.json()["project_v2_id"])
 
-    # Windows folder names cannot contain ':', so this case cannot arise there.
+    # An scp-style source that names a folder here (git checks for one before
+    # it reads host:path as SSH) never copies that folder either. Windows folder
+    # names cannot contain ':', so this case cannot arise there.
+    scp = "git@git.example.com:example-org/kit.git"
     if os.name != "nt":
-        # An scp-style source that names a folder here (git checks for one before
-        # it reads host:path as SSH) never copies that folder either.
-        scp = "git@git.example.com:example-org/kit.git"
         local = ws / "git@git.example.com:example-org" / "kit.git"
         local.parent.mkdir(parents=True)
         git(ws, "init", "-q", "--bare", "-b", "main", str(local))
