@@ -420,6 +420,21 @@ def test_clean_orphan_pr_assets_push_is_accepted(asset_repo, tmp_path):
     assert git("ls-remote", str(remote)).stdout != ""
 
 
+def test_a_windows_checkout_with_old_crlf_files_is_refused_with_the_fix(monkeypatch):
+    listing = "\n".join([
+        "i/lf    w/crlf  attr/text=auto eol=lf \tfrontend/src/lib/components/chat/ChatInput.svelte",
+        "i/lf    w/lf    attr/text=auto eol=lf \tapp/main.py",
+        "i/lf    w/crlf  attr/text eol=crlf    \trun_local.bat",
+    ])
+    monkeypatch.setattr(local_ci, "git", lambda *args: listing if args == ("ls-files", "--eol") else "")
+    assert local_ci.stale_line_endings() == ["frontend/src/lib/components/chat/ChatInput.svelte"]
+    monkeypatch.setattr(local_ci.os, "name", "nt")
+    with pytest.raises(local_ci.Failure, match=re.escape(local_ci.REWRITE_LINE_ENDINGS)):
+        local_ci.line_endings_preflight()
+    monkeypatch.setattr(local_ci.os, "name", "posix")
+    local_ci.line_endings_preflight()
+
+
 def test_windows_known_failures_list_is_well_formed():
     sys.path.insert(0, str(ROOT / "scripts" / "ci"))
     import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]

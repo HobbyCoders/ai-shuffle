@@ -374,7 +374,7 @@ def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[
     if has_module(python, "pytest_timeout"):
         args += [f"--timeout={timeout}"]
     if os.name == "nt":
-        # Skips the tests in scripts/ci/windows_known_failures.txt (kept empty).
+        # Skips the Windows-only failures listed, by cause, in scripts/ci/windows_known_failures.txt.
         args += ["-p", "windows_known_failures"]
     return args
 
@@ -1035,8 +1035,37 @@ def attest_preflight(revision: str, resumed: bool = False) -> None:
     attest_update_reach(revision)
 
 
+REWRITE_LINE_ENDINGS = "git rm -r -q --cached . && git reset -q --hard HEAD"
+
+
+def stale_line_endings() -> list[str]:
+    """Tracked files still checked out with CRLF where .gitattributes asks for LF.
+
+    A checkout made before the repo-wide ``eol=lf`` rule keeps CRLF in every
+    file a later update did not touch, and exact-text tests then fail.
+    """
+    stale = []
+    for line in git("ls-files", "--eol").splitlines():
+        meta, _, path = line.partition("\t")
+        fields = meta.split()
+        if len(fields) >= 2 and fields[1] in ("w/crlf", "w/mixed") and "eol=lf" in meta:
+            stale.append(path)
+    return stale
+
+
+def line_endings_preflight() -> None:
+    if os.name != "nt":
+        return
+    stale = stale_line_endings()
+    if stale:
+        raise Failure(f"{len(stale)} tracked files (e.g. {stale[0]}) still have the CRLF line endings of a "
+                      f"checkout older than the repo-wide LF rule. Rewrite them once with "
+                      f"`{REWRITE_LINE_ENDINGS}` (untracked files such as .venv stay), then run again.")
+
+
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
+    line_endings_preflight()
     revision = git("rev-parse", "HEAD")
     if args.attest and args.only:
         raise Failure("--attest cannot be combined with --only")
