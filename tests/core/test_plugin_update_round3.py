@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.fs_utils import force_rmtree
 from app.core.plugin_install import _check_update_version, _copy_tree_resolving_symlinks
 from app.core.plugin_models import AutoUpdateSettings
 from app.core.plugin_updates import _compare_versions
@@ -202,7 +203,7 @@ def test_single_release_comparison(installed, candidate, order):
 @pytest.mark.parametrize("kind", ["directory", "url", "sha", "implicit"])
 def test_same_release_missing_tree_is_repairable_even_at_unchanged_pin(sources, kind):
     svc, upstream, skill, info = setup(sources, kind)
-    shutil.rmtree(info.install_path)
+    force_rmtree(info.install_path)  # its git pack files are read-only on Windows
     updates = svc.check_for_updates(refresh_sources=True)
     assert len(updates) == 1 and "repair" in updates[0].available_version
     assert len(svc.update_all_plugins()) == 1

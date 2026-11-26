@@ -751,7 +751,8 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
     hooks = tmp_path / "disabled-hooks"  # where init points core.hooksPath
     source = tmp_path / ".githooks/pre-push"
     source.parent.mkdir()
-    source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n")
+    # LF on Windows too: the hook is installed from the committed (LF) blob.
+    source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n", newline="\n")
     # The remote is this repository itself: its branch main is what it reports.
     git(tmp_path, "remote", "add", "origin", str(tmp_path))
     on_main = commit(tmp_path)
@@ -771,7 +772,7 @@ def test_push_brings_an_older_installed_hook_up_to_mains(tmp_path, monkeypatch, 
         git(tmp_path, "init", "-q", "--bare", str(pushed))
         git(tmp_path, "remote", "set-url", "--push", "origin", str(pushed))
     if source_on_main is False:
-        source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n# changed on this branch\n")
+        source.write_text(f"#!/bin/sh\n{local_ci.HOOK_MARKER} v5\n# changed on this branch\n", newline="\n")
         # A tracking ref that already has the change is not the remote's word.
         git(tmp_path, "update-ref", "refs/remotes/origin/main", commit(tmp_path))
     text = {"foreign": "#!/bin/sh\necho mine\n", None: None}.get(

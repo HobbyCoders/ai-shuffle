@@ -48,11 +48,13 @@ tests/core/test_worker_settings.py::test_slow_reads_are_parallel_cached_and_shar
 tests/core/test_native_generation.py::test_video_deadline_and_cancel_preserve_reported_cost
 
 # Windows file system: O_APPEND is not atomic across processes, a file name cannot
-# hold a line break, and Git keeps a linked checkout's .git open.
+# hold a line break, Git keeps a linked checkout's .git open, and a folder another
+# process is listing cannot be changed under it.
 fluid/tests/unit/test_memory_jit_delivery.py::test_the_log_takes_concurrent_writers_from_two_processes
 tests/scripts/test_backend_test_map.py::test_a_file_name_with_a_line_break_runs_everything
 tests/api/test_worker_folder_change.py::test_refuses_retarget_with_unprovable_legacy_worktree
 tests/core/test_plugin_source_updates.py::test_refreshed_implicit_component_root_cannot_read_outside_checkout
+tests/core/test_plugin_update_round3.py::test_uncoordinated_git_sync_can_overlap_install_without_copying_outside
 
 # Budgets measured on Linux: Windows paths and platform guidance are longer.
 tests/core/test_time_prefix_budget.py::test_owner_code_prefix_budget

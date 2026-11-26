@@ -71,6 +71,7 @@ class CacheSeedWorkflowTest(unittest.TestCase):
         # be published when this shared size/SHA verifier fails.
         self.assertEqual("actions/checkout@v4", steps[0]["uses"])
 
+    @unittest.skipUnless(Path("/bin/bash").exists(), "needs /bin/bash (a Linux worker)")
     def test_inline_shell_parses(self):
         for step in self.workflow()["jobs"]["seed"]["steps"]:
             if "run" in step:

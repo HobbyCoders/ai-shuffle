@@ -273,7 +273,8 @@ def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
                      "-p", "scripts.ci.record_failures"]
             passed_file = failed_file.with_name("passed.txt")
             try:
-                run(rerun, cwd=cwd, env={**(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
+                # python_env() first: the rerun's pytest_args load the Windows list plugin.
+                run(rerun, cwd=cwd, env={**python_env(), **(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
                     timeout=timeout, retry=False)
             except Failure:
                 raise Failure(f"{shown} (in {rel}) exited {returncode}; "
@@ -660,12 +661,14 @@ def workflows(ctx: Context) -> None:
             raise Failure(f"{ctx.python} needs {module} (PyYAML, pytest) for the workflow policy checks")
     run([ctx.python, "scripts/ci/test-artifact-policy.py"])
     run([ctx.python, "scripts/ci/test-cost-policy.py"])
+    known = ["-p", "windows_known_failures"] if os.name == "nt" else []  # as pytest_args does
     run([ctx.python, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--confcutdir=tests/scripts",
+         *known,
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
          "tests/scripts/test_local_ci.py", "tests/scripts/test_local_ci_preflight.py",
          "tests/scripts/test_local_ci_stages.py", "tests/scripts/test_security_gate.py",
          "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_npm_audit_gate.py",
-         "tests/scripts/test_cloud_split.py"])
+         "tests/scripts/test_cloud_split.py"], env=python_env())
 
 
 def android_play(ctx: Context) -> None:
