@@ -8,6 +8,55 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.3.10 (2026-11-26)
+
+### Memory and learning
+
+- Saved facts reach an agent just when they apply, instead of all at the start of a chat.
+- One learner handles memories and learned behaviour rules on any provider, with a daily limit on learning calls and an off switch, and its model judges conflicting memories instead of matching words.
+- Learning runs on each chat's own model and effort instead of the Text Generation model, and each chat's turns go only to that chat's provider.
+
+### Projects
+
+- A project page lists the project's checkouts worker by worker.
+- **Clone from GitHub** is more reliable, and the New project dialog is clearer.
+- Adding a repository from a supported Git host by its `git@` or HTTPS address now gives one project either way. Projects that were already duplicated this way stay separate. Switching a project's repository applies on every worker.
+- New chats start from the repository's real default branch, not always `main`.
+- Removing a project, deleting a group and the folder tree are safer, and a clone never reuses a stale folder.
+
+### Chats and sessions
+
+- Message all active chats at once.
+- Fork a chat to another worker. A fork of a chat in a Git project gets its own working copy.
+- **Watch** on a pull request has an agent follow its CI and reviews, within limits you set.
+- Design mode in the Browser panel: mark UI changes on the live page and send them to the agent.
+- Plugins installed from a shareable source sync between workers.
+
+### Agents and providers
+
+- Each Claude row has its own on/off switch, and a Claude API key runs beside the subscription.
+- Fast and Ultrafast cycle from the corner bolt on the effort card.
+- Stop and timeouts clean up what they started more reliably, including process trees, MCP calls and Swarms. They cannot undo work already sent to an outside service. Delegated Claude Code chats survive crashes and recovery.
+- Known credentials and common secret formats are masked in more places, including provider errors, logs and learner evidence, and files save without being truncated.
+
+### Desktop app
+
+- **Settings → System → Updates** says when the latest installer brings a newer launcher than the one you run, with a link to the download; the update button points there.
+- Once 1.3.10 is running, it checks the dependency cache faster on later updates, even with an older launcher.
+- The 1.3.10 installer brings a newer launcher that checks the restore point faster and skips the database copy when the database format is unchanged. Updating from the installer's bundled build still takes a copy. An in-app update alone keeps your current launcher.
+- The usage panel no longer flashes a terminal window on Windows.
+
+### Interface
+
+- **Export** is in the chat actions menu on desktop and phone.
+- On the phone, Controls sit on the composer's context line and the Vault is under Chat controls; a question card folds away without losing your answers.
+- Settings categories are reorganized, the sidebar keeps projects in name order with foldable groups, and the phone tab row follows the rail order.
+- The app and container start faster.
+
+### Fixed
+
+- Many fixes to sync between workers, hand-offs, tasks and wakeups.
+
 ## 1.3.9 (2026-11-21)
 
 1.3.9 contains everything in 1.3.8, plus a fix to how the Windows installer is built. 1.3.8 reached the in-app updater, the macOS download and Play internal testing, but its Windows installer could not be built, which also kept the Docker latest tag and the website's Windows, Linux and Android downloads on 1.3.1. 1.3.9 finishes that rollout.
