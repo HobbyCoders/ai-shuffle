@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/sv
 import { preloadAllDocs } from '$lib/docs/index';
 import DocsCard from './DocsCard.svelte';
 afterEach(() => { cleanup(); sessionStorage.clear(); });
+// Each test renders the whole bundled docs set: 3-6 s on a loaded Windows runner, over the 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
 describe('Docs shared navigation', () => {
  it('searches the bundled docs, selects with the keyboard and shows the matching article', async () => {
   await preloadAllDocs();

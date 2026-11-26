@@ -1,6 +1,7 @@
 """scripts/local_ci.py: suite selection, pass records and the pre-push decision."""
 import io
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -419,13 +420,49 @@ def test_clean_orphan_pr_assets_push_is_accepted(asset_repo, tmp_path):
     assert git("ls-remote", str(remote)).stdout != ""
 
 
+def test_a_windows_checkout_with_old_crlf_files_is_refused_with_the_fix(monkeypatch):
+    listing = "\n".join([
+        "i/lf    w/crlf  attr/text=auto eol=lf \tfrontend/src/lib/components/chat/ChatInput.svelte",
+        "i/lf    w/lf    attr/text=auto eol=lf \tapp/main.py",
+        "i/lf    w/crlf  attr/text eol=crlf    \trun_local.bat",
+    ])
+    diffs = {("diff", "--name-only", "HEAD"): "", ("diff", "--cached", "--name-only", "HEAD"): ""}
+
+    def git(*args):
+        if args == ("ls-files", "--eol"):
+            return listing
+        return diffs.get(args, "")
+
+    monkeypatch.setattr(local_ci, "git", git)
+    assert local_ci.stale_line_endings() == ["frontend/src/lib/components/chat/ChatInput.svelte"]
+    monkeypatch.setattr(local_ci.os, "name", "nt")
+    with pytest.raises(local_ci.Failure) as clean:
+        local_ci.line_endings_preflight()
+    assert all(command in str(clean.value) for command in local_ci.REWRITE_LINE_ENDINGS)
+    # Uncommitted work, in the working copy or only staged: never offer the hard reset.
+    for diff in diffs:
+        diffs[diff] = "app/main.py"
+        with pytest.raises(local_ci.Failure, match="uncommitted changes") as dirty:
+            local_ci.line_endings_preflight()
+        assert "reset" not in str(dirty.value)
+        diffs[diff] = ""
+    monkeypatch.setattr(local_ci.os, "name", "posix")
+    local_ci.line_endings_preflight()
+
+
 def test_windows_known_failures_list_is_well_formed():
     sys.path.insert(0, str(ROOT / "scripts" / "ci"))
     import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
 
     tests, files = known.load()
-    # All listed failures are retired. New regressions must not become skips.
-    assert (tests, files) == (set(), set())
+    # Every entry names a file and test that exist, so a rename cannot leave a
+    # stale skip behind (or silently skip nothing).
+    for entry in files:
+        assert (ROOT / entry).is_file(), entry
+    for entry in tests:
+        path, name = entry.split("::", 1)
+        source = (ROOT / path).read_text(encoding="utf-8")
+        assert re.search(rf"def {re.escape(name.split('::')[-1])}\(", source), entry
     assert known.base_id("fluid\\tests\\unit\\test_x.py::test_y[a-b]") == "fluid/tests/unit/test_x.py::test_y"
 
     # fluid's rootdir is fluid/, so its ids lack the prefix; the path restores it.

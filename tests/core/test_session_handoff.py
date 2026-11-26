@@ -1,4 +1,5 @@
 """Agent-queued hand-off to another worker, run when the session is idle."""
+import re
 import asyncio
 import sqlite3
 import threading
@@ -1627,7 +1628,9 @@ def test_1416_a_queued_hand_off_names_the_background_work_holding_it():
     finally:
         task_registry.clear_session("s1")
     for result in (queued, again):
-        assert "Held by 2 background tasks: Watch CI, Review the PR." in result["message"]
+        # Both tasks can start in the same clock tick (Windows), so either order is fine.
+        assert re.search(r"Held by 2 background tasks: (Watch CI, Review the PR|Review the PR, Watch CI)\.",
+                         result["message"]), result["message"]
         assert "at most 10 minutes" in result["message"]
         assert "the turn" not in result["message"].split("Held by")[1]
     assert queued["message"].startswith("Hand-off to DesktopWorker is queued.")

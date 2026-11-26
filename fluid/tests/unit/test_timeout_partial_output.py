@@ -198,7 +198,9 @@ async def test_bash_in_a_cell_times_out_under_the_ceiling_with_its_output(tmp_pa
     assert len(results) == 1 and results[0].is_error
     output = results[0].output
     # 8s ceiling - 5s grace, less the time the call spent before Bash started.
-    assert re.search(r"timed out after 2\.\ds \(cut from 600s to fit the time left", output), output
+    # Windows rounds the cut up to the whole 3s boundary.
+    budget = r"(2\.\d|3)s" if sys.platform == "win32" else r"2\.\ds"
+    assert re.search(rf"timed out after {budget} \(cut from 600s to fit the time left", output), output
     assert "FATAL: db locked" in output and "may be incomplete" in output
     assert "cancelled before it returned" not in output
     assert "FATAL: db locked" in out.text and "CAUGHT" in out.text

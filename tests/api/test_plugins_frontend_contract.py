@@ -16,6 +16,7 @@ Regenerate after an intentional change with:
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from app.core.plugin_service import PluginService
 FIXTURE = (Path(__file__).resolve().parents[2]
            / "frontend" / "src" / "lib" / "api" / "__fixtures__" / "plugin-responses.json")
 HOME = "/home/user"
+REVISION = re.compile(r"(/\.revision-[^/]+-)[0-9a-f]{64}(?=/|$)")
 FIXED_TIME = "2026-01-02T03:04:05"
 
 # Keys per response; mirrors the TypeScript interfaces in frontend/src/lib/api/plugins.ts.
@@ -54,7 +56,7 @@ EXPECTED_KEYS = {
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, newline="\n")
 
 
 @pytest.fixture
@@ -110,20 +112,25 @@ def client(svc, monkeypatch):
     return TestClient(app)
 
 
-def _normalise(value, tmp: str):
+def _normalise(value, tmp: str, *, shared: bool = False):
+    """Machine-neutral payloads; ``shared`` also hides the per-platform digest."""
     if isinstance(value, dict):
-        return {k: (FIXED_TIME if k == "installed_at" and v else _normalise(v, tmp))
+        return {k: (FIXED_TIME if k == "installed_at" and v else _normalise(v, tmp, shared=shared))
                 for k, v in value.items()}
     if isinstance(value, list):
-        return [_normalise(v, tmp) for v in value]
+        return [_normalise(v, tmp, shared=shared) for v in value]
     if isinstance(value, str):
         if value.startswith(tmp):
-            return HOME + value[len(tmp):].replace(os.sep, "/")
+            path = HOME + value[len(tmp):].replace(os.sep, "/")
+            # The cache folder names the tree digest, and Windows sorts the
+            # tree's paths without case, so the shared fixture cannot pin it.
+            # Same-run comparisons keep the real digest.
+            return REVISION.sub(r"\1<tree-digest>", path) if shared else path
         return value
     return value
 
 
-def _payloads(client, tmp_path) -> dict:
+def _payloads(client, tmp_path, *, shared: bool = False) -> dict:
     def ok(response):
         assert response.status_code == 200, response.text
         return response.json()
@@ -136,7 +143,7 @@ def _payloads(client, tmp_path) -> dict:
         "installed": ok(client.get("/api/v1/plugins/installed")),
         "file_based_agents": ok(client.get("/api/v1/plugins/agents/file-based")),
     }
-    return _normalise(raw, str(tmp_path))
+    return _normalise(raw, str(tmp_path), shared=shared)
 
 
 def test_response_keys_match_the_frontend_types(client, tmp_path, svc):
@@ -167,7 +174,7 @@ def test_response_keys_match_the_frontend_types(client, tmp_path, svc):
 
 
 def test_shared_frontend_fixture_matches_live_responses(client, tmp_path):
-    payloads = _payloads(client, tmp_path)
+    payloads = _payloads(client, tmp_path, shared=True)
     rendered = json.dumps(payloads, indent="\t", sort_keys=True) + "\n"
     if os.environ.get("UPDATE_PLUGIN_CONTRACT_FIXTURE") == "1":
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)

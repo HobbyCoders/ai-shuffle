@@ -7,6 +7,7 @@ setup itself always runs through the real git-ops claim pass.
 """
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import subprocess
@@ -1212,18 +1213,20 @@ def test_a_new_project_clone_never_reads_a_local_repository(client, ws, test_db,
     assert not _listed(client, resp.json()["project_v2_id"])
 
     # An scp-style source that names a folder here (git checks for one before
-    # it reads host:path as SSH) never copies that folder either.
+    # it reads host:path as SSH) never copies that folder either. Windows folder
+    # names cannot contain ':', so this case cannot arise there.
     scp = "git@git.example.com:example-org/kit.git"
-    local = ws / "git@git.example.com:example-org" / "kit.git"
-    local.parent.mkdir(parents=True)
-    git(ws, "init", "-q", "--bare", "-b", "main", str(local))
-    resp = _clone_new(client, scp, id="kit", name="Kit")
-    assert resp.status_code == 202, resp.text
-    _run_setups()
-    status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
-    assert status["status"] == "error", status
-    assert "use Folder" in status["error"]
-    assert not (ws / "kit").exists()
+    if os.name != "nt":
+        local = ws / "git@git.example.com:example-org" / "kit.git"
+        local.parent.mkdir(parents=True)
+        git(ws, "init", "-q", "--bare", "-b", "main", str(local))
+        resp = _clone_new(client, scp, id="kit", name="Kit")
+        assert resp.status_code == 202, resp.text
+        _run_setups()
+        status = client.get(f"/api/v1/projects/setup/{resp.json()['op_id']}").json()
+        assert status["status"] == "error", status
+        assert "use Folder" in status["error"]
+        assert not (ws / "kit").exists()
 
     # Setting up an existing project still copies a local source as before.
     command = project_setup._clone_command("/srv/repo.git", "/tmp/x")

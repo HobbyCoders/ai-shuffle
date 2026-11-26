@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it as vitestIt } from "vitest";
 import { existsSync } from "node:fs";
 import { chromium, type Browser } from "playwright-core";
 import { recorderSource } from "../src/recorder/driver.js";
@@ -6,8 +6,12 @@ import { recorderSource } from "../src/recorder/driver.js";
 const executablePath = process.env.CHROMIUM_PATH || [
   "/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome-stable",
 ].find(existsSync);
+// Windows has none of those paths: without CHROMIUM_PATH there is no browser, as in captcha.browser.test.ts.
+const noBrowser = !executablePath && process.platform === "win32";
+const it = noBrowser ? vitestIt.skip : vitestIt;
 let browser: Browser;
 beforeAll(async () => {
+  if (noBrowser) return;
   browser = await chromium.launch({ executablePath, headless: true, args: ["--no-sandbox"] });
 });
 afterAll(async () => { await browser?.close(); });

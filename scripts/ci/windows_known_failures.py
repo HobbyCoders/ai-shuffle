@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 LIST = ROOT / "scripts/ci/windows_known_failures.txt"
-# The list stays empty: a Windows failure is fixed, not skipped.
+# Each entry or group names why it fails on Windows; small fixes beat listing.
 SOURCE = "scripts/ci/windows_known_failures.txt"
 
 

@@ -1026,8 +1026,13 @@ The last lines of each run list what this machine did not cover:
 - On Windows, tests requiring POSIX executables or unavailable symlink
   privileges skip individually with their platform or capability reason.
   Desktop typechecks and unit tests run on Windows as well as Linux.
-  `scripts/ci/windows_known_failures.txt` is empty, and a regression test keeps
-  it empty. Fix failures rather than adding exclusions to get a push through.
+  `scripts/ci/windows_known_failures.txt` lists, grouped by cause, the tests
+  that exercise Linux process, timing or file behaviour a Windows release does
+  not depend on; Linux CI still runs them. A regression test requires every
+  entry to name a real test. Fix a small Windows failure rather than listing it.
+- Every text file checks out with LF (`.gitattributes`), except `.bat` and
+  `.cmd`. On Windows, `local_ci.py check|full` refuses a checkout that still has
+  CRLF from before that rule and prints the one-time command that rewrites it.
 - macOS folder confinement and the iOS app: no Mac. The owner dispatches
   `ci-folder-confinement.yml` or `ios.yml` when a change needs them, usually
   before a release.

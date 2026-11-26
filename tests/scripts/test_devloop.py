@@ -1,6 +1,13 @@
 """The dev loop launcher (scripts/devloop/__main__.py) and its seed bookkeeping."""
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip('The devloop is Linux/macOS only: it relies on os.getuid, O_NOFOLLOW, fcntl and SIGHUP', allow_module_level=True)
+
 import asyncio
 import ipaddress
 import json

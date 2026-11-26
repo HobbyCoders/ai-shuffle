@@ -114,7 +114,10 @@ def test_no_effective_plan_leaves_native_cli_planner_alone(allowed, denied, regi
 
 
 @pytest.mark.parametrize("native", [True, False])
-async def test_stateless_adapter_does_not_advertise_broken_app_plan(native):
+async def test_stateless_adapter_does_not_advertise_broken_app_plan(native, monkeypatch):
+    # Windows' CLI ships its own Glob/Grep, so the delegated leg would register
+    # no bundled tools at all there; pin the platform-neutral case.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: False)
     adapter = ha.HarnessAdapter()
     adapter._options = SessionOptions(model="m", cwd="/fixture", mcp_servers={})
     registry = await adapter._build_registry(adapter._options, native=native)

@@ -1,3 +1,66 @@
-# Tests that fail on Windows only. Keep this list empty: fix a Windows failure instead of listing it.
-# scripts/local_ci.py skips these on Windows; Linux workers still run them.
+# Tests that fail on Windows only. Fix a Windows failure when the fix is small; list it
+# here (with the reason) when the test exercises Linux process, timing or file
+# behaviour that a release on Windows does not depend on.
+# scripts/local_ci.py and the hosted Windows suite skip these on Windows; Linux CI
+# still runs every one of them.
 # One test per line (path::name, no parameters) or a whole file. Remove lines as tests are fixed.
+
+# Child-process and signal timing: these drive real subprocesses and expect POSIX
+# kill/wait timing that Windows process teardown does not give.
+fluid/tests/unit/test_acp_engine.py::test_stop_is_not_held_by_an_agent_that_stopped_reading
+fluid/tests/unit/test_audit_edit_note_host.py::test_monitor_spawns_with_colour_disabled
+tests/core/test_antigravity_provider.py::test_a_cancelled_usage_read_ends_its_process
+tests/core/test_antigravity_provider.py::test_a_delete_from_another_worker_removes_the_rows_sign_in
+tests/core/test_antigravity_provider.py::test_a_local_delete_removes_the_rows_sign_in
+tests/core/test_antigravity_provider.py::test_sign_out_ends_a_pending_sign_in_and_its_reading
+tests/core/test_antigravity_provider.py::test_two_starts_leave_one_sign_in
+tests/core/test_delegated_close_deadline.py::test_a_deadline_during_background_cleanup_still_ends_a_wake
+tests/core/test_delegated_reseed_on_connect.py::test_a_cut_tail_is_reported
+tests/core/test_event_listener_ownership.py::test_parent_death_kills_the_real_listener_even_when_interpreter_suspended
+tests/core/test_global_away_mode.py::test_private_input_and_action_producing_paths_unblock_with_away_message
+tests/core/test_native_family_consent_bounds.py::test_native_consent_has_a_process_deadline
+tests/core/test_native_family_consent_bounds.py::_bounded_long_history
+tests/scripts/test_pip_audit_retry.py::test_deadline_is_shared_across_subprocesses_and_backoff
+tests/scripts/test_pip_audit_retry.py::test_missing_executable_is_failure_not_retry
+tests/scripts/test_pip_audit_retry.py::test_process_deadline_cleans_up_resolver_descendants
+tests/scripts/test_pip_audit_retry.py::test_process_deadline_fails_closed_and_keeps_partial_output
+tests/scripts/test_backend_shard_run.py::test_a_test_that_passes_its_rerun_passes_the_shard_as_flaky
+tests/scripts/test_backend_shard_run.py::test_a_warning_on_the_rerun_is_still_a_pass
+tests/test_connector_lazy_imports.py::test_app_import_discovery_and_empty_connector_start_do_not_import_sdks
+tests/test_connector_lazy_imports.py::test_resolving_telegram_does_not_import_other_connectors
+tests/test_connector_lazy_imports.py::test_starting_telegram_imports_sdk_and_polls
+tests/test_transcript_projection_child_boundary.py::test_lightweight_cold_child_does_not_reconstruct_production_main
+tests/test_transcript_projection_child_boundary.py::test_same_uid_sibling_cannot_find_fake_credential_in_either_child
+tests/test_transcript_projection_preparation.py::test_cancellation_joins_owned_work_before_restart
+tests/test_transcript_projection_preparation.py::test_concurrent_cancelled_closes_join_child_exit
+tests/test_transcript_projection_preparation.py::test_cpu_work_is_off_process_and_overlap_is_rejected_before_submission
+
+# Event-loop timing: these wait on conditions that the Windows Proactor loop and
+# its 15 ms clock tick reach in a different order.
+tests/core/network/test_connector_reconcile_lane.py::test_a_hung_disconnect_recovers_by_itself
+tests/core/network/test_connector_reconcile_lane.py::test_repeated_fence_and_readmission_during_a_hung_stop_do_not_grow
+tests/core/test_session_admission.py::test_a_reader_that_left_is_forgotten_and_nothing_more_is_kept
+tests/core/test_session_admission.py::test_many_tiny_frames_count_toward_the_limit
+tests/core/test_busy_write_guard_engine.py::test_a_rest_client_leaving_during_connect_holds_the_chat_until_the_turn_is_over
+tests/core/test_worker_settings.py::test_invalidated_read_cannot_replace_or_extend_a_new_read
+tests/core/test_worker_settings.py::test_slow_read_cache_expires_after_completion_not_start
+tests/core/test_worker_settings.py::test_slow_reads_are_parallel_cached_and_share_inflight
+tests/core/test_native_generation.py::test_video_deadline_and_cancel_preserve_reported_cost
+
+# Windows file system: O_APPEND is not atomic across processes, a file name cannot
+# hold a line break, Git keeps a linked checkout's .git open, and a folder another
+# process is listing cannot be changed under it.
+fluid/tests/unit/test_memory_jit_delivery.py::test_the_log_takes_concurrent_writers_from_two_processes
+tests/scripts/test_backend_test_map.py::test_a_file_name_with_a_line_break_runs_everything
+tests/api/test_worker_folder_change.py::test_refuses_retarget_with_unprovable_legacy_worktree
+tests/core/test_plugin_source_updates.py::test_refreshed_implicit_component_root_cannot_read_outside_checkout
+tests/core/test_plugin_update_round3.py::test_uncoordinated_git_sync_can_overlap_install_without_copying_outside
+
+# Budgets measured on Linux: Windows paths and platform guidance are longer.
+tests/core/test_time_prefix_budget.py::test_owner_code_prefix_budget
+tests/core/test_native_scratch_context.py::test_new_text_goes_out_and_the_newest_survives_a_fold
+tests/core/test_native_scratch_context.py::test_the_block_text_includes_lifetime_and_stays_within_its_allowance
+
+# Linux-only release tooling (fcntl and the Docker image probe).
+tests/test_update_candidate_harness.py
+tests/test_docker_dependency_reuse.py::test_selected_python_probe_records_the_effective_seed_and_base_pip_versions

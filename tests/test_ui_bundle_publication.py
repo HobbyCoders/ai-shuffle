@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import zipfile
 
 import pytest
@@ -45,7 +46,12 @@ def test_missing_phone_shell_and_zip_expansion_are_rejected(assets, tmp_path, mo
         archive.describe_ui_bundle(output, REVISION, VERSION)
 
 
-@pytest.mark.parametrize("name", ["../escape", "file:stream", "alias\\name", "INDEX.HTML"])
+@pytest.mark.parametrize("name", [
+    "../escape", "file:stream",
+    # On Windows zipfile writes the backslash as "/", so this entry is never hostile there.
+    pytest.param("alias\\name", marks=pytest.mark.skipif(sys.platform == "win32", reason="zipfile rewrites \\ on Windows")),
+    "INDEX.HTML",
+])
 def test_unsafe_or_duplicate_ui_files_are_refused(assets, tmp_path, name):
     output = tmp_path / "hostile.zip"
     archive.build_ui_bundle(assets, REVISION, VERSION, output)

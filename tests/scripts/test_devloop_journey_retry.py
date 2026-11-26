@@ -1,6 +1,13 @@
 """The CI entry point, with real summary files but no browser/database required."""
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip('The devloop is Linux/macOS only: it relies on os.getuid, O_NOFOLLOW, fcntl and SIGHUP', allow_module_level=True)
+
 import json
 import sys
 from pathlib import Path

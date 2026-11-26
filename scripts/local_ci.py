@@ -273,7 +273,8 @@ def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
                      "-p", "scripts.ci.record_failures"]
             passed_file = failed_file.with_name("passed.txt")
             try:
-                run(rerun, cwd=cwd, env={**(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
+                # python_env() first: the rerun's pytest_args load the Windows list plugin.
+                run(rerun, cwd=cwd, env={**python_env(), **(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
                     timeout=timeout, retry=False)
             except Failure:
                 raise Failure(f"{shown} (in {rel}) exited {returncode}; "
@@ -374,7 +375,7 @@ def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[
     if has_module(python, "pytest_timeout"):
         args += [f"--timeout={timeout}"]
     if os.name == "nt":
-        # Skips the tests in scripts/ci/windows_known_failures.txt (kept empty).
+        # Skips the Windows-only failures listed, by cause, in scripts/ci/windows_known_failures.txt.
         args += ["-p", "windows_known_failures"]
     return args
 
@@ -660,12 +661,14 @@ def workflows(ctx: Context) -> None:
             raise Failure(f"{ctx.python} needs {module} (PyYAML, pytest) for the workflow policy checks")
     run([ctx.python, "scripts/ci/test-artifact-policy.py"])
     run([ctx.python, "scripts/ci/test-cost-policy.py"])
+    known = ["-p", "windows_known_failures"] if os.name == "nt" else []  # as pytest_args does
     run([ctx.python, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--confcutdir=tests/scripts",
+         *known,
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
          "tests/scripts/test_local_ci.py", "tests/scripts/test_local_ci_preflight.py",
          "tests/scripts/test_local_ci_stages.py", "tests/scripts/test_security_gate.py",
          "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_npm_audit_gate.py",
-         "tests/scripts/test_cloud_split.py"])
+         "tests/scripts/test_cloud_split.py"], env=python_env())
 
 
 def android_play(ctx: Context) -> None:
@@ -1035,8 +1038,47 @@ def attest_preflight(revision: str, resumed: bool = False) -> None:
     attest_update_reach(revision)
 
 
+#: Two commands, run one after the other from the repository root (any shell).
+REWRITE_LINE_ENDINGS = ("git rm -r -q --cached .", "git reset -q --hard HEAD")
+
+
+def stale_line_endings() -> list[str]:
+    """Tracked files still checked out with CRLF where .gitattributes asks for LF.
+
+    A checkout made before the repo-wide ``eol=lf`` rule keeps CRLF in every
+    file a later update did not touch, and exact-text tests then fail.
+    """
+    stale = []
+    for line in git("ls-files", "--eol").splitlines():
+        meta, _, path = line.partition("\t")
+        fields = meta.split()
+        if len(fields) >= 2 and fields[1] in ("w/crlf", "w/mixed") and "eol=lf" in meta:
+            stale.append(path)
+    return stale
+
+
+def line_endings_preflight() -> None:
+    if os.name != "nt":
+        return
+    stale = stale_line_endings()
+    if not stale:
+        return
+    problem = (f"{len(stale)} tracked files (e.g. {stale[0]}) still have the CRLF line endings of a "
+               f"checkout older than the repo-wide LF rule.")
+    # Content diffs, not status: a CRLF-only difference is not a change once normalized. The staged
+    # diff catches an edit that is staged while the working copy matches HEAD again.
+    if git("diff", "--name-only", "HEAD") or git("diff", "--cached", "--name-only", "HEAD"):
+        raise Failure(f"{problem} This checkout also has uncommitted changes, which rewriting it would "
+                      f"discard: commit or save them first, then run again for the rewrite command.")
+    first, second = REWRITE_LINE_ENDINGS
+    raise Failure(f"{problem} Rewrite them once from the repository root: run `{first}`, and only if it "
+                  f"succeeds run `{second}` (nothing is uncommitted; untracked files such as .venv stay), "
+                  f"then run again.")
+
+
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
+    line_endings_preflight()
     revision = git("rev-parse", "HEAD")
     if args.attest and args.only:
         raise Failure("--attest cannot be combined with --only")

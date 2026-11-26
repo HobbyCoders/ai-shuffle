@@ -4,6 +4,7 @@ Claude API and the Claude subscription are separate options: the key runs on
 fluid's native Anthropic client, the subscription on the Claude Code CLI.
 """
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -488,6 +489,7 @@ def test_remember_models_suppresses_noop_writes_and_keeps_plain_list_format(key,
 
     # Explicit manual refresh (touch_timestamp=True) with unchanged models updates
     # ONLY fetched_at and leaves claude_api_models_cache untouched.
+    time.sleep(0.05)  # past the Windows clock tick, so the new stamp differs
     touched_ts = cap.remember_models(
         KEY,
         [{"id": "claude-live-1", "label": "Live One"}],
