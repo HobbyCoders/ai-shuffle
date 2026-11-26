@@ -50,12 +50,12 @@ PROGRESS = [
     ("The gesture fix is half done.", "When working on PR #1824"),
     # A continuation naming a full PR link.
     ("Continuing https://github.com/example/widgets/pull/1824", "When resuming the widgets fix"),
-    # "On branch <name>" with a single-component name.
-    ("On branch main; next step is to rerun CI.", "When rerunning CI"),
+    # A quoted single-component branch name.
+    ("On branch `release`; next step is to rerun CI.", "When rerunning CI"),
     # A reference opening a clause, its status after the colon.
     ("PR #1824: next step is to add the scroll test.", "When adding the scroll test"),
-    # A spaced dash ends a clause, so "on branch main" opens one.
-    ("Handoff — on branch main; next step is to rerun CI.", "When rerunning CI"),
+    # A spaced dash ends a clause, so "on branch fix-login" opens one.
+    ("Handoff — on branch fix-login; next step is to rerun CI.", "When rerunning CI"),
 ]
 
 # Lasting rules that cite a PR, issue or branch, or use progress-like words
@@ -100,6 +100,11 @@ LASTING = [
     # "On branch creation" is prose, not a branch called "creation".
     ("On branch creation, the next step after naming the branch is to set its upstream "
      "before the first push.", "When creating a branch"),
+    # A default branch is lasting context, never the work, quoted or not
+    # (owner decision: a missed "On branch main; next step …" is acceptable).
+    ("Deploy checklist — on branch main, never deploy while waiting for CI.",
+     "When deploying"),
+    ("On branch `main`, never merge while checks are still failing.", "When merging"),
 ]
 
 

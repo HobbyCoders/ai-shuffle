@@ -18,9 +18,9 @@ model.
 * the fact is anchored to the work: its when-line names a PR, issue or work
   branch ("When working on PR #1824"; a named branch such as main may be
   lasting context there, so it does not count), or a clause of the text opens
-  with "on branch <name>" ("on branch main", "on branch docs/x"; an unquoted
-  single name only for main, master, develop or trunk). Then any progress
-  wording in the fact counts.
+  with "on branch <name>" ("on branch docs/x"). A default branch (main,
+  master, develop, trunk) is never the work, so "on branch main" anchors
+  nothing. Then any progress wording in the fact counts.
 
 A generic condition in a rule ("never merge while a migration is in progress;
 see issue #88") is none of these, so it saves.
@@ -41,14 +41,13 @@ _WORK = (
     r"|(?<![\w/.-])(?:feat|feature|fix|bugfix|hotfix|chore|refactor|wip)/[A-Za-z0-9][\w.-]*)"
 )
 # Any branch named as one: "branch docs/update-readme", "branch fix-login", a
-# quoted "branch `main`", and "on branch" with an unquoted single name only
-# for a default branch ("on branch creation" is prose). A named branch may be
-# lasting context ("when deploying on branch main"), so it never anchors a
-# fact from the when-line.
+# quoted "branch `release`". An unquoted single name ("on branch creation") is
+# prose, and a default branch (main, master, develop, trunk) is lasting
+# context, never a piece of work. A named branch may also be lasting context
+# in the when-line, so it never anchors a fact from there.
 _NAMED = (
     r"(?:\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
-    r"|\bbranch\s+[`'\"][A-Za-z0-9][\w./-]*"
-    r"|\bon\s+branch\s+(?:main|master|develop|trunk)\b)"
+    r"|\bbranch\s+[`'\"](?!(?:main|master|develop|trunk)\b)[A-Za-z0-9][\w./-]*)"
 )
 _REF = "(?:" + _WORK + "|" + _NAMED + ")"
 _REFERENCE = re.compile(_REF, re.IGNORECASE)

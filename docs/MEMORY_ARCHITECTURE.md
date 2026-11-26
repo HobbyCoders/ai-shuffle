@@ -28,15 +28,16 @@ Remember guards what it writes (Memory v3 phase 2a):
   save whose progress wording ("continuing", "left off", "in progress", "next
   step", "still needed", WIP as a status and similar) is about a pull request,
   issue or branch reference (`#123`, `PR 123`, an issue or PR link, `feat/x`,
-  `branch <name>`, `on branch main`): the reference is the status's subject,
+  `branch fix-login`): the reference is the status's subject,
   joined by a be-verb, "remains", "still" or a colon ("Issue #88 is in
   progress", "PR #1824: next step is…"), a continuation names it
   ("Continuing PR #1824"), or the fact is anchored to it (its when-line names
   a PR, issue or work branch such as `feat/x`, or a clause of the text opens
   "on branch <name>"). A named branch in the when-line ("When deploying on
-  branch main", "On branch main") is lasting context and anchors nothing, and
-  an unquoted single name after "on branch" counts only if it is main, master,
-  develop or trunk, so "On branch creation, …" is prose. Nearness alone does not
+  branch main", "On branch main") is lasting context and anchors nothing. A
+  default branch (main, master, develop, trunk) never counts as the work, and
+  an unquoted single name after "on branch" is prose ("On branch creation, …").
+  Nearness alone does not
   count, so a lasting rule that cites a PR ("Since PR #1909 the pre-push hook
   refuses…", "never merge while a migration is in progress; see issue #88")
   saves. Remember passes the check to `FactStore.save` as `check(text, when)`,
