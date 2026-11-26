@@ -10243,6 +10243,7 @@ def _learner_route(session_id: str, owner: str) -> Optional[Any]:
             context_window=window,
             session_model=model,
             billing=learner_billing(*shape),
+            destination=f"{target.kind}:{provider_id or ''}",
         )
     except Exception:  # noqa: BLE001 — no route: those entries are never sent elsewhere
         logger.warning("[HarnessAdapter] learner route lookup failed", exc_info=True)

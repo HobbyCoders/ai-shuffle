@@ -534,6 +534,9 @@ class LearnerRoute(NamedTuple):
     session_model: str | None = None
     #: How the route's provider bills a call (BILLING_SUBSCRIPTION, metered).
     billing: str | None = None
+    #: Where the text goes (provider kind and row): retained workflow evidence
+    #: from another chat is shown only to a call with the same destination.
+    destination: str | None = None
 
 
 def _bounded(value: Any, low: int, high: int) -> int | None:
@@ -698,6 +701,12 @@ class Synthesizer:
         self._route = route
         # The foreign route of the group being called, or None (this chat).
         self._active_route: LearnerRoute | None = None
+        # Each chat's destination (LearnerRoute.destination) seen this pass,
+        # for filtering retained workflow evidence (see _synthesis_input).
+        self._destinations: dict[str, str | None] = {}
+        # (model, billing, prompt limit) of a call made since the last
+        # pass-log row (see _complete): the row records a call that ran.
+        self._last_call: tuple[str, Any, int] | None = None
         # The daily call budget this learner spends (see learner_budget):
         # ``daily_calls`` is the explicit setting, a number or a callable
         # read at pass time (None or 0: automatic); ``billing`` says how this
@@ -875,7 +884,10 @@ class Synthesizer:
             self._budget_spent_day = None
             self._latch_checked = False
         try:
-            backoff = self._store.learner_backoff(self._model)
+            # The model the next pass will run on: a chat that switched away
+            # from a failing model is not held to that model's backoff.
+            pending = self._pending_target
+            backoff = self._store.learner_backoff(pending[0] if pending else self._model)
         except Exception:
             backoff = {}
         if backoff and time.time() < float(backoff.get("until", 0.0)):
@@ -1367,21 +1379,74 @@ class Synthesizer:
         that chat (gone, no model, a provider that refuses background calls,
         or its model is backing off after failures)."""
         routes: dict[str, LearnerRoute | None] = {}
+        self._destinations = {}
         for _, entry in shown:
             key = self._route_key(entry)
             if key is None or key in routes:
                 continue
-            route: LearnerRoute | None
-            try:
-                route = await asyncio.to_thread(self._route, key)  # type: ignore[arg-type]
-            except Exception:  # noqa: BLE001 — no route: never another provider
-                _log.debug("learner route lookup failed", exc_info=True)
-                route = None
+            route = await self._lookup_route(key)
+            self._destinations[key] = route.destination if route else None
             if route is not None and self._backing_off(route.model):
                 await self._close_routes({key: route})
                 route = None
             routes[key] = route
         return routes
+
+    async def _lookup_route(self, session: str) -> LearnerRoute | None:
+        try:
+            return await asyncio.to_thread(self._route, session)  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 — no route: never another provider
+            _log.debug("learner route lookup failed", exc_info=True)
+            return None
+
+    async def _learn_destinations(self, sessions: list[str]) -> None:
+        """Record where each of ``sessions`` sends its text (clients are
+        built lazily, so nothing is opened; they are closed regardless)."""
+        for session in sessions:
+            if session in self._destinations:
+                continue
+            route = await self._lookup_route(session)
+            self._destinations[session] = route.destination if route else None
+            await self._close_routes({session: route})
+
+    async def _learn_evidence_destinations(self, fitted: list[tuple[int, dict]]) -> None:
+        """Before a slice that accepts a workflow, learn the destination of
+        every chat whose retained entries in those projects could be shown as
+        workflow evidence, so _synthesis_input can keep to the call's own."""
+        if self._route is None:
+            return
+        projects = {e.get("project") for _, e in fitted
+                    if e.get("kind") == "user"
+                    and e.get("text", "").strip().lower().startswith("workflow accepted: ")}
+        if not projects:
+            return
+        try:
+            retained = self._store.journal_entries()
+        except (ValueError, OSError):
+            return
+        sessions = sorted({str(e["session"]) for e in retained
+                           if e.get("session") and e.get("project") in projects})
+        if self._own_session:
+            sessions.insert(0, self._own_session)
+        await self._learn_destinations(sessions)
+
+    def _evidence_allowed(self, entry: dict, group_session: str | None) -> bool:
+        """Whether a retained entry may be shown to the call being built for
+        ``group_session``'s entries: the same chat, or another chat whose text
+        goes to the same destination. Unstamped entries have no known origin
+        and are left out."""
+        if self._route is None:
+            return True
+        session = entry.get("session")
+        if not session:
+            return False
+        if group_session and session == group_session:
+            return True
+        if self._active_route is not None:
+            dest = self._active_route.destination
+        else:
+            dest = self._destinations.get(self._own_session) if self._own_session else None
+        return dest is not None and self._destinations.get(str(session)) == dest
 
     def _backing_off(self, model: str) -> bool:
         try:
@@ -1464,6 +1529,7 @@ class Synthesizer:
         deferred = len(shown) - len(fitted)
         if deferred:
             reached = fitted[-1][0]
+        await self._learn_evidence_destinations(fitted)
         groups: dict[tuple[str | None, str | None], list[dict]] = {}
         for _, entry in fitted:
             groups.setdefault(self._group_key(entry), []).append(entry)
@@ -1655,13 +1721,19 @@ class Synthesizer:
         ``MAX_LOG_ENTRIES`` passes.
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
-        record["model"] = self._model
-        # How this pass was billed and the most journal text it could send,
-        # apart from the budget's source (a custom daily cap hides billing).
-        billing = self._resolve(self._billing)
+        # The model, billing and most journal text of a call this pass made
+        # (another chat's when only its entries were learned), or this
+        # learner's when it made none. The budget's source is separate:
+        # a custom daily cap hides billing.
+        last, self._last_call = self._last_call, None
+        if last is not None:
+            record["model"], billing, record["prompt_limit"] = last
+        else:
+            record["model"] = self._model
+            billing = self._resolve(self._billing)
+            record["prompt_limit"] = self._prompt_limit
         if isinstance(billing, str):
             record["billing"] = billing
-        record["prompt_limit"] = self._prompt_limit
         if self._resolved_budget is not None:
             # Which daily budget applied, and why (setting, or the default
             # for how the pass's provider bills it).
@@ -2170,10 +2242,14 @@ class Synthesizer:
                    e.get("text", "").strip().lower().startswith("workflow accepted: ")
                    for e in entries):
             return prompt, _SYNTH_SYSTEM, []
+        # Another chat's retained text is shown only where that chat's own
+        # text would go (see _learn_evidence_destinations).
+        group_session = self._route_key(entries[0]) or self._own_session
         try:
             forgotten = self._store._facts.snapshot().get("forgotten_before", 0)
             retained = [e for e in self._store.journal_entries()
-                        if e.get("ts", 0) > forgotten and e.get("project") == self._project]
+                        if e.get("ts", 0) > forgotten and e.get("project") == self._project
+                        and self._evidence_allowed(e, group_session)]
             excluded = {r["name"] for r in WorkflowProposals(self._store).list()
                         if r["project"] == self._project}
             from fluid.codemode.workflow_loss import load_loss
@@ -2251,13 +2327,27 @@ Never claim a workflow is installed because it was proposed."""
         result as NO_CHANGES.
         """
         # Synthesis leaves CONSOLIDATE_RESERVED_CALLS of the day's budget
-        # for curation; consolidation itself may spend them.
+        # for curation; consolidation itself may spend them. Another chat's
+        # call counts toward the same day but is held to the cap its own
+        # billing sets: a metered chat never spends a subscription's default.
+        if self._active_route is not None:
+            budget = learner_budget(self._resolve(self._daily_calls), self._active_route.billing)
+            limit = None if budget.source == "metered_default" else budget.daily
+            billing: Any = self._active_route.billing
+        else:
+            budget = self._budget()
+            limit = self._claim_limit()
+            billing = self._resolve(self._billing)
         if reserve is None:
-            reserve = 0 if system is _CONSOLIDATE_SYSTEM else self._budget().reserved
-        limit = self._claim_limit()
+            reserve = 0 if system is _CONSOLIDATE_SYSTEM else budget.reserved
         claim = {"reserve": reserve} if limit is None else {"reserve": reserve, "limit": limit}
         if not self._store._facts.claim_inference_call(**claim):
             raise InferenceBudgetExhausted(BUDGET_SPENT_MESSAGE)
+        # The pass-log row records a call that ran: this chat's own when it
+        # made one (other chats' models are listed under "routed"), else the
+        # other chat's.
+        if self._last_call is None or self._active_route is None:
+            self._last_call = (self._model, billing, self._prompt_limit)
         if len(prompt) > self._prompt_limit:
             # _prompt keeps every section inside the limit; reaching this
             # cut means a budget is wrong, and it is worth a line.
@@ -2285,18 +2375,26 @@ Never claim a workflow is installed because it was proposed."""
         raw: dict[str, Any] = {}
         stop_reason: str | None = None
         error: dict[str, Any] | None = None
-        async for chunk in self._provider.stream(request):
-            payload = chunk.payload or {}
-            if chunk.kind == "text_delta":
-                parts.append(payload["text"])
-            elif chunk.kind in ("message_start", "usage", "message_stop"):
-                reported = payload.get("usage")
-                if isinstance(reported, dict):
-                    raw.update({k: v for k, v in reported.items() if v})
-                if payload.get("stop_reason"):
-                    stop_reason = str(payload["stop_reason"])
-            elif chunk.kind == "error" and error is None:
-                error = dict(payload)
+        try:
+            async for chunk in self._provider.stream(request):
+                payload = chunk.payload or {}
+                if chunk.kind == "text_delta":
+                    parts.append(payload["text"])
+                elif chunk.kind in ("message_start", "usage", "message_stop"):
+                    reported = payload.get("usage")
+                    if isinstance(reported, dict):
+                        raw.update({k: v for k, v in reported.items() if v})
+                    if payload.get("stop_reason"):
+                        stop_reason = str(payload["stop_reason"])
+                elif chunk.kind == "error" and error is None:
+                    error = dict(payload)
+        except Exception as exc:  # noqa: BLE001 — see below
+            # Another chat's provider that raises (a disabled row, a
+            # credential that will not resolve) fails like one that sends an
+            # error chunk: that chat backs off, not the one running the pass.
+            if self._active_route is None:
+                raise
+            error = {"message": f"{type(exc).__name__}: {exc}"}
         usage: dict[str, int] = {}
         _add_usage(usage, raw)
         self.last_pass_usage = dict(usage)

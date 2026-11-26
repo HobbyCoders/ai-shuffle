@@ -400,6 +400,76 @@ async def test_another_chats_failing_provider_does_not_hold_up_this_chat(tmp_pat
     assert not synth.last_pass_failed
 
 
+async def test_the_pass_log_records_the_call_that_ran(tmp_path):
+    """Only chat B's turns are in the slice: the row reports B's model,
+    billing and excerpt limit, not those of chat A that started the pass."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        billing=continual_mod.BILLING_SUBSCRIPTION,
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert own.prompts == [] and len(theirs.prompts) == 1
+    row = rows(store)[-1]
+    assert row["model"] == "model-b" and row["billing"] == "metered"
+    assert row["prompt_limit"] <= continual_mod.METERED_PROMPT_CHAR_LIMIT
+
+
+async def test_another_chats_metered_call_keeps_to_the_metered_cap(tmp_path):
+    """A subscription chat's 200-call default does not pay for a metered
+    chat's call once the metered default is spent."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=facts_mod.MAX_INFERENCE_CALLS_PER_DAY,
+               last_at=now - 3600)
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        billing=continual_mod.BILLING_SUBSCRIPTION,
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert theirs.prompts == [], "the metered call is refused at its own cap"
+    assert store.synth_cursor() == 0
+
+
+async def test_another_chats_provider_that_raises_does_not_hold_up_this_chat(tmp_path):
+    """Chat B's provider raises (a disabled row, a credential that will not
+    resolve) instead of sending an error chunk: B backs off, A does not."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+
+    class Raises(Recording):
+        async def stream(self, request):
+            raise RuntimeError("provider row disabled")
+            yield  # pragma: no cover
+
+    own, theirs = Recording(), Raises()
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(provider=theirs, model="model-b")})
+    await synth._run_safe()
+    assert store.synth_cursor() == 10 and len(own.prompts) == 1
+    assert store.learner_backoff("model-b") and store.learner_backoff("model-a") == {}
+    assert "provider row disabled" in rows(store)[-1]["routed"][0]["error"]
+    assert not synth.last_pass_failed
+
+
+def test_a_switch_away_from_a_backing_off_model_is_due_at_once(tmp_path):
+    """Model A is backing off and the chat switches to B: the next pass is
+    due on B without waiting out A's backoff."""
+    store = SkillStore(tmp_path)
+    for i in range(3):
+        store.journal_append(edit_cell(i))
+    synth = Synthesizer(None, "model-a", store, min_new_entries=1)
+    synth._note_failure("HTTP 500", model="model-a")
+    assert store.learner_backoff("model-a") and not synth.due(closing=True)
+    synth.retarget("model-b")
+    assert synth.due(closing=True)
+
+
 async def test_a_pass_stops_before_a_project_the_day_cannot_pay_for(tmp_path):
     store = SkillStore(tmp_path)
     _two_projects(store)

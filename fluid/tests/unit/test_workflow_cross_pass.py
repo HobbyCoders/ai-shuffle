@@ -135,3 +135,32 @@ def test_workflow_prompt_allowances_and_no_duplicate_paragraphs(tmp_path: Path) 
                 assert "<workflow>JSON</workflow>" in texts["system"]
                 assert texts["request"].count("--- session first ---") == 1
                 assert texts["request"].count("--- session second ---") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_provider", [False, True])
+async def test_another_chats_retained_evidence_stays_on_its_own_provider(
+    tmp_path: Path, same_provider: bool,
+) -> None:
+    """Chats learn on their own providers: chat "first"'s retained turns are
+    shown as workflow evidence to chat "second"'s call only when both chats'
+    text goes to the same provider."""
+    from fluid.codemode.continual import LearnerRoute
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    store = SkillStore(tmp_path / "store")
+    where = {"first": "row-a", "second": "row-a" if same_provider else "row-b"}
+
+    def route(session: str):
+        return LearnerRoute(provider=None, model="m", destination=where[session])
+
+    synth = Synthesizer(None, "fixture", store, project=project_key_for(cwd),
+                        own_session="second", route=route)
+    await journal_success(store, cwd, "first")
+    first = store.journal_entries()
+    await journal_success(store, cwd, "second")
+    current = store.journal_entries()[len(first):]
+    await synth._learn_evidence_destinations(list(enumerate(current)))
+    prompt, _system, evidence = synth._synthesis_input(current)
+    assert ("Retained workflow evidence" in prompt) is same_provider
+    assert any(e.get("session") == "first" for e in evidence) is same_provider
