@@ -551,10 +551,34 @@ def login() -> int:
     return 0
 
 
+def _hang(seconds: float) -> None:
+    """Don't answer for `seconds`, the way a stuck agent doesn't.
+
+    On Windows the tests start this script through an agy.cmd wrapper, so
+    killing "the agent" ends only cmd.exe. A plain sleep would then keep running,
+    holding its HOME open until the test's scratch can't be removed. The agent
+    exits as soon as the wrapper that started it is gone.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        synchronize, wait_object_0 = 0x00100000, 0
+        parent = kernel32.OpenProcess(synchronize, False, os.getppid())
+        if parent:
+            try:
+                if kernel32.WaitForSingleObject(parent, int(seconds * 1000)) == wait_object_0:
+                    os._exit(1)
+            finally:
+                kernel32.CloseHandle(parent)
+            return
+    import time
+    time.sleep(seconds)
+
+
 def usage() -> int:
     if os.environ.get("FAKE_ACP_USAGE_SLEEP"):  # a read that does not answer
-        import time
-        time.sleep(float(os.environ["FAKE_ACP_USAGE_SLEEP"]))
+        _hang(float(os.environ["FAKE_ACP_USAGE_SLEEP"]))
     raw = os.environ.get("FAKE_ACP_USAGE")
     if raw is not None:
         print(raw, flush=True)
@@ -571,9 +595,8 @@ def usage() -> int:
 
 
 def models() -> int:
-    import time
     if os.environ.get("FAKE_ACP_MODELS_SLEEP"):  # a listing that does not answer
-        time.sleep(float(os.environ["FAKE_ACP_MODELS_SLEEP"]))
+        _hang(float(os.environ["FAKE_ACP_MODELS_SLEEP"]))
     sys.stderr.write("Fetching available models...")
     if not (os.environ.get("FAKE_ACP_SIGNED_IN") == "1" or os.path.exists(_MARKER)
             or os.environ.get("GEMINI_API_KEY")):
