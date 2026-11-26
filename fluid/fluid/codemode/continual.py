@@ -2538,13 +2538,17 @@ Never claim a workflow is installed because it was proposed."""
         return changed
 
     def _apply_rules(self, text: str, entries: list[dict] | None,
-                     errors: list[str]) -> list[str]:
+                     errors: list[str], repeats: list[str] | None = None) -> list[str]:
         """Save each ``<rule>`` the output writes as a behaviour-rule fact
         (fluid.codemode.behavior). A rule needs a ``quote`` found in what the
         user wrote in this slice: the model that proposes it is the one tool
         output may have steered. A rewrite must name a rule listed this pass
         (``_rule_lines``) that the owner has not kept. Learner rules are
-        agent-tier (``durable``) and fade unless re-learned."""
+        agent-tier (``durable``) and fade unless re-learned.
+
+        A rule already held word for word (same key, text and scope) is a
+        repeat, not a new rule: the learned-rule cap does not refuse it, and
+        its change name is also added to ``repeats`` when one is given."""
         from fluid.codemode import behavior
 
         tags = list(_RULE_RE.finditer(text or ""))
@@ -2586,14 +2590,16 @@ Never claim a workflow is installed because it was proposed."""
             if old is not None and old.protected:
                 errors.append(f"{label}: kept by the owner")
                 continue
+            held = None
             if old is None:
+                key = behavior.rule_key(applies_to, body)
+                held = next((m for m in self._store.memories() if m.key == key), None)
                 learned = sum(1 for m in self._store.memories()
                               if behavior.is_rule_key(m.key) and not m.protected)
-                if learned >= behavior.MAX_LEARNED_RULES:
+                if held is None and learned >= behavior.MAX_LEARNED_RULES:
                     errors.append(f"{label}: {behavior.MAX_LEARNED_RULES} learned rules already; "
                                   "merge into a listed rule instead")
                     continue
-                key = behavior.rule_key(applies_to, body)
             else:
                 digest = str(old.key).rsplit(".", 1)[-1]
                 key = f"{behavior.KEY_PREFIX}{applies_to}.{digest}"
@@ -2612,6 +2618,9 @@ Never claim a workflow is installed because it was proposed."""
                 errors.append(f"{label}: {exc}")
                 continue
             changed.append(f"rule:{saved.id}")
+            if (repeats is not None and held is not None and held.id == saved.id
+                    and held.text == saved.text and held.scope == saved.scope):
+                repeats.append(f"rule:{saved.id}")
         return changed
 
     async def _apply(self, text: str, entries: list[dict] | None = None, *,

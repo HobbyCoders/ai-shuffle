@@ -1923,22 +1923,27 @@ class SessionPool:
         Each engine's close stops its transport without waiting for its
         chat's session reflection; every reflection still running is then
         waited for together, at most ``SHUTDOWN_DRAIN_SECONDS`` in total and
-        never past ``deadline``. One cut off is retried when its chat next
-        closes (fluid.codemode.journal.finish_drains).
+        never into the cleanup reserve before ``deadline``
+        (``query_shutdown.CLEANUP_RESERVE_SECONDS``, kept for connectors,
+        pending event writes and database teardown). One cut off is retried
+        when its chat next closes (fluid.codemode.journal.finish_drains).
         """
         from fluid.codemode import journal
 
         await self.stop_idle_watchdog()
-        journal.defer_drain_waits()
         session_ids = list(self._pool.keys())
-        for session_id in session_ids:
-            try:
-                await self.remove(session_id, deadline=deadline)
-            except Exception as e:
-                logger.warning(f"[Pool] Error during shutdown for session {session_id}: {e}")
+        with journal.deferred_drain_waits():
+            for session_id in session_ids:
+                try:
+                    await self.remove(session_id, deadline=deadline)
+                except Exception as e:
+                    logger.warning(f"[Pool] Error during shutdown for session {session_id}: {e}")
         budget = journal.SHUTDOWN_DRAIN_SECONDS
         if deadline is not None:
-            budget = min(budget, deadline - asyncio.get_running_loop().time())
+            from app.core.query_shutdown import CLEANUP_RESERVE_SECONDS
+
+            cutoff = deadline - CLEANUP_RESERVE_SECONDS
+            budget = min(budget, cutoff - asyncio.get_running_loop().time())
         try:
             await journal.finish_drains(budget)
         except Exception as e:
