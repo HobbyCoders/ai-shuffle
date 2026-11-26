@@ -572,20 +572,17 @@ async def test_shutdown_waits_for_every_reflection_at_once_and_one_cut_off_refle
         chat(store, session, CORRECTION)
         providers[session] = Blocking(FACT)
     loop = asyncio.get_running_loop()
-    journal.defer_drain_waits()
-    try:
-        started = loop.time()
+    started = loop.time()
+    with journal.deferred_drain_waits():
         for session in sessions:  # each engine's close returns without waiting
             await journal.wait_drain(journal.start_drain(
                 DrainingJournal(learner(store, providers[session], session))))
-        assert loop.time() - started < 0.5
-        await asyncio.wait_for(asyncio.gather(*(p.started.wait() for p in providers.values())), 2)
-        cut = await journal.finish_drains(0.3)
-        elapsed = loop.time() - started
-    finally:
-        journal._DEFERRING.discard(loop)
+    assert loop.time() - started < 0.5
+    await asyncio.wait_for(asyncio.gather(*(p.started.wait() for p in providers.values())), 2)
+    cut = await journal.finish_drains(0.3)
+    elapsed = loop.time() - started
     assert cut == len(sessions)
-    assert elapsed < 0.3 + 1.0 + 0.5  # one shared budget, not one per chat
+    assert elapsed < 0.3 + 0.5 + 0.2  # one shared budget, unwinding included
     state = reflection.ReflectionState(store.root)
     assert all(state.through(s) == 0 for s in sessions)  # nothing marked: nothing lost
     assert reflection.ProposalInbox(store.root).open() == []
@@ -593,3 +590,101 @@ async def test_shutdown_waits_for_every_reflection_at_once_and_one_cut_off_refle
     provider = Scripted(FACT)
     await learner(store, provider, "ses_0").drain()  # that chat's next close
     assert len(provider.prompts) == 1 and state.through("ses_0") > 0
+
+
+async def test_a_retry_after_a_partial_write_reports_only_what_is_new(tmp_path, monkeypatch):
+    """The preference saves as a rule, then the inbox write for the fact
+    fails. The retry gets the same output at the learned-rule cap: the rule is
+    a repeat (not refused, not sent to the inbox) and is not reported again."""
+    from fluid.codemode import behavior
+
+    store = SkillStore(tmp_path)
+    for n in range(behavior.MAX_LEARNED_RULES - 1):
+        store.save_memory(f"When testing: filler rule number {n}.", provenance="user", durable=True,
+                          key=behavior.rule_key("all", f"filler {n}"))
+    chat(store, "ses_p", [("user", "Check the deploy."), ("assistant", "Deployed; logs attached below."),
+                          ("user", "No, I prefer one-line status replies.")])
+    output = ('<proposal kind="owner_preference" quote="I prefer one-line status replies" '
+              'when="When reporting status">Reply to a status check in one line.</proposal>' + FACT)
+    real = reflection.ProposalInbox.propose
+
+    def busy(self, **kwargs):
+        raise reflection.InboxBusy("proposals is held by another writer; nothing was written")
+
+    monkeypatch.setattr(reflection.ProposalInbox, "propose", busy)
+    provider = Scripted(output, output)
+    await learner(store, provider, "ses_p").drain()
+    rules = [m for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected]
+    assert len(rules) == behavior.MAX_LEARNED_RULES  # the preference saved: rule 24
+    first = reflections(store)[-1]
+    assert first["unsaved"] == 1 and first["rules"] == 1
+    assert reflection.ReflectionState(store.root).through("ses_p") == 0
+
+    monkeypatch.setattr(reflection.ProposalInbox, "propose", real)
+    await learner(store, provider, "ses_p").drain()  # the chat's next close
+    assert len(provider.prompts) == 2
+    again = reflections(store)[-1]
+    assert again["outcome"] == "ran" and again["rules"] == 0 and again["proposed"] == 1
+    assert "learned rules already" not in (again.get("error") or "")
+    assert ([(m.id, m.text) for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected]
+            == [(m.id, m.text) for m in rules])  # no copy, nothing dropped
+    [proposal] = reflection.ProposalInbox(store.root).open()
+    assert proposal["kind"] == reflection.OWNER_FACT  # the preference never fell into the inbox
+    assert [c for c in again.get("changed", []) if c.startswith("rule:")] == []
+    assert reflection.ReflectionState(store.root).through("ses_p") > 0
+
+
+def test_the_same_chat_proposing_again_is_a_repeat(tmp_path):
+    inbox = reflection.ProposalInbox(tmp_path)
+    first = inbox.propose(kind=reflection.OWNER_FACT, text="The NAS is at 192.168.1.20.",
+                          scope="global", session="ses_a")
+    assert not first.get("repeat")
+    again = inbox.propose(kind=reflection.OWNER_FACT, text="The NAS is at 192.168.1.20.",
+                          scope="global", session="ses_a")
+    assert again["repeat"] and again["id"] == first["id"]
+    other = inbox.propose(kind=reflection.OWNER_FACT, text="the nas is at 192.168.1.20",
+                          scope="global", session="ses_b")
+    assert not other.get("repeat") and other["sessions"] == ["ses_a", "ses_b"]
+
+
+async def test_deferral_is_local_to_shutdown_and_ends_with_it(tmp_path):
+    """A close elsewhere on the loop while shutdown runs, and every close
+    after it (even one in a task shutdown started), still waits."""
+    from fluid.codemode import journal
+
+    class Slow:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def aclose(self) -> None:
+            await self.release.wait()
+
+    async def waits(j) -> bool:
+        task = asyncio.create_task(journal.wait_drain(journal.start_drain(j)))
+        await asyncio.sleep(0.05)
+        blocked = not task.done()
+        j.release.set()
+        await asyncio.wait_for(task, 1)
+        return blocked
+
+    gate = asyncio.Event()
+
+    async def eviction() -> bool:
+        await gate.wait()
+        return await waits(Slow())
+
+    elsewhere = asyncio.create_task(eviction())
+    with journal.deferred_drain_waits():
+        deferred = Slow()
+        await asyncio.wait_for(journal.wait_drain(journal.start_drain(deferred)), 0.5)
+        gate.set()
+        assert await elsewhere  # a concurrent eviction is not deferred
+
+        async def after_shutdown() -> bool:
+            await asyncio.sleep(0.1)
+            return await waits(Slow())
+
+        later = asyncio.create_task(after_shutdown())  # started by shutdown, outlives it
+    deferred.release.set()
+    assert await later  # inherited the deferral, which ended with shutdown
+    assert await waits(Slow())  # an ordinary close on the same loop waits again

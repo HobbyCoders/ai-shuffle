@@ -209,7 +209,9 @@ across the model call: inbox and state writes run in a worker thread under
 their own short advisory locks, and a writer that could not take its lock
 writes nothing. A proposal the inbox could not store (busy or a write error)
 leaves the watermark where it was, so the chat's next close reflects on the
-same turns again; saved rules and facts dedupe on the retry.
+same turns again. On that retry a rule already held word for word is a repeat:
+the learned-rule cap doesn't refuse it, and neither it nor a proposal this chat
+already queued is reported again as a new change.
 
 **Engines.** Native chats drain the journal in their shielded close. Claude
 Code and Antigravity chats start the drain as its own tracked task once the
@@ -217,9 +219,13 @@ CLI or agent turn has stopped, so the host's five-second close deadline ends
 only the wait for it, never the reflection call, and the agent process is
 stopped without waiting for it. At app shutdown the session pool first stops
 every engine without waiting for its reflection, then waits for all running
-reflections together for at most 10 seconds (inside the supervisor's stop
-deadline). A reflection cut off there never reached its watermark write, so
-the chat is reflected again at its next close after the restart.
+reflections together for at most 10 seconds. That wait, and the unwinding of
+the ones it cancels, ends before the two-second cleanup reserve ahead of the
+supervisor's stop deadline, which stays for connectors, pending event writes
+and database teardown. Only shutdown's own engine closes skip their wait (a
+task-local flag that ends with shutdown); a concurrent eviction still waits.
+A reflection cut off there never reached its watermark write, so the chat is
+reflected again at its next close after the restart.
 
 **Rollback.** `FLUID_MEMORY_LEARNER=continuous` (a plain env read, listed as
 internal in `scripts/ci/env_allowlist.json`) brings back the continuous
