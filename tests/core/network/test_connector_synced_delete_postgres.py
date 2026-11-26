@@ -36,6 +36,14 @@ BOT = "bot-1399-lock-order"
 KEY = "key-1399-lock-order"
 
 
+def _failures(caplog):
+    """Exceptions logged during the race. SessionSearch logs its expected
+    fallback on a PostgreSQL without pg_trgm with a traceback; that is not a
+    deadlock."""
+    return [record.exc_info[1] for record in caplog.records
+            if record.exc_info and record.name != "app.db.session_recall"]
+
+
 def _pair(pg_workers, **connector):
     """Two converged workers that both hold connector C."""
     a, b = pg_workers("worker-a"), pg_workers("worker-b")
@@ -165,7 +173,7 @@ def test_chunk_editing_then_deleting_a_connector_waits_for_its_lock_first(
 
     # A deadlock victim inside the chunk is rolled back to its savepoint and
     # left for a retry; one outside it would fail the watch import above.
-    failures = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    failures = _failures(caplog)
     assert committed and not failures, failures
     # The restore landed after the first check: this pass replaces nothing.
     assert result.retry == 1 and result.applied == result.rejected == result.lost == 0, result.reasons
@@ -280,7 +288,7 @@ def test_chunk_editing_a_connector_then_deleting_its_key_and_it_takes_the_lock_f
 
     # Before the clear took C's lock first: psycopg2.errors.DeadlockDetected.
     committed = _race_watch_import(private_cluster, b, apply)
-    failures = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    failures = _failures(caplog)
     assert committed and not failures, failures
     # The restore is signed before the chunk replaces anything; A's later
     # versions are then ordered against it like any concurrent edit.

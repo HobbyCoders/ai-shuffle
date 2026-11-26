@@ -107,7 +107,9 @@ def run_query_shutdown_probe(tmp_path, mode, budget, query_path, *, container_su
     script = tmp_path / "server.py"
     setup = QUERY_SETUP + f"\nMODE = {mode!r}\nMEMORY_DELAY = {memory_delay!r}\nPERSIST_DELAY = {persist_delay!r}\n" + REAL_QUERY_SETUP
     script.write_text(SERVER.replace("serve.run(app,", setup + "\nserve.run(app,"))
-    env = dict(os.environ, SHUFFLE_PREVIEW_PORT="off", PYTHONPATH=str(ROOT))
+    # The checkout's fluid package lives in fluid/fluid: without that entry an
+    # installed (older) fluid in site-packages shadows it in the child.
+    env = dict(os.environ, SHUFFLE_PREVIEW_PORT="off", PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / "fluid"))))
     env.pop("SHUFFLE_SUPERVISOR_STOP_SECONDS", None)
     connection = None
     log = tmp_path / "server.log"
