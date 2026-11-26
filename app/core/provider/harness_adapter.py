@@ -3543,8 +3543,9 @@ class HarnessAdapter(ProviderAdapter):
                 return
             synth.retarget(target.model, target.context_window)
             if self._learner_provider is not None:
-                # The helper reads its model from the binding; a native
-                # client keeps its row and takes the model per request.
+                # The binding supplies the provider row (a native client
+                # keeps the row it was built with); every request names
+                # its model.
                 self._learner_provider._options = target.options
         except Exception:  # noqa: BLE001 — the switch itself already landed
             logger.warning("[HarnessAdapter] learner retarget failed", exc_info=True)
