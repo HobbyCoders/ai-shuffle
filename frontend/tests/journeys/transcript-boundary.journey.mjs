@@ -148,7 +148,9 @@ await runJourney({
 					};
 				});
 				log(`scroll up ${steps} steps: ${JSON.stringify({ ...run, ranges: run.ranges.slice(0, 12) })}`);
+				const firstStart = Number(run.ranges[0].split(',')[0]), lastStart = Number(run.ranges.at(-1).split(',')[0]);
 				expect(run.streaming, 'the later reply was still streaming at the end');
+				expect(firstStart > 0 && lastStart < firstStart, `scrolling up admitted older rows (start ${firstStart} -> ${lastStart})`);
 				expect(run.revisits === 0, `the mounted slice never flips back while the reader scrolls up (${run.ranges.length} distinct steps, ${run.revisits} revisits)`);
 			} finally {
 				const stop = page.getByRole('button', { name: /^Stop/ });
