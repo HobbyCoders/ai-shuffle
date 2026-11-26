@@ -14,6 +14,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 - Saved facts reach an agent just when they apply, instead of all at the start of a chat.
 - One learner handles memories and learned behaviour rules on any provider, with a daily limit on learning calls and an off switch, and its model judges conflicting memories instead of matching words.
+- Learning runs on each chat's own model and effort instead of the Text Generation model, and each chat's turns go only to that chat's provider.
 
 ### Projects
 
