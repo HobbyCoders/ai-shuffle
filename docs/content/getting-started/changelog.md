@@ -41,7 +41,8 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Desktop app
 
 - **Settings → System → Updates** says when the latest installer brings a newer launcher than the one you run, with a link to the download; the update button points there.
-- After you run the 1.3.10 installer, later updates skip the database copy when the database format is unchanged, and check the dependency cache and restore point faster. An in-app update from an older installer keeps its old launcher and does not get these.
+- Updates check the dependency cache faster, including in-app updates from an older installer.
+- The 1.3.10 installer brings a newer launcher that checks the restore point faster and skips the database copy when the database format is unchanged. The first in-app update after installing still takes a copy. An in-app update alone keeps your current launcher.
 - The usage panel no longer flashes a terminal window on Windows.
 
 ### Interface
