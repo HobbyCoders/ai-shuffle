@@ -1065,15 +1065,16 @@ class Synthesizer:
 
     def _starter_has_calls(self) -> bool:
         """Whether this chat's own synthesis share has a call left today
-        (read only; the claim itself decides). False when unreadable."""
+        (read only; the claim itself decides). The owner's cap is read afresh,
+        as the refused claim read it, so a cap lowered mid-pass is not judged
+        against a stale one. False when unreadable."""
         try:
+            budget = self._budget(refresh=True)
             state = self._store._facts.inference_budget()
-            budget = self._budget()
-            limit = self._claim_limit()
         except Exception:  # noqa: BLE001 — unknown: treat the day as spent
             return False
         calls = int(state.get("calls") or 0) if state.get("day") == int(time.time() // 86400) else 0
-        cap = MAX_INFERENCE_CALLS_PER_DAY if limit is None else int(limit)
+        cap = MAX_INFERENCE_CALLS_PER_DAY if budget.source == "metered_default" else int(budget.daily)
         return calls < cap - max(0, budget.reserved)
 
     def _paced(self, now: float | None = None) -> bool:
@@ -1583,6 +1584,9 @@ class Synthesizer:
         done: set[tuple[str | None, str | None]] = set()
         routed: dict[str, str | None] = {}
         stop: Exception | None = None
+        # Whether any model call ran (a cap-only slice made none), and whether
+        # this chat's own call succeeded (only that clears its own backoff).
+        called = own_ok = False
         original_project = self._project
         try:
             for (route_key, project), group in groups.items():
@@ -1595,6 +1599,7 @@ class Synthesizer:
                         prompt, system, workflow_entries = self._synthesis_input(group)
                         text, group_usage = await self._complete(prompt, system)
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
+                    called = True
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
                     if route is not None:
@@ -1623,6 +1628,8 @@ class Synthesizer:
                         raise  # no call made: _run_safe logs the skip
                     stop = exc
                     break
+                called = True
+                own_ok = own_ok or route is None
                 for key, value in group_usage.items():
                     usage[key] = usage.get(key, 0) + value
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
@@ -1683,7 +1690,9 @@ class Synthesizer:
         elif stop is not None:
             self.last_error = str(stop)
             retry = self._note_failure(self.last_error)
-        else:
+        elif own_ok:
+            # Only this chat's own successful call proves its row works; a
+            # slice of other chats' entries says nothing about it.
             try:
                 self._store.clear_learner_backoff(self.backoff_key())
             except Exception:
@@ -1707,6 +1716,9 @@ class Synthesizer:
             consumed=len(entries), output_preview=text, usage=usage,
             stop_reason=self.last_stop_reason, deferred=deferred or None,
             filtered=filtered or None, retry_after_s=retry, routed=routed or None,
+            # Read past without a call (only other chats' capped entries):
+            # not a synthesis that came back empty.
+            ran=called,
         )
         return changed
 

@@ -10373,7 +10373,11 @@ async def _generation_helper_stream(request: Any, binding: SessionOptions) -> As
             if text:
                 parts.append(text)
     provider_id = binding.extra.get("provider_id")
-    model = f"{PROVIDER_MODEL_PREFIX}{provider_id}:{binding.model}" if provider_id else binding.model
+    # The request's model, not the binding's: a mid-pass switch updates the
+    # binding at once, and the learner filtered this request's evidence for
+    # the model it names (see Synthesizer._evidence_allowed).
+    requested = getattr(request, "model", None) or binding.model
+    model = f"{PROVIDER_MODEL_PREFIX}{provider_id}:{requested}" if provider_id else requested
     try:
         text = await generate_with_claude(
             "\n\n".join(parts), model=model,

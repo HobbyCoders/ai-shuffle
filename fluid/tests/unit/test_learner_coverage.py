@@ -436,6 +436,38 @@ async def test_another_chats_metered_call_keeps_to_the_metered_cap(tmp_path):
     assert theirs.prompts == [], "the metered call is refused at its own cap"
     assert own.prompts == [] and store.synth_cursor() == 5, "read past unsent, like a failure"
     assert store.learner_backoff("model-b") == {}, "a cap is not a fault"
+    assert rows(store)[-1].get("ran") is False, "no call ran: not an empty synthesis"
+
+
+def test_a_cap_lowered_mid_pass_is_read_afresh(tmp_path):
+    """The owner lowers the daily cap while a pass runs: whether this chat
+    still has calls is judged against the new cap, not the one cached."""
+    store = SkillStore(tmp_path)
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=20, last_at=now - 3600)
+    cap = [100]
+    synth = Synthesizer(None, "model-a", store, daily_calls=lambda: cap[0],
+                        billing=continual_mod.BILLING_SUBSCRIPTION)
+    assert synth._starter_has_calls()
+    cap[0] = 10
+    assert not synth._starter_has_calls()
+
+
+async def test_a_pass_of_other_chats_keeps_this_chats_backoff(tmp_path):
+    """Only chat B's healthy entries are in the slice: chat A's own row made
+    no call, so its failure history is kept for its next attempt."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    store.note_learner_failure("model-a@openai:row-x", "HTTP 401", now=time.time() - 3600,
+                               base=60, cap=60)
+    own, theirs = Recording(), Recording()
+    own.destination = "openai:row-x"
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(
+        provider=theirs, model="model-b", destination="openai:row-y")})
+    await synth._run_safe()
+    assert own.prompts == [] and len(theirs.prompts) == 1
+    assert store.learner_backoff("model-a@openai:row-x")["failures"] == 1
 
 
 async def test_another_chats_cap_does_not_hold_up_the_chat_behind_it(tmp_path):

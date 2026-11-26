@@ -496,6 +496,14 @@ async def test_the_generation_helper_learner_answers_as_stream_chunks(monkeypatc
     [c async for c in provider.stream(request)]
     assert (seen[0][1], seen[0][3]) == ("opus", None)
 
+    # A switch mid-pass has already moved the binding on: the request still
+    # goes to the model the pass filtered it for.
+    request.model = "opus"
+    provider._options = SessionOptions(model="sonnet")
+    seen.clear()
+    [c async for c in provider.stream(request)]
+    assert seen[0][1] == "opus"
+
     async def broken(prompt, timeout_seconds=None, **_):
         raise RuntimeError("provider down")
 
