@@ -115,17 +115,25 @@ await runJourney({
 			await mark('"On this page" → the second "Removed" scrolls to that heading, not the first');
 			await page.locator('.doc-inline-toggle').click();
 			const toc = page.locator('.doc-inline-list nav[aria-label="On this page"]');
+			// The smooth scroll's length grows with the changelog (about 1.5 s
+			// after 1.3.10), so check where it stops, not a fixed delay later:
+			// mid-scroll the pane can be passing the heading on its way elsewhere.
+			// Not `scrollend`: the click ends a short scroll before the long one.
 			await toc.getByRole('button', { name: 'Removed', exact: true }).nth(1).click();
-			const secondRemoved = () => {
+			const paneTop = () => document.querySelector('.docs-content')?.closest('.view-main-slot')?.scrollTop;
+			let scrollEnded = false;
+			for (let last, still = Date.now(), cap = Date.now() + 5000; Date.now() < cap; await page.waitForTimeout(100)) {
+				const top = await page.evaluate(paneTop);
+				if (top !== last) [last, still] = [top, Date.now()];
+				else if (Date.now() - still >= 500) { scrollEnded = true; break; }
+			}
+			const where = await page.evaluate(() => {
 				const pane = document.querySelector('.docs-content')?.closest('.view-main-slot')?.getBoundingClientRect();
 				const removed = [...document.querySelectorAll('.docs-content h2, .docs-content h3')].filter((h) => h.textContent?.trim() === 'Removed');
 				const box = removed[1]?.getBoundingClientRect();
 				return { ids: removed.map((h) => h.id), inView: !!(pane && box && box.top >= pane.top - 2 && box.top < pane.top + pane.height / 2) };
-			};
-			// The smooth scroll's length grows with the changelog (about 1.5 s
-			// after 1.3.10), so wait for it to land instead of a fixed delay.
-			await page.waitForFunction(`(${secondRemoved})().inView`, null, { timeout: 5000 }).catch(() => {});
-			const where = await page.evaluate(secondRemoved);
+			});
+			expect(scrollEnded, 'the pane stops scrolling within 5 s');
 			expect(where.ids.length >= 2 && new Set(where.ids).size === where.ids.length, `each "Removed" has its own anchor (${JSON.stringify(where.ids)})`);
 			expect(where.inView, `the second "Removed" is at the top of the pane (${JSON.stringify(where)})`);
 		}
