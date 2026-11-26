@@ -426,12 +426,12 @@ def test_a_windows_checkout_with_old_crlf_files_is_refused_with_the_fix(monkeypa
         "i/lf    w/lf    attr/text=auto eol=lf \tapp/main.py",
         "i/lf    w/crlf  attr/text eol=crlf    \trun_local.bat",
     ])
-    edited = {"value": ""}
+    diffs = {("diff", "--name-only", "HEAD"): "", ("diff", "--cached", "--name-only", "HEAD"): ""}
 
     def git(*args):
         if args == ("ls-files", "--eol"):
             return listing
-        return edited["value"] if args == ("diff", "--name-only", "HEAD") else ""
+        return diffs.get(args, "")
 
     monkeypatch.setattr(local_ci, "git", git)
     assert local_ci.stale_line_endings() == ["frontend/src/lib/components/chat/ChatInput.svelte"]
@@ -439,11 +439,13 @@ def test_a_windows_checkout_with_old_crlf_files_is_refused_with_the_fix(monkeypa
     with pytest.raises(local_ci.Failure) as clean:
         local_ci.line_endings_preflight()
     assert all(command in str(clean.value) for command in local_ci.REWRITE_LINE_ENDINGS)
-    # Uncommitted work: never offer the hard reset that would discard it.
-    edited["value"] = "app/main.py"
-    with pytest.raises(local_ci.Failure, match="uncommitted changes") as dirty:
-        local_ci.line_endings_preflight()
-    assert "reset" not in str(dirty.value)
+    # Uncommitted work, in the working copy or only staged: never offer the hard reset.
+    for diff in diffs:
+        diffs[diff] = "app/main.py"
+        with pytest.raises(local_ci.Failure, match="uncommitted changes") as dirty:
+            local_ci.line_endings_preflight()
+        assert "reset" not in str(dirty.value)
+        diffs[diff] = ""
     monkeypatch.setattr(local_ci.os, "name", "posix")
     local_ci.line_endings_preflight()
 

@@ -1062,13 +1062,15 @@ def line_endings_preflight() -> None:
         return
     problem = (f"{len(stale)} tracked files (e.g. {stale[0]}) still have the CRLF line endings of a "
                f"checkout older than the repo-wide LF rule.")
-    # Content diff, not status: a CRLF-only difference is not a change once normalized.
-    if git("diff", "--name-only", "HEAD"):
+    # Content diffs, not status: a CRLF-only difference is not a change once normalized. The staged
+    # diff catches an edit that is staged while the working copy matches HEAD again.
+    if git("diff", "--name-only", "HEAD") or git("diff", "--cached", "--name-only", "HEAD"):
         raise Failure(f"{problem} This checkout also has uncommitted changes, which rewriting it would "
                       f"discard: commit or save them first, then run again for the rewrite command.")
     first, second = REWRITE_LINE_ENDINGS
-    raise Failure(f"{problem} Rewrite them once from the repository root with `{first}` and then "
-                  f"`{second}` (nothing is uncommitted; untracked files such as .venv stay), then run again.")
+    raise Failure(f"{problem} Rewrite them once from the repository root: run `{first}`, and only if it "
+                  f"succeeds run `{second}` (nothing is uncommitted; untracked files such as .venv stay), "
+                  f"then run again.")
 
 
 def cmd_check(args) -> int:
