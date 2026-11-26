@@ -255,7 +255,9 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   every worker consolidate the same episodes twice. Reflection's proposed
   memories (`proposals.json`) do sync, as one `memory_proposal` record per
   store that older workers skip, so the Settings → Memory inbox is the same on
-  every worker and a chat on one worker can corroborate another's proposal.
+  every worker, and the owner's decisions (dismissals included, kept for
+  good) travel with them, so a dismissed proposal does not come back from
+  another worker.
 - **Prose skills sync from `~/.fluid/skills`, not the data dir.** That is the
   only global directory fluid's skill discovery and the delegated leg's
   "# More skills" list read, so it is the source of truth; a data-dir copy

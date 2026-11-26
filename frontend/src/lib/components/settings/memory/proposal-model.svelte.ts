@@ -3,9 +3,10 @@
  *
  * Session reflection (Memory v3) saves a rule or preference that quotes the
  * owner at once. Anything else it notices waits here: it becomes an
- * agent-saved memory when a second chat finds the same thing or the owner
- * accepts it, and otherwise expires. Proposals sync to every worker; agents
- * never see one until it is saved.
+ * agent-saved memory only when the owner accepts it, and otherwise expires;
+ * a dismissed one never comes back. "From N chats" is information only.
+ * Proposals and decisions sync to every worker; agents never see a proposal
+ * until it is saved.
  *
  * GET /memories/proposals, POST /memories/proposals/{id}/accept|dismiss.
  */
@@ -137,10 +138,10 @@ export class ProposalModel {
 			return out.memory ?? null;
 		} catch (e) {
 			const status = statusOf(e);
-			if (status === 404) {
+			if (status === 404 || status === 409) {
 				// Decided on another worker, or expired: drop it and say so.
 				this.items = this.items.filter((p) => p.id !== id);
-				this.error = detail(e) || 'This proposal was already decided or has expired.';
+				this.error = 'This proposal was already decided or has expired.';
 			} else if (isForbidden(e)) {
 				this.error = 'You need owner access to decide proposed memories.';
 			} else if (status === undefined) {

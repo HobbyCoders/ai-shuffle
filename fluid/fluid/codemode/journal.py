@@ -29,7 +29,9 @@ other entry.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -38,6 +40,8 @@ from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
 from fluid.context.screening import clip_redacted, redact_secrets
 from fluid.tools.view import POINTER_MARK
+
+_log = logging.getLogger(__name__)
 
 _EVENT_CAP = 1_500
 _INPUT_CAP = 600
@@ -435,3 +439,36 @@ class ToolJournal:
                 await self._synthesizer.drain()
             except Exception:
                 pass
+
+
+#: Learner drains started by :func:`start_drain`, held until they finish: an
+#: engine that closed is dropped, and nothing else keeps its drain's task.
+_DRAINS: set[asyncio.Task] = set()
+
+
+def start_drain(journal: Any) -> asyncio.Task:
+    """``journal.aclose()`` (the learner's drain: session reflection or the
+    continuous learner's last pass) as its own task, started once per journal.
+
+    An engine's close runs under the host's short deadline (five seconds),
+    while the drain has its own bounded budget (``close_timeout``). Awaiting
+    the returned task through :func:`asyncio.shield` lets that deadline end
+    the engine's wait without cancelling a reflection call already paid for.
+    The task is kept in :data:`_DRAINS` until it ends, and never raises."""
+    task = getattr(journal, "_drain_task", None)
+    if task is None:
+        task = asyncio.get_running_loop().create_task(_drain(journal), name="learner-drain")
+        _DRAINS.add(task)
+        task.add_done_callback(_DRAINS.discard)
+        try:
+            journal._drain_task = task
+        except AttributeError:
+            pass
+    return task
+
+
+async def _drain(journal: Any) -> None:
+    try:
+        await journal.aclose()
+    except Exception:
+        _log.debug("closing the learner journal failed", exc_info=True)

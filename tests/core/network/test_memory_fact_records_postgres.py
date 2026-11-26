@@ -410,15 +410,17 @@ async def test_failed_write_is_retried_on_the_next_publish_pass(pg_workers, touc
 
 async def test_proposals_replicate_to_the_inbox_and_never_become_facts(pg_workers, touched):
     """Memory v3 reflection proposals ride one ``memory_proposal`` record per
-    store. The receiver keeps them beside its own inbox (a session there can
-    corroborate them), never in its fact store; an empty inbox retracts it."""
+    store, with the owner's decisions. The receiver keeps them beside its own
+    inbox, never in its fact store. A dismissal travels and is kept for good:
+    an identical later proposal on the receiver stays dismissed, even after
+    the sender's record is retracted."""
     from fluid.codemode import reflection
 
     a, b = await pair(pg_workers, touched)
     text = "The project deploys with make release from the repository root."
     with a.active():
         facts(a).save_memory("Fact A.", protected=True)
-        row, _ = reflection.ProposalInbox(facts(a).root).propose(
+        row = reflection.ProposalInbox(facts(a).root).propose(
             kind="project", text=text, scope="global", session="ses_on_a")
     publish(a)
     (rid,) = own(a, memory_records.PROPOSAL_PREFIX)
@@ -430,21 +432,28 @@ async def test_proposals_replicate_to_the_inbox_and_never_become_facts(pg_worker
         [mirrored] = inbox.open()
         assert mirrored["id"] == row["id"] and mirrored["sessions"] == ["ses_on_a"]
         assert not (facts(b).root / reflection.PROPOSAL_FILE).exists()  # B published nothing of its own
-        _, corroborated = inbox.propose(kind="project", text=text, scope="global", session="ses_on_b")
-        assert corroborated
+        both = inbox.propose(kind="project", text=text, scope="global", session="ses_on_b")
+        assert set(both["sessions"]) == {"ses_on_a", "ses_on_b"}
+        assert text not in texts(b)  # seen in two chats is information, never a save
 
-    # A dismisses it: the decision travels, then the record holds only that.
+    # A dismisses it: the decision travels and B keeps it.
     with a.active():
-        reflection.ProposalInbox(facts(a).root).decide(row["id"], reflection.DISMISSED)
+        reflection.ProposalInbox(facts(a).root).dismiss(row["id"])
     publish(a)
     await receive(b, a, touched)
     with b.active():
-        assert reflection.ProposalInbox(facts(b).root).open() == []
-        assert text not in texts(b)
+        inbox = reflection.ProposalInbox(facts(b).root)
+        assert inbox.open() == [] and text not in texts(b)
+        assert inbox.decision(row["id"])["status"] == reflection.DISMISSED
 
-    # A's inbox empties (decisions age out): its record is retracted.
+    # A's inbox is gone entirely: its record is retracted, B's dismissal stays.
     with a.active():
         (facts(a).root / reflection.PROPOSAL_FILE).unlink()
         facts(a).save_memory("Fact A2.", protected=True)
     publish(a)
     assert own(a, memory_records.PROPOSAL_PREFIX)[rid]["deleted"]
+    await receive(b, a, touched)
+    with b.active():
+        inbox = reflection.ProposalInbox(facts(b).root)
+        again = inbox.propose(kind="project", text=text, scope="global", session="ses_later_on_b")
+        assert again["status"] == reflection.DISMISSED and inbox.open() == []

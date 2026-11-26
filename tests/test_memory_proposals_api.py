@@ -41,10 +41,9 @@ def world(tmp_path, monkeypatch):
 def propose(root, text="The project deploys with make release.", *, kind="project",
             scope="project:garden", session="ses_1", quote=None):
     root.mkdir(parents=True, exist_ok=True)
-    row, _ = reflection.ProposalInbox(root).propose(kind=kind, text=text, scope=scope,
-                                                     session=session, quote=quote,
-                                                     when="When deploying the garden")
-    return row
+    return reflection.ProposalInbox(root).propose(kind=kind, text=text, scope=scope,
+                                                  session=session, quote=quote,
+                                                  when="When deploying the garden")
 
 
 def test_empty_inbox_lists_nothing_and_creates_no_files(world):
@@ -83,9 +82,33 @@ def test_accept_saves_an_agent_saved_fact_and_closes_the_proposal(world):
     entry = next(e for e in SkillStore(root)._facts.snapshot()["entries"]
                  if e["id"] == body["memory"]["id"])
     assert entry.get("durable") and not entry.get("protected") and entry["scope"] == "project:garden"
+    assert entry["provenance"] == "session"
     assert client.get(BASE).json()["items"] == []
-    assert client.post(f"{BASE}/{row['id']}/accept").status_code == 404
-    assert client.post(f"{BASE}/{row['id']}/dismiss").status_code == 404
+    # Only the winning decision counts: a second accept or a late dismiss is 409.
+    assert client.post(f"{BASE}/{row['id']}/accept").status_code == 409
+    assert client.post(f"{BASE}/{row['id']}/dismiss").status_code == 409
+    assert sum("make release" in e["text"] for e in SkillStore(root)._facts.snapshot()["entries"]) == 1
+
+
+def test_an_accepted_proposal_with_a_quote_is_still_agent_saved(world):
+    client, root = world
+    row = propose(root, "The owner keeps release notes at example.com/blog.", kind="owner_fact",
+                  scope="global", quote="I keep release notes at example.com/blog")
+    body = client.post(f"{BASE}/{row['id']}/accept").json()
+    entry = next(e for e in SkillStore(root)._facts.snapshot()["entries"]
+                 if e["id"] == body["memory"]["id"])
+    # The quote is the owner's words in a chat, not the owner saving a memory.
+    assert entry["provenance"] == "session" and not entry.get("protected")
+
+
+def test_accept_after_a_dismissal_on_another_worker_is_refused(world):
+    client, root = world
+    row = propose(root)
+    inbox = reflection.ProposalInbox(root)
+    inbox.apply_remote("dev-other", [], {row["id"]: {"status": "dismissed", "at": 1.0}})
+    assert client.post(f"{BASE}/{row['id']}/accept").status_code == 409
+    memories_file = root / "memories.json"
+    assert not memories_file.exists() or "make release" not in memories_file.read_text()
 
 
 def test_dismiss_saves_nothing(world):
@@ -97,7 +120,10 @@ def test_dismiss_saves_nothing(world):
     memories_file = root / "memories.json"
     assert not memories_file.exists() or "make release" not in memories_file.read_text()
     stored = json.loads((root / reflection.PROPOSAL_FILE).read_text())
-    assert stored["proposals"][0]["status"] == "dismissed"
+    assert stored["proposals"] == [] and stored["decisions"][row["id"]]["status"] == "dismissed"
+    # A later chat proposing it again does not bring it back.
+    propose(root, session="ses_2")
+    assert client.get(BASE).json()["items"] == []
 
 
 def test_unknown_or_malformed_ids_are_refused(world):

@@ -206,7 +206,9 @@ async def _run(operation, *args):
 
 
 # ── proposals (Memory v3 session reflection) ─────────────────────────────
-_PROPOSAL_GONE = "This proposal was already decided or has expired."
+_PROPOSAL_GONE = "No such proposal."
+_PROPOSAL_DECIDED = "This proposal was already decided or has expired."
+_PROPOSAL_BUSY = "The proposal inbox is busy. Try again in a moment."
 
 
 def _scope_label(scope, project_names):
@@ -251,24 +253,27 @@ def _list_proposals():
 
 
 def _decide_proposal(proposal_id, accept):
+    """Accept or dismiss an open proposal. The decision is one transition
+    under the inbox lock: only the winner saves (accept) or records it; a
+    proposal already decided, here or on another worker, or expired is 409."""
     store = store_for_owner("local")
     inbox = reflection.ProposalInbox(store.root)
-    row = inbox.get(proposal_id)
-    if row is None:
-        raise HTTPException(404, _PROPOSAL_GONE)
-    if not accept:
-        try:
-            inbox.decide(proposal_id, reflection.DISMISSED)
-        except KeyError:
-            raise HTTPException(404, _PROPOSAL_GONE) from None
-        return {"id": proposal_id, "status": reflection.DISMISSED, "memory": None}
-    # The owner's acceptance saves an agent-saved fact (the durable tier the
-    # learner writes), not a user-saved one: it stays revertible from the list.
-    saved = reflection.promote(store, row, session=None, automatic=False)
     try:
-        inbox.decide(proposal_id, reflection.ACCEPTED, fact_id=saved.id)
+        if not accept:
+            inbox.dismiss(proposal_id)
+            return {"id": proposal_id, "status": reflection.DISMISSED, "memory": None}
+        # The owner's acceptance saves an agent-saved fact (the durable tier
+        # the learner writes, provenance "session"), not a user-saved one: it
+        # stays revertible from the list.
+        _, saved = inbox.accept(
+            proposal_id, lambda row: reflection.promote(store, row, automatic=False)
+        )
     except KeyError:
-        pass  # decided elsewhere meanwhile; the fact is saved either way
+        raise HTTPException(404, _PROPOSAL_GONE) from None
+    except reflection.ProposalDecided:
+        raise HTTPException(409, _PROPOSAL_DECIDED) from None
+    except reflection.InboxBusy:
+        raise HTTPException(503, _PROPOSAL_BUSY) from None
     entry = _find(store, saved.id)
     return {"id": proposal_id, "status": reflection.ACCEPTED,
             "memory": _item(entry, "active", _project_names([entry]))}

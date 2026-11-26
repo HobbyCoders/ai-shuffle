@@ -166,9 +166,11 @@ synthesis-log row records the model, billing and prompt limit used.
 - `<rule applies_to quote>` saves a behaviour rule through the existing
   `_apply_rules` path. A rule still needs a quote found in the user's turns,
   as `behavior.py` requires.
-- `<proposal kind="owner_preference" quote="…">` saves at once as an
-  agent-saved durable fact (`provenance="user"`, `automatic=True`, revertible),
-  but only when its quote is found in the user's turns.
+- `<proposal kind="owner_preference" quote="…">` whose quote is found in the
+  user's turns becomes a behaviour rule ("When <its when-line>: <text>")
+  through the same `_apply_rules` checks (quote, permission, injection, cap),
+  so it shows under Learned behaviour and is revertible there. One those
+  checks refuse goes to the inbox instead.
 - Any other `<proposal kind="owner_preference|owner_fact|project">` goes to
   the inbox. An unverified quote is dropped.
 
@@ -177,18 +179,38 @@ workflow proposals (`workflows.py`) do not run in reflection mode. The rule
 conflict review (`conflict_review.py`) still runs after a reflection that did
 not fail.
 
-**Inbox.** `proposals.json` beside the store holds this worker's proposals:
-id (a hash of kind, scope and normalised text), kind, text, scope, quote,
-when-line, sessions, created and expiry times, and status. A new proposal that
-matches an open one of the same kind and scope (word overlap ≥ 0.6) adds its
-session instead of a second row. When two distinct sessions, on any worker,
-have produced it, it is promoted to an agent-saved durable fact. The owner can
-also accept or dismiss it (`GET /api/v1/memories/proposals`, `POST
-/api/v1/memories/proposals/{id}/accept`, `POST …/dismiss`). A decided proposal
-stays decided: the same text from a later chat does not reopen it. Open
-proposals expire 14 days after they were first made, and the file holds at
-most 100. A proposal is not a fact: it takes no slot, is not in the index,
+**Inbox.** `proposals.json` beside the store holds this worker's open
+proposals and the owner's decisions. A proposal has an id (a hash of kind,
+scope and its text with case, spacing and punctuation removed), kind, text,
+scope, quote, when-line, sessions, and created and expiry times. Only an exact
+duplicate after that normalisation joins an open row, adding its session;
+"seen in N chats" is shown to the owner as information and never saves
+anything. A proposal becomes an agent-saved durable fact (`provenance=
+"session"`, quoted or not) only when the owner accepts it (`GET
+/api/v1/memories/proposals`, `POST /api/v1/memories/proposals/{id}/accept`,
+`POST …/dismiss`). Accept is one transition under the inbox lock: the
+proposal must still be open, the fact is saved, then the decision is
+recorded; a proposal already decided on any worker, or expired, answers 409.
+Decisions (id, status, time) are kept for good and never pruned, so a
+dismissed proposal does not come back from any worker. Open proposals expire
+14 days after they were first made and are left out before any lookup or
+merge, so the same text later starts fresh. The file holds at most 100 open
+proposals. A proposal is not a fact: it takes no slot, is not in the index,
 just-in-time delivery or Recall, and expiring it is not counted as a loss.
+
+**Concurrency.** One reflection runs at a time per store on a worker, behind
+an asyncio lock (waiting never blocks the event loop; a chat waiting over 60
+seconds is skipped as `busy` and retried at its next close). The session's
+watermark is read again once the lock is held, before any call is paid for.
+No file lock is held across the model call: inbox and state writes run in a
+worker thread under their own short advisory locks, and a writer that could
+not take its lock writes nothing.
+
+**Engines.** Native chats drain the journal in their shielded close. Claude
+Code and Antigravity chats start the drain as its own tracked task once the
+CLI or agent turn has stopped, so the host's five-second close deadline ends
+only the wait for it, never the reflection call, and the agent process is
+stopped without waiting for it.
 
 **Rollback.** `FLUID_MEMORY_LEARNER=continuous` (a plain env read, listed as
 internal in `scripts/ci/env_allowlist.json`) brings back the continuous
@@ -444,12 +466,13 @@ retrying publication, so a crash between a save and a publish does not lose the
 save. A local receipt does not claim that an offline worker has received it.
 Reflection proposals travel as one record per store
 (`memory-proposal:<device>:<owner-hash>`, kind `memory_proposal`, content
-`{schema, owner, device, proposals}`) whenever `proposals.json` changes. A
-receiver keeps each peer's list in `proposals.remote.json`, which is never
-read as facts. The inbox merges the lists by id: sessions are joined, so a
-proposal from a session on another worker corroborates a local one, and a
-decision made on any worker closes it everywhere. A deleted record removes
-that peer's list. Older workers ignore these records: every earlier `_apply`
+`{schema, owner, device, proposals, decisions}`) whenever `proposals.json`
+changes. A receiver keeps each peer's lists in `proposals.remote.json`, which
+is never read as facts, and copies the peer's decisions into its own
+`proposals.json` for good. The inbox merges open proposals by id (their chats
+are listed together, as information) and a decision made on any worker closes
+the proposal everywhere; the earliest decision wins. A deleted record removes
+that peer's open list, never a decision already copied. Older workers ignore these records: every earlier `_apply`
 acts only on kinds `skill` and `prose_skill` and on ids starting with
 `memory-fact:`, `memory-barrier:`, `memory-v2:` or the legacy `fact:`, and
 skips any other record. So a proposal can never reach an older worker's facts.

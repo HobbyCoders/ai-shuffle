@@ -17,15 +17,17 @@ most one model call, and only when the session gave a reason to.
 - **What it reads.** The session's own user turns, the assistant's replies,
   its friction records and the facts and rules in scope; never the tool
   stream. Bounded by :data:`REFLECTION_INPUT_CHARS` (about 7k tokens).
-- **Where it goes.** A rule quoting the owner's words is saved at once as a
-  learned behaviour rule (agent tier, revertible on Settings > Learning). A
-  preference quoting the owner is saved at once as an agent-saved fact.
-  Everything else is a *proposal* in :class:`ProposalInbox`: it becomes an
-  agent-saved fact when a second, distinct session independently proposes it
-  or when the owner accepts it, and otherwise expires after 14 days. An open
-  proposal is not a fact: it is never in ``memories.json``, so it never takes
-  a slot, never reaches the index, just-in-time delivery or Recall, and is
-  never counted as a dropped fact.
+- **Where it goes.** A rule or a preference quoting the owner's words is
+  saved at once as a learned behaviour rule (agent tier, revertible on
+  Settings > Learned behaviour). Everything else is a *proposal* in
+  :class:`ProposalInbox`: it becomes an agent-saved fact only when the owner
+  accepts it, and otherwise expires after 14 days. A dismissed proposal never
+  comes back. An open proposal is not a fact: it is never in
+  ``memories.json``, so it never takes a slot, never reaches the index,
+  just-in-time delivery or Recall, and is never counted as a dropped fact.
+  The same proposal from several chats (equal after case, spacing and
+  punctuation) is one row that lists them all; that count is information
+  for the owner, never a reason to save.
 
 The worker-wide rollback switch ``FLUID_MEMORY_LEARNER=continuous`` brings
 back the continuous learner (skills, consolidation, when-line backfill and
@@ -33,14 +35,17 @@ workflow proposals included). Phase 3 deletes it.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import time
+import weakref
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 LEARNER_SWITCH = "FLUID_MEMORY_LEARNER"
 CONTINUOUS = "continuous"
@@ -60,12 +65,18 @@ REPEATED_FRICTION = 2
 PROPOSAL_FILE = "proposals.json"
 REMOTE_PROPOSAL_FILE = "proposals.remote.json"
 STATE_FILE = ".reflection-state.json"
+PROPOSAL_LOCK = ".proposals"
+STATE_LOCK = ".reflection-state"
 PROPOSAL_TTL_SECONDS = 14 * 86400
 MAX_PROPOSALS = 100
 MAX_PROPOSAL_CHARS = 500
 MAX_STATE_SESSIONS = 500
-#: Word overlap at which two proposals of one kind and scope are the same.
-MATCH_THRESHOLD = 0.6
+#: How long a writer waits for another process holding the inbox or the
+#: reflection state. Writes take milliseconds; this only bites when stuck.
+LOCK_WAIT_SECONDS = 5.0
+#: How long one chat's reflection waits for another's to finish on this
+#: worker before it is skipped as busy (and retried at the chat's next close).
+REFLECTION_WAIT_SECONDS = 60.0
 
 OWNER_RULE = "owner_rule"
 OWNER_PREFERENCE = "owner_preference"
@@ -78,13 +89,22 @@ KIND_LABELS = {
     OWNER_FACT: "Owner fact",
     PROJECT: "Project knowledge",
 }
-OPEN, ACCEPTED, DISMISSED, PROMOTED = "open", "accepted", "dismissed", "promoted"
-DECIDED = (ACCEPTED, DISMISSED, PROMOTED)
+OPEN, ACCEPTED, DISMISSED = "open", "accepted", "dismissed"
+DECISIONS = (ACCEPTED, DISMISSED)
 _DEFAULT_WHEN = {
     OWNER_PREFERENCE: "When working with the owner (learned preference)",
     OWNER_FACT: "When working with the owner",
     PROJECT: "When working in this project",
 }
+
+
+class InboxBusy(OSError):
+    """Another writer held the inbox or the reflection state for the whole
+    wait. Nothing was written."""
+
+
+class ProposalDecided(LookupError):
+    """The proposal was accepted, dismissed or expired before this decision."""
 
 
 def learner_mode() -> str:
@@ -170,10 +190,25 @@ def _write_json(path: Path, value: Any) -> None:
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
-def _lock(root: Path, name: str):
+@contextmanager
+def _locked(root: Path, name: str) -> Iterator[None]:
+    """Hold ``root/name``'s advisory lock inside the block, or raise
+    :class:`InboxBusy` without entering it: a writer that could not take the
+    lock never writes."""
     from fluid.codemode.skills import journal_lock
 
-    return journal_lock(Path(root) / name, wait=5.0)
+    Path(root).mkdir(parents=True, exist_ok=True)
+    with journal_lock(Path(root) / name, wait=LOCK_WAIT_SECONDS) as held:
+        if not held:
+            raise InboxBusy(f"{name.lstrip('.')} is held by another writer; nothing was written")
+        yield
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ── which sessions were reflected ───────────────────────────────────────────
@@ -192,50 +227,33 @@ class ReflectionState:
 
     def through(self, session: str) -> float:
         row = self._sessions().get(session)
-        try:
-            return float(row.get("through", 0.0)) if isinstance(row, dict) else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+        return _float(row.get("through")) if isinstance(row, dict) else 0.0
 
     def all_through(self) -> dict[str, float]:
-        out: dict[str, float] = {}
-        for sid, row in self._sessions().items():
-            try:
-                out[sid] = float(row.get("through", 0.0))
-            except (AttributeError, TypeError, ValueError):
-                continue
-        return out
+        return {sid: _float(row.get("through")) for sid, row in self._sessions().items()
+                if isinstance(row, dict)}
 
     def mark(self, session: str, through: float, *, now: float | None = None) -> None:
-        with _lock(self.path.parent, ".reflection-state"):
+        """Record ``session`` as reflected through ``through``. InboxBusy
+        (nothing written) when another process held the state."""
+        with _locked(self.path.parent, STATE_LOCK):
             sessions = self._sessions()
             sessions[session] = {"through": float(through), "at": float(now or time.time())}
             if len(sessions) > MAX_STATE_SESSIONS:
-                newest = sorted(sessions.items(), key=lambda kv: -float(kv[1].get("at", 0) or 0))
+                newest = sorted(sessions.items(), key=lambda kv: -_float(kv[1].get("at")))
                 sessions = dict(newest[:MAX_STATE_SESSIONS])
             _write_json(self.path, {"schema": 1, "sessions": sessions})
 
 
 # ── the proposal inbox ──────────────────────────────────────────────────────
-_STOPWORDS = frozenset(
-    "a an and are as at be by for from has have in is it its of on or that the this to was "
-    "were will with when owner user agent should always".split()
-)
-
-
-def _words(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", str(text).lower()) if w not in _STOPWORDS}
-
-
-def similarity(a: str, b: str) -> float:
-    left, right = _words(a), _words(b)
-    if not left or not right:
-        return 0.0
-    return len(left & right) / len(left | right)
+def normalize(text: str) -> str:
+    """``text`` compared as a proposal: case, spacing and punctuation aside,
+    every word kept in order ("do not" stays apart from "do")."""
+    return " ".join(re.sub(r"[\W_]+", " ", str(text or "").casefold()).split())
 
 
 def proposal_id(kind: str, scope: str, text: str) -> str:
-    basis = f"{kind}|{scope}|{' '.join(sorted(_words(text)))}"
+    basis = f"{kind}|{scope}|{normalize(text)}"
     return "p" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:15]
 
 
@@ -245,16 +263,55 @@ def _valid_item(item: Any) -> bool:
             and isinstance(item.get("sessions"), list))
 
 
+def _clean_decisions(raw: Any) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if isinstance(raw, dict):
+        for pid, row in raw.items():
+            if isinstance(pid, str) and isinstance(row, dict) and row.get("status") in DECISIONS:
+                kept = {"status": row["status"], "at": _float(row.get("at"))}
+                if isinstance(row.get("fact_id"), str):
+                    kept["fact_id"] = row["fact_id"]
+                out[pid] = kept
+    return out
+
+
+def _parse(doc: Any) -> tuple[list[dict], dict[str, dict]]:
+    """(proposals, decisions) from one worker's inbox document. A list is
+    proposals alone; a decided row of the first format is a decision."""
+    if isinstance(doc, list):
+        items, decisions = doc, {}
+    elif isinstance(doc, dict):
+        items, decisions = doc.get("proposals"), _clean_decisions(doc.get("decisions"))
+    else:
+        return [], {}
+    rows: list[dict] = []
+    for item in items if isinstance(items, list) else []:
+        if not _valid_item(item):
+            continue
+        if item.get("status") in DECISIONS:
+            decisions.setdefault(item["id"], {"status": item["status"],
+                                              "at": _float(item.get("decided_at"))})
+        else:
+            rows.append(item)
+    return rows, decisions
+
+
+def _live(rows: Iterable[dict], now: float) -> list[dict]:
+    """Rows that have not expired. An expired row is gone before any lookup
+    or merge, so the same proposal later starts a fresh 14 days."""
+    return [r for r in rows if _float(r.get("expires_at")) > now]
+
+
 class ProposalInbox:
     """Proposals reflection was not sure enough to save, kept in the owner's
     store directory, outside the fact store.
 
-    ``proposals.json`` holds this worker's proposals and its decisions (an
-    accepted, dismissed or promoted proposal stays listed for 14 days so the
-    decision reaches other workers). ``proposals.remote.json`` holds the
-    copies other workers published (app.network.memory_records): the inbox
-    shows the merged view, and a proposal another worker's session produced
-    counts toward corroboration here. Phase 3 moves this to SQLite."""
+    ``proposals.json`` holds this worker's open proposals and every decision
+    the owner made on any worker. Decisions are kept for good (an id, a
+    status and a time each): a dismissed proposal never comes back, and an
+    accepted one is not offered again. ``proposals.remote.json`` holds what
+    other workers published (app.network.memory_records); the inbox shows the
+    merged view. Phase 3 moves this to SQLite."""
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -262,24 +319,21 @@ class ProposalInbox:
         self.remote_path = self.root / REMOTE_PROPOSAL_FILE
 
     # storage
-    def _local(self) -> list[dict]:
-        doc = _read_json(self.path)
-        items = doc.get("proposals") if isinstance(doc, dict) else None
-        return [i for i in items if _valid_item(i)] if isinstance(items, list) else []
+    def _local(self) -> tuple[list[dict], dict[str, dict]]:
+        return _parse(_read_json(self.path))
 
-    def _remote(self) -> dict[str, list[dict]]:
+    def _remote(self) -> dict[str, tuple[list[dict], dict[str, dict]]]:
         doc = _read_json(self.remote_path)
         devices = doc.get("devices") if isinstance(doc, dict) else None
         if not isinstance(devices, dict):
             return {}
-        out: dict[str, list[dict]] = {}
-        for device, items in devices.items():
-            if isinstance(items, list):
-                out[str(device)] = [i for i in items if _valid_item(i)]
-        return out
+        return {str(device): _parse(value) for device, value in devices.items()}
 
-    def _save(self, items: list[dict], now: float) -> None:
-        _write_json(self.path, {"schema": 1, "proposals": _prune(items, now)})
+    def _save(self, rows: list[dict], decisions: dict[str, dict], now: float) -> None:
+        kept = [r for r in _live(rows, now) if r["id"] not in decisions]
+        kept.sort(key=lambda r: -_float(r.get("updated_at") or r.get("created_at")))
+        _write_json(self.path, {"schema": 2, "proposals": kept[:MAX_PROPOSALS],
+                                "decisions": decisions})
 
     def _announce(self) -> None:
         """Tell the host this worker's proposals changed (it republishes
@@ -288,31 +342,57 @@ class ProposalInbox:
 
         transactions.committed_change(self.path)
 
-    def export(self, now: float | None = None) -> list[dict]:
-        """This worker's proposals and decisions, for replication."""
-        return _prune(self._local(), now or time.time())
+    def export(self, now: float | None = None) -> dict:
+        """This worker's open proposals and its decisions, for replication."""
+        now = now or time.time()
+        rows, decisions = self._local()
+        return {"proposals": [r for r in _live(rows, now) if r["id"] not in decisions],
+                "decisions": decisions}
 
-    def apply_remote(self, device: str, items: list[dict] | None) -> None:
-        """Keep another worker's published proposals (None: it has none)."""
-        with _lock(self.root, ".proposals"):
+    def apply_remote(self, device: str, items: list[dict] | None,
+                     decisions: dict | None = None, *, now: float | None = None) -> None:
+        """Keep another worker's published proposals and decisions (None:
+        it has none left). Its decisions are also kept here for good, so a
+        dismissal outlives that worker's record. Under the inbox lock, like
+        every local decision."""
+        now = now or time.time()
+        rows, theirs = _parse({"proposals": items or [], "decisions": decisions or {}})
+        with _locked(self.root, PROPOSAL_LOCK):
             doc = _read_json(self.remote_path)
             devices = doc.get("devices") if isinstance(doc, dict) else None
             devices = devices if isinstance(devices, dict) else {}
-            clean = [i for i in (items or []) if _valid_item(i)][:MAX_PROPOSALS]
-            if clean:
-                devices[str(device)] = clean
+            if rows or theirs:
+                devices[str(device)] = {"proposals": rows[:MAX_PROPOSALS], "decisions": theirs}
             else:
                 devices.pop(str(device), None)
-            _write_json(self.remote_path, {"schema": 1, "devices": devices})
+            _write_json(self.remote_path, {"schema": 2, "devices": devices})
+            local_rows, mine = self._local()
+            adopted = {pid: row for pid, row in theirs.items() if pid not in mine}
+            if adopted:
+                self._save(local_rows, {**mine, **adopted}, now)
 
     # the merged view
-    def _merged(self, now: float) -> dict[str, dict]:
-        """Every proposal by id over this worker and the others: sessions
-        joined, decided if any worker decided it, expiring at the latest."""
+    def _decisions(self) -> dict[str, dict]:
+        """Every decision on any worker; the earliest one wins."""
+        out: dict[str, dict] = {}
+        sources = [self._local()[1]] + [d for _, d in self._remote().values()]
+        for decisions in sources:
+            for pid, row in decisions.items():
+                if pid not in out or row["at"] < out[pid]["at"]:
+                    out[pid] = row
+        return out
+
+    def _merged(self, now: float) -> tuple[dict[str, dict], dict[str, dict]]:
+        """(open proposals by id, decisions) over this worker and the others.
+        An open proposal joins its sessions across workers and expires at the
+        latest; expired and decided ones are left out."""
+        decisions = self._decisions()
         merged: dict[str, dict] = {}
-        sources = [("local", self._local())] + [(d, items) for d, items in self._remote().items()]
-        for origin, items in sources:
-            for item in items:
+        sources = [("local", self._local()[0])] + [(d, rows) for d, (rows, _) in self._remote().items()]
+        for origin, rows in sources:
+            for item in _live(rows, now):
+                if item["id"] in decisions:
+                    continue
                 row = merged.get(item["id"])
                 if row is None:
                     row = merged[item["id"]] = {**item, "sessions": [], "origins": [],
@@ -321,115 +401,104 @@ class ProposalInbox:
                     if isinstance(sid, str) and sid not in row["sessions"]:
                         row["sessions"].append(sid)
                 row["origins"].append(origin)
-                if item.get("status") in DECIDED:
-                    row["status"] = item["status"]
-                    row["decided_at"] = item.get("decided_at")
-                row["expires_at"] = max(float(row["expires_at"] or 0.0), float(item.get("expires_at") or 0.0))
-                row["created_at"] = min(float(row.get("created_at") or now), float(item.get("created_at") or now))
+                row["expires_at"] = max(_float(row["expires_at"]), _float(item.get("expires_at")))
+                row["created_at"] = min(_float(row.get("created_at")) or now,
+                                        _float(item.get("created_at")) or now)
                 if not row.get("quote") and item.get("quote"):
                     row["quote"] = item["quote"]
-        return merged
+        return merged, decisions
+
+    def _ever_listed(self, pid: str) -> bool:
+        """True when ``pid`` is in any worker's file, expired rows included."""
+        sources = [self._local()[0]] + [rows for rows, _ in self._remote().values()]
+        return any(r["id"] == pid for rows in sources for r in rows)
 
     def open(self, now: float | None = None) -> list[dict]:
         """Open, unexpired proposals, newest first."""
-        now = now or time.time()
-        rows = [r for r in self._merged(now).values()
-                if r["status"] == OPEN and r["expires_at"] > now]
-        rows.sort(key=lambda r: -float(r.get("updated_at") or r.get("created_at") or 0))
+        rows = list(self._merged(now or time.time())[0].values())
+        rows.sort(key=lambda r: -_float(r.get("updated_at") or r.get("created_at")))
         return rows
 
     def get(self, pid: str, now: float | None = None) -> dict | None:
-        return next((r for r in self.open(now) if r["id"] == pid), None)
+        return self._merged(now or time.time())[0].get(pid)
 
-    def _match(self, kind: str, scope: str, text: str, now: float) -> dict | None:
-        best, score = None, 0.0
-        for row in self.open(now):
-            if row["kind"] != kind or row.get("scope") != scope:
-                continue
-            s = similarity(text, row["text"])
-            if s > score:
-                best, score = row, s
-        return best if score >= MATCH_THRESHOLD else None
+    def decision(self, pid: str) -> dict | None:
+        return self._decisions().get(pid)
 
     # writes
     def propose(self, *, kind: str, text: str, scope: str, session: str,
                 quote: str | None = None, when: str | None = None,
-                now: float | None = None) -> tuple[dict, bool]:
-        """Add a proposal, or this session to a matching one. Returns the
-        merged proposal and whether it is now corroborated (two distinct
-        sessions). The caller saves a corroborated one as a fact and then
-        :meth:`decide` s it ``promoted``."""
+                now: float | None = None) -> dict:
+        """Add a proposal, or this session to the same open one (equal after
+        :func:`normalize`). Returns the merged row; one the owner already
+        decided comes back with that decision as its status and is not
+        added."""
         if kind not in PROPOSAL_KINDS:
             raise ValueError(f"unknown proposal kind {kind!r}")
         now = now or time.time()
-        with _lock(self.root, ".proposals"):
-            match = self._match(kind, scope, text, now)
-            items = self._local()
-            pid = match["id"] if match else proposal_id(kind, scope, text)
-            mine = next((i for i in items if i["id"] == pid), None)
+        pid = proposal_id(kind, scope, text)
+        with _locked(self.root, PROPOSAL_LOCK):
+            decided = self._decisions().get(pid)
+            if decided is not None:
+                return {"id": pid, "kind": kind, "scope": scope, "text": text, **decided}
+            rows, decisions = self._local()
+            rows = _live(rows, now)
+            mine = next((r for r in rows if r["id"] == pid), None)
             if mine is None:
-                base = match or {"text": text, "when": when, "quote": quote,
-                                 "created_at": now, "expires_at": now + PROPOSAL_TTL_SECONDS}
-                mine = {"id": pid, "kind": kind, "scope": scope, "text": base["text"],
-                        "when": base.get("when"), "quote": base.get("quote") or quote,
-                        "sessions": [], "created_at": float(base.get("created_at") or now),
-                        "expires_at": float(base.get("expires_at") or now + PROPOSAL_TTL_SECONDS),
-                        "status": OPEN}
-                items.append(mine)
+                mine = {"id": pid, "kind": kind, "scope": scope, "text": text, "when": when,
+                        "quote": quote, "sessions": [], "created_at": now,
+                        "expires_at": now + PROPOSAL_TTL_SECONDS, "status": OPEN}
+                rows.append(mine)
             if session not in mine["sessions"]:
                 mine["sessions"].append(session)
             if not mine.get("quote") and quote:
                 mine["quote"] = quote
             mine["updated_at"] = now
-            self._save(items, now)
+            self._save(rows, decisions, now)
         self._announce()
-        merged = self._merged(now).get(pid) or mine
-        return merged, len(set(merged["sessions"])) >= 2 and merged["status"] == OPEN
+        return self._merged(now)[0].get(pid) or mine
 
-    def decide(self, pid: str, status: str, *, fact_id: str | None = None,
-               now: float | None = None) -> dict:
-        """Record the owner's (or corroboration's) decision on an open
-        proposal. KeyError when it is not open here."""
-        if status not in DECIDED:
-            raise ValueError(f"unknown decision {status!r}")
+    def dismiss(self, pid: str, *, now: float | None = None) -> dict:
+        """Dismiss an open proposal for good. KeyError when it is unknown,
+        :class:`ProposalDecided` when it was decided or expired first."""
+        row, _ = self._decide(pid, DISMISSED, None, now)
+        return row
+
+    def accept(self, pid: str, save: Callable[[dict], Any], *,
+               now: float | None = None) -> tuple[dict, Any]:
+        """Accept an open proposal: under the inbox lock it must still be
+        open, ``save(row)`` saves the fact, then the decision is recorded.
+        Only the winning decision saves. KeyError when the proposal is
+        unknown, :class:`ProposalDecided` when it was decided or expired
+        first; ``save``'s own errors leave the proposal open."""
+        return self._decide(pid, ACCEPTED, save, now)
+
+    def _decide(self, pid: str, status: str, save: Callable[[dict], Any] | None,
+                now: float | None) -> tuple[dict, Any]:
         now = now or time.time()
-        with _lock(self.root, ".proposals"):
-            row = self._merged(now).get(pid)
-            if row is None or row["status"] != OPEN or row["expires_at"] <= now:
+        with _locked(self.root, PROPOSAL_LOCK):
+            merged, decisions = self._merged(now)
+            row = merged.get(pid)
+            if row is None:
+                if pid in decisions or self._ever_listed(pid):
+                    raise ProposalDecided(pid)
                 raise KeyError(pid)
-            items = self._local()
-            mine = next((i for i in items if i["id"] == pid), None)
-            if mine is None:
-                mine = {k: row.get(k) for k in ("id", "kind", "scope", "text", "when", "quote",
-                                                  "created_at", "expires_at")}
-                mine["sessions"] = list(row["sessions"])
-                items.append(mine)
-            mine.update(status=status, decided_at=now, updated_at=now)
-            if fact_id:
-                mine["fact_id"] = fact_id
-            self._save(items, now)
+            saved = save(row) if save is not None else None
+            rows, mine = self._local()
+            record: dict[str, Any] = {"status": status, "at": now}
+            fact_id = getattr(saved, "id", None)
+            if isinstance(fact_id, str):
+                record["fact_id"] = fact_id
+            mine[pid] = record
+            self._save([r for r in rows if r["id"] != pid], mine, now)
         self._announce()
-        return {**row, "status": status}
+        return {**row, "status": status}, saved
 
 
-def _prune(items: list[dict], now: float) -> list[dict]:
-    """Drop expired open proposals and decisions older than the TTL; keep at
-    most :data:`MAX_PROPOSALS`, decisions before the oldest open ones."""
-    kept = []
-    for item in items:
-        if item.get("status") in DECIDED:
-            if float(item.get("decided_at") or 0) + PROPOSAL_TTL_SECONDS > now:
-                kept.append(item)
-        elif float(item.get("expires_at") or 0) > now:
-            kept.append(item)
-    if len(kept) > MAX_PROPOSALS:
-        kept.sort(key=lambda i: (i.get("status") == OPEN, -float(i.get("updated_at") or 0)))
-        kept = kept[:MAX_PROPOSALS]
-    return kept
-
-
-def promote(store: Any, proposal: dict, *, session: str | None, automatic: bool) -> Any:
-    """Save ``proposal`` as an agent-saved fact (durable tier)."""
+def promote(store: Any, proposal: dict, *, automatic: bool) -> Any:
+    """Save ``proposal`` as an agent-saved fact (durable tier). Its evidence
+    is a chat, so provenance is ``session`` even when it carries a quote:
+    ``user`` is for what the owner saved or said themselves."""
     from fluid.codemode import facts
 
     when = proposal.get("when") or _DEFAULT_WHEN.get(proposal.get("kind"), _DEFAULT_WHEN[OWNER_FACT])
@@ -438,9 +507,8 @@ def promote(store: Any, proposal: dict, *, session: str | None, automatic: bool)
     except ValueError:
         when = _DEFAULT_WHEN[OWNER_FACT]
     return store.save_memory(
-        proposal["text"], scope=proposal.get("scope") or "global",
-        provenance="user" if proposal.get("quote") else "session",
-        durable=True, source_session=session or (proposal.get("sessions") or [None])[0],
+        proposal["text"], scope=proposal.get("scope") or "global", provenance="session",
+        durable=True, source_session=(proposal.get("sessions") or [None])[0],
         when=when, automatic=automatic,
     )
 
@@ -459,25 +527,25 @@ replies, and [friction] lines as the harness's own record of wasted calls
 angry words: read the reply before it to find what went wrong.
 
 Write at most five items, each one of:
-- a behaviour rule, when the owner corrected HOW the agent works: one line,
-  "When <situation>: <what to do>", imperative, at most 300 characters,
-  general enough for next time but keeping the owner's scope and exceptions.
-  quote= must be copied word for word from the [user] line that shows the
-  correction; a rule without a real quote is refused. applies_to is "all"
-  unless the failure is specific to the model family that line was talking
-  to ("[user to <family>]"). Prefer rewriting a listed rule (its id) to a
-  near-duplicate. A rule never grants permission ("without asking", "skip
-  review").
+- a behaviour rule, when the owner corrected HOW the agent works or said in
+  their own words how they like things done: one line, "When <situation>:
+  <what to do>", imperative, at most 300 characters, general enough for next
+  time but keeping the owner's scope and exceptions. quote= must be copied
+  word for word from the [user] line that shows it; a rule without a real
+  quote is refused. applies_to is "all" unless the failure is specific to the
+  model family that line was talking to ("[user to <family>]"). Prefer
+  rewriting a listed rule (its id) to a near-duplicate. A rule never grants
+  permission ("without asking", "skip review").
   <rule applies_to="all" quote="exact owner words">When X: do Y.</rule>
   <rule id="m7" applies_to="all" quote="exact owner words">When X: do Y.</rule>
 - a proposal, for something TRUE worth remembering, one fact per item, at
-  most 500 characters:
+  most 500 characters. The owner reviews each before it is saved:
   <proposal kind="KIND" scope="global|project" quote="exact owner words" when="When ...">the fact</proposal>
-  KIND is owner_preference (how the owner likes things done, in their own
-  words: quote required), owner_fact (about the owner, their machines or
-  accounts) or project (this project's code, layout or conventions:
-  scope="project"). quote is optional except for owner_preference; when= is
-  one short line saying when the fact matters.
+  KIND is owner_preference (how the owner seems to like things done, when
+  they did not say it outright), owner_fact (about the owner, their machines
+  or accounts) or project (this project's code, layout or conventions:
+  scope="project"). quote is optional; when= is one short line saying when
+  the fact matters.
 - NO_CHANGES when nothing is worth keeping.
 
 Do not capture: anything a listed memory or rule already says; one-task
@@ -543,16 +611,26 @@ def build_input(synth: Any, entries: list[dict], signals: list[str],
     return head_text + "\n\n## This chat\n" + "\n".join(body)
 
 
-def apply_output(synth: Any, text: str, entries: list[dict], session: str,
-                 inbox: ProposalInbox, errors: list[str]) -> tuple[list[str], dict[str, int]]:
-    """Save the rules and quoted preferences, queue the other proposals and
-    promote the ones a second session corroborated. Returns the change names
-    and counts by outcome."""
+def _preference_rule(body: str, when: str | None) -> str:
+    """A quoted preference as a behaviour rule: "When <situation>: <it>"."""
+    if re.match(r"(?i)when\b[^:]{1,200}:", body):
+        return body
+    situation = (when or "").strip().rstrip(".:")
+    if not re.match(r"(?i)when\b", situation):
+        situation = "When working with the owner"
+    return f"{situation}: {body}"
+
+
+async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
+                       inbox: ProposalInbox, errors: list[str]) -> tuple[list[str], dict[str, int]]:
+    """Save the rules (a quoted preference is one too) through the learner's
+    behaviour-rule checks, and queue every other proposal for the owner.
+    Returns the change names and counts by outcome. Inbox writes run in a
+    worker thread: waiting on the inbox lock never blocks the event loop."""
     from fluid.codemode import behavior, facts
 
     changed = list(synth._apply_rules(text, entries, errors))
-    counts = {"rules": len(changed), "saved": 0, "proposed": 0, "corroborated": 0}
-    store = synth._store
+    counts = {"rules": len(changed), "proposed": 0}
     for match in list(_PROPOSAL_RE.finditer(text or ""))[:MAX_PROPOSALS_PER_PASS]:
         attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
         kind = attrs.get("kind", "")
@@ -575,44 +653,32 @@ def apply_output(synth: Any, text: str, entries: list[dict], session: str,
             except ValueError:
                 when = None
         quote = attrs.get("quote") or None
-        quoted = bool(quote) and behavior.quote_in_user_text(quote, entries)
-        if quote and not quoted:
+        if quote and not behavior.quote_in_user_text(quote, entries):
             quote = None
+        if kind == OWNER_PREFERENCE and quote and "<" not in body:
+            # The owner said it: a learned behaviour rule, with the same
+            # quote, permission, injection and cap checks as any rule. One
+            # those checks refuse waits for the owner instead.
+            tag = f'<rule applies_to="all" quote="{quote}">{_preference_rule(body, when)}</rule>'
+            refused: list[str] = []
+            rules = synth._apply_rules(tag, entries, refused)
+            if rules:
+                changed.extend(rules)
+                counts["rules"] += len(rules)
+                continue
+            errors.extend(f"{label}: {reason}" for reason in refused)
         scope_attr = attrs.get("scope") or ("project" if kind == PROJECT else "global")
         scope = synth._resolve_scope(scope_attr) or "global"
-        if kind == OWNER_PREFERENCE and quoted:
-            try:
-                saved = store.save_memory(
-                    body, scope=scope, provenance="user", durable=True,
-                    source_session=session, when=when or _DEFAULT_WHEN[OWNER_PREFERENCE],
-                    automatic=True,
-                )
-            except ValueError as exc:
-                errors.append(f"{label}: {exc}")
-                continue
-            changed.append(f"memory:{saved.id}")
-            counts["saved"] += 1
-            continue
         try:
-            row, corroborated = inbox.propose(kind=kind, text=body, scope=scope, session=session,
-                                              quote=quote, when=when)
+            row = await asyncio.to_thread(inbox.propose, kind=kind, text=body, scope=scope,
+                                          session=session, quote=quote, when=when)
         except (OSError, ValueError) as exc:
             errors.append(f"{label}: {exc}")
             continue
         if row.get("status") != OPEN:
-            continue  # decided (dismissed) within the last 14 days: stays decided
-        if not corroborated:
-            changed.append(f"proposal:{row['id']}")
-            counts["proposed"] += 1
-            continue
-        try:
-            saved = promote(store, row, session=session, automatic=True)
-            inbox.decide(row["id"], PROMOTED, fact_id=saved.id)
-        except (KeyError, OSError, ValueError) as exc:
-            errors.append(f"{label}: {exc}")
-            continue
-        changed.append(f"memory:{saved.id}")
-        counts["corroborated"] += 1
+            continue  # the owner decided it already: it stays decided
+        changed.append(f"proposal:{row['id']}")
+        counts["proposed"] += 1
     return changed, counts
 
 
@@ -644,22 +710,41 @@ def advance_cursor(store: Any, state: ReflectionState) -> None:
         pass
 
 
+#: One reflection at a time per store on this worker, per event loop. An
+#: asyncio lock: waiting for it never blocks the loop, and it is never a file
+#: lock held across the model call.
+_TURNS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _turn_lock(root: Path) -> asyncio.Lock:
+    locks = _TURNS.setdefault(asyncio.get_running_loop(), {})
+    key = str(Path(root))
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
+async def _mark(synth: Any, state: ReflectionState, session: str, through: float) -> None:
+    try:
+        await asyncio.to_thread(state.mark, session, through)
+    except OSError as exc:
+        # Not marked: the chat's next close reads these turns again.
+        synth.last_error = f"reflection state not saved: {exc}"
+
+
 async def reflect(synth: Any) -> list[str]:
     """One reflection of this chat's new turns. Returns the change names.
 
     Runs on the chat's own route (provider row, model, effort), under the
     learner's daily budget and per-billing caps; a model the chat backs off
     is skipped. A session that failed the gate is marked reflected; one that
-    could not be reflected (budget, backoff, provider error) is not, so the
-    next settle retries it."""
-    from fluid.codemode.continual import (
-        SYNTHESIS_LOCK,
-        InferenceBudgetExhausted,
-        SynthesisIncomplete,
-        SynthesisProviderError,
-    )
-    from fluid.codemode.skills import journal_lock
-
+    could not be reflected (budget, backoff, provider error, busy) is not, so
+    the next settle retries it. Another chat's reflection on this worker is
+    waited for cooperatively; the session's watermark is read again once it
+    is this chat's turn, before any call is paid for."""
     synth.last_pass_failed = False
     synth.last_pass_skipped = False
     store = synth._store
@@ -667,19 +752,40 @@ async def reflect(synth: Any) -> list[str]:
     if not synth.enabled(refresh=True) or not session:
         synth.last_pass_skipped = True
         return []
+    lock = _turn_lock(store.root)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=REFLECTION_WAIT_SECONDS)
+    except TimeoutError:
+        synth.last_pass_skipped = True
+        synth._log_pass("reflection", [], ran=False, counts_toward_yield=False,
+                        extra={"session": str(session), "outcome": "skipped", "reason": "busy"})
+        return []
+    try:
+        return await _reflect_turn(synth, store, str(session))
+    finally:
+        lock.release()
+
+
+async def _reflect_turn(synth: Any, store: Any, session: str) -> list[str]:
+    from fluid.codemode.continual import (
+        InferenceBudgetExhausted,
+        SynthesisIncomplete,
+        SynthesisProviderError,
+    )
+
     state = ReflectionState(store.root)
     forgotten_before = store._facts.snapshot().get("forgotten_before", 0)
-    through = state.through(str(session))
-    entries = session_entries(store, str(session), through, forgotten_before)
+    through = state.through(session)
+    entries = session_entries(store, session, through, forgotten_before)
     if not entries:
         advance_cursor(store, state)
         return []
     newest = max(float(e.get("ts") or 0) for e in entries)
     turns = sum(1 for e in entries if e.get("kind") == "user")
-    base = {"session": str(session), "turns": turns}
+    base = {"session": session, "turns": turns}
     signals = gate(entries, continued=through > 0)
     if not signals:
-        state.mark(str(session), newest)
+        await _mark(synth, state, session, newest)
         synth.last_pass_skipped = True
         synth._log_pass("reflection", [], ran=False, counts_toward_yield=False,
                         extra={**base, "outcome": "skipped", "reason": "no_signal"})
@@ -693,44 +799,40 @@ async def reflect(synth: Any) -> list[str]:
         synth._log_pass("reflection", [], ran=False, counts_toward_yield=False,
                         extra={**base, "outcome": "skipped", "reason": "backoff", "signals": signals})
         return []
-    with journal_lock(store.root / SYNTHESIS_LOCK, wait=30.0) as held:
-        if not held:
-            synth.last_pass_skipped = True
-            synth._log_pass("reflection", [], ran=False, counts_toward_yield=False,
-                            extra={**base, "outcome": "skipped", "reason": "busy", "signals": signals})
-            return []
-        projects = Counter(e.get("project") for e in entries if e.get("project"))
-        original_project = synth._project
-        if projects:
-            synth._project = projects.most_common(1)[0][0]
+    projects = Counter(e.get("project") for e in entries if e.get("project"))
+    original_project = synth._project
+    if projects:
+        synth._project = projects.most_common(1)[0][0]
+    try:
+        prompt = build_input(synth, entries, signals, synth._prompt_limit)
         try:
-            prompt = build_input(synth, entries, signals, synth._prompt_limit)
-            try:
-                text, usage = await synth._complete(prompt, REFLECT_SYSTEM, reserve=0)
-            except InferenceBudgetExhausted:
-                synth._latch_spent_day()
-                synth._log_budget_spent("reflection")
-                return []
-            except (SynthesisIncomplete, SynthesisProviderError) as exc:
-                synth.last_error = str(exc)
-                retry = synth._note_failure(synth.last_error)
-                synth._log_pass("reflection", [], error=synth.last_error, usage=exc.usage,
-                                retry_after_s=retry, counts_toward_yield=False,
-                                extra={**base, "outcome": "error", "signals": signals})
-                return []
-            if store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
-                return []  # a Forget landed during the call: its text must not come back
-            errors: list[str] = []
-            inbox = ProposalInbox(store.root)
-            changed, counts = apply_output(synth, text, entries, str(session), inbox, errors)
-        finally:
-            synth._project = original_project
-    state.mark(str(session), newest)
+            text, usage = await synth._complete(prompt, REFLECT_SYSTEM, reserve=0)
+        except InferenceBudgetExhausted:
+            synth._latch_spent_day()
+            synth._log_budget_spent("reflection")
+            return []
+        except (SynthesisIncomplete, SynthesisProviderError) as exc:
+            synth.last_error = str(exc)
+            retry = synth._note_failure(synth.last_error)
+            synth._log_pass("reflection", [], error=synth.last_error, usage=exc.usage,
+                            retry_after_s=retry, counts_toward_yield=False,
+                            extra={**base, "outcome": "error", "signals": signals})
+            return []
+        if store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
+            return []  # a Forget landed during the call: its text must not come back
+        errors: list[str] = []
+        inbox = ProposalInbox(store.root)
+        changed, counts = await apply_output(synth, text, entries, session, inbox, errors)
+    finally:
+        synth._project = original_project
+    synth.last_error = None
+    await _mark(synth, state, session, newest)
     try:
         store.clear_learner_backoff(synth.backoff_key())
     except Exception:  # noqa: BLE001
         pass
-    synth.last_error = "; ".join(errors) if errors else None
+    if errors:
+        synth.last_error = "; ".join(filter(None, [*errors, synth.last_error]))
     synth._log_pass("reflection", changed, error=synth.last_error, consumed=len(entries),
                     output_preview=text, usage=usage, stop_reason=synth.last_stop_reason,
                     counts_toward_yield=False,

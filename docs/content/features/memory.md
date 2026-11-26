@@ -36,7 +36,7 @@ The learner reflects on a chat once, when the chat settles or goes quiet, in a s
 
 Words inside code don't count. A chat with none of these is skipped without any model call, and **Recent activity** says so. If you come back to a chat and it settles again, the learner reads only the new part.
 
-It reads your messages, the agent's replies, the friction it noticed and the memories already saved for that place. It doesn't read the tool calls. It saves a preference at once only when it can quote your own words for it. Anything else it learns waits in **Proposed memories**.
+It reads your messages, the agent's replies, the friction it noticed and the memories already saved for that place. It doesn't read the tool calls. It saves a preference at once, as a rule under **Learned behaviour**, only when it can quote your own words for it. Anything else it learns waits in **Proposed memories**.
 
 ### Proposed memories
 
@@ -44,10 +44,12 @@ It reads your messages, the agent's replies, the friction it noticed and the mem
 
 - **Accept** saves it as a memory, and agents can use it from the next chat.
 - **Dismiss** drops it without saving anything.
-- If a second, different chat comes to the same conclusion, it's saved as a memory automatically.
-- Otherwise it disappears after 14 days.
+- Otherwise it disappears after 14 days. Nothing is saved unless you accept it.
+- A proposal you dismiss doesn't come back, even if a later chat finds the same thing.
 
-Agents never see a proposal: it isn't in the memory list, isn't added to chats and Recall can't find it. Proposals are shared with all your workers, so a chat on one worker can confirm a proposal from another, and accepting or dismissing it anywhere decides it everywhere.
+If several chats noticed the same thing, the proposal says how many. That's for your information only.
+
+Agents never see a proposal: it isn't in the memory list, isn't added to chats and Recall can't find it. Proposals are shared with all your workers, and accepting or dismissing one anywhere decides it everywhere.
 
 ### Cost
 

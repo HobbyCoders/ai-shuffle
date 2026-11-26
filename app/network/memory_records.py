@@ -207,19 +207,22 @@ def _fact_records(ctx, payload, owner_hash):
 
 
 def _proposal_record(ctx, store, owner_hash):
-    """This worker's proposal inbox for one store, or nothing when it has
-    none (an earlier record is then retracted like a dropped fact)."""
+    """This worker's proposal inbox for one store: its open proposals and
+    the owner's decisions (dismissals are permanent, so they travel too), or
+    nothing when it has neither (an earlier record is then retracted like a
+    dropped fact)."""
     from fluid.codemode.reflection import ProposalInbox
 
     try:
-        items = ProposalInbox(store.root).export()
+        exported = ProposalInbox(store.root).export()
     except (OSError, ValueError):
         log.warning("Skipped an unreadable memory proposal inbox", exc_info=True)
         return {}
-    if not items:
+    if not exported["proposals"] and not exported["decisions"]:
         return {}
-    content = json.dumps({"schema": 1, "owner": store._facts.owner, "device": ctx.device_id,
-                          "proposals": items}, sort_keys=True)
+    content = json.dumps({"schema": 2, "owner": store._facts.owner, "device": ctx.device_id,
+                          "proposals": exported["proposals"],
+                          "decisions": exported["decisions"]}, sort_keys=True)
     return {f"{PROPOSAL_PREFIX}{ctx.device_id}:{owner_hash}":
             (PROPOSAL_KIND, "global", content, _hash(content))}
 
@@ -239,12 +242,14 @@ def _apply_proposals(record, ctx) -> bool:
         ProposalInbox(store.root).apply_remote(device, None)
         return True
     payload = json.loads(record.get("content") or "{}")
-    if not isinstance(payload, dict) or not isinstance(payload.get("proposals"), list):
+    if (not isinstance(payload, dict) or not isinstance(payload.get("proposals"), list)
+            or not isinstance(payload.get("decisions", {}), dict)):
         raise ValueError("Invalid memory proposal record")
     owner = payload.get("owner")
     if _hash(str(owner)) != owner_hash:
         raise ValueError("Memory proposal record names another owner")
-    ProposalInbox(_store(owner).root).apply_remote(device, payload["proposals"])
+    ProposalInbox(_store(owner).root).apply_remote(device, payload["proposals"],
+                                                   payload.get("decisions") or {})
     return True
 
 

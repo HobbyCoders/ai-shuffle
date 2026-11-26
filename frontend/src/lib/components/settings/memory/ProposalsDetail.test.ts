@@ -115,7 +115,7 @@ it('dismisses a proposal without saving anything', async () => {
 });
 
 it('drops a proposal another worker already decided and says so', async () => {
-	http.post.mockRejectedValue(Object.assign(new Error('gone'), { status: 404, detail: 'This proposal was already decided or has expired.' }));
+	http.post.mockRejectedValue(Object.assign(new Error('conflict'), { status: 409, detail: 'This proposal was already decided or has expired.' }));
 	await show('proposals');
 	await screen.findAllByTestId('memory-proposal');
 	await fireEvent.click(screen.getByRole('button', { name: 'Accept: The project deploys with make release.' }));

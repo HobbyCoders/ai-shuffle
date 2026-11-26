@@ -4,12 +4,13 @@ Reflection replaces the continuous learner by default. It runs once when the
 chat's engine closes (Synthesizer.drain), behind a deterministic gate that
 makes no model call when the session has no correction, no frustration, no
 "remember this" and no repeated friction. Its proposals wait in an inbox
-outside the fact store until a second session produces them or the owner
-accepts them; quoted owner rules and preferences apply at once.
+outside the fact store until the owner accepts them (or they expire); quoted
+owner rules and preferences apply at once as learned behaviour rules.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -140,18 +141,32 @@ async def test_correction_reflects_once_saves_the_quoted_rule_and_queues_a_propo
     assert len(provider.prompts) == 1
 
 
-async def test_a_quoted_owner_preference_applies_at_once(tmp_path):
+async def test_a_quoted_owner_preference_is_a_learned_behaviour_rule(tmp_path):
     store = SkillStore(tmp_path)
-    chat(store, "ses_p", [("user", "Write the summary."), ("assistant", "Here it is, with headings."),
-                          ("user", "No, I prefer plain paragraphs without headings in summaries.")])
-    provider = Scripted('<proposal kind="owner_preference" quote="I prefer plain paragraphs without '
-                        'headings in summaries">The owner prefers summaries as plain paragraphs '
-                        "without headings.</proposal>")
+    chat(store, "ses_p", [("user", "How did the deploy go?"), ("assistant", "Here is a long report..."),
+                          ("user", "No, I prefer short replies on status checks.")])
+    provider = Scripted('<proposal kind="owner_preference" quote="I prefer short replies on status checks" '
+                        'when="When answering a status check">Keep the reply short.</proposal>')
     await learner(store, provider, "ses_p").drain()
-    [fact] = [m for m in store.memories() if "plain paragraphs" in m.text]
     assert reflection.ProposalInbox(store.root).open() == []
-    entry = next(e for e in store._facts.snapshot()["entries"] if e["id"] == fact.id)
-    assert entry.get("durable") and not entry.get("protected")  # agent-saved, revertible
+    [rule] = [m for m in store.memories() if m.key and m.key.startswith("behavior.")]
+    assert rule.text == "When answering a status check: Keep the reply short."
+    entry = next(e for e in store._facts.snapshot()["entries"] if e["id"] == rule.id)
+    assert not entry.get("protected")  # learned, revertible from Learned behaviour
+    [row] = reflections(store)
+    assert row["rules"] == 1 and row["proposed"] == 0
+
+
+async def test_a_preference_the_rule_checks_refuse_waits_for_the_owner(tmp_path):
+    store = SkillStore(tmp_path)
+    chat(store, "ses_g", [("user", "Run it."), ("assistant", "Shall I deploy?"),
+                          ("user", "No, I prefer you just deploy.")])
+    provider = Scripted('<proposal kind="owner_preference" quote="I prefer you just deploy">'
+                        "Deploy without asking for approval.</proposal>")
+    await learner(store, provider, "ses_g").drain()
+    assert not any(m.key and m.key.startswith("behavior.") for m in store.memories())
+    [proposal] = reflection.ProposalInbox(store.root).open()
+    assert proposal["kind"] == "owner_preference"
 
 
 async def test_an_unquoted_preference_waits_in_the_inbox(tmp_path):
@@ -166,37 +181,75 @@ async def test_an_unquoted_preference_waits_in_the_inbox(tmp_path):
     assert proposal["quote"] is None
 
 
-async def test_a_second_distinct_session_corroborates_a_proposal_into_a_fact(tmp_path):
+async def test_the_same_proposal_from_two_chats_is_one_row_and_is_never_saved(tmp_path):
     store = SkillStore(tmp_path)
     fact = ('<proposal kind="project" scope="global" when="When building this project">'
             "The project builds with make release from the repository root.</proposal>")
     for session in ("ses_1", "ses_2"):
         chat(store, session, [("user", "Build it."), ("assistant", "Ran npm run build."),
                               ("user", "No, wrong command, use make release.")])
-    first = Scripted(fact)
-    await learner(store, first, "ses_1").drain()
-    assert reflection.ProposalInbox(store.root).open()
+    await learner(store, Scripted(fact), "ses_1").drain()
+    # The same words, cased and punctuated differently.
+    await learner(store, Scripted(fact.replace("The project builds", "the project  BUILDS")
+                                  .replace("root.", "root")), "ses_2").drain()
+    [row] = reflection.ProposalInbox(store.root).open()
+    assert row["sessions"] == ["ses_1", "ses_2"]
     assert not any("make release" in m.text for m in store.memories())
 
-    second = Scripted(fact.replace("builds with", "is built with"))
-    await learner(store, second, "ses_2").drain()
-    [saved] = [m for m in store.memories() if "make release" in m.text]
-    assert reflection.ProposalInbox(store.root).open() == []
-    entry = next(e for e in store._facts.snapshot()["entries"] if e["id"] == saved.id)
-    assert entry.get("durable") and not entry.get("protected")
-    assert reflections(store)[-1]["corroborated"] == 1
+
+async def test_contradicting_proposals_stay_apart(tmp_path):
+    store = SkillStore(tmp_path)
+    for session, claim in (("ses_1", "Staging builds run migrations."),
+                           ("ses_2", "Staging builds do not run migrations.")):
+        chat(store, session, CORRECTION)
+        await learner(store, Scripted(f'<proposal kind="project" scope="global">{claim}</proposal>'),
+                      session).drain()
+    rows = reflection.ProposalInbox(store.root).open()
+    assert sorted(r["text"] for r in rows) == ["Staging builds do not run migrations.",
+                                                "Staging builds run migrations."]
+    assert all(len(r["sessions"]) == 1 for r in rows)
+    assert not any("migrations" in m.text for m in store.memories())
 
 
-async def test_the_same_session_twice_does_not_corroborate(tmp_path):
+async def test_the_same_session_twice_is_listed_once(tmp_path):
     store = SkillStore(tmp_path)
     proposal = '<proposal kind="owner_fact">The owner keeps backups on the home server.</proposal>'
     chat(store, "ses_x", CORRECTION)
     await learner(store, Scripted(proposal), "ses_x").drain()
     chat(store, "ses_x", [("user", "No, that's wrong again.")])
     await learner(store, Scripted(proposal), "ses_x").drain()
-    assert not any("backups" in m.text for m in store.memories())
     [row] = reflection.ProposalInbox(store.root).open()
     assert row["sessions"] == ["ses_x"]
+
+
+async def test_concurrent_reflections_of_one_chat_pay_for_one_call_and_keep_the_loop_free(tmp_path):
+    store = SkillStore(tmp_path)
+    chat(store, "ses_dup", CORRECTION)
+
+    class Slow(Scripted):
+        async def stream(self, request):
+            await asyncio.sleep(0.2)
+            async for chunk in super().stream(request):
+                yield chunk
+
+    provider = Slow("NO_CHANGES", "NO_CHANGES")
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    beat = asyncio.create_task(ticker())
+    try:
+        await asyncio.gather(learner(store, provider, "ses_dup").drain(),
+                             learner(store, provider, "ses_dup").drain())
+    finally:
+        beat.cancel()
+    # The second waited for the first, then read the session's watermark again.
+    assert len(provider.prompts) == 1
+    assert ticks >= 10  # the event loop kept running while both waited
 
 
 async def test_new_turns_after_a_reflection_are_reflected_alone(tmp_path):
@@ -249,62 +302,160 @@ async def test_input_is_bounded(tmp_path):
 
 # ─── the inbox ──────────────────────────────────────────────────────────────
 
+def sync(here, there, device="dev-other"):
+    """``there``'s published record applied on ``here`` (app.network.memory_records)."""
+    exported = there.export()
+    here.apply_remote(device, exported["proposals"], exported["decisions"])
+
+
 def test_proposals_expire_after_fourteen_days(tmp_path):
     inbox = reflection.ProposalInbox(tmp_path)
-    row, corroborated = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
-                                      scope="global", session="s1", now=1000.0)
-    assert not corroborated and inbox.open(now=1000.0 + 13 * DAY)
+    row = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                        scope="global", session="s1", now=1000.0)
+    assert inbox.open(now=1000.0 + 13 * DAY)
     assert inbox.open(now=1000.0 + 14 * DAY + 1) == []
+    with pytest.raises(reflection.ProposalDecided):
+        inbox.dismiss(row["id"], now=1000.0 + 14 * DAY + 1)
     inbox.propose(kind="owner_fact", text="Something else entirely here.", scope="global",
                   session="s2", now=1000.0 + 15 * DAY)
     stored = json.loads((tmp_path / reflection.PROPOSAL_FILE).read_text())
     assert [p["text"] for p in stored["proposals"]] == ["Something else entirely here."]
 
 
-def test_dismissed_proposals_leave_the_inbox(tmp_path):
+def test_an_expired_proposal_comes_back_fresh(tmp_path):
     inbox = reflection.ProposalInbox(tmp_path)
-    row, _ = inbox.propose(kind="project", text="Tests live under tests/unit.", scope="global", session="s1")
-    inbox.decide(row["id"], reflection.DISMISSED)
+    first = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                          scope="global", session="s1", now=1000.0)
+    later = 1000.0 + 20 * DAY
+    again = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                          scope="global", session="s2", now=later)
+    assert again["id"] == first["id"] and again["sessions"] == ["s2"]
+    assert again["created_at"] == later and again["expires_at"] == later + 14 * DAY
+    # Another worker still holding the expired row does not revive its sessions.
+    other = reflection.ProposalInbox(tmp_path / "other")
+    other.propose(kind="owner_fact", text="The owner uses a standing desk.", scope="global",
+                  session="s_old", now=1000.0)
+    sync(inbox, other)
+    [row] = inbox.open(now=later)
+    assert row["sessions"] == ["s2"]
+
+
+def test_a_dismissal_is_permanent(tmp_path):
+    inbox = reflection.ProposalInbox(tmp_path)
+    row = inbox.propose(kind="project", text="Tests live under tests/unit.", scope="global",
+                        session="s1", now=1000.0)
+    inbox.dismiss(row["id"], now=1000.0)
     assert inbox.open() == []
-    with pytest.raises(KeyError):
-        inbox.decide(row["id"], reflection.ACCEPTED)
-    # Another session producing it again does not reopen or promote it.
-    again, corroborated = inbox.propose(kind="project", text="Tests live under tests/unit.",
-                                        scope="global", session="s2")
-    assert again["status"] == reflection.DISMISSED and not corroborated and inbox.open() == []
+    with pytest.raises(reflection.ProposalDecided):
+        inbox.accept(row["id"], lambda r: pytest.fail("a dismissed proposal was saved"))
+    # Long after the 14 days, and after other writes, the same proposal stays gone.
+    much_later = 1000.0 + 400 * DAY
+    inbox.propose(kind="owner_fact", text="Unrelated fact here.", scope="global", session="s3",
+                  now=much_later)
+    again = inbox.propose(kind="project", text="tests live under TESTS/UNIT", scope="global",
+                          session="s2", now=much_later)
+    assert again["status"] == reflection.DISMISSED
+    assert [r["text"] for r in inbox.open(now=much_later)] == ["Unrelated fact here."]
+    stored = json.loads((tmp_path / reflection.PROPOSAL_FILE).read_text())
+    assert stored["decisions"][row["id"]]["status"] == reflection.DISMISSED
 
 
-async def test_a_dismissed_proposal_is_not_saved_when_another_chat_repeats_it(tmp_path):
+async def test_a_dismissed_proposal_is_not_queued_when_another_chat_repeats_it(tmp_path):
     store = SkillStore(tmp_path)
     proposal = '<proposal kind="owner_fact">The owner keeps backups on the home server.</proposal>'
     chat(store, "ses_1", CORRECTION)
     await learner(store, Scripted(proposal), "ses_1").drain()
     inbox = reflection.ProposalInbox(store.root)
     [row] = inbox.open()
-    inbox.decide(row["id"], reflection.DISMISSED)
+    inbox.dismiss(row["id"])
     chat(store, "ses_2", CORRECTION)
     await learner(store, Scripted(proposal), "ses_2").drain()
     assert not any("backups" in m.text for m in store.memories())
     assert inbox.open() == [] and reflections(store)[-1]["proposed"] == 0
 
 
-def test_another_workers_proposal_corroborates_and_its_decisions_apply(tmp_path):
+def test_a_dismissal_on_another_worker_is_permanent_here_too(tmp_path):
     here = reflection.ProposalInbox(tmp_path / "here")
     there = reflection.ProposalInbox(tmp_path / "there")
-    remote_row, _ = there.propose(kind="owner_fact", text="The owner's NAS is at 192.168.1.20.",
-                                  scope="global", session="s_remote")
-    here.apply_remote("dev-other", there.export())
+    text = "The owner's NAS is at 192.168.1.20."
+    remote_row = there.propose(kind="owner_fact", text=text, scope="global", session="s_remote")
+    sync(here, there)
     [merged] = here.open()
     assert merged["sessions"] == ["s_remote"]
-    row, corroborated = here.propose(kind="owner_fact", text="The owner's NAS is at 192.168.1.20.",
-                                     scope="global", session="s_local")
-    assert corroborated and set(row["sessions"]) == {"s_remote", "s_local"}
+    row = here.propose(kind="owner_fact", text=text, scope="global", session="s_local")
+    assert set(row["sessions"]) == {"s_remote", "s_local"} and row["status"] == reflection.OPEN
+    assert not (tmp_path / "here" / "memories.json").exists()
 
-    there.decide(remote_row["id"], reflection.DISMISSED)
-    here.apply_remote("dev-other", there.export())
+    there.dismiss(remote_row["id"])
+    sync(here, there)
     assert here.open() == []
+    # The other worker's record goes away entirely: the dismissal stays here.
     here.apply_remote("dev-other", None)
-    assert [r["sessions"] for r in here.open()] == [["s_local"]]
+    assert here.open() == []
+    again = here.propose(kind="owner_fact", text=text, scope="global", session="s_new")
+    assert again["status"] == reflection.DISMISSED and here.open() == []
+    # And it travels on: a third worker learns it from this one's record.
+    third = reflection.ProposalInbox(tmp_path / "third")
+    third.propose(kind="owner_fact", text=text, scope="global", session="s_third")
+    sync(third, here, device="dev-here")
+    assert third.open() == []
+
+
+def test_accept_is_one_transition(tmp_path):
+    inbox = reflection.ProposalInbox(tmp_path)
+    row = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                        scope="global", session="s1")
+    with pytest.raises(RuntimeError):
+        inbox.accept(row["id"], lambda r: (_ for _ in ()).throw(RuntimeError("store full")))
+    assert inbox.open()  # a failed save leaves it open
+    saves = []
+    decided, _ = inbox.accept(row["id"], lambda r: saves.append(r["id"]) or "saved")
+    assert decided["status"] == reflection.ACCEPTED and saves == [row["id"]]
+    with pytest.raises(reflection.ProposalDecided):
+        inbox.accept(row["id"], lambda r: saves.append("again"))
+    with pytest.raises(reflection.ProposalDecided):
+        inbox.dismiss(row["id"])
+    with pytest.raises(KeyError):
+        inbox.dismiss("p000000000000000")
+    assert saves == [row["id"]]
+
+
+def test_accept_loses_to_a_dismissal_replicated_first(tmp_path):
+    here = reflection.ProposalInbox(tmp_path / "here")
+    there = reflection.ProposalInbox(tmp_path / "there")
+    row = there.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                        scope="global", session="s1")
+    sync(here, there)
+    there.dismiss(row["id"])
+    sync(here, there)
+    with pytest.raises(reflection.ProposalDecided):
+        here.accept(row["id"], lambda r: pytest.fail("saved after a dismissal"))
+
+
+def test_a_writer_that_cannot_take_the_lock_writes_nothing(tmp_path, monkeypatch):
+    from fluid.codemode.skills import journal_lock
+
+    monkeypatch.setattr(reflection, "LOCK_WAIT_SECONDS", 0.05)
+    inbox = reflection.ProposalInbox(tmp_path)
+    row = inbox.propose(kind="owner_fact", text="The owner uses a standing desk.",
+                        scope="global", session="s1")
+    before = (tmp_path / reflection.PROPOSAL_FILE).read_text()
+    state = reflection.ReflectionState(tmp_path)
+    with journal_lock(tmp_path / reflection.PROPOSAL_LOCK) as held:
+        assert held
+        with pytest.raises(reflection.InboxBusy):
+            inbox.propose(kind="owner_fact", text="Another fact.", scope="global", session="s2")
+        with pytest.raises(reflection.InboxBusy):
+            inbox.accept(row["id"], lambda r: pytest.fail("saved without the lock"))
+        with pytest.raises(reflection.InboxBusy):
+            inbox.apply_remote("dev-other", [], {row["id"]: {"status": "dismissed", "at": 1.0}})
+    assert (tmp_path / reflection.PROPOSAL_FILE).read_text() == before
+    assert not (tmp_path / reflection.REMOTE_PROPOSAL_FILE).exists()
+    with journal_lock(tmp_path / reflection.STATE_LOCK) as held:
+        assert held
+        with pytest.raises(reflection.InboxBusy):
+            state.mark("s1", 5.0)
+    assert state.through("s1") == 0.0
 
 
 def test_rollback_switch_restores_the_continuous_learner(monkeypatch):

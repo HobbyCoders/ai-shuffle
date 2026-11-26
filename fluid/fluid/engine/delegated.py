@@ -1667,18 +1667,20 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         close can land on a file another thread has just opened with that
         number, which then reads short or gets another file's bytes.
         """
+        drain = None
         try:
             try:
                 await self._stop_live_work()
             finally:
                 self._release_bridge_resources()
-            # Only ever reached inside the caller's deadline: its drain has a
-            # much longer budget of its own, so a cancelled close must not start it.
+            # The learner's drain (session reflection) starts only once the CLI
+            # is stopped, so a close cancelled before then starts none. It is
+            # its own task with its own bounded budget: the caller's deadline
+            # (five seconds) ends this close's wait for it, never the call.
             if self._journal is not None:
-                try:
-                    await self._journal.aclose()
-                except Exception:
-                    logger.debug("closing the continual journal failed", exc_info=True)
+                from fluid.codemode.journal import start_drain
+
+                drain = start_drain(self._journal)
             if self._socket_server is not None:
                 try:
                     await self._socket_server.wait_closed()
@@ -1699,6 +1701,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     await asyncio.wait(set(self._cli_id_writes), timeout=5)
                 except Exception:
                     logger.debug("draining cli_session_id writes failed", exc_info=True)
+            if drain is not None:
+                await asyncio.shield(drain)
         finally:
             await self.bus.close()
 

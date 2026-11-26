@@ -118,8 +118,8 @@
 			{#if proposals.loaded && !proposals.forbidden}
 				<div class="pr-note">
 					<InlineBanner tone="info" compact>
-						A proposal is saved as a memory when a second chat finds the same thing, or when you accept it. Otherwise it
-						expires after {proposals.ttlDays} days. Agents don’t use a proposal until it’s saved. Proposals and your
+						A proposal is saved as a memory only when you accept it. Otherwise it expires after {proposals.ttlDays} days,
+						and a dismissed one doesn’t come back. Agents don’t use a proposal until it’s saved. Proposals and your
 						decisions are shared with all your workers.
 					</InlineBanner>
 				</div>
