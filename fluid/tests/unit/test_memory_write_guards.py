@@ -37,6 +37,17 @@ PROGRESS = [
      "migration test.", "When checking the widgets migration"),
     ("Session notes for the cache refactor live in the WorkingRecord.",
      "When continuing the work on fix/cache-keys"),
+    # Terse continuation: the verb names the reference directly.
+    ("Continuing PR #1824", "When picking up the cover-screen fix"),
+    ("Resuming #2210 after the rebase.", "When the importer rebase is done"),
+    # A branch named as one, whatever its prefix, anchors the whole fact.
+    ("On branch docs/update-readme; next step is to check the links.",
+     "When checking the readme links"),
+    # A status whose subject is the referenced work.
+    ("Issue #88 is in progress; the importer is still missing a test.",
+     "When working on the importer"),
+    # The when-line names the work, so the text's status is about it.
+    ("The gesture fix is half done.", "When working on PR #1824"),
 ]
 
 # Lasting rules that cite a PR, issue or branch, or use progress-like words
@@ -60,6 +71,16 @@ LASTING = [
      "When cutting a release"),
     ("C# projects build with dotnet 8 and the entity &#123; is escaped in XML docs.",
      "When building the C# tools"),
+    # A generic condition in a rule is not the cited issue's status.
+    ("Never merge while a migration is in progress; see issue #88.",
+     "When merging a pull request"),
+    ("Don't deploy while a migration is in progress (issue #88 explains why).",
+     "When deploying the server"),
+    ("PR #1800 made the merge gate refuse branches whose checks are still failing.",
+     "When a pull request is blocked by the merge gate"),
+    # A docs/ path is not a branch.
+    ("Keep docs/update-readme.md short; the next step after editing it is the link check.",
+     "When editing the readme"),
 ]
 
 
@@ -111,6 +132,20 @@ async def test_agent_correction_into_progress_is_refused(tmp_path):
                           "memory_id": fact.id, "expected_revision": fact.revision}, ctx(store))
     assert out.is_error and "task progress" in out.text
     assert store.memories()[0].text == LASTING[4][0]
+
+
+async def test_correction_is_checked_against_the_stored_when_line(tmp_path):
+    """A correction that omits ``when`` keeps the stored one, so the guard
+    reads that: the same pair sent whole would be refused."""
+    store = SkillStore(tmp_path)
+    first = await remember({"text": "Gesture tests need a Robolectric run.",
+                            "when": "When working on PR #1824"}, ctx(store))
+    assert not first.is_error
+    fact = store.memories()[0]
+    out = await remember({"text": "The gesture fix is half done.", "memory_id": fact.id,
+                          "expected_revision": fact.revision}, ctx(store))
+    assert out.is_error and "task progress" in out.text
+    assert store.memories()[0].text == "Gesture tests need a Robolectric run."
 
 
 # ─── similar facts at save time ──────────────────────────────────────────────

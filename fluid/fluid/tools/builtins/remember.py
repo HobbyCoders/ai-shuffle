@@ -87,8 +87,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                            is_error=True)
     # Task progress goes stale when the work lands (Memory v3 §5.1). An agent's
     # save is refused; the owner's is kept, with a note.
-    from fluid.codemode.task_state import task_progress
-    progress = task_progress(input.get("text"), input.get("when"))
+    progress = await asyncio.to_thread(_task_progress, store, input, correction)
     if progress and not user_requested:
         return ToolOutcome(text=f"Not saved: {_progress_reason(progress)}. Keep it in the working "
                                 "record (WorkingRecord) or session notes (Note). A lasting rule "
@@ -139,6 +138,23 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
 
 TRIGGER_INPUTS = ("command", "paths", "tools")
+
+
+def _task_progress(store: Any, input: dict[str, Any], correction: Any) -> str | None:
+    """task_state.task_progress on the fact as it would be saved: a correction
+    that omits text or when keeps the stored one, so check that one."""
+    from fluid.codemode.task_state import task_progress
+    text, when = input.get("text"), input.get("when")
+    pairs = [(text, when)]
+    if correction and (not text or not when):
+        try:
+            mid, key = input.get("memory_id"), input.get("key")
+            stored = [m for m in store.memories()
+                      if (m.id == mid if mid else m.key == key)]
+        except Exception:  # noqa: BLE001 — the save path reports a bad store itself
+            stored = []
+        pairs = [(text or m.text, when or m.when) for m in stored] or pairs
+    return next((hit for t, w in pairs if (hit := task_progress(t, w))), None)
 
 
 def _progress_reason(phrase: str) -> str:
