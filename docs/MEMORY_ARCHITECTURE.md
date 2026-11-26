@@ -169,8 +169,10 @@ synthesis-log row records the model, billing and prompt limit used.
 - `<proposal kind="owner_preference" quote="…">` whose quote is found in the
   user's turns becomes a behaviour rule ("When <its when-line>: <text>")
   through the same `_apply_rules` checks (quote, permission, injection, cap),
-  so it shows under Learned behaviour and is revertible there. One those
-  checks refuse goes to the inbox instead.
+  so it shows under Learned behaviour and is revertible there. It keeps its
+  proposal's scope: `scope="project"` makes a rule for the chat's project
+  only, never a global one (a chat with no project sends it to the inbox).
+  One those checks refuse goes to the inbox instead.
 - Any other `<proposal kind="owner_preference|owner_fact|project">` goes to
   the inbox. An unverified quote is dropped.
 
@@ -198,19 +200,26 @@ merge, so the same text later starts fresh. The file holds at most 100 open
 proposals. A proposal is not a fact: it takes no slot, is not in the index,
 just-in-time delivery or Recall, and expiring it is not counted as a loss.
 
-**Concurrency.** One reflection runs at a time per store on a worker, behind
-an asyncio lock (waiting never blocks the event loop; a chat waiting over 60
-seconds is skipped as `busy` and retried at its next close). The session's
-watermark is read again once the lock is held, before any call is paid for.
-No file lock is held across the model call: inbox and state writes run in a
-worker thread under their own short advisory locks, and a writer that could
-not take its lock writes nothing.
+**Concurrency.** Chats reflect concurrently. Only two closes of the same chat
+take turns, behind an asyncio lock keyed by store and session (waiting never
+blocks the event loop; a close waiting over 60 seconds is skipped as `busy`
+and retried at the chat's next close). The session's watermark is read again
+once the lock is held, before any call is paid for. No file lock is held
+across the model call: inbox and state writes run in a worker thread under
+their own short advisory locks, and a writer that could not take its lock
+writes nothing. A proposal the inbox could not store (busy or a write error)
+leaves the watermark where it was, so the chat's next close reflects on the
+same turns again; saved rules and facts dedupe on the retry.
 
 **Engines.** Native chats drain the journal in their shielded close. Claude
 Code and Antigravity chats start the drain as its own tracked task once the
 CLI or agent turn has stopped, so the host's five-second close deadline ends
 only the wait for it, never the reflection call, and the agent process is
-stopped without waiting for it.
+stopped without waiting for it. At app shutdown the session pool first stops
+every engine without waiting for its reflection, then waits for all running
+reflections together for at most 10 seconds (inside the supervisor's stop
+deadline). A reflection cut off there never reached its watermark write, so
+the chat is reflected again at its next close after the restart.
 
 **Rollback.** `FLUID_MEMORY_LEARNER=continuous` (a plain env read, listed as
 internal in `scripts/ci/env_allowlist.json`) brings back the continuous

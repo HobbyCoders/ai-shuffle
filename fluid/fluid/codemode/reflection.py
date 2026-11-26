@@ -43,9 +43,9 @@ import re
 import time
 import weakref
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, AsyncIterator, Callable, Iterable, Iterator
 
 LEARNER_SWITCH = "FLUID_MEMORY_LEARNER"
 CONTINUOUS = "continuous"
@@ -74,8 +74,9 @@ MAX_STATE_SESSIONS = 500
 #: How long a writer waits for another process holding the inbox or the
 #: reflection state. Writes take milliseconds; this only bites when stuck.
 LOCK_WAIT_SECONDS = 5.0
-#: How long one chat's reflection waits for another's to finish on this
-#: worker before it is skipped as busy (and retried at the chat's next close).
+#: How long a close waits for an earlier close of the same chat to finish
+#: reflecting on this worker before it is skipped as busy (and retried at the
+#: chat's next close). Other chats never wait for it.
 REFLECTION_WAIT_SECONDS = 60.0
 
 OWNER_RULE = "owner_rule"
@@ -655,11 +656,16 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
         quote = attrs.get("quote") or None
         if quote and not behavior.quote_in_user_text(quote, entries):
             quote = None
-        if kind == OWNER_PREFERENCE and quote and "<" not in body:
+        scope_attr = "project" if (attrs.get("scope") or
+                                   ("project" if kind == PROJECT else "global")) == "project" else "global"
+        if (kind == OWNER_PREFERENCE and quote and "<" not in body
+                and (scope_attr == "global" or synth._project)):
             # The owner said it: a learned behaviour rule, with the same
-            # quote, permission, injection and cap checks as any rule. One
-            # those checks refuse waits for the owner instead.
-            tag = f'<rule applies_to="all" quote="{quote}">{_preference_rule(body, when)}</rule>'
+            # quote, permission, injection and cap checks as any rule, and
+            # the proposal's scope: a preference about one repository is a
+            # rule there only. One those checks refuse waits for the owner.
+            tag = (f'<rule applies_to="all" scope="{scope_attr}" quote="{quote}">'
+                   f"{_preference_rule(body, when)}</rule>")
             refused: list[str] = []
             rules = synth._apply_rules(tag, entries, refused)
             if rules:
@@ -667,12 +673,17 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
                 counts["rules"] += len(rules)
                 continue
             errors.extend(f"{label}: {reason}" for reason in refused)
-        scope_attr = attrs.get("scope") or ("project" if kind == PROJECT else "global")
         scope = synth._resolve_scope(scope_attr) or "global"
         try:
             row = await asyncio.to_thread(inbox.propose, kind=kind, text=body, scope=scope,
                                           session=session, quote=quote, when=when)
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
+            # Storage, not the proposal (InboxBusy is one): the turns stay
+            # unreflected so the chat's next close pays for them again.
+            errors.append(f"{label}: not saved ({exc})")
+            counts["unsaved"] = counts.get("unsaved", 0) + 1
+            continue
+        except ValueError as exc:
             errors.append(f"{label}: {exc}")
             continue
         if row.get("status") != OPEN:
@@ -710,21 +721,48 @@ def advance_cursor(store: Any, state: ReflectionState) -> None:
         pass
 
 
-#: One reflection at a time per store on this worker, per event loop. An
-#: asyncio lock: waiting for it never blocks the loop, and it is never a file
-#: lock held across the model call.
+#: One reflection at a time per chat (store and session) on this worker, per
+#: event loop: a second close of the same chat waits for the first and then
+#: re-reads its watermark; another chat never waits. An asyncio lock: waiting
+#: for it never blocks the loop, and it is never a file lock held across the
+#: model call.
 _TURNS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]" = (
     weakref.WeakKeyDictionary()
 )
 
 
-def _turn_lock(root: Path) -> asyncio.Lock:
+_USERS: "weakref.WeakKeyDictionary[asyncio.Lock, int]" = weakref.WeakKeyDictionary()
+
+
+class _TurnBusy(Exception):
+    """Another close of the same chat held its reflection past the wait."""
+
+
+@asynccontextmanager
+async def _chat_turn(root: Path, session: str, timeout: float) -> AsyncIterator[None]:
+    """Hold this chat's reflection lock; :class:`_TurnBusy` when another
+    close of the same chat kept it past ``timeout``. A chat's entry is dropped once no
+    close holds or waits for it, so the table stays as small as the closes
+    in flight."""
     locks = _TURNS.setdefault(asyncio.get_running_loop(), {})
-    key = str(Path(root))
+    key = f"{Path(root)}\0{session}"
     lock = locks.get(key)
     if lock is None:
         lock = locks[key] = asyncio.Lock()
-    return lock
+    _USERS[lock] = _USERS.get(lock, 0) + 1
+    try:
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        except TimeoutError:
+            raise _TurnBusy from None
+        try:
+            yield
+        finally:
+            lock.release()
+    finally:
+        _USERS[lock] -= 1
+        if not _USERS[lock] and locks.get(key) is lock:
+            del locks[key]
 
 
 async def _mark(synth: Any, state: ReflectionState, session: str, through: float) -> None:
@@ -742,9 +780,10 @@ async def reflect(synth: Any) -> list[str]:
     learner's daily budget and per-billing caps; a model the chat backs off
     is skipped. A session that failed the gate is marked reflected; one that
     could not be reflected (budget, backoff, provider error, busy) is not, so
-    the next settle retries it. Another chat's reflection on this worker is
-    waited for cooperatively; the session's watermark is read again once it
-    is this chat's turn, before any call is paid for."""
+    the next settle retries it, and so is one whose proposals the inbox could
+    not store. Chats reflect concurrently; a second close of the same chat
+    waits cooperatively for the first, then reads the session's watermark
+    again before any call is paid for."""
     synth.last_pass_failed = False
     synth.last_pass_skipped = False
     store = synth._store
@@ -752,18 +791,14 @@ async def reflect(synth: Any) -> list[str]:
     if not synth.enabled(refresh=True) or not session:
         synth.last_pass_skipped = True
         return []
-    lock = _turn_lock(store.root)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=REFLECTION_WAIT_SECONDS)
-    except TimeoutError:
+        async with _chat_turn(store.root, str(session), REFLECTION_WAIT_SECONDS):
+            return await _reflect_turn(synth, store, str(session))
+    except _TurnBusy:
         synth.last_pass_skipped = True
         synth._log_pass("reflection", [], ran=False, counts_toward_yield=False,
                         extra={"session": str(session), "outcome": "skipped", "reason": "busy"})
         return []
-    try:
-        return await _reflect_turn(synth, store, str(session))
-    finally:
-        lock.release()
 
 
 async def _reflect_turn(synth: Any, store: Any, session: str) -> list[str]:
@@ -826,7 +861,13 @@ async def _reflect_turn(synth: Any, store: Any, session: str) -> list[str]:
     finally:
         synth._project = original_project
     synth.last_error = None
-    await _mark(synth, state, session, newest)
+    if counts.get("unsaved"):
+        # A proposal the inbox could not store would be lost for good if the
+        # watermark moved: leave it, so the next close reflects these turns
+        # again (rules and proposals already saved repeat without a copy).
+        synth.last_pass_failed = True
+    else:
+        await _mark(synth, state, session, newest)
     try:
         store.clear_learner_backoff(synth.backoff_key())
     except Exception:  # noqa: BLE001

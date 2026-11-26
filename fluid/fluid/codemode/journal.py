@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -452,9 +453,10 @@ def start_drain(journal: Any) -> asyncio.Task:
 
     An engine's close runs under the host's short deadline (five seconds),
     while the drain has its own bounded budget (``close_timeout``). Awaiting
-    the returned task through :func:`asyncio.shield` lets that deadline end
-    the engine's wait without cancelling a reflection call already paid for.
-    The task is kept in :data:`_DRAINS` until it ends, and never raises."""
+    the returned task through :func:`wait_drain` lets that deadline end the
+    engine's wait without cancelling a reflection call already paid for. The
+    task is kept in :data:`_DRAINS` until it ends, and never raises; a second
+    close of the same engine gets the same task."""
     task = getattr(journal, "_drain_task", None)
     if task is None:
         task = asyncio.get_running_loop().create_task(_drain(journal), name="learner-drain")
@@ -472,3 +474,48 @@ async def _drain(journal: Any) -> None:
         await journal.aclose()
     except Exception:
         _log.debug("closing the learner journal failed", exc_info=True)
+
+
+#: Event loops shutting down (see :func:`defer_drain_waits`).
+_DEFERRING: "weakref.WeakSet[asyncio.AbstractEventLoop]" = weakref.WeakSet()
+
+#: The most app shutdown spends waiting for reflection drains, all of them
+#: together: well inside a supervisor's kill deadline (30 s at most).
+SHUTDOWN_DRAIN_SECONDS = 10.0
+
+
+async def wait_drain(task: asyncio.Task) -> None:
+    """An engine's close waiting for its drain: shielded, so the host's
+    deadline ends only the wait. While the app shuts down it does not wait at
+    all; :func:`finish_drains` waits for every drain at once instead."""
+    if asyncio.get_running_loop() in _DEFERRING:
+        return
+    await asyncio.shield(task)
+
+
+def defer_drain_waits() -> None:
+    """App shutdown: from now on an engine's close stops its transport and
+    returns without waiting for its learner drain, so closing many chats in
+    a row never adds one drain wait per chat."""
+    _DEFERRING.add(asyncio.get_running_loop())
+
+
+async def finish_drains(budget: float = SHUTDOWN_DRAIN_SECONDS) -> int:
+    """Wait at most ``budget`` seconds, in total, for every learner drain on
+    this loop, then cancel the rest. Returns how many were cut off.
+
+    A cut-off reflection records nothing for its chat (the watermark moves
+    only after its output is stored, see fluid.codemode.reflection), so the
+    chat's turns are reflected again the next time it closes."""
+    loop = asyncio.get_running_loop()
+    pending = {t for t in _DRAINS if t.get_loop() is loop and not t.done()}
+    if not pending:
+        return 0
+    _, late = await asyncio.wait(pending, timeout=max(0.0, budget))
+    for task in late:
+        task.cancel()
+    if late:
+        _log.info("%d learner reflection(s) cut off at shutdown; those chats reflect "
+                  "when they next close", len(late))
+        await asyncio.wait(late, timeout=1.0)
+    return len(late)

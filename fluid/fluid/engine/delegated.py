@@ -1678,7 +1678,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # its own task with its own bounded budget: the caller's deadline
             # (five seconds) ends this close's wait for it, never the call.
             if self._journal is not None:
-                from fluid.codemode.journal import start_drain
+                from fluid.codemode.journal import start_drain, wait_drain
 
                 drain = start_drain(self._journal)
             if self._socket_server is not None:
@@ -1702,7 +1702,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 except Exception:
                     logger.debug("draining cli_session_id writes failed", exc_info=True)
             if drain is not None:
-                await asyncio.shield(drain)
+                await wait_drain(drain)
         finally:
             await self.bus.close()
 

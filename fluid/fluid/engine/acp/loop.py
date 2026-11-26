@@ -704,14 +704,14 @@ class AcpLoop:
             if task is not None and not task.done():
                 task.cancel()
             if self._journal is not None:
-                from fluid.codemode.journal import start_drain
+                from fluid.codemode.journal import start_drain, wait_drain
 
                 drain = start_drain(self._journal)
             if task is not None and not task.done():
                 await asyncio.wait({task}, timeout=TURN_CANCEL_WAIT)
             await self._stop_process()
         if drain is not None:
-            await asyncio.shield(drain)
+            await wait_drain(drain)
 
     async def replace_spec(self, spec: AcpAgentSpec) -> None:
         """Use ``spec`` from the next turn: the running process is stopped

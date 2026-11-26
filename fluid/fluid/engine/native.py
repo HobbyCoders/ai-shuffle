@@ -2275,7 +2275,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         if self._codemode is not None:
             await self._codemode.aclose()
         if self._journal is not None:
-            await self._journal.aclose()
+            # Tracked, so app shutdown waits for every chat's reflection under
+            # one budget instead of one wait per chat (journal.finish_drains).
+            from fluid.codemode.journal import start_drain, wait_drain
+
+            await wait_drain(start_drain(self._journal))
         await self.bus.close()
 
     # ─── Context-usage snapshot ──────────────────────────────────────────

@@ -464,3 +464,132 @@ def test_rollback_switch_restores_the_continuous_learner(monkeypatch):
     assert reflection.learner_mode() == reflection.CONTINUOUS and not reflection.reflection_mode()
     monkeypatch.setenv(reflection.LEARNER_SWITCH, "anything else")
     assert reflection.reflection_mode()
+
+
+# ─── round 3: scope, per-chat lock, retryable storage, shutdown ─────────────
+
+class Blocking(Scripted):
+    """A provider whose call waits until the test releases it."""
+
+    def __init__(self, *answers: str) -> None:
+        super().__init__(*answers)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream(self, request):
+        self.started.set()
+        await self.release.wait()
+        async for chunk in super().stream(request):
+            yield chunk
+
+
+class DrainingJournal:
+    """What an engine's learner journal does on close: drain the learner."""
+
+    def __init__(self, synth) -> None:
+        self.synth = synth
+
+    async def aclose(self) -> None:
+        await self.synth.drain()
+
+
+FACT = ('<proposal kind="owner_fact" scope="global" when="When working on the web service">'
+        "The web service listens on port 8080.</proposal>")
+
+
+async def test_a_quoted_project_preference_is_a_rule_in_that_project_only(tmp_path):
+    from fluid.codemode import behavior
+
+    store = SkillStore(tmp_path)
+    store.journal_context(session_id="ses_r", project="proj-api")
+    for kind, text in [("user", "Write the migration."), ("assistant", "One migration adds and fills it."),
+                       ("user", "No, in this repo I prefer schema and backfill migrations split.")]:
+        store.journal_append({"kind": kind, "text": text})
+    provider = Scripted('<proposal kind="owner_preference" scope="project" '
+                        'quote="in this repo I prefer schema and backfill migrations split" '
+                        'when="When writing a database migration">'
+                        "Put the schema change and the backfill in separate migrations.</proposal>")
+    await learner(store, provider, "ses_r").drain()
+    entries = store._facts.snapshot()["entries"]
+    [rule] = [e for e in entries if str(e.get("key") or "").startswith("behavior.")]
+    assert rule["scope"] == "proj-api"
+    assert [e["id"] for e in behavior.rules_for(entries, project="proj-api")] == [rule["id"]]
+    assert behavior.rules_for(entries, project="proj-web") == []  # another repo never gets it
+
+
+async def test_two_chats_reflect_at_once_and_neither_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(reflection, "REFLECTION_WAIT_SECONDS", 0.2)
+    store = SkillStore(tmp_path)
+    chat(store, "ses_slow", CORRECTION)
+    chat(store, "ses_fast", CORRECTION)
+    slow, fast = Blocking(FACT), Scripted(FACT)
+    first = asyncio.create_task(learner(store, slow, "ses_slow").drain())
+    await asyncio.wait_for(slow.started.wait(), 2)
+    # The slow chat's call is still out; the other chat does not wait for it.
+    await asyncio.wait_for(learner(store, fast, "ses_fast").drain(), 2)
+    assert len(fast.prompts) == 1
+    slow.release.set()
+    await asyncio.wait_for(first, 2)
+    rows = {r["session"]: r for r in reflections(store)}
+    assert rows["ses_slow"]["outcome"] == rows["ses_fast"]["outcome"] == "ran"
+    assert not any(r.get("reason") == "busy" for r in reflections(store))
+    [proposal] = reflection.ProposalInbox(store.root).open()
+    assert sorted(proposal["sessions"]) == ["ses_fast", "ses_slow"]
+    assert reflection._TURNS.get(asyncio.get_running_loop()) == {}  # nothing left held
+
+
+async def test_an_inbox_that_cannot_store_a_proposal_leaves_the_turns_to_reflect_again(tmp_path, monkeypatch):
+    store = SkillStore(tmp_path)
+    chat(store, "ses_b", CORRECTION)
+    real = reflection.ProposalInbox.propose
+
+    def busy(self, **kwargs):
+        raise reflection.InboxBusy("proposals is held by another writer; nothing was written")
+
+    monkeypatch.setattr(reflection.ProposalInbox, "propose", busy)
+    provider = Scripted(FACT, FACT)
+    await learner(store, provider, "ses_b").drain()
+    assert reflection.ProposalInbox(store.root).open() == []
+    assert reflection.ReflectionState(store.root).through("ses_b") == 0
+    [row] = reflections(store)
+    assert row["outcome"] == "ran" and row["unsaved"] == 1 and "not saved" in row["error"]
+
+    monkeypatch.setattr(reflection.ProposalInbox, "propose", real)
+    await learner(store, provider, "ses_b").drain()  # the chat's next close
+    assert len(provider.prompts) == 2
+    [proposal] = reflection.ProposalInbox(store.root).open()
+    assert proposal["sessions"] == ["ses_b"]
+    assert reflection.ReflectionState(store.root).through("ses_b") > 0
+
+
+async def test_shutdown_waits_for_every_reflection_at_once_and_one_cut_off_reflects_later(tmp_path):
+    from fluid.codemode import journal
+
+    store = SkillStore(tmp_path)
+    sessions = [f"ses_{n}" for n in range(5)]
+    providers = {}
+    for session in sessions:
+        chat(store, session, CORRECTION)
+        providers[session] = Blocking(FACT)
+    loop = asyncio.get_running_loop()
+    journal.defer_drain_waits()
+    try:
+        started = loop.time()
+        for session in sessions:  # each engine's close returns without waiting
+            await journal.wait_drain(journal.start_drain(
+                DrainingJournal(learner(store, providers[session], session))))
+        assert loop.time() - started < 0.5
+        await asyncio.wait_for(asyncio.gather(*(p.started.wait() for p in providers.values())), 2)
+        cut = await journal.finish_drains(0.3)
+        elapsed = loop.time() - started
+    finally:
+        journal._DEFERRING.discard(loop)
+    assert cut == len(sessions)
+    assert elapsed < 0.3 + 1.0 + 0.5  # one shared budget, not one per chat
+    state = reflection.ReflectionState(store.root)
+    assert all(state.through(s) == 0 for s in sessions)  # nothing marked: nothing lost
+    assert reflection.ProposalInbox(store.root).open() == []
+
+    provider = Scripted(FACT)
+    await learner(store, provider, "ses_0").drain()  # that chat's next close
+    assert len(provider.prompts) == 1 and state.through("ses_0") > 0
