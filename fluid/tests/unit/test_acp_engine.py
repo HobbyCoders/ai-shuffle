@@ -181,6 +181,48 @@ async def test_each_turn_feeds_the_memory_learner_its_text_and_model(tmp_path: P
         await d.close()
 
 
+class _DrainingJournal(_Journal):
+    """A journal whose close is the learner's drain (session reflection)."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__()
+        self.seconds = seconds
+        self.closes = 0
+        self.finished = False
+
+    async def aclose(self) -> None:
+        self.closes += 1
+        await asyncio.sleep(self.seconds)
+        self.finished = True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM and process groups are POSIX")
+async def test_close_drains_the_learner_journal_without_holding_up_the_agent_stop(tmp_path: Path) -> None:
+    """An Antigravity chat reflects when its engine closes: the journal's
+    drain runs once, the agent process is ended without waiting for it, and
+    the host's deadline ends only the close's wait, never the drain."""
+    from fluid.codemode import journal as journal_module
+
+    journal = _DrainingJournal(seconds=0.6)
+    d = await _driver(tmp_path, model="gemini-3.8-flash", journal=journal)
+    try:
+        assert isinstance(await d.turn("stream"), TurnComplete)
+        pid = d.loop.pid
+        assert pid is not None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(d.loop.aclose(), timeout=0.3)
+        assert await _wait_ended(pid, timeout=1)
+        assert journal.closes == 1 and not journal.finished
+        drain = journal._drain_task
+        assert drain in journal_module._DRAINS
+        await asyncio.wait_for(asyncio.shield(drain), timeout=5)
+        assert journal.finished and not drain.cancelled()
+        await d.loop.aclose()  # a second close starts no second drain
+        assert journal.closes == 1
+    finally:
+        await d.close()
+
+
 async def test_context_usage_is_the_agents_own_usage_update(tmp_path: Path) -> None:
     # agy 1.5.13 sends usage_update {used, size} after each turn (live probe,
     # 2026-11-20); the fake's "stream" turn sends used=120, size=1000.

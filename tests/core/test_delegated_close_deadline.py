@@ -209,13 +209,14 @@ def test_a_dropped_loop_leaves_uvloop_no_unclosed_server_to_collect():
 
 
 class _SlowJournal:
-    def __init__(self) -> None:
+    def __init__(self, seconds: float = 30) -> None:
         self.started = False
         self.finished = False
+        self.seconds = seconds
 
     async def aclose(self) -> None:
         self.started = True
-        await asyncio.sleep(30)
+        await asyncio.sleep(self.seconds)
         self.finished = True
 
 
@@ -238,10 +239,15 @@ async def test_a_cancelled_close_does_not_start_the_journal_drain():
 
 @posix_only
 @pytest.mark.asyncio
-async def test_a_deadline_cuts_the_journal_drain_short_after_a_clean_stop():
+async def test_a_deadline_ends_the_wait_but_not_the_journal_drain():
+    """A reflection call that takes longer than the host's close deadline (a
+    six-second call against five, scaled down) is not cancelled: the deadline
+    ends this close's wait, the bridge is released, the drain finishes."""
+    from fluid.codemode import journal as journal_module
+
     loop = await _loop_with_bridge()
     socket_path, tmpdir = loop._socket_path, loop._tmpdir
-    loop._journal = journal = _SlowJournal()
+    loop._journal = journal = _SlowJournal(seconds=0.6)
 
     started = time.monotonic()
     with pytest.raises(asyncio.TimeoutError):
@@ -250,6 +256,11 @@ async def test_a_deadline_cuts_the_journal_drain_short_after_a_clean_stop():
     assert time.monotonic() - started < 3
     assert journal.started and not journal.finished
     _assert_released(loop, socket_path, tmpdir)
+    drain = journal._drain_task
+    assert drain in journal_module._DRAINS and not drain.done()
+    await asyncio.wait_for(asyncio.shield(drain), timeout=5)
+    assert journal.finished and not drain.cancelled()
+    assert drain not in journal_module._DRAINS
 
 
 @posix_only

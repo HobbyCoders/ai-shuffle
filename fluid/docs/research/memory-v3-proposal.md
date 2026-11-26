@@ -104,7 +104,7 @@ This replaces the task-slice, novelty-allowance and change-list machinery in `me
 - **Reflection replaces the continuous learner.** When a session settles, one model call runs, and only if the session had at least one of: a user correction or frustration signal, an explicit "remember", or friction that repeated. Its input is the user turns, the assistant's final replies, friction records, and the current facts in scope. It does not read the tool-call stream.
 - **Output is proposals with evidence:** a quote from the user's words (required for rules, as `behavior.py` already requires), the session id and the proposed kind.
   - Quoted owner rules and preferences apply at once as **agent-saved** facts, visible and revertible, as behaviour rules are today.
-  - Other inferred facts wait in a **proposal inbox**. A proposal becomes a fact when a second, distinct session produces it independently, or when the owner accepts it in Settings → Memory. Otherwise it expires quietly after 14 days. It never takes a live slot and never counts as "lost".
+  - Other inferred facts wait in a **proposal inbox**. A proposal becomes a fact when a second, distinct session produces it independently, or when the owner accepts it in Settings → Memory. Otherwise it expires quietly after 14 days. It never takes a live slot and never counts as "lost". *(Changed in phase 2: promotion by a second session was dropped. Only the owner's Accept saves a proposal; see §11.)*
 - **Estimated cost:** about 10–25 calls a day at about 6–8k input tokens each, versus about 75 a day at about 18k. That is roughly an 80–90% cut. This is an estimate to confirm in phase 0, not a measurement.
 - **Removed:** Python helper-skill synthesis (near-zero yield, no kernel on the delegated leg), the separate consolidation pass, the when-line backfill learner, and the inert prose-workflow proposals (#206, until it has a real design).
 
@@ -162,7 +162,7 @@ Net: about 5k lines removed and about 1.5–2k added. Fewer moving parts means f
 - **Trigger noise.** Over-broad words could inject irrelevant facts. Mitigation: two-word minimum for word triggers, delivery once per session, and per-delivery caps. Phase 0 precision is the gate.
 - **Less background learning.** Some facts the continuous learner would have caught from tool output alone will be missed. The data says those facts mostly went unused (196 of 201 archived never recalled), so this trade looks right, but it is a trade.
 - **Mixed-version networks** during the SQLite migration. Replication records do not change, so older workers keep merging. The local file format is the only break, and it gets an export tool.
-- **Owner inbox fatigue.** The 2-session corroboration rule should keep it small. If it grows, auto-expiry does the cleanup.
+- **Owner inbox fatigue.** Phase 2 dropped automatic promotion (§11), so every proposal waits for the owner. Exact duplicates share one row, and auto-expiry after 14 days does the cleanup.
 
 ## 9. Phase 0 results: offline trigger replay (2026-11-25)
 
@@ -245,3 +245,22 @@ Phase 1 added just-in-time delivery beside the index, which is unchanged. `docs/
 - User turns and delegation briefs carry matching facts in that turn's context note. Tool calls carry them with the call's result. Both legs follow the caps above, deliver each fact once per session and re-arm on compaction.
 - Each delivery is recorded only on the local worker, in an append-only log (`jit_deliveries.jsonl`, rotated by size), and memory health counts deliveries in its `delivery` signal. `FLUID_MEMORY_JIT=false` turns delivery off.
 - **Timing finding.** Delivery before the tool runs is not possible without holding the call. On either leg, a model reads added context only in its next request, which follows the call. Native PreToolUse context and the Claude Code CLI's PreToolUse `additionalContext` (CLI 2.1.331) arrive with the call's result, the same moment as PostToolUse context. Tool deliveries are therefore recorded as late, as section 9 asked, and user-turn deliveries as on time. Closing the gap needs an owner decision. One option: deny a call once, on its first command-fact match in a session, with the fact as the reason, and let the agent re-issue the call. The cost is one extra call per such fact per session.
+
+## 11. Phase 2 shipped (reflection and the proposal inbox)
+
+Phase 2 came as two PRs. This one ships session reflection and the proposal inbox. The other one (the Remember task-state guard, similar facts in the save receipt and env facts moved to the session-start probe) is described in its own PR. `docs/MEMORY_ARCHITECTURE.md` ("Session reflection and the proposal inbox") describes how this part works.
+
+- **One call per settled session.** Reflection runs on the learner's existing drain, which fires when a chat's engine closes (idle eviction, settle or shutdown) on both legs. A finished turn starts nothing. A chat that comes back is reflected on its new lines only.
+- **Deterministic gate.** A correction after an agent reply, a frustration mark, an explicit "remember this", or the same friction twice. Anything else is logged as skipped (`no_signal`) with no model call. Settings → Learning shows the last reflection, whether it ran, why it was skipped, and the model and billing it used.
+- **Input** is the session's user turns, final replies, friction and the facts in scope. It never includes the tool stream. It is bounded to 28,000 characters (about 7k tokens) or the route's prompt limit, whichever is smaller.
+- **Routing** is the session's own route from #1996 (model, provider row, effort, `model@row` backoff and per-billing caps). Because one call reads one chat, the cross-chat split #1996 needed doesn't arise.
+- **Output.**
+  - Quoted owner rules apply at once, as before.
+  - Quoted owner preferences apply at once as learned behaviour rules, through the same quote, permission and injection checks, so they appear under Learned behaviour and can be reverted there. A project-scoped preference becomes a rule for that project only.
+  - Owner facts, project knowledge and unquoted preferences go to the proposal inbox (Settings → Memory → Proposed memories). A proposal is saved, as an agent-saved fact with provenance `session`, only when the owner accepts it. Otherwise it expires after 14 days without counting as a loss. A dismissal is permanent and replicates.
+  - **Decision during review: no promotion by corroboration.** §5.3 planned to promote a proposal once a second distinct session produced it. Word overlap can merge two contradictory claims ("Staging builds do run migrations" and "... do not run ..."), and reconciling corroboration across workers needs a lot of state. Only exact duplicates (equal after case, spacing and punctuation) share a row, and the "seen in N chats" count is information for the owner, never a reason to save.
+- **Replication.** Proposals and the owner's decisions replicate as a `memory_proposal` record that every earlier worker skips, so the inbox is shared across workers and an old worker can never read a proposal as a fact.
+- **All three engines.** Native chats drain in their shielded close. Claude Code and Antigravity chats start the drain as a tracked task once the CLI or agent has stopped, so the host's five-second close deadline never cancels a reflection call. At app shutdown every engine is stopped first and all reflections are then waited for together, at most 10 seconds in total and never into the cleanup reserve before the stop deadline. One cut off there is retried at the chat's next close. Chats reflect concurrently; a failed inbox write leaves the chat to be reflected again.
+- **Turned off in reflection mode:** helper-skill synthesis, consolidation, the when-line backfill and workflow proposals. Conflict review stays until phase 3.
+- **Rollback.** `FLUID_MEMORY_LEARNER=continuous` brings the continuous learner back until phase 3 deletes it.
+- **Section 6 targets** (learner calls per day, input tokens per week, dropped facts) can only be measured after a week on the owner's workers. They aren't measured yet.

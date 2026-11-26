@@ -35,6 +35,7 @@ import warnings
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
+from fluid.codemode import reflection
 from fluid.codemode.behavior import is_rule_key
 from fluid.codemode.facts import MAX_INFERENCE_CALLS_PER_DAY
 from fluid.codemode.skills import (
@@ -1100,7 +1101,13 @@ class Synthesizer:
         return self._store._journal_size() > JOURNAL_MAX_BYTES * PACE_PRESSURE_FRACTION
 
     def kick(self) -> None:
-        """Start a background pass if one is due and none is running."""
+        """Start a background pass if one is due and none is running.
+
+        Memory v3 reflection (the default) learns once, on close (see
+        drain()); a turn starts nothing. ``FLUID_MEMORY_LEARNER=continuous``
+        restores the passes below."""
+        if reflection.reflection_mode():
+            return
         if self._task is not None and not self._task.done():
             return
         if not self.due():
@@ -1144,13 +1151,15 @@ class Synthesizer:
                 _log.info("conflict review or when-line backfill on close was cut off "
                           "after %.0fs; a later pass retries", self._close_timeout)
             else:
+                kind = "reflection" if reflection.reflection_mode() else "synthesis"
                 self.last_error = (
-                    f"synthesis on close exceeded {self._close_timeout:.0f}s and was abandoned"
+                    f"{kind} on close exceeded {self._close_timeout:.0f}s and was abandoned"
                 )
                 # An abandoned pass leaves no cursor movement (the slice
                 # retries next session) — but it must leave a trace, or a
                 # slow pass is indistinguishable from one that never ran.
-                self._log_pass("synthesis", [], error=self.last_error)
+                self._log_pass(kind, [], error=self.last_error,
+                               extra={"outcome": "error"} if kind == "reflection" else None)
             if self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -1162,8 +1171,41 @@ class Synthesizer:
             except Exception:
                 pass
             self._task = None
+        if reflection.reflection_mode():
+            await self._reflect_safe()
+            return
         if self.due(closing=True):
             await self._run_safe()
+
+    async def _reflect_safe(self) -> list[str]:
+        """Reflect on this chat once (fluid.codemode.reflection), then the
+        owner-rule conflict review as before. No helper-skill synthesis, no
+        consolidation, no when-line backfill, no workflow proposals: those
+        belong to the continuous learner."""
+        self._in_backfill = False
+        try:
+            changed = await asyncio.wait_for(reflection.reflect(self), timeout=self._pass_timeout)
+        except TimeoutError:
+            self.last_error = f"reflection exceeded {self._pass_timeout:.0f}s"
+            retry = self._note_failure(self.last_error)
+            self._log_pass("reflection", [], error=self.last_error, retry_after_s=retry,
+                           counts_toward_yield=False, extra={"outcome": "error"})
+            return []
+        except Exception as exc:  # never let reflection break the session close
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            retry = self._note_failure(self.last_error)
+            self._log_pass("reflection", [], error=self.last_error, retry_after_s=retry,
+                           counts_toward_yield=False, extra={"outcome": "error"})
+            return []
+        if not self.last_pass_failed and self.enabled():
+            from fluid.codemode.conflict_review import run as review_conflicts
+
+            self._in_backfill = True
+            reviewed = await review_conflicts(self)
+            self._in_backfill = False
+            changed += ["memory-conflict:" + mid for mid in reviewed.changed]
+        await self._notify(changed)
+        return changed
 
     async def _run_safe(self) -> list[str]:
         self._in_backfill = False
@@ -1766,8 +1808,12 @@ class Synthesizer:
         ran: bool = True,
         counts_toward_yield: bool = True,
         routed: dict[str, str | None] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
+
+        ``extra`` adds fields of a reflection row (its session, outcome,
+        skip reason, signals and counts; see fluid.codemode.reflection).
 
         ``ran=False`` marks a row for a pass that made no model call (the
         lock was held elsewhere, the daily budget was spent, or every entry
@@ -1841,6 +1887,8 @@ class Synthesizer:
             record["output_tokens"] = int(usage["output_tokens"])
         if stop_reason:
             record["stop_reason"] = stop_reason
+        if extra:
+            record.update({k: v for k, v in extra.items() if k not in record})
         if error and consumed:
             # The pass ran; some proposals were rejected by validation.
             _log.warning(

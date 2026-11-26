@@ -684,10 +684,17 @@ class AcpLoop:
         ``TURN_CLOSE_GRACE``), and the agent's process tree is ended in
         ``finally``: a host that gives up and cancels this call still leaves
         nothing running.
+
+        The learner journal is closed too (session reflection,
+        fluid.codemode.reflection), as its own task started once the turn has
+        ended: it reads the journal on disk, not the agent, so it never holds
+        up the process stop, and the host's deadline ends only this call's
+        wait for it.
         """
         self._closed = True
         self._interrupted.set()
         task = self._turn_task
+        drain = None
         try:
             if task is not None and not task.done():
                 await self._cancel_remote(timeout=CLOSE_CANCEL_WRITE_TIMEOUT)
@@ -696,8 +703,15 @@ class AcpLoop:
         finally:
             if task is not None and not task.done():
                 task.cancel()
+            if self._journal is not None:
+                from fluid.codemode.journal import start_drain, wait_drain
+
+                drain = start_drain(self._journal)
+            if task is not None and not task.done():
                 await asyncio.wait({task}, timeout=TURN_CANCEL_WAIT)
             await self._stop_process()
+        if drain is not None:
+            await wait_drain(drain)
 
     async def replace_spec(self, spec: AcpAgentSpec) -> None:
         """Use ``spec`` from the next turn: the running process is stopped

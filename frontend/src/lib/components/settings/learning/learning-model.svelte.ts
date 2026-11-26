@@ -37,6 +37,21 @@ export interface LearnerSetup {
 	billing: 'subscription' | 'metered';
 	/** Most prompt text one pass may send. */
 	pass_chars: number;
+	/** `reflection` (one pass per finished chat, the default) or the rollback `continuous` learner. */
+	mode?: 'reflection' | 'continuous';
+	/** The newest reflection, ran or skipped; null before the first one. */
+	reflection?: LastReflection | null;
+}
+
+export interface LastReflection {
+	at: number | null;
+	outcome: 'ok' | 'error' | 'budget' | 'skipped';
+	/** Why a reflection was skipped: `no_signal`, `backoff` or `busy`. */
+	reason: string | null;
+	/** What made the chat worth a reflection: correction, frustration, remember, friction. */
+	signals: string[];
+	model: string | null;
+	billing: string | null;
 }
 
 export interface LearnerPass {
@@ -46,10 +61,15 @@ export interface LearnerPass {
 	read: number;
 	rules: { id: string; text: string | null }[];
 	memories: number;
+	/** Reflection only: things queued in Settings > Memory > Proposed memories. */
+	proposals?: number;
 	input_tokens: number | null;
 	output_tokens: number | null;
 	outcome: 'ok' | 'error' | 'budget' | 'skipped';
 	error_kind: string | null;
+	reason?: string | null;
+	signals?: string[];
+	model?: string | null;
 }
 
 export interface GuidanceBlock {
@@ -96,14 +116,58 @@ export function ruleMeta(r: LearnedRule): string {
 	return [r.applies_label, who, ago].filter(Boolean).join(' · ');
 }
 
+const SKIP_REASONS: Record<string, string> = {
+	no_signal: 'no correction, frustration, “remember this” or repeated friction',
+	backoff: 'this chat’s model is backing off after errors',
+	busy: 'another learning pass was running'
+};
+
+const SIGNALS: Record<string, string> = {
+	correction: 'a correction',
+	frustration: 'frustration',
+	remember: '“remember this”',
+	friction: 'repeated friction'
+};
+
+/** "Skipped: no correction, …" for a skip reason the worker recorded. */
+export function skipText(reason: string | null | undefined): string {
+	const why = reason ? SKIP_REASONS[reason] : '';
+	return why ? `Skipped: ${why}` : 'Skipped, no model call';
+}
+
+export function signalText(signals: readonly string[] | undefined): string {
+	return (signals ?? []).map((s) => SIGNALS[s] ?? s).join(', ');
+}
+
+/** The Setup row for the newest reflection: what happened, when, on what. */
+export function reflectionText(r: LastReflection | null | undefined): string {
+	if (!r) return 'None yet. One runs when a chat settles.';
+	const ago = agoText(r.at);
+	const when = ago ? ` · ${ago}` : '';
+	if (r.outcome === 'skipped') return `${skipText(r.reason)}${when}`;
+	if (r.outcome === 'budget') return `Stopped: daily call limit reached${when}`;
+	const how = [r.model, r.billing === 'subscription' ? 'flat-rate subscription' : r.billing ? 'pay-per-use' : '']
+		.filter(Boolean)
+		.join(', ');
+	const head = r.outcome === 'error' ? 'Failed' : 'Ran';
+	const why = r.signals.length ? ` for ${signalText(r.signals)}` : '';
+	return `${head}${why}${how ? ` on ${how}` : ''}${when}`;
+}
+
 export function passSummary(p: LearnerPass): string {
+	const reflection = p.kind === 'reflection';
 	if (p.outcome === 'budget') return 'Stopped: daily call limit reached';
-	if (p.outcome === 'skipped') return 'Skipped, no model call';
+	if (p.outcome === 'skipped') return reflection ? `Reflection ${skipText(p.reason).toLowerCase()}` : 'Skipped, no model call';
 	if (p.outcome === 'error') return `Failed${p.error_kind ? ` (${p.error_kind})` : ''}`;
-	const parts = [`Read ${p.read.toLocaleString()} ${p.read === 1 ? 'entry' : 'entries'}`];
+	const parts = [
+		reflection
+			? `Reflected on ${p.read.toLocaleString()} ${p.read === 1 ? 'line' : 'lines'}`
+			: `Read ${p.read.toLocaleString()} ${p.read === 1 ? 'entry' : 'entries'}`
+	];
 	if (p.rules.length) parts.push(`${p.rules.length} ${p.rules.length === 1 ? 'rule' : 'rules'}`);
 	if (p.memories) parts.push(`${p.memories} ${p.memories === 1 ? 'memory' : 'memories'}`);
-	if (!p.rules.length && !p.memories) parts.push('nothing new');
+	if (p.proposals) parts.push(`${p.proposals} ${p.proposals === 1 ? 'proposal' : 'proposals'}`);
+	if (!p.rules.length && !p.memories && !p.proposals) parts.push('nothing new');
 	return parts.join(' · ');
 }
 

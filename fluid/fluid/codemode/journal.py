@@ -29,15 +29,21 @@ other entry.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Iterator
 
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.skills import SkillStore
 from fluid.context.screening import clip_redacted, redact_secrets
 from fluid.tools.view import POINTER_MARK
+
+_log = logging.getLogger(__name__)
 
 _EVENT_CAP = 1_500
 _INPUT_CAP = 600
@@ -435,3 +441,125 @@ class ToolJournal:
                 await self._synthesizer.drain()
             except Exception:
                 pass
+
+
+#: Learner drains started by :func:`start_drain`, held until they finish: an
+#: engine that closed is dropped, and nothing else keeps its drain's task.
+_DRAINS: set[asyncio.Task] = set()
+
+
+def start_drain(journal: Any) -> asyncio.Task:
+    """``journal.aclose()`` (the learner's drain: session reflection or the
+    continuous learner's last pass) as its own task, started once per journal.
+
+    An engine's close runs under the host's short deadline (five seconds),
+    while the drain has its own bounded budget (``close_timeout``). Awaiting
+    the returned task through :func:`wait_drain` lets that deadline end the
+    engine's wait without cancelling a reflection call already paid for. The
+    task is kept in :data:`_DRAINS` until it ends, and never raises; a second
+    close of the same engine gets the same task."""
+    task = getattr(journal, "_drain_task", None)
+    if task is None:
+        task = asyncio.get_running_loop().create_task(_drain(journal), name="learner-drain")
+        _DRAINS.add(task)
+        task.add_done_callback(_DRAINS.discard)
+        try:
+            journal._drain_task = task
+        except AttributeError:
+            pass
+    return task
+
+
+async def _drain(journal: Any) -> None:
+    try:
+        await journal.aclose()
+    except Exception:
+        _log.debug("closing the learner journal failed", exc_info=True)
+
+
+class _Deferral:
+    """One app shutdown's removal calls (see :func:`deferred_drain_waits`)."""
+
+    __slots__ = ("active",)
+
+    def __init__(self) -> None:
+        self.active = True
+
+
+#: Set only in the task running shutdown's removal calls (and in tasks those
+#: calls start, which inherit it). It stops deferring when that block ends,
+#: so a task it started that outlives shutdown waits for its drains again.
+_DEFER: ContextVar[_Deferral | None] = ContextVar("fluid_defer_drain_waits", default=None)
+
+#: The most app shutdown spends waiting for reflection drains, all of them
+#: together: well inside a supervisor's kill deadline (30 s at most).
+SHUTDOWN_DRAIN_SECONDS = 10.0
+#: Of a shutdown drain budget, the part kept back for cancelled drains to
+#: unwind before the cutoff (never more than a quarter of the budget).
+DRAIN_UNWIND_SECONDS = 0.5
+
+
+async def wait_drain(task: asyncio.Task) -> None:
+    """An engine's close waiting for its drain: shielded, so the host's
+    deadline ends only the wait. Inside :func:`deferred_drain_waits` it does
+    not wait at all; :func:`finish_drains` waits for every drain at once."""
+    deferral = _DEFER.get()
+    if deferral is not None and deferral.active:
+        return
+    await asyncio.shield(task)
+
+
+@contextmanager
+def deferred_drain_waits() -> Iterator[None]:
+    """App shutdown's removal calls: an engine closed inside this block stops
+    its transport and returns without waiting for its learner drain, so
+    closing many chats in a row never adds one drain wait per chat. Only the
+    current task (and what it starts while the block runs) is affected; any
+    other close on the loop, such as a concurrent eviction, still waits."""
+    deferral = _Deferral()
+    token = _DEFER.set(deferral)
+    try:
+        yield
+    finally:
+        deferral.active = False
+        _DEFER.reset(token)
+
+
+async def finish_drains(budget: float = SHUTDOWN_DRAIN_SECONDS) -> int:
+    """Wait for every learner drain on this loop, then cancel the rest and
+    give them time to unwind, all within ``budget`` seconds in total:
+    shutdown stops waiting at that cutoff. (An inbox or state write already
+    running in a worker thread can still finish after it.) Returns how many
+    were cut off.
+
+    The watermark moves only after a reflection's output is stored (see
+    fluid.codemode.reflection), so if a cut-off reflection's watermark did
+    not advance, the chat's next close retries those turns. A watermark
+    write already running in a worker thread can still finish after the
+    cutoff, and then those turns count as reflected. Cancelling
+    this wait (shutdown itself cancelled) cancels the drains it was waiting
+    for, with the same result."""
+    loop = asyncio.get_running_loop()
+    pending = {t for t in _DRAINS if t.get_loop() is loop and not t.done()}
+    if not pending:
+        return 0
+    budget = max(0.0, budget)
+    cutoff = loop.time() + budget
+    unwind = min(DRAIN_UNWIND_SECONDS, budget / 4)
+    try:
+        if budget - unwind > 0:
+            _, pending = await asyncio.wait(pending, timeout=budget - unwind)
+    except asyncio.CancelledError:
+        for task in pending:
+            task.cancel()
+        raise
+    late = {t for t in pending if not t.done()}
+    for task in late:
+        task.cancel()
+    if late:
+        _log.info("%d learner reflection(s) cut off at shutdown; those chats reflect "
+                  "when they next close", len(late))
+        remaining = cutoff - loop.time()
+        if remaining > 0:
+            await asyncio.wait(late, timeout=remaining)
+    return len(late)

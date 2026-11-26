@@ -10319,6 +10319,12 @@ class _LearnerProvider:
         # The binding a built native client was made with: it keeps that row
         # after a model switch replaces ``_options`` (see destination).
         self._built: Optional[SessionOptions] = None
+        # Streams in flight, and whether aclose() was asked for meanwhile.
+        # Session reflection makes its one call while the engine closes (the
+        # drain outlives the adapter's close grace, shielded), so a close that
+        # lands mid-call is deferred to the end of that call.
+        self._active = 0
+        self._closing = False
 
     @property
     def destination(self) -> str:
@@ -10339,11 +10345,22 @@ class _LearnerProvider:
             async for chunk in _generation_helper_stream(request, self._options):
                 yield chunk
             return
-        client = await self._ensure()
-        async for chunk in client.stream(request):
-            yield chunk
+        self._active += 1
+        try:
+            client = await self._ensure()
+            async for chunk in client.stream(request):
+                yield chunk
+        finally:
+            self._active -= 1
+            if self._closing and self._active == 0:
+                await self._close_http()
 
     async def aclose(self) -> None:
+        self._closing = True
+        if self._active == 0:
+            await self._close_http()
+
+    async def _close_http(self) -> None:
         http, self._http, self._client = self._http, None, None
         if http is not None:
             await http.aclose()
