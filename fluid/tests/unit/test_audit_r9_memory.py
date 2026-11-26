@@ -313,48 +313,7 @@ async def test_recall_hit_labels_tool_facts(tmp_path) -> None:
     assert "confirm with Remember" in out.text
 
 
-# ─── 4: mechanical fact harvest ──────────────────────────────────────────────
-
-
-def test_environment_facts_are_harvested_with_stable_keys(tmp_path, monkeypatch) -> None:
-    import importlib.util
-
-    from fluid.context import runtime_facts as rf
-
-    (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend" / "package.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    facts = dict(rf.harvest_environment_facts(str(tmp_path)))
-    assert "pytest is not importable" in facts["env.pytest"]
-    assert "frontend" in facts["env.node_modules"]
-
-    store = SkillStore(tmp_path / "store")
-    ids = rf.write_harvested_facts(store, "project:x", list(facts.items()))
-    assert len(ids) == 2
-    entries = {e.key: e for e in store.memories()}
-    assert entries["env.pytest"].provenance == "tool" and not entries["env.pytest"].protected
-    assert entries["env.pytest"].scope == "project:x"
-    # Idempotent: the same state again is not a new revision.
-    rf.write_harvested_facts(store, "project:x", list(facts.items()))
-    assert {e.key: e.revision for e in store.memories()} == {k: 1 for k in entries}
-    # A user's explicit Remember on the same key wins and is left alone.
-    store.save_memory("pytest: use .venv", protected=True, key="env.pytest", scope="project:x",
-                      memory_id=entries["env.pytest"].id, expected_revision=1)
-    rf.write_harvested_facts(store, "project:x", [("env.pytest", "harvested again")])
-    assert {e.key: e.text for e in store.memories()}["env.pytest"] == "pytest: use .venv"
-    section = store.render_memory_section("project:x")
-    assert "Node dependencies" in section and "confirm with Remember" in section
-
-
-def test_browser_host_fact_is_harvested_from_a_browser_result() -> None:
-    from fluid.context import runtime_facts as rf
-
-    out = "Cannot reach http://localhost:5193 from the browser host. Browse http://10.0.0.30:5193 instead."
-    facts = rf.harvest_tool_facts("mcp__browser__browser_navigate", out)
-    assert facts and facts[0][0] == "env.browser_host"
-    assert "10.0.0.30" in facts[0][1] and "0.0.0.0" in facts[0][1]
-    assert rf.harvest_tool_facts("Read", out) == []
-    assert rf.harvest_tool_facts("browser_navigate", "Browse http://localhost:1 instead") == []
+# ─── 4: environment facts are live, not memories ─────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -367,13 +326,14 @@ async def test_runtime_facts_block_emits_without_an_environment_section(tmp_path
     loop.system_sections = CompiledPrompt(sections=(), text=None)  # compiled, no env section
     loop.ctx = ToolCtx(cwd=str(tmp_path))
     loop._runtime_facts_sent = None
-    loop._runtime_facts_harvested = False
     store = SkillStore(tmp_path / "store")
     loop.ctx.extra["memory_store"] = store
     loop.ctx.extra["memory_project"] = "project:t"
     first = await loop._environment_reminder()
     assert first is not None and "Runtime facts" in first and "pytest in worker Python" in first
-    assert any(e.key == "env.pytest" for e in store.memories())
+    # Memory v3 §5.1: the block is the home of environment facts; nothing is
+    # harvested into the store (env.pytest once had 39 revisions there).
+    assert store.memories() == []
     # Unchanged facts: nothing rides the second turn.
     assert await loop._environment_reminder() is None
     # Changed facts: the block comes back.
@@ -385,7 +345,6 @@ async def test_runtime_facts_block_emits_without_an_environment_section(tmp_path
     bare.system_sections = None
     bare.ctx = ToolCtx(cwd=str(tmp_path))
     bare._runtime_facts_sent = None
-    bare._runtime_facts_harvested = True
     assert await bare._environment_reminder() is None
 
 

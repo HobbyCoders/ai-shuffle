@@ -16,6 +16,8 @@ Open a memory, edit it, and choose **Save**. **When this applies** tells agents 
 
 When a chat reaches the situation a memory describes, its full text is added to the chat once: with your message when your words match it, or with the result of a matching command, file or tool. An agent saving a memory can name the commands (such as `git push`), file paths or tools it applies to. Set `FLUID_MEMORY_JIT=false` on the worker to turn this off. Agents still see the list of memories either way.
 
+Agents don't save where a piece of work stands, such as "continuing the fix in PR #123", as a memory: that goes in the chat's working notes. If you ask for it anyway, it's saved. When an agent saves a memory that looks like one it already has, it's shown the existing one so it can update it instead of keeping two. Facts about a worker's setup, such as which Python has pytest, are checked fresh at the start of each chat rather than saved as memories; ones saved before expire on their own.
+
 - Saving a memory an agent wrote makes it yours, and it's kept until you change it.
 - Saving an archived memory makes it active again.
 - A memory marked **Needs review** conflicts with another one, or a newer one replaced it. Saving your version settles it.

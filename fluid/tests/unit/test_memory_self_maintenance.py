@@ -299,9 +299,15 @@ B_PYTEST = "pytest is not importable from the worker Python C:/Py/python.exe."
 
 
 def harvest(store, text, key="env.pytest"):
-    from fluid.context.runtime_facts import write_harvested_facts
-
-    return write_harvested_facts(store, "project:x", [(key, text)])
+    # Stores still hold per-worker facts the retired environment harvest
+    # wrote (they expire by TTL), saved exactly like this; a refused save
+    # (a fact the user protected) was skipped.
+    try:
+        saved = store.save_memory(text, scope="project:x", provenance="tool", protected=False,
+                                  key=key, per_worker=True)
+    except ValueError:
+        return []
+    return [saved.id]
 
 
 def sync(a, b, rounds=2):

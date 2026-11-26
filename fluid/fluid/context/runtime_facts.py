@@ -9,7 +9,6 @@ import importlib.util
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -121,7 +120,12 @@ def _provisioning_fact(root: Path) -> str | None:
 
 
 def runtime_facts(cwd: str) -> str:
-    """Live availability facts; refresh on user turns, not in the cached prefix."""
+    """Live availability facts; refresh on user turns, not in the cached prefix.
+
+    These are probed live and never written to the memory store: a per-worker
+    harvest (``env.pytest``, ``env.node_modules``, ``env.browser_host``) only
+    restated them, one store revision per change (Memory v3 §5.1).
+    """
     root = Path(cwd)
     lines = [f"Worker Python: {json.dumps(sys.executable)}"]
     try:
@@ -173,150 +177,3 @@ def runtime_facts(cwd: str) -> str:
         lines.append("Dependency presence could not be inspected.")
     lines.append("Availability is not a successful test run. Missing dependencies require explicit setup; never copy credentials or assume shared links exist.")
     return "\n".join(lines)
-
-
-# ─── mechanical fact harvest ─────────────────────────────────────────────────
-#
-# The note above is per turn and per process. The harvesters below turn the
-# same observations ("no pytest in the worker Python", "this worktree has no
-# node_modules") into FactStore entries with ``provenance="tool"`` and a stable
-# key, so a later session on the same project sees them in the # Memory
-# section (rendered with a "confirm with Remember" hint) without the model
-# or the synthesizer having to do anything.
-
-# Keys are stable per fact class so a re-harvest updates in place. They must
-# match facts.save's key pattern ``[a-zA-Z0-9_.:-]{1,96}``.
-_KEY_PYTEST = "env.pytest"
-_KEY_NODE_MODULES = "env.node_modules"
-_KEY_BROWSER_HOST = "env.browser_host"
-
-# The app's browser tools answer a loopback URL with "Browse http://<host>:
-# <port> instead" when they run on another machine; the host is the durable
-# part, the port is whatever server the session happened to start.
-_BROWSE_INSTEAD_RE = re.compile(r"[Bb]rowse\s+(https?://[^\s/]+)(?:[/\s]|$)[^\n]*?\binstead\b")
-_BROWSER_TOOL_RE = re.compile(r"(?:^|__)browser_[a-z_]+$")
-
-
-def _safe_key(suffix: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.:-]", "-", suffix)[:96]
-
-
-def _stable_install_path(path: str) -> str:
-    """Hide packaged revision directories in memories, keeping path separators."""
-    return re.sub(r"([\\/]versions[\\/])[0-9a-fA-F]{40}(?=[\\/]|$)", r"\1<current>", path)
-
-
-def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
-    """``(key, text)`` facts a worker can establish without the model.
-
-    Only the facts worth a memory: a missing pytest (with where Python lives,
-    since that is the thing sessions get wrong), and, when any package
-    directory's node_modules are missing or empty, the package directories a
-    fresh worktree must install. Text is deliberately free of dates, counts
-    and per-worktree install state so a re-harvest is a no-op save. Packaged
-    version directories use <current>; the live runtime note has exact paths.
-    """
-    root = Path(cwd)
-    facts: list[tuple[str, str]] = []
-    try:
-        pytest_found = importlib.util.find_spec("pytest") is not None
-    except (ImportError, ValueError, AttributeError):
-        pytest_found = False
-    exe = _stable_install_path(sys.executable)
-    if not pytest_found:
-        cli = shutil.which("pytest")
-        hint = f"; a pytest executable is on PATH at {_stable_install_path(cli)}" if cli else (
-            "; run tests with a project venv or install pytest there first"
-        )
-        facts.append((_KEY_PYTEST, f"pytest is not importable from the worker Python {exe}{hint}."))
-    else:
-        facts.append((_KEY_PYTEST, f"pytest is importable from the worker Python {exe}."))
-    try:
-        packages = ([root] if (root / "package.json").is_file() else []) + [
-            child for child in sorted(root.iterdir())
-            if child.is_dir() and not child.name.startswith(".")
-            and child.name != "node_modules" and (child / "package.json").is_file()
-        ]
-    except OSError:
-        packages = []
-    labels: list[str] = []
-    missing = False
-    for package in packages[:8]:
-        labels.append(str(package.relative_to(root)) or ".")
-        modules = package / "node_modules"
-        try:
-            empty = modules.is_dir() and next(modules.iterdir(), None) is None
-        except OSError:
-            empty = False
-        missing = missing or not modules.is_dir() or empty
-    if missing:
-        # Names every package directory, not just the ones missing right now:
-        # which are installed differs per worktree, and naming those made each
-        # session in another worktree rewrite the fact (#1814). The per-turn
-        # runtime note still says which are missing in this checkout.
-        facts.append((
-            _KEY_NODE_MODULES,
-            "Node dependencies can be missing in " + ", ".join(labels)
-            + " (run the package's install step in each fresh worktree before its scripts).",
-        ))
-    return facts
-
-
-def harvest_tool_facts(name: str, output: str) -> list[tuple[str, str]]:
-    """Facts a tool RESULT establishes mechanically (currently: browser host).
-
-    Only browser_* tool outputs are inspected, and only for the harness's own
-    "Browse <url> instead" redirection — that sentence means the browser runs
-    on a host other than the worker, which is the fact two sessions six
-    minutes apart each rediscovered and Remembered separately.
-    """
-    leaf = str(name or "").split("__")[-1]
-    if not _BROWSER_TOOL_RE.search(leaf) or not output:
-        return []
-    match = _BROWSE_INSTEAD_RE.search(output[:4000])
-    if not match:
-        return []
-    origin = match.group(1)
-    scheme, _, authority = origin.partition("://")
-    if authority.startswith("["):  # bracketed IPv6 literal, maybe with a port
-        host = authority[: authority.find("]") + 1]
-    else:
-        host = authority.split(":", 1)[0]
-    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "[::]"):
-        return []
-    # Built from scheme + host, not by cutting the last ":" off the origin —
-    # a portless origin has no port colon, and that cut left "http:".
-    return [(
-        _KEY_BROWSER_HOST,
-        f"The browser tools run on another host: local servers must bind "
-        f"0.0.0.0 and be browsed via {scheme}://{host}:<port> "
-        f"(loopback URLs are rewritten to this host).",
-    )]
-
-
-def write_harvested_facts(store, project: str | None, facts) -> list[str]:
-    """Save harvested facts as unprotected tool-provenance memories.
-
-    Each fact describes this worker (its interpreter, checkout, browser
-    host), so it is stored per worker: another worker's harvest under the
-    same key is its own fact, shown and recalled only on that worker.
-
-    Same text under the same key is a no-op save, so calling this every turn
-    costs nothing once the state is recorded. A key the user has protected by
-    an explicit Remember is left alone (``save`` refuses to overwrite it, and
-    that refusal is the right answer). Returns the ids written; never raises.
-    """
-    written: list[str] = []
-    if store is None:
-        return written
-    for key, text in facts:
-        try:
-            saved = store.save_memory(
-                text, scope=project, provenance="tool", protected=False, key=_safe_key(key),
-                per_worker=True,
-            )
-        except Exception as exc:  # noqa: BLE001 — a fact is never worth a turn
-            _log.debug("runtime fact %s not saved: %s", key, exc)
-            continue
-        written.append(saved.id)
-    return written

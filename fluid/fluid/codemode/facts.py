@@ -947,7 +947,7 @@ class FactStore:
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
              when=None, always=None, require_when=False, automatic=False, triggers=None,
-             _document=None):
+             check=None, _document=None):
         """Save one fact in a tier.
 
         ``automatic`` marks background learning (the learner, consolidation).
@@ -979,6 +979,8 @@ class FactStore:
         refuses one that would overflow it (:meth:`_check_always_budget`).
         ``triggers`` (None keeps the current ones; ``{}`` clears them) are
         explicit just-in-time triggers (:func:`validate_triggers`).
+        ``check(text, when)`` sees the effective text and when-line of the
+        resolved target before anything is written; ValueError refuses.
         """
         if isinstance(key, str) and key.startswith("memory.coexist.job."):
             # Keys of the retired word-matching questions name no rule pair.
@@ -1095,6 +1097,11 @@ class FactStore:
                                 # never turned into a rule (or back).
                                 and not (_is_rule_key(key) or _is_rule_key(e.get("key")))
                                 and fingerprint(e["text"]) == fp))), None)
+            if check is not None:
+                # The fact as it will be saved, once the target is resolved and
+                # before any write: a correction keeps its when-line unless it
+                # sends one. ``check`` raises ValueError to refuse.
+                check(text, when if when is not None else (old or {}).get("when"))
             now = time.time()
             # A behaviour rule moved to another model family keeps its text but
             # changes its key: that is a revision, not a repeat of the same save.
@@ -1362,8 +1369,11 @@ class FactStore:
             self._maintain(doc, keep=entry["id"])
             receipt["replaced"] = self._replaced(entry, targets)
             if old is None and (protected or is_durable):
-                receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
-                                                   correction_project)
+                try:
+                    receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
+                                                       correction_project)
+                except Exception:  # noqa: BLE001 — a hint never fails the save
+                    _log.debug("similar-facts hint failed", exc_info=True)
             if _document is None:
                 self._write(doc)
             return self._entry(entry)
@@ -1616,7 +1626,8 @@ class FactStore:
             ratio = shared / max(1, min(len(mine), len(theirs)))
             if shared >= SIMILAR_MIN_SHARED and ratio >= SIMILAR_MIN_RATIO:
                 hits.append((-shared, -ratio, e["id"], e))
-        return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
+        return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"],
+                 "when": when_line(e)}
                 for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
 
     def annotate(self, memory_id: str, *, when: str, expected_revision: int,

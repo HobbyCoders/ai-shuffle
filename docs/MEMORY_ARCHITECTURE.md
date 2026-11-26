@@ -22,6 +22,50 @@ allow a correction to supersede its earlier value rather than create another
 current fact. The narrow built-in name key does not equate nicknames and legal
 names. Arbitrary facts can be addressed by their IDs.
 
+Remember guards what it writes (Memory v3 phase 2a):
+
+- **Task progress is refused.** `fluid/fluid/codemode/task_state.py` flags a
+  save whose progress wording ("continuing", "left off", "in progress", "next
+  step", "still needed", WIP as a status and similar) is about a pull request,
+  issue or branch reference (`#123`, `PR 123`, an issue or PR link, `feat/x`,
+  `branch fix-login`): the reference is the status's subject,
+  joined by a be-verb, "remains", "still" or a colon ("Issue #88 is in
+  progress", "PR #1824: next step is…"), a continuation names it
+  ("Continuing PR #1824"), or the fact is anchored to it (its when-line names
+  a PR, issue or work branch such as `feat/x`, or a clause of the text opens
+  "on branch <name>"). A named branch in the when-line ("When deploying on
+  branch main", "On branch main") is lasting context and anchors nothing. A
+  default branch (main, master, develop, trunk) never counts as the work, and
+  an unquoted single name after "on branch" is prose ("On branch creation, …").
+  Nearness alone does not
+  count, so a lasting rule that cites a PR ("Since PR #1909 the pre-push hook
+  refuses…", "never merge while a migration is in progress; see issue #88")
+  saves. Remember passes the check to `FactStore.save` as `check(text, when)`,
+  which runs once the save has resolved its target (by ID, including an
+  archived fact, or by key in the resolved scope) and before anything is
+  written, so a correction that omits `when` is checked with the when-line it
+  keeps. An agent's save is refused and pointed at WorkingRecord or Note; a save the
+  owner asked for is kept, and its receipt says task progress belongs in the
+  working record. Facts naming a PR do not retire when that PR closes: the
+  only PR state the app tracks is the owner's PR watches, which cover only
+  watched PRs and live in the app database that Fluid's maintenance does not
+  read.
+- **Similar facts are named.** A new agent or owner save lists, in its
+  receipt, up to three live facts in the same scope (or the session's
+  project, for a global save) that share at least five subject terms, also a
+  quarter of the smaller fact's terms (`FactStore._similar`), each by ID,
+  revision and when-line, so a near-duplicate becomes a `replaces` or a
+  correction. The fact just saved and anything it replaced are excluded;
+  corrections get no list. A failure there never fails the committed save.
+  `fluid/tests/fixtures/memory_similar.py` holds the invented store the
+  threshold is tested on.
+- **Environment facts are not memories.** Which Python has pytest, missing
+  `node_modules` and where the agent browser runs are probed live at session
+  start (the runtime-facts block in `fluid/fluid/context/runtime_facts.py`;
+  in the app, the "# Workspace facts" card in `app/core/environment.py`) and
+  are no longer harvested into the store. `env.*` facts harvested before stay
+  until their TTL.
+
 The app resolves the authenticated session through `app/core/fluid_memory.py`.
 Installation-owner facts stay at `<data_dir>/fluid/skills`; API users have
 separate hashed roots below `.users/`, with the owner recorded in the document.
@@ -376,9 +420,9 @@ are detected by their causal clocks rather than timestamps. Unresolved
 contradictions are withheld; a user correction can resolve them against a known
 revision. An older replica cannot overwrite a causally newer value.
 
-Environment facts the harness harvests from tool output (whether pytest is
-importable from the worker's Python and where, missing `node_modules`, the
-browser host) describe one worker. They are stored per worker: each carries
+Environment facts the harness used to harvest from tool output (whether pytest
+is importable from the worker's Python and where, missing `node_modules`, the
+browser host; no longer written, see Durable facts) describe one worker. They are stored per worker: each carries
 the store ID of the worker that harvested it, a harvest matches only that
 worker's own copy, and each worker's copy of a key is its own slot, so two
 workers no longer rewrite one shared fact with their own paths. They replicate
