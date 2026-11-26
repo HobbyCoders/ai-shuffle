@@ -17,8 +17,10 @@ model.
   it ("still failing on PR #12");
 * the fact is anchored to the work: its when-line names a PR, issue or work
   branch ("When working on PR #1824"; a named branch such as main may be
-  lasting context there, so it does not count), or a clause opens with "on
-  branch <name>". Then any progress wording in the fact counts.
+  lasting context there, so it does not count), or a clause of the text opens
+  with "on branch <name>" ("on branch main", "on branch docs/x"; an unquoted
+  single name only for main, master, develop or trunk). Then any progress
+  wording in the fact counts.
 
 A generic condition in a rule ("never merge while a migration is in progress;
 see issue #88") is none of these, so it saves.
@@ -39,14 +41,14 @@ _WORK = (
     r"|(?<![\w/.-])(?:feat|feature|fix|bugfix|hotfix|chore|refactor|wip)/[A-Za-z0-9][\w.-]*)"
 )
 # Any branch named as one: "branch docs/update-readme", "branch fix-login", a
-# quoted "branch `main`", and "on branch <name>" with a single name only if it
-# is a default branch or a ; or : follows it ("on branch creation" is prose).
-# A named branch may be lasting context ("when deploying on branch main"), so
-# it never anchors a fact from the when-line alone.
+# quoted "branch `main`", and "on branch" with an unquoted single name only
+# for a default branch ("on branch creation" is prose). A named branch may be
+# lasting context ("when deploying on branch main"), so it never anchors a
+# fact from the when-line.
 _NAMED = (
     r"(?:\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
     r"|\bbranch\s+[`'\"][A-Za-z0-9][\w./-]*"
-    r"|\bon\s+branch\s+(?:(?:main|master|develop|trunk)\b|[A-Za-z0-9][\w.-]*(?=\s*[;:])))"
+    r"|\bon\s+branch\s+(?:main|master|develop|trunk)\b)"
 )
 _REF = "(?:" + _WORK + "|" + _NAMED + ")"
 _REFERENCE = re.compile(_REF, re.IGNORECASE)
@@ -72,7 +74,7 @@ _OPEN = r"[\s(\[`'\"]+"
 # What makes the reference the subject of the status that follows it: a
 # be-verb, "remains", or "still" opening the status. Proximity alone is not.
 _SUBJECT = (r"(?:\s+(?:is|are|was|were|remains?)\s+(?:(?:now|currently|still)\s+)?"
-            r"|\s+(?=still\b|waiting\b))")
+            r"|\s+(?=still\b))")
 
 _ABOUT = [re.compile(p, re.IGNORECASE) for p in (
     # "Issue #88 is in progress", "pull/301 is not yet merged", "PR 12 still failing".
@@ -96,11 +98,10 @@ _ACROSS = [re.compile(p, re.IGNORECASE) for p in (
 
 # The fact itself is about the work: "On branch docs/x; next step is ...".
 # The lookahead keeps "on branch <name>" (part of the reference) and
-# "on <reference>" both anchored to a clause that opens with "on". Whole
-# fields, so the ; or : after a single branch name is still there to see.
+# "on <reference>" both anchored to a clause that opens with "on". Only the
+# text: the when-line anchors only through a work reference.
 _ON_WORK = re.compile(
-    r"(?:^|[;!?]|[.:](?=\s))\s*"
-    r"(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?(?=on\b)(?:on\s+)?" + _REF,
+    r"^(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?(?=on\b)(?:on\s+)?" + _REF,
     re.IGNORECASE)
 
 # Any progress wording, counted once the fact is anchored to a reference.
@@ -132,8 +133,8 @@ def task_progress(text: object, when: object = None) -> str | None:
             (m for clause in _clauses(part) for p in _ABOUT if (m := p.search(clause))), None)
         if match:
             return match.group("p")
-    anchored = (isinstance(when, str) and _WORK_REFERENCE.search(when)) or any(
-        _ON_WORK.search(part) for part in fields)
+    anchored = (isinstance(when, str) and _WORK_REFERENCE.search(when)) or (
+        isinstance(text, str) and any(_ON_WORK.search(clause) for clause in _clauses(text)))
     if anchored:
         match = _PROGRESS.search(" ".join(fields))
         if match:

@@ -32,11 +32,11 @@ Remember guards what it writes (Memory v3 phase 2a):
   joined by a be-verb, "remains", "still" or a colon ("Issue #88 is in
   progress", "PR #1824: next step is…"), a continuation names it
   ("Continuing PR #1824"), or the fact is anchored to it (its when-line names
-  a PR, issue or work branch such as `feat/x`, or a clause opens "on branch
-  <name>"). A named branch in the when-line ("When deploying on branch main")
-  is lasting context and anchors nothing, and an unquoted single name after
-  "on branch" counts only if it is main, master, develop or trunk or a `;` or
-  `:` follows it, so "On branch creation, …" is prose. Nearness alone does not
+  a PR, issue or work branch such as `feat/x`, or a clause of the text opens
+  "on branch <name>"). A named branch in the when-line ("When deploying on
+  branch main", "On branch main") is lasting context and anchors nothing, and
+  an unquoted single name after "on branch" counts only if it is main, master,
+  develop or trunk, so "On branch creation, …" is prose. Nearness alone does not
   count, so a lasting rule that cites a PR ("Since PR #1909 the pre-push hook
   refuses…", "never merge while a migration is in progress; see issue #88")
   saves. Remember passes the check to `FactStore.save` as `check(text, when)`,
