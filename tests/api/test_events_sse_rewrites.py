@@ -330,7 +330,14 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
         await stream.aclose()
 
 
-async def test_empty_client_does_not_adopt_an_older_readers_probe(mock_db, gw, monkeypatch):
+@pytest.mark.parametrize("windows_clock", [False, True], ids=["fine-clock", "windows-clock"])
+async def test_empty_client_does_not_adopt_an_older_readers_probe(mock_db, gw, monkeypatch, windows_clock):
+    if windows_clock:
+        # Windows' event loop treats a timer due within its 15.6 ms clock tick
+        # as due now, so the keepalive below times out at once. The client then
+        # reads the replaced log itself before the shared reader's older check
+        # arrives, and that check must not reset it.
+        monkeypatch.setattr(asyncio.get_running_loop(), "_clock_resolution", 0.015625)
     sid = "empty-client-existing-reader"
     warm, _ = await warm_reader(sid)
     mirror_rows(sid, 0, replace=True)

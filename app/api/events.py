@@ -767,8 +767,17 @@ async def event_stream(
                     # can choose this empty stream's identity.
                     continue
                 if item.epoch != log_epoch:
-                    yield _reset_frame("epoch", item.epoch)
-                    return
+                    # The shared reader may have probed the log before this
+                    # client's own read moved it to a newer one. Only the
+                    # database decides: a stale probe never resets a current
+                    # client, and the reader's close still rejoins it.
+                    checked_epoch, reset = await asyncio.to_thread(
+                        _resume_check, session_id, cursor, log_epoch
+                    )
+                    if reset or checked_epoch != log_epoch:
+                        yield _reset_frame(reset or "epoch", checked_epoch)
+                        return
+                    continue
                 if item.reset:
                     yield _reset_frame(item.reset, item.epoch)
                     return
