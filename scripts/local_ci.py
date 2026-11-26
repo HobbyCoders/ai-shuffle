@@ -1035,7 +1035,8 @@ def attest_preflight(revision: str, resumed: bool = False) -> None:
     attest_update_reach(revision)
 
 
-REWRITE_LINE_ENDINGS = "git rm -r -q --cached . && git reset -q --hard HEAD"
+#: Two commands, run one after the other from the repository root (any shell).
+REWRITE_LINE_ENDINGS = ("git rm -r -q --cached .", "git reset -q --hard HEAD")
 
 
 def stale_line_endings() -> list[str]:
@@ -1057,10 +1058,17 @@ def line_endings_preflight() -> None:
     if os.name != "nt":
         return
     stale = stale_line_endings()
-    if stale:
-        raise Failure(f"{len(stale)} tracked files (e.g. {stale[0]}) still have the CRLF line endings of a "
-                      f"checkout older than the repo-wide LF rule. Rewrite them once with "
-                      f"`{REWRITE_LINE_ENDINGS}` (untracked files such as .venv stay), then run again.")
+    if not stale:
+        return
+    problem = (f"{len(stale)} tracked files (e.g. {stale[0]}) still have the CRLF line endings of a "
+               f"checkout older than the repo-wide LF rule.")
+    # Content diff, not status: a CRLF-only difference is not a change once normalized.
+    if git("diff", "--name-only", "HEAD"):
+        raise Failure(f"{problem} This checkout also has uncommitted changes, which rewriting it would "
+                      f"discard: commit or save them first, then run again for the rewrite command.")
+    first, second = REWRITE_LINE_ENDINGS
+    raise Failure(f"{problem} Rewrite them once from the repository root with `{first}` and then "
+                  f"`{second}` (nothing is uncommitted; untracked files such as .venv stay), then run again.")
 
 
 def cmd_check(args) -> int:

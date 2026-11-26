@@ -426,11 +426,24 @@ def test_a_windows_checkout_with_old_crlf_files_is_refused_with_the_fix(monkeypa
         "i/lf    w/lf    attr/text=auto eol=lf \tapp/main.py",
         "i/lf    w/crlf  attr/text eol=crlf    \trun_local.bat",
     ])
-    monkeypatch.setattr(local_ci, "git", lambda *args: listing if args == ("ls-files", "--eol") else "")
+    edited = {"value": ""}
+
+    def git(*args):
+        if args == ("ls-files", "--eol"):
+            return listing
+        return edited["value"] if args == ("diff", "--name-only", "HEAD") else ""
+
+    monkeypatch.setattr(local_ci, "git", git)
     assert local_ci.stale_line_endings() == ["frontend/src/lib/components/chat/ChatInput.svelte"]
     monkeypatch.setattr(local_ci.os, "name", "nt")
-    with pytest.raises(local_ci.Failure, match=re.escape(local_ci.REWRITE_LINE_ENDINGS)):
+    with pytest.raises(local_ci.Failure) as clean:
         local_ci.line_endings_preflight()
+    assert all(command in str(clean.value) for command in local_ci.REWRITE_LINE_ENDINGS)
+    # Uncommitted work: never offer the hard reset that would discard it.
+    edited["value"] = "app/main.py"
+    with pytest.raises(local_ci.Failure, match="uncommitted changes") as dirty:
+        local_ci.line_endings_preflight()
+    assert "reset" not in str(dirty.value)
     monkeypatch.setattr(local_ci.os, "name", "posix")
     local_ci.line_endings_preflight()
 
