@@ -103,7 +103,8 @@ class RobolectricDependenciesTests(unittest.TestCase):
         play = yaml.load((ROOT / ".github/workflows/android-play.yml").read_text(), Loader=yaml.BaseLoader)
         bundle = play["jobs"]["bundle"]["steps"]
         self.assertFalse([s for s in bundle if s.get("uses", "").startswith(("actions/cache@", "actions/cache/save@"))])
-        play_restore = next(s for s in bundle if s.get("uses") == "actions/cache/restore@v4")
+        play_restore = next(s for s in bundle if s.get("name") == "Restore pinned Robolectric jars")
+        self.assertEqual(play_restore["uses"], "actions/cache/restore@v4")
         build = next(s for s in bundle if s.get("name") == "Test and build signed bundle")
         self.assertEqual(play_restore["with"], {"path": path, "key": key})
         self.assertEqual(build["env"]["ROBOLECTRIC_JAR_CACHE"], path)
@@ -112,19 +113,40 @@ class RobolectricDependenciesTests(unittest.TestCase):
         self.assertIn('coordinate.startsWith("android-all-instrumented:")', script)
 
     def test_android_tests_have_their_own_gradle_cache_key(self):
-        # setup-java never re-saves an existing key; sharing the default key let the
-        # minified build (no unit tests or lint) save it first.
-        def setup_java(filename, job):
-            steps = yaml.load((ROOT / ".github/workflows" / filename).read_text(),
-                              Loader=yaml.BaseLoader)["jobs"][job]["steps"]
-            return next(s for s in steps if s.get("uses", "").startswith("actions/setup-java@"))["with"]
-        android = setup_java("android.yml", "build")
-        self.assertEqual(android["cache"], "gradle")
-        self.assertEqual(android["cache-dependency-path"].split(),
-                         ["android/**/*.gradle*", "android/**/gradle-wrapper.properties", "android/gradle.properties"])
-        for filename, job in (("ci-android-minified.yml", "build"), ("android-play.yml", "bundle")):
-            other = setup_java(filename, job)
-            self.assertNotEqual(other.get("cache-dependency-path"), android["cache-dependency-path"], filename)
+        # Sharing setup-java's default key let the minified build (no unit tests
+        # or lint) save it first. setup-java also has no fallback key, so the
+        # version bump in every release PR started cold and Maven Central
+        # answered 429 (issue #1041): a miss must fall back to the newest entry.
+        def steps(filename, job):
+            return yaml.load((ROOT / ".github/workflows" / filename).read_text(),
+                             Loader=yaml.BaseLoader)["jobs"][job]["steps"]
+        def setup_java(job_steps):
+            return next(s for s in job_steps if s.get("uses", "").startswith("actions/setup-java@"))["with"]
+        prefix = "gradle-android-tests-${{ runner.os }}-"
+        cache = {
+            "path": "~/.gradle/caches\n~/.gradle/wrapper\n",
+            "key": prefix + "${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', "
+                            "'android/gradle.properties') }}",
+            "restore-keys": prefix + "\n",
+        }
+        android = steps("android.yml", "build")
+        self.assertNotIn("cache", setup_java(android))
+        gradle = next(s for s in android if s.get("name") == "Gradle dependency cache")
+        self.assertEqual(gradle["uses"], "actions/cache@v4")  # Saves only when the job succeeds.
+        self.assertEqual(gradle["with"], cache)
+        self.assertLess(android.index(gradle), android.index(
+            next(s for s in android if s.get("name") == "Resolve pinned Robolectric dependencies")))
+        # The signing job reads the same entries and never saves one.
+        play = steps("android-play.yml", "bundle")
+        self.assertNotIn("cache", setup_java(play))
+        play_gradle = next(s for s in play if s.get("name") == "Restore Gradle dependency cache")
+        self.assertEqual(play_gradle["uses"], "actions/cache/restore@v4")
+        self.assertEqual(play_gradle["with"], cache)
+        self.assertLess(play.index(play_gradle), play.index(
+            next(s for s in play if s.get("name") == "Test and build signed bundle")))
+        # The minified build keeps setup-java's own key, so it never saves this one.
+        minified = steps("ci-android-minified.yml", "build")
+        self.assertFalse([s for s in minified if prefix in s.get("with", {}).get("key", "")])
 
     def test_pr_checks_also_run_unit_tests_with_push_on(self):
         # Release builds carry Firebase config (push on); PR builds do not.

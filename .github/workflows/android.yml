@@ -75,17 +75,26 @@ jobs:
           distribution: temurin
           # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
           java-version: '21'
-          cache: gradle
-          # Its own key: setup-java never re-saves an existing key, and with the
-          # default file list the minified build (no unit tests or lint) saved
-          # it first (run 44961909135), so every run here downloaded the test
-          # and lint classpath. Listing gradle.properties, which the default
-          # patterns miss, makes this hash differ; it is a Gradle input anyway.
-          # setup-java saves only after the whole job succeeds.
-          cache-dependency-path: |
-            android/**/*.gradle*
-            android/**/gradle-wrapper.properties
-            android/gradle.properties
+
+      # Gradle's dependency cache, with its own key prefix: the minified build
+      # (no unit tests or lint) used to save the shared setup-java key first
+      # (run 44961909135), so this job downloaded the test and lint classpath
+      # every time. setup-java has no fallback key, and every release bumps the
+      # version in app/build.gradle.kts, so each release PR started cold and
+      # fetched nativeruntime-dist-compat from Maven Central until it answered
+      # 429 (run 45727676411, issue #1041). On a miss, restore-keys takes the
+      # newest entry this prefix saved (pull requests and tags read main's);
+      # Gradle then downloads only what changed. Saved only when the job
+      # succeeds, under the exact key.
+      - name: Gradle dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-tests-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', 'android/gradle.properties') }}
+          restore-keys: |
+            gradle-android-tests-${{ runner.os }}-
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
