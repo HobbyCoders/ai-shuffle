@@ -13,39 +13,41 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Memory and learning
 
 - Saved facts reach an agent just when they apply, instead of all at the start of a chat.
-- One learner handles memories and learned behaviour rules on any provider, with a cost cap and an off switch, and its model judges conflicting memories instead of matching words.
+- One learner handles memories and learned behaviour rules on any provider, with a daily limit on learning calls and an off switch, and its model judges conflicting memories instead of matching words.
 
 ### Projects
 
 - A project page lists the project's checkouts worker by worker.
 - **Clone from GitHub** is more reliable, and the New project dialog is clearer.
-- `git@` and HTTPS addresses of the same repository make one project, and switching a project's repository applies on every worker.
+- Adding a repository from a supported Git host by its `git@` or HTTPS address now gives one project either way. Projects that were already duplicated this way stay separate. Switching a project's repository applies on every worker.
 - New chats start from the repository's real default branch, not always `main`.
 - Removing a project, deleting a group and the folder tree are safer, and a clone never reuses a stale folder.
 
 ### Chats and sessions
 
 - Message all active chats at once.
-- Fork a chat to another worker; every fork gets its own worktree.
+- Fork a chat to another worker. A fork of a chat in a Git project gets its own working copy.
 - **Watch** on a pull request has an agent follow its CI and reviews, within limits you set.
 - Design mode in the Browser panel: mark UI changes on the live page and send them to the agent.
-- Installed plugins sync between workers.
+- Plugins installed from a shareable source sync between workers.
 
 ### Agents and providers
 
 - Each Claude row has its own on/off switch, and a Claude API key runs beside the subscription.
 - Fast and Ultrafast cycle from the corner bolt on the effort card.
-- Stop and timeouts end everything they started, including process trees, MCP calls and Swarms; delegated Claude Code chats survive crashes and recovery.
-- Credentials stay out of provider errors, logs and learner evidence, and files save without being truncated.
+- Stop and timeouts clean up what they started more reliably, including process trees, MCP calls and Swarms. They cannot undo work already sent to an outside service. Delegated Claude Code chats survive crashes and recovery.
+- Known credentials and common secret formats are masked in more places, including provider errors, logs and learner evidence, and files save without being truncated.
 
 ### Desktop app
 
-- Updates skip the database copy when the database level is unchanged, and check the dependency cache and restore point faster.
-- Settings > Updates and the update button say when the latest installer brings a newer launcher than the one you run, with a link to the download.
+- **Settings → System → Updates** says when the latest installer brings a newer launcher than the one you run, with a link to the download; the update button points there.
+- After you run the 1.3.10 installer, later updates skip the database copy when the database format is unchanged, and check the dependency cache and restore point faster. An in-app update from an older installer keeps its old launcher and does not get these.
 - The usage panel no longer flashes a terminal window on Windows.
 
 ### Interface
 
+- **Export** is in the chat actions menu on desktop and phone.
+- On the phone, Controls sit on the composer's context line and the Vault is under Chat controls; a question card folds away without losing your answers.
 - Settings categories are reorganized, the sidebar keeps projects in name order with foldable groups, and the phone tab row follows the rail order.
 - The app and container start faster.
 
