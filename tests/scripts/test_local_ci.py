@@ -472,6 +472,26 @@ def test_windows_known_failures_list_is_well_formed():
     assert known.repo_id(Item()) == "fluid/tests/unit/test_x.py::TestA::test_y"
 
 
+def test_only_a_symlink_the_test_itself_makes_is_skipped_without_the_privilege():
+    sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
+
+    class NoPrivilege(OSError):  # what os.symlink raises in an unelevated Windows shell
+        winerror = 1314
+
+    def caught(code: str, filename: Path, error: type[OSError] = NoPrivilege):
+        try:
+            exec(compile(code, str(filename), "exec"), {"error": error})
+        except OSError as exc:
+            return pytest.ExceptionInfo.from_exception(exc)
+
+    raise_it = "raise error('A required privilege is not held by the client')"
+    assert known.symlink_refused_in_test_code(caught(raise_it, ROOT / "tests/api/test_example.py"))
+    # The same error from app code is a real failure: installs run unelevated.
+    assert not known.symlink_refused_in_test_code(caught(raise_it, ROOT / "app/core/example.py"))
+    assert not known.symlink_refused_in_test_code(caught(raise_it, ROOT / "tests/api/test_example.py", OSError))
+
+
 @pytest.mark.parametrize("files,expected", [
     (["app/core/deploy_status.py"], {"backend"}),
     (["fluid/fluid/engine/delegated.py"], {"fluid", "backend"}),
