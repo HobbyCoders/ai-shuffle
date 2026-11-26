@@ -116,13 +116,16 @@ await runJourney({
 			await page.locator('.doc-inline-toggle').click();
 			const toc = page.locator('.doc-inline-list nav[aria-label="On this page"]');
 			await toc.getByRole('button', { name: 'Removed', exact: true }).nth(1).click();
-			await page.waitForTimeout(800);
-			const where = await page.evaluate(() => {
+			const secondRemoved = () => {
 				const pane = document.querySelector('.docs-content')?.closest('.view-main-slot')?.getBoundingClientRect();
 				const removed = [...document.querySelectorAll('.docs-content h2, .docs-content h3')].filter((h) => h.textContent?.trim() === 'Removed');
 				const box = removed[1]?.getBoundingClientRect();
 				return { ids: removed.map((h) => h.id), inView: !!(pane && box && box.top >= pane.top - 2 && box.top < pane.top + pane.height / 2) };
-			});
+			};
+			// The smooth scroll's length grows with the changelog (about 1.5 s
+			// after 1.3.10), so wait for it to land instead of a fixed delay.
+			await page.waitForFunction(`(${secondRemoved})().inView`, null, { timeout: 5000 }).catch(() => {});
+			const where = await page.evaluate(secondRemoved);
 			expect(where.ids.length >= 2 && new Set(where.ids).size === where.ids.length, `each "Removed" has its own anchor (${JSON.stringify(where.ids)})`);
 			expect(where.inView, `the second "Removed" is at the top of the pane (${JSON.stringify(where)})`);
 		}
