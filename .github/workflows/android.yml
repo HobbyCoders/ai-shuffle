@@ -86,15 +86,20 @@ jobs:
       # newest entry this prefix saved (pull requests and tags read main's);
       # Gradle then downloads only what changed. Saved only when the job
       # succeeds, under the exact key.
+      # The second restore key is the entry setup-java saved for the same files
+      # (run 45222289026), so the first runs under this prefix start warm. It
+      # matches only because the paths are written exactly as setup-java writes
+      # them (absolute, this order): the path list is part of the cache version.
       - name: Gradle dependency cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
+            /home/runner/.gradle/caches
+            /home/runner/.gradle/wrapper
           key: gradle-android-tests-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', 'android/gradle.properties') }}
           restore-keys: |
             gradle-android-tests-${{ runner.os }}-
+            setup-java-${{ runner.os }}-x64-gradle-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', 'android/gradle.properties') }}
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3

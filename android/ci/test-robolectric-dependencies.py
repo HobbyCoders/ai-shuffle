@@ -123,11 +123,14 @@ class RobolectricDependenciesTests(unittest.TestCase):
         def setup_java(job_steps):
             return next(s for s in job_steps if s.get("uses", "").startswith("actions/setup-java@"))["with"]
         prefix = "gradle-android-tests-${{ runner.os }}-"
+        files = ("${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', "
+                 "'android/gradle.properties') }}")
         cache = {
-            "path": "~/.gradle/caches\n~/.gradle/wrapper\n",
-            "key": prefix + "${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', "
-                            "'android/gradle.properties') }}",
-            "restore-keys": prefix + "\n",
+            # Exactly setup-java's paths: the path list is part of the cache version,
+            # so the legacy setup-java entry restores only with these strings.
+            "path": "/home/runner/.gradle/caches\n/home/runner/.gradle/wrapper\n",
+            "key": prefix + files,
+            "restore-keys": prefix + "\nsetup-java-${{ runner.os }}-x64-gradle-" + files + "\n",
         }
         android = steps("android.yml", "build")
         self.assertNotIn("cache", setup_java(android))
