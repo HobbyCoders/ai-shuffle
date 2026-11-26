@@ -93,7 +93,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}
 	class FakeUpdater {
 		get current() { return { release: '1.0.2' }; }
-		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onRestartCancelled(fn) { this.restartCancelled = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
+		setPolicy() {} setBridge() {} useApplications() {} subscribe() { return () => {}; } onBeforeInstall() {} onInstallFailed(fn) { this.installFailed = fn; } onInstallGuard() {} onRestarting(fn) { this.restarting = fn; } onRestartCancelled(fn) { this.restartCancelled = fn; } onFailedStart(recovery) { this.failedStart = recovery; } onInstallerAdvice(advice) { this.installerAdvice = advice; } onInstallPrepared(prepare, discard) { this.prepared = { prepare, discard }; } start() {} stop() {}
 		async check() {}
 	}
 	let updater;

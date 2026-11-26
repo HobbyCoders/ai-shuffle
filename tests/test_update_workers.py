@@ -1427,6 +1427,46 @@ def test_snapshot_reads_a_peer_desktops_installer_hint(setup, monkeypatch):
     assert [w["remedy"] for w in workers][:2] == [None, "installer"]
 
 
+def test_the_desktop_bridge_keeps_the_installer_fields():
+    """The launcher's report reaches desktop_exchange through this model; a
+    field it does not declare is dropped before remedy() can read it."""
+    from app.api.internal import DesktopUpdateState
+    state = DesktopUpdateState(phase="error", error=FAILED_START, installer_newer=True, retry_start=False,
+                               installer_recommended=True).model_dump()
+    assert (state["installer_newer"], state["retry_start"], state["installer_recommended"]) == (True, False, True)
+    # Launchers that never report them still validate.
+    assert DesktopUpdateState(phase="idle").model_dump()["installer_recommended"] is None
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"kind": "desktop", "online": True, "phase": "idle", "installer_recommended": True}, True),
+    ({"kind": "desktop", "phase": "available", "version": "abc", "installer_recommended": True}, True),
+    ({"kind": "desktop", "online": True, "phase": "idle", "installer_recommended": False}, False),
+    ({"kind": "desktop", "online": True, "phase": "idle"}, False),
+    # Only the stronger notice when only the installer can finish the update.
+    ({"kind": "desktop", "online": True, "phase": "error", "error": NO_BUILD, "installer_recommended": True}, False),
+    ({"kind": "desktop", "online": True, "phase": "unsupported", "installer_recommended": True}, False),
+    # An offline desktop's last words are not its current state; containers have no installer.
+    ({"kind": "desktop", "online": False, "phase": "idle", "installer_recommended": True}, False),
+    ({"phase": "idle", "installer_recommended": True}, False),
+    ({"kind": "desktop", "online": True, "phase": "idle", "installer_recommended": "yes"}, False),
+])
+def test_the_installer_is_recommended_only_beside_working_in_app_updates(row, expected):
+    assert fleet.installer_recommended(row) is expected
+
+
+def test_snapshot_reports_a_recommended_installer_for_this_desktop_and_a_peer(setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(updates, "_desktop_seen", 0)
+    updates.desktop_exchange({"phase": "idle", "version": None, "installer_recommended": True})
+    remote.return_value = {"supported": True, "allow_updates": True, "kind": "desktop", "phase": "idle",
+                           "installer_recommended": True}
+    workers = asyncio.run(fleet.snapshot())["workers"]
+    assert [w["installer_recommended"] for w in workers][:2] == [True, True]
+    assert [w["remedy"] for w in workers][:2] == [None, None]
+
+
 def test_snapshot_reports_the_installer_remedy_for_this_desktop_and_a_peer(setup, monkeypatch):
     values, remote = setup
     values[updates.ALL_KEY] = "true"

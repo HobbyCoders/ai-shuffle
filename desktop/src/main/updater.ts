@@ -38,6 +38,12 @@ export interface UpdateState {
   installer_newer?: boolean | null;
   /** The offered update is one whose last first start did not finish and was put back (RETRY_MESSAGE says so). */
   retry_start?: boolean;
+  /**
+   * In-app updates work, but the installed launcher stays older than the one
+   * this version packs and the latest installer would replace it
+   * (installer-advice.ts). The web UI recommends the installer.
+   */
+  installer_recommended?: boolean;
 }
 /** The source updater's refusal of a revision whose first start failed (source-updates.ts update()). */
 export const FAILED_START = /this revision failed to start/i;
@@ -90,6 +96,7 @@ export class Updater {
   private restartCancelled: () => void = () => {};
   private prepared: { prepare: () => Promise<void>; discard: () => Promise<void> } | null = null;
   private failedStarts: FailedStartRecovery | null = null;
+  private installerAdvice: (() => Promise<boolean | null>) | null = null;
   private policy: () => Promise<boolean> = async () => true;
   private bridge: ((state: UpdateState) => Promise<Record<string, unknown>>) | null = null;
   private safeToRestart: () => Promise<boolean> = async () => false;
@@ -200,6 +207,14 @@ export class Updater {
   onInstallPrepared(prepare: () => Promise<void>, discard: () => Promise<void>): void { this.prepared = { prepare, discard }; }
   /** A check refused because an update's first start failed: retry it when the launcher put everything back. */
   onFailedStart(recovery: FailedStartRecovery): void { this.failedStarts = recovery; }
+  /** Whether to recommend the latest installer (installer-advice.ts); asked with every source update check. */
+  onInstallerAdvice(advice: () => Promise<boolean | null>): void { this.installerAdvice = advice; }
+  /** Never holds up or fails the check; an unknown answer (null) keeps the last one. */
+  private adviseInstaller(): void {
+    const advice = this.installerAdvice;
+    if (!advice) return;
+    void advice().then(value => { if (value !== null) this.set({ installer_recommended: value }); }, () => {});
+  }
   /** The check again after releasing failed starts, or null when none could be released. */
   private async retryFailedStart(error: unknown, interactive: boolean): Promise<{ result: Awaited<ReturnType<SourceUpdates['check']>>; released: string[] } | null> {
     if (!this.failedStarts || !this.applications || !FAILED_START.test(String(error))) return null;
@@ -285,6 +300,7 @@ export class Updater {
           : { phase: 'idle', version: null, percent: null, message: null, checkedAt: new Date().toISOString(), release: null, notes: null });
         return;
       }
+      this.adviseInstaller();
       let result: Awaited<ReturnType<SourceUpdates['check']>>;
       let released: string[] = [];
       try { result = await this.applications.check(undefined, interactive); }

@@ -610,3 +610,24 @@ test('#98: a failed download of a newer release keeps the staged one ready to in
  const plain = fixture(); plain.updater.useApplications(source({ download: async () => { throw Error('offline'); } }));
  await plain.updater.check(); await plain.updater.download(); assert.equal(plain.updater.current.phase, 'error');
 });
+
+test('a source check asks whether to recommend the installer and keeps the last answer when the hub is unreadable', async () => {
+ const { updater } = fixture(); const answers = [true, null, false]; let asked = 0;
+ updater.useApplications(source());
+ updater.onInstallerAdvice(async () => { asked++; return answers.shift(); });
+ const settle = () => new Promise(resolve => setImmediate(resolve));
+ await updater.check(); await settle();
+ assert.equal(asked, 1); assert.equal(updater.current.installer_recommended, true);
+ await updater.check(); await settle();
+ assert.equal(updater.current.installer_recommended, true, 'an unreadable hub keeps the last answer');
+ await updater.check(); await settle();
+ assert.equal(updater.current.installer_recommended, false);
+});
+
+test('a failing installer advice never fails the update check', async () => {
+ const { updater } = fixture();
+ updater.useApplications(source());
+ updater.onInstallerAdvice(async () => { throw new Error('offline'); });
+ await updater.check(); await new Promise(resolve => setImmediate(resolve));
+ assert.equal(updater.current.phase, 'available'); assert.equal(updater.current.installer_recommended, undefined);
+});

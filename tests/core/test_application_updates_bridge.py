@@ -213,3 +213,17 @@ def test_desktop_idle_status_drops_a_stale_in_progress_message(bridge):
     assert updates.status()["message"] is None
     updates.desktop_exchange({"phase": "checking", "message": "Checking for updates…"})
     assert updates.status()["message"] == "Checking for updates…"
+
+
+def test_desktop_status_recommends_the_installer_only_without_the_installer_remedy(bridge):
+    """Settings' own banner reads this status: it must agree with the worker list,
+    which never recommends the installer when the update already needs it."""
+    updates.desktop_exchange({"phase": "available", "version": "abc", "installer_recommended": True})
+    assert updates.status()["installer_recommended"] is True
+    updates.desktop_exchange({"phase": "error", "installer_recommended": True,
+                              "error": "This release needs a newer launcher. Install the latest AI Shuffle installer to update."})
+    assert updates.status()["installer_recommended"] is False
+    updates.desktop_exchange({"phase": "unsupported", "installer_recommended": True})
+    assert updates.status()["installer_recommended"] is False
+    updates.desktop_exchange({"phase": "idle"})
+    assert updates.status()["installer_recommended"] is False
