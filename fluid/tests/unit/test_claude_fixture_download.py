@@ -1,4 +1,5 @@
 """Stock CLI fixtures are pinned, checksum-verified, and never overwrite files."""
+import os
 import hashlib
 import io
 import json
@@ -40,7 +41,8 @@ def test_fixture_is_verified_and_executable(tmp_path, monkeypatch):
     target = tmp_path / "claude"
     downloader.fetch("2.1.314", target)
     assert target.read_bytes() == content
-    assert target.stat().st_mode & 0o700 == 0o700
+    # Windows has no execute bit; there the file only has to be readable.
+    assert os.name == "nt" or target.stat().st_mode & 0o700 == 0o700
     assert seen == [f"{downloader.BASE}/2.1.314/manifest.json",
                     f"{downloader.BASE}/2.1.314/linux-x64/claude"]
 

@@ -495,7 +495,8 @@ def test_head_and_tail_reads_stay_inside_the_byte_budget(tmp_path, monkeypatch) 
         return Counting(real_open(self, *args, **kwargs), self.name)
 
     proj = _mk_project(tmp_path)
-    (proj / "AGENTS.md").write_text("line\n" * 60_000, encoding="utf-8")
+    # Bytes, not text: Windows text mode would write \r\n and shift the budget.
+    (proj / "AGENTS.md").write_bytes(b"line\n" * 60_000)
     (proj / "small.md").write_text("a" * 1_000, encoding="utf-8")
     monkeypatch.setattr(Path, "open", counting_open)
     head, tail = instructions._read_head_tail(proj / "AGENTS.md", 1_000)

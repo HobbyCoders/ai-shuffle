@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import os
 
 import pytest
@@ -234,6 +235,7 @@ def test_credential_ask_resolves_relative_paths_against_the_session_cwd(
     assert evaluate_rules(rules, "Read", {"file_path": "settings "}, cwd=str(elsewhere)) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink resolution in the cwd; Windows needs elevation to create links")
 def test_symlink_loop_does_not_break_the_rule_check(tmp_path) -> None:
     _symlink_or_skip(tmp_path / "loop ", tmp_path / "loop ")
     assert evaluate_rules(_credential_rules(), "Read", {"file_path": "loop "}, cwd=str(tmp_path)) is None
@@ -244,6 +246,7 @@ def test_symlink_loop_does_not_break_the_rule_check(tmp_path) -> None:
     assert not allow.matches("Read", {"file_path": "loop /x"}, cwd=str(tmp_path))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink resolution in the cwd; Windows needs elevation to create links")
 def test_credential_ask_follows_a_link_before_dotdot_in_the_cwd(tmp_path) -> None:
     """The tool joins the cwd as given and resolves afterwards, so in
     ``work/link/..`` the ``..`` leaves the link's target, not ``work``."""
@@ -300,6 +303,7 @@ def test_allow_rule_has_no_relative_form_when_the_cwd_is_not_canonical(tmp_path)
     assert allow.matches("Read", {"file_path": "granted/report"}, cwd=str(checkout))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink resolution in the cwd; Windows needs elevation to create links")
 def test_ask_rule_keeps_the_resolved_path_when_it_cannot_be_reached(
     tmp_path, monkeypatch
 ) -> None:
