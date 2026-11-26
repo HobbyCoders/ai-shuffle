@@ -228,7 +228,12 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			// that fits. Compute candidates without committing/pinning twice.
 			next = endingRange(startingRange(previous.start - 1).end);
 		}
-		return commit(next.start, next.end, reading);
+		const paged = commit(next.start, next.end, reading);
+		// The budget can trim the admitted older row straight back off to keep the
+		// reading key. Dropping only newer rows is not paging: the next streaming
+		// reprice re-adds them, and the slice then flips every frame at the top.
+		if (preserveReading && paged.start >= previous.start) range = previous;
+		return range;
 	}
 	return {
 		cap,

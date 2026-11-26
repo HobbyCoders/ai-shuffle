@@ -2,7 +2,7 @@
 // keyed anchor when a smaller overlap fits; disjoint shifts must align their
 // navigation boundary, never reuse the evicted DOM's absolute scrollTop.
 import { runJourney } from './runner.mjs';
-import { expect, waitChatOpen } from './lib/app.mjs';
+import { expect, openNewChat, typeAndSend, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const LOG = '[role="log"][aria-label="Conversation messages"]';
@@ -87,5 +87,76 @@ await runJourney({
 			expect(newer.indices.length <= 120 && newer.nodes < 12000, 'boundary recovery does not expand the mounted DOM budget');
 		},
 		allow: DEV_INSTANCE_NOISE
-	}))
+	})).concat([{
+		// Scrolling up to the top of the mounted slice while a later reply streams.
+		// Two rich replies cannot share the content budget, so automatic paging at
+		// the top cannot admit the older one beside the reply being read. It used
+		// to drop only the newer rows; the next streamed token put them back, and
+		// the slice with its Show newer / Jump to latest controls flipped per frame.
+		name: 'streaming-top-edge-holds',
+		async setup({ page, status, variant }) {
+			await openNewChat({ page, status, variant });
+			for (const messagesAtLeast of [2, 4]) {
+				await typeAndSend(page, 'Write a rich reply. [script:reader-growth tps=0 latency_ms=0]');
+				await waitTurnSettled(page, { messagesAtLeast, text: 'GROWING_READER_END', hold: 250 });
+			}
+			await typeAndSend(page, 'Keep streaming while I scroll up. [script:long tps=12 latency_ms=0]');
+			await page.getByRole('button', { name: /^Stop/ }).waitFor();
+			await page.waitForFunction(selector => {
+				const last = [...document.querySelectorAll(`${selector} [data-transcript-index]`)].at(-1);
+				return Number(last?.dataset.transcriptIndex) >= 4 && last.textContent.trim().length > 200;
+			}, LOG, { timeout: 30_000 });
+		},
+		async act({ page, mark, log }) {
+			await mark('scroll up through the earlier rich reply while the later one streams');
+			try {
+				await page.evaluate(selector => {
+					const log = document.querySelector(selector);
+					const frames = window.__topEdgeFrames = [];
+					window.__topEdgeSampling = true;
+					const sample = () => {
+						if (!window.__topEdgeSampling) return;
+						frames.push([...log.querySelectorAll('[data-transcript-index]')].map(row => row.dataset.transcriptIndex).join(','));
+						requestAnimationFrame(sample);
+					};
+					requestAnimationFrame(sample);
+				}, LOG);
+				// Wheel up like a reader, in small steps, until the first mounted row
+				// is on screen, then keep pushing against that edge for a while.
+				await page.locator(LOG).hover();
+				const firstRowTop = () => page.locator(LOG).evaluate(log =>
+					log.querySelector('[data-transcript-index]').getBoundingClientRect().top - log.getBoundingClientRect().top);
+				let steps = 0;
+				while (steps < 300 && await firstRowTop() < 0) {
+					await page.mouse.wheel(0, -200);
+					await page.waitForTimeout(30);
+					steps++;
+				}
+				for (let i = 0; i < 30; i++) {
+					await page.mouse.wheel(0, -40);
+					await page.waitForTimeout(50);
+				}
+				const run = await page.evaluate(() => {
+					window.__topEdgeSampling = false;
+					const ranges = window.__topEdgeFrames.filter((range, i, all) => !i || range !== all[i - 1]);
+					return {
+						frames: window.__topEdgeFrames.length, ranges,
+						// Paging toward older rows moves one way; returning to a range
+						// already left is the frame-by-frame flip.
+						revisits: ranges.filter((range, i) => ranges.slice(0, i).includes(range)).length,
+						streaming: [...document.querySelectorAll('button')].some(button => /^Stop/.test(button.getAttribute('aria-label') || button.textContent.trim()))
+					};
+				});
+				log(`scroll up ${steps} steps: ${JSON.stringify({ ...run, ranges: run.ranges.slice(0, 12) })}`);
+				const firstStart = Number(run.ranges[0].split(',')[0]), lastStart = Number(run.ranges.at(-1).split(',')[0]);
+				expect(run.streaming, 'the later reply was still streaming at the end');
+				expect(firstStart > 0 && lastStart < firstStart, `scrolling up admitted older rows (start ${firstStart} -> ${lastStart})`);
+				expect(run.revisits === 0, `the mounted slice never flips back while the reader scrolls up (${run.ranges.length} distinct steps, ${run.revisits} revisits)`);
+			} finally {
+				const stop = page.getByRole('button', { name: /^Stop/ });
+				if (await stop.isVisible()) await stop.click();
+			}
+		},
+		allow: DEV_INSTANCE_NOISE
+	}])
 });
