@@ -75,7 +75,11 @@ def sign_ins(client, tmp_path, monkeypatch):
     base = tmp_path / ".claude"
     (base / "projects").mkdir(parents=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(base))
-    monkeypatch.setattr(claude_cli_home.sys, "platform", "linux")
+    # Saved sign-ins are off on macOS, so a Mac runs the Linux path. Windows
+    # keeps its own: faking Linux there makes directory symlinks, which a
+    # Windows account without Developer Mode may not create (WinError 1314).
+    if claude_cli_home.sys.platform == "darwin":
+        monkeypatch.setattr(claude_cli_home.sys, "platform", "linux")
     monkeypatch.setattr(claude_cli_home, "root", lambda: tmp_path / "logins")
     values = {}
     for name in ("get_system_setting", "get_system_setting_cached"):
