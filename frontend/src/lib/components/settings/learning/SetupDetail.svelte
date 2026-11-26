@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * Learner setup: the on/off switch, the daily call limit and the model it
-	 * runs on. Both settings are the owner policy, shared with every worker.
+	 * runs on (each chat's own model and effort; the latest pass's model is
+	 * shown). Both settings are the owner policy, shared with every worker.
 	 * Off means no learning calls at all; saved rules and memories still apply.
 	 */
 	import { flashSaved } from '$lib/settings/save-status.svelte';
@@ -11,7 +12,6 @@
 	import Switch from '../rows/Switch.svelte';
 	import NumberField from '../rows/NumberField.svelte';
 	import Meter from '../rows/Meter.svelte';
-	import LinkValue from '../rows/LinkValue.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { Power } from 'lucide-svelte';
@@ -79,13 +79,11 @@
 			<RowGroup title="Model">
 				<SettingRow
 					label="Runs on"
-					hint={setup.provider ? `${setup.provider} · ${setup.billing === 'subscription' ? 'flat-rate subscription' : 'pay per use'}` : 'Your Text generation model'}
+					hint={setup.model
+						? `Same model and effort as the chat it learns from · Last pass: ${setup.model}`
+						: 'Same model and effort as the chat it learns from'}
 				>
-					{#if setup.model}
-						<LinkValue label={setup.model} mono target={{ category: 'models', item: 'text' }} ariaLabel="Change the Text generation model" />
-					{:else}
-						<LinkValue label="Choose a model" target={{ category: 'models', item: 'text' }} />
-					{/if}
+					<ValueText value="Each chat’s model" />
 				</SettingRow>
 				<SettingRow label="Reads per pass" hint={setup.billing === 'subscription' ? 'Larger excerpts on a flat-rate subscription' : 'Capped small on pay-per-use providers'}>
 					<ValueText value={`Up to ~${Math.round(setup.pass_chars / 4000).toLocaleString()}k tokens`} />

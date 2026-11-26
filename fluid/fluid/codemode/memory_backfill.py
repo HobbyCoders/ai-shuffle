@@ -119,7 +119,7 @@ async def run(synth: Any, *, limit: int = BATCH_SIZE) -> Result:
                 return result
             now = time.time()
             if (now < float(store.backfill_backoff().get("until", 0))
-                    or now < float(store.learner_backoff(synth._model).get("until", 0))
+                    or now < float(store.learner_backoff(synth.backoff_key()).get("until", 0))
                     or now < store.consolidation_retry_at()):
                 return result
             path = store.root / STATE_FILE

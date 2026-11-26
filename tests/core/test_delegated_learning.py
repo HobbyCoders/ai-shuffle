@@ -82,36 +82,60 @@ class FakeInference:
 
 
 class _Learner:
-    """Records which provider binding the adapter built the learner client for."""
+    """Records the learner's model calls: the native client the adapter built
+    (and its binding), and the generation-helper calls a Claude Code
+    session's passes make (``helper``: prompt, model, effort)."""
 
     def __init__(self, monkeypatch, reply=None) -> None:
+        from app.api import generation
+
         self.client = FakeInference(reply or _reply("NO_CHANGES"))
         self.built: list[tuple[str, dict]] = []
+        self.helper: list[tuple[str, Any, Any]] = []
+        text = "".join(
+            c.payload["text"] for c in (reply or _reply("NO_CHANGES"))(None) if c.kind == "text_delta"
+        )
 
         async def build(kind, options):
             self.built.append((kind, dict(options.extra), options.model))
             return self.client, None
 
+        async def generate(prompt, model=None, timeout_seconds=None, effort=None):
+            self.helper.append((prompt, model, effort))
+            return text
+
         monkeypatch.setattr(ha, "_build_provider_client", build)
+        monkeypatch.setattr(generation, "generate_with_claude", generate)
 
 
-def _text_generation(monkeypatch, config: dict | None = CHATGPT_TEXT_GENERATION,
-                     rows: dict | None = None, window: int | None = None) -> list:
-    """Bind the owner's Text Generation model (Settings > Default models).
-    ``rows`` maps provider ids to their (type, auth mode, dialect) shape."""
+def _shapes(monkeypatch, rows: dict | None = None) -> None:
+    """``rows`` maps provider ids to their (type, auth mode, dialect) shape."""
+    shapes = {"row-chatgpt": ("chatgpt", "chatgpt", None), **(rows or {})}
+    monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: shapes.get(pid, (None, None, None)))
+
+
+def _text_generation_unused(monkeypatch) -> list:
+    """Bind a Text Generation model the learner must never read."""
     from app.core import generation_options
 
     reads: list = []
-    shapes = {"row-chatgpt": ("chatgpt", "chatgpt", None), **(rows or {})}
 
     def read():
         reads.append(True)
-        return dict(config or {"model": None, "provider": None})
+        return dict(CHATGPT_TEXT_GENERATION)
 
     monkeypatch.setattr(generation_options, "text_generation_config", read)
-    monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: shapes.get(pid, (None, None, None)))
-    monkeypatch.setattr(ha, "_provider_row_window", lambda pid, model: window)
     return reads
+
+
+def _no_learner(monkeypatch) -> None:
+    monkeypatch.setattr(ha, "_learner_target", lambda options, owner: None)
+
+
+def _claude_billing(monkeypatch, mode: str | None) -> None:
+    from app.core import usage_attribution
+
+    monkeypatch.setattr(usage_attribution, "claude_billing", lambda: mode)
 
 
 def _store() -> SkillStore:
@@ -191,7 +215,7 @@ class Run:
 
 @pytest.mark.asyncio
 async def test_a_claude_turn_journals_user_tool_friction_and_assistant_records(monkeypatch, tmp_path):
-    _text_generation(monkeypatch, None)  # no learner: the journal is still kept
+    _no_learner(monkeypatch)  # no learner: the journal is still kept
     skill = _write_skill(tmp_path / "home")
     run = Run(tmp_path, [_learning_turn(tmp_path, skill)])
     async with run:
@@ -238,7 +262,6 @@ async def test_a_claude_turn_journals_user_tool_friction_and_assistant_records(m
 @pytest.mark.asyncio
 async def test_learning_off_builds_no_journal(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "fluid_continual", False)
-    _text_generation(monkeypatch)
     run = Run(tmp_path, [[{"op": "text", "text": "hi"}, {"op": "result"}]])
     async with run:
         await run.turn("hello")
@@ -248,7 +271,6 @@ async def test_learning_off_builds_no_journal(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_an_auxiliary_request_builds_no_journal(monkeypatch, tmp_path):
-    _text_generation(monkeypatch)
     adapter = ha.HarnessAdapter()
     adapter._options = SessionOptions(model="opus", extra={"assistant_proactive": {"kind": "x"}})
     assert await adapter._delegated_journal(adapter._options, "ses_x") == (None, None)
@@ -267,49 +289,52 @@ def _seed_backlog(store: SkillStore, n: int = 24) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_finished_reply_runs_a_learner_pass_on_the_text_generation_model(monkeypatch, tmp_path):
+async def test_a_finished_reply_runs_a_learner_pass_on_the_sessions_model_and_effort(monkeypatch, tmp_path):
     learner = _Learner(monkeypatch, _reply(
         '<memory scope="project">The team deploys with npm test first.</memory>'
     ))
-    reads = _text_generation(monkeypatch)
+    reads = _text_generation_unused(monkeypatch)
+    _claude_billing(monkeypatch, "subscription")
     store = _store()
     _seed_backlog(store)
     run = Run(tmp_path, [[{"op": "text", "text": "Done."}, {"op": "result"}]])
+    run.options.effort = "high"
     async with run:
         synthesizer = run.adapter.engine._journal._synthesizer
-        assert synthesizer is not None and synthesizer._model == "gpt-sub"
+        assert synthesizer is not None and synthesizer._model == "opus"
         # Scoped and announced as on the native leg: the project key, the
         # session model's guidance channel, and the engine's own bus.
         assert synthesizer._project == project_key_for(str(tmp_path))
         assert synthesizer._session_model == "opus" and synthesizer._on_change is not None
         assert run.adapter.engine.bus is run.adapter._continual_bus
-        # A subscription row's passes get the subscription default budget.
+        # The CLI on a Claude subscription: the subscription default budget.
         assert synthesizer._budget() == (200, 8, "subscription_default")
-        # The client waits for a pass: nothing was built at connect.
-        assert learner.built == []
+        # The owner raises the chat's effort mid-chat (set_run_settings
+        # writes the session options): the next pass follows it.
+        run.options.effort = "max"
         await run.turn("Remember we always run npm test before deploying")
         if synthesizer._task is not None:
             await synthesizer._task
 
-    assert reads
-    assert learner.built == [("openai_responses", {
-        "provider_id": "row-chatgpt", "provider_type": "chatgpt", "provider_auth_mode": "chatgpt",
-    }, "gpt-sub")]
+    # Never the Text Generation model, and no native client: the CLI session's
+    # passes run through the generation helper on the chat's own binding.
+    assert reads == [] and learner.built == []
+    assert learner.helper and {(m, e) for _, m, e in learner.helper} == {("opus", "max")}
     # A pass reads one session's entries at a time: the earlier backlog, then
-    # this session's turn (a due curation pass may follow on the same client).
-    prompts = [r.messages[0].content[0].text for r in learner.client.requests]
+    # this session's turn (a due curation pass may follow).
+    prompts = [p for p, _, _ in learner.helper]
     # The line names the family the user was talking to (the session's opus).
     assert any("[user to claude] Remember we always run npm test before deploying" in p for p in prompts)
     assert not any("<system-reminder>" in p for p in prompts)
     # Every call was claimed from the store's shared daily budget.
-    assert store._facts.inference_budget()["calls"] == len(learner.client.requests)
+    assert store._facts.inference_budget()["calls"] == len(learner.helper)
     assert any("npm test first" in m.text for m in store.memories())
 
 
 @pytest.mark.asyncio
 async def test_a_spent_daily_budget_stops_delegated_passes_too(monkeypatch, tmp_path):
     learner = _Learner(monkeypatch)
-    _text_generation(monkeypatch)
+    _claude_billing(monkeypatch, "subscription")
     store = _store()
     _seed_backlog(store)
     # Other sessions on this store spent the day's synthesis share, at the
@@ -320,65 +345,113 @@ async def test_a_spent_daily_budget_stops_delegated_passes_too(monkeypatch, tmp_
     run = Run(tmp_path, [[{"op": "text", "text": "Done."}, {"op": "result"}]])
     async with run:
         await run.turn("hello")
-    assert learner.client.requests == []
+    assert learner.client.requests == [] and learner.helper == []
 
 
 @pytest.mark.asyncio
 async def test_no_usable_learner_provider_keeps_the_journal_for_a_later_pass(monkeypatch, tmp_path):
     learner = _Learner(monkeypatch)
-    _text_generation(monkeypatch, None)
+    _no_learner(monkeypatch)
     store = _store()
     _seed_backlog(store)
     run = Run(tmp_path, [[{"op": "text", "text": "Done."}, {"op": "result"}]])
     async with run:
         await run.turn("hello")
-    assert learner.built == [] and learner.client.requests == []
+    assert learner.built == [] and learner.client.requests == [] and learner.helper == []
     assert store.synth_cursor() == 0
     assert [e["kind"] for e in _journal(store)][-2:] == ["user", "assistant"]
 
 
-def test_the_owners_learner_runs_on_the_text_generation_model(monkeypatch):
-    """Whatever the session runs on, the owner's passes use the Text
-    Generation binding: a row a native client can call directly."""
-    _text_generation(monkeypatch, window=272_000)
-    options = SessionOptions(model="opus", extra={
+def test_the_owners_learner_runs_on_the_sessions_native_row_model_and_effort(monkeypatch):
+    """A session on a row a native client can call: the pass calls that row
+    with the chat's own model, sized for its window, at the chat's current
+    effort. Never the Text Generation binding."""
+    reads = _text_generation_unused(monkeypatch)
+    monkeypatch.setattr(ha, "_native_context_window", lambda kind, options: 272_000)
+    options = SessionOptions(model="opus", effort="high", extra={
         "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
     })
     target = ha._learner_target(options, "local")
-    assert (target.kind, target.model, target.source) == ("openai_responses", "gpt-sub", "text_generation")
+    assert (target.kind, target.model) == ("anthropic", ha._native_api_model("opus", options))
     assert target.options.extra == {
-        "provider_id": "row-chatgpt", "provider_type": "chatgpt", "provider_auth_mode": "chatgpt",
+        "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
     }
-    # Sized for the row's window, not a small local model's.
     assert target.context_window == 272_000
+    assert target.effort() == "high"
+    options.effort = "low"  # changed mid-chat
+    assert target.effort() == "low"
+    options.effort = "bogus"  # never forwarded to a provider
+    assert target.effort() is None
+    assert reads == []
 
+    # A pinned learner model keeps the learner's own low effort.
     monkeypatch.setattr(settings, "fluid_continual_model", "gpt-sub-mini")
-    assert ha._learner_target(options, "local").model == "gpt-sub-mini"
+    target = ha._learner_target(options, "local")
+    assert (target.model, target.effort) == ("gpt-sub-mini", continual_mod.SYNTH_EFFORT)
 
 
-def test_any_other_binding_runs_through_text_generation(monkeypatch):
-    """A Claude sign-in (CLI only), native Anthropic with no row, or any row
-    without a native client: the pass goes through the text-generation
-    helper, so learning works on every provider. The row's shape is kept
-    for billing."""
-    _text_generation(monkeypatch, {"provider": "row-claude", "model": "claude-haiku"},
-                     rows={"row-claude": ("anthropic", "oauth", None)})
-    target = ha._learner_target(SessionOptions(model="opus"), "local")
-    assert (target.kind, target.model) == (ha.TEXT_GENERATION_LEARNER, "claude-haiku")
-    assert target.options.extra["provider_auth_mode"] == "oauth"
+def test_any_other_binding_runs_through_the_generation_helper_on_the_sessions_binding(monkeypatch):
+    """A Claude sign-in row (CLI only), native Anthropic with no row, or any
+    row without a native client: the pass goes through the generation helper
+    on the chat's own model and row, so learning works on every provider.
+    The row's shape is kept for billing."""
+    reads = _text_generation_unused(monkeypatch)
+    _shapes(monkeypatch, {"row-claude": ("anthropic", "oauth", None)})
+    target = ha._learner_target(SessionOptions(model="opus", extra={"provider_id": "row-claude"}), "local")
+    assert (target.kind, target.model) == (ha.GENERATION_HELPER_LEARNER, "opus")
+    assert target.options.extra == {"provider_id": "row-claude", "provider_type": "anthropic",
+                                    "provider_auth_mode": "oauth"}
 
-    _text_generation(monkeypatch, {"provider": None, "model": "claude-haiku"})
-    target = ha._learner_target(SessionOptions(model="opus"), "local")
-    assert target.kind == ha.TEXT_GENERATION_LEARNER and target.options.extra == {}
+    target = ha._learner_target(SessionOptions(model="sonnet"), "local")
+    assert (target.kind, target.model) == (ha.GENERATION_HELPER_LEARNER, "sonnet")
+    assert target.options.extra == {}
+    assert reads == []
 
 
-def test_no_text_generation_model_means_no_learner(monkeypatch):
-    _text_generation(monkeypatch, None)
-    assert ha._learner_target(SessionOptions(model="opus"), "local") is None
+def test_another_chats_route_is_its_own_row_model_and_effort(monkeypatch):
+    """A pass reading chat B's journal entries sends them to B's provider
+    row, model and effort, as B's session row stores them."""
+    from app.db import sessions
+
+    _shapes(monkeypatch)
+    reads = _text_generation_unused(monkeypatch)
+    rows = {"chat-b": {"model": "prov:row-chatgpt:gpt-5.5", "provider_id": None, "effort": "high"}}
+    monkeypatch.setattr(sessions, "get_session", rows.get)
+    route = ha._learner_route("chat-b", "local")
+    assert route is not None and route.model == "gpt-5.5" and route.session_model == "gpt-5.5"
+    assert route.provider.name == "openai_responses" and route.billing == "subscription"
+    assert route.effort() == "high" and not reads
+    assert ha._learner_route("gone", "local") is None
+
+
+def test_a_guarded_antigravity_sign_in_has_no_learner(monkeypatch):
+    """That row refuses every background call, so a pass could only fail;
+    the chat runs without a learner instead of moving to another provider.
+    With the guard lifted, the pass runs on the row through the helper."""
+    from app.core import antigravity
+
+    _shapes(monkeypatch, {"row-ag": ("antigravity", "google", None)})
+    rows = {"row-ag": {"id": "row-ag", "provider_type": "antigravity", "auth_mode": "google"}}
+    monkeypatch.setattr(ha, "_lookup_provider_row", lambda pid: rows.get(pid))
+    guarded = {"on": True}
+    monkeypatch.setattr(antigravity, "guarded", lambda row: guarded["on"])
+    options = SessionOptions(model="gemini-pro", extra={"provider_id": "row-ag"})
+    assert ha._provider_row_kind("antigravity", "google") == ha._ANTIGRAVITY_KIND
+    assert ha._learner_target(options, "local") is None
+    guarded["on"] = False
+    target = ha._learner_target(options, "local")
+    assert (target.kind, target.model) == (ha.GENERATION_HELPER_LEARNER, "gemini-pro")
+
+
+def test_a_session_without_a_model_has_no_learner(monkeypatch):
+    _shapes(monkeypatch)
+    assert ha._learner_target(SessionOptions(model=""), "local") is None
 
 
 def test_an_api_users_session_never_spends_the_owners_binding(monkeypatch):
-    reads = _text_generation(monkeypatch)
+    reads = _text_generation_unused(monkeypatch)
+    _shapes(monkeypatch)
+    # A Claude Code session with no row would run on the owner's CLI login.
     assert ha._learner_target(SessionOptions(model="opus"), "api:u1") is None
     assert reads == []
     # Its own API-key row, when a native client can call it.
@@ -386,31 +459,50 @@ def test_an_api_users_session_never_spends_the_owners_binding(monkeypatch):
         "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
     })
     target = ha._learner_target(own, "api:u1")
-    assert (target.kind, target.source) == ("anthropic", "session")
+    assert target.kind == "anthropic"
     assert target.model == ha._native_api_model("opus", own)
 
 
 @pytest.mark.asyncio
-async def test_the_text_generation_learner_answers_as_stream_chunks(monkeypatch):
+async def test_the_generation_helper_learner_answers_as_stream_chunks(monkeypatch):
     from types import SimpleNamespace
 
     from app.api import generation
 
     seen: list = []
 
-    async def generate(prompt, timeout_seconds=None, **_):
-        seen.append((prompt, timeout_seconds))
+    async def generate(prompt, model=None, timeout_seconds=None, effort=None):
+        seen.append((prompt, model, timeout_seconds, effort))
         return "NO_CHANGES"
 
     monkeypatch.setattr(generation, "generate_with_claude", generate)
     block = SimpleNamespace(text="[user] journal excerpt")
-    request = SimpleNamespace(system="SYSTEM RULES", messages=[SimpleNamespace(content=[block])])
-    provider = ha._LearnerProvider(ha.TEXT_GENERATION_LEARNER, SessionOptions(model="m"))
+    request = SimpleNamespace(system="SYSTEM RULES", messages=[SimpleNamespace(content=[block])],
+                              effort="xhigh")
+    provider = ha._LearnerProvider(ha.GENERATION_HELPER_LEARNER,
+                                   SessionOptions(model="m", extra={"provider_id": "row-x"}))
     chunks = [c async for c in provider.stream(request)]
     assert [c.kind for c in chunks] == ["text_delta", "message_stop"]
     assert chunks[0].payload["text"] == "NO_CHANGES"
-    assert "SYSTEM RULES" in seen[0][0] and "[user] journal excerpt" in seen[0][0]
-    assert seen[0][1] == ha.TEXT_GENERATION_LEARNER_TIMEOUT
+    prompt, model, timeout, effort = seen[0]
+    assert "SYSTEM RULES" in prompt and "[user] journal excerpt" in prompt
+    # The session's row and model as one run binding, at the pass's effort.
+    assert (model, timeout, effort) == ("prov:row-x:m", ha.GENERATION_HELPER_LEARNER_TIMEOUT, "xhigh")
+
+    # No row (the Claude Code CLI): the bare model; no effort, the model's default.
+    request.effort = None
+    seen.clear()
+    provider = ha._LearnerProvider(ha.GENERATION_HELPER_LEARNER, SessionOptions(model="opus"))
+    [c async for c in provider.stream(request)]
+    assert (seen[0][1], seen[0][3]) == ("opus", None)
+
+    # A switch mid-pass has already moved the binding on: the request still
+    # goes to the model the pass filtered it for.
+    request.model = "opus"
+    provider._options = SessionOptions(model="sonnet")
+    seen.clear()
+    [c async for c in provider.stream(request)]
+    assert seen[0][1] == "opus"
 
     async def broken(prompt, timeout_seconds=None, **_):
         raise RuntimeError("provider down")
@@ -423,7 +515,6 @@ async def test_the_text_generation_learner_answers_as_stream_chunks(monkeypatch)
 @pytest.mark.asyncio
 async def test_a_switched_off_learner_makes_no_calls(monkeypatch, tmp_path):
     learner = _Learner(monkeypatch)
-    _text_generation(monkeypatch)
     monkeypatch.setattr(fluid_memory, "learner_enabled", lambda: False)
     store = _store()
     _seed_backlog(store)
@@ -433,7 +524,7 @@ async def test_a_switched_off_learner_makes_no_calls(monkeypatch, tmp_path):
         synthesizer = run.adapter.engine._journal._synthesizer
         if synthesizer is not None and synthesizer._task is not None:
             await synthesizer._task
-    assert learner.client.requests == [] and learner.built == []
+    assert learner.client.requests == [] and learner.built == [] and learner.helper == []
     assert store._facts.inference_budget().get("calls", 0) == 0
 
 
@@ -449,13 +540,32 @@ async def test_the_learner_client_is_closed_with_the_session(monkeypatch, tmp_pa
         return FakeInference(_reply("NO_CHANGES")), Http()
 
     monkeypatch.setattr(ha, "_build_provider_client", build)
-    _text_generation(monkeypatch)
     run = Run(tmp_path, [[{"op": "text", "text": "Done."}, {"op": "result"}]])
     async with run:
         learner = run.adapter._learner_provider
         assert learner is not None
         await learner._ensure()
     assert closed == [True] and run.adapter._learner_provider is None
+
+
+@pytest.mark.asyncio
+async def test_the_learner_reports_the_row_its_client_was_built_for(monkeypatch):
+    """A chat switches rows while its learner already holds a client: the
+    learner still reports the old row, where its calls actually go, so
+    another chat's text kept for the new row is not sent through it."""
+    async def build(kind, options):
+        return FakeInference(_reply("NO_CHANGES")), None
+
+    monkeypatch.setattr(ha, "_build_provider_client", build)
+    provider = ha._LearnerProvider("openai_responses",
+                                   SessionOptions(model="m", extra={"provider_id": "row-x"}))
+    assert provider.destination == "openai_responses:row-x"
+    provider._options = SessionOptions(model="m", extra={"provider_id": "row-y"})
+    assert provider.destination == "openai_responses:row-y", "nothing built yet: the new row"
+    await provider._ensure()
+    provider._options = SessionOptions(model="m2", extra={"provider_id": "row-z"})
+    assert provider.destination == "openai_responses:row-y", "the built client's row"
+    assert ha._learner_destination("openai_responses", provider._options) == "openai_responses:row-z"
 
 
 def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
@@ -466,7 +576,7 @@ def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
     api_row = SessionOptions(model="claude", extra={
         "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
     })
-    owner = SimpleNamespace(_announce_continual=None)
+    owner = SimpleNamespace(_announce_continual=None, _resolve_app_session_id=lambda: "s")
     synth, _ = ha.HarnessAdapter._learner_synthesizer(
         owner, FakeInference(_reply("NO_CHANGES")), "claude", store, None, session, "s",
         session_model="opus", context_window=None, binding=api_row)
@@ -490,23 +600,53 @@ def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
         assert synth._budget().source == source, mode
 
 
-def test_a_text_generation_learner_bills_each_pass_by_the_current_binding(monkeypatch):
+def test_a_generation_helper_learner_bills_by_the_sessions_row(monkeypatch):
+    """Not by the Text Generation binding: a chat on a Claude plan row is
+    flat-rate even when Text Generation sits on a metered API key."""
     from types import SimpleNamespace
 
     from app.core import generation_options
 
-    binding = {"model": "claude", "provider": "row-plan"}
-    monkeypatch.setattr(generation_options, "text_generation_config", lambda: dict(binding))
+    monkeypatch.setattr(generation_options, "text_generation_config",
+                        lambda: {"model": "claude", "provider": "row-key"})
     shapes = {"row-plan": ("anthropic", "oauth", None), "row-key": ("anthropic", "api_key", None)}
     monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: shapes[pid])
-    provider = ha._LearnerProvider(ha.TEXT_GENERATION_LEARNER, SessionOptions(model="claude"))
-    owner = SimpleNamespace(_announce_continual=None)
+    binding = SessionOptions(model="opus", extra={"provider_id": "row-plan"})
+    provider = ha._LearnerProvider(ha.GENERATION_HELPER_LEARNER, binding)
+    owner = SimpleNamespace(_announce_continual=None, _resolve_app_session_id=lambda: "s")
     synth, _ = ha.HarnessAdapter._learner_synthesizer(
-        owner, provider, "claude", _store(), None, SessionOptions(model="opus", cwd=".", extra={}),
-        "s", session_model="opus", context_window=None,
-        binding=SessionOptions(model="claude", extra={"provider_id": "row-plan"}))
+        owner, provider, "opus", _store(), None, SessionOptions(model="opus", cwd=".", extra={}),
+        "s", session_model="opus", context_window=None, binding=binding)
     assert synth._budget(refresh=True).source == "subscription_default"
-    # The owner moves Text Generation to an API key mid-chat: the next pass
-    # is metered, with the metered request size.
-    binding["provider"] = "row-key"
-    assert synth._budget(refresh=True).source == "metered_default"
+
+
+@pytest.mark.asyncio
+async def test_a_mid_chat_model_switch_moves_the_learner_to_the_new_model(monkeypatch):
+    """set_model hot-swaps without a reconnect; the learner follows, so a pass
+    never pairs the old model with an effort picked for the new one."""
+    _shapes(monkeypatch)
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(model="opus", cwd=".", extra={})
+    target = ha._learner_target(adapter._options, "local")
+    provider = ha._LearnerProvider(target.kind, target.options)
+    adapter._learner_provider = provider
+    synth, _ = adapter._learner_synthesizer(
+        provider, target.model, _store(), None, adapter._options, "s",
+        session_model="opus", context_window=None, binding=target.options, effort=target.effort)
+    assert adapter._learner_synth is synth and synth._model == "opus"
+
+    adapter._options.model = "sonnet"  # what set_model writes
+    await adapter._retarget_learner()
+    assert provider._options.model == "sonnet"
+    # A pass in flight keeps its model (request, log row, failure backoff);
+    # the switch applies when the next pass starts.
+    assert synth._model == "opus"
+    synth._apply_target()
+    assert synth._model == "sonnet"
+
+    # A pinned learner model stays where it is.
+    monkeypatch.setattr(settings, "fluid_continual_model", "pinned-model")
+    adapter._options.model = "haiku"
+    await adapter._retarget_learner()
+    synth._apply_target()
+    assert synth._model == "sonnet"

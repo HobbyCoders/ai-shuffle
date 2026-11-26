@@ -899,7 +899,7 @@ async def _step(synth: Any, result: Result) -> None:
     if not claims and not batch.subjects:
         return
     if (now < float(review_backoff(root).get("until", 0))
-            or now < float(store.learner_backoff(synth._model).get("until", 0))
+            or now < float(store.learner_backoff(synth.backoff_key()).get("until", 0))
             or now < store.consolidation_retry_at()):
         return
     budget = synth._budget(refresh=True)

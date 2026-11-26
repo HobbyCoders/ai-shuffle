@@ -2630,7 +2630,7 @@ async def test_native_leg_continual_off_keeps_code_mode(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_native_leg_continual_model_pins_synthesis(monkeypatch, tmp_path):
     """fluid_continual_model pins synthesis to one model; unset, the owner's
-    learner runs on the Text Generation model, not the session's own."""
+    learner runs on the session's own model, never the Text Generation one."""
     from app.core import generation_options
     from app.core.config import settings
 
@@ -2643,7 +2643,7 @@ async def test_native_leg_continual_model_pins_synthesis(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "fluid_continual_model", None)
     captured = await _connect_native_capturing(monkeypatch, tmp_path)
-    assert captured["codemode"]._synthesizer._model == "text-gen-model"
+    assert captured["codemode"]._synthesizer._model == "gpt-4o"
 
 
 @pytest.mark.asyncio
