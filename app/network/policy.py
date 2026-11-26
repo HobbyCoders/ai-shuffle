@@ -392,8 +392,9 @@ _register(Collection(
     name="memory", table="network_memory_records", keys=("id",),
     fields=("id", "kind", "scope", "content", "content_hash", "deleted", "updated_at"),
     resource="memory", priority=86,
-    notes="Fact snapshots (memory-v2:), code-mode skills (skill:<name>, <data_dir>/fluid/skills/*.py) and "
-          "prose skill folders (prose-skill:<name>, ~/.fluid/skills/<name>/SKILL.md). The journal stays local."))
+    notes="Fact snapshots (memory-v2:), code-mode skills (skill:<name>, <data_dir>/fluid/skills/*.py), "
+          "prose skill folders (prose-skill:<name>, ~/.fluid/skills/<name>/SKILL.md) and each worker's "
+          "reflection proposals (memory-proposal:, never applied as facts). The journal stays local."))
 
 _register(Collection(
     name="working_record", table="owner_working_items", keys=("id",),

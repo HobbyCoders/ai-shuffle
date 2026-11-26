@@ -17,6 +17,8 @@
 	import SelectField from '../rows/SelectField.svelte';
 	import MemoryDetail from './MemoryDetail.svelte';
 	import MemoryHealthDetail from './MemoryHealthDetail.svelte';
+	import ProposalsDetail from './ProposalsDetail.svelte';
+	import { PROPOSALS_ITEM, ProposalModel, inboxSummary } from './proposal-model.svelte';
 	import { memorySummary } from '../pages/memory-health';
 	import { memoryHealth } from '$lib/stores/memory-health.svelte';
 	import { MEMORY_HEALTH_ITEM } from '$lib/settings/entries/memory';
@@ -33,10 +35,14 @@
 
 	const CATEGORY = 'memory' as const;
 	const HEALTH = MEMORY_HEALTH_ITEM;
+	const INBOX = PROPOSALS_ITEM;
 	const model = acquireMemoryModel();
+	const proposals = new ProposalModel();
 
 	onMount(() => {
 		void model.load();
+		// The row shows how many proposals wait, before it is opened.
+		void proposals.load();
 		// The health row reads its warning without being opened (#1042); a
 		// request already on its way (the detail pane's) is shared.
 		void memoryHealth.refresh();
@@ -85,6 +91,12 @@
 		healthData ? (healthData.state === 'healthy' ? 'ok' : 'warn') : healthLoad === 'error' ? 'off' : undefined
 	);
 
+	/* Shown with the reflection learner, and whenever proposals wait (a worker
+	   rolled back to the continuous learner still shows other workers' ones). */
+	const showInbox = $derived(
+		!proposals.loaded || proposals.mode === 'reflection' || proposals.items.length > 0 || selected === INBOX
+	);
+
 	const summary = (m: MemoryItem) => (model.dirty(m.id) ? 'Unsaved changes' : memoryMeta(m));
 </script>
 
@@ -113,6 +125,15 @@
 	{#snippet list()}
 		<div class="mem-list" data-setting-anchor="memory.list">
 			<ListItem id={HEALTH} name="Memory health" category={CATEGORY} summary={healthSummary} status={healthTone} />
+			{#if showInbox}
+				<ListItem
+					id={INBOX}
+					name="Proposed memories"
+					category={CATEGORY}
+					summary={proposals.forbidden ? FORBIDDEN_TEXT : proposals.loadError ? 'Unavailable' : inboxSummary(proposals.items.length)}
+					status={proposals.items.length ? 'warn' : undefined}
+				/>
+			{/if}
 			{#if model.loadError}
 				<InlineBanner tone="warn">
 					<span role="alert">{model.loadError}</span>
@@ -159,6 +180,8 @@
 	{#snippet detail()}
 		{#if selected === HEALTH}
 			<MemoryHealthDetail />
+		{:else if selected === INBOX}
+			<ProposalsDetail {proposals} memories={model} />
 		{:else if selected && known}
 			{#key selected}
 				<MemoryDetail {model} id={selected} />

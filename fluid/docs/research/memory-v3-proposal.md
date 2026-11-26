@@ -245,3 +245,20 @@ Phase 1 added just-in-time delivery beside the index, which is unchanged. `docs/
 - User turns and delegation briefs carry matching facts in that turn's context note. Tool calls carry them with the call's result. Both legs follow the caps above, deliver each fact once per session and re-arm on compaction.
 - Each delivery is recorded only on the local worker, in an append-only log (`jit_deliveries.jsonl`, rotated by size), and memory health counts deliveries in its `delivery` signal. `FLUID_MEMORY_JIT=false` turns delivery off.
 - **Timing finding.** Delivery before the tool runs is not possible without holding the call. On either leg, a model reads added context only in its next request, which follows the call. Native PreToolUse context and the Claude Code CLI's PreToolUse `additionalContext` (CLI 2.1.331) arrive with the call's result, the same moment as PostToolUse context. Tool deliveries are therefore recorded as late, as section 9 asked, and user-turn deliveries as on time. Closing the gap needs an owner decision. One option: deny a call once, on its first command-fact match in a session, with the fact as the reason, and let the agent re-issue the call. The cost is one extra call per such fact per session.
+
+## 11. Phase 2 shipped (reflection and the proposal inbox)
+
+Phase 2 came as two PRs. This one ships session reflection and the proposal inbox. The other one (the Remember task-state guard, similar facts in the save receipt and env facts moved to the session-start probe) is described in its own PR. `docs/MEMORY_ARCHITECTURE.md` ("Session reflection and the proposal inbox") describes how this part works.
+
+- **One call per settled session.** Reflection runs on the learner's existing drain, which fires when a chat's engine closes (idle eviction, settle or shutdown) on both legs. A finished turn starts nothing. A chat that comes back is reflected on its new lines only.
+- **Deterministic gate.** A correction after an agent reply, a frustration mark, an explicit "remember this", or the same friction twice. Anything else is logged as skipped (`no_signal`) with no model call. Settings → Learning shows the last reflection, whether it ran, why it was skipped, and the model and billing it used.
+- **Input** is the session's user turns, final replies, friction and the facts in scope. It never includes the tool stream. It is bounded to 28,000 characters (about 7k tokens) or the route's prompt limit, whichever is smaller.
+- **Routing** is the session's own route from #1996 (model, provider row, effort, `model@row` backoff and per-billing caps). Because one call reads one chat, the cross-chat split #1996 needed doesn't arise.
+- **Output.**
+  - Quoted owner rules apply at once, as before.
+  - Quoted owner preferences apply at once as agent-saved, revertible facts.
+  - Owner facts, project knowledge and unquoted preferences go to the proposal inbox (Settings → Memory → Proposed memories). A proposal is promoted when a second distinct session produces it, on any worker, or when the owner accepts it. Otherwise it expires after 14 days without counting as a loss.
+- **Replication.** Proposals replicate as a `memory_proposal` record that every earlier worker skips, so the inbox is shared across workers and an old worker can never read a proposal as a fact.
+- **Turned off in reflection mode:** helper-skill synthesis, consolidation, the when-line backfill and workflow proposals. Conflict review stays until phase 3.
+- **Rollback.** `FLUID_MEMORY_LEARNER=continuous` brings the continuous learner back until phase 3 deletes it.
+- **Section 6 targets** (learner calls per day, input tokens per week, dropped facts) can only be measured after a week on the owner's workers. They aren't measured yet.

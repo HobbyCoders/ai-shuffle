@@ -222,6 +222,17 @@ def _no_real_claude_on_path_each_test():
 
 
 @pytest.fixture(autouse=True)
+def _continuous_learner_unless_marked(request, monkeypatch):
+    """Memory v3 session reflection is the default learner; the tests written
+    for the continuous learner drive it through its rollback switch.
+    Reflection tests carry ``@pytest.mark.memory_reflection``."""
+    if request.node.get_closest_marker("memory_reflection") is None:
+        monkeypatch.setenv("FLUID_MEMORY_LEARNER", "continuous")
+    else:
+        monkeypatch.delenv("FLUID_MEMORY_LEARNER", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_cli_probe(monkeypatch):
     """Status endpoints must not run whatever `claude` the test machine has.
 

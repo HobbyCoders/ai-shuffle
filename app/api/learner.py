@@ -1,6 +1,7 @@
 """Owner-only view and control of the memory learner's behaviour rules.
 
-The memory learner (fluid.codemode.continual) is the only learner. Next to
+The memory learner is session reflection (fluid.codemode.reflection; the
+continuous learner in fluid.codemode.continual is its rollback). Next to
 facts it writes *behaviour rules* ("When X: do Y") taken from moments where
 the owner corrected the agent or was frustrated with it. Rules are facts in
 the same store under a ``behavior.<family>.<digest>`` key, so they sync to
@@ -32,7 +33,7 @@ from app.api.memories import (
     _visible,
 )
 from app.core.fluid_memory import store_for_owner
-from fluid.codemode import behavior, facts
+from fluid.codemode import behavior, facts, reflection
 from fluid.codemode.transactions import file_transaction
 
 logger = logging.getLogger(__name__)
@@ -142,7 +143,47 @@ def _setup(store) -> dict[str, Any]:
         "model": str(last["model"]) if last.get("model") else None,
         "billing": billing or "metered",
         "pass_chars": pass_chars,
+        "mode": reflection.learner_mode(),
+        "reflection": _last_reflection(store),
     }
+
+
+def _last_reflection(store) -> dict[str, Any] | None:
+    """The newest reflection row, ran or skipped: when, what happened and
+    why, and the model and billing of the call (the chat's own route)."""
+    try:
+        lines = (Path(store.root) / ".synthesis-log.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("kind") != "reflection":
+            continue
+        error = str(row.get("error") or "")
+        ran = row.get("ran") is not False
+        return {
+            "at": row.get("ts"),
+            "outcome": _reflection_outcome(row, error),
+            "reason": row.get("reason") if isinstance(row.get("reason"), str) else None,
+            "signals": [str(s) for s in row.get("signals") or []][:4],
+            "model": str(row["model"]) if ran and row.get("model") else None,
+            "billing": row.get("billing") if ran and isinstance(row.get("billing"), str) else None,
+        }
+    return None
+
+
+def _reflection_outcome(row: dict, error: str) -> str:
+    if error.startswith("InferenceBudgetExhausted"):
+        return "budget"
+    outcome = row.get("outcome")
+    if outcome == "ran":
+        return "error" if error and not row.get("consumed") else "ok"
+    if outcome in ("skipped", "error"):
+        return outcome
+    return "skipped" if row.get("ran") is False else "error" if error else "ok"
 
 
 # ── rules ────────────────────────────────────────────────────────────────
@@ -210,6 +251,7 @@ def _activity(store, rule_text: dict[str, str]) -> list[dict]:
         rules = [c.split(":", 1)[1] for c in changed if c.startswith("rule:")]
         usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
         error = str(row.get("error") or "")
+        reflected = row.get("kind") == "reflection"
         rows.append({
             "at": row.get("ts"),
             "kind": str(row.get("kind") or "pass"),
@@ -217,12 +259,17 @@ def _activity(store, rule_text: dict[str, str]) -> list[dict]:
             "read": int(row.get("consumed") or 0),
             "rules": [{"id": rid, "text": rule_text.get(rid)} for rid in rules],
             "memories": sum(1 for c in changed if c.startswith("memory")),
+            "proposals": sum(1 for c in changed if c.startswith("proposal:")),
             "input_tokens": int(usage.get("input_tokens") or 0) or None,
             "output_tokens": int(usage.get("output_tokens") or 0) or None,
-            "outcome": ("budget" if error.startswith("InferenceBudgetExhausted")
+            "outcome": (_reflection_outcome(row, error) if reflected
+                        else "budget" if error.startswith("InferenceBudgetExhausted")
                         else "skipped" if row.get("ran") is False or error.startswith("skipped:")
                         else "error" if error else "ok"),
             "error_kind": error.split(":", 1)[0][:60] if error else None,
+            "reason": row.get("reason") if reflected and isinstance(row.get("reason"), str) else None,
+            "signals": [str(s) for s in row.get("signals") or []][:4] if reflected else [],
+            "model": str(row["model"]) if row.get("model") and row.get("ran") is not False else None,
         })
     return rows
 

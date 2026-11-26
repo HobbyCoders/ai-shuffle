@@ -182,6 +182,18 @@ def codemode_marker(tmp_path, request):
 
 
 @pytest.fixture(autouse=True)
+def _continuous_learner_unless_marked(request, monkeypatch):
+    """Memory v3 session reflection is the default learner; the tests written
+    for the continuous learner (passes per turn, consolidation, backfill,
+    workflows) drive it through its rollback switch. Reflection tests carry
+    ``@pytest.mark.memory_reflection`` and see the default."""
+    if request.node.get_closest_marker("memory_reflection") is None:
+        monkeypatch.setenv("FLUID_MEMORY_LEARNER", "continuous")
+    else:
+        monkeypatch.delenv("FLUID_MEMORY_LEARNER", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_builtin_skills(tmp_path_factory, monkeypatch):
     """Keep the package's built-in skills (``fluid/builtin_skills``) out of the
     skill listings tests assert on. Tests of a built-in skill point

@@ -50,6 +50,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # Make the shared scratch helper importable from Fluid's separate pytest root.
 pythonpath = [".."]
+markers = [
+    "memory_reflection: runs with the default Memory v3 session-reflection learner (others pin the continuous learner)",
+]
 
 [tool.uv]
 package = true

@@ -4,7 +4,7 @@
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
-	import { agoText, dateText, passSummary, tokenText, type LearningModel } from './learning-model.svelte';
+	import { agoText, dateText, passSummary, signalText, tokenText, type LearningModel } from './learning-model.svelte';
 
 	interface Props {
 		model: LearningModel;
@@ -35,7 +35,11 @@
 								<span class="lb-sum">{passSummary(p)}</span>
 								<time class="lb-at" title={dateText(p.at)}>{agoText(p.at)}</time>
 							</div>
-							{#if tokenText(p)}<div class="lb-tok">{tokenText(p)}</div>{/if}
+							{#if p.model || tokenText(p) || p.signals?.length}
+								<div class="lb-tok">
+									{[p.signals?.length ? `For ${signalText(p.signals)}` : '', p.model, tokenText(p)].filter(Boolean).join(' · ')}
+								</div>
+							{/if}
 							{#if p.rules.length}
 								<ul class="lb-rules">
 									{#each p.rules as r (r.id)}

@@ -265,6 +265,32 @@ def test_activity_reads_the_pass_log_without_error_text(world):
     assert rows[1]["memories"] == 1 and rows[1]["input_tokens"] == 900
 
 
+@pytest.mark.memory_reflection
+def test_setup_and_activity_report_the_last_reflection_ran_or_skipped(world):
+    """Memory v3: Settings > Learning says whether the newest reflection ran
+    (its model and billing) or was skipped (and why, with no model)."""
+    client, store = world
+    assert client.get(BASE).json()["setup"]["reflection"] is None
+    log = store.root / ".synthesis-log.jsonl"
+    now = time.time()
+    log.write_text("\n".join(json.dumps(row) for row in (
+        {"ts": now - 60, "kind": "reflection", "outcome": "ran", "ran": True, "model": "gpt-chat",
+         "billing": "subscription", "signals": ["correction"], "consumed": 6,
+         "changed": ["rule:m1", "proposal:pabc", "memory:m2"]},
+        {"ts": now, "kind": "reflection", "outcome": "skipped", "reason": "no_signal", "ran": False,
+         "model": "gpt-chat", "billing": "subscription", "changed": []},
+    )) + "\n", encoding="utf-8")
+    body = client.get(BASE).json()
+    assert body["setup"]["mode"] == "reflection"
+    assert body["setup"]["reflection"] == {"at": now, "outcome": "skipped", "reason": "no_signal",
+                                           "signals": [], "model": None, "billing": None}
+    skipped, ran = body["activity"][:2]
+    assert (skipped["kind"], skipped["outcome"], skipped["reason"], skipped["model"]) == (
+        "reflection", "skipped", "no_signal", None)
+    assert (ran["outcome"], ran["signals"], ran["model"], ran["proposals"], ran["memories"]) == (
+        "ok", ["correction"], "gpt-chat", 1, 1)
+
+
 def test_saved_guidance_from_the_old_learner_becomes_rules_once(tmp_path):
     root = tmp_path / "guidance"
     (root / "scoped").mkdir(parents=True)

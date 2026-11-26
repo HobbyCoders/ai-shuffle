@@ -15,7 +15,8 @@
 	import ValueText from '../rows/ValueText.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { Power } from 'lucide-svelte';
-	import { capText, type LearningModel } from './learning-model.svelte';
+	import type { StatusTone } from '$lib/settings/types';
+	import { capText, reflectionText, type LearningModel } from './learning-model.svelte';
 
 	interface Props {
 		model: LearningModel;
@@ -24,6 +25,17 @@
 	let { model }: Props = $props();
 
 	const setup = $derived(model.data?.setup);
+	/* Memory v3: one reflection per finished chat, unless the worker rolled back. */
+	const reflecting = $derived(setup?.mode !== 'continuous');
+	const LAST: Record<string, [string, StatusTone]> = {
+		ok: ['Ran', 'ok'],
+		skipped: ['Skipped', 'off'],
+		budget: ['Limit reached', 'warn'],
+		error: ['Failed', 'warn']
+	};
+	const last = $derived(setup?.reflection ? (LAST[setup.reflection.outcome] ?? LAST.error) : (['None yet', 'off'] as const));
+	const lastValue = $derived(last[0]);
+	const lastTone = $derived<StatusTone>(last[1]);
 
 	async function toggle(on: boolean): Promise<boolean> {
 		const ok = await model.setPolicy({ learner_enabled: on });
@@ -77,6 +89,11 @@
 				</SettingRow>
 			</RowGroup>
 			<RowGroup title="Model">
+				{#if reflecting}
+					<SettingRow label="Last reflection" wrapHint hint={reflectionText(setup.reflection)}>
+						<span data-testid="learning-last-reflection"><ValueText value={lastValue} status={lastTone} /></span>
+					</SettingRow>
+				{/if}
 				<SettingRow
 					label="Runs on"
 					hint={setup.model
@@ -89,11 +106,20 @@
 					<ValueText value={`Up to ~${Math.round(setup.pass_chars / 4000).toLocaleString()}k tokens`} />
 				</SettingRow>
 			</RowGroup>
-			<InlineBanner tone="info" compact>
-				The learner never reads a whole chat. It reads a short digest of what changed since its last pass, and only
-				when a chat settles or you sound frustrated with the agent. Swearing or words like “wrong” and “stop” flag a chat so its lesson is
-				learned sooner.
-			</InlineBanner>
+			{#if reflecting}
+				<InlineBanner tone="info" compact>
+					The learner reflects on a chat once, after it settles or goes quiet, in one model call. It runs only when you corrected the
+					agent, sounded frustrated, asked it to remember something, or the same problem kept repeating; other chats are skipped
+					without a call. It reads your messages and the agent’s replies, not its tool calls. Rules quoting your words apply at
+					once; other findings wait in Settings › Memory › Proposed memories.
+				</InlineBanner>
+			{:else}
+				<InlineBanner tone="info" compact>
+					The learner never reads a whole chat. It reads a short digest of what changed since its last pass, and only
+					when a chat settles or you sound frustrated with the agent. Swearing or words like “wrong” and “stop” flag a chat so its lesson is
+					learned sooner.
+				</InlineBanner>
+			{/if}
 		{:else if model.loading}
 			<p class="st-empty" role="status">Loading…</p>
 		{/if}

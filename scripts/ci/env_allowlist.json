@@ -1262,6 +1262,11 @@
     "reason": "Temporary default-on rollback switch for just-in-time delivery of matching memories with a turn or tool result",
     "base_settings": false
   },
+  "FLUID_MEMORY_LEARNER": {
+    "kind": "internal",
+    "reason": "Temporary rollback switch: continuous brings back the continuous memory learner in place of session reflection (Memory v3 phase 2)",
+    "base_settings": false
+  },
   "FLUID_MODEL": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Highest-precedence model override in standalone Fluid",

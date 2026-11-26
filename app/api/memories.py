@@ -5,7 +5,7 @@ import hashlib
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
@@ -14,7 +14,7 @@ from app.api.auth import require_admin
 from app.core.fluid_memory import store_for_owner
 from app.db.async_database import run_sync
 from app.db.projects import get_projects_by_ids
-from fluid.codemode import behavior, facts
+from fluid.codemode import behavior, facts, reflection
 from fluid.codemode.skills import MAX_MEMORY_CHARS
 from fluid.codemode.transactions import file_transaction
 
@@ -205,9 +205,93 @@ async def _run(operation, *args):
         raise _store_error(exc) from None
 
 
+# ── proposals (Memory v3 session reflection) ─────────────────────────────
+_PROPOSAL_GONE = "This proposal was already decided or has expired."
+
+
+def _scope_label(scope, project_names):
+    if scope == "global":
+        return "All projects"
+    if scope.startswith("project:"):
+        return project_names.get(scope[8:], "Other project")
+    return "Other project"
+
+
+def _proposal_item(row, project_names, titles):
+    scope = str(row.get("scope") or "global")
+    sessions = [s for s in row.get("sessions") or [] if isinstance(s, str)]
+    return {
+        "id": row["id"],
+        "text": row["text"],
+        "kind": row["kind"],
+        "kind_label": reflection.KIND_LABELS.get(row["kind"], "Memory"),
+        "quote": row.get("quote") or None,
+        "when": row.get("when") or None,
+        "scope": scope,
+        "scope_label": _scope_label(scope, project_names),
+        "sessions": [{"id": sid, "title": titles.get(sid)} for sid in sessions],
+        "session_count": len(set(sessions)),
+        "created_at": row.get("created_at") or None,
+        "expires_at": row.get("expires_at") or None,
+    }
+
+
+def _list_proposals():
+    from app.db.sessions import get_sessions_by_ids
+
+    store = store_for_owner("local", initialize=False)
+    rows = reflection.ProposalInbox(store.root).open()
+    ids = {str(r.get("scope"))[8:] for r in rows if str(r.get("scope") or "").startswith("project:")}
+    names = {pid: p["name"] for pid, p in get_projects_by_ids(ids).items()}
+    sids = sorted({s for r in rows for s in r.get("sessions") or [] if isinstance(s, str)})
+    titles = {sid: row.get("title") for sid, row in get_sessions_by_ids(sids).items()}
+    return {"items": [_proposal_item(r, names, titles) for r in rows],
+            "ttl_days": reflection.PROPOSAL_TTL_SECONDS // 86400,
+            "mode": reflection.learner_mode()}
+
+
+def _decide_proposal(proposal_id, accept):
+    store = store_for_owner("local")
+    inbox = reflection.ProposalInbox(store.root)
+    row = inbox.get(proposal_id)
+    if row is None:
+        raise HTTPException(404, _PROPOSAL_GONE)
+    if not accept:
+        try:
+            inbox.decide(proposal_id, reflection.DISMISSED)
+        except KeyError:
+            raise HTTPException(404, _PROPOSAL_GONE) from None
+        return {"id": proposal_id, "status": reflection.DISMISSED, "memory": None}
+    # The owner's acceptance saves an agent-saved fact (the durable tier the
+    # learner writes), not a user-saved one: it stays revertible from the list.
+    saved = reflection.promote(store, row, session=None, automatic=False)
+    try:
+        inbox.decide(proposal_id, reflection.ACCEPTED, fact_id=saved.id)
+    except KeyError:
+        pass  # decided elsewhere meanwhile; the fact is saved either way
+    entry = _find(store, saved.id)
+    return {"id": proposal_id, "status": reflection.ACCEPTED,
+            "memory": _item(entry, "active", _project_names([entry]))}
+
+
 @router.get("")
 async def list_memories():
     return await _run(_list)
+
+
+@router.get("/proposals")
+async def list_proposals():
+    return await _run(_list_proposals)
+
+
+@router.post("/proposals/{proposal_id}/accept")
+async def accept_proposal(proposal_id: Annotated[str, Path(min_length=2, max_length=40)]):
+    return await _run(_decide_proposal, proposal_id, True)
+
+
+@router.post("/proposals/{proposal_id}/dismiss")
+async def dismiss_proposal(proposal_id: Annotated[str, Path(min_length=2, max_length=40)]):
+    return await _run(_decide_proposal, proposal_id, False)
 
 
 @router.put("/{memory_id}")

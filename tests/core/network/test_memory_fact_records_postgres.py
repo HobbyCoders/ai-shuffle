@@ -406,3 +406,45 @@ async def test_failed_write_is_retried_on_the_next_publish_pass(pg_workers, touc
         "SELECT id, content FROM network_memory_records WHERE id = ANY(%s)", (ids,))}
     assert "Arrives despite a failed write." in texts(b)
     assert memory_records._reconcile_owed is False
+
+
+async def test_proposals_replicate_to_the_inbox_and_never_become_facts(pg_workers, touched):
+    """Memory v3 reflection proposals ride one ``memory_proposal`` record per
+    store. The receiver keeps them beside its own inbox (a session there can
+    corroborate them), never in its fact store; an empty inbox retracts it."""
+    from fluid.codemode import reflection
+
+    a, b = await pair(pg_workers, touched)
+    text = "The project deploys with make release from the repository root."
+    with a.active():
+        facts(a).save_memory("Fact A.", protected=True)
+        row, _ = reflection.ProposalInbox(facts(a).root).propose(
+            kind="project", text=text, scope="global", session="ses_on_a")
+    publish(a)
+    (rid,) = own(a, memory_records.PROPOSAL_PREFIX)
+    assert a.sql("SELECT kind FROM network_memory_records WHERE id=%s", (rid,))[0]["kind"] == "memory_proposal"
+    await receive(b, a, touched)
+    assert text not in texts(b) and "Fact A." in texts(b)
+    with b.active():
+        inbox = reflection.ProposalInbox(facts(b).root)
+        [mirrored] = inbox.open()
+        assert mirrored["id"] == row["id"] and mirrored["sessions"] == ["ses_on_a"]
+        assert not (facts(b).root / reflection.PROPOSAL_FILE).exists()  # B published nothing of its own
+        _, corroborated = inbox.propose(kind="project", text=text, scope="global", session="ses_on_b")
+        assert corroborated
+
+    # A dismisses it: the decision travels, then the record holds only that.
+    with a.active():
+        reflection.ProposalInbox(facts(a).root).decide(row["id"], reflection.DISMISSED)
+    publish(a)
+    await receive(b, a, touched)
+    with b.active():
+        assert reflection.ProposalInbox(facts(b).root).open() == []
+        assert text not in texts(b)
+
+    # A's inbox empties (decisions age out): its record is retracted.
+    with a.active():
+        (facts(a).root / reflection.PROPOSAL_FILE).unlink()
+        facts(a).save_memory("Fact A2.", protected=True)
+    publish(a)
+    assert own(a, memory_records.PROPOSAL_PREFIX)[rid]["deleted"]

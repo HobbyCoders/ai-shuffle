@@ -25,6 +25,15 @@ on the next publish pass after an apply hit an I/O error.
 Code-mode Python skills live under ``skills_root()``; prose skill folders
 (``~/.fluid/skills/<name>/SKILL.md``) ride the same collection through
 :mod:`app.network.prose_skills`.
+
+Session reflection's proposal inbox (fluid.codemode.reflection) rides here too:
+one ``memory-proposal:<device>:<owner hash>`` record of kind
+``memory_proposal`` per store holds that worker's open proposals and its
+recent decisions; receivers keep it in ``proposals.remote.json``, never in the
+fact store. Every older ``_apply`` handles only the kinds ``skill`` and
+``prose_skill`` and the ids ``memory-fact:``, ``memory-barrier:``,
+``memory-v2:`` and legacy ``fact:``, and skips any other record, so a worker
+that predates the inbox ignores proposals instead of reading them as facts.
 """
 from __future__ import annotations
 
@@ -44,6 +53,8 @@ CAPABILITY = "memory_fact_records"
 FACT_PREFIX = "memory-fact:"
 BARRIER_PREFIX = "memory-barrier:"
 SNAPSHOT_PREFIX = "memory-v2:"
+PROPOSAL_PREFIX = "memory-proposal:"
+PROPOSAL_KIND = "memory_proposal"
 _SKILL_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$")
 MAX_SKILL_BYTES = 65536
 WRITE_QUIET_SECONDS = 0.1
@@ -110,8 +121,9 @@ def install_write_hook() -> None:
             path = path.resolve()
             # Only installation/API-owner fact stores and installation Python
             # skills are shared. Project/standalone stores must stay local.
-            if (path.parent == root and (path.name == "memories.json" or path.suffix == ".py")) or (
-                path.name == "memories.json" and path.parent.parent == root / ".users"
+            shared = ("memories.json", "proposals.json")
+            if (path.parent == root and (path.name in shared or path.suffix == ".py")) or (
+                path.name in shared and path.parent.parent == root / ".users"
             ):
                 now = monotonic()
                 with _write_lock:
@@ -194,6 +206,48 @@ def _fact_records(ctx, payload, owner_hash):
     return out
 
 
+def _proposal_record(ctx, store, owner_hash):
+    """This worker's proposal inbox for one store, or nothing when it has
+    none (an earlier record is then retracted like a dropped fact)."""
+    from fluid.codemode.reflection import ProposalInbox
+
+    try:
+        items = ProposalInbox(store.root).export()
+    except (OSError, ValueError):
+        log.warning("Skipped an unreadable memory proposal inbox", exc_info=True)
+        return {}
+    if not items:
+        return {}
+    content = json.dumps({"schema": 1, "owner": store._facts.owner, "device": ctx.device_id,
+                          "proposals": items}, sort_keys=True)
+    return {f"{PROPOSAL_PREFIX}{ctx.device_id}:{owner_hash}":
+            (PROPOSAL_KIND, "global", content, _hash(content))}
+
+
+def _apply_proposals(record, ctx) -> bool:
+    """Keep another worker's proposal inbox beside this worker's (never in
+    the fact store). A deleted record means it has no proposals left."""
+    from fluid.codemode.reflection import ProposalInbox
+
+    device, _, owner_hash = record["id"][len(PROPOSAL_PREFIX):].partition(":")
+    if not device or device == ctx.device_id or not owner_hash:
+        return False
+    if record.get("deleted"):
+        store = next((s for s in _stores() if _hash(s._facts.owner) == owner_hash), None)
+        if store is None:
+            return False
+        ProposalInbox(store.root).apply_remote(device, None)
+        return True
+    payload = json.loads(record.get("content") or "{}")
+    if not isinstance(payload, dict) or not isinstance(payload.get("proposals"), list):
+        raise ValueError("Invalid memory proposal record")
+    owner = payload.get("owner")
+    if _hash(str(owner)) != owner_hash:
+        raise ValueError("Memory proposal record names another owner")
+    ProposalInbox(_store(owner).root).apply_remote(device, payload["proposals"])
+    return True
+
+
 def _refresh(ctx, manifest) -> bool:
     root = _root()
     incoming = {}
@@ -214,6 +268,7 @@ def _refresh(ctx, manifest) -> bool:
             content = json.dumps(payload, sort_keys=True)
             rid = f"{SNAPSHOT_PREFIX}{ctx.device_id}:{owner_hash}"
             incoming[rid] = ("fact", "global", content, _hash(content))
+        incoming.update(_proposal_record(ctx, store, owner_hash))
     if root.is_dir():
         for path in root.glob("*.py"):
             if path.stem.startswith("_") or not _SKILL_NAME.fullmatch(path.stem):
@@ -237,7 +292,8 @@ def _refresh(ctx, manifest) -> bool:
                 "content_hash=EXCLUDED.content_hash, deleted=FALSE, updated_at=NOW()",
                 (rid, kind, scope, content, digest),
             )
-        own = [f"{prefix}{ctx.device_id}:" for prefix in (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX)]
+        own = [f"{prefix}{ctx.device_id}:"
+               for prefix in (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX, PROPOSAL_PREFIX)]
         for rid, old in known.items():
             # Retract this worker's fact, barrier and (once no old worker
             # reads it) whole-store records of stores read this pass. Receivers
@@ -290,13 +346,13 @@ def apply_to_files(ids: list[str], *, ctx=None, reconcile=False) -> int:
             # reconcile_files) leaves out this worker's own records.
             if reconcile:
                 _reconcile_owed = False  # set again by any failure below
-            own = () if "" in ids else tuple(f"{p}{ctx.device_id}:" for p in
-                                             (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX))
+            prefixes = (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX, PROPOSAL_PREFIX)
+            own = () if "" in ids else tuple(f"{p}{ctx.device_id}:" for p in prefixes)
             with get_db() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT id FROM network_memory_records WHERE deleted = FALSE AND "
-                            "(id LIKE %s OR id LIKE %s OR id LIKE %s)",
-                            tuple(p + "%" for p in (FACT_PREFIX, BARRIER_PREFIX, SNAPSHOT_PREFIX)))
+                            "(id LIKE %s OR id LIKE %s OR id LIKE %s OR id LIKE %s)",
+                            tuple(p + "%" for p in prefixes))
                 ids = sorted({i for i in ids if i} |
                              {r["id"] for r in cur.fetchall() if not (own and r["id"].startswith(own))})
             if not ids:
@@ -360,6 +416,10 @@ def _apply(ids, ctx, manifest) -> int:
                         continue
                     atomic_write_text(path, source)
                 applied += 1
+                continue
+            if record.get("kind") == PROPOSAL_KIND:
+                if rid.startswith(PROPOSAL_PREFIX) and _apply_proposals(record, ctx):
+                    applied += 1
                 continue
             if rid.startswith((FACT_PREFIX, BARRIER_PREFIX)):
                 # A deleted fact record means only "no longer exported there".

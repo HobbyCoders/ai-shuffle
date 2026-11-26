@@ -119,6 +119,82 @@ mark a fact delivered unseen until the next compaction (the index and Recall
 still have it), and a session idle across two log rotations can get a fact
 once more after resuming.
 
+## Session reflection and the proposal inbox
+
+Memory v3 phase 2 (`fluid/fluid/codemode/reflection.py`) replaced the
+continuous learner as the default way Fluid learns. A finished turn no longer
+starts a pass (`Synthesizer.kick` does nothing). The pass runs once, when the
+chat's engine closes: `CodeModeSession.aclose` or the delegated
+`ToolJournal.aclose` drains the learner when the pool evicts an idle engine,
+the chat settles or the worker shuts down. That close is the one event both legs
+already share, and it fires once per idle stretch. The native engine shields
+its close, so the call outlives the adapter's 5-second close grace, and the
+learner's HTTP client closes only once no call is using it.
+
+**Gate.** `reflection.gate` runs first and uses no model. The chat qualifies
+when a user turn after an agent reply reads as a correction (starting "no",
+"wrong" or "not that", or containing "don't", "stop", "instead", "I prefer",
+"from now on", "next time", "I meant", "that's not right" and similar), a
+user turn carries the frustration
+mark the journal already sets, the user asked to remember something, or the
+same friction signal appeared at least twice. Text inside code doesn't count.
+A chat that fails the gate is marked reflected and logged as
+`{"kind": "reflection", "outcome": "skipped", "reason": "no_signal", "ran":
+false}` with no call. Other skip reasons are `backoff` (the chat's model is
+backing off after a failure) and `busy` (another pass holds the synthesis
+lock for 30 seconds).
+
+**Input.** The input is the session's own `user`, `assistant`, `remember` and
+`friction` journal lines newer than its last reflection (`.reflection-state.json`
+keeps a per-session high-water mark, capped at 500 sessions), the facts and
+rules in scope, and why the chat was picked. There are no tool or cell lines
+and no subagent lines. It is bounded to the smaller of 28,000 characters
+(about 7k tokens) and the chat route's prompt limit. User turns are clipped to
+2,000 characters and kept first (newest first). Replies (800) and friction
+(300) fill the rest, in order. A chat that comes back and settles again is
+reflected on its new lines alone, and a Forget during the call drops the
+answer.
+
+**Routing and cost.** A reflection reads one session, so it uses that
+session's own route from PR #1996: the chat's model, provider row and effort
+(`FLUID_CONTINUAL_MODEL` still pins the model), its `model@row` backoff, and
+the same per-billing daily call budget and pacing as every learner call. The
+synthesis-log row records the model, billing and prompt limit used.
+
+**Output.** The model answers `NO_CHANGES` or up to five tagged items:
+
+- `<rule applies_to quote>` saves a behaviour rule through the existing
+  `_apply_rules` path. A rule still needs a quote found in the user's turns,
+  as `behavior.py` requires.
+- `<proposal kind="owner_preference" quote="…">` saves at once as an
+  agent-saved durable fact (`provenance="user"`, `automatic=True`, revertible),
+  but only when its quote is found in the user's turns.
+- Any other `<proposal kind="owner_preference|owner_fact|project">` goes to
+  the inbox. An unverified quote is dropped.
+
+Skills, consolidation, the when-line backfill (`memory_backfill.py`) and
+workflow proposals (`workflows.py`) do not run in reflection mode. The rule
+conflict review (`conflict_review.py`) still runs after a reflection that did
+not fail.
+
+**Inbox.** `proposals.json` beside the store holds this worker's proposals:
+id (a hash of kind, scope and normalised text), kind, text, scope, quote,
+when-line, sessions, created and expiry times, and status. A new proposal that
+matches an open one of the same kind and scope (word overlap ≥ 0.6) adds its
+session instead of a second row. When two distinct sessions, on any worker,
+have produced it, it is promoted to an agent-saved durable fact. The owner can
+also accept or dismiss it (`GET /api/v1/memories/proposals`, `POST
+/api/v1/memories/proposals/{id}/accept`, `POST …/dismiss`). A decided proposal
+stays decided: the same text from a later chat does not reopen it. Open
+proposals expire 14 days after they were first made, and the file holds at
+most 100. A proposal is not a fact: it takes no slot, is not in the index,
+just-in-time delivery or Recall, and expiring it is not counted as a loss.
+
+**Rollback.** `FLUID_MEMORY_LEARNER=continuous` (a plain env read, listed as
+internal in `scripts/ci/env_allowlist.json`) brings back the continuous
+learner described in the rest of this document until phase 3 deletes it.
+`fluid_continual` still turns learning on and off in both modes.
+
 ## Learning from Claude Code sessions
 
 Claude Code (delegated) sessions feed the same journal as native JSON-mode
@@ -133,8 +209,10 @@ Python kernel, so every call is a direct `tool` record, as in native JSON mode.
 The same caps, the low-value read filter and the secret screen on saved facts
 apply.
 
-A finished reply kicks a learner pass and closing the session drains it, under
-the store's shared pacing and daily budget. The CLI is not a client the learner
+Closing the session reflects on it once (see Session reflection above). Under
+the `FLUID_MEMORY_LEARNER=continuous` rollback, a finished reply kicks a
+learner pass and closing the session drains it. Both run under the store's
+shared pacing and daily budget. The CLI is not a client the learner
 can call, so passes use, in order: the session's own provider row when a native
 client can call it, with `FLUID_CONTINUAL_MODEL` or the session model; for the
 installation owner's sessions only, a usable flat-rate subscription row
@@ -364,6 +442,17 @@ with an I/O error; its own records are left out, since its files are their
 source. The committed local file is the durable source for
 retrying publication, so a crash between a save and a publish does not lose the
 save. A local receipt does not claim that an offline worker has received it.
+Reflection proposals travel as one record per store
+(`memory-proposal:<device>:<owner-hash>`, kind `memory_proposal`, content
+`{schema, owner, device, proposals}`) whenever `proposals.json` changes. A
+receiver keeps each peer's list in `proposals.remote.json`, which is never
+read as facts. The inbox merges the lists by id: sessions are joined, so a
+proposal from a session on another worker corroborates a local one, and a
+decision made on any worker closes it everywhere. A deleted record removes
+that peer's list. Older workers ignore these records: every earlier `_apply`
+acts only on kinds `skill` and `prose_skill` and on ids starting with
+`memory-fact:`, `memory-barrier:`, `memory-v2:` or the legacy `fact:`, and
+skips any other record. So a proposal can never reach an older worker's facts.
 User-level prose skill folders (`~/.fluid/skills/<name>/SKILL.md`) travel in
 the same collection through `app/network/prose_skills.py`; they are
 instructions, not memory, and docs/network/README.md describes their rules.
