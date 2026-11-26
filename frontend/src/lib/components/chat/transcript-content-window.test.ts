@@ -36,6 +36,22 @@ describe('nested transcript mount budget', () => {
   reading = 2;
   expect(window.loadOlder({ preserveReading: true })).toEqual({ start: 0, end: 3 });
  });
+ it('leaves newer rows mounted when no older row fits beside the reading reply', () => {
+  // A small prompt and an expensive live reply sit at the top of the slice with
+  // affordable rows below them, and the row above is too costly to admit.
+  // Automatic paging used to drop those newer rows without adding any older
+  // one; the next streaming reprice re-added them, so the slice, its Show newer
+  // control and Jump to latest flickered on every frame at the top.
+  const costs = [8000, 100, 8000, 1000, 1000, 1000];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 2 });
+  window.setItemCount(6);
+  const mounted = window.restoreRange({ start: 1, end: 6 });
+  expect(mounted).toEqual({ start: 1, end: 6 });
+  expect(window.loadOlder({ preserveReading: true })).toBe(mounted);
+  expect(window.visibleRange).toBe(mounted);
+  // Explicit Show earlier still navigates past the reply.
+  expect(window.loadOlder().start).toBe(0);
+ });
  it('protects the reading row under the outer cap even without weighted costs', () => {
   const window = createTranscriptWindow({ cap: 4, step: 2, getReadingIndex: () => 9 });
   window.setItemCount(10);
