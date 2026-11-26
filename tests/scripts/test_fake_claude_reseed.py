@@ -1,4 +1,11 @@
 """App-produced reseed files must be readable by the dev loop's actual CLI."""
+
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip("The devloop's fake Claude CLI is a #!/bin/sh shim, which Windows cannot run", allow_module_level=True)
 import json
 
 from app.core.provider.fluid_transcript import build_cli_transcript_entries

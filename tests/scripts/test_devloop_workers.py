@@ -1,6 +1,13 @@
 """Two disposable workers use real pairing, never the installed worker's state."""
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip('The devloop is Linux/macOS only: it relies on os.getuid, O_NOFOLLOW, fcntl and SIGHUP', allow_module_level=True)
+
 import argparse
 import asyncio
 import ipaddress

@@ -22,7 +22,8 @@ async def _spawn(loop, source):
         start_new_session=sys.platform != "win32",
     )
     loop._proc = proc
-    assert await proc.stdout.readline() == b"ready\n"
+    # rstrip: Windows text-mode stdout ends the line with \r\n.
+    assert (await proc.stdout.readline()).rstrip() == b"ready"
     return proc
 
 

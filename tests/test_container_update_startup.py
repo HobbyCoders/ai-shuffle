@@ -1,4 +1,11 @@
 """HTTP-ready update commands must not wait for the first periodic health probe."""
+
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip('The container runtime runs only inside the Linux image (fcntl, pwd)', allow_module_level=True)
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock

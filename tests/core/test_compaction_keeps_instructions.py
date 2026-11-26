@@ -12,6 +12,13 @@ every assertion below is about that text, not about what Fluid stored.
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip("The devloop's fake Claude CLI is a #!/bin/sh shim, which Windows cannot run", allow_module_level=True)
+
 import asyncio
 import json
 import logging

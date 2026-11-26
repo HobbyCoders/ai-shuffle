@@ -76,7 +76,8 @@ def test_installed_commands_and_skills_follow_owner_enablement(installed_plugin,
             assert entries[name]["source"] == "installed@journey"
             assert 'Installed two words / release. "two words" release.' in result
             recorded = svc.get_installation_records("installed@journey")[0]["installPath"]
-            assert recorded in result
+            # The plugin root is expanded with forward slashes on every platform.
+            assert Path(recorded).as_posix() in result
             assert Path(recorded).is_dir()
             assert "${CLAUDE_PLUGIN_" not in result
         else:

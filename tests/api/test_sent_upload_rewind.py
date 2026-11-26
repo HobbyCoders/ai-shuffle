@@ -485,7 +485,8 @@ async def test_remote_materialization_records_the_local_paths(staged_upload, rew
         stack.enter_context(patch.object(query_engine, "_stream_to_websocket_impl", real_stream))
         stack.enter_context(patch.object(turn_recorder.TurnRecorder, "create_for_run", real_create))
         assert await session_runtime.SessionRuntime(queued).execute() == "completed"
-        assert str(local_path) in str(bounds.adapter.send_query.call_args)
+        # As it appears in the call's repr (Windows backslashes are doubled there).
+        assert repr(str(local_path))[1:-1] in str(bounds.adapter.send_query.call_args)
     assert local_path.read_bytes() == b"image"
     users = [row for row in session_events.get_events(SID) if row["event_type"] == "message.user"]
     assert len(users) == 1

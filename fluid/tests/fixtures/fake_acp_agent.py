@@ -511,11 +511,19 @@ async def main() -> None:
     if os.environ.get("FAKE_ACP_IGNORE_EOF") == "1" and sys.platform != "win32":
         import signal
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    reader = asyncio.StreamReader(limit=16 * 1024 * 1024)
-    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    if sys.platform == "win32":
+        # The Proactor loop cannot read an inherited anonymous pipe, so read
+        # stdin a line at a time on a thread. One line is in flight at most,
+        # so an agent whose loop is blocked still stops reading its stdin.
+        async def readline() -> bytes:
+            return await asyncio.to_thread(sys.stdin.buffer.readline)
+    else:
+        reader = asyncio.StreamReader(limit=16 * 1024 * 1024)
+        await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+        readline = reader.readline
     tasks = set()
     while True:
-        line = await reader.readline()
+        line = await readline()
         if not line:
             if os.environ.get("FAKE_ACP_IGNORE_EOF") == "1":
                 await asyncio.Event().wait()

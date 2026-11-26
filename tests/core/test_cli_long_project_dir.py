@@ -1,6 +1,7 @@
 """Exact Claude Code directory names, including collisions and UTF-16 cwd hashes."""
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -29,6 +30,7 @@ process.stdout.write(name);
     assert _cli_project_dir(tmp_path, cwd).name == expected
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a drive-less /workspace cwd gains a drive letter on Windows")
 def test_new_long_cwd_never_reuses_a_same_prefix_sibling(tmp_path):
     cwd = "/workspace/" + "long-segment/" * 20 + "checkout"
     sibling = _cli_project_dir(tmp_path, cwd + "-other")

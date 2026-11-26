@@ -1,4 +1,11 @@
 """Pure benchmark checks: no services, database or credentials needed."""
+
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip('The sync benchmark measures with the POSIX resource module', allow_module_level=True)
 import io
 import json
 import math

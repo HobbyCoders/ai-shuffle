@@ -943,7 +943,8 @@ def test_delegated_authored_commands_require_enablement_and_current_approval(aut
     if state == "approved":
         assert expanded == expand_native_command(str(cwd), prompt)
         assert 'Draft two words for release. All: "two words" release.' in expanded
-        assert str(saved.path) in expanded
+        # The plugin root is expanded with forward slashes on every platform.
+        assert saved.path.as_posix() in expanded
         assert "${CLAUDE_PLUGIN_" not in expanded
     else:
         assert expanded == prompt

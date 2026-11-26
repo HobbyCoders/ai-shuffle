@@ -1,4 +1,11 @@
 """Observe the disposable fake CLI's own cwd, without changing protocol or cwd."""
+
+import sys
+
+import pytest
+
+if sys.platform == "win32":
+    pytest.skip("The devloop's fake Claude CLI is a #!/bin/sh shim, which Windows cannot run", allow_module_level=True)
 import json
 import os
 from pathlib import Path

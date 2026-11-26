@@ -30,9 +30,14 @@ BASE = "/api/v1/antigravity"
 @pytest.fixture
 def fake_agy(tmp_path, monkeypatch):
     """The fake agent behind the binary override, with a private data dir."""
-    wrapper = tmp_path / "agy"
-    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n')
-    wrapper.chmod(0o755)
+    if sys.platform == "win32":
+        # Windows runs a .cmd directly but cannot run a #!/bin/sh script.
+        wrapper = tmp_path / "agy.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{FAKE}" %*\r\n')
+    else:
+        wrapper = tmp_path / "agy"
+        wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n')
+        wrapper.chmod(0o755)
     monkeypatch.setenv(ag.BINARY_ENV, str(wrapper))
     monkeypatch.setattr(ag, "_root", lambda: tmp_path / "antigravity")
     return wrapper

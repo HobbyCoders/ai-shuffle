@@ -75,8 +75,12 @@ def preview_environment(
     empty = directory / "empty.env"
     empty.write_text("")
     root = Path(__file__).resolve().parents[1]
-    env = {key: value for key, value in os.environ.items()
-           if key in ("PATH", "LANG", "LD_LIBRARY_PATH")}
+    # Windows children need SYSTEMROOT (asyncio's sockets fail without it) and
+    # the temp and shell variables; Linux keeps its minimal set.
+    kept = ("PATH", "LANG", "LD_LIBRARY_PATH")
+    if os.name == "nt":
+        kept += ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATHEXT", "COMSPEC")
+    env = {key: value for key, value in os.environ.items() if key in kept}
     env.update(HOME=str(home), DATA_DIR=str(directory / "data"),
                XDG_CONFIG_HOME=str(home / ".config"), XDG_DATA_HOME=str(home / ".local/share"),
                XDG_CACHE_HOME=str(home / ".cache"), WORKSPACE_DIR=str(workspace),
