@@ -209,9 +209,9 @@ across the model call: inbox and state writes run in a worker thread under
 their own short advisory locks, and a writer that could not take its lock
 writes nothing. A proposal the inbox could not store (busy or a write error)
 leaves the watermark where it was, so the chat's next close reflects on the
-same turns again. On that retry a rule already held word for word is a repeat:
-the learned-rule cap doesn't refuse it, and neither it nor a proposal this chat
-already queued is reported again as a new change.
+same turns again. On that retry a rule already saved matches its own key and
+scope (no copy), and a proposal this chat already queued is neither written
+nor reported again.
 
 **Engines.** Native chats drain the journal in their shielded close. Claude
 Code and Antigravity chats start the drain as its own tracked task once the

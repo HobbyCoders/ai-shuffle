@@ -527,8 +527,10 @@ def deferred_drain_waits() -> Iterator[None]:
 
 async def finish_drains(budget: float = SHUTDOWN_DRAIN_SECONDS) -> int:
     """Wait for every learner drain on this loop, then cancel the rest and
-    give them time to unwind: all of it within ``budget`` seconds in total,
-    nothing after it. Returns how many were cut off.
+    give them time to unwind, all within ``budget`` seconds in total:
+    shutdown stops waiting at that cutoff. (An inbox or state write already
+    running in a worker thread can still finish after it.) Returns how many
+    were cut off.
 
     A cut-off reflection records nothing for its chat (the watermark moves
     only after its output is stored, see fluid.codemode.reflection), so the

@@ -592,16 +592,14 @@ async def test_shutdown_waits_for_every_reflection_at_once_and_one_cut_off_refle
     assert len(provider.prompts) == 1 and state.through("ses_0") > 0
 
 
-async def test_a_retry_after_a_partial_write_reports_only_what_is_new(tmp_path, monkeypatch):
+async def test_a_retry_after_a_partial_write_saves_nothing_twice(tmp_path, monkeypatch):
     """The preference saves as a rule, then the inbox write for the fact
-    fails. The retry gets the same output at the learned-rule cap: the rule is
-    a repeat (not refused, not sent to the inbox) and is not reported again."""
+    fails. The retry gets the same output: the rule is matched by its own
+    key and scope (no copy), the fact lands in the inbox once, and the
+    watermark moves."""
     from fluid.codemode import behavior
 
     store = SkillStore(tmp_path)
-    for n in range(behavior.MAX_LEARNED_RULES - 1):
-        store.save_memory(f"When testing: filler rule number {n}.", provenance="user", durable=True,
-                          key=behavior.rule_key("all", f"filler {n}"))
     chat(store, "ses_p", [("user", "Check the deploy."), ("assistant", "Deployed; logs attached below."),
                           ("user", "No, I prefer one-line status replies.")])
     output = ('<proposal kind="owner_preference" quote="I prefer one-line status replies" '
@@ -614,23 +612,19 @@ async def test_a_retry_after_a_partial_write_reports_only_what_is_new(tmp_path, 
     monkeypatch.setattr(reflection.ProposalInbox, "propose", busy)
     provider = Scripted(output, output)
     await learner(store, provider, "ses_p").drain()
-    rules = [m for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected]
-    assert len(rules) == behavior.MAX_LEARNED_RULES  # the preference saved: rule 24
+    [rule] = [m for m in store.memories() if behavior.is_rule_key(m.key)]
     first = reflections(store)[-1]
     assert first["unsaved"] == 1 and first["rules"] == 1
+    assert reflection.ProposalInbox(store.root).open() == []
     assert reflection.ReflectionState(store.root).through("ses_p") == 0
 
     monkeypatch.setattr(reflection.ProposalInbox, "propose", real)
     await learner(store, provider, "ses_p").drain()  # the chat's next close
     assert len(provider.prompts) == 2
-    again = reflections(store)[-1]
-    assert again["outcome"] == "ran" and again["rules"] == 0 and again["proposed"] == 1
-    assert "learned rules already" not in (again.get("error") or "")
-    assert ([(m.id, m.text) for m in store.memories() if behavior.is_rule_key(m.key) and not m.protected]
-            == [(m.id, m.text) for m in rules])  # no copy, nothing dropped
+    assert reflections(store)[-1]["outcome"] == "ran"
+    assert [(m.id, m.text) for m in store.memories() if behavior.is_rule_key(m.key)] == [(rule.id, rule.text)]
     [proposal] = reflection.ProposalInbox(store.root).open()
-    assert proposal["kind"] == reflection.OWNER_FACT  # the preference never fell into the inbox
-    assert [c for c in again.get("changed", []) if c.startswith("rule:")] == []
+    assert proposal["kind"] == reflection.OWNER_FACT and proposal["sessions"] == ["ses_p"]
     assert reflection.ReflectionState(store.root).through("ses_p") > 0
 
 

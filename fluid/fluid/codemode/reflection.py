@@ -634,11 +634,8 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
     worker thread: waiting on the inbox lock never blocks the event loop."""
     from fluid.codemode import behavior, facts
 
-    # A retry after a storage error (see _reflect_turn) gets the same output
-    # again: what it already saved is a repeat, never reported as new.
-    repeats: list[str] = []
-    changed = list(synth._apply_rules(text, entries, errors, repeats))
-    counts = {"rules": 0, "proposed": 0}
+    changed = list(synth._apply_rules(text, entries, errors))
+    counts = {"rules": len(changed), "proposed": 0}
     for match in list(_PROPOSAL_RE.finditer(text or ""))[:MAX_PROPOSALS_PER_PASS]:
         attrs = dict(_ATTR_RE.findall(match.group(1) or ""))
         kind = attrs.get("kind", "")
@@ -674,9 +671,10 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
             tag = (f'<rule applies_to="all" scope="{scope_attr}" quote="{quote}">'
                    f"{_preference_rule(body, when)}</rule>")
             refused: list[str] = []
-            rules = synth._apply_rules(tag, entries, refused, repeats)
+            rules = synth._apply_rules(tag, entries, refused)
             if rules:
                 changed.extend(rules)
+                counts["rules"] += len(rules)
                 continue
             errors.extend(f"{label}: {reason}" for reason in refused)
         scope = synth._resolve_scope(scope_attr) or "global"
@@ -696,8 +694,6 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
             continue  # decided already (it stays decided), or queued from this chat before
         changed.append(f"proposal:{row['id']}")
         counts["proposed"] += 1
-    changed = [name for name in changed if name not in repeats]
-    counts["rules"] = sum(1 for name in changed if name.startswith("rule:"))
     return changed, counts
 
 
