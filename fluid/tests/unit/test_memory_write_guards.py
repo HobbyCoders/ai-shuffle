@@ -54,6 +54,8 @@ PROGRESS = [
     ("On branch main; next step is to rerun CI.", "When rerunning CI"),
     # A reference opening a clause, its status after the colon.
     ("PR #1824: next step is to add the scroll test.", "When adding the scroll test"),
+    # A bare "waiting on CI" whose subject is the reference.
+    ("PR 77 waiting on CI before the docs pass.", "When checking the docs pass"),
 ]
 
 # Lasting rules that cite a PR, issue or branch, or use progress-like words
@@ -90,6 +92,11 @@ LASTING = [
     # Near the reference, but the reference is not the status's subject.
     ("Issue #88 explains why migrations in progress block deploys.",
      "When deploying during a migration"),
+    # A named branch as recurring context in the when-line anchors nothing.
+    ("Never deploy while waiting for CI.", "When deploying on branch main"),
+    # "On branch creation" is prose, not a branch called "creation".
+    ("On branch creation, the next step after naming the branch is to set its upstream "
+     "before the first push.", "When creating a branch"),
 ]
 
 

@@ -15,9 +15,10 @@ model.
 * a continuation names it ("Continuing PR #1824", "continuing the scroll fix
   in PR #1824", "left off on feat/x", "WIP: PR 77"), or a status is "on/for"
   it ("still failing on PR #12");
-* the fact is anchored to the work: its when-line names a reference ("When
-  working on PR #1824"), or a clause opens with "on branch <name>". Then any
-  progress wording in the fact counts.
+* the fact is anchored to the work: its when-line names a PR, issue or work
+  branch ("When working on PR #1824"; a named branch such as main may be
+  lasting context there, so it does not count), or a clause opens with "on
+  branch <name>". Then any progress wording in the fact counts.
 
 A generic condition in a rule ("never merge while a migration is in progress;
 see issue #88") is none of these, so it saves.
@@ -26,8 +27,8 @@ from __future__ import annotations
 
 import re
 
-# A pull request, issue or branch the work is happening on.
-_REF = (
+# A pull request, issue or work branch: a piece of work that ends.
+_WORK = (
     r"(?:(?<![\w&#/])#\d{1,6}\b"                             # #1824 (not &#123; or C#1)
     r"|\b(?:PR|MR|pull\s+request|issue)[\s-]*#?\d{1,6}\b"    # PR 1824, issue #12
     # An issue or PR link, with or without its scheme; then a GitLab one.
@@ -35,14 +36,21 @@ _REF = (
     r"|(?:\bhttps?://[\w.-]+(?:/[\w.-]+)*)?/-/(?:merge_requests|issues)/\d+"
     # A branch with a conventional work prefix. Not docs/, test/, ci/ or
     # build/ on their own: those are as often folders as branches.
-    r"|(?<![\w/.-])(?:feat|feature|fix|bugfix|hotfix|chore|refactor|wip)/[A-Za-z0-9][\w.-]*"
-    # Any branch named as one: "branch docs/update-readme", "branch fix-login",
-    # a quoted "branch `main`", and "on branch main" with any single name.
-    r"|\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
-    r"|\bbranch\s+[`'\"][A-Za-z0-9][\w./-]*"
-    r"|\bon\s+branch\s+[A-Za-z0-9][\w./-]*)"
+    r"|(?<![\w/.-])(?:feat|feature|fix|bugfix|hotfix|chore|refactor|wip)/[A-Za-z0-9][\w.-]*)"
 )
+# Any branch named as one: "branch docs/update-readme", "branch fix-login", a
+# quoted "branch `main`", and "on branch <name>" with a single name only if it
+# is a default branch or a ; or : follows it ("on branch creation" is prose).
+# A named branch may be lasting context ("when deploying on branch main"), so
+# it never anchors a fact from the when-line alone.
+_NAMED = (
+    r"(?:\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
+    r"|\bbranch\s+[`'\"][A-Za-z0-9][\w./-]*"
+    r"|\bon\s+branch\s+(?:(?:main|master|develop|trunk)\b|[A-Za-z0-9][\w.-]*(?=\s*[;:])))"
+)
+_REF = "(?:" + _WORK + "|" + _NAMED + ")"
 _REFERENCE = re.compile(_REF, re.IGNORECASE)
+_WORK_REFERENCE = re.compile(_WORK, re.IGNORECASE)
 
 # Where a piece of work stands.
 _STATUS = (
@@ -64,7 +72,7 @@ _OPEN = r"[\s(\[`'\"]+"
 # What makes the reference the subject of the status that follows it: a
 # be-verb, "remains", or "still" opening the status. Proximity alone is not.
 _SUBJECT = (r"(?:\s+(?:is|are|was|were|remains?)\s+(?:(?:now|currently|still)\s+)?"
-            r"|\s+(?=still\b))")
+            r"|\s+(?=still\b|waiting\b))")
 
 _ABOUT = [re.compile(p, re.IGNORECASE) for p in (
     # "Issue #88 is in progress", "pull/301 is not yet merged", "PR 12 still failing".
@@ -88,9 +96,11 @@ _ACROSS = [re.compile(p, re.IGNORECASE) for p in (
 
 # The fact itself is about the work: "On branch docs/x; next step is ...".
 # The lookahead keeps "on branch <name>" (part of the reference) and
-# "on <reference>" both anchored to a clause that opens with "on".
+# "on <reference>" both anchored to a clause that opens with "on". Whole
+# fields, so the ; or : after a single branch name is still there to see.
 _ON_WORK = re.compile(
-    r"^(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?(?=on\b)(?:on\s+)?" + _REF,
+    r"(?:^|[;!?]|[.:](?=\s))\s*"
+    r"(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?(?=on\b)(?:on\s+)?" + _REF,
     re.IGNORECASE)
 
 # Any progress wording, counted once the fact is anchored to a reference.
@@ -122,8 +132,8 @@ def task_progress(text: object, when: object = None) -> str | None:
             (m for clause in _clauses(part) for p in _ABOUT if (m := p.search(clause))), None)
         if match:
             return match.group("p")
-    anchored = (isinstance(when, str) and _REFERENCE.search(when)) or any(
-        _ON_WORK.search(clause) for part in fields for clause in _clauses(part))
+    anchored = (isinstance(when, str) and _WORK_REFERENCE.search(when)) or any(
+        _ON_WORK.search(part) for part in fields)
     if anchored:
         match = _PROGRESS.search(" ".join(fields))
         if match:
