@@ -127,7 +127,19 @@ jobs:
           distribution: temurin
           # Robolectric's Android 16 runtime requires Java 21; app bytecode stays 17.
           java-version: '21'
-          cache: gradle
+      # The unit tests need the same classpath android.yml caches (including
+      # Robolectric's nativeruntime jar). Read that job's entry, falling back to
+      # its newest one, instead of setup-java's shared key, which the minified
+      # build saves without it. This signing job never saves a cache.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-tests-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', 'android/gradle.properties') }}
+          restore-keys: |
+            gradle-android-tests-${{ runner.os }}-
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
