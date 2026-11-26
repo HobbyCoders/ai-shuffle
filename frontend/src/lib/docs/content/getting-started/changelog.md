@@ -8,6 +8,51 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 1.3.10 (2026-11-26)
+
+### Memory and learning
+
+- Saved facts reach an agent just when they apply, instead of all at the start of a chat.
+- One learner handles memories and learned behaviour rules on any provider, with a cost cap and an off switch, and its model judges conflicting memories instead of matching words.
+
+### Projects
+
+- A project page lists the project's checkouts worker by worker.
+- **Clone from GitHub** is more reliable, and the New project dialog is clearer.
+- `git@` and HTTPS addresses of the same repository make one project, and switching a project's repository applies on every worker.
+- New chats start from the repository's real default branch, not always `main`.
+- Removing a project, deleting a group and the folder tree are safer, and a clone never reuses a stale folder.
+
+### Chats and sessions
+
+- Message all active chats at once.
+- Fork a chat to another worker; every fork gets its own worktree.
+- **Watch** on a pull request has an agent follow its CI and reviews, within limits you set.
+- Design mode in the Browser panel: mark UI changes on the live page and send them to the agent.
+- Installed plugins sync between workers.
+
+### Agents and providers
+
+- Each Claude row has its own on/off switch, and a Claude API key runs beside the subscription.
+- Fast and Ultrafast cycle from the corner bolt on the effort card.
+- Stop and timeouts end everything they started, including process trees, MCP calls and Swarms; delegated Claude Code chats survive crashes and recovery.
+- Credentials stay out of provider errors, logs and learner evidence, and files save without being truncated.
+
+### Desktop app
+
+- Updates skip the database copy when the database level is unchanged, and check the dependency cache and restore point faster.
+- Settings > Updates and the update button say when the latest installer brings a newer launcher than the one you run, with a link to the download.
+- The usage panel no longer flashes a terminal window on Windows.
+
+### Interface
+
+- Settings categories are reorganized, the sidebar keeps projects in name order with foldable groups, and the phone tab row follows the rail order.
+- The app and container start faster.
+
+### Fixed
+
+- Many fixes to sync between workers, hand-offs, tasks and wakeups.
+
 ## 1.3.9 (2026-11-21)
 
 1.3.9 contains everything in 1.3.8, plus a fix to how the Windows installer is built. 1.3.8 reached the in-app updater, the macOS download and Play internal testing, but its Windows installer could not be built, which also kept the Docker latest tag and the website's Windows, Linux and Android downloads on 1.3.1. 1.3.9 finishes that rollout.
