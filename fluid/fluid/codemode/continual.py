@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -520,6 +521,21 @@ class LearnerBudget(NamedTuple):
         return {"daily": self.daily, "reserved": self.reserved, "source": self.source}
 
 
+class LearnerRoute(NamedTuple):
+    """Where another chat's journal entries are learned: that chat's own
+    provider, model and effort (see ``Synthesizer(route=...)``). Its text is
+    never sent to the running chat's provider."""
+
+    provider: Any
+    model: str
+    effort: Any = None
+    context_window: int | None = None
+    #: The chat's model id, for the rule family its behaviour rules target.
+    session_model: str | None = None
+    #: How the route's provider bills a call (BILLING_SUBSCRIPTION, metered).
+    billing: str | None = None
+
+
 def _bounded(value: Any, low: int, high: int) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -667,8 +683,21 @@ class Synthesizer:
         workflow_cwd: str | None = None,
         daily_calls: int | Callable[[], Any] | None = None,
         billing: str | Callable[[], str | None] | None = None,
+        own_session: str | None = None,
+        route: Callable[[str], LearnerRoute | None] | None = None,
     ) -> None:
         self._workflow_cwd = workflow_cwd
+        # The journal is shared by every chat of the store, so a pass can read
+        # other chats' entries. With ``route``, an entry stamped with another
+        # chat's session (not ``own_session``) is learned on that chat's own
+        # model: ``route(session)`` returns its LearnerRoute (blocking; run in
+        # a thread), or None when that chat has no learner, and its entries
+        # are then consumed unlearned rather than sent to another provider.
+        # Without ``route`` every entry is learned here (a single-chat host).
+        self._own_session = own_session
+        self._route = route
+        # The foreign route of the group being called, or None (this chat).
+        self._active_route: LearnerRoute | None = None
         # The daily call budget this learner spends (see learner_budget):
         # ``daily_calls`` is the explicit setting, a number or a callable
         # read at pass time (None or 0: automatic); ``billing`` says how this
@@ -786,6 +815,8 @@ class Synthesizer:
         # OpenCode also needs the owning conversation's wire identity, but
         # must not receive Responses-only cache-affinity body fields.
         kind = getattr(self._provider, "name", None)
+        if self._active_route is not None:
+            return {}, None  # another chat's call never carries this chat's wire identity
         if self._routing is None or kind not in ("openai_responses", "opencode"):
             return {}, None
         try:
@@ -1175,15 +1206,17 @@ class Synthesizer:
                 ran=False,
             )
 
-    def _note_failure(self, error: str) -> float:
+    def _note_failure(self, error: str, model: str | None = None) -> float:
         """Record a failed pass in the store's shared backoff; returns the
         seconds until this model's next attempt (0 when it could not be
-        recorded)."""
-        self.last_pass_failed = True
+        recorded). ``model`` is a foreign route's model: its failure backs
+        that model off without failing this chat's pass."""
+        if model is None:
+            self.last_pass_failed = True
         now = time.time()
         try:
             entry = self._store.note_learner_failure(
-                self._model, error, now=now,
+                model or self._model, error, now=now,
                 base=FAILURE_BACKOFF_BASE, cap=FAILURE_BACKOFF_MAX,
             )
         except Exception:
@@ -1309,34 +1342,159 @@ class Synthesizer:
             # pacing holds back). Session close and urgency land here too.
             self.last_pass_skipped = True
             return []
+        routes = await self._resolve_routes(shown)
+        try:
+            return await self._learn_slice(
+                lease, forgotten_before, cursor, indexed, shown, reached, slice_end, routes,
+            )
+        finally:
+            await self._close_routes(routes)
+
+    def _route_key(self, entry: dict) -> str | None:
+        """The other chat whose model learns ``entry``, or None for this one.
+        Entries without a session stamp predate stamping and stay here."""
+        session = entry.get("session")
+        if self._route is None or not session or session == self._own_session:
+            return None
+        return str(session)
+
+    def _group_key(self, entry: dict) -> tuple[str | None, str | None]:
+        """One call per chat route and project."""
+        return self._route_key(entry), entry.get("project")
+
+    async def _resolve_routes(self, shown: list[tuple[int, dict]]) -> dict[str, LearnerRoute | None]:
+        """Each other chat in ``shown`` and its route. None is no learner for
+        that chat (gone, no model, a provider that refuses background calls,
+        or its model is backing off after failures)."""
+        routes: dict[str, LearnerRoute | None] = {}
+        for _, entry in shown:
+            key = self._route_key(entry)
+            if key is None or key in routes:
+                continue
+            route: LearnerRoute | None
+            try:
+                route = await asyncio.to_thread(self._route, key)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 — no route: never another provider
+                _log.debug("learner route lookup failed", exc_info=True)
+                route = None
+            if route is not None and self._backing_off(route.model):
+                await self._close_routes({key: route})
+                route = None
+            routes[key] = route
+        return routes
+
+    def _backing_off(self, model: str) -> bool:
+        try:
+            backoff = self._store.learner_backoff(model)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(backoff) and time.time() < float(backoff.get("until", 0.0))
+
+    @staticmethod
+    async def _close_routes(routes: dict[str, LearnerRoute | None]) -> None:
+        seen: set[int] = set()
+        for route in routes.values():
+            close = getattr(route.provider, "aclose", None) if route else None
+            if close is None or id(route.provider) in seen:
+                continue
+            seen.add(id(route.provider))
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 — a client that will not close never fails a pass
+                pass
+
+    def _route_limit(self, route: LearnerRoute) -> int:
+        """The prompt size a route's model takes (see :meth:`_size_request`)."""
+        subscription = route.billing == BILLING_SUBSCRIPTION
+        window = (route.context_window or context_window_for(route.model)
+                  or (SUBSCRIPTION_ASSUMED_WINDOW if subscription else None))
+        limit = prompt_char_limit(window, self._max_tokens)
+        return limit if subscription else min(limit, METERED_PROMPT_CHAR_LIMIT)
+
+    @contextlib.contextmanager
+    def _routed(self, route: LearnerRoute | None):
+        """Build and send one group's call on ``route`` (another chat's
+        provider, model, effort and rule family), then restore this chat's."""
+        if route is None:
+            yield
+            return
+        saved = (self._provider, self._model, self._effort, self._session_model,
+                 self._prompt_limit, self._active_route)
+        self._provider, self._model, self._effort = route.provider, route.model, route.effort
+        self._session_model = route.session_model or route.model
+        self._prompt_limit = self._route_limit(route)
+        self._active_route = route
+        try:
+            yield
+        finally:
+            (self._provider, self._model, self._effort, self._session_model,
+             self._prompt_limit, self._active_route) = saved
+
+    def _consume_unshown(self, lease: str | None, reached: int, filtered: int) -> list[str]:
+        self._store.commit_synth_cursor(lease, reached)
+        self._log_pass("synthesis", [], consumed=0, filtered=filtered, ran=False)
+        try:
+            self._store.reap_journal()
+        except Exception:
+            pass
+        return []
+
+    async def _learn_slice(
+        self, lease: str | None, forgotten_before: float, cursor: int,
+        indexed: list[tuple[int, dict]], shown: list[tuple[int, dict]],
+        reached: int, slice_end: int, routes: dict[str, LearnerRoute | None],
+    ) -> list[str]:
+        # Another chat without a learner: its entries are consumed unshown,
+        # never sent to this chat's provider.
+        shown = [(n, e) for n, e in shown
+                 if (key := self._route_key(e)) is None or routes.get(key) is not None]
+        if not shown:
+            return self._consume_unshown(lease, reached, len(indexed))
         # Only what the prompt can show is consumed: the rest of the slice
-        # stays behind the cursor for the next pass. Each project in the
-        # slice costs one call, so the slice also stops before a project the
-        # day's remaining calls could not pay for.
-        fitted = self._fit_calls(self._fit_journal(shown))
+        # stays behind the cursor for the next pass. Each chat and project in
+        # the slice costs one call, so the slice also stops before a group the
+        # day's remaining calls could not pay for. It is fitted to the
+        # smallest model it may go to.
+        own_limit = self._prompt_limit
+        self._prompt_limit = min([own_limit, *(self._route_limit(r) for r in routes.values() if r)])
+        try:
+            fitted = self._fit_calls(self._fit_journal(shown))
+        finally:
+            self._prompt_limit = own_limit
         deferred = len(shown) - len(fitted)
         if deferred:
             reached = fitted[-1][0]
-        groups: dict[str | None, list[dict]] = {}
+        groups: dict[tuple[str | None, str | None], list[dict]] = {}
         for _, entry in fitted:
-            groups.setdefault(entry.get("project"), []).append(entry)
+            groups.setdefault(self._group_key(entry), []).append(entry)
         changed: list[str] = []
         usage: dict[str, int] = {}
         text = ""
-        done: set[str | None] = set()
+        done: set[tuple[str | None, str | None]] = set()
+        routed: dict[str, str | None] = {}
         stop: Exception | None = None
         original_project = self._project
         try:
-            for project, group in groups.items():
+            for (route_key, project), group in groups.items():
+                route = routes.get(route_key) if route_key else None
                 # Unattributed legacy input may produce global facts, but must
                 # not be assigned to whichever project happens to run next.
                 self._project = project or "legacy:unassigned"
                 try:
-                    prompt, system, workflow_entries = self._synthesis_input(group)
-                    text, group_usage = await self._complete(prompt, system)
+                    with self._routed(route):
+                        prompt, system, workflow_entries = self._synthesis_input(group)
+                        text, group_usage = await self._complete(prompt, system)
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
                     for key, value in exc.usage.items():
                         usage[key] = usage.get(key, 0) + value
+                    if route is not None:
+                        # Another chat's provider failed: its entries are
+                        # consumed unlearned so one chat's provider cannot
+                        # hold up the others' learning; its model backs off.
+                        routed[route.model] = str(exc)
+                        self._note_failure(str(exc), model=route.model)
+                        done.add((route_key, project))
+                        continue
                     stop = exc
                     break
                 except InferenceBudgetExhausted as exc:
@@ -1348,8 +1506,15 @@ class Synthesizer:
                     usage[key] = usage.get(key, 0) + value
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
                     return []
-                changed.extend(await self._apply(text, group, workflow_entries=workflow_entries))
-                done.add(project)
+                with self._routed(route):
+                    changed.extend(await self._apply(text, group, workflow_entries=workflow_entries))
+                if route is not None:
+                    routed.setdefault(route.model, None)
+                    try:
+                        self._store.clear_learner_backoff(route.model)
+                    except Exception:
+                        pass
+                done.add((route_key, project))
         finally:
             self._project = original_project
         if stop is not None and not done:
@@ -1363,15 +1528,16 @@ class Synthesizer:
                 consumed=0, output_chars=getattr(stop, "output_chars", None),
                 usage=usage, stop_reason=getattr(stop, "stop_reason", None),
                 provider_status=getattr(stop, "status", None),
-                retry_after_s=retry,
+                retry_after_s=retry, routed=routed or None,
             )
             return changed
         if stop is not None:
-            # Some projects were answered and applied: consume the prefix of
-            # the slice they cover, so those entries are not paid for again.
+            # Some groups were answered and applied (or were another chat's
+            # failed call): consume the prefix of the slice they cover, so
+            # those entries are not paid for again.
             prefix = []
             for n, entry in fitted:
-                if entry.get("project") not in done:
+                if self._group_key(entry) not in done:
                     break
                 prefix.append((n, entry))
             reached = prefix[-1][0] if prefix else cursor
@@ -1418,7 +1584,7 @@ class Synthesizer:
             "synthesis", changed, error=self.last_error,
             consumed=len(entries), output_preview=text, usage=usage,
             stop_reason=self.last_stop_reason, deferred=deferred or None,
-            filtered=filtered or None, retry_after_s=retry,
+            filtered=filtered or None, retry_after_s=retry, routed=routed or None,
         )
         return changed
 
@@ -1433,14 +1599,15 @@ class Synthesizer:
         return effective.daily - effective.reserved - calls
 
     def _fit_calls(self, fitted: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
-        """The prefix of ``fitted`` whose projects the day's remaining calls
-        can pay for (always the first project, which the claim then decides)."""
+        """The prefix of ``fitted`` whose groups (chat route and project) the
+        day's remaining calls can pay for (always the first group, which the
+        claim then decides)."""
         left = self._calls_left()
         if left is None:
             return fitted
-        projects: set[str | None] = set()
+        projects: set[tuple[str | None, str | None]] = set()
         for i, (_, entry) in enumerate(fitted):
-            project = entry.get("project")
+            project = self._group_key(entry)
             if project not in projects:
                 if projects and len(projects) >= max(1, left):
                     return fitted[:i]
@@ -1464,6 +1631,7 @@ class Synthesizer:
         filtered: int | None = None,
         ran: bool = True,
         counts_toward_yield: bool = True,
+        routed: dict[str, str | None] | None = None,
     ) -> None:
         """Append one pass record to ``.synthesis-log.jsonl`` (best-effort).
 
@@ -1508,6 +1676,13 @@ class Synthesizer:
             record["deferred"] = int(deferred)
         if filtered:
             record["filtered"] = int(filtered)
+        if routed:
+            # Other chats' entries learned on their own models this pass:
+            # the model each went to, and its error when that call failed.
+            record["routed"] = [
+                {"model": model, **({"error": err} if err else {})}
+                for model, err in routed.items()
+            ]
         if not ran:
             record["ran"] = False
         if usage:
@@ -2101,7 +2276,10 @@ Never claim a workflow is installed because it was proposed."""
             effort=self._effort() if callable(self._effort) else self._effort,
             extra=extra,
             wire_state=wire_state,
-            session_id=wire_state.session_id if wire_state else self._session_id,
+            session_id=(
+                wire_state.session_id if wire_state
+                else None if self._active_route is not None else self._session_id
+            ),
         )
         parts: list[str] = []
         raw: dict[str, Any] = {}

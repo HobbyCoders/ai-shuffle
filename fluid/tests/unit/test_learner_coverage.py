@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from fluid.codemode import SkillStore, Synthesizer, memory_health
 from fluid.codemode import facts as facts_mod
 from fluid.codemode import continual as continual_mod
-from fluid.codemode.continual import low_value_entry, paced_call_allowance
+from fluid.codemode.continual import LearnerRoute, low_value_entry, paced_call_allowance
 from fluid.codemode.skills import JOURNAL_LOSS_FILE, JOURNAL_MAX_BYTES
 from fluid.codemode.transactions import file_transaction
 from fluid.providers.base import StreamChunk
@@ -323,6 +323,81 @@ async def test_a_switch_during_a_pass_blames_a_failure_on_the_model_that_made_it
     assert synth._model == "model-a"
     synth._apply_target()
     assert synth._model == "model-b"
+
+
+class Recording(Scripted):
+    """Scripted, keeping each request and whether the client was closed."""
+
+    def __init__(self, fail=()) -> None:
+        super().__init__(fail)
+        self.requests: list = []
+        self.closed = False
+
+    async def stream(self, request):
+        self.requests.append(request)
+        async for chunk in super().stream(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _two_chats(store, per=5):
+    """``per`` entries from this chat (chat-a), then ``per`` from chat-b."""
+    for i in range(2 * per):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-a" if i < per else "chat-b"})
+
+
+def _routed_synth(store, own, routes: dict):
+    return Synthesizer(own, "model-a", store, min_new_entries=1,
+                       own_session="chat-a", route=routes.get)
+
+
+async def test_another_chats_entries_go_to_that_chats_own_model(tmp_path):
+    """The journal is shared: a pass started by chat A sends chat B's turns
+    only to B's provider, model and effort, never to A's."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own, theirs = Recording(), Recording()
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(
+        provider=theirs, model="model-b", effort="high", session_model="model-b")})
+    await synth._run_safe()
+    assert len(own.prompts) == 1 and len(theirs.prompts) == 1
+    assert "f0.py" in own.prompts[0] and "f5.py" not in own.prompts[0]
+    assert "f5.py" in theirs.prompts[0] and "f0.py" not in theirs.prompts[0]
+    assert theirs.requests[0].model == "model-b" and theirs.requests[0].effort == "high"
+    assert own.requests[0].model == "model-a"
+    assert store.synth_cursor() == 10 and theirs.closed
+    row = rows(store)[-1]
+    assert row["model"] == "model-a" and row["routed"] == [{"model": "model-b"}]
+    assert synth._model == "model-a" and synth._provider is own
+
+
+async def test_a_chat_without_a_learner_is_consumed_unsent(tmp_path):
+    """No route for chat B (gone, no model, guarded sign-in): its turns are
+    read past, never sent to chat A's provider."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own = Recording()
+    await _routed_synth(store, own, {})._run_safe()
+    assert len(own.prompts) == 1 and "f5.py" not in own.prompts[0]
+    assert store.synth_cursor() == 10
+    assert rows(store)[-1]["filtered"] == 5
+
+
+async def test_another_chats_failing_provider_does_not_hold_up_this_chat(tmp_path):
+    """Chat B's provider errors: its turns are consumed unlearned and its
+    model backs off; chat A's learning goes on and A is not backed off."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own, theirs = Recording(), Recording(fail={1})
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(provider=theirs, model="model-b")})
+    await synth._run_safe()
+    assert store.synth_cursor() == 10
+    assert store.learner_backoff("model-b") and store.learner_backoff("model-a") == {}
+    row = rows(store)[-1]
+    assert "error" not in row and "HTTP 500" in row["routed"][0]["error"]
+    assert not synth.last_pass_failed
 
 
 async def test_a_pass_stops_before_a_project_the_day_cannot_pay_for(tmp_path):

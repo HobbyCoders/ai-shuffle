@@ -408,6 +408,22 @@ def test_any_other_binding_runs_through_the_generation_helper_on_the_sessions_bi
     assert reads == []
 
 
+def test_another_chats_route_is_its_own_row_model_and_effort(monkeypatch):
+    """A pass reading chat B's journal entries sends them to B's provider
+    row, model and effort, as B's session row stores them."""
+    from app.db import sessions
+
+    _shapes(monkeypatch)
+    reads = _text_generation_unused(monkeypatch)
+    rows = {"chat-b": {"model": "prov:row-chatgpt:gpt-5.5", "provider_id": None, "effort": "high"}}
+    monkeypatch.setattr(sessions, "get_session", rows.get)
+    route = ha._learner_route("chat-b", "local")
+    assert route is not None and route.model == "gpt-5.5" and route.session_model == "gpt-5.5"
+    assert route.provider.name == "openai_responses" and route.billing == "subscription"
+    assert route.effort() == "high" and not reads
+    assert ha._learner_route("gone", "local") is None
+
+
 def test_a_guarded_antigravity_sign_in_has_no_learner(monkeypatch):
     """That row refuses every background call, so a pass could only fail;
     the chat runs without a learner instead of moving to another provider.
@@ -532,7 +548,7 @@ def test_a_learner_on_an_api_key_row_keeps_the_metered_budget(monkeypatch):
     api_row = SessionOptions(model="claude", extra={
         "provider_id": "row-key", "provider_type": "anthropic", "provider_auth_mode": "api_key",
     })
-    owner = SimpleNamespace(_announce_continual=None)
+    owner = SimpleNamespace(_announce_continual=None, _resolve_app_session_id=lambda: "s")
     synth, _ = ha.HarnessAdapter._learner_synthesizer(
         owner, FakeInference(_reply("NO_CHANGES")), "claude", store, None, session, "s",
         session_model="opus", context_window=None, binding=api_row)
@@ -569,7 +585,7 @@ def test_a_generation_helper_learner_bills_by_the_sessions_row(monkeypatch):
     monkeypatch.setattr(ha, "_lookup_provider_row_shape", lambda pid: shapes[pid])
     binding = SessionOptions(model="opus", extra={"provider_id": "row-plan"})
     provider = ha._LearnerProvider(ha.GENERATION_HELPER_LEARNER, binding)
-    owner = SimpleNamespace(_announce_continual=None)
+    owner = SimpleNamespace(_announce_continual=None, _resolve_app_session_id=lambda: "s")
     synth, _ = ha.HarnessAdapter._learner_synthesizer(
         owner, provider, "opus", _store(), None, SessionOptions(model="opus", cwd=".", extra={}),
         "s", session_model="opus", context_window=None, binding=binding)

@@ -3504,6 +3504,9 @@ class HarnessAdapter(ProviderAdapter):
         if not any(shape) and bound.extra.get("provider_id"):
             shape = _lookup_provider_row_shape(str(bound.extra["provider_id"]))[:2]
         billing: Any = learner_billing(*shape)
+        # The journal is shared by the owner's chats: another chat's entries
+        # are learned on that chat's own model (_learner_route), never here.
+        owner = getattr(getattr(skills, "_facts", None), "owner", "local")
         synthesizer = Synthesizer(
             provider,
             model,
@@ -3518,6 +3521,8 @@ class HarnessAdapter(ProviderAdapter):
             context_window=context_window,
             daily_calls=learner_daily_calls,
             billing=billing,
+            own_session=self._resolve_app_session_id(),
+            route=functools.partial(_learner_route, owner=owner),
         )
         self._learner_synth = synthesizer
         return synthesizer, engine_bus
@@ -10189,6 +10194,58 @@ def _learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTar
         )
     except Exception:  # noqa: BLE001 — no learner is the safe answer
         logger.warning("[HarnessAdapter] learner provider lookup failed", exc_info=True)
+        return None
+
+
+def _learner_route(session_id: str, owner: str) -> Optional[Any]:
+    """Where another chat's journal entries are learned: that chat's own
+    provider, model and effort as its session row stores them, through the
+    same rules as its own learner (:func:`_learner_target`), or None when it
+    has none (gone, no model, a guarded sign-in). The shared journal is read
+    by whichever chat's pass comes first; this keeps each chat's text on the
+    provider its owner picked for it.
+
+    Blocking (DB and provider-row reads); the learner runs it in a thread.
+    Never raises.
+    """
+    from fluid.codemode.continual import LearnerRoute
+
+    from app.core.fluid_memory import learner_billing
+    from app.core.query_options import decode_provider_model
+    from app.db.sessions import get_session
+
+    try:
+        row = get_session(session_id)
+        if row is None:
+            return None
+        model = row.get("model")
+        provider_id = row.get("provider_id")
+        decoded = decode_provider_model(model)
+        if decoded:
+            provider_id, model = decoded
+        if not model:
+            return None
+        extra: Dict[str, Any] = {"provider_id": provider_id} if provider_id else {}
+        options = SessionOptions(model=model, effort=row.get("effort"), extra=extra)
+        target = _learner_target(options, owner)
+        if target is None:
+            return None
+        shape: tuple = (None, None)
+        if provider_id:
+            shape = _lookup_provider_row_shape(str(provider_id))[:2]
+        window = target.context_window
+        if window is None and provider_id:
+            window = _provider_row_window(str(provider_id), target.model)
+        return LearnerRoute(
+            provider=_LearnerProvider(target.kind, target.options),
+            model=target.model,
+            effort=target.effort,
+            context_window=window,
+            session_model=model,
+            billing=learner_billing(*shape),
+        )
+    except Exception:  # noqa: BLE001 — no route: those entries are never sent elsewhere
+        logger.warning("[HarnessAdapter] learner route lookup failed", exc_info=True)
         return None
 
 
