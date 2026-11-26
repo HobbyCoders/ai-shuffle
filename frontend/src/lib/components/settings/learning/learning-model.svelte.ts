@@ -31,8 +31,9 @@ export interface LearnerSetup {
 	daily_cap: number;
 	cap_source: 'setting' | 'subscription_default' | 'metered_default';
 	calls_today: number;
+	/** The model the latest pass ran on (passes use each chat's own model). */
 	model: string | null;
-	provider: string | null;
+	/** How the latest pass was billed. */
 	billing: 'subscription' | 'metered';
 	/** Most prompt text one pass may send. */
 	pass_chars: number;

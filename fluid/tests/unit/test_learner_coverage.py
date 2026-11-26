@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from fluid.codemode import SkillStore, Synthesizer, memory_health
 from fluid.codemode import facts as facts_mod
 from fluid.codemode import continual as continual_mod
-from fluid.codemode.continual import low_value_entry, paced_call_allowance
+from fluid.codemode.continual import LearnerRoute, low_value_entry, paced_call_allowance
 from fluid.codemode.skills import JOURNAL_LOSS_FILE, JOURNAL_MAX_BYTES
 from fluid.codemode.transactions import file_transaction
 from fluid.providers.base import StreamChunk
@@ -300,6 +300,259 @@ class Scripted(NoChanges):
 def _two_projects(store, per=15):
     for i in range(2 * per):
         store.journal_append({**edit_cell(i), "project": "projA" if i < per else "projB"})
+
+
+async def test_a_switch_during_a_pass_blames_a_failure_on_the_model_that_made_it(tmp_path):
+    """The chat moves to model B while A's request is pending: A's failure
+    is logged and backed off as A, and B takes over from the next pass."""
+    store = SkillStore(tmp_path)
+    _two_projects(store)
+    synth = Synthesizer(None, "model-a", store, min_new_entries=1)
+
+    class SwitchMidCall(Scripted):
+        async def stream(self, request):
+            synth.retarget("model-b")
+            async for chunk in super().stream(request):
+                yield chunk
+
+    synth._provider = SwitchMidCall(fail={1})
+    await synth._run_safe()
+    row = rows(store)[-1]
+    assert row["model"] == "model-a" and "HTTP 500" in row["error"]
+    assert store.learner_backoff("model-a") and store.learner_backoff("model-b") == {}
+    assert synth._model == "model-a"
+    synth._apply_target()
+    assert synth._model == "model-b"
+
+
+class Recording(Scripted):
+    """Scripted, keeping each request and whether the client was closed."""
+
+    def __init__(self, fail=()) -> None:
+        super().__init__(fail)
+        self.requests: list = []
+        self.closed = False
+
+    async def stream(self, request):
+        self.requests.append(request)
+        async for chunk in super().stream(request):
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _two_chats(store, per=5):
+    """``per`` entries from this chat (chat-a), then ``per`` from chat-b."""
+    for i in range(2 * per):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-a" if i < per else "chat-b"})
+
+
+def _routed_synth(store, own, routes: dict):
+    return Synthesizer(own, "model-a", store, min_new_entries=1,
+                       own_session="chat-a", route=routes.get)
+
+
+async def test_another_chats_entries_go_to_that_chats_own_model(tmp_path):
+    """The journal is shared: a pass started by chat A sends chat B's turns
+    only to B's provider, model and effort, never to A's."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own, theirs = Recording(), Recording()
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(
+        provider=theirs, model="model-b", effort="high", session_model="model-b")})
+    await synth._run_safe()
+    assert len(own.prompts) == 1 and len(theirs.prompts) == 1
+    assert "f0.py" in own.prompts[0] and "f5.py" not in own.prompts[0]
+    assert "f5.py" in theirs.prompts[0] and "f0.py" not in theirs.prompts[0]
+    assert theirs.requests[0].model == "model-b" and theirs.requests[0].effort == "high"
+    assert own.requests[0].model == "model-a"
+    assert store.synth_cursor() == 10 and theirs.closed
+    row = rows(store)[-1]
+    assert row["model"] == "model-a" and row["routed"] == [{"model": "model-b"}]
+    assert synth._model == "model-a" and synth._provider is own
+
+
+async def test_a_chat_without_a_learner_is_consumed_unsent(tmp_path):
+    """No route for chat B (gone, no model, guarded sign-in): its turns are
+    read past, never sent to chat A's provider."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own = Recording()
+    await _routed_synth(store, own, {})._run_safe()
+    assert len(own.prompts) == 1 and "f5.py" not in own.prompts[0]
+    assert store.synth_cursor() == 10
+    assert rows(store)[-1]["filtered"] == 5
+
+
+async def test_another_chats_failing_provider_does_not_hold_up_this_chat(tmp_path):
+    """Chat B's provider errors: its turns are consumed unlearned and its
+    model backs off; chat A's learning goes on and A is not backed off."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own, theirs = Recording(), Recording(fail={1})
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(provider=theirs, model="model-b")})
+    await synth._run_safe()
+    assert store.synth_cursor() == 10
+    assert store.learner_backoff("model-b") and store.learner_backoff("model-a") == {}
+    row = rows(store)[-1]
+    assert "error" not in row and "HTTP 500" in row["routed"][0]["error"]
+    assert not synth.last_pass_failed
+
+
+async def test_the_pass_log_records_the_call_that_ran(tmp_path):
+    """Only chat B's turns are in the slice: the row reports B's model,
+    billing and excerpt limit, not those of chat A that started the pass."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        billing=continual_mod.BILLING_SUBSCRIPTION,
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert own.prompts == [] and len(theirs.prompts) == 1
+    row = rows(store)[-1]
+    assert row["model"] == "model-b" and row["billing"] == "metered"
+    assert row["prompt_limit"] <= continual_mod.METERED_PROMPT_CHAR_LIMIT
+
+
+async def test_another_chats_metered_call_keeps_to_the_metered_cap(tmp_path):
+    """A subscription chat's 200-call default does not pay for a metered
+    chat's call once the metered default is spent."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=facts_mod.MAX_INFERENCE_CALLS_PER_DAY,
+               last_at=now - 3600)
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        billing=continual_mod.BILLING_SUBSCRIPTION,
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert theirs.prompts == [], "the metered call is refused at its own cap"
+    assert own.prompts == [] and store.synth_cursor() == 5, "read past unsent, like a failure"
+    assert store.learner_backoff("model-b") == {}, "a cap is not a fault"
+    assert rows(store)[-1].get("ran") is False, "no call ran: not an empty synthesis"
+
+
+def test_a_cap_lowered_mid_pass_is_read_afresh(tmp_path):
+    """The owner lowers the daily cap while a pass runs: whether this chat
+    still has calls is judged against the new cap, not the one cached."""
+    store = SkillStore(tmp_path)
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=20, last_at=now - 3600)
+    cap = [100]
+    synth = Synthesizer(None, "model-a", store, daily_calls=lambda: cap[0],
+                        billing=continual_mod.BILLING_SUBSCRIPTION)
+    assert synth._starter_has_calls()
+    cap[0] = 10
+    assert not synth._starter_has_calls()
+
+
+async def test_a_pass_of_other_chats_keeps_this_chats_backoff(tmp_path):
+    """Only chat B's healthy entries are in the slice: chat A's own row made
+    no call, so its failure history is kept for its next attempt."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    store.note_learner_failure("model-a@openai:row-x", "HTTP 401", now=time.time() - 3600,
+                               base=60, cap=60)
+    own, theirs = Recording(), Recording()
+    own.destination = "openai:row-x"
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(
+        provider=theirs, model="model-b", destination="openai:row-y")})
+    await synth._run_safe()
+    assert own.prompts == [] and len(theirs.prompts) == 1
+    assert store.learner_backoff("model-a@openai:row-x")["failures"] == 1
+
+
+async def test_another_chats_cap_does_not_hold_up_the_chat_behind_it(tmp_path):
+    """Metered chat B is first in the shared journal and past its cap;
+    subscription chat A, behind it, still has calls and is learned today."""
+    store = SkillStore(tmp_path)
+    for i in range(10):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b" if i < 5 else "chat-a"})
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=facts_mod.MAX_INFERENCE_CALLS_PER_DAY,
+               last_at=now - 3600)
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        billing=continual_mod.BILLING_SUBSCRIPTION,
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert theirs.prompts == [] and len(own.prompts) == 1 and "f5.py" in own.prompts[0]
+    assert store.synth_cursor() == 10 and not synth.last_pass_failed
+
+
+async def test_another_chats_turns_wait_when_the_whole_day_is_spent(tmp_path):
+    """Everyone's budget is spent: chat B's refused turns are kept for the
+    next day, not read past."""
+    store = SkillStore(tmp_path)
+    for i in range(5):
+        store.journal_append({**edit_cell(i), "project": "p", "session": "chat-b"})
+    now = time.time()
+    set_budget(store, day=int(now // DAY), calls=facts_mod.MAX_INFERENCE_CALLS_PER_DAY,
+               last_at=now - 3600)
+    own, theirs = Recording(), Recording()
+    synth = Synthesizer(own, "model-a", store, min_new_entries=1, own_session="chat-a",
+                        route={"chat-b": LearnerRoute(provider=theirs, model="model-b",
+                                                      billing="metered")}.get)
+    await synth._run_safe()
+    assert theirs.prompts == [] and store.synth_cursor() == 0
+
+
+async def test_a_failing_row_backs_off_only_that_row(tmp_path):
+    """Chats A and B use the same model id on different provider rows. B's
+    row fails; A's pass succeeds and does not clear B's backoff."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+    own, theirs = Recording(), Recording(fail={1})
+    own.destination = "openai:row-x"
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(
+        provider=theirs, model="model-a", destination="openai:row-y")})
+    await synth._run_safe()
+    assert len(own.prompts) == 1 and store.synth_cursor() == 10
+    assert store.learner_backoff("model-a@openai:row-y"), "B's row backs off"
+    assert store.learner_backoff("model-a@openai:row-x") == {}
+    assert synth.backoff_key() == "model-a@openai:row-x"
+
+
+async def test_another_chats_provider_that_raises_does_not_hold_up_this_chat(tmp_path):
+    """Chat B's provider raises (a disabled row, a credential that will not
+    resolve) instead of sending an error chunk: B backs off, A does not."""
+    store = SkillStore(tmp_path)
+    _two_chats(store)
+
+    class Raises(Recording):
+        async def stream(self, request):
+            raise RuntimeError("provider row disabled")
+            yield  # pragma: no cover
+
+    own, theirs = Recording(), Raises()
+    synth = _routed_synth(store, own, {"chat-b": LearnerRoute(provider=theirs, model="model-b")})
+    await synth._run_safe()
+    assert store.synth_cursor() == 10 and len(own.prompts) == 1
+    assert store.learner_backoff("model-b") and store.learner_backoff("model-a") == {}
+    assert "provider row disabled" in rows(store)[-1]["routed"][0]["error"]
+    assert not synth.last_pass_failed
+
+
+def test_a_switch_away_from_a_backing_off_model_is_due_at_once(tmp_path):
+    """Model A is backing off and the chat switches to B: the next pass is
+    due on B without waiting out A's backoff."""
+    store = SkillStore(tmp_path)
+    for i in range(3):
+        store.journal_append(edit_cell(i))
+    synth = Synthesizer(None, "model-a", store, min_new_entries=1)
+    synth._note_failure("HTTP 500")
+    assert store.learner_backoff("model-a") and not synth.due(closing=True)
+    synth.retarget("model-b")
+    assert synth.due(closing=True)
 
 
 async def test_a_pass_stops_before_a_project_the_day_cannot_pay_for(tmp_path):

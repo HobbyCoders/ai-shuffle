@@ -475,6 +475,10 @@ class HarnessAdapter(ProviderAdapter):
         # closed after the engine (whose close drains the learner). None on
         # the native leg, whose learner shares the session's client.
         self._learner_provider: Optional["_LearnerProvider"] = None
+        # The session's memory learner and its store owner: a mid-chat model
+        # switch points later passes at the new model (_retarget_learner).
+        self._learner_synth: Optional[Any] = None
+        self._learner_owner: str = "local"
         # Highest seq that already existed when the CURRENT turn was submitted.
         # A terminal event at or below it belongs to an earlier turn, so it can
         # never settle this one (see ``receive_events``).
@@ -1117,20 +1121,21 @@ class HarnessAdapter(ProviderAdapter):
                     )
                     synthesizer = None
                     if settings.fluid_continual:
-                        # The same target as the delegated leg: the owner's
-                        # Text Generation binding, or an API user's own row
-                        # (_learner_target). None keeps the journal for a
-                        # later pass on the same store.
+                        # The same target as the delegated leg: the session's
+                        # own model, row and effort (_learner_target). None
+                        # keeps the journal for a later pass on the same store.
                         owner = getattr(getattr(skills, "_facts", None), "owner", "local")
                         target = await run_sync(_learner_target, options, owner)
                         if target is not None:
                             learner = _LearnerProvider(target.kind, target.options)
                             self._learner_provider = learner
+                            self._learner_owner = owner
                             synthesizer, engine_bus = self._learner_synthesizer(
                                 learner, target.model, skills, memory_project, options,
                                 fluid_session_id,
                                 session_model=options.model or cast(str, native_model),
                                 context_window=target.context_window, binding=target.options,
+                                effort=target.effort,
                             )
 
                     # Never for the chat lane. Code mode replaces the request
@@ -1649,6 +1654,7 @@ class HarnessAdapter(ProviderAdapter):
                     pass
                 self._provider_http = None
             learner, self._learner_provider = self._learner_provider, None
+            self._learner_synth = None
             if learner is not None:
                 try:
                     await learner.aclose()
@@ -3449,12 +3455,16 @@ class HarnessAdapter(ProviderAdapter):
         self, provider: Any, model: str, skills: Any, memory_project: Optional[str],
         options: SessionOptions, fluid_session_id: Optional[str], *,
         session_model: Optional[str], context_window: Optional[int],
-        binding: Optional[SessionOptions] = None,
+        binding: Optional[SessionOptions] = None, effort: Any = None,
     ) -> tuple:
         """``(Synthesizer, EventBus)``: the memory learner, for either leg.
 
-        ``binding`` is the provider row the learner's passes run on when it
-        is not the session's own (a delegated session's learner target). Its
+        ``effort`` is what each pass sends (:attr:`_LearnerTarget.effort`):
+        the session's current effort, read at pass time, so the learner
+        thinks as hard as the chat it learns from.
+
+        ``binding`` is the provider row the learner's passes run on (the
+        learner target's copy of the session's row). Its
         shape decides the daily budget's default: flat-rate subscription rows
         get more calls than metered ones; the owner's ``learner_daily_calls``
         policy overrides either and is read at pass time.
@@ -3494,10 +3504,9 @@ class HarnessAdapter(ProviderAdapter):
         if not any(shape) and bound.extra.get("provider_id"):
             shape = _lookup_provider_row_shape(str(bound.extra["provider_id"]))[:2]
         billing: Any = learner_billing(*shape)
-        if getattr(provider, "name", None) == TEXT_GENERATION_LEARNER:
-            # The helper routes each pass to the CURRENT Text Generation
-            # binding, so the pass's budget and request size follow it too.
-            billing = _text_generation_billing
+        # The journal is shared by the owner's chats: another chat's entries
+        # are learned on that chat's own model (_learner_route), never here.
+        owner = getattr(getattr(skills, "_facts", None), "owner", "local")
         synthesizer = Synthesizer(
             provider,
             model,
@@ -3507,12 +3516,39 @@ class HarnessAdapter(ProviderAdapter):
             session_id=fluid_session_id or self._resolve_app_session_id(),
             on_change=_announce,
             session_model=session_model,
+            effort=effort,
             enabled=learner_enabled,
             context_window=context_window,
             daily_calls=learner_daily_calls,
             billing=billing,
+            own_session=self._resolve_app_session_id(),
+            route=functools.partial(_learner_route, owner=owner),
         )
+        self._learner_synth = synthesizer
         return synthesizer, engine_bus
+
+    async def _retarget_learner(self) -> None:
+        """Point the session's learner at the model the chat just switched
+        to (``set_model`` hot-swaps without a reconnect), so a pass never
+        pairs the old model with an effort picked for the new one. Never
+        raises: a failed lookup leaves the learner where it was."""
+        from app.core.config import settings
+
+        synth, options = self._learner_synth, self._options
+        if synth is None or options is None or settings.fluid_continual_model:
+            return
+        try:
+            target = await run_sync(_learner_target, options, self._learner_owner)
+            if target is None:
+                return
+            synth.retarget(target.model, target.context_window)
+            if self._learner_provider is not None:
+                # The binding supplies the provider row (a native client
+                # keeps the row it was built with); every request names
+                # its model.
+                self._learner_provider._options = target.options
+        except Exception:  # noqa: BLE001 — the switch itself already landed
+            logger.warning("[HarnessAdapter] learner retarget failed", exc_info=True)
 
     async def _delegated_journal(
         self, options: SessionOptions, fluid_session_id: Optional[str],
@@ -3546,10 +3582,12 @@ class HarnessAdapter(ProviderAdapter):
             if target is not None:
                 provider = _LearnerProvider(target.kind, target.options)
                 self._learner_provider = provider
+                self._learner_owner = getattr(getattr(skills, "_facts", None), "owner", "local")
                 synthesizer, engine_bus = self._learner_synthesizer(
                     provider, target.model, skills, memory_project, options,
                     fluid_session_id, session_model=options.model,
                     context_window=target.context_window, binding=target.options,
+                    effort=target.effort,
                 )
             else:
                 logger.debug(
@@ -4618,6 +4656,7 @@ class HarnessAdapter(ProviderAdapter):
         if self._options is not None:
             # Later picks (Ultrafast, effort) are checked against this model.
             self._options.model = requested
+            await self._retarget_learner()
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool,
@@ -10057,104 +10096,166 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
 
 #: Leg kinds a memory learner can call: the native provider clients.
 _LEARNER_KINDS = frozenset({"anthropic", "openai_responses", "openrouter", "gemini"})
-# A learner target whose passes run through the app's text-generation helper
-# (app.api.generation.generate_with_claude): any binding without a native
-# client, the Claude Code CLI included.
-TEXT_GENERATION_LEARNER = "text_generation"
+# A learner target whose passes run through the app's one-shot generation
+# helper (app.api.generation.generate_with_claude) on the SESSION's binding:
+# any leg without a native client, the Claude Code CLI included.
+GENERATION_HELPER_LEARNER = "generation_helper"
 
 
 class _LearnerTarget(NamedTuple):
     """Where a session's memory-learner passes run (:func:`_learner_target`)."""
 
     kind: str
-    #: The binding :func:`_build_provider_client` reads (provider row id and
-    #: shape); never the session's own options.
+    #: The binding :func:`_build_provider_client` (or the generation helper)
+    #: reads: the session's provider row id and shape, never its other options.
     options: SessionOptions
     model: str
     context_window: Optional[int]
-    #: ``"text_generation"`` (the owner's binding) or ``"session"`` (an API
-    #: user's own provider row).
-    source: str
+    #: The reasoning effort a pass sends: a callable reading the session's
+    #: current effort (it follows a mid-chat change), or a fixed level when
+    #: ``fluid_continual_model`` pins a different model.
+    effort: Any
 
 
 def _learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTarget]:
     """Where a session's memory-learner passes run, for either leg, or None.
 
-    1. The installation owner's sessions: the Text Generation binding
-       (Settings > Default models), the model that already names branches
-       and writes commit messages, so the owner picks what learning costs.
-       ``fluid_continual_model`` still pins the model when set. A row a
-       native client can call is called directly (exact token counts); any
-       other binding, the Claude Code CLI included, runs through the app's
-       text-generation helper, so learning works on every provider.
-    2. An API user's session: its own bound provider row, when a native
-       client can call it. It never spends the owner's binding.
-    3. None: the journal is kept without a learner.
+    Passes run on the session's own model, provider and effort, the ones
+    the owner picked for the chat. The Text Generation model is a fast,
+    cheap model meant for titles and commit messages; it wrote poor
+    behaviour rules. ``fluid_continual_model`` still pins the model (with
+    the learner's own low effort) when set.
+
+    1. A provider row a native client can call: called directly (exact
+       token counts). This is the only target an API user's session gets,
+       so it never spends the owner's credentials.
+    2. The owner's session on any other leg (the Claude Code CLI, a row
+       without a native client): the app's generation helper on the
+       session's binding, so learning works on every provider.
+    3. None: the journal is kept without a learner. Also for a guarded
+       Antigravity personal sign-in, which refuses background calls.
 
     Blocking (settings and provider-row reads); callers run it in a thread.
     Never raises.
     """
+    from fluid.codemode.continual import SYNTH_EFFORT
+
     from app.core.config import settings
 
     pinned = settings.fluid_continual_model
+    effort: Any = SYNTH_EFFORT if pinned else (lambda: _valid_effort(getattr(options, "effort", None)))
     try:
-        if owner == "local":
-            from app.core.generation_options import text_generation_config
-
-            config = text_generation_config()
-            model = pinned or config.get("model")
+        provider_id = options.extra.get("provider_id")
+        shape: tuple = (None, None, None)
+        if provider_id:
+            shape = (
+                options.extra.get("provider_type"),
+                options.extra.get("provider_auth_mode"),
+                options.extra.get("provider_dialect"),
+            )
+            if not shape[0]:
+                shape = _lookup_provider_row_shape(str(provider_id))
+        kind = _provider_row_kind(*shape) if provider_id else None
+        if kind in _LEARNER_KINDS:
+            model = pinned or (
+                _native_api_model(options.model, options) if kind == "anthropic" else options.model
+            )
             if not model:
                 return None
-            provider_id = config.get("provider")
-            if provider_id:
-                shape = _lookup_provider_row_shape(str(provider_id))
-                kind = _provider_row_kind(*shape)
-                if kind in _LEARNER_KINDS:
-                    return _LearnerTarget(
-                        kind=cast(str, kind),
-                        options=_learner_binding(model, str(provider_id), shape),
-                        model=model,
-                        context_window=_provider_row_window(str(provider_id), model),
-                        source="text_generation",
-                    )
-            # The row's shape still decides billing (a Claude subscription
-            # sign-in is flat-rate); no row is native Anthropic via the CLI.
-            binding = (
-                _learner_binding(model, str(provider_id), _lookup_provider_row_shape(str(provider_id)))
-                if provider_id else SessionOptions(model=model)
-            )
             return _LearnerTarget(
-                kind=TEXT_GENERATION_LEARNER, options=binding, model=model,
-                context_window=None, source="text_generation",
+                kind=cast(str, kind),
+                options=_learner_binding(model, str(provider_id), shape),
+                model=model,
+                context_window=None if pinned else _native_context_window(cast(str, kind), options),
+                effort=effort,
             )
-        provider_id = options.extra.get("provider_id")
-        if not provider_id:
+        if owner != "local":
             return None
-        shape = (
-            options.extra.get("provider_type"),
-            options.extra.get("provider_auth_mode"),
-            options.extra.get("provider_dialect"),
-        )
-        if not shape[0]:
-            shape = _lookup_provider_row_shape(str(provider_id))
-        kind = _provider_row_kind(*shape)
-        if kind not in _LEARNER_KINDS:
-            return None
-        model = pinned or (
-            _native_api_model(options.model, options) if kind == "anthropic" else options.model
-        )
+        if kind == _ANTIGRAVITY_KIND:
+            from app.core import antigravity
+
+            # A personal sign-in that serves only the owner typing refuses
+            # every background call: a pass would only fail and back off.
+            # The chat runs without a learner; never on another provider.
+            row = _lookup_provider_row(str(provider_id))
+            if row is None or antigravity.guarded(row):
+                return None
+        model = pinned or options.model
         if not model:
             return None
+        # The row's shape still decides billing (a Claude subscription
+        # sign-in is flat-rate); no row is native Anthropic via the CLI.
+        binding = (
+            _learner_binding(model, str(provider_id), shape)
+            if provider_id else SessionOptions(model=model)
+        )
         return _LearnerTarget(
-            kind=cast(str, kind),
-            options=_learner_binding(model, str(provider_id), shape),
-            model=model,
-            context_window=None if pinned else _native_context_window(cast(str, kind), options),
-            source="session",
+            kind=GENERATION_HELPER_LEARNER, options=binding, model=model,
+            context_window=None, effort=effort,
         )
     except Exception:  # noqa: BLE001 — no learner is the safe answer
         logger.warning("[HarnessAdapter] learner provider lookup failed", exc_info=True)
         return None
+
+
+def _learner_route(session_id: str, owner: str) -> Optional[Any]:
+    """Where another chat's journal entries are learned: that chat's own
+    provider, model and effort as its session row stores them, through the
+    same rules as its own learner (:func:`_learner_target`), or None when it
+    has none (gone, no model, a guarded sign-in). The shared journal is read
+    by whichever chat's pass comes first; this keeps each chat's text on the
+    provider its owner picked for it.
+
+    Blocking (DB and provider-row reads); the learner runs it in a thread.
+    Never raises.
+    """
+    from fluid.codemode.continual import LearnerRoute
+
+    from app.core.fluid_memory import learner_billing
+    from app.core.query_options import decode_provider_model
+    from app.db.sessions import get_session
+
+    try:
+        row = get_session(session_id)
+        if row is None:
+            return None
+        model = row.get("model")
+        provider_id = row.get("provider_id")
+        decoded = decode_provider_model(model)
+        if decoded:
+            provider_id, model = decoded
+        if not model:
+            return None
+        extra: Dict[str, Any] = {"provider_id": provider_id} if provider_id else {}
+        options = SessionOptions(model=model, effort=row.get("effort"), extra=extra)
+        target = _learner_target(options, owner)
+        if target is None:
+            return None
+        shape: tuple = (None, None)
+        if provider_id:
+            shape = _lookup_provider_row_shape(str(provider_id))[:2]
+        window = target.context_window
+        if window is None and provider_id:
+            window = _provider_row_window(str(provider_id), target.model)
+        return LearnerRoute(
+            provider=_LearnerProvider(target.kind, target.options),
+            model=target.model,
+            effort=target.effort,
+            context_window=window,
+            session_model=model,
+            billing=learner_billing(*shape),
+            destination=_learner_destination(target.kind, target.options),
+        )
+    except Exception:  # noqa: BLE001 — no route: those entries are never sent elsewhere
+        logger.warning("[HarnessAdapter] learner route lookup failed", exc_info=True)
+        return None
+
+
+def _learner_destination(kind: str, binding: SessionOptions) -> str:
+    """Where a learner client's calls go: its kind and provider row (empty
+    for native Anthropic through the CLI). The learner compares it to keep
+    one chat's text off another chat's provider (LearnerRoute.destination)."""
+    return f"{kind}:{binding.extra.get('provider_id') or ''}"
 
 
 def _provider_row_window(provider_id: str, model: str) -> Optional[int]:
@@ -10215,16 +10316,27 @@ class _LearnerProvider:
         self._client: Any = None
         self._http: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
+        # The binding a built native client was made with: it keeps that row
+        # after a model switch replaces ``_options`` (see destination).
+        self._built: Optional[SessionOptions] = None
+
+    @property
+    def destination(self) -> str:
+        """Where this client's next call goes (_learner_destination): the row
+        a built native client was made with, else the current binding."""
+        return _learner_destination(self._kind, self._built or self._options)
 
     async def _ensure(self) -> Any:
         async with self._lock:
             if self._client is None:
-                self._client, self._http = await _build_provider_client(self._kind, self._options)
+                options = self._options
+                self._client, self._http = await _build_provider_client(self._kind, options)
+                self._built = options
             return self._client
 
     async def stream(self, request: Any) -> AsyncIterator[Any]:
-        if self._kind == TEXT_GENERATION_LEARNER:
-            async for chunk in _text_generation_stream(request):
+        if self._kind == GENERATION_HELPER_LEARNER:
+            async for chunk in _generation_helper_stream(request, self._options):
                 yield chunk
             return
         client = await self._ensure()
@@ -10237,33 +10349,23 @@ class _LearnerProvider:
             await http.aclose()
 
 
-def _text_generation_billing() -> Optional[str]:
-    """How a pass through the text-generation helper is billed now: by the
-    owner's current Text Generation binding, which the helper re-reads every
-    call (a changed binding applies to the next pass, not the next chat)."""
-    from app.core.fluid_memory import learner_billing
-    from app.core.generation_options import text_generation_config
-
-    provider_id = text_generation_config().get("provider")
-    shape = _lookup_provider_row_shape(str(provider_id))[:2] if provider_id else (None, None)
-    return learner_billing(*shape)
-
-
-# One learner pass through the text-generation helper; a pass that has not
+# One learner pass through the generation helper; a pass that has not
 # answered by then is abandoned (the learner counts it as a failed pass).
-TEXT_GENERATION_LEARNER_TIMEOUT = 300.0
+GENERATION_HELPER_LEARNER_TIMEOUT = 300.0
 
 
-async def _text_generation_stream(request: Any) -> AsyncIterator[Any]:
-    """A learner request answered by the app's text-generation helper, as the
-    stream chunks the learner reads: the reply text and a stop, or an error
-    chunk. The helper runs on the owner's Text Generation binding whatever
-    its leg (the Claude Code CLI included) and records its own usage, so the
-    pass reports no token counts of its own; the daily call cap still holds.
+async def _generation_helper_stream(request: Any, binding: SessionOptions) -> AsyncIterator[Any]:
+    """A learner request answered by the app's one-shot generation helper on
+    the session's ``binding`` (its model and provider row) at the request's
+    effort, as the stream chunks the learner reads: the reply text and a
+    stop, or an error chunk. The helper runs on any leg (the Claude Code CLI
+    included) and records its own usage, so the pass reports no token counts
+    of its own; the daily call cap still holds.
     """
     from fluid.providers.base import StreamChunk
 
     from app.api.generation import generate_with_claude
+    from app.core.query_options import PROVIDER_MODEL_PREFIX
 
     parts = [f"<instructions>\n{request.system}\n</instructions>"] if request.system else []
     for message in request.messages:
@@ -10271,13 +10373,21 @@ async def _text_generation_stream(request: Any) -> AsyncIterator[Any]:
             text = getattr(block, "text", None)
             if text:
                 parts.append(text)
+    provider_id = binding.extra.get("provider_id")
+    # The request's model, not the binding's: a mid-pass switch updates the
+    # binding at once, and the learner filtered this request's evidence for
+    # the model it names (see Synthesizer._evidence_allowed).
+    requested = getattr(request, "model", None) or binding.model
+    model = f"{PROVIDER_MODEL_PREFIX}{provider_id}:{requested}" if provider_id else requested
     try:
         text = await generate_with_claude(
-            "\n\n".join(parts), timeout_seconds=TEXT_GENERATION_LEARNER_TIMEOUT,
+            "\n\n".join(parts), model=model,
+            effort=_valid_effort(getattr(request, "effort", None)),
+            timeout_seconds=GENERATION_HELPER_LEARNER_TIMEOUT,
         )
     except Exception as exc:  # noqa: BLE001 — the pass fails, never the session
         detail = getattr(exc, "detail", None) or str(exc) or type(exc).__name__
-        yield StreamChunk("error", {"message": f"text generation failed: {detail}"})
+        yield StreamChunk("error", {"message": f"learner generation failed: {detail}"})
         return
     yield StreamChunk("text_delta", {"text": text})
     yield StreamChunk("message_stop", {"stop_reason": "end_turn"})

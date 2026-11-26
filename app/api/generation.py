@@ -196,6 +196,7 @@ async def generate_with_claude(
     prompt: str,
     model: Optional[str] = None,
     timeout_seconds: float = 120.0,
+    effort: Optional[str] = None,
 ) -> str:
     """
     Generate a response using AI, honoring the text-generation setting.
@@ -232,6 +233,10 @@ async def generate_with_claude(
                the adapter is torn down and an HTTP 504 is raised. Latency-
                sensitive callers (branch names) pass a shorter budget so their
                non-AI fallback fires quickly.
+        effort: Reasoning effort for an explicit ``model`` (the memory
+               learner passes its chat's effort). None is the model's own
+               default. Ignored without ``model``: the text-generation
+               setting carries its own effort.
 
     Returns:
         Text response from the model.
@@ -258,7 +263,7 @@ async def generate_with_claude(
 
         decoded = decode_provider_model(model)
         provider_id, selected_model = decoded if decoded else (None, model)
-        generation_config = {"model": selected_model, "provider": provider_id, "effort": None}
+        generation_config = {"model": selected_model, "provider": provider_id, "effort": effort}
         model = selected_model
     else:
         try:

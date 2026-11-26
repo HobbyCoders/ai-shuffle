@@ -135,3 +135,42 @@ def test_workflow_prompt_allowances_and_no_duplicate_paragraphs(tmp_path: Path) 
                 assert "<workflow>JSON</workflow>" in texts["system"]
                 assert texts["request"].count("--- session first ---") == 1
                 assert texts["request"].count("--- session second ---") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,client,model,shown", [
+    ("same row and model", "row-a", "m", True),
+    ("other row", "row-b", "m", False),
+    # "second" has just switched its saved row to row-a, but its learner
+    # still holds the row-b client: the call goes to row-b.
+    ("switched, old client", "row-b", "m", False),
+    ("same row, other model", "row-a", "other", False),
+    ("client does not say", None, "m", False),
+])
+async def test_another_chats_retained_evidence_stays_on_its_own_provider(
+    tmp_path: Path, case: str, client: str | None, model: str, shown: bool,
+) -> None:
+    """Chats learn on their own providers: chat "first"'s retained turns are
+    shown as workflow evidence to chat "second"'s call only when that call's
+    client goes to first's own row and model."""
+    from types import SimpleNamespace
+    from fluid.codemode.continual import LearnerRoute
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    store = SkillStore(tmp_path / "store")
+    saved = {"first": "row-a", "second": "row-a" if case.startswith("switched") else client}
+
+    def route(session: str):
+        return LearnerRoute(provider=None, model="m", destination=saved[session])
+
+    synth = Synthesizer(SimpleNamespace(destination=client), model, store,
+                        project=project_key_for(cwd), own_session="second", route=route)
+    same_provider = shown
+    await journal_success(store, cwd, "first")
+    first = store.journal_entries()
+    await journal_success(store, cwd, "second")
+    current = store.journal_entries()[len(first):]
+    await synth._learn_evidence_destinations(list(enumerate(current)))
+    prompt, _system, evidence = synth._synthesis_input(current)
+    assert ("Retained workflow evidence" in prompt) is same_provider
+    assert any(e.get("session") == "first" for e in evidence) is same_provider
