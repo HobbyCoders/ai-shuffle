@@ -130,7 +130,13 @@
 					id={INBOX}
 					name="Proposed memories"
 					category={CATEGORY}
-					summary={proposals.forbidden ? FORBIDDEN_TEXT : proposals.loadError ? 'Unavailable' : inboxSummary(proposals.items.length)}
+					summary={proposals.forbidden
+						? FORBIDDEN_TEXT
+						: proposals.loadError
+							? 'Unavailable'
+							: proposals.loaded
+								? inboxSummary(proposals.items.length)
+								: 'What the learner wasn’t sure enough to save'}
 					status={proposals.items.length ? 'warn' : undefined}
 				/>
 			{/if}

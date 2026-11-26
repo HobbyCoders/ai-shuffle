@@ -166,8 +166,9 @@
 		color: var(--st-mfg);
 	}
 	.pr-chats {
+		list-style: none;
 		margin: 4px 0 0;
-		padding-left: 18px;
+		padding: 0;
 		font-size: 12px;
 		color: var(--st-mfg);
 		overflow-wrap: anywhere;

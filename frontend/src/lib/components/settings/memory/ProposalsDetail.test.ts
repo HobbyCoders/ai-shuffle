@@ -123,6 +123,19 @@ it('drops a proposal another worker already decided and says so', async () => {
 	expect(screen.getAllByTestId('memory-proposal')).toHaveLength(1);
 });
 
+it('turns the header green once the last proposal is decided', async () => {
+	inbox = [proposal()];
+	http.post.mockResolvedValue({ id: 'p1', status: 'dismissed', memory: null });
+	await show('proposals');
+	await screen.findAllByTestId('memory-proposal');
+	const dot = () => document.querySelector('.status .st-dot');
+	expect(dot()?.classList.contains('warn')).toBe(true);
+	await fireEvent.click(screen.getByRole('button', { name: 'Dismiss: The project deploys with make release.' }));
+	await waitFor(() => expect(screen.getByText(/Nothing waiting/)).toBeTruthy());
+	expect(dot()?.classList.contains('ok')).toBe(true);
+	expect(dot()?.classList.contains('warn')).toBe(false);
+});
+
 it('says when nothing waits', async () => {
 	inbox = [];
 	await show('proposals');
