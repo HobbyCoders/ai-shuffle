@@ -408,6 +408,25 @@ def test_any_other_binding_runs_through_the_generation_helper_on_the_sessions_bi
     assert reads == []
 
 
+def test_a_guarded_antigravity_sign_in_has_no_learner(monkeypatch):
+    """That row refuses every background call, so a pass could only fail;
+    the chat runs without a learner instead of moving to another provider.
+    With the guard lifted, the pass runs on the row through the helper."""
+    from app.core import antigravity
+
+    _shapes(monkeypatch, {"row-ag": ("antigravity", "google", None)})
+    rows = {"row-ag": {"id": "row-ag", "provider_type": "antigravity", "auth_mode": "google"}}
+    monkeypatch.setattr(ha, "_lookup_provider_row", lambda pid: rows.get(pid))
+    guarded = {"on": True}
+    monkeypatch.setattr(antigravity, "guarded", lambda row: guarded["on"])
+    options = SessionOptions(model="gemini-pro", extra={"provider_id": "row-ag"})
+    assert ha._provider_row_kind("antigravity", "google") == ha._ANTIGRAVITY_KIND
+    assert ha._learner_target(options, "local") is None
+    guarded["on"] = False
+    target = ha._learner_target(options, "local")
+    assert (target.kind, target.model) == (ha.GENERATION_HELPER_LEARNER, "gemini-pro")
+
+
 def test_a_session_without_a_model_has_no_learner(monkeypatch):
     _shapes(monkeypatch)
     assert ha._learner_target(SessionOptions(model=""), "local") is None
@@ -574,10 +593,16 @@ async def test_a_mid_chat_model_switch_moves_the_learner_to_the_new_model(monkey
 
     adapter._options.model = "sonnet"  # what set_model writes
     await adapter._retarget_learner()
-    assert synth._model == "sonnet" and provider._options.model == "sonnet"
+    assert provider._options.model == "sonnet"
+    # A pass in flight keeps its model (request, log row, failure backoff);
+    # the switch applies when the next pass starts.
+    assert synth._model == "opus"
+    synth._apply_target()
+    assert synth._model == "sonnet"
 
     # A pinned learner model stays where it is.
     monkeypatch.setattr(settings, "fluid_continual_model", "pinned-model")
     adapter._options.model = "haiku"
     await adapter._retarget_learner()
+    synth._apply_target()
     assert synth._model == "sonnet"

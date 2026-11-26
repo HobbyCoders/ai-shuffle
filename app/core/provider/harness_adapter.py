@@ -10126,7 +10126,8 @@ def _learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTar
     2. The owner's session on any other leg (the Claude Code CLI, a row
        without a native client): the app's generation helper on the
        session's binding, so learning works on every provider.
-    3. None: the journal is kept without a learner.
+    3. None: the journal is kept without a learner. Also for a guarded
+       Antigravity personal sign-in, which refuses background calls.
 
     Blocking (settings and provider-row reads); callers run it in a thread.
     Never raises.
@@ -10164,6 +10165,15 @@ def _learner_target(options: SessionOptions, owner: str) -> Optional[_LearnerTar
             )
         if owner != "local":
             return None
+        if kind == _ANTIGRAVITY_KIND:
+            from app.core import antigravity
+
+            # A personal sign-in that serves only the owner typing refuses
+            # every background call: a pass would only fail and back off.
+            # The chat runs without a learner; never on another provider.
+            row = _lookup_provider_row(str(provider_id))
+            if row is None or antigravity.guarded(row):
+                return None
         model = pinned or options.model
         if not model:
             return None

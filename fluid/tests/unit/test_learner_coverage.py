@@ -302,6 +302,29 @@ def _two_projects(store, per=15):
         store.journal_append({**edit_cell(i), "project": "projA" if i < per else "projB"})
 
 
+async def test_a_switch_during_a_pass_blames_a_failure_on_the_model_that_made_it(tmp_path):
+    """The chat moves to model B while A's request is pending: A's failure
+    is logged and backed off as A, and B takes over from the next pass."""
+    store = SkillStore(tmp_path)
+    _two_projects(store)
+    synth = Synthesizer(None, "model-a", store, min_new_entries=1)
+
+    class SwitchMidCall(Scripted):
+        async def stream(self, request):
+            synth.retarget("model-b")
+            async for chunk in super().stream(request):
+                yield chunk
+
+    synth._provider = SwitchMidCall(fail={1})
+    await synth._run_safe()
+    row = rows(store)[-1]
+    assert row["model"] == "model-a" and "HTTP 500" in row["error"]
+    assert store.learner_backoff("model-a") and store.learner_backoff("model-b") == {}
+    assert synth._model == "model-a"
+    synth._apply_target()
+    assert synth._model == "model-b"
+
+
 async def test_a_pass_stops_before_a_project_the_day_cannot_pay_for(tmp_path):
     store = SkillStore(tmp_path)
     _two_projects(store)

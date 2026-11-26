@@ -69,6 +69,33 @@ def test_overview_lists_rules_only_and_reports_setup(world):
     assert entry.id not in {m["id"] for m in client.get("/api/v1/memories").json()["items"]}
 
 
+def test_setup_reports_the_last_passs_model_and_billing_under_a_custom_cap(world, monkeypatch):
+    """Passes run on each chat's model: Setup shows the newest pass that
+    called one, and its billing comes from the row, not the cap's source
+    (a custom cap records source "setting")."""
+    client, store = world
+    assert client.get(BASE).json()["setup"]["model"] is None
+    log = store.root / ".synthesis-log.jsonl"
+    rows = [
+        {"model": "gpt-sub", "billing": "subscription", "prompt_limit": 200_000,
+         "budget": {"daily": 100, "reserved": 8, "source": "setting"}},
+        {"model": "skipped-model", "ran": False},  # no model call: not "the last pass"
+    ]
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    monkeypatch.setattr(fluid_memory, "learner_daily_calls", lambda: 100)
+    setup = client.get(BASE).json()["setup"]
+    assert (setup["model"], setup["billing"], setup["pass_chars"]) == ("gpt-sub", "subscription", 200_000)
+    assert setup["daily_cap"] == 100 and setup["cap_source"] == "setting"
+    # Back to the default: the subscription default, not the metered one.
+    monkeypatch.setattr(fluid_memory, "learner_daily_calls", lambda: 0)
+    assert client.get(BASE).json()["setup"]["cap_source"] == "subscription_default"
+    # A row from before passes recorded billing is unknown: capped as metered.
+    log.write_text(json.dumps({"model": "old", "budget": {"source": "subscription_default"}}) + "\n",
+                   encoding="utf-8")
+    setup = client.get(BASE).json()["setup"]
+    assert (setup["model"], setup["billing"], setup["cap_source"]) == ("old", "metered", "metered_default")
+
+
 def test_create_edit_keeps_and_retargets_a_rule(world):
     client, store = world
     created = client.post(f"{BASE}/rules", json={"text": "When unsure: ask one short question.",

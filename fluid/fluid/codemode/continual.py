@@ -713,6 +713,8 @@ class Synthesizer:
         # A level, or a callable read when each request is built (a host
         # whose learner follows the session's effort, changed mid-chat).
         self._effort = effort
+        # (model, window) set by retarget(), applied when the next pass starts.
+        self._pending_target: tuple[str, int | None] | None = None
         self._task: asyncio.Task | None = None
         # UTC day (time // 86400) on which the daily budget was found spent.
         # Until the day rolls over ``due()`` is False, so a kick per cell
@@ -909,11 +911,17 @@ class Synthesizer:
 
     def retarget(self, model: str, context_window: int | None = None) -> None:
         """Run later passes on ``model``: a host whose learner follows the
-        session's model calls this when the chat switches models. A pass
-        already in flight keeps its model; the next one is sized for the new
-        window (:meth:`_size_request`) unless a limit was set on purpose."""
-        self._model = model
-        self._window = context_window or context_window_for(model)
+        session's model calls this when the chat switches models. It applies
+        when the next pass starts, so a pass already in flight keeps its
+        model for its request, its log row and any failure backoff. The next
+        pass is sized for the new window (:meth:`_size_request`) unless a
+        limit was set on purpose."""
+        self._pending_target = (model, context_window or context_window_for(model))
+
+    def _apply_target(self) -> None:
+        pending, self._pending_target = self._pending_target, None
+        if pending is not None:
+            self._model, self._window = pending
 
     def _size_request(self) -> None:
         """Size this pass's request. With no known window a learner billed
@@ -1230,6 +1238,7 @@ class Synthesizer:
             self.last_pass_skipped = True
             return []
         self._budget(refresh=True)  # a changed setting applies from this pass on
+        self._apply_target()  # a model the chat switched to since the last pass
         self._size_request()
         with journal_lock(self._store.root / SYNTHESIS_LOCK) as held:
             if not held:
@@ -1479,6 +1488,12 @@ class Synthesizer:
         """
         record: dict[str, Any] = {"ts": time.time(), "kind": kind, "changed": changed}
         record["model"] = self._model
+        # How this pass was billed and the most journal text it could send,
+        # apart from the budget's source (a custom daily cap hides billing).
+        billing = self._resolve(self._billing)
+        if isinstance(billing, str):
+            record["billing"] = billing
+        record["prompt_limit"] = self._prompt_limit
         if self._resolved_budget is not None:
             # Which daily budget applied, and why (setting, or the default
             # for how the pass's provider bills it).

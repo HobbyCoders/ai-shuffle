@@ -117,15 +117,19 @@ def _setup(store) -> dict[str, Any]:
     )
 
     last = _last_pass(store)
-    source = (last.get("budget") or {}).get("source") if isinstance(last.get("budget"), dict) else None
-    billing = (BILLING_SUBSCRIPTION if source == "subscription_default"
-               else BILLING_METERED if source == "metered_default" else None)
+    # Rows written before passes recorded their billing are unknown (capped
+    # as metered), never guessed from the budget's source.
+    billing = last.get("billing") if last.get("billing") in (BILLING_SUBSCRIPTION, BILLING_METERED) else None
     setting = learner_daily_calls()
     budget = learner_budget(setting, billing)
     spent = store._facts.inference_budget()
     today = int(time.time() // 86400)
-    # The most journal text one pass may send (Synthesizer._size_request).
-    if billing == BILLING_SUBSCRIPTION:
+    # The most journal text one pass may send: what the last pass could send
+    # (Synthesizer._size_request), else the default for its billing.
+    recorded = last.get("prompt_limit")
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded > 0:
+        pass_chars = recorded
+    elif billing == BILLING_SUBSCRIPTION:
         pass_chars = prompt_char_limit(SUBSCRIPTION_ASSUMED_WINDOW, SYNTH_MAX_TOKENS)
     else:
         pass_chars = min(prompt_char_limit(None, SYNTH_MAX_TOKENS), METERED_PROMPT_CHAR_LIMIT)
