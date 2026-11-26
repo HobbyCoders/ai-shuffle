@@ -16,6 +16,7 @@ Regenerate after an intentional change with:
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from app.core.plugin_service import PluginService
 FIXTURE = (Path(__file__).resolve().parents[2]
            / "frontend" / "src" / "lib" / "api" / "__fixtures__" / "plugin-responses.json")
 HOME = "/home/user"
+REVISION = re.compile(r"(/\.revision-[^/]+-)[0-9a-f]{64}(?=/|$)")
 FIXED_TIME = "2026-01-02T03:04:05"
 
 # Keys per response; mirrors the TypeScript interfaces in frontend/src/lib/api/plugins.ts.
@@ -54,7 +56,7 @@ EXPECTED_KEYS = {
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, newline="\n")
 
 
 @pytest.fixture
@@ -118,7 +120,10 @@ def _normalise(value, tmp: str):
         return [_normalise(v, tmp) for v in value]
     if isinstance(value, str):
         if value.startswith(tmp):
-            return HOME + value[len(tmp):].replace(os.sep, "/")
+            path = HOME + value[len(tmp):].replace(os.sep, "/")
+            # The cache folder names the tree digest, and Windows sorts the
+            # tree's paths without case, so the digest is per platform.
+            return REVISION.sub(r"\1<tree-digest>", path)
         return value
     return value
 

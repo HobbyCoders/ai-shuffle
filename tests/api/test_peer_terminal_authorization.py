@@ -6,6 +6,7 @@ link table is a dict (its four statements are exercised on PostgreSQL by the
 two-worker run recorded in docs/internal/terminals.md).
 """
 import contextvars
+import os
 import time as real_time
 from types import SimpleNamespace
 
@@ -21,6 +22,9 @@ from tests.api.test_terminals_api import MEMBER_PAIRED, attach, client, ctx, own
 ROW = {"id": "destination", "device_name": "Destination", "is_self": False, "online": True,
        "capabilities": {"terminal": service.PEER_TERMINAL_VERSION}, "endpoints": ["https://peer.example"]}
 _here = contextvars.ContextVar("here", default="source")
+# These drive a POSIX shell (printf, bash). Windows workers offer only PowerShell;
+# their terminals are covered by tests/core/test_terminals_windows.py.
+posix_shell = pytest.mark.skipif(os.name == "nt" or not service.pty_supported(), reason="needs a POSIX shell on a Unix PTY")
 
 
 class Context:
@@ -124,6 +128,7 @@ def device(peer):
     return linked
 
 
+@posix_shell
 def test_linked_device_gets_a_real_shell_that_types_resizes_reconnects_and_closes(peer, device):
     terminal = opens(peer, device)
     with wsc(peer.tc, ws_url(terminal["id"])) as ws:
@@ -148,6 +153,7 @@ def test_a_chat_opens_in_its_own_folder_on_the_receiver(peer, device, tmp_path, 
     assert terminal["cwd"] == str(tmp_path) and peer.ctx.reg.list()[0].cwd == str(tmp_path)
 
 
+@posix_shell
 def test_open_and_paste_runs_nothing_until_enter(peer, device):
     terminal = opens(peer, device, action=links.ACTION_OPEN_AND_PASTE, shell="bash")
     with wsc(peer.tc, ws_url(terminal["id"])) as ws:
@@ -161,6 +167,7 @@ def test_open_and_paste_runs_nothing_until_enter(peer, device):
         read_until(ws, b"RAN_NOW")
 
 
+@posix_shell
 def test_clipboard_paste_into_an_open_peer_shell_is_ordinary_input(peer, device):
     terminal = opens(peer, device, shell="bash")
     with wsc(peer.tc, ws_url(terminal["id"])) as ws:
