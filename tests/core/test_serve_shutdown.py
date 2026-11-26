@@ -128,7 +128,7 @@ def wait_for_ready(root, process):
 def test_single_sigterm_drains_connections_then_reaches_lifespan(tmp_path, open_stream):
     script = tmp_path / 'server.py'
     script.write_text(SERVER)
-    env = dict(os.environ, SHUFFLE_PREVIEW_PORT='off', PYTHONPATH=str(ROOT))
+    env = dict(os.environ, SHUFFLE_PREVIEW_PORT='off', PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / 'fluid'))))
     log = tmp_path / 'server.log'
     connection = None
     with log.open('w') as output:
@@ -171,7 +171,7 @@ def test_single_sigterm_drains_connections_then_reaches_lifespan(tmp_path, open_
 def test_finite_query_settles_after_sigterm(tmp_path, open_stream, query_path):
     script = tmp_path / 'server.py'
     script.write_text(SERVER.replace('serve.run(app,', QUERY_SETUP + '\nserve.run(app,'))
-    env = dict(os.environ, SHUFFLE_PREVIEW_PORT='off', PYTHONPATH=str(ROOT))
+    env = dict(os.environ, SHUFFLE_PREVIEW_PORT='off', PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / 'fluid'))))
     connection = stream = None
     log = tmp_path / 'server.log'
     with log.open('w') as output:

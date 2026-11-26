@@ -101,7 +101,7 @@ def test_the_owner_chat_lifts_from_its_own_folder(workspace, monkeypatch):
     assert _blob_bytes(ids) == [b"owner-chat"]
 
 
-def test_a_no_project_lift_stays_inside_each_root(workspace, tmp_path):
+def test_a_no_project_lift_stays_inside_each_root(workspace, tmp_path, requires_symlinks):
     database.create_session(session_id="np-chat", profile_id="scope-agent", mode="chat")
     secret = tmp_path / "secret.env"
     secret.write_bytes(b"API_KEY=nope")
@@ -137,7 +137,7 @@ def test_only_an_owner_send_admits_the_composer_areas(workspace):
     assert _blob_bytes(ids) == [b"chat-lane-bytes", b"from-b"]
 
 
-def test_the_composer_areas_are_only_upload_folders(workspace, tmp_path):
+def test_the_composer_areas_are_only_upload_folders(workspace, tmp_path, requires_symlinks):
     other = _project(workspace, "proj-b")
     _project(workspace, "proj-a")
     database.create_session(session_id="code-a", profile_id="scope-agent", project_id="proj-a")

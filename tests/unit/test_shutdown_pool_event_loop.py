@@ -1,5 +1,6 @@
 """Drive real close_pool from shutdown_services without conftest's DB stubs."""
 from __future__ import annotations
+import os
 from typing import Any
 from pytest import MonkeyPatch
 from pathlib import Path
@@ -10,7 +11,10 @@ pytest_plugins = ["pytester"]
 def test_shutdown_services_drains_pool_off_event_loop(
     pytester: Any, monkeypatch: MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+    # The checkout's fluid package lives in fluid/fluid: without that entry an
+    # installed (older) fluid in site-packages shadows it in the child.
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(root), str(root / "fluid"))))
     pytester.makepyfile("""
 import asyncio
 import threading
