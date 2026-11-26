@@ -14,8 +14,8 @@ const seed = () => [
  memory('d', 'Two facts disagree about the staging address.', { needs_review: true }),
 ];
 const workspace = page => page.getByRole('navigation', { name: 'Workspace', exact: true });
-// Memory health opens its own pane; it is not a saved memory.
-const MEMORY_ROW = '.mem-list [data-settings-item]:not([data-settings-item="health"])';
+// Memory health and Proposed memories open their own panes; neither is a saved memory.
+const MEMORY_ROW = '.mem-list [data-settings-item]:not([data-settings-item="health"]):not([data-settings-item="proposals"])';
 const rows = page => page.locator(MEMORY_ROW).filter({ visible: true });
 const text = page => page.getByRole('textbox', { name: 'What to remember', exact: true }).filter({ visible: true });
 const button = (page, name) => page.getByRole('button', { name, exact: true }).filter({ visible: true }).first();
@@ -35,6 +35,8 @@ await runJourney({ name: 'settings-memory', browser: async () => ({ context: { s
   const api = page.memoryApi = { items: seed(), mode: 'ok', puts: [], deletes: [] };
   await page.route(/\/api\/v1\/memories(\/[^/?]+)?(\?.*)?$/, async route => {
    const request = route.request(), url = new URL(request.url()), id = url.pathname.split('/memories/')[1];
+   // The proposal inbox shares the prefix: answer it empty (the ProposalList shape).
+   if (id === 'proposals') return route.fulfill({ json: { items: [], ttl_days: 14, mode: 'reflection' } });
    if (request.method() === 'GET') return route.fulfill({ json: { items: api.items, limits: { text_chars: 2000, when_chars: 140 } } });
    if (request.method() === 'DELETE') { api.deletes.push(url.search); api.items = api.items.filter(m => m.id !== id); return route.fulfill({ status: 204, body: '' }); }
    const body = request.postDataJSON(); api.puts.push(body);
