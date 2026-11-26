@@ -1734,6 +1734,20 @@ def test_agent_env_keeps_windows_app_data_in_the_rows_home(monkeypatch: pytest.M
     assert "APPDATA" not in agent_env(home, source=source)
 
 
+def test_agent_env_turns_off_agys_own_updater_on_windows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """On Windows agy's detached self-updater flashes a terminal window; the app
+    updates agy itself. agy honours only "true" (1.5.17 ignores "1")."""
+    from fluid.engine.acp.antigravity import agent_env
+
+    home = str(tmp_path / "row-1")
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert agent_env(home, source={"PATH": "/bin"})["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+    # A value inherited from the host never reaches the agent in its place.
+    assert agent_env(home, source={"AGY_CLI_DISABLE_AUTO_UPDATE": "1"})["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert "AGY_CLI_DISABLE_AUTO_UPDATE" not in agent_env(home, source={"PATH": "/bin"})
+
+
 # CLI 1.5.9's combined ids (the binary's strings); the option values the real
 # agent offers for them were not observed.
 HYDROGEN = {"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],

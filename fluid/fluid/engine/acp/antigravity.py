@@ -78,6 +78,11 @@ def agent_env(home: str, *, api_key: str | None = None, extra: Mapping[str, str]
             except OSError:
                 pass
             env[name] = path
+        # agy's own updater runs detached (no console), and its `agy --version`
+        # child then gets a new console: a terminal window flashes on screen.
+        # The app installs and updates agy itself (Settings > Providers). Only
+        # "true" is honoured; agy 1.5.17 ignores "1".
+        env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
     env.setdefault("TERM", "dumb")
     env["NO_BROWSER"] = "1"
     if api_key:
