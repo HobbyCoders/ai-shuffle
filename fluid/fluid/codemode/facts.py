@@ -947,7 +947,7 @@ class FactStore:
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
              when=None, always=None, require_when=False, automatic=False, triggers=None,
-             _document=None):
+             check=None, _document=None):
         """Save one fact in a tier.
 
         ``automatic`` marks background learning (the learner, consolidation).
@@ -979,6 +979,8 @@ class FactStore:
         refuses one that would overflow it (:meth:`_check_always_budget`).
         ``triggers`` (None keeps the current ones; ``{}`` clears them) are
         explicit just-in-time triggers (:func:`validate_triggers`).
+        ``check(text, when)`` sees the effective text and when-line of the
+        resolved target before anything is written; ValueError refuses.
         """
         if isinstance(key, str) and key.startswith("memory.coexist.job."):
             # Keys of the retired word-matching questions name no rule pair.
@@ -1095,6 +1097,11 @@ class FactStore:
                                 # never turned into a rule (or back).
                                 and not (_is_rule_key(key) or _is_rule_key(e.get("key")))
                                 and fingerprint(e["text"]) == fp))), None)
+            if check is not None:
+                # The fact as it will be saved, once the target is resolved and
+                # before any write: a correction keeps its when-line unless it
+                # sends one. ``check`` raises ValueError to refuse.
+                check(text, when if when is not None else (old or {}).get("when"))
             now = time.time()
             # A behaviour rule moved to another model family keeps its text but
             # changes its key: that is a revision, not a repeat of the same save.

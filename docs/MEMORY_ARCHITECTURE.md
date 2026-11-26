@@ -28,13 +28,18 @@ Remember guards what it writes (Memory v3 phase 2a):
   save whose progress wording ("continuing", "left off", "in progress", "next
   step", "still needed", WIP as a status and similar) is about a pull request,
   issue or branch reference (`#123`, `PR 123`, an issue or PR link, `feat/x`,
-  `branch <name>`): the reference is the status's subject ("Issue #88 is in
-  progress"), a continuation names it ("Continuing PR #1824"), or the fact is
-  anchored to it (its when-line names the reference, or a clause opens "on
-  branch <name>"). A lasting rule that cites a PR ("Since PR #1909 the
-  pre-push hook refuses…", "never merge while a migration is in progress; see
-  issue #88") saves. A correction is checked with the stored text or when-line
-  it keeps. An agent's save is refused and pointed at WorkingRecord or Note; a save the
+  `branch <name>`, `on branch main`): the reference is the status's subject,
+  joined by a be-verb, "remains", "still" or a colon ("Issue #88 is in
+  progress", "PR #1824: next step is…"), a continuation names it
+  ("Continuing PR #1824"), or the fact is anchored to it (its when-line names
+  the reference, or a clause opens "on branch <name>"). Nearness alone does not
+  count, so a lasting rule that cites a PR ("Since PR #1909 the pre-push hook
+  refuses…", "never merge while a migration is in progress; see issue #88")
+  saves. Remember passes the check to `FactStore.save` as `check(text, when)`,
+  which runs once the save has resolved its target (by ID, including an
+  archived fact, or by key in the resolved scope) and before anything is
+  written, so a correction that omits `when` is checked with the when-line it
+  keeps. An agent's save is refused and pointed at WorkingRecord or Note; a save the
   owner asked for is kept, and its receipt says task progress belongs in the
   working record. Facts naming a PR do not retire when that PR closes: the
   only PR state the app tracks is the owner's PR watches, which cover only

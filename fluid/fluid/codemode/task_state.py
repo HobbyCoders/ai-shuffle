@@ -9,8 +9,9 @@ model.
 
 "About" means one of:
 
-* the reference is the subject of a status in the same clause ("Issue #88 is
-  in progress", "PR 77 waiting on CI");
+* the reference is the subject of a status, joined by a be-verb, "remains",
+  "still", or a colon or dash ("Issue #88 is in progress", "PR #12 still
+  failing", "PR #1824: next step is ..."); nearness alone is not enough;
 * a continuation names it ("Continuing PR #1824", "continuing the scroll fix
   in PR #1824", "left off on feat/x", "WIP: PR 77"), or a status is "on/for"
   it ("still failing on PR #12");
@@ -29,13 +30,17 @@ import re
 _REF = (
     r"(?:(?<![\w&#/])#\d{1,6}\b"                             # #1824 (not &#123; or C#1)
     r"|\b(?:PR|MR|pull\s+request|issue)[\s-]*#?\d{1,6}\b"    # PR 1824, issue #12
-    r"|\bgithub\.com/[\w.-]+/[\w.-]+/(?:pull|issues)/\d+"    # an issue or PR link
-    r"|/-/(?:merge_requests|issues)/\d+"                     # a GitLab link
+    # An issue or PR link, with or without its scheme; then a GitLab one.
+    r"|(?:\bhttps?://)?(?:www\.)?\bgithub\.com/[\w.-]+/[\w.-]+/(?:pull|issues)/\d+"
+    r"|(?:\bhttps?://[\w.-]+(?:/[\w.-]+)*)?/-/(?:merge_requests|issues)/\d+"
     # A branch with a conventional work prefix. Not docs/, test/, ci/ or
     # build/ on their own: those are as often folders as branches.
     r"|(?<![\w/.-])(?:feat|feature|fix|bugfix|hotfix|chore|refactor|wip)/[A-Za-z0-9][\w.-]*"
-    # Any branch named as one ("branch docs/update-readme", "branch fix-login").
-    r"|\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*)"
+    # Any branch named as one: "branch docs/update-readme", "branch fix-login",
+    # a quoted "branch `main`", and "on branch main" with any single name.
+    r"|\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
+    r"|\bbranch\s+[`'\"][A-Za-z0-9][\w./-]*"
+    r"|\bon\s+branch\s+[A-Za-z0-9][\w./-]*)"
 )
 _REFERENCE = re.compile(_REF, re.IGNORECASE)
 
@@ -56,9 +61,14 @@ _CONTINUE = (r"(?:\bcontinu(?:e|es|ing)|\bresum(?:e|es|ing)|\bpick(?:s|ing|ed)?\
 # Tolerated between a phrase and the reference it is about, within a clause.
 _OPEN = r"[\s(\[`'\"]+"
 
+# What makes the reference the subject of the status that follows it: a
+# be-verb, "remains", or "still" opening the status. Proximity alone is not.
+_SUBJECT = (r"(?:\s+(?:is|are|was|were|remains?)\s+(?:(?:now|currently|still)\s+)?"
+            r"|\s+(?=still\b))")
+
 _ABOUT = [re.compile(p, re.IGNORECASE) for p in (
-    # "Issue #88 is in progress", "pull/301 is not yet merged".
-    _REF + r"(?:\s+[^\s,]+){0,3}?\s+(?P<p>" + _STATUS + ")",
+    # "Issue #88 is in progress", "pull/301 is not yet merged", "PR 12 still failing".
+    _REF + _SUBJECT + r"(?P<p>" + _STATUS + ")",
     # "still failing on PR #12", "remaining work for #301".
     r"(?P<p>" + _STATUS + r")\s+(?:on|for|in|of|with)\s+(?:the\s+)?" + _REF,
     # "Continuing PR #1824", "left off on feat/x", "resuming with #12".
@@ -67,12 +77,20 @@ _ABOUT = [re.compile(p, re.IGNORECASE) for p in (
     r"(?P<p>" + _CONTINUE + r"\s+(?:the|this|my|our|work|on|after|at)\b)"
     r"(?:\s+[^\s,]+){0,8}?" + _OPEN + _REF,
 )]
-# "WIP: PR 77", "WIP on feat/x": reads across its own colon, so whole fields.
-_WIP = re.compile(r"(?P<p>(?-i:WIP))\s*:?\s+(?:on\s+)?" + _REF, re.IGNORECASE)
+# These read across the colon or dash the clause split cuts at, so they see
+# whole fields: "WIP: PR 77", "WIP on feat/x", and a reference opening a
+# clause as the subject of a status after a colon or dash ("PR #1824: next
+# step is the scroll test").
+_ACROSS = [re.compile(p, re.IGNORECASE) for p in (
+    r"(?P<p>(?-i:WIP))\s*:?\s+(?:on\s+)?" + _REF,
+    r"(?:^|[;!?]|[.:](?=\s))\s*" + _REF + r"\s*(?::|\s[–—-])\s*(?P<p>" + _STATUS + ")",
+)]
 
 # The fact itself is about the work: "On branch docs/x; next step is ...".
+# The lookahead keeps "on branch <name>" (part of the reference) and
+# "on <reference>" both anchored to a clause that opens with "on".
 _ON_WORK = re.compile(
-    r"^(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?on\s+(?:branch\s+)?" + _REF,
+    r"^(?:(?:I'm|I\s+am|we're|we\s+are|currently|now|still)\s+)?(?=on\b)(?:on\s+)?" + _REF,
     re.IGNORECASE)
 
 # Any progress wording, counted once the fact is anchored to a reference.
@@ -100,7 +118,7 @@ def task_progress(text: object, when: object = None) -> str | None:
     if not fields or not any(_REFERENCE.search(part) for part in fields):
         return None
     for part in fields:
-        match = _WIP.search(part) or next(
+        match = next((m for p in _ACROSS if (m := p.search(part))), None) or next(
             (m for clause in _clauses(part) for p in _ABOUT if (m := p.search(clause))), None)
         if match:
             return match.group("p")

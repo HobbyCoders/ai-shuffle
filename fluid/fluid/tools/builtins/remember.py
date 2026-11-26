@@ -85,14 +85,21 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(text="Not saved: always is only for a rule the owner asked to apply "
                                 "in every chat; pass user_requested=true only if they did.",
                            is_error=True)
-    # Task progress goes stale when the work lands (Memory v3 §5.1). An agent's
-    # save is refused; the owner's is kept, with a note.
-    progress = await asyncio.to_thread(_task_progress, store, input, correction)
-    if progress and not user_requested:
-        return ToolOutcome(text=f"Not saved: {_progress_reason(progress)}. Keep it in the working "
-                                "record (WorkingRecord) or session notes (Note). A lasting rule "
-                                "that cites a PR saves; state the rule, not the work's status.",
-                           is_error=True)
+    # Task progress goes stale when the work lands (Memory v3 §5.1). The store
+    # checks the fact as it will be saved (a correction keeps its stored
+    # when-line): an agent's save is refused; the owner's is kept, with a note.
+    noted: list[str] = []
+
+    def check(text: str, when: str | None) -> None:
+        from fluid.codemode.task_state import task_progress
+        phrase = task_progress(text, when)
+        if phrase and not user_requested:
+            raise ValueError(f"{_progress_reason(phrase)}. Keep it in the working record "
+                             "(WorkingRecord) or session notes (Note). A lasting rule that "
+                             "cites a PR saves; state the rule, not the work's status.")
+        if phrase:
+            noted.append(phrase)
+
     # Explicit just-in-time triggers; absent keys keep a correction's own.
     triggers = ({k: input[k] for k in TRIGGER_INPUTS if input.get(k) is not None}
                 if any(input.get(k) is not None for k in TRIGGER_INPUTS) else None)
@@ -105,7 +112,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             correction_project=ctx.extra.get("memory_project"),
             source_session=ctx.session_id, restore=input.get("restore") is True,
             replaces=replaces, receipt=receipt, when=input.get("when"), always=always,
-            require_when=True, triggers=triggers, **tier,
+            require_when=True, triggers=triggers, check=check, **tier,
         )
     except (ValueError, OSError, TimeoutError) as exc:
         return ToolOutcome(text=f"Not saved: {exc}", is_error=True)
@@ -131,30 +138,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if triggers is None and _words_only(saved):
         text += (" It loads mid-task only on words in a turn: if a command or file is the "
                  "situation, correct it (memory_id, expected_revision) adding command or paths.")
-    if progress:
-        text += (f"\nKept because the user asked, but {_progress_reason(progress)}: task progress "
+    if noted:
+        text += (f"\nKept because the user asked, but {_progress_reason(noted[0])}: task progress "
                  "belongs in the working record (WorkingRecord) or session notes (Note).")
     return ToolOutcome(text=text + _receipt_notes(receipt))
 
 
 TRIGGER_INPUTS = ("command", "paths", "tools")
-
-
-def _task_progress(store: Any, input: dict[str, Any], correction: Any) -> str | None:
-    """task_state.task_progress on the fact as it would be saved: a correction
-    that omits text or when keeps the stored one, so check that one."""
-    from fluid.codemode.task_state import task_progress
-    text, when = input.get("text"), input.get("when")
-    pairs = [(text, when)]
-    if correction and (not text or not when):
-        try:
-            mid, key = input.get("memory_id"), input.get("key")
-            stored = [m for m in store.memories()
-                      if (m.id == mid if mid else m.key == key)]
-        except Exception:  # noqa: BLE001 — the save path reports a bad store itself
-            stored = []
-        pairs = [(text or m.text, when or m.when) for m in stored] or pairs
-    return next((hit for t, w in pairs if (hit := task_progress(t, w))), None)
 
 
 def _progress_reason(phrase: str) -> str:

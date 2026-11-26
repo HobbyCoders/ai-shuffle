@@ -48,6 +48,12 @@ PROGRESS = [
      "When working on the importer"),
     # The when-line names the work, so the text's status is about it.
     ("The gesture fix is half done.", "When working on PR #1824"),
+    # A continuation naming a full PR link.
+    ("Continuing https://github.com/example/widgets/pull/1824", "When resuming the widgets fix"),
+    # "On branch <name>" with a single-component name.
+    ("On branch main; next step is to rerun CI.", "When rerunning CI"),
+    # A reference opening a clause, its status after the colon.
+    ("PR #1824: next step is to add the scroll test.", "When adding the scroll test"),
 ]
 
 # Lasting rules that cite a PR, issue or branch, or use progress-like words
@@ -81,6 +87,9 @@ LASTING = [
     # A docs/ path is not a branch.
     ("Keep docs/update-readme.md short; the next step after editing it is the link check.",
      "When editing the readme"),
+    # Near the reference, but the reference is not the status's subject.
+    ("Issue #88 explains why migrations in progress block deploys.",
+     "When deploying during a migration"),
 ]
 
 
@@ -146,6 +155,39 @@ async def test_correction_is_checked_against_the_stored_when_line(tmp_path):
                           "expected_revision": fact.revision}, ctx(store))
     assert out.is_error and "task progress" in out.text
     assert store.memories()[0].text == "Gesture tests need a Robolectric run."
+
+
+async def test_archived_fact_correction_is_checked_against_its_stored_when_line(tmp_path):
+    """A correction by ID may revive an archived fact; the store resolves that
+    target, so the guard reads its when-line too and nothing is revived."""
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("Gesture tests need a Robolectric run.",
+                             when="When working on PR #1824", durable=True)
+    assert store.retire_memory(fact.id, reason="test")
+    archived, = store.archived_memories()
+    out = await remember({"text": "The gesture fix is half done.", "memory_id": archived.id,
+                          "expected_revision": archived.revision}, ctx(store))
+    assert out.is_error and "task progress" in out.text
+    assert store.memories() == []
+    assert [m.text for m in store.archived_memories()] == ["Gesture tests need a Robolectric run."]
+
+
+async def test_key_correction_reads_the_when_line_of_the_fact_it_resolves(tmp_path):
+    """A key correction resolves to this project's or the global slot; another
+    project's fact under the same key must not decide the guard."""
+    store = SkillStore(tmp_path)
+    store.save_memory("Fixture runner is alpha.", key="fixture.runner",
+                      when="When running the fixture suite", durable=True)
+    store.save_memory("Fixture runner needs the gesture build.", key="fixture.runner",
+                      scope="project:two", when="When working on PR #1824", durable=True)
+    target = next(m for m in store.memories() if m.scope == "global")
+    out = await remember({"text": "The gesture fix is half done.", "key": "fixture.runner",
+                          "expected_revision": target.revision},
+                         ToolCtx(extra={"memory_store": store, "memory_project": "project:one"}))
+    assert not out.is_error, out.text
+    texts = {m.scope: m.text for m in store.memories()}
+    assert texts == {"global": "The gesture fix is half done.",
+                     "project:two": "Fixture runner needs the gesture build."}
 
 
 # ─── similar facts at save time ──────────────────────────────────────────────
