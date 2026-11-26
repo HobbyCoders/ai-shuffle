@@ -1362,8 +1362,11 @@ class FactStore:
             self._maintain(doc, keep=entry["id"])
             receipt["replaced"] = self._replaced(entry, targets)
             if old is None and (protected or is_durable):
-                receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
-                                                   correction_project)
+                try:
+                    receipt["similar"] = self._similar(doc, entry, {e["id"] for e in targets},
+                                                       correction_project)
+                except Exception:  # noqa: BLE001 — a hint never fails the save
+                    _log.debug("similar-facts hint failed", exc_info=True)
             if _document is None:
                 self._write(doc)
             return self._entry(entry)
@@ -1616,7 +1619,8 @@ class FactStore:
             ratio = shared / max(1, min(len(mine), len(theirs)))
             if shared >= SIMILAR_MIN_SHARED and ratio >= SIMILAR_MIN_RATIO:
                 hits.append((-shared, -ratio, e["id"], e))
-        return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"]}
+        return [{"id": e["id"], "revision": e.get("revision", 1), "text": e["text"],
+                 "when": when_line(e)}
                 for *_, e in sorted(hits, key=lambda h: h[:3])[:MAX_SIMILAR]]
 
     def annotate(self, memory_id: str, *, when: str, expected_revision: int,

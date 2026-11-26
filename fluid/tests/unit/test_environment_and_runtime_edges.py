@@ -1,5 +1,5 @@
 """Environment/runtime-fact gathering edges: git state rendering without a
-real repository, degraded subprocesses, receipt failures and fact harvest."""
+real repository, degraded subprocesses and receipt failures."""
 
 from __future__ import annotations
 
@@ -202,81 +202,3 @@ def test_runtime_facts_survives_find_spec_errors_and_unlistable_root(tmp_path, m
     note = runtime.runtime_facts(str(missing))
     assert "pytest in worker Python: not found" in note
     assert "Dependency presence could not be inspected." in note
-    facts = dict(runtime.harvest_environment_facts(str(missing)))
-    assert "not importable" in facts["env.pytest"]
-
-
-def test_harvest_environment_facts_reports_empty_node_modules(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: object())
-    (tmp_path / "package.json").write_text("{}")
-    (tmp_path / "node_modules").mkdir()
-    facts = dict(runtime.harvest_environment_facts(str(tmp_path)))
-    assert "is importable" in facts["env.pytest"]
-    assert "missing in ." in facts["env.node_modules"]
-
-
-def test_harvested_node_modules_fact_is_the_same_in_every_worktree(tmp_path, monkeypatch) -> None:
-    # #1814: the fact named only the packages missing in the session's own
-    # worktree, so each session in another worktree rewrote it (revision 74).
-    from fluid.codemode.skills import SkillStore
-
-    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: object())
-    fresh, older = tmp_path / "fresh", tmp_path / "older"
-    for checkout in (fresh, older):
-        for package in ("desktop", "frontend"):
-            (checkout / package).mkdir(parents=True)
-            (checkout / package / "package.json").write_text("{}")
-    (older / "frontend" / "node_modules" / "left-pad").mkdir(parents=True)
-    texts = [dict(runtime.harvest_environment_facts(str(c)))["env.node_modules"] for c in (fresh, older)]
-    assert texts[0] == texts[1] and "desktop, frontend" in texts[0]
-
-    store = SkillStore(tmp_path / "store")
-    for checkout in (fresh, older, fresh):
-        runtime.write_harvested_facts(store, "project:x", runtime.harvest_environment_facts(str(checkout)))
-    fact = next(m for m in store.memories() if m.key == "env.node_modules")
-    assert fact.revision == 1
-
-
-def test_harvest_skips_node_modules_fact_when_every_package_is_installed(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: object())
-    (tmp_path / "package.json").write_text("{}")
-    (tmp_path / "node_modules" / "left-pad").mkdir(parents=True)
-    assert "env.node_modules" not in dict(runtime.harvest_environment_facts(str(tmp_path)))
-
-
-@pytest.mark.parametrize("origin, expected", [
-    ("http://10.0.0.5:8080", "http://10.0.0.5:<port>"),
-    ("http://10.0.0.5", "http://10.0.0.5:<port>"),  # portless: was "http:<port>"
-    ("https://[fd00::5]:3000", "https://[fd00::5]:<port>"),
-])
-def test_browser_host_fact_keeps_scheme_and_host(origin, expected) -> None:
-    facts = runtime.harvest_tool_facts(
-        "mcp__browser__browser_navigate", f"Browse {origin} instead of localhost."
-    )
-    assert facts and f"browsed via {expected} " in facts[0][1]
-
-
-def test_browser_host_fact_ignores_loopback_and_other_tools() -> None:
-    assert runtime.harvest_tool_facts("browser_navigate", "Browse http://[::1]:80 instead") == []
-    assert runtime.harvest_tool_facts("browser_navigate", "Browse http://localhost instead") == []
-    assert runtime.harvest_tool_facts("Bash", "Browse http://10.0.0.5 instead") == []
-    assert runtime.harvest_tool_facts("browser_navigate", "no redirect here") == []
-
-
-def test_write_harvested_facts_skips_refused_saves() -> None:
-    class Store:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def save_memory(self, text, **kw):
-            self.calls += 1
-            if kw["key"] == "env.pytest":
-                raise ValueError("protected")
-            return type("Saved", (), {"id": "m1"})()
-
-    store = Store()
-    assert runtime.write_harvested_facts(None, None, [("k", "t")]) == []
-    written = runtime.write_harvested_facts(
-        store, "proj", [("env.pytest", "a"), ("env/node modules", "b")]
-    )
-    assert written == ["m1"] and store.calls == 2

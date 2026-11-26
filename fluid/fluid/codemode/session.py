@@ -708,22 +708,6 @@ class CodeModeSession:
                         )
                     except Exception:
                         pass
-                    # Facts a tool result establishes on its own (the browser
-                    # host) go straight to the memory store, tool-provenance,
-                    # so the next session does not rediscover them.
-                    try:
-                        from fluid.context.runtime_facts import (
-                            harvest_tool_facts,
-                            write_harvested_facts,
-                        )
-
-                        harvested = harvest_tool_facts(name, out)
-                        if harvested:
-                            write_harvested_facts(
-                                self._skills, (extra or {}).get("memory_project"), harvested,
-                            )
-                    except Exception:
-                        pass
                 await loop._emit(ToolResult(
                     session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
                     name=name, output=out, is_error=is_error,

@@ -1460,11 +1460,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # The model the last ProfileResolved event was emitted for.
         self._profile_resolved_for: str | None = None
         # Runtime-facts block bookkeeping (see _environment_reminder): the
-        # facts text last sent to the model, and whether this engine has
-        # already harvested them into the memory store.
+        # facts text last sent to the model.
         self._runtime_facts_sent: str | None = None
         self._resume_environment: str | None = None
-        self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
         # System text of the request in flight / the last completed one, for
         # the cache probe's system diff (see _cache_probe_fields).
@@ -3693,9 +3691,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         prompt they ride their own small block on the first turn and
         whenever they change, even when a host suppressed the environment
         section. A bare system string (no sections) still gets nothing. Gathering runs
-        git and stats the tree, so it runs off the loop. Either way the facts
-        are also harvested into the memory store (see
-        :func:`fluid.context.runtime_facts.harvest_environment_facts`).
+        git and stats the tree, so it runs off the loop. The facts are live
+        only; they are not written to the memory store.
         """
         sections = self.system_sections.sections if self.system_sections else ()
         has_env_section = any(s.kind == "environment" for s in sections)
@@ -3720,9 +3717,7 @@ class NativeLoop(BackgroundLifecycleMixin):
     def _gather_environment(self, full: bool) -> tuple[tuple[str, str] | None, str]:
         """Thread-side half of :meth:`_environment_reminder`: the full note
         when the prompt has an environment section, plus the runtime facts
-        text on their own for the change check. Also harvests the facts into
-        the memory store once per engine (file I/O, so it belongs here off
-        the loop)."""
+        text on their own for the change check."""
         from fluid.context.runtime_facts import runtime_facts
 
         facts = runtime_facts(self.ctx.cwd)
@@ -3732,28 +3727,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         except Exception:
             values = {}
         note = environment_note_parts(self.ctx.cwd, time_context=values or {}) if full else None
-        self._harvest_runtime_facts()
         return note, facts
-
-    def _harvest_runtime_facts(self) -> None:
-        """Write mechanically established environment facts to the memory
-        store, once per engine instance. Best-effort and silent."""
-        if self._runtime_facts_harvested:
-            return
-        self._runtime_facts_harvested = True
-        store = self.ctx.extra.get("memory_store") or self.ctx.extra.get("recall_store")
-        if store is None or not hasattr(store, "save_memory"):
-            return
-        from fluid.context.runtime_facts import (
-            harvest_environment_facts,
-            write_harvested_facts,
-        )
-
-        try:
-            facts = harvest_environment_facts(self.ctx.cwd)
-            write_harvested_facts(store, self.ctx.extra.get("memory_project"), facts)
-        except Exception:  # noqa: BLE001 — never let bookkeeping touch a turn
-            log.debug("runtime fact harvest failed", exc_info=True)
 
     async def _emit_profile_resolved(self, sid: str, turn_id: str) -> None:
         """Record which guidance family this engine's model resolved to.

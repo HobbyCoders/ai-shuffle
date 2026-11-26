@@ -85,6 +85,15 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return ToolOutcome(text="Not saved: always is only for a rule the owner asked to apply "
                                 "in every chat; pass user_requested=true only if they did.",
                            is_error=True)
+    # Task progress goes stale when the work lands (Memory v3 §5.1). An agent's
+    # save is refused; the owner's is kept, with a note.
+    from fluid.codemode.task_state import task_progress
+    progress = task_progress(input.get("text"), input.get("when"))
+    if progress and not user_requested:
+        return ToolOutcome(text=f"Not saved: {_progress_reason(progress)}. Keep it in the working "
+                                "record (WorkingRecord) or session notes (Note). A lasting rule "
+                                "that cites a PR saves; state the rule, not the work's status.",
+                           is_error=True)
     # Explicit just-in-time triggers; absent keys keep a correction's own.
     triggers = ({k: input[k] for k in TRIGGER_INPUTS if input.get(k) is not None}
                 if any(input.get(k) is not None for k in TRIGGER_INPUTS) else None)
@@ -123,10 +132,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if triggers is None and _words_only(saved):
         text += (" It loads mid-task only on words in a turn: if a command or file is the "
                  "situation, correct it (memory_id, expected_revision) adding command or paths.")
+    if progress:
+        text += (f"\nKept because the user asked, but {_progress_reason(progress)}: task progress "
+                 "belongs in the working record (WorkingRecord) or session notes (Note).")
     return ToolOutcome(text=text + _receipt_notes(receipt))
 
 
 TRIGGER_INPUTS = ("command", "paths", "tools")
+
+
+def _progress_reason(phrase: str) -> str:
+    return (f'this reads as task progress (a PR, issue or branch with "{phrase}"), '
+            "which goes stale when the work lands")
 
 
 def _words_only(saved: Any) -> bool:
@@ -198,14 +215,23 @@ def _receipt_notes(receipt: dict[str, Any]) -> str:
                   + ", ".join(f"[{mid}]" for mid in receipt["replaced"]) + ".")
     for skipped in receipt.get("skipped") or ():
         notes += f"\nNot replaced: {skipped}."
-    similar = receipt.get("similar") or ()
-    if similar:
-        # A hint only: nothing was changed. One retry with replaces folds them in.
-        rows = "; ".join(f"[{s['id']} r{s['revision']}] {_clip(s['text'])}" for s in similar)
-        ids = ", ".join(f'"{s["id"]}"' for s in similar)
-        notes += (f"\nSimilar saved facts: {rows}. If this replaces them, save it again "
-                  f"with replaces=[{ids}].")
+    try:
+        notes += _similar_note(receipt.get("similar") or ())
+    except Exception:  # noqa: BLE001 — a hint never fails a committed save
+        pass
     return notes
+
+
+def _similar_note(similar: Any) -> str:
+    """Live facts on the same subject (facts._similar), by id, revision and
+    when-line, so a near-duplicate becomes a correction. A hint only."""
+    if not similar:
+        return ""
+    rows = "; ".join(f"[{s['id']} r{s['revision']}] {_clip(s.get('when') or s['text'])}"
+                     for s in similar)
+    ids = ", ".join(f'"{s["id"]}"' for s in similar)
+    return (f"\nSimilar saved facts: {rows}. If this replaces them, save it again "
+            f"with replaces=[{ids}] rather than keeping a near-duplicate.")
 
 
 def _clip(text: str, limit: int = 80) -> str:

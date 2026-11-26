@@ -229,19 +229,12 @@ async def test_task_sync_returns_child_text_inline(tmp_path, mode, isolate_home)
     assert result_block.content[0].text == "sync child report"
     assert not result_block.is_error
 
-    # Exercise the real environment-fact producer, not a pre-seeded memory.
-    # The CLI's default continual store must live in this test's private home.
-    from fluid.codemode.skills import project_key_for
-    from fluid.context.runtime_facts import harvest_environment_facts
-
+    # A real session start writes no environment facts into the CLI's default
+    # continual store (this test's private home): they are probed live.
     memories = isolate_home / ".fluid" / "skills" / "memories.json"
-    entries = json.loads(memories.read_text(encoding="utf-8"))["entries"]
-    pytest_fact = dict(harvest_environment_facts(str(tmp_path)))["env.pytest"]
-    assert any(
-        e["text"] == pytest_fact and e["scope"] == project_key_for(tmp_path)
-        and e["key"] == "env.pytest" and e["provenance"] == "tool"
-        for e in entries
-    )
+    entries = (json.loads(memories.read_text(encoding="utf-8"))["entries"]
+               if memories.exists() else [])
+    assert not [e for e in entries if str(e.get("key") or "").startswith("env.")]
 
 
 async def test_task_uses_agent_definition_prompt_and_tools(tmp_path) -> None:
