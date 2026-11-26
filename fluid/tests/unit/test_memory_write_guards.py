@@ -52,6 +52,8 @@ PROGRESS = [
     ("Continuing https://github.com/example/widgets/pull/1824", "When resuming the widgets fix"),
     # A quoted single-component branch name.
     ("On branch `release`; next step is to rerun CI.", "When rerunning CI"),
+    # A name that only starts like a default branch is still a work branch.
+    ("On branch `main.hotfix`; next step is to rerun CI.", "When rerunning CI"),
     # A reference opening a clause, its status after the colon.
     ("PR #1824: next step is to add the scroll test.", "When adding the scroll test"),
     # A spaced dash ends a clause, so "on branch fix-login" opens one.

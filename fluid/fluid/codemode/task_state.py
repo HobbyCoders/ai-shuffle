@@ -47,7 +47,7 @@ _WORK = (
 # in the when-line, so it never anchors a fact from there.
 _NAMED = (
     r"(?:\bbranch\s+[`'\"]?[A-Za-z0-9][\w.-]*[/_-][\w./-]*"
-    r"|\bbranch\s+[`'\"](?!(?:main|master|develop|trunk)\b)[A-Za-z0-9][\w./-]*)"
+    r"|\bbranch\s+[`'\"](?!(?:main|master|develop|trunk)(?![\w./-]))[A-Za-z0-9][\w./-]*)"
 )
 _REF = "(?:" + _WORK + "|" + _NAMED + ")"
 _REFERENCE = re.compile(_REF, re.IGNORECASE)
