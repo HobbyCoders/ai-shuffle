@@ -532,9 +532,11 @@ async def finish_drains(budget: float = SHUTDOWN_DRAIN_SECONDS) -> int:
     running in a worker thread can still finish after it.) Returns how many
     were cut off.
 
-    A cut-off reflection records nothing for its chat (the watermark moves
-    only after its output is stored, see fluid.codemode.reflection), so the
-    chat's turns are reflected again the next time it closes. Cancelling
+    The watermark moves only after a reflection's output is stored (see
+    fluid.codemode.reflection), so if a cut-off reflection's watermark did
+    not advance, the chat's next close retries those turns. A watermark
+    write already running in a worker thread can still finish after the
+    cutoff, and then those turns count as reflected. Cancelling
     this wait (shutdown itself cancelled) cancels the drains it was waiting
     for, with the same result."""
     loop = asyncio.get_running_loop()

@@ -224,8 +224,9 @@ the ones it cancels, ends before the two-second cleanup reserve ahead of the
 supervisor's stop deadline, which stays for connectors, pending event writes
 and database teardown. Only shutdown's own engine closes skip their wait (a
 task-local flag that ends with shutdown); a concurrent eviction still waits.
-A reflection cut off there never reached its watermark write, so the chat is
-reflected again at its next close after the restart.
+If a reflection cut off there did not advance its watermark, the chat's next
+close after the restart retries those turns. A watermark write already running
+in a worker thread can still finish after the cutoff.
 
 **Rollback.** `FLUID_MEMORY_LEARNER=continuous` (a plain env read, listed as
 internal in `scripts/ci/env_allowlist.json`) brings back the continuous
