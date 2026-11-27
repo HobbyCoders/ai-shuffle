@@ -358,6 +358,9 @@ def _needles(secret: str, header_value: str) -> list[str]:
         base64.b64encode(secret.encode()).decode(),
         base64.b64encode(header_value.encode()).decode(),
     }
+    # Unpadded and URL-safe base64 (JWTs, URL parameters) of the credential.
+    for encoded in (base64.b64encode(secret.encode()), base64.urlsafe_b64encode(secret.encode())):
+        values.update((encoded.decode(), encoded.decode().rstrip("=")))
     try:
         decoded = base64.b64decode(secret, validate=True).decode("utf-8")
         if len(decoded) >= 6 and decoded.isprintable():
@@ -687,16 +690,19 @@ def _pick(document: object, field: str) -> object:
 
 
 def capturable(value: object) -> bool:
-    """Visible ASCII, spaces and line breaks: what ``redact`` finds in every form."""
+    """One line of visible ASCII: what ``redact`` finds in every form a later
+    echo can carry (a JSON ``\\n`` escape of a line break it does not)."""
     return (isinstance(value, str) and CAPTURE_MIN <= len(value) <= CAPTURE_MAX
-            and all(0x20 <= ord(ch) <= 0x7E or ch in "\r\n" for ch in value))
+            and all(0x20 <= ord(ch) <= 0x7E for ch in value))
 
 
 def _shape(value: object, depth: int = 0) -> object:
-    """The response's structure with every text value withheld, so a wrong
-    field can be corrected without the secret ever being shown."""
+    """The response's structure with every value but true, false and null
+    withheld, so a wrong field can be corrected without anything being shown."""
     if isinstance(value, str):
         return _WITHHELD
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return "[number]"
     if depth >= 8:
         return "[...]"
     if isinstance(value, dict):
@@ -706,11 +712,35 @@ def _shape(value: object, depth: int = 0) -> object:
     return value
 
 
-def _withheld(reason: str, document: object = None) -> bytes:
-    shown: dict = {"withheld": reason}
-    if document is not None:
-        shown["shape"] = _shape(document)
-    return json.dumps(shown).encode()
+def _mark(shape: object, field: str) -> None:
+    """Show where the captured value was in a shape."""
+    *parents, last = field.split(".")
+    for key in parents:
+        if isinstance(shape, dict):
+            shape = shape.get(key)
+        elif isinstance(shape, list) and key.isdigit() and int(key) < len(shape):
+            shape = shape[int(key)]
+        else:
+            return
+    if isinstance(shape, dict) and last in shape:
+        shape[last] = "[captured]"
+    elif isinstance(shape, list) and last.isdigit() and int(last) < len(shape):
+        shape[int(last)] = "[captured]"
+
+
+def held_needles(values: tuple[str, ...]) -> list[str]:
+    """Every form of these captured values ``redact`` should find."""
+    return sorted(set().union(*(_needles(value, value) for value in values if value)), key=len, reverse=True)
+
+
+def is_github_api(origin: Origin | None, pin: str) -> bool:
+    """The public GitHub API, verified by the system's certificate store: the
+    only place a captured secret may be sent."""
+    return (origin is not None and origin.host == GITHUB_API_HOST and origin.port == GITHUB_API_PORT
+            and origin.prefix == "" and not pin)
+
+
+GITHUB_API_HOST, GITHUB_API_PORT = "api.github.com", 443
 
 
 GITHUB_SECRET_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,254}")
@@ -845,18 +875,29 @@ async def perform_capturing(
         except ValueError:
             document = None
         value = _pick(document, capture) if document is not None else None
-        if capturable(value):
+        shape = _shape(document) if document is not None else None
+        if capturable(value) and not (value in header[1] or any(n in value for n in needles)):
             captured = value
+            _mark(shape, capture)
             needles = sorted(set(needles).union(_needles(value, value)), key=len, reverse=True)
             note = {"field": capture, "captured": True}
         else:
-            reason = (f"{capture} is not a text value of 8 to {CAPTURE_MAX:,} visible characters in this response"
-                      if document is not None else "the response is not complete JSON")
-            note = {"field": capture, "captured": False, "reason": reason + "; nothing was captured"}
-            kept = bytearray(_withheld(
-                f"The body is withheld because {reason}, and it may hold a credential shown only once. "
-                "The service may already have created it.", document))
-            truncated = False
+            reason = ("the response is not complete JSON" if document is None
+                      else f"{capture} holds the credential this grant signs in with" if capturable(value)
+                      else f"{capture} is not one line of 8 to {CAPTURE_MAX:,} visible characters in this response")
+            note = {"field": capture, "captured": False,
+                    "reason": reason + "; nothing was captured. The service may already have created it"}
+        # The response to a request that creates a credential may hold it, or
+        # another, under any field or header: only its structure is returned,
+        # never a value, whether or not the named field was taken.
+        shown = json.dumps({"withheld": "Every value is withheld from a capture response.", "shape": shape})
+        return {
+            "status": status,
+            "headers": {},
+            "body": redact(shown.encode(), needles).decode("utf-8", "replace"),
+            "truncated": False,
+            "capture": note,
+        }, captured
     elif capture:
         note = {"field": capture, "captured": False,
                 "reason": f"the service answered {status}; nothing was captured"}

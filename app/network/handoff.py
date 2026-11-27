@@ -180,6 +180,15 @@ def open_prompt(cursor, sid, *, allow_questions=False):
     return broker.pending_count(sid) > 0
 
 
+def _forget_vault_captures(sid):
+    """A chat changing hands ends the secrets it captured here (Vault hand-off):
+    moving it back before they expire must not bring them back. Cleared even if
+    the move then rolls back, which only means capturing again."""
+    from app.core.vault_access import broker
+
+    broker.forget_captures(sid)
+
+
 def _check_unfinished_wakes(cursor, sid):
     ctx = engine.context()
     cursor.execute("SELECT 1 FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE "
@@ -1049,6 +1058,7 @@ def _commit(sid, target, payload, token):
                      "handoff": {"token": token, "held_messages": held_messages}}
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
                     (target, target, json.dumps(placement), session_branch, sid))
+        _forget_vault_captures(sid)
         # _idle above ran before this UPDATE locked the session row. Turn
         # admission queues under that lock, so a turn admitted in between (a
         # started chat's report, #1443) is visible only now: refuse as _idle
@@ -1836,6 +1846,7 @@ def _accept_owner_row(conn, cur, sid, device_id, branch, token=None, locked=()):
         placement["handoff"] = {"token": token}
     cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
                 (device_id, settings.effective_instance_id, json.dumps(placement), branch, sid))
+    _forget_vault_captures(sid)
     if branch is None:
         cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
     if token:

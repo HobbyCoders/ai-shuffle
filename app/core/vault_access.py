@@ -760,6 +760,7 @@ class Broker:
     def __init__(self):
         self.grants: dict[str, Grant] = {}
         self.captures: dict[str, Capture] = {}
+        self.capturing: dict[str, int] = {}  # capture requests in flight, per chat
         self.actions: dict[str, Action] = {}
         self.requests: dict[str, AccessRequest] = {}
         self._pending_lock = threading.RLock()
@@ -1697,6 +1698,15 @@ class Broker:
         await self.get(session_id, action.grant_id)
         if action.decision.done():
             raise AccessDenied("This action is no longer awaiting approval.")
+        if allow and action.always:
+            # Asked in every mode and refused in Away: a card left open when
+            # the chat went Away is refused, not approved.
+            from app.core.away_mode import answers_questions_async, DEFERRED_MESSAGE
+            if await answers_questions_async(session_id):
+                await self.defer_pending_away(session_id)
+                raise AccessDenied(DEFERRED_MESSAGE)
+            if action.decision.done():
+                raise AccessDenied("This action is no longer awaiting approval.")
         action.decision.set_result(allow)
 
     async def resolve_mode_actions(self, session_id: str):
@@ -1781,9 +1791,8 @@ class Broker:
                 raise AccessDenied("This service grant is read-only: only GET and HEAD are allowed.")
             capture = arguments.get("capture")
             capture = vault_services.capture_field(capture) if capture not in (None, "") else ""
-            if capture and sum(c.session_id == session_id for c in self.captures.values()) >= CAPTURE_LIMIT:
-                raise AccessDenied(f"This chat already holds {CAPTURE_LIMIT} captured secrets; "
-                                   "copy or let them expire first.")
+            if capture:
+                self._capture_room(session_id)
             # The approval card shows exactly what is sent; the credential is never an argument.
             arguments = {"method": method, "path": path, "body": body,
                          "content_type": (content_type or "application/json") if body else ""}
@@ -1793,8 +1802,11 @@ class Broker:
                 # Refuse before asking for approval when the plugin changed.
                 await _current_plugin(grant)
         elif operation == "copy_secret":
-            if grant.kind != "service" or grant.origin is None:
-                raise AccessDenied("Copy a secret with a writable GitHub service grant.")
+            if grant.kind != "service" or not vault_services.is_github_api(grant.origin, grant.fingerprint):
+                # The card says GitHub: any other service could answer the
+                # public-key request with its own key and open what follows.
+                raise AccessDenied("Copy a secret with a writable service grant for https://api.github.com "
+                                   "(no path, verified by the system's certificates).")
             if not grant.writable:
                 raise AccessDenied("This GitHub grant is read-only; writing a secret needs a writable grant.")
             capture = await self._capture(session_id, arguments.get("secret_id"))
@@ -1869,19 +1881,57 @@ class Broker:
         """One ChatHttpRequest. Values this chat captured stay redacted from
         every response, so no service can echo one back."""
         capture = arguments.get("capture", "")
-        result, value = await self._send(grant, arguments["method"], arguments["path"], arguments["body"],
-                                         arguments["content_type"], also_redact=self._held(session_id),
-                                         capture=capture)
-        if value is not None:
-            held = self._hold(session_id, await session_owner(session_id), value,
-                              f"{grant.label}: {arguments['method']} {arguments['path']} → {capture}")
-            result["capture"] = {**result["capture"], **held.model_public()}
-        return result
+        if capture:
+            # Reserved before sending: each capture request may mint a credential.
+            self._capture_room(session_id)
+            self.capturing[session_id] = self.capturing.get(session_id, 0) + 1
+        try:
+            result, value = await self._send(grant, arguments["method"], arguments["path"], arguments["body"],
+                                             arguments["content_type"], also_redact=self._held(session_id),
+                                             capture=capture)
+            if value is not None:
+                held = self._hold(session_id, await session_owner(session_id), value,
+                                  f"{grant.label}: {arguments['method']} {arguments['path']} → {capture}")
+                result["capture"] = {**result["capture"], **held.model_public()}
+        finally:
+            if capture:
+                self.capturing[session_id] -= 1
+                if not self.capturing[session_id]:
+                    del self.capturing[session_id]
+        # A value captured while this request was in flight was not in its redaction set.
+        return self.redact_held(session_id, result)
+
+    def _capture_room(self, session_id: str) -> None:
+        held = len(self._held(session_id)) + self.capturing.get(session_id, 0)
+        if held >= CAPTURE_LIMIT:
+            raise AccessDenied(f"This chat already holds or is capturing {CAPTURE_LIMIT} secrets; "
+                               "each lasts 15 minutes. Wait for one to expire.")
+
+    def redact_held(self, session_id: str, result: object) -> object:
+        """``result`` with every value this chat now holds redacted again."""
+        needles = vault_services.held_needles(self._held(session_id))
+        if not needles or not isinstance(result, dict):
+            return result
+        again = dict(result)
+        if isinstance(again.get("body"), str):
+            again["body"] = vault_services.redact(again["body"].encode(), needles).decode("utf-8", "replace")
+        if isinstance(again.get("headers"), dict):
+            again["headers"] = {name: vault_services.redact(value.encode(), needles).decode("utf-8", "replace")
+                                if isinstance(value, str) else value for name, value in again["headers"].items()}
+        return again
 
     def _held(self, session_id: str) -> tuple[str, ...]:
         now = time.time()
         return tuple(c.value for c in list(self.captures.values())
                      if c.session_id == session_id and c.expires_at > now and c.value)
+
+    def forget_captures(self, session_id: str) -> None:
+        """End every value this chat holds: its ownership is moving. Safe from
+        any thread (a handoff transaction): the value is cleared at once and
+        the entry falls away at its expiry."""
+        for capture in list(self.captures.values()):
+            if capture.session_id == session_id:
+                capture.value = ""
 
     def _hold(self, session_id: str, owner: tuple, value: str, source: str) -> Capture:
         capture = Capture("sec_" + uuid.uuid4().hex[:24], session_id, owner, value, source,
@@ -1902,7 +1952,8 @@ class Broker:
         if capture is None or capture.session_id != session_id:
             raise AccessDenied("No such captured secret in this chat. Capture one with ChatHttpRequest's capture "
                                "field; captures last 15 minutes, stay with the chat that made them and end on restart.")
-        if capture.expires_at <= time.time() or capture.owner != await session_owner(session_id):
+        if (not capture.value or capture.expires_at <= time.time()
+                or capture.owner != await session_owner(session_id)):
             self._drop(capture.id)
             raise AccessDenied("The captured secret expired or this chat's owner changed. Create it again.")
         return capture

@@ -124,6 +124,8 @@ def create_vault_server(session_id: str):
         results = []
         for index, outcome in enumerate(settled):
             ok, value = outcome if isinstance(outcome, tuple) else (False, FAILED)
+            # Another item may have captured a value this one echoed before it was held.
+            value = broker.redact_held(session_id, value) if ok else value
             results.append({"index": index, "ok": True, "result": value} if ok
                            else {"index": index, "ok": False, "error": value})
         return {"content": [{"type": "text", "text": json.dumps({"results": results})}]}
@@ -168,7 +170,7 @@ def create_vault_server(session_id: str):
     async def command(args):
         return await invoke("command", args)
 
-    @tool("ChatHttpRequest", "Send an HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted. For independent requests, pass requests (1-8 items with these fields) instead: they run concurrently and return {results: [{index, ok, result or error}]} in order once all finish; one failure does not stop the others. capture (a JSON field path) keeps that field of a 2xx response, such as a token just created, from you: it comes back redacted with capture.secret_id for ChatCopySecret; if the field is missing, only the body's shape is shown.", HTTP_SCHEMA)
+    @tool("ChatHttpRequest", "Send an HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted. For independent requests, pass requests (1-8 items with these fields) instead: they run concurrently and return {results: [{index, ok, result or error}]} in order once all finish; one failure does not stop the others. capture (a JSON field path, such as result.value) holds that one-line field of a 2xx response, such as a token just created, for ChatCopySecret as capture.secret_id; you get only the response's shape, never its values.", HTTP_SCHEMA)
     async def http(args):
         try:
             batch = vault_http_batch.items(args)
