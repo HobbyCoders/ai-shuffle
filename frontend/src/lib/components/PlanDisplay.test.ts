@@ -15,15 +15,29 @@ const plan = {
 };
 
 describe('PlanDisplay', () => {
- it('shows goal, current step, blocker and honest provenance without expanding', () => {
-  const { getByText, getByRole, queryByRole } = render(PlanDisplay, { props: { plan } });
-  expect(getByRole('region', { name: 'Session plan' })).toBeTruthy();
+ it('collapses to one tool-style row: goal, progress and blockers, nothing below it', () => {
+  const { getByText, getByRole, queryByRole, queryByText, container } = render(PlanDisplay, { props: { plan } });
+  const region = getByRole('region', { name: 'Session plan' });
   expect(getByText(plan.goal)).toBeTruthy();
-  expect(getByText('Build the fix')).toBeTruthy();
+  expect(getByText('1/5')).toBeTruthy();
   expect(getByText('1 blocked')).toBeTruthy();
-  expect(getByText('Model-reported · not independently verified')).toBeTruthy();
+  expect(queryByText('Build the fix')).toBeNull();
+  expect(queryByText('Model-reported · not independently verified')).toBeNull();
   expect(queryByRole('list')).toBeNull();
-  expect(getByRole('button', { name: /Expand plan/ }).getAttribute('aria-expanded')).toBe('false');
+  // The row button is the only thing the collapsed plan renders.
+  expect([...region.children].map(el => el.tagName)).toEqual(['BUTTON']);
+  expect(container.querySelector('[data-testid="plan-status-progress"]')).toBeTruthy();
+  const button = getByRole('button', { name: /Expand plan/ });
+  expect(button.getAttribute('aria-expanded')).toBe('false');
+  expect(button.getAttribute('aria-label')).toContain('1 of 5 steps reported completed, 1 blocked');
+ });
+
+ it('marks a fully completed plan with the done glyph and says so when expanded', async () => {
+  const done = { ...plan, tasks: plan.tasks.slice(0, 2).map(t => ({ ...t, status: 'completed' })) };
+  const { getByRole, getByText, container } = render(PlanDisplay, { props: { plan: done } });
+  expect(container.querySelector('[data-testid="plan-status-done"]')).toBeTruthy();
+  await fireEvent.click(getByRole('button', { name: /Expand plan/ }));
+  expect(getByText('All steps completed')).toBeTruthy();
  });
 
  it('expands into accessible statuses, acceptance, blockers, evidence and opaque refs', async () => {
@@ -41,6 +55,8 @@ describe('PlanDisplay', () => {
   expect(getByText('run:123')).toBeTruthy();
   expect(container.querySelector('a')).toBeNull();
   expect(getByText('Snapshot · plan 2 · revision 7')).toBeTruthy();
+  expect(getByText('Model-reported · not independently verified')).toBeTruthy();
+  expect(getByText('1 cancelled')).toBeTruthy();
   await fireEvent.click(toggle);
   expect(container.querySelector('[data-plan-task]')).toBeNull();
  });
@@ -67,11 +83,13 @@ describe('PlanDisplay', () => {
   expect(container.querySelector('.plan-details')).toBeNull();
  });
 
- it('does not report cancelled work as successful completion', () => {
-  const { getByText, queryByText } = render(PlanDisplay, { props: { plan: { ...plan, tasks: [plan.tasks[4]] } } });
+ it('does not report cancelled work as successful completion', async () => {
+  const { getByRole, getByText, queryByText, container } = render(PlanDisplay, { props: { plan: { ...plan, tasks: [plan.tasks[4]] } } });
+  expect(getByText('0/1')).toBeTruthy();
+  expect(container.querySelector('[data-testid="plan-status-done"]')).toBeNull();
+  await fireEvent.click(getByRole('button', { name: /Expand plan/ }));
   expect(getByText('1 cancelled')).toBeTruthy();
   expect(queryByText('All steps completed')).toBeNull();
-  expect(getByText('0/1')).toBeTruthy();
  });
 
  it('shows an initialized empty plan without inventing progress', async () => {

@@ -24,6 +24,8 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # combined_full +1,042 on both legs (native 136,469 -> 137,511; delegated
 # 113,940 -> 114,982). Native compiled_eager +16, still under its baseline;
 # delegated eager unchanged.
+# Nov 2026: Plan's deferred help says to send only changed tasks, so updates
+# stop resending the whole plan; per-field limits shrink: Plan 2,005 -> 2,028.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
@@ -73,6 +75,6 @@ def test_plan_help_is_bounded_and_deferred(native):
         assert contract in docs[0] and contract not in compiled.text
     for field in ("depends_on", "blocked_reason", "evidence", "references"):
         assert field in docs[0]
-    for limit in ("1-80 chars", "<=600 chars", "<=1000 chars", "<=200 chars",
-                  "<=10 ID strings", "<=3 strings", "<=5 strings", "<=100 chars each"):
+    for limit in ("1-80 chars", "<=300 chars", "<=400 chars", "<=120 chars", "<=200 chars",
+                  "<=10 ID strings", "<=2 strings", "<=3 strings", "<=100 chars each"):
         assert limit in docs[0]

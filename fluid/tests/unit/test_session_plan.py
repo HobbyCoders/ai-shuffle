@@ -39,8 +39,11 @@ def test_atomic_updates_revisions_retries_and_no_mutation_on_error():
       {"id": "b", "title": "y", "status": "pending", "depends_on": ["a"]}], "cycle"),
     ([{"id": "a", "title": "x", "status": "cancelled"},
       {"id": "b", "title": "y", "status": "completed", "depends_on": ["a"]}], "cancellation is not success"),
-    ([{"id": "a", "title": "x" * 201, "status": "pending"}], "title"),
-    ([{"id": "a", "title": "x", "status": "pending", "references": ["x"] * 6}], "references"),
+    ([{"id": "a", "title": "x" * 121, "status": "pending"}], "title"),
+    ([{"id": "a", "title": "x", "status": "pending", "references": [str(i) for i in range(4)]}], "references"),
+    ([{"id": "a", "title": "x", "status": "pending", "evidence": ["x" * 201]}], "evidence"),
+    ([{"id": "a", "title": "x", "status": "pending", "evidence": ["one", "two", "three"]}], "evidence"),
+    ([{"id": "a", "title": "x", "status": "blocked", "blocked_reason": "x" * 201}], "blocked_reason"),
     ([{"id": "a", "title": "x", "status": "pending"}] * 2, "unique"),
     ([{"id": str(i), "title": "x", "status": "pending"} for i in range(51)], "50"),
 ])
@@ -50,8 +53,12 @@ def test_invalid_batch_rejected_whole(tasks, match):
 
 
 def test_payload_bound_and_receipt_window():
-    with pytest.raises(ValueError, match="32KiB"):
-        plan.apply_update(plan.empty_plan(), [], start(goal="x" * 33000))
+    with pytest.raises(ValueError, match="16KiB; send only changed tasks"):
+        plan.apply_update(plan.empty_plan(), [], start(goal="x" * 17000))
+    with pytest.raises(ValueError, match="goal"):
+        plan.apply_update(plan.empty_plan(), [], start(goal="x" * 301))
+    with pytest.raises(ValueError, match="done_when"):
+        plan.apply_update(plan.empty_plan(), [], start(done_when="x" * 401))
     document, receipts, _, _ = plan.apply_update(plan.empty_plan(), [], start())
     for revision in range(1, 70):
         document, receipts, _, _ = plan.apply_update(document, receipts, {
@@ -59,6 +66,43 @@ def test_payload_bound_and_receipt_window():
     assert len(receipts) == plan.MAX_RECEIPTS
     with pytest.raises(ValueError, match="Revision conflict"):
         plan.apply_update(document, receipts, start())
+
+
+def test_plans_saved_under_older_larger_bounds_stay_updatable():
+    # Text a plan stored before the tighter bounds is kept as-is when a later
+    # update does not resend it, and an oversized plan can still be finished.
+    long = "e" * 450
+    legacy = {**plan.empty_plan(), "revision": 3, "goal": "g" * 550, "done_when": "d" * 900, "tasks": [
+        {"id": f"t{i}", "title": "t" * 180, "status": "blocked" if i == 0 else "in_progress",
+         "blocked_reason": "r" * 450 if i == 0 else None, "depends_on": [],
+         "evidence": [long, long, long], "references": ["ref"] * 5} for i in range(12)]}
+    for task in legacy["tasks"]:
+        if task["blocked_reason"] is None:
+            del task["blocked_reason"]
+    assert len(json.dumps(legacy).encode()) > plan.MAX_PAYLOAD
+    status_only = [{"id": t["id"], "title": "Short title", "status": "completed"} for t in legacy["tasks"][1:]]
+    document, _, _, _ = plan.apply_update(legacy, [], {
+        "action": "update", "request_id": "finish", "expected_revision": 3, "tasks": status_only})
+    kept = {t["id"]: t for t in document["tasks"]}
+    assert kept["t1"]["evidence"] == [long, long, long] and kept["t1"]["references"] == ["ref"] * 5
+    assert kept["t0"]["blocked_reason"] == "r" * 450 and document["goal"] == "g" * 550
+    # Resending old long text is held to the new bound.
+    with pytest.raises(ValueError, match="evidence"):
+        plan.apply_update(document, [], {"action": "update", "request_id": "resend", "expected_revision": 4,
+                                         "tasks": [{"id": "t1", "title": "x", "status": "completed", "evidence": [long]}]})
+    # A plan under the bound may not grow past it.
+    small, receipts, _, _ = plan.apply_update(plan.empty_plan(), [], start())
+    grow = [{"id": f"n{i}", "title": "x" * 120, "status": "pending", "evidence": ["y" * 200, "z" * 200]}
+            for i in range(30)]
+    for n, batch in enumerate((grow[:15], grow[15:])):
+        try:
+            small, receipts, _, _ = plan.apply_update(small, receipts, {
+                "action": "update", "request_id": f"grow{n}", "expected_revision": small["revision"], "tasks": batch})
+        except ValueError as exc:
+            assert "Stored plan exceeds 16KiB" in str(exc)
+            break
+    else:
+        raise AssertionError("a plan grew past 16KiB")
 
 
 def test_rollover_cannot_hide_open_work_and_preserves_monotonic_revision():
@@ -105,7 +149,7 @@ async def test_host_failure_never_falls_back(tmp_path):
 
 def test_reminder_is_bounded_and_honest():
     document, _, _, _ = plan.apply_update(plan.empty_plan(), [], start(tasks=[
-        {"id": str(i), "title": "x" * 120, "status": "blocked", "blocked_reason": "why" * 60}
+        {"id": str(i), "title": "x" * 100, "status": "blocked", "blocked_reason": "why" * 33}
         for i in range(50)]))
     text = plan.render_reminder(document)
     assert len(text) <= 2440 and "blocked=50" in text
@@ -166,7 +210,7 @@ def test_deferred_plan_help_preserves_all_semantic_and_safety_rules():
         "Initial/rollover updates require goal, done_when, tasks",
         "rollover=true only after all old tasks completed/cancelled",
         "host retains history", "IDs stable per generation", "Tasks require id/title/status",
-        "max 50/generation, 32KiB payload", "Dependencies must exist, be acyclic",
+        "max 50/generation, 16KiB payload", "send only changed ones", "Dependencies must exist, be acyclic",
         "completed before dependents complete", "blocked needs blocked_reason",
         "Evidence/existing execution references optional, not proof",
         "Batch meaningful transitions", "keep blockers visible",

@@ -12,8 +12,14 @@ from typing import Any
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_TASKS = 50
-MAX_PAYLOAD = 32768
+# The model resends plan text on every update and reads it back on get, so
+# every field stays short. Plans saved under the old 32KiB bound keep working.
+MAX_PAYLOAD = 16384
+LEGACY_MAX_PAYLOAD = 32768
 MAX_RECEIPTS = 64
+GOAL_CHARS, DONE_WHEN_CHARS, TITLE_CHARS, BLOCKED_CHARS = 300, 400, 120, 200
+# (count, chars) per list field.
+LIST_BOUNDS = {"depends_on": (10, 64), "evidence": (2, 200), "references": (3, 100)}
 STATUSES = ("pending", "in_progress", "blocked", "completed", "cancelled")
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 # Only the decision to plan is eager. Mechanics and store boundaries live in
@@ -29,24 +35,26 @@ TASK_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "id": {"type": "string", "pattern": ID_PATTERN},
-        "title": {"type": "string", "maxLength": 200},
+        "title": {"type": "string", "maxLength": TITLE_CHARS},
         "status": {"type": "string", "enum": list(STATUSES)},
-        "depends_on": {"type": "array", "maxItems": 10, "items": {"type": "string"}},
-        "blocked_reason": {"type": "string", "maxLength": 500},
-        "evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 500}},
-        "references": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 100}},
+        "depends_on": {"type": "array", "maxItems": LIST_BOUNDS["depends_on"][0], "items": {"type": "string"}},
+        "blocked_reason": {"type": "string", "maxLength": BLOCKED_CHARS},
+        "evidence": {"type": "array", "maxItems": LIST_BOUNDS["evidence"][0],
+                     "items": {"type": "string", "maxLength": LIST_BOUNDS["evidence"][1]}},
+        "references": {"type": "array", "maxItems": LIST_BOUNDS["references"][0],
+                       "items": {"type": "string", "maxLength": LIST_BOUNDS["references"][1]}},
     }, "required": ["id", "title", "status"],
 }
 SPEC = ToolSpec(
     name="Plan", description=(
         "Session-owned intent, not execution or independent verification; "
         "cancelled is not success. get reads state; update atomically upserts "
-        "stable task IDs (omitted tasks survive), optionally goal/done_when acceptance. "
+        "stable task IDs (omitted tasks survive: send only changed ones), optionally goal/done_when acceptance. "
         "Start at revision 0; updates need expected_revision and unique request_id. "
         "Retry verbatim (last 64 receipts); on conflict get before editing. "
         "Initial/rollover updates require goal, done_when, tasks. rollover=true only "
         "after all old tasks completed/cancelled; host retains history; IDs stable "
-        "per generation. Tasks require id/title/status; max 50/generation, 32KiB payload. "
+        "per generation. Tasks require id/title/status; max 50/generation, 16KiB payload. "
         "Dependencies must exist, be acyclic and completed before dependents complete. "
         "blocked needs blocked_reason. Evidence/existing execution references optional, "
         "not proof. Batch meaningful transitions; keep blockers visible. Never starts "
@@ -59,13 +67,13 @@ SPEC = ToolSpec(
         "rollover": {"type": "boolean", "description": "New generation; see rollover rules above."},
         "expected_revision": {"type": "integer", "minimum": 0, "description": "Current revision (>=0)."},
         "request_id": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Retry key, 1-80 chars."},
-        "goal": {"type": "string", "maxLength": 600, "description": "Goal, <=600 chars."},
-        "done_when": {"type": "string", "maxLength": 1000, "description": "Acceptance, <=1000 chars."},
+        "goal": {"type": "string", "maxLength": GOAL_CHARS, "description": f"Goal, <={GOAL_CHARS} chars."},
+        "done_when": {"type": "string", "maxLength": DONE_WHEN_CHARS, "description": f"Acceptance, <={DONE_WHEN_CHARS} chars."},
         "tasks": {"type": "array", "maxItems": MAX_TASKS, "items": TASK_SCHEMA, "description": (
             "Up to 50 task objects. Required: id (matches " + ID_PATTERN + "), "
-            "title (string <=200 chars), status (pending/in_progress/blocked/completed/cancelled). "
-            "Optional: depends_on (<=10 ID strings), blocked_reason (string <=500 chars), "
-            "evidence (<=3 strings, <=500 chars each), references (<=5 strings, <=100 chars each). "
+            f"title (string <={TITLE_CHARS} chars), status (pending/in_progress/blocked/completed/cancelled). "
+            f"Optional: depends_on (<=10 ID strings), blocked_reason (string <={BLOCKED_CHARS} chars), "
+            "evidence (<=2 strings, <=200 chars each), references (<=3 strings, <=100 chars each). "
             "Unknown fields rejected in tasks and top-level input."
         )},
     }, "required": ["action"]}, risk="safe",
@@ -86,7 +94,7 @@ def _text(value, name, maximum, *, empty=False):
 
 def validate_input(args: dict) -> None:
     if not isinstance(args, dict) or len(json.dumps(args, ensure_ascii=True).encode()) > MAX_PAYLOAD:
-        raise ValueError("Plan payload must be an object of at most 32KiB")
+        raise ValueError("Plan payload must be an object of at most 16KiB; send only changed tasks")
     allowed = set(SPEC.input_schema["properties"])
     if set(args) - allowed or args.get("action") not in ("get", "update"):
         raise ValueError("Unknown Plan action or field")
@@ -119,7 +127,7 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         if not all(args.get(k) for k in ("goal", "done_when", "tasks")):
             raise ValueError("Rollover requires goal, done_when and new tasks")
         updated.update(tasks=[], generation=document["generation"] + 1)
-    for key, bound in (("goal", 600), ("done_when", 1000)):
+    for key, bound in (("goal", GOAL_CHARS), ("done_when", DONE_WHEN_CHARS)):
         if key in args:
             updated[key] = _text(args[key], key, bound)
     tasks = {t["id"]: deepcopy(t) for t in updated["tasks"]}
@@ -134,17 +142,23 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         if not isinstance(tid, str) or not re.fullmatch(ID_PATTERN, tid) or tid in seen:
             raise ValueError("Task IDs must be unique stable alphanumeric/_/- identifiers (1..64 characters)")
         seen.add(tid)
-        title = _text(task.get("title"), "title", 200)
+        title = _text(task.get("title"), "title", TITLE_CHARS)
         if task.get("status") not in STATUSES:
             raise ValueError("Invalid task status")
         current = {**tasks.get(tid, {}), **deepcopy(task), "title": title}
-        for key, count, bound in (("depends_on", 10, 64), ("evidence", 3, 500), ("references", 5, 100)):
-            values = current.get(key, [])
+        # Bounds apply to text sent now. Stored values were valid when saved
+        # (possibly under older, larger bounds) and pass through untouched.
+        for key, (count, bound) in LIST_BOUNDS.items():
+            if key not in task:
+                current[key] = current.get(key, [])
+                continue
+            values = task[key]
             if not isinstance(values, list) or len(values) > count:
                 raise ValueError(f"{key} must have at most {count} entries")
             current[key] = list(dict.fromkeys(_text(v, key, bound) for v in values))
         if current["status"] == "blocked":
-            current["blocked_reason"] = _text(current.get("blocked_reason"), "blocked_reason", 500)
+            if "blocked_reason" in task or not current.get("blocked_reason"):
+                current["blocked_reason"] = _text(current.get("blocked_reason"), "blocked_reason", BLOCKED_CHARS)
         else:
             current.pop("blocked_reason", None)
         tasks[tid] = current
@@ -170,8 +184,12 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
     for tid in tasks:
         visit(tid)
     updated.update(revision=document["revision"] + 1, tasks=list(tasks.values()))
-    if len(json.dumps(updated, ensure_ascii=True).encode()) > MAX_PAYLOAD:
-        raise ValueError("Stored plan exceeds 32KiB")
+    # A plan already past the bound (saved under the old one) may still be
+    # finished or rolled over; it just cannot pass the old ceiling.
+    stored = len(json.dumps(document, ensure_ascii=True).encode())
+    ceiling = LEGACY_MAX_PAYLOAD if stored > MAX_PAYLOAD else MAX_PAYLOAD
+    if len(json.dumps(updated, ensure_ascii=True).encode()) > ceiling:
+        raise ValueError(f"Stored plan exceeds {ceiling // 1024}KiB; shorten task text or roll over")
     result = {"revision": updated["revision"], "generation": updated["generation"], "changed_ids": list(t["id"] for t in incoming),
               "counts": {s: sum(t["status"] == s for t in updated["tasks"]) for s in STATUSES},
               "status_source": "model_reported"}
