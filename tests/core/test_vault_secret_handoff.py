@@ -119,7 +119,7 @@ async def test_a_created_token_reaches_github_without_the_agent_seeing_it(broker
     seen.append(created)
     assert created["status"] == 200 and created["capture"]["captured"] is True
     assert created["headers"] == {} and json.loads(created["body"])["shape"] == {
-        "success": True, "result": {"id": "[withheld]", "name": "[withheld]", "value": "[captured]"}}
+        "[key 1]": True, "result": {"[key 1]": "[withheld]", "[key 2]": "[withheld]", "value": "[captured]"}}
     secret_id = created["capture"]["secret_id"]
     listed = await broker.resources("chat")
     seen.append(listed)
@@ -177,8 +177,8 @@ async def test_a_wrong_field_withholds_the_body_and_shows_only_its_shape(broker,
     assert NEW_TOKEN not in json.dumps(result)
     assert result["capture"]["captured"] is False and "secret_id" not in result["capture"]
     shown = json.loads(result["body"])
-    assert shown["shape"] == {"success": True, "result": {"id": "[withheld]", "name": "[withheld]",
-                                                          "value": "[withheld]"}}
+    assert shown["shape"] == {"[key 1]": True, "result": {"[key 1]": "[withheld]", "[key 2]": "[withheld]",
+                                                          "[key 3]": "[withheld]"}}
     assert not broker.captures
 
 
@@ -275,7 +275,7 @@ async def test_a_capture_response_never_shows_a_value_even_for_a_wrong_text_fiel
         "method": "POST", "path": "/accounts/acct/tokens", "body": "{}", "capture": "result.id"})
     assert result["capture"]["captured"] is True and NEW_TOKEN not in json.dumps(result)
     assert result["headers"] == {} and json.loads(result["body"])["shape"] == {
-        "result": {"id": "[captured]", "value": "[withheld]", "expires_on": "[number]"}}
+        "result": {"id": "[captured]", "[key 2]": "[withheld]", "[key 3]": "[number]"}}
 
 
 @pytest.mark.parametrize("value, reason", [
@@ -386,14 +386,19 @@ async def test_a_credential_used_as_a_key_is_not_shown(broker, api, trust, bypas
         "method": "POST", "path": "/accounts/acct/tokens", "body": "{}", "capture": "result.id"})
     assert NEW_TOKEN not in json.dumps(result) and "AbCdEf" not in json.dumps(result)
     assert json.loads(result["body"])["shape"]["result"] == {
-        "id": "[captured]", "tokens": {"[key 1]": {"active": True}, "[key 2]": "[number]"}}
+        "id": "[captured]", "[key 2]": {"[key 1]": {"[key 1]": True}, "[key 2]": "[number]"}}
 
 
-@pytest.mark.parametrize("key, plain", [
-    ("value", True), ("expires_on", True), ("keyId", True), ("result", True),
-    ("tok_0123", False), ("AbCdEfGhIjKlMnOp", False), ("a" * 33, False), ("has-dash", False)])
-def test_only_plain_field_names_appear_in_a_shape(key, plain):
-    assert vault_services._plain_key(key) is plain
+async def test_a_shape_names_only_the_capture_fields_keys(broker, api, trust, bypass):  # noqa: F811
+    # A second credential may be a key that reads like words; only the path the agent gave is named.
+    api.routes[("POST", "/client/v4/accounts/acct/tokens")] = ("200 OK", {"result": {
+        "api-key": NEW_TOKEN, "recovery": {"lakes_amber_elm_orbit_spire": True}}, "items": [{"x": 1}]})
+    cloudflare, _ = await grants(broker, api)
+    result = await broker.run("chat", cloudflare, "http", {
+        "method": "POST", "path": "/accounts/acct/tokens", "body": "{}", "capture": "result.api-key"})
+    assert result["capture"]["captured"] is True and "lakes" not in json.dumps(result)
+    assert json.loads(result["body"])["shape"] == {
+        "result": {"api-key": "[captured]", "[key 2]": {"[key 1]": True}}, "[key 2]": [{"[key 1]": "[number]"}]}
 
 
 async def test_an_escaped_echo_of_the_grants_credential_is_not_captured(broker, api, trust, bypass):  # noqa: F811

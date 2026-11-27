@@ -696,9 +696,13 @@ def capturable(value: object) -> bool:
             and all(0x20 <= ord(ch) <= 0x7E for ch in value))
 
 
-def _shape(value: object, depth: int = 0) -> object:
+def _shape(value: object, path: list[str] | None, captured: bool, depth: int = 0) -> object:
     """The response's structure with every value but true, false and null
-    withheld, so a wrong field can be corrected without anything being shown."""
+    withheld. Keys are named only along ``path``, the capture field the agent
+    gave: any other key may itself be a credential (a map keyed by token), so
+    it shows as ``[key N]``. The taken field shows as ``[captured]``."""
+    if path is not None and not path:
+        return "[captured]" if captured else _shape(value, None, False, depth)
     if isinstance(value, str):
         return _WITHHELD
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -708,35 +712,15 @@ def _shape(value: object, depth: int = 0) -> object:
     if isinstance(value, dict):
         shown: dict = {}
         for key, item in list(value.items())[:50]:
-            # A service may key a map by the credential it issued.
-            shown[key if _plain_key(key) else f"[key {len(shown) + 1}]"] = _shape(item, depth + 1)
+            on_path = path is not None and key == path[0]
+            shown[key if on_path else f"[key {len(shown) + 1}]"] = _shape(
+                item, path[1:] if on_path else None, captured, depth + 1)
         return shown
     if isinstance(value, list):
-        return [_shape(item, depth + 1) for item in value[:10]]
+        return [_shape(item, path[1:] if path is not None and path[0] == str(index) else None,
+                       captured, depth + 1)
+                for index, item in enumerate(value[:10])]
     return value
-
-
-def _plain_key(key: str) -> bool:
-    """A field name a person wrote (``value``, ``expires_on``, ``keyId``), not
-    an identifier or credential: letters and underscores, mostly lowercase."""
-    return (re.fullmatch(r"[A-Za-z][A-Za-z_]{0,31}", key) is not None
-            and sum(ch.isupper() for ch in key) * 4 <= len(key))
-
-
-def _mark(shape: object, field: str) -> None:
-    """Show where the captured value was in a shape."""
-    *parents, last = field.split(".")
-    for key in parents:
-        if isinstance(shape, dict):
-            shape = shape.get(key)
-        elif isinstance(shape, list) and key.isdigit() and int(key) < len(shape):
-            shape = shape[int(key)]
-        else:
-            return
-    if isinstance(shape, dict) and last in shape:
-        shape[last] = "[captured]"
-    elif isinstance(shape, list) and last.isdigit() and int(last) < len(shape):
-        shape[int(last)] = "[captured]"
 
 
 def held_needles(values: tuple[str, ...]) -> list[str]:
@@ -886,11 +870,9 @@ async def perform_capturing(
         except ValueError:
             document = None
         value = _pick(document, capture) if document is not None else None
-        shape = _shape(document) if document is not None else None
         # The grant's own credential, as written or escaped, is not a new one.
         if capturable(value) and value not in header[1] and redact(value.encode(), needles) == value.encode():
             captured = value
-            _mark(shape, capture)
             needles = sorted(set(needles).union(_needles(value, value)), key=len, reverse=True)
             note = {"field": capture, "captured": True}
         else:
@@ -902,7 +884,9 @@ async def perform_capturing(
         # The response to a request that creates a credential may hold it, or
         # another, under any field or header: only its structure is returned,
         # never a value, whether or not the named field was taken.
-        shown = json.dumps({"withheld": "Every value is withheld from a capture response.", "shape": shape})
+        shape = None if document is None else _shape(document, capture.split("."), captured is not None)
+        shown = json.dumps({"withheld": "Every value and every key but the capture field's is withheld "
+                                        "from a capture response.", "shape": shape})
         return {
             "status": status,
             "headers": {},
