@@ -161,15 +161,20 @@ def test_a_current_git_keeps_its_reads_unprompted(git_probe) -> None:
 
 
 @pytest.fixture
-def no_process_may_start(monkeypatch: pytest.MonkeyPatch):
-    """Fail the test if anything at all is started."""
+def started(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Every attempt to start a process from here on. A list rather than an
+    error: the risk hook's caller turns an error into "ask", which would hide
+    the start."""
+    seen: list[object] = []
 
-    def refuse(*args, **kwargs):
-        raise AssertionError(f"a process was started: {args!r}")
+    def record(*args, **kwargs):
+        seen.append(args)
+        raise OSError("no process may start here")
 
-    monkeypatch.setattr(subprocess, "Popen", refuse)
-    monkeypatch.setattr(subprocess, "run", refuse)
-    monkeypatch.setattr(os, "system", refuse)
+    monkeypatch.setattr(subprocess, "Popen", record)
+    monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(os, "system", record)
+    return seen
 
 
 @pytest.mark.parametrize("known", [False, True])
@@ -201,7 +206,7 @@ def test_rating_a_call_starts_no_process(
     if known:
         child_env.learn_git_version()
     asked_before = len(calls)
-    request.getfixturevalue("no_process_may_start")
+    started = request.getfixturevalue("started")
     rules = (
         [Rule(tool="*", decision=rule_decision, input_globs={"command": "git status"})]
         if rule_decision else []
@@ -216,7 +221,7 @@ def test_rating_a_call_starts_no_process(
             spec, {"command": "git status"})
         assert verdict.decision == expected
     assert classify({"command": "git log -3"}) == ("safe" if known else "write")
-    assert len(calls) == asked_before
+    assert started == [] and len(calls) == asked_before
 
 
 def test_a_git_installed_later_is_unknown_until_a_session_starts(
