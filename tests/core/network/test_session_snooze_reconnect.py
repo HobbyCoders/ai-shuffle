@@ -177,6 +177,37 @@ async def test_wake_waits_for_a_full_pull(workers, monkeypatch):
             assert not transport.caught_up_since_start()
 
 
+async def test_failed_push_keeps_a_short_pull_behind(workers, monkeypatch):
+    a, b = _pair(workers)
+    with a.active():
+        await _patch("s1", False, _soon(1))
+    converge([a, b])
+    for index in range(3):
+        set_owner_pref(a, f"backlog-{index}", index)
+    set_owner_pref(b, "to-push", 1)
+    served = ServedBy(a, "https://owner.example.com")
+    answer = served.handler
+    pushes = []
+
+    def refuse_push(request):
+        if request.url.path == "/api/v1/network/peer/ops":
+            pushes.append(request)
+            return httpx.Response(413, json={"detail": "too large"})
+        return answer(request)
+
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 1)
+    monkeypatch.setattr(transport, "SYNC_PULL_SECONDS", 0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse_push)) as client:
+        with b.active():
+            store.touch_member(a.device_id, endpoints=[served.base_url])
+            link = transport._links[a.device_id] = transport.PeerLink(a.device_id, [served.base_url])
+            with pytest.raises((transport.PeerError, httpx.HTTPError)):
+                await link.sync_once(client, engine.context())
+            assert pushes  # the pull ended short, then the push was refused
+            assert link.last_pass[1] == transport.PASS_BEHIND
+            assert not transport.caught_up_since_start()
+
+
 async def test_offline_peer_does_not_stop_wakes(workers):
     """The only peer is off: the outbox stays held, but due chats still wake."""
     a, b = _pair(workers)
@@ -195,7 +226,14 @@ async def test_offline_peer_does_not_stop_wakes(workers):
                 link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
                 with pytest.raises(transport.PeerConnectFailed):
                     await link.sync_once(client, engine.context())
-                assert link.last_pass[1] == transport.PASS_FAILED
+                assert link.last_pass[1] == transport.PASS_OFFLINE
+                assert transport.caught_up_since_start()
+                # The machine sleeps after that dial: it no longer counts on resume.
+                transport._gate_checked_at = time.time() - transport.RESUME_GAP_SECONDS - 1
+                assert not transport.caught_up_since_start()
+                assert await session_snooze.wake_due_once(now=_soon(60)) == 0
+                with pytest.raises(transport.PeerConnectFailed):
+                    await link.sync_once(client, engine.context())
                 assert transport.caught_up_since_start()
                 assert await session_snooze.wake_due_once(now=_soon(60)) == 1
                 assert _snooze_of(a, "s1") == (True, None)

@@ -76,8 +76,14 @@ SYNC_PULL_SECONDS = 3.0
 # keeps counting for ``caught_up_since_start``: a connected peer is passed at
 # least every SYNC_IDLE_MAX_SECONDS, an offline one retried within
 # PEER_BACKOFF_MAX_SECONDS.
-PASS_CURRENT, PASS_BEHIND, PASS_FAILED = "current", "behind", "failed"
-PASS_FRESH_SECONDS = {PASS_CURRENT: 4 * SYNC_IDLE_MAX_SECONDS, PASS_FAILED: PEER_BACKOFF_MAX_SECONDS + 300.0}
+PASS_CURRENT, PASS_BEHIND, PASS_OFFLINE = "current", "behind", "offline"
+PASS_FRESH_SECONDS = {PASS_CURRENT: 4 * SYNC_IDLE_MAX_SECONDS, PASS_OFFLINE: PEER_BACKOFF_MAX_SECONDS + 300.0}
+# ``caught_up_since_start`` runs every few seconds (the snooze sweep). A longer
+# gap between two calls means this process did not run (the machine slept):
+# passes from before it no longer count, whatever the clock in use did meanwhile.
+RESUME_GAP_SECONDS = 90.0
+_gate_checked_at: Optional[float] = None
+_resumed_at = 0.0
 # Set for the launch barrier's requests only (a context variable, so the
 # background sync loop keeps its own timeouts): a dead address fails fast.
 connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
@@ -827,10 +833,16 @@ class PeerLink:
     async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
         async with self._sync_lock:
             self.syncing = catch_up
+            started = time.time()
             try:
                 return await self._sync_once(client, ctx, catch_up=catch_up)
-            except Exception:
-                self.last_pass = (time.time(), PASS_FAILED)
+            except Exception as exc:
+                # A failure after the pull (the push) keeps its outcome. Only a
+                # peer no request reached is offline; one that answered and
+                # then failed leaves us behind it.
+                if self.last_pass is None or self.last_pass[0] < started:
+                    offline = isinstance(exc, (PeerConnectFailed, *CONNECT_ERRORS))
+                    self.last_pass = (time.time(), PASS_OFFLINE if offline else PASS_BEHIND)
                 raise
             finally:
                 self.syncing = False
@@ -1540,21 +1552,25 @@ def caught_up_since_start() -> bool:
     """Whether this worker holds what the peers it can reach hold.
 
     Every active peer we can dial must have had a recent sync pass of ours:
-    one that pulled its stream to the frontier it named, or one that failed
-    (an offline peer: edits on either side of a partition meet by the usual
-    last-writer rule, as before). A pass cut short by the time budget, an
-    old pass (this machine slept; wall time, as monotonic time can stop in
-    a suspend), no pass yet, or a first state copy still arriving all mean
-    our copy may be hours old. True without a network. Automatic work that
-    acts on replicated state (the snooze wake) waits for this. Runs in a
-    worker thread (it reads members and presence).
+    one that pulled its stream to the frontier it named, or one that could
+    not reach it (an offline peer: edits on either side of a partition meet
+    by the usual last-writer rule, as before). A pass cut short or failed
+    after the peer answered, an old pass, one from before this machine slept
+    (``RESUME_GAP_SECONDS``), no pass yet, or a first state copy still
+    arriving all mean our copy may be hours old. True without a network.
+    Automatic work that acts on replicated state (the snooze wake) waits for
+    this. Runs in a worker thread (it reads members and presence).
     """
+    global _gate_checked_at, _resumed_at
     ctx = engine.context()
     if ctx is None:
         return True
+    now = time.time()
+    if _gate_checked_at is not None and now - _gate_checked_at > RESUME_GAP_SECONDS:
+        _resumed_at = now
+    _gate_checked_at = now
     if ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return False
-    now = time.time()
     presence = engine.all_presence()
     for row in store.list_members(include_revoked=False):
         device_id = row["device_id"]
@@ -1568,7 +1584,7 @@ def caught_up_since_start() -> bool:
         if last is None:
             return False
         at, outcome = last
-        if outcome == PASS_BEHIND or now - at > PASS_FRESH_SECONDS[outcome]:
+        if outcome == PASS_BEHIND or at < _resumed_at or now - at > PASS_FRESH_SECONDS[outcome]:
             return False
     return True
 
@@ -2073,7 +2089,9 @@ def forget_peers() -> None:
 
 def reset_for_tests() -> None:
     global _full_scan_requested, _dirty_sessions, _advertised, _owner_candidates, _pending_wake
+    global _gate_checked_at, _resumed_at
     _pending_wake = None
+    _gate_checked_at, _resumed_at = None, 0.0
     engine.set_pending_kick(None)
     forget_peers()
     lan.reset_for_tests()
