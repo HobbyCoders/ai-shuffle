@@ -28,6 +28,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # Capture this before any fixture redirects HOME.
 _REAL_SKILLS_ROOT = Path.home() / ".fluid" / "skills"
+_REAL_HOME = Path.home().resolve()
 
 
 @contextmanager
@@ -151,7 +152,31 @@ def isolate_home(tmp_path_factory, monkeypatch):
     # same per-test root; later imports also see the patched source value.
     for module in (skills, workflows):
         monkeypatch.setattr(module, "DEFAULT_SKILLS_ROOT", home / ".fluid" / "skills")
+    _hide_dirs_above_basetemp(tmp_path_factory.getbasetemp(), monkeypatch)
     return home
+
+
+def _hide_dirs_above_basetemp(basetemp, monkeypatch) -> None:
+    """Keep the project walk inside pytest's temp tree when that tree is in the real home.
+
+    On Windows, temp lives under the user profile, so a walk up from a tmp cwd with
+    no git root reaches the real home. Its ``.fluid/AGENTS.md`` and skills are no
+    longer the (redirected) global scope, so they would load as project files.
+    """
+    base = Path(basetemp).resolve()
+    if not base.is_relative_to(_REAL_HOME):
+        return
+    from fluid.context import instructions, settings_stack
+
+    walk = instructions._walk_up_dirs
+
+    def inside_basetemp(cwd):
+        chain = walk(cwd)
+        kept = [d for d in chain if d == base or not base.is_relative_to(d)]
+        return kept or chain
+
+    for module in (instructions, settings_stack):
+        monkeypatch.setattr(module, "_walk_up_dirs", inside_basetemp)
 
 
 @pytest.fixture
