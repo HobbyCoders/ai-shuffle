@@ -109,10 +109,13 @@ model *reads* framing tokens even when they can't structurally escape.
   file asks. A session started inside one of those folders (`repo/.vscode`)
   gets no approval at all, whether the folder is named that way or reached
   through a link of that name. A folder that one of those names links to
-  from beside it (`.vscode -> editor-config`) is treated as that folder
-  under every name, including for a session started inside it; a link to it
-  from elsewhere in the tree is not seen, since finding one would take a
-  walk of the whole project. A request that lists several files (a
+  (`.vscode -> tooling/editor`) is treated as that folder under every name,
+  including for a session started inside it: the protected names in the
+  file's folder and in every folder above it are read, and the route through
+  a link is judged like any other, so a worktree checkout reached through
+  one stays project code. A link that sits elsewhere in the tree is not
+  seen, since finding one would take a walk of the whole project. A request
+  that lists several files (a
   delegated agent reporting one edit over more than one target,
   `file_paths`) is approved only when every file passes; the delegated-agent
   mapping lists the targets for every request that can stand for an edit,

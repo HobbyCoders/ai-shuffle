@@ -348,6 +348,77 @@ def test_a_folder_a_protected_name_links_to_asks_under_any_name(project: Path, n
     assert _ok(project, "README.md")
 
 
+@pytest.mark.parametrize("name", [".vscode", ".claude", ".husky"])
+def test_a_protected_name_that_links_deeper_into_the_project_asks(project: Path, name: str) -> None:
+    """``.vscode -> tooling/editor``: the link is not beside the folder it
+    points at, it is in a folder above it."""
+    target = project / "tooling" / "editor"
+    (target / "deep").mkdir(parents=True)
+    _symlink(project / name, target, folder=True)
+    assert not _ok(project, "tooling/editor/settings.json")
+    assert not _ok(project, "tooling/editor/deep/tasks.json")
+    assert not _ok(project, str(target / "settings.json"))
+    # Started inside the target, in a folder below it and in the one above.
+    assert not edit_stays_in_project({"file_path": "settings.json"}, str(target))
+    assert not edit_stays_in_project({"file_path": "tasks.json"}, str(target / "deep"))
+    assert not edit_stays_in_project({"file_path": "editor/settings.json"}, str(project / "tooling"))
+    # What the link does not lead to is still project code.
+    assert _ok(project, "tooling/build.py")
+    assert _ok(project, "src/app.py")
+    assert edit_stays_in_project({"file_path": "build.py"}, str(project / "tooling"))
+
+
+def test_a_protected_name_that_links_to_its_own_folder_asks(project: Path) -> None:
+    """``.vscode -> .``: every file of the folder is also under ``.vscode``."""
+    (project / "pkg").mkdir()
+    _symlink(project / "pkg" / ".vscode", project / "pkg", folder=True)
+    assert not _ok(project, "pkg/settings.json")
+    assert not _ok(project, "pkg/sub/tasks.json")
+    assert _ok(project, "src/app.py")
+
+
+@pytest.mark.parametrize(("link", "real"), [(".claude", ".fluid"), (".fluid", ".claude")])
+def test_a_worktree_reached_through_a_linked_settings_folder_is_project_code(
+    project: Path, link: str, real: str
+) -> None:
+    """``.claude -> .fluid``: a checkout under ``.fluid/worktrees/<name>`` is
+    one under ``.claude/worktrees/<name>`` too, and both are project code."""
+    checkout = project / real / "worktrees" / "feature"
+    (checkout / "src").mkdir(parents=True)
+    _symlink(project / link, project / real, folder=True)
+    for started in (checkout, project / link / "worktrees" / "feature"):
+        assert edit_stays_in_project({"file_path": "src/app.py"}, str(started))
+        assert edit_stays_in_project({"file_path": "README.md"}, str(started))
+        assert not edit_stays_in_project({"file_path": ".vscode/tasks.json"}, str(started))
+    assert _ok(project, f"{real}/worktrees/feature/src/app.py")
+    assert _ok(project, f"{link}/worktrees/feature/src/app.py")
+    # The settings folder itself still asks under both names.
+    assert not _ok(project, f"{real}/settings.json")
+    assert not _ok(project, f"{link}/settings.json")
+    assert not _ok(project, f"{real}/worktrees/notes.md")
+
+
+def test_a_linked_folder_is_recognised_when_its_path_is_spelled_differently(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a volume that ignores letter case the link can resolve to a
+    spelling the edited path does not share. The folder is the same one."""
+    target = project / "tooling"
+    target.mkdir()
+    link = project / ".vscode"
+    _symlink(link, target, folder=True)
+    resolve = os.path.realpath
+
+    def other_spelling(path, *args, **kwargs):
+        if os.fspath(path) == str(link):
+            return str(project / "TOOLING")
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", other_spelling)
+    assert not _ok(project, "tooling/settings.json")
+    assert _ok(project, "src/app.py")
+
+
 def test_a_dangling_protected_link_asks_for_the_folder_it_names(project: Path) -> None:
     """The link's folder does not exist yet: Write would create it, and the
     file would then sit under the protected name."""

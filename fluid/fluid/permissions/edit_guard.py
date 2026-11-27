@@ -16,8 +16,9 @@ when the file the tool will open
   settings file (``.bashrc``, ``.gitconfig``, ``.mcp.json``, ...), and is not
   a credential file or under a protected install path;
 - is not a second name for a file that also lives somewhere else (a hard
-  link), and is not in a folder that one of those protected names links to
-  from beside it (``.vscode -> editor-config``).
+  link), and is not under a folder that one of those protected names, in
+  the file's folder or any folder above it, links to
+  (``.vscode -> tooling/editor``).
 
 Everything else is not denied, it asks, exactly as the default mode does.
 
@@ -185,44 +186,72 @@ def _is_second_name(path: str) -> bool:
     return os.path.isfile(path) and info.st_nlink > 1
 
 
-def _same_folder(link: str, folder: str) -> bool:
-    """True when ``link`` (a name that exists, or a dangling link) leads to
-    ``folder``, a real path."""
+def _below_link(link: str, opened: str, route: list[tuple[str, list[str]]]) -> list[str] | None:
+    """The components of ``opened`` below the folder ``link`` leads to, or
+    None when the file is not under it.
+
+    ``link`` is a name that exists or a dangling link (compared by where it
+    points, since Write would create the folder). ``route`` is the folders on
+    the way to the file with what lies below each.
+    """
     try:
-        if os.path.normcase(os.path.realpath(link)) == os.path.normcase(folder):
-            return True
-        return os.path.samefile(link, folder)
+        below = _inside(opened, os.path.realpath(link))
     except (OSError, ValueError):
-        return False
+        below = None
+    if below is not None:
+        return below
+    # The same folder under a spelling the two paths do not share (letter
+    # case on a volume that ignores it): compared as the folder it is.
+    try:
+        found = os.stat(link)
+    except (OSError, ValueError):
+        return None
+    for folder, rest in route:
+        try:
+            if os.path.samestat(found, os.stat(folder)):
+                return rest
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def _reached_by_protected_name(opened: str, top: str | None) -> bool:
-    """True when a folder on the way to ``opened`` (a real path) is what a
-    protected name beside it links to.
+    """True when ``opened`` (a real path) is also a file under a protected
+    name that no name on its own route shows.
 
-    With ``repo/.vscode`` a link to ``repo/editor-config``, a file in
-    ``editor-config`` is also a file in ``.vscode``, whichever name the call
-    or the session used: the names on the route do not show it, so the links
-    beside each folder are read. Only a link next to the folder it points at
-    is seen; finding one anywhere else would take a walk of the whole tree.
+    With ``repo/.vscode`` a link to ``repo/tooling/editor``, a file in
+    ``tooling/editor`` is a file in ``.vscode`` whichever name the call or
+    the session used. So each protected name in the file's folder and in
+    every folder above it is read: when the file lies under what the name
+    leads to, the route through that name is judged like any other, which
+    keeps a ``<.fluid|.claude>/worktrees/<name>/`` checkout project code.
 
-    The folders checked are the file's own, then each one above it, up to but
-    not including ``top`` (None: up to the filesystem root).
+    Folders above ``top`` are not read (None: up to the filesystem root). A
+    protected name that sits anywhere else in the tree is not seen; finding
+    it would take a walk of the whole tree.
     """
-    folder = os.path.dirname(opened)
+    # (folder, the components of the file below it), nearest folder first.
+    route: list[tuple[str, list[str]]] = []
+    folder, rest = os.path.dirname(opened), [os.path.basename(opened)]
     top = None if top is None else os.path.normcase(top)
     while True:
+        route.append((folder, list(rest)))
         parent = os.path.dirname(folder)
         if parent == folder or os.path.normcase(folder) == top:
-            return False
-        own = _plain_name(os.path.basename(folder))
-        for name in PROTECTED_DIR_NAMES:
-            if name == own:
-                continue  # The folder's own name is judged with the route.
-            beside = os.path.join(parent, name)
-            if os.path.lexists(beside) and _same_folder(beside, folder):
-                return True
+            break
+        rest.insert(0, os.path.basename(folder))
         folder = parent
+    for folder, _rest in route:
+        for name in PROTECTED_DIR_NAMES:
+            link = os.path.join(folder, name)
+            if not os.path.lexists(link):
+                continue
+            below = _below_link(link, opened, route)
+            if below is not None and not _dirs_allow(
+                [name] + [_plain_name(part) for part in below]
+            ):
+                return True
+    return False
 
 
 def _spelled_path(value: str, cwd: str) -> str | None:
@@ -309,7 +338,7 @@ def _path_allowed(
             )
             if named is None or not _names_allow(named, root_is_home=real == home):
                 return False
-        # Last, because it reads the disk: no folder on the way is one a
+        # Last, because it reads the disk: the file is not under a folder a
         # protected name links to. The working folder is checked all the way
         # up, like its names; a folder the host added from itself down.
         return not _reached_by_protected_name(opened, None if is_project else real)
