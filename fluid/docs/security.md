@@ -193,9 +193,15 @@ model *reads* framing tokens even when they can't structurally escape.
   host runs that same git for its own work: a program an approved step
   installed there is the worker's program from then on, on every platform.
   `--output`, `--ext-diff` and `--textconv` prompt in any
-  shortened form (`--ext-d`). What this does not cover: a checkout whose own
-  `.git/config` is already hostile can name a diff driver or a filter that
-  `git diff` runs, so writes to `.git` have to stay behind a prompt.
+  shortened form (`--ext-d`). What these settings do not cover: a checkout's
+  own `.git/config` can name a filter, a diff driver, a text converter or a
+  signature program, and git runs them on `git status`, `git diff`,
+  `git show`, `git log -p` and `git blame`; no git option turns all of that
+  off. A clone does not carry `.git/config`, but an unpacked archive can. So
+  a folder's `.git` counts as the project's own configuration: writes to
+  `.git` stay behind a prompt, and in a project the `fluid` CLI's owner has
+  not trusted (item 10) no git command is rated read-only and the harness
+  starts no git of its own.
 - **Settings that choose the programs.** The classifier knows what the
   worker's own `cat`, `ls` and `git` do. A session whose settings `env` sets
   `PATH`, `PATHEXT`, a shell startup file (`BASH_ENV`, `ENV`, `ZDOTDIR`),
@@ -270,10 +276,25 @@ built-in defaults plus the user's own config.
   grants it, so nothing the project or a process that sets variables for the
   CLI controls can.
 - The answer is kept in `~/.fluid/trusted_projects.json`, keyed by the
-  project's resolved path (the git repository root, or the start directory
+  project's real path (the git repository root, or the start directory
   outside a checkout). A project cannot carry its own trust, a checkout
   nested inside a trusted folder is asked about separately, and a link to an
-  untrusted folder is judged by where it leads.
+  untrusted folder is judged by where it leads. A recorded path is compared
+  as text and never resolved again, so a trusted folder that is moved away
+  and replaced by a link to another folder is not trusted through the old
+  name, and no case folding is done. The answer at the question is saved for
+  the folder that was shown; two `fluid` processes that answer at once both
+  keep their answer (the update holds a lock file beside the record).
+- The project's `.git` is part of it. git runs the programs `.git/config`
+  names even on a status read, so in an untrusted project the harness runs
+  no git of its own (the prompt has no git lines, file listing falls back to
+  a directory walk) and every git command the agent runs asks first.
+- Outside a git checkout the project is the trusted folder alone: nothing
+  above it is searched for instruction files, commands, skills or agents, so
+  a shared temp or download folder above an unpacked project has no say.
+- The Claude provider's child process reads settings and instruction files
+  itself. It is started with the same scopes (`--setting-sources`), so it
+  leaves an untrusted project's files out too.
 - Without a terminal there is no question. The project's files are left out
   and stderr says so, which is the safe result for a script or CI run in a
   checkout nobody vouched for.
@@ -281,7 +302,9 @@ built-in defaults plus the user's own config.
 - The rule reads paths only, so it is the same on Linux, macOS and Windows.
 
 The AI Shuffle app does not load a project's fluid config files into its
-sessions; it configures them itself, so this layer is the CLI's.
+sessions; it configures them itself, so this layer is the CLI's. The app has
+no trust question: a project there is a folder its owner registered, and git
+runs in it as in a trusted project.
 
 ## What this does not claim
 
@@ -304,6 +327,15 @@ sessions; it configures them itself, so this layer is the CLI's.
   that reach a trusted project later (a pull, a branch switch, an edit by the
   agent) load without a new question. Take the trust back with
   `fluid trust --remove` before working on content you have not read.
+- Project trust does not defend against whoever starts the process. The
+  home folder (`HOME`, `USERPROFILE`) decides where the trust record and the
+  user config live, and a launcher that points it at a project makes that
+  project's files the user's own. Nothing inside a project folder can set
+  it.
+- A trusted project's `.git/config`, and any project's in the AI Shuffle
+  app, can name programs that `git status` and `git diff` run without a
+  prompt. Register or trust a folder that came with its own `.git` (an
+  unpacked archive, a copied checkout) only after reading that file.
 
 ## Override reference
 

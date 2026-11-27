@@ -179,6 +179,19 @@ def _hide_dirs_above_basetemp(basetemp, monkeypatch) -> None:
         monkeypatch.setattr(module, "_walk_up_dirs", inside_basetemp)
 
 
+@pytest.fixture(autouse=True)
+def _project_switches_reset():
+    """The ``fluid`` CLI sets two process-wide switches from the trust answer
+    (one process serves one project). A test that runs the CLI must not leave
+    them set for the next test."""
+    yield
+    from fluid.context.instructions import set_project_walk_bound
+    from fluid.tools.child_env import set_project_git_trusted
+
+    set_project_git_trusted(True)
+    set_project_walk_bound(None)
+
+
 @pytest.fixture
 def trusted_projects(monkeypatch):
     """Every project folder counts as trusted (``fluid.config.trust``).

@@ -374,7 +374,7 @@ def test_a_yes_that_cannot_be_saved_still_stands_for_this_run(
 ) -> None:
     _on_a_terminal(monkeypatch, "y")
 
-    def refuse(cwd=None):
+    def refuse(cwd=None, *, root=None):
         raise PermissionError("read-only home")
 
     monkeypatch.setattr("fluid.config.trust.trust_project", refuse)
@@ -414,3 +414,302 @@ def test_an_untrusted_projects_agent_file_is_not_used_for_a_worker(project: Path
 
     assert not found(_load(project))
     assert found(_load(project, project_trusted=True))
+
+
+# ─── the record ──────────────────────────────────────────────────────────────
+
+
+def test_a_recorded_path_is_never_resolved_again(
+    project: Path, tmp_path: Path, requires_symlinks
+) -> None:
+    """A trusted folder is moved away and its old name becomes a link to
+    another checkout: the old name must not carry the trust over."""
+    trust_project(project)
+    other = tmp_path / "someone-elses"
+    (other / ".git").mkdir(parents=True)
+    _write(other / ".fluid" / "config.toml", HOSTILE_TOML)
+    project.rename(tmp_path / "moved-away")
+    project.symlink_to(other, target_is_directory=True)
+    assert not is_project_trusted(project)
+    assert not is_project_trusted(other)
+    assert not _took_over(_load(project))
+
+
+def test_names_that_differ_only_in_case_are_two_projects(
+    tmp_path: Path, monkeypatch
+) -> None:
+    upper, lower = tmp_path / "Repo", tmp_path / "repo"
+    (upper / ".git").mkdir(parents=True)
+    if lower.exists():
+        pytest.skip("this filesystem holds one folder for both spellings")
+    (lower / ".git").mkdir(parents=True)
+    # Windows folds case in normcase; the record must not use it.
+    monkeypatch.setattr(os.path, "normcase", lambda path: os.fspath(path).lower())
+    trust_project(upper)
+    assert is_project_trusted(upper)
+    assert not is_project_trusted(lower)
+    untrust_project(lower)
+    assert is_project_trusted(upper)
+
+
+def test_two_answers_at_once_are_both_kept(tmp_path: Path, monkeypatch) -> None:
+    """Each update reads the list, adds its folder and writes it back. Without
+    one lock over all three, the slower of two writers drops the other's."""
+    import threading
+    import time
+
+    from fluid.config import trust
+
+    folders = [tmp_path / f"p{i}" for i in range(6)]
+    for folder in folders:
+        (folder / ".git").mkdir(parents=True)
+    read = trust._read
+
+    def slow_read() -> list[str]:
+        projects = read()
+        time.sleep(0.05)
+        return projects
+
+    monkeypatch.setattr(trust, "_read", slow_read)
+    threads = [threading.Thread(target=trust_project, args=(f,)) for f in folders]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    monkeypatch.setattr(trust, "_read", read)
+    assert sorted(trusted_projects()) == sorted(os.path.realpath(f) for f in folders)
+
+
+def test_an_update_that_cannot_get_the_lock_changes_nothing(
+    project: Path, monkeypatch
+) -> None:
+    from fluid._filelock import file_lock
+    from fluid.config import trust
+
+    monkeypatch.setattr(trust, "_LOCK_WAIT_S", 0.05)
+    trust_file().parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(trust_file().with_name(trust.TRUST_FILE_NAME + ".lock")) as held:
+        assert held
+        with pytest.raises(OSError):
+            trust_project(project)
+    assert not is_project_trusted(project)
+
+
+def test_a_yes_is_for_the_folder_that_was_shown(
+    project: Path, tmp_path: Path, monkeypatch, capsys, requires_symlinks
+) -> None:
+    """The working folder is a link that is pointed at another checkout while
+    the question is open: the yes was for the first one, and the folder the
+    session would now run in has not been answered for."""
+    mine = tmp_path / "mine"
+    (mine / ".git").mkdir(parents=True)
+    link = tmp_path / "work"
+    link.symlink_to(mine, target_is_directory=True)
+
+    def swap_then_yes(prompt: str = "") -> str:
+        link.unlink()
+        link.symlink_to(project, target_is_directory=True)
+        return "y"
+
+    monkeypatch.setattr("sys.stdin", _Terminal())
+    monkeypatch.setattr("sys.stdout", _Terminal())
+    monkeypatch.setattr("builtins.input", swap_then_yes)
+    assert _project_trusted(_args(link), ask=True) is False
+    assert "another project" in capsys.readouterr().err
+    assert not is_project_trusted(project)
+    assert not is_project_trusted(mine)
+
+
+# ─── git in an untrusted project ─────────────────────────────────────────────
+
+
+def _no_program_may_start(monkeypatch) -> None:
+    import subprocess
+
+    def started(*args, **kwargs):
+        raise AssertionError(f"a program was started: {args[0] if args else kwargs}")
+
+    monkeypatch.setattr(subprocess, "run", started)
+    monkeypatch.setattr(subprocess, "Popen", started)
+
+
+def test_the_harness_starts_no_git_of_its_own_in_an_untrusted_project(
+    project: Path, monkeypatch, capsys
+) -> None:
+    """A checkout's own ``.git`` names programs git runs on a status read
+    (filters, hooks). Until the folder is trusted, the prompt's git lines,
+    the provisioning receipt and Glob's link listing go without git."""
+    from fluid.context import environment, runtime_facts
+    from fluid.tools.builtins._util import _LinkProbe
+    from fluid.tools.child_env import project_git_trusted
+
+    assert main(["config", "--cwd", str(project)]) == 0
+    capsys.readouterr()
+    assert not project_git_trusted()
+    _no_program_may_start(monkeypatch)
+    assert environment.git_context_parts(str(project)) is None
+    assert not environment.is_git_work_tree(str(project))
+    note, details = environment.environment_note_parts(str(project))
+    assert "Current branch" not in note and "Recent commits" not in details
+    assert runtime_facts._receipt_path(project) is None
+    assert _LinkProbe(project).procs == []
+
+
+def test_a_trusted_project_gets_git_with_the_agent_git_settings(
+    project: Path, monkeypatch, capsys
+) -> None:
+    import subprocess
+
+    from fluid.context import environment
+    from fluid.tools.child_env import AGENT_GIT_CONFIG, project_git_trusted
+
+    assert main(["config", "--cwd", str(project), "--trust-project"]) == 0
+    capsys.readouterr()
+    assert project_git_trusted()
+    seen: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    environment.is_git_work_tree(str(project))
+    assert seen
+    env = seen[0]
+    pairs = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+             for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    assert all(pairs.get(key) == value for key, value in AGENT_GIT_CONFIG)
+
+
+def test_no_git_command_is_rated_read_only_in_an_untrusted_project(
+    project: Path, monkeypatch, capsys
+) -> None:
+    from fluid.tools import child_env
+    from fluid.tools.builtins.bash_risk import is_read_only
+
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
+    reads = ("git status", "git log --oneline -5", "git diff", "git -C sub status",
+             "git rev-parse HEAD", "git branch --show-current")
+    assert all(is_read_only(command) for command in reads)
+    assert main(["config", "--cwd", str(project)]) == 0
+    capsys.readouterr()
+    assert not any(is_read_only(command) for command in reads)
+    # Only git: the other read-only commands are what they were.
+    assert is_read_only("ls -la") and is_read_only("cat README.md")
+    assert main(["config", "--cwd", str(project), "--trust-project"]) == 0
+    assert all(is_read_only(command) for command in reads)
+
+
+# ─── what a session finds, through the real builders ─────────────────────────
+
+
+def test_the_claude_child_gets_the_sessions_setting_sources(project: Path) -> None:
+    """The Claude CLI reads settings and instruction files itself, so the
+    engine the loader builds tells it which scopes to read."""
+    from fluid.config.loader import build_engine
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.store.base import MemoryStore
+
+    def sources_sent(config) -> tuple[list[str], bool]:
+        engine = build_engine(config, MemoryStore(), provider_name="claude")
+        assert isinstance(engine, DelegatedLoop)
+        argv = engine._build_argv()
+        repl = Repl(engine, "s1", input_fn=lambda _p: "", out=io.StringIO())
+        return argv[argv.index("--setting-sources") + 1].split(","), repl._project_files_on()
+
+    assert sources_sent(_load(project)) == (["user"], False)
+    assert sources_sent(_load(project, project_trusted=True)) == (
+        ["user", "project", "local"], True)
+
+
+def test_the_claude_engine_does_not_find_an_untrusted_projects_command(project: Path) -> None:
+    from fluid.config.loader import build_engine
+    from fluid.store.base import MemoryStore
+
+    def rendered(config):
+        engine = build_engine(config, MemoryStore(), provider_name="claude")
+        repl = Repl(engine, "s1", input_fn=lambda _p: "", out=io.StringIO())
+        return repl._render_user_command("deploy", "")
+
+    assert rendered(_load(project)) is None
+    assert rendered(_load(project, project_trusted=True)) is not None
+
+
+def test_outside_a_checkout_nothing_above_the_trusted_folder_is_searched(
+    tmp_path: Path, capsys
+) -> None:
+    """The trust answer names one folder. A folder above it (a shared temp or
+    download folder) can hold a command file too, and is not that folder."""
+    from fluid.context.instructions import (
+        _project_roots, discover_project_instruction_files,
+    )
+
+    shared = tmp_path / "shared"
+    _write(shared / "AGENTS.md", "from the folder above\n")
+    _write(shared / ".fluid" / "commands" / "deploy.md", "run this\n")
+    child = shared / "unpacked"
+    _write(child / "AGENTS.md", "the project's own\n")
+
+    def found() -> tuple[list[str], list[Path]]:
+        files = [f.path for f in discover_project_instruction_files(child)]
+        return files, _project_roots(child, "commands")
+
+    # A host that sets no bound keeps the walk to the filesystem root.
+    files, roots = found()
+    assert str(shared / "AGENTS.md") in files
+    assert shared / ".fluid" / "commands" in roots
+
+    assert main(["trust", "--cwd", str(child)]) == 0
+    assert main(["config", "--cwd", str(child)]) == 0
+    capsys.readouterr()
+    files, roots = found()
+    assert files == [str(child / "AGENTS.md")]
+    assert roots == [child / ".agents" / "commands", child / ".fluid" / "commands"]
+
+
+def test_inside_a_checkout_the_walk_still_starts_at_the_git_root(
+    project: Path, capsys
+) -> None:
+    from fluid.context.instructions import discover_project_instruction_files
+
+    inner = project / "src" / "pkg"
+    _write(inner / "AGENTS.md", "inner\n")
+    assert main(["config", "--cwd", str(inner), "--trust-project"]) == 0
+    capsys.readouterr()
+    files = [f.path for f in discover_project_instruction_files(inner)]
+    assert files == [str(project / "AGENTS.md"), str(inner / "AGENTS.md")]
+
+
+def test_a_workflow_proposal_is_compared_with_the_skills_the_session_loads(
+    project: Path,
+) -> None:
+    from fluid.codemode.workflows import WorkflowProposals
+
+    _write(project / ".fluid" / "skills" / "release-notes" / "SKILL.md",
+           "---\nname: release-notes\ndescription: write the release notes\n---\nbody\n")
+    check = WorkflowProposals._deduplicate
+    with pytest.raises(ValueError):
+        check(project, "release-notes", "something else entirely")
+    with pytest.raises(ValueError):
+        check(project, "release-notes", "something else entirely",
+              _load(project, project_trusted=True).setting_sources)
+    # An untrusted project's skills have no say.
+    check(project, "release-notes", "something else entirely", _load(project).setting_sources)
+
+
+def test_memory_backfill_says_when_a_projects_config_was_left_out(
+    project: Path, monkeypatch, capsys
+) -> None:
+    from fluid.codemode import continual, memory_backfill
+    from fluid.config import loader
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(loader, "_build_provider_client", lambda config, name: object())
+    monkeypatch.setattr(continual, "Synthesizer", lambda *args, **kwargs: (args, kwargs))
+    memory_backfill._synthesizer(object())
+    err = capsys.readouterr().err
+    assert "not a trusted project" in err and str(project) in err
+    trust_project(project)
+    memory_backfill._synthesizer(object())
+    assert capsys.readouterr().err == ""
+

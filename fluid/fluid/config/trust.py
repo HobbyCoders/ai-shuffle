@@ -18,9 +18,19 @@ Trust is per path, not per content: a trusted project that later pulls a
 changed config is still trusted, as with any tool that keeps this kind of
 record.
 
-The rule is the same on Linux, macOS and Windows: paths are compared after
-links are followed and with the platform's own case folding, and a record
-that cannot be read means "not trusted".
+The rule is the same on Linux, macOS and Windows. The record holds the real
+path the folder had when it was trusted (links followed), and a folder is
+trusted only when its real path now is that exact text. A recorded path is
+never resolved again, so a trusted folder that is later moved away and
+replaced by a link to somewhere else is not trusted through the old name.
+No case folding is done: Windows reports a path in the spelling the disk
+holds, so ``Repo`` and ``repo`` are one folder there, and where the
+spelling typed is kept (macOS) a differently spelled path asks again. A
+record that cannot be read means "not trusted".
+
+The home folder decides where the record lives. Whoever sets ``HOME`` (or
+``USERPROFILE``) for the process already chooses the user config, which can
+do everything a project's files can; a project folder cannot set it.
 """
 
 from __future__ import annotations
@@ -28,7 +38,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+
+from fluid._filelock import file_lock
 
 TRUST_FILE_NAME = "trusted_projects.json"
 
@@ -54,7 +67,8 @@ def project_root(cwd: str | os.PathLike[str] | None = None) -> Path | None:
 
 
 def _key(folder: str | os.PathLike[str]) -> str:
-    return os.path.normcase(os.path.realpath(os.fspath(folder)))
+    """The text a folder is recorded and looked up under: its real path."""
+    return os.path.realpath(os.fspath(folder))
 
 
 def _read() -> list[str]:
@@ -87,6 +101,28 @@ def _write(projects: list[str]) -> None:
         raise
 
 
+# How long a second ``fluid`` waits for the first to finish its update.
+_LOCK_WAIT_S = 5.0
+
+
+def _update(change: Callable[[list[str]], list[str] | None]) -> None:
+    """Read the record, apply ``change`` and write the result, as one step.
+
+    Two ``fluid`` processes answering for two folders at once would each
+    write the list they read plus their own entry, and the later write would
+    drop the earlier answer. The lock is on its own file beside the record.
+    ``change`` returns the new list, or None to leave the record alone.
+    """
+    path = trust_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(path.with_name(TRUST_FILE_NAME + ".lock"), wait=_LOCK_WAIT_S) as held:
+        if not held:
+            raise OSError(f"{path} is being updated by another fluid process")
+        projects = change(_read())
+        if projects is not None:
+            _write(projects)
+
+
 def trusted_projects() -> list[str]:
     """Every trusted project folder, as recorded."""
     return _read()
@@ -101,20 +137,31 @@ def is_project_trusted(cwd: str | os.PathLike[str] | None = None) -> bool:
     root = project_root(cwd)
     if root is None:
         return True
-    key = _key(root)
-    return any(_key(item) == key for item in _read())
+    return _key(root) in _read()
 
 
-def trust_project(cwd: str | os.PathLike[str] | None = None) -> Path | None:
-    """Record the project ``cwd`` belongs to as trusted. Returns its root."""
-    root = project_root(cwd)
-    if root is None:
+def is_trusted_root(root: str | os.PathLike[str]) -> bool:
+    """True when ``root`` itself is a recorded project folder."""
+    return _key(root) in _read()
+
+
+def trust_project(
+    cwd: str | os.PathLike[str] | None = None,
+    *,
+    root: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    """Record a project as trusted and return its root.
+
+    ``root`` is the folder to record when the caller already showed one to
+    the owner: the answer is kept for that folder, not for whatever ``cwd``
+    leads to by the time the answer arrives.
+    """
+    folder = project_root(cwd) if root is None else Path(root)
+    if folder is None:
         return None
-    key = _key(root)
-    projects = _read()
-    if not any(_key(item) == key for item in projects):
-        _write([*projects, os.path.realpath(root)])
-    return root
+    key = _key(folder)
+    _update(lambda projects: None if key in projects else [*projects, key])
+    return folder
 
 
 def untrust_project(cwd: str | os.PathLike[str] | None = None) -> Path | None:
@@ -123,10 +170,12 @@ def untrust_project(cwd: str | os.PathLike[str] | None = None) -> Path | None:
     if root is None:
         return None
     key = _key(root)
-    projects = _read()
-    kept = [item for item in projects if _key(item) != key]
-    if len(kept) != len(projects):
-        _write(kept)
+
+    def drop(projects: list[str]) -> list[str] | None:
+        kept = [item for item in projects if item != key]
+        return kept if len(kept) != len(projects) else None
+
+    _update(drop)
     return root
 
 
@@ -134,6 +183,7 @@ __all__ = [
     "PROJECT_SOURCES",
     "TRUST_FILE_NAME",
     "is_project_trusted",
+    "is_trusted_root",
     "project_root",
     "trust_file",
     "trust_project",

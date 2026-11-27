@@ -20,7 +20,7 @@ from itertools import islice
 from pathlib import Path
 
 from fluid.tools import spill
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import harden_git_env, project_git_trusted, scrub_child_env
 from fluid.tools.registry import ToolCtx
 
 _TRUNCATE_LIMIT = 12_000  # chars; keep head + tail, drop (and spill) the middle
@@ -317,7 +317,9 @@ class _LinkProbe:
         self.root = root
         self.procs: list[subprocess.Popen[bytes]] = []
         git = shutil.which("git")
-        if git is None:
+        # No git in a project the owner has not trusted: the scandir pass
+        # answers instead (see ``child_env.set_project_git_trusted``).
+        if git is None or not project_git_trusted():
             return
         try:
             for cmd in _GIT_CMDS:
@@ -327,7 +329,7 @@ class _LinkProbe:
                     [git, "-c", "core.fsmonitor=false", *cmd],
                     cwd=str(root), stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    env=scrub_child_env(),
+                    env=harden_git_env(scrub_child_env()),
                 ))
         except OSError:
             self.close()

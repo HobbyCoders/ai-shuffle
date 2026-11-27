@@ -881,6 +881,7 @@ def _wire_continual(
             client, config.continual_model or model, skills,
             project=project_key_for(config.cwd),
             workflow_cwd=config.cwd,
+            workflow_sources=config.setting_sources,
             session_id=session_id,
             on_change=on_change,
             session_model=model,
@@ -1083,6 +1084,9 @@ def build_engine(
             hooks=hooks,
             journal=journal,
             mcp_servers=_mcp_server_map(config, disabled_mcp, child_env) or None,
+            # The Claude child reads settings and instruction files itself:
+            # it gets the same sources, so an untrusted project's are left out.
+            setting_sources=config.setting_sources,
         )
 
     # Native providers.

@@ -503,11 +503,40 @@ def _git_root(cwd: Path) -> Path | None:
     return None
 
 
+# Outside a git checkout the walk climbs to the filesystem root. A host that
+# asks the owner to trust one folder (the ``fluid`` CLI, ``fluid.config.
+# trust``) sets that folder here, and the walk then stops at it: a folder
+# above the trusted one (a shared temp directory, a download folder) is not
+# searched for instruction files, commands, skills or agents. Inside a
+# checkout the git root is the boundary either way.
+_WALK_BOUND: Path | None = None
+
+
+def set_project_walk_bound(root: str | os.PathLike[str] | None) -> None:
+    """Keep the project walk at or below ``root`` outside a git checkout.
+    None restores the walk to the filesystem root."""
+    global _WALK_BOUND
+    _WALK_BOUND = None if root is None else Path(root).resolve()
+
+
+def _walk_boundary(cwd: Path) -> Path:
+    """The outermost directory the walk from ``cwd`` (resolved) reaches."""
+    root = _git_root(cwd)
+    if root is not None:
+        return root
+    bound = _WALK_BOUND
+    if bound is None:
+        return Path(cwd.anchor or "/")
+    # Below the bound: stop at it. Anywhere else: the folder alone.
+    return bound if cwd == bound or bound in cwd.parents else cwd
+
+
 def _walk_up_dirs(cwd: Path) -> list[Path]:
-    """Directories from the outermost boundary (git root, else fs root) down to
-    ``cwd`` — so blocks end up ordered least-specific → most-specific."""
+    """Directories from the outermost boundary (git root, else fs root or the
+    host's bound) down to ``cwd`` — so blocks end up ordered least-specific →
+    most-specific."""
     cwd = cwd.resolve()
-    root = _git_root(cwd) or Path(cwd.anchor or "/")
+    root = _walk_boundary(cwd)
     chain: list[Path] = []
     d = cwd
     while True:

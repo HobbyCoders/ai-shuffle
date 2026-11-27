@@ -55,7 +55,10 @@ The project layer loads only for a project you have trusted. Until then the
 - its `.fluid/mcp.json`, `.fluid/hooks.json`, `.fluid/settings.json` and
   `.fluid/settings.local.json`;
 - its instruction files, skills, agents, slash commands, and the plugins its
-  settings enable.
+  settings enable;
+- its `.git`: git runs the programs `.git/config` names (filters, diff
+  drivers) even for `git status`, so fluid runs no git of its own there, the
+  prompt has no git lines, and each git command the agent runs asks first.
 
 In terms of the keys below, `setting_sources` is reduced to what is left
 without `project` and `local`, whichever layer named them: a user config,
@@ -64,7 +67,9 @@ is the trust answer. System, user, environment and flag layers load as usual.
 
 The project is the git repository root, or the start directory outside a
 checkout, and a checkout nested inside a trusted folder is its own project.
-Trust is recorded by resolved path in `~/.fluid/trusted_projects.json`, never
+Outside a checkout the `fluid` CLI searches the start directory alone for
+instruction files, commands, skills and agents, not the folders above it.
+Trust is recorded by real path in `~/.fluid/trusted_projects.json`, never
 inside the project, by one of:
 
 - answering yes when `fluid chat` or `fluid run` asks. They ask once per
@@ -76,9 +81,10 @@ inside the project, by one of:
 Without a terminal nothing is asked: the project's files are left out and two
 lines on stderr say so. Trust is for the folder, not for its contents at the
 time, so files that arrive later (a `git pull`, a branch switch) load without
-a new question. The rule is the same on Linux, macOS and Windows; on a
-case-insensitive file system a path spelled with different case may be asked
-about again.
+a new question. The rule is the same on Linux, macOS and Windows. A recorded
+path is compared as text: a folder that is moved or renamed is asked about
+again, and where the file system keeps the spelling you typed (macOS) a path
+spelled with different case is too.
 
 This is the standalone CLI's rule. A harness embedder that builds its config
 with `load_config` gets the same default and can pass `project_trusted`.
@@ -173,6 +179,10 @@ The global `~/.fluid/AGENTS.md` and `~/.fluid/{skills,agents,commands}` roots
 are excluded from project/nested discovery by resolved path: they load only
 in the user scope. Other home-level files (including `.fluid/AGENTS.local.md`,
 which is not global) and ancestors above home still participate in the walk.
+The `fluid` CLI is narrower outside a git checkout: there the walk is the
+start directory alone, the folder the [trust answer](#project-trust) is for,
+so an `AGENTS.md` in a folder above it does not load. Put the project in a
+git repository to get a walk from its root.
 `AGENTS.local.md` is the gitignored personal file that layers after the shared
 one, the role `CLAUDE.local.md` has in Claude Code; the settings import maps
 `CLAUDE.local.md` to it. `AGENTS.override.md` is the Codex convention and does

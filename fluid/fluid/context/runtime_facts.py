@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import harden_git_env, project_git_trusted, scrub_child_env
 
 _log = logging.getLogger(__name__)
 
@@ -32,11 +32,15 @@ _KEYS = ("linked", "installed", "synced", "skipped", "errors")
 
 
 def _receipt_path(root: Path) -> Path | None:
+    # No git is started in a project the owner has not trusted (see
+    # ``child_env.set_project_git_trusted``).
+    if not project_git_trusted():
+        return None
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", _RECEIPT], cwd=root,
             capture_output=True, text=True, timeout=1,
-            env=scrub_child_env(),
+            env=harden_git_env(scrub_child_env()),
         )
         if result.returncode:
             return None

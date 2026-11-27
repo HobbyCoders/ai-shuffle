@@ -77,10 +77,24 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _resolve_config(args: argparse.Namespace, *, ask: bool = False) -> HarnessConfig:
+    from fluid.config.trust import project_root
+    from fluid.context.instructions import set_project_walk_bound
+    from fluid.tools.child_env import set_project_git_trusted
+
+    cwd = getattr(args, "cwd", None)
+    trusted = _project_trusted(args, ask=ask)
+    # A folder's own ``.git`` names programs git runs on a status read too, so
+    # in an untrusted project the harness starts no git of its own and every
+    # git command asks. One process serves one project.
+    set_project_git_trusted(trusted)
+    # Outside a git checkout the project is the working folder alone: nothing
+    # above the folder the trust answer is for is searched for instruction
+    # files, commands, skills or agents.
+    set_project_walk_bound(project_root(cwd) or Path(cwd or Path.cwd()))
     return load_config(
-        cwd=getattr(args, "cwd", None),
+        cwd=cwd,
         overrides=_cli_overrides(args),
-        project_trusted=_project_trusted(args, ask=ask),
+        project_trusted=trusted,
     )
 
 
@@ -114,8 +128,15 @@ def _project_trusted(args: argparse.Namespace, *, ask: bool) -> bool:
         except EOFError:
             answer = ""
         if answer.strip().lower() in ("y", "yes"):
+            # The yes is for the folder that was shown. If the working folder
+            # leads somewhere else by now (a link changed while the question
+            # was open), that other folder has not been answered for.
+            if project_root(cwd) != root:
+                print("fluid: the working folder now leads to another project; "
+                      "continuing without its files.", file=sys.stderr)
+                return False
             try:
-                trust_project(cwd)
+                trust_project(root=root)
             except OSError as exc:
                 # The answer still stands for this run; it could not be kept.
                 print(f"fluid: could not save the answer ({exc}); trusting for this run only.",
@@ -536,7 +557,7 @@ def _cmd_trust(args: argparse.Namespace) -> int:
             untrust_project(args.cwd)
             print(f"No longer trusted: {root}")
         else:
-            trust_project(args.cwd)
+            trust_project(root=root)
             print(f"Trusted: {root}\nfluid now loads this project's own config, hooks, "
                   "MCP servers and other files.")
     except OSError as exc:

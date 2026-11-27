@@ -916,8 +916,13 @@ def _git_sets_banned_option(arg: str) -> bool:
 
 
 def _git_ok(args: list[str]) -> bool:
-    from fluid.tools.child_env import git_hardening_supported
+    from fluid.tools.child_env import git_hardening_supported, project_git_trusted
 
+    # git runs the programs a checkout's own ``.git`` names (filters, diff
+    # drivers, hooks), on ``git status`` too. In a project the owner has not
+    # trusted, no git command is rated read-only: each one asks.
+    if not project_git_trusted():
+        return False
     # The settings that stop git running a program a folder names
     # (child_env.harden_git_env) need git 2.38. On an older git, or when git
     # cannot be asked, no git command is rated read-only. This asks the

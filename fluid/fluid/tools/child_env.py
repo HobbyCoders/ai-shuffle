@@ -199,6 +199,32 @@ def harden_git_env(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+# Whether git may run unprompted in the project this process works in.
+#
+# The settings above stop git using a repository-shaped folder it merely
+# found, which is what a clone can carry. They do not make a checkout's own
+# ``.git`` safe: git runs the filters, diff drivers, signature programs and
+# hooks that ``.git`` names, on ``git status`` and ``git diff`` too, and no
+# option turns all of that off. So a folder's ``.git`` counts as the project's
+# own configuration. The ``fluid`` CLI switches this off for a project its
+# owner has not trusted (``fluid.config.trust``): the harness then runs no git
+# of its own there and the Bash classifier rates no git command read-only.
+# A host that never calls the setter (the app, whose projects the owner
+# registered himself) keeps it on.
+_PROJECT_GIT_TRUSTED = True
+
+
+def set_project_git_trusted(trusted: bool) -> None:
+    """Say whether this process's project may have git run unprompted in it."""
+    global _PROJECT_GIT_TRUSTED
+    _PROJECT_GIT_TRUSTED = bool(trusted)
+
+
+def project_git_trusted() -> bool:
+    """False when git must not run in the project without the owner's say."""
+    return _PROJECT_GIT_TRUSTED
+
+
 # ``GIT_CONFIG_COUNT`` came with git 2.31 and ``safe.bareRepository`` with
 # 2.38. An older git reads neither and says nothing, so the settings above
 # protect nothing there.
