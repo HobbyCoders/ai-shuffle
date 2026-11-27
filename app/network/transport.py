@@ -897,7 +897,9 @@ class PeerLink:
                 # that, the peer is offline only when every address it has was
                 # tried and none has a running worker. One address failing that
                 # way (the one a cached token uses) is forgotten, so the next
-                # pass tries them all; until then we may be behind.
+                # pass tries them all; until then we may be behind. (A LAN
+                # address in its re-probe wait is skipped; that wait ends on
+                # resume, see ``caught_up_since_start``.)
                 if self.last_pass is prior:
                     offline = getattr(exc, "routes_down", False)
                     if not offline and _worker_down(exc):
@@ -1634,6 +1636,10 @@ def caught_up_since_start() -> bool:
         wall_gap = now - _gate_checked_at[0]
         if wall_gap > RESUME_GAP_SECONDS or wall_gap - (mono - _gate_checked_at[1]) > RESUME_DRIFT_SECONDS:
             _resumed_at = now
+            # A LAN that failed before the sleep (another network, say) may
+            # work now: probe it on the next pass before calling a peer offline.
+            for link in list(_links.values()):
+                link.lan_retry_at = 0.0
     _gate_checked_at = (now, mono)
     if ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return False

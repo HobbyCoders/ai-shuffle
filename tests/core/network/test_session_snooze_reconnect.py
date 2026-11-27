@@ -350,6 +350,23 @@ async def test_pass_spanning_a_sleep_does_not_count(workers):
             assert transport.caught_up_since_start()
 
 
+async def test_resume_ends_the_lan_reprobe_wait(workers):
+    """A LAN that failed before the sleep (another network) is probed again
+    before the peer can be called offline."""
+    a, b = _pair(workers)
+    with a.active():
+        store.touch_member(b.device_id, endpoints=["https://mirror.example.com"])
+        link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
+        link.lan_endpoints = ["http://192.168.1.20:8000"]
+        link._lan_failed(OSError("no route"))
+        assert link.lan_retry_at > time.monotonic()
+        transport.caught_up_since_start()
+        assert link.lan_retry_at > time.monotonic()  # no sleep: the wait stands
+        transport._gate_checked_at = (time.time() - 20, transport._awake_seconds() - 1)
+        transport.caught_up_since_start()
+        assert link.lan_retry_at == 0.0
+
+
 def test_awake_clock_is_monotonic_off_windows(monkeypatch):
     monkeypatch.setattr(transport, "_windows_awake", None)
     before = transport._awake_seconds()
