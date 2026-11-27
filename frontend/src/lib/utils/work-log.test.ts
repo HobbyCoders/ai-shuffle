@@ -2112,6 +2112,13 @@ describe('live runs', () => {
 		const abandoned = tool({ toolStatus: 'error', streaming: false, toolInput: undefined, partialToolInput: '{"comm' });
 		const retried = buildDisplayItems([prompt, lead, abandoned, tool({ toolStatus: 'running', streaming: true })], LIVE);
 		expect(runsOf(liveLog(retried)!)).toEqual([[1, [abandoned]]]);
+		// Cut off beside a row that ends its run (a parallel delegation), it
+		// still shows rather than folding with that earlier run.
+		const sibling = tool({ toolStatus: 'error', streaming: false, toolInput: { command: 'sleep 60' } });
+		const worker = msg({ type: 'subagent', agentStatus: 'running' });
+		const beside = buildDisplayItems([prompt, a, sibling, worker], { ...LIVE, isStreaming: false, latestTurnUnsettled: true });
+		expect(runsOf(liveLog(beside)!)).toEqual([[0, [a]]]);
+		expect(collapsedVisibleMessages(beside)).toContain(sibling);
 	});
 
 	it('opens no fold onto reasoning alone when thinking blocks are hidden', () => {
@@ -2128,6 +2135,17 @@ describe('live runs', () => {
 		const ran = tool();
 		const mixed = buildDisplayItems([prompt, thought, ran, running], { ...LIVE, thinkingShown: false });
 		expect(runsOf(liveLog(mixed)!)).toEqual([[0, [thought, ran]]]);
+		// Settled, the same holds: no disclosure onto hidden reasoning alone.
+		const answer = text('Answer');
+		const settledHidden = buildDisplayItems([prompt, thought, answer], { ...SETTLED, thinkingShown: false });
+		const hiddenFold = settledHidden.find((item) => item.kind === 'work_log');
+		if (hiddenFold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(hiddenFold.folded).toEqual([]);
+		expect(hiddenFold.sequence.some((entry) => entry.hiddenWhenCollapsed)).toBe(false);
+		const settledShown = buildDisplayItems([prompt, thought, answer], SETTLED);
+		const shownFold = settledShown.find((item) => item.kind === 'work_log');
+		if (shownFold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(shownFold.folded.map((entry) => entry.message)).toEqual([thought]);
 	});
 
 	it('folds a failed tool with its run and counts it, keeping it in the expanded run', () => {
@@ -2173,8 +2191,8 @@ describe('live runs', () => {
 	// used to leave a lone row at every one of those points.
 	it('folds a coordinator turn into prose between runs', () => {
 		const prompt = user('Merge the batch', undefined, 'turn-1');
-		const send = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__SendMessage', toolStatus: 'error' });
-		const [bash1, bash2] = [tool(), tool({ toolStatus: 'error' })];
+		const send = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__SendMessage', toolStatus: 'error', toolResult: 'no such agent' });
+		const [bash1, bash2] = [tool(), tool({ toolStatus: 'error', toolResult: 'exit 1' })];
 		const getTask = tool({ toolName: 'mcp__fluid_bundled__mcp__builtins__TaskGet' });
 		const table = text('Batch landed:\n\n| PR | Merge |\n| --- | --- |\n| #2291 | 6860e83 |');
 		const notice = msg({ role: 'system', type: 'system', systemSubtype: 'task_notification', systemData: { status: 'completed' } });

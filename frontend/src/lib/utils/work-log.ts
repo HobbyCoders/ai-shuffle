@@ -1204,9 +1204,12 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// Rows a folded run hides; anything else (a tool still running, a
 	// screenshot, streaming thinking) keeps its place between the folds.
 	// A wake's "Task completed" row folds with the work and the fold counts it
-	// ("got 1 task result"); the prose either side of it still stays.
+	// ("got 1 task result"); the prose either side of it still stays. The call
+	// Stop cut off stays too, in whichever run: the stopped turn is held open
+	// above what was not sent (#1147), showing what it was doing, and folds
+	// once the turn settles.
 	const foldsWithRun = (entry: Positioned) =>
-		!terminal.has(entry) && (
+		!terminal.has(entry) && !stoppedMidCall(entry.message) && (
 			isCompletedRoutineWork(entry.message) ||
 			isGroupableSystem(entry.message) ||
 			compactedMidTurn.has(entry) ||
@@ -1244,12 +1247,9 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// agent delivered stays on screen, as a steer does: it was sent in for the
 	// reader, and folds once the agent's next prose ends the run. Nothing still
 	// streaming folds: a code-mode cell counts as routine whatever its state,
-	// and a streaming one is the only row that shows its work so far. The call
-	// Stop cut off stays too: the stopped turn is held open above what was not
-	// sent (#1147), showing what it was doing, and folds once the turn settles.
+	// and a streaming one is the only row that shows its work so far.
 	foldRun(open.filter((entry) =>
-		foldsWithRun(entry) && !agentDelivery(entry.message) && !entry.message.streaming
-		&& !stoppedMidCall(entry.message)), open[0]);
+		foldsWithRun(entry) && !agentDelivery(entry.message) && !entry.message.streaming), open[0]);
 
 	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
 	// A generated picture never folds here (it is the result), but the reply
@@ -1708,7 +1708,7 @@ export function buildTranscriptModel(
 			(entry) => !foldsAsProse(entry),
 			gallery.length > 1 ? { sources: new Set(gallery.map((item) => item.src)), entries: galleryEntries } : null
 		);
-		const shouldHide = (entry: Positioned) =>
+		const hides = (entry: Positioned) =>
 			!isPromptRow(entry) && (
 				isCompletedRoutineWork(entry.message, galleryEntries.has(entry), media.get(entry)?.shown) ||
 				isGroupableSystem(entry.message) ||
@@ -1716,6 +1716,10 @@ export function buildTranscriptModel(
 				entry.message.type === 'tool_result' ||
 				foldsAsProse(entry)
 			);
+		// As in a live run: reasoning alone, with thinking blocks turned off,
+		// would fold into a disclosure that opens onto nothing, so nothing folds.
+		const foldsAnything = response.some((entry) => hides(entry) && (thinkingShown || entry.message.type !== 'thinking'));
+		const shouldHide = (entry: Positioned) => foldsAnything && hides(entry);
 		const folded = response
 			.filter(shouldHide)
 			.map((entry) => ({ message: entry.message, index: entry.index }));

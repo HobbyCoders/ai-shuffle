@@ -34,7 +34,7 @@ export function longTurn() {
 		timestamp: '2026-10-10T20:25:00.000Z'
 	});
 	const build = tool({ toolName: 'Bash', toolInput: { command: 'npm run build' }, timestamp: '2026-10-10T20:20:00.000Z' });
-	const failed = tool({ toolName: 'Edit', toolStatus: 'error', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:00.000Z' });
+	const failed = tool({ toolName: 'Edit', toolStatus: 'error', toolResult: 'old_string not found', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:00.000Z' });
 	const retry = tool({ toolName: 'Edit', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:30.000Z' });
 	const worker2 = subagent({ toolId: 'task-2', agentName: 'Reviewer', agentStatus: 'running', timestamp: '2026-10-10T20:22:00.000Z' });
 	const steer2 = user('Also note the token rotation date', '2026-10-10T20:23:00.000Z', 'turn-1');
