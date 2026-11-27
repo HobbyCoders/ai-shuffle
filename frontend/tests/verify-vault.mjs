@@ -38,6 +38,19 @@ const scenarios = [
 		action: { operation: 'write', arguments: { path: 'todo.md', content: '- call the plumber' } }, shown: 'todo.md\n\n- call the plumber',
 		title: 'Write this file on Notes?', scope: 'Once, in /home/me/notes', button: 'Write once',
 		hint: 'It writes this text once. The next write asks again.' },
+	{ name: 'service-capture', grant: { kind: 'service', label: 'Cloudflare', target: 'https://api.cloudflare.com/client/v4', writable: true },
+		action: { operation: 'http', arguments: { method: 'POST', path: '/accounts/acct/tokens', body: '{"name":"deploy"}', content_type: 'application/json', capture: 'result.value' } },
+		shown: 'POST /accounts/acct/tokens\napplication/json\n\n{"name":"deploy"}',
+		title: 'Send this to Cloudflare?', scope: 'Once, to https://api.cloudflare.com/client/v4', button: 'Send once',
+		capture: 'The response’s result.value is kept hidden from the agent, so it can only be copied on with your approval.',
+		hint: 'It is sent with the sign-in attached; the agent never sees the token or password. The next change asks again.' },
+	{ name: 'copy-secret', grant: { kind: 'service', label: 'GitHub', target: 'https://api.github.com', writable: true },
+		action: { operation: 'copy_secret', arguments: { secret: 'Cloudflare: POST /accounts/acct/tokens → result.value', secret_id: 'sec_1',
+			repository: 'example-org/website', environment: 'production', name: 'CLOUDFLARE_API_TOKEN' } },
+		shownIn: 'dl.pa-copy',
+		shown: 'FromCloudflare: POST /accounts/acct/tokens → result.value Repositoryexample-org/website Environmentproduction SecretCLOUDFLARE_API_TOKEN',
+		title: 'Copy a secret to GitHub?', scope: 'Once, with GitHub', button: 'Copy once',
+		hint: 'The worker encrypts the value with GitHub’s key and writes it, replacing any secret of that name. The agent never sees it, and it is not saved in the Vault. Every copy asks, even in Bypass.' },
 ];
 let passed = 0;
 
@@ -77,8 +90,14 @@ for (const [viewport, touch] of [[{ width: 1280, height: 800 }, false], [{ width
 		await card.waitFor();
 		check(await page.locator('.pa-pop:not([hidden])').count() === 0, 'the panel stays closed');
 		check(await card.getByText(scenario.title).isVisible(), 'title', scenario.title);
-		check((await card.locator('.pa-hint').textContent()) === scenario.hint, 'hint', await card.locator('.pa-hint').textContent());
-		check((await card.locator('pre.pa-mono').textContent()) === scenario.shown, 'action shown verbatim', await card.locator('pre.pa-mono').textContent());
+		const hint = card.locator('.pa-hint').last();
+		check((await hint.textContent()) === scenario.hint, 'hint', await hint.textContent());
+		if (scenario.capture) {
+			const kept = card.locator('.pa-hint').first();
+			check((await kept.textContent()) === scenario.capture, 'captured field named', await kept.textContent());
+		}
+		const shown = card.locator(scenario.shownIn ?? 'pre.pa-mono');
+		check((await shown.textContent()) === scenario.shown, 'action shown verbatim', await shown.textContent());
 		check(await card.getByText(scenario.scope, { exact: true }).isVisible(), 'grant scope', scenario.scope);
 		const fit = await page.evaluate(() => {
 			const box = document.querySelector('.pa-lane').getBoundingClientRect();
