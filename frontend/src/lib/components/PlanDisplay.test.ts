@@ -50,6 +50,8 @@ describe('PlanDisplay', () => {
    expect(getByText(status, { selector: '.sr-only' })).toBeTruthy();
   }
   expect(getByText(plan.done_when)).toBeTruthy();
+  // The row preview ellipsizes, so the body repeats the full goal (no hover on touch).
+  expect(container.querySelector('[data-testid="plan-goal-full"]')?.textContent).toBe(plan.goal);
   expect(getByText('Device is offline')).toBeTruthy();
   expect(getByText('Observed the native producer')).toBeTruthy();
   expect(getByText('run:123')).toBeTruthy();

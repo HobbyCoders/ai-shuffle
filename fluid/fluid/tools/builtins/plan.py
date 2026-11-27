@@ -92,6 +92,13 @@ def _text(value, name, maximum, *, empty=False):
     return value.strip()
 
 
+def _kept(value, stored, name, maximum):
+    # Text resent unchanged passes even if it was saved under older, larger bounds.
+    if isinstance(stored, str) and isinstance(value, str) and value.strip() == stored:
+        return stored
+    return _text(value, name, maximum)
+
+
 def validate_input(args: dict) -> None:
     if not isinstance(args, dict) or len(json.dumps(args, ensure_ascii=True).encode()) > MAX_PAYLOAD:
         raise ValueError("Plan payload must be an object of at most 16KiB; send only changed tasks")
@@ -127,9 +134,10 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         if not all(args.get(k) for k in ("goal", "done_when", "tasks")):
             raise ValueError("Rollover requires goal, done_when and new tasks")
         updated.update(tasks=[], generation=document["generation"] + 1)
+    rollover = bool(args.get("rollover"))
     for key, bound in (("goal", GOAL_CHARS), ("done_when", DONE_WHEN_CHARS)):
         if key in args:
-            updated[key] = _text(args[key], key, bound)
+            updated[key] = _kept(args[key], None if rollover else document[key], key, bound)
     tasks = {t["id"]: deepcopy(t) for t in updated["tasks"]}
     incoming = args.get("tasks", [])
     if not isinstance(incoming, list) or len(incoming) > MAX_TASKS:
@@ -142,23 +150,29 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         if not isinstance(tid, str) or not re.fullmatch(ID_PATTERN, tid) or tid in seen:
             raise ValueError("Task IDs must be unique stable alphanumeric/_/- identifiers (1..64 characters)")
         seen.add(tid)
-        title = _text(task.get("title"), "title", TITLE_CHARS)
+        old = tasks.get(tid, {})
+        title = _kept(task.get("title"), old.get("title"), "title", TITLE_CHARS)
         if task.get("status") not in STATUSES:
             raise ValueError("Invalid task status")
-        current = {**tasks.get(tid, {}), **deepcopy(task), "title": title}
-        # Bounds apply to text sent now. Stored values were valid when saved
-        # (possibly under older, larger bounds) and pass through untouched.
+        current = {**old, **deepcopy(task), "title": title}
+        # Bounds apply to new text. Stored values were valid when saved
+        # (possibly under older, larger bounds) and may be kept or resent.
         for key, (count, bound) in LIST_BOUNDS.items():
             if key not in task:
                 current[key] = current.get(key, [])
                 continue
-            values = task[key]
+            values, stored = task[key], old.get(key) or []
+            if values == stored:
+                current[key] = stored
+                continue
             if not isinstance(values, list) or len(values) > count:
                 raise ValueError(f"{key} must have at most {count} entries")
-            current[key] = list(dict.fromkeys(_text(v, key, bound) for v in values))
+            current[key] = list(dict.fromkeys(
+                v if isinstance(v, str) and v in stored else _text(v, key, bound) for v in values))
         if current["status"] == "blocked":
             if "blocked_reason" in task or not current.get("blocked_reason"):
-                current["blocked_reason"] = _text(current.get("blocked_reason"), "blocked_reason", BLOCKED_CHARS)
+                current["blocked_reason"] = _kept(current.get("blocked_reason"), old.get("blocked_reason"),
+                                                  "blocked_reason", BLOCKED_CHARS)
         else:
             current.pop("blocked_reason", None)
         tasks[tid] = current
@@ -185,9 +199,10 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         visit(tid)
     updated.update(revision=document["revision"] + 1, tasks=list(tasks.values()))
     # A plan already past the bound (saved under the old one) may still be
-    # finished or rolled over; it just cannot pass the old ceiling.
+    # finished; it just cannot pass the old ceiling. A new generation carries
+    # no old text, so rollover always gets the current bound.
     stored = len(json.dumps(document, ensure_ascii=True).encode())
-    ceiling = LEGACY_MAX_PAYLOAD if stored > MAX_PAYLOAD else MAX_PAYLOAD
+    ceiling = LEGACY_MAX_PAYLOAD if stored > MAX_PAYLOAD and not rollover else MAX_PAYLOAD
     if len(json.dumps(updated, ensure_ascii=True).encode()) > ceiling:
         raise ValueError(f"Stored plan exceeds {ceiling // 1024}KiB; shorten task text or roll over")
     result = {"revision": updated["revision"], "generation": updated["generation"], "changed_ids": list(t["id"] for t in incoming),

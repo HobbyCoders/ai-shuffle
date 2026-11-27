@@ -98,6 +98,8 @@
 		</button>
 		{#if expanded}
 			<div id={detailsId} class="plan-details">
+				<!-- The row preview ellipsizes; the full goal wraps here (no hover on touch). -->
+				{#if view.goal}<div class="plan-section"><div class="plan-section-label">Goal</div><p class="acceptance" data-testid="plan-goal-full">{view.goal}</p></div>{/if}
 				{#if view.done_when}<div class="plan-section"><div class="plan-section-label">Done when</div><p class="acceptance">{view.done_when}</p></div>{/if}
 				{#if !view.tasks.length}<p class="empty">No steps reported yet.</p>{/if}
 				<ul class="plan-tasks">
