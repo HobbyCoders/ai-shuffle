@@ -29,9 +29,7 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        // Needed for the touch-and-hold link menu. The menu itself only copies the address:
-        // no preview loads the link (see contextMenuConfigurationForElement).
-        webView.allowsLinkPreview = true
+        webView.allowsLinkPreview = false
         webView.allowsBackForwardNavigationGestures = false
     }
 
@@ -152,34 +150,6 @@ final class ChatWebController: NSObject, WKNavigationDelegate, WKUIDelegate {
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
         alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
         presenter.present(alert, animated: true)
-    }
-
-    /// Touch and hold on a web link offers "Copy Link", titled with the address. There is no
-    /// preview, which would load the link outside the content rules, and no open action. Other
-    /// elements, and links that are not http(s), get no menu.
-    func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo,
-                 completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
-        guard !closing, ChatPolicy.document(base: server.baseUrl, topLevel: webView.url, authorized: authorized()),
-              let link = ChatPolicy.copyableLink(elementInfo.linkURL) else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
-            UIMenu(title: link.absoluteString, children: [Self.copyLinkAction(link)])
-        })
-    }
-
-    /// Tapping the menu's preview would open the link in place; this menu only copies.
-    func webView(_ webView: WKWebView, contextMenuForElement elementInfo: WKContextMenuElementInfo,
-                 willCommitWithAnimator animator: UIContextMenuInteractionCommitAnimating) {}
-
-    static let copyLinkTitle = "Copy Link"
-
-    /// Puts the link on the pasteboard as a URL and as plain text, so it pastes into any field.
-    static func copyLinkAction(_ link: URL, pasteboard: UIPasteboard = .general) -> UIAction {
-        UIAction(title: copyLinkTitle, image: UIImage(systemName: "doc.on.doc")) { _ in
-            pasteboard.items = [["public.url": link, "public.utf8-plain-text": link.absoluteString]]
-        }
     }
 
     // MARK: Helpers

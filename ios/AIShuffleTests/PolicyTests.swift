@@ -125,17 +125,6 @@ final class MobileUITests: XCTestCase {
 final class ChatPolicyTests: XCTestCase {
     private let base = "https://worker.example"
 
-    func testOnlyWebLinksAreOfferedForCopying() {
-        for raw in ["https://example.com/docs?page=2#top", "http://example.com/", "https://worker.example/api/v1/files/report.pdf"] {
-            XCTAssertEqual(ChatPolicy.copyableLink(URL(string: raw))?.absoluteString, raw)
-        }
-        for raw in ["javascript:alert(1)", "data:text/html,hi", "file:///tmp/a.txt", "mailto:someone@example.com",
-                    "https://", "/relative/path", "https://example.com/" + String(repeating: "a", count: 8192)] {
-            XCTAssertNil(ChatPolicy.copyableLink(URL(string: raw)), raw)
-        }
-        XCTAssertNil(ChatPolicy.copyableLink(nil))
-    }
-
     func testNavigation() {
         func decide(_ raw: String?, main: Bool = true, tap: Bool = true) -> ChatPolicy.Navigation {
             ChatPolicy.navigation(base: base, url: raw.flatMap { URL(string: $0) }, mainFrame: main, userInitiated: tap)

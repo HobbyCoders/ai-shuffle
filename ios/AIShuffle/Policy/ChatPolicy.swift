@@ -70,14 +70,6 @@ enum ChatPolicy {
         return .cancel
     }
 
-    /// The address a touch and hold on a chat link offers to copy: web (http/https) links only,
-    /// never script or data URLs. Copying never loads the link, so `navigation` is unaffected.
-    static func copyableLink(_ url: URL?) -> URL? {
-        guard let url, url.absoluteString.count <= maxURLLength, url.host?.isEmpty == false,
-              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else { return nil }
-        return url
-    }
-
     /// Whether the document on screen is the worker's phone UI and the chat is still authorized.
     static func document(base: String, topLevel: URL?, authorized: Bool) -> Bool {
         authorized && MobileUI.isUiURL(base: base, url: topLevel)
