@@ -124,6 +124,9 @@ def test_passive_external_checks_are_cached_and_never_reach_git(sources, monkeyp
     assert summary["updated_plugins"] == [] and summary["errors"] == []
 
 
+# 2001 files go through the confined copy and digest several times. Windows pins
+# every ancestor directory per file, so one run takes 120-150 s on a desktop.
+@pytest.mark.timeout(600)
 def test_large_implicit_tree_updates_without_authored_approval_limits(sources):
     svc, upstream, skill, info = setup(sources, "implicit")
     for i in range(2001):
