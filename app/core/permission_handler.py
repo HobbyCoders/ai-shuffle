@@ -1094,7 +1094,11 @@ class PermissionHandler:
         Vault requests, questions, screen-access prompts and redirected worker
         prompts retain their own explicit answer. No remembered rules are added.
         """
-        from app.core.session_modes import effective_permission_mode, mode_approves_without_prompt
+        from app.core.session_modes import (
+            effective_permission_mode,
+            mode_approves_without_prompt,
+            session_edit_roots,
+        )
 
         rows = await run_sync(self._v2_pending_permissions, session_id)
         for row in rows:
@@ -1111,7 +1115,10 @@ class PermissionHandler:
             if not mode_approves_without_prompt(
                 mode, payload.get("tool_name", ""), payload.get("tool_input"),
                 cwd=state.callback_refs.get("cwd"),
-                extra_roots=state.callback_refs.get("add_dirs"),
+                extra_roots=session_edit_roots(
+                    session_id, state.callback_refs.get("cwd"),
+                    state.callback_refs.get("add_dirs"),
+                ),
             ):
                 continue
             if payload.get("safety_check"):

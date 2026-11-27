@@ -24,6 +24,7 @@ from fluid.events.model import (
     ToolUse,
 )
 from fluid.messages.content import Text, Thinking, ToolResultBlock, ToolUseBlock
+from fluid.permissions.edit_guard import EDIT_PATH_LIST_FIELD
 
 # ACP ``ToolKind`` → the tool name the app's transcript already knows how to
 # render. ``title`` and the raw input ride along in the input.
@@ -38,6 +39,9 @@ KIND_TOOL_NAMES = {
     "think": "Think",
     "switch_mode": "SwitchMode",
 }
+# The names an edit request is shown under (``edit`` kind; a diff with no old
+# text becomes ``Write``).
+_EDIT_TOOL_NAMES = frozenset({"Edit", "Write"})
 PLAN_TOOL_NAME = "TodoWrite"
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "completed"}
 
@@ -93,6 +97,21 @@ def _first_diff(items: Any) -> Mapping[str, Any] | None:
         if isinstance(item, Mapping) and item.get("type") == "diff":
             return item
     return None
+
+
+def _edit_targets(call: Mapping[str, Any]) -> list[str]:
+    """Every file the request reports it will change: the path of each diff
+    and of each location, in order, once each."""
+    paths: list[str] = []
+    content = call.get("content")
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, Mapping) and item.get("type") == "diff":
+            paths.append(str(item.get("path") or ""))
+    locations = call.get("locations")
+    for item in locations if isinstance(locations, list) else []:
+        if isinstance(item, Mapping) and item.get("path"):
+            paths.append(str(item["path"]))
+    return list(dict.fromkeys(paths))
 
 
 def _jsonable(value: Any) -> Any:
@@ -217,6 +236,22 @@ class TurnMapper:
             first = locations[0] if isinstance(locations[0], Mapping) else {}
             if first.get("path"):
                 data["file_path"] = str(first["path"])
+        if name in _EDIT_TOOL_NAMES:
+            # ``file_path`` shows one file. A request that reports more than
+            # one target lists them all, so whoever approves it judges every
+            # file and not the first alone (see permissions.edit_guard).
+            targets = _edit_targets(call)
+            shown = data.get("file_path")
+            if any(target != shown for target in targets):
+                listed = data.get(EDIT_PATH_LIST_FIELD)
+                merged: list[Any] = []
+                for item in [
+                    *(listed if isinstance(listed, list) else [] if listed is None else [listed]),
+                    *targets,
+                ]:
+                    if item not in merged:
+                        merged.append(item)
+                data[EDIT_PATH_LIST_FIELD] = merged
         return name, data, False
 
     def _start_tool(self, call: Mapping[str, Any]) -> list[Event]:

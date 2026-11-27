@@ -118,6 +118,7 @@ from app.core.session_modes import (
     effective_permission_mode,
     mode_approves_without_prompt,
     safety_check_denial,
+    session_edit_roots,
 )
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
@@ -4330,12 +4331,15 @@ class HarnessAdapter(ProviderAdapter):
         with the call's input and the folders this session works in: Accept
         Edits approves an edit of a project file and nothing outside it."""
         options = self._options
+        cwd = getattr(options, "cwd", None)
         return mode_approves_without_prompt(
             self.permission_mode,
             self._permission_tool_name(ev.name),
             ev.input,
-            cwd=getattr(options, "cwd", None),
-            extra_roots=getattr(options, "add_dirs", None),
+            cwd=cwd,
+            extra_roots=session_edit_roots(
+                self._resolve_app_session_id(), cwd, getattr(options, "add_dirs", None),
+            ),
         )
 
     async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
@@ -6490,26 +6494,32 @@ class HarnessAdapter(ProviderAdapter):
         The credential-file asks (``.env``, private keys, ``.netrc``, ...) are
         the ones the ``fluid`` CLI installs. Without them a ``Read`` of such a
         file is a read-class call and runs with no prompt. They are installed
-        for every mode, because the mode can change on a live engine: an ask
-        goes to the app's approver, which puts it to a person under Ask and
-        Accept Edits and approves it under Bypass. They come first, so a
-        chat-lane rule that follows still has the last word.
+        for every mode, because the mode can change on a live engine, and each
+        reads the engine's policy when a call is judged: under Bypass
+        (``never_ask``) they stand aside, so a call there is decided, and
+        counted by the repeat guard, exactly as it was before. They come
+        first, so a chat-lane rule that follows still has the last word.
         """
         from fluid.config.loader import sensitive_file_rules
 
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
-        rules = [*sensitive_file_rules(), *(_chat_mode_rules(options) or ())]
         scope = _assistant_scope(options)
         if scope is not None:
-            return _AssistantPermissionEngine(
-                scope, approval_policy=policy, rules=rules,
+            engine: PermissionEngine = _AssistantPermissionEngine(
+                scope, approval_policy=policy,
                 doom_loop_threshold_for=_screen_tool_repeat_threshold,
             )
-        return PermissionEngine(
-            approval_policy=policy, rules=rules,
-            doom_loop_threshold_for=_screen_tool_repeat_threshold,
-        )
+        else:
+            engine = PermissionEngine(
+                approval_policy=policy,
+                doom_loop_threshold_for=_screen_tool_repeat_threshold,
+            )
+        engine.rules = [
+            *sensitive_file_rules(active=lambda: engine.approval_policy != "never_ask"),
+            *(_chat_mode_rules(options) or ()),
+        ]
+        return engine
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────

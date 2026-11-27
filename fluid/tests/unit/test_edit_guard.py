@@ -242,17 +242,110 @@ def test_the_extra_folders_are_only_asked_for_outside_the_project(project: Path)
     assert calls == [1]
 
 
-def test_the_sessions_scratch_folder_is_its_own(project: Path) -> None:
+def test_the_sessions_scratch_folder_is_the_one_its_host_names(project: Path) -> None:
+    """The scratch folder is the one the session's owner resolves and passes
+    in. It is never read off the path being edited: that made every
+    session's scratch folder editable by every other session."""
     home = project.parent / "home"
-    scratch = home / ".fluid" / "projects" / "-work-project" / "scratch" / "ses_1"
-    assert _ok(project, str(scratch / "brief.md"))
-    assert _ok(project, str(scratch / "evidence" / "run.log"))
-    # Only the scratch folder: the rest of the harness's state asks.
     state = home / ".fluid" / "projects" / "-work-project"
-    assert not _ok(project, str(state / "memory" / "facts.md"))
-    assert not _ok(project, str(state / "scratch"))
-    assert not _ok(project, str(home / ".fluid" / "settings.json"))
-    assert not _ok(project, str(scratch / ".git" / "config"))
+    scratch = state / "scratch" / "ses_1"
+    mine = {"extra_roots": [str(scratch)]}
+    assert _ok(project, str(scratch / "brief.md"), **mine)
+    assert _ok(project, str(scratch / "evidence" / "run.log"), **mine)
+    # Another session's scratch folder, and this one's with nothing passed.
+    assert not _ok(project, str(state / "scratch" / "ses_2" / "brief.md"), **mine)
+    assert not _ok(project, str(scratch / "brief.md"))
+    # Only the scratch folder: the rest of the harness's state asks.
+    assert not _ok(project, str(state / "memory" / "facts.md"), **mine)
+    assert not _ok(project, str(state / "scratch"), **mine)
+    assert not _ok(project, str(home / ".fluid" / "settings.json"), **mine)
+    assert not _ok(project, str(scratch / ".git" / "config"), **mine)
+    # A scratch folder kept somewhere else entirely (FLUID_PROJECTS_DIR).
+    elsewhere = project.parent / "state" / "proj" / "scratch" / "ses_1"
+    assert _ok(project, str(elsewhere / "brief.md"), extra_roots=[str(elsewhere)])
+
+
+def _symlink(link: Path, target: Path, *, folder: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=folder)
+    except (OSError, NotImplementedError):  # Windows without the privilege
+        pytest.skip("this account cannot create links")
+
+
+@pytest.mark.parametrize("name", [".env", ".gitconfig", ".bashrc", "fluid.toml", ".mcp.json"])
+def test_a_protected_name_that_links_to_an_ordinary_file_asks(project: Path, name: str) -> None:
+    """Following the link gives ``config/local.txt``, an ordinary project
+    file. The name the call wrote is still the protected one."""
+    target = project / "config" / "local.txt"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("x")
+    _symlink(project / name, target)
+    assert _ok(project, "config/local.txt")
+    assert not _ok(project, name)
+    assert not _ok(project, str(project / name))
+
+
+def test_a_protected_folder_that_links_to_an_ordinary_one_asks(project: Path) -> None:
+    plain = project / "tooling"
+    plain.mkdir()
+    (plain / "settings.json").write_text("{}")
+    _symlink(project / ".vscode", plain, folder=True)
+    assert _ok(project, "tooling/settings.json")
+    assert not _ok(project, ".vscode/settings.json")
+
+
+def test_an_ordinary_link_inside_the_project_is_still_approved(project: Path) -> None:
+    (project / "docs").mkdir()
+    (project / "docs" / "guide.md").write_text("x")
+    _symlink(project / "manual", project / "docs", folder=True)
+    assert _ok(project, "manual/guide.md")
+
+
+@pytest.mark.parametrize("inside", [".vscode", ".git/hooks", ".claude", ".fluid", ".devcontainer"])
+def test_a_session_started_inside_a_protected_folder_asks(project: Path, inside: str) -> None:
+    """The protected name is in the working folder's own path, above every
+    file the session names."""
+    folder = project / inside
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in ("settings.json", "pre-commit", "notes/x.md"):
+        assert not edit_stays_in_project({"file_path": name}, str(folder))
+        assert not edit_stays_in_project({"file_path": str(folder / name)}, str(folder))
+
+
+@pytest.mark.parametrize("parent", [".fluid", ".claude"])
+def test_a_session_started_in_a_worktree_checkout_edits_its_code(project: Path, parent: str) -> None:
+    checkout = project / parent / "worktrees" / "feat-x"
+    (checkout / "src").mkdir(parents=True)
+    assert edit_stays_in_project({"file_path": "src/app.py"}, str(checkout))
+    assert edit_stays_in_project({"file_path": "README.md"}, str(checkout))
+    assert not edit_stays_in_project({"file_path": ".git/config"}, str(checkout))
+    assert not edit_stays_in_project({"file_path": ".vscode/tasks.json"}, str(checkout))
+    # The worktrees folder itself is not a checkout.
+    assert not edit_stays_in_project(
+        {"file_path": "x.py"}, str(project / parent / "worktrees"))
+
+
+@pytest.mark.parametrize("name", ["fluid.toml", "FLUID.TOML", "sub/fluid.toml", "fluid.toml."])
+def test_the_top_level_harness_config_asks(project: Path, name: str) -> None:
+    """``fluid.toml`` is harness configuration the CLI loads from a project
+    that has no ``.fluid/config.toml``."""
+    assert not _ok(project, name)
+
+
+def test_every_file_a_request_lists_is_judged(project: Path) -> None:
+    """A delegated agent can report one edit over several files. Approval
+    of the first is not approval of the rest."""
+    inside, other = "src/app.py", "src/util.py"
+    outside = str(project.parent / "elsewhere" / "x.py")
+    cwd = str(project)
+    assert edit_stays_in_project({"file_path": inside, "file_paths": [inside, other]}, cwd)
+    assert edit_stays_in_project({"file_paths": [inside, other]}, cwd)
+    assert not edit_stays_in_project({"file_path": inside, "file_paths": [inside, outside]}, cwd)
+    assert not edit_stays_in_project(
+        {"file_path": inside, "file_paths": [inside, ".git/hooks/pre-commit"]}, cwd)
+    # A list that cannot be read as paths asks.
+    for listed in ([], "src/app.py", [inside, None], [inside, 3], [inside, ""], {"a": 1}):
+        assert not edit_stays_in_project({"file_path": inside, "file_paths": listed}, cwd)
 
 
 def test_a_session_working_in_the_home_folder_does_not_get_its_dot_folders(

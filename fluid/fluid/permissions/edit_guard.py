@@ -38,6 +38,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any
 
 from fluid.permissions.rules import _openable, _opened_path
@@ -45,6 +46,10 @@ from fluid.permissions.rules import _openable, _opened_path
 # The input fields the edit-class tools name their file in (Edit, Write,
 # MultiEdit: ``file_path``; NotebookEdit: ``notebook_path``).
 EDIT_PATH_FIELDS: tuple[str, ...] = ("file_path", "notebook_path")
+
+# A request that names several files (a delegated agent reporting one edit
+# over more than one target) lists them all here; each is judged.
+EDIT_PATH_LIST_FIELD = "file_paths"
 
 # Folders whose contents configure a tool or run later without a prompt:
 # version control (hooks, config), agent and editor settings (permission
@@ -68,6 +73,8 @@ PROTECTED_FILE_GLOBS: tuple[str, ...] = (
     ".profile", ".kshrc", ".cshrc", ".tcshrc", ".login", "config.fish",
     "*profile.ps1",
     ".envrc", ".gitconfig", ".gitmodules", ".gitattributes",
+    # Harness configuration fluid loads from a project's top folder.
+    "fluid.toml",
     ".mcp.json", ".claude.json", ".ripgreprc", ".curlrc", ".wgetrc",
 )
 
@@ -122,19 +129,25 @@ def _home() -> str | None:
     return _real(home) if home and home != "~" else None
 
 
-def _scratch_roots(path: str, home: str | None) -> list[str]:
-    """The harness scratch folder ``path`` is in, if any.
-
-    Sessions are told to keep briefs and working files in
-    ``~/.fluid/projects/<project>/scratch/<session>/`` (``fluid.state``), so
-    an edit there is the session's own work wherever its project is.
-    """
-    if home is None:
-        return []
-    parts = _inside(path, os.path.join(home, ".fluid", "projects"))
-    if parts is None or len(parts) < 4 or parts[1] != "scratch":
-        return []
-    return [os.path.join(home, ".fluid", "projects", *parts[:3])]
+def _dirs_allow(plain: list[str]) -> bool:
+    """False when one of the folder names is protected. ``<.fluid|.claude>/
+    worktrees/<name>/`` is a checkout of the project, so those three names
+    are stepped over."""
+    index = 0
+    while index < len(plain):
+        name = plain[index]
+        if name in PROTECTED_DIR_NAMES:
+            is_worktree = (
+                name in _WORKTREE_PARENTS
+                and index + 3 < len(plain)
+                and plain[index + 1] == "worktrees"
+            )
+            if not is_worktree:
+                return False
+            index += 3  # past ``<parent>/worktrees/<name>``
+            continue
+        index += 1
+    return True
 
 
 def _names_allow(parts: list[str], *, root_is_home: bool) -> bool:
@@ -146,21 +159,19 @@ def _names_allow(parts: list[str], *, root_is_home: bool) -> bool:
     # at its top; no list of names keeps up with that.
     if root_is_home and plain[0].startswith("."):
         return False
-    index = 0
-    while index < len(plain):
-        name = plain[index]
-        if name in PROTECTED_DIR_NAMES:
-            is_worktree_file = (
-                name in _WORKTREE_PARENTS
-                and index + 3 < len(plain)
-                and plain[index + 1] == "worktrees"
-            )
-            if not is_worktree_file:
-                return False
-            index += 3  # past ``<parent>/worktrees/<name>``
-            continue
-        index += 1
+    if not _dirs_allow(plain):
+        return False
     return not any(fnmatchcase(plain[-1], glob) for glob in PROTECTED_FILE_GLOBS)
+
+
+def _root_allows(root: str) -> bool:
+    """False for a working folder that is itself inside a protected folder
+    (a session started in ``repo/.vscode`` or ``repo/.git/hooks``): every
+    file below it configures a tool. A worktree checkout is project code."""
+    parts = [part for part in root.replace("\\", "/").split("/") if part]
+    # A trailing ``<parent>/worktrees/<name>`` needs a file below it to be
+    # stepped over, so one placeholder stands in for the file.
+    return _dirs_allow([_plain_name(part) for part in parts] + ["file"])
 
 
 def _is_second_name(path: str) -> bool:
@@ -173,38 +184,85 @@ def _is_second_name(path: str) -> bool:
     return os.path.isfile(path) and info.st_nlink > 1
 
 
+def _spelled_path(value: str, cwd: str) -> str | None:
+    """``value`` as an absolute path with no link followed: the names the
+    caller wrote, where :func:`_opened_path` gives the file they reach."""
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            path = Path(cwd) / path
+        return os.path.abspath(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _spelled(folder: Any) -> str | None:
+    """A folder as its caller wrote it, absolute, no link followed."""
+    if isinstance(folder, os.PathLike):
+        folder = os.fspath(folder)
+    if not isinstance(folder, str) or not folder.strip():
+        return None
+    try:
+        return os.path.abspath(os.path.expanduser(folder))
+    except (OSError, ValueError):
+        return None
+
+
+def _credential_path(path: str) -> bool:
+    from fluid.tools.hardening import PROTECTED_WRITE_PREFIXES, is_sensitive_path
+
+    posix = path.replace("\\", "/")
+    if is_sensitive_path(posix) or posix.startswith(PROTECTED_WRITE_PREFIXES):
+        return True
+    return is_sensitive_path("/".join(_plain_name(part) for part in posix.split("/")))
+
+
 def _path_allowed(
     value: str, cwd: str, roots: Callable[[], Iterable[str]] | Iterable[str] | None
 ) -> bool:
-    from fluid.tools.hardening import PROTECTED_WRITE_PREFIXES, is_sensitive_path
-
     opened = _opened_path(value, cwd)
-    if opened is None or not _openable(opened):
+    spelled = _spelled_path(value, cwd)
+    if opened is None or spelled is None or not _openable(opened):
         return False
-    posix = opened.replace("\\", "/")
-    if is_sensitive_path(posix) or posix.startswith(PROTECTED_WRITE_PREFIXES):
-        return False
-    if is_sensitive_path("/".join(_plain_name(part) for part in posix.split("/"))):
+    # Both the file reached and the name written are judged: a link named
+    # ``.env`` that points at an ordinary file is still an edit of ``.env``.
+    if _credential_path(opened) or _credential_path(spelled):
         return False
     if _is_second_name(opened):
         return False
 
     home = _home()
-    project = _real(cwd)
-    if project is not None:
-        parts = _inside(opened, project)
-        if parts is not None:
-            return _names_allow(parts, root_is_home=project == home)
-    # Only now ask the host for its extra folders: most edits are in the
-    # project, and working the extra ones out can cost a lookup.
-    extra = [*(roots() if callable(roots) else (roots or ())), *_scratch_roots(opened, home)]
-    for folder in extra:
-        root = _real(folder)
-        if root is None:
+    # (real folder, the folder as written, is it the working folder)
+    folders: list[tuple[str | None, str | None, bool]] = [(_real(cwd), _spelled(cwd), True)]
+    project = folders[0][0]
+    if project is None or _inside(opened, project) is None:
+        # Only now ask the host for its extra folders: most edits are in the
+        # project, and working the extra ones out can cost a lookup.
+        folders += [
+            (_real(folder), _spelled(folder), False)
+            for folder in (roots() if callable(roots) else (roots or ()))
+        ]
+    for real, written, is_project in folders:
+        if real is None:
             continue
-        parts = _inside(opened, root)
-        if parts is not None:
-            return _names_allow(parts, root_is_home=root == home)
+        parts = _inside(opened, real)
+        if parts is None:
+            continue
+        # A host adds a folder knowing where it is; the working folder is
+        # wherever the session was started.
+        if is_project and not _root_allows(real):
+            return False
+        if not _names_allow(parts, root_is_home=real == home):
+            return False
+        if spelled == opened:
+            return True
+        # The spelling took another route (a link on the way). Its names
+        # must be allowed too, and it must stay in the same folder.
+        for base in (written, real):
+            named = _inside(spelled, base) if base is not None else None
+            if named is not None:
+                return _names_allow(named, root_is_home=real == home)
+        return False
     return False
 
 
@@ -226,6 +284,11 @@ def edit_stays_in_project(
     if not isinstance(tool_input, Mapping) or not isinstance(cwd, str) or not cwd.strip():
         return False
     values = [tool_input[key] for key in EDIT_PATH_FIELDS if tool_input.get(key) is not None]
+    listed = tool_input.get(EDIT_PATH_LIST_FIELD)
+    if listed is not None:
+        if not isinstance(listed, list | tuple) or not listed:
+            return False
+        values += list(listed)
     if not values:
         return False
     for value in values:
@@ -242,6 +305,7 @@ def edit_stays_in_project(
 
 __all__ = [
     "EDIT_PATH_FIELDS",
+    "EDIT_PATH_LIST_FIELD",
     "PROTECTED_DIR_NAMES",
     "PROTECTED_FILE_GLOBS",
     "edit_stays_in_project",

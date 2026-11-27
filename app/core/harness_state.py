@@ -47,6 +47,18 @@ def session_state_root(session_id: str | None, cwd: str | None = None) -> Path:
     return project_state_root(row, cwd)
 
 
+def session_scratch_dir(session_id: str | None, cwd: str | None = None) -> str | None:
+    """The scratch folder the session is told to use (``fluid.state.
+    scratch_prompt``), built the way that reminder builds it. None without a
+    session id: no folder is guessed."""
+    if not session_id:
+        return None
+    from fluid.state import scratch_dir
+
+    ctx = bind_state_context(ToolCtx(cwd=cwd or ".", session_id=session_id), lambda: session_id)
+    return str(scratch_dir(ctx))
+
+
 def bind_state_context(ctx: ToolCtx, session_id: Callable[[], str | None]) -> ToolCtx:
     """Late-bind app identity: fresh engines acquire their session ID after boot."""
     ctx.extra["harness_state_root"] = lambda: session_state_root(session_id(), ctx.cwd)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -100,6 +101,21 @@ class PermissionEngine:
         # kept by identity so a mode switch lifts exactly these and no
         # configured rule that happens to look the same.
         self._mode_rules: list[Rule] = []
+        # Folders outside the working folder the session may edit under
+        # Accept Edits: a list, or a callable returning one. The loop that
+        # owns the session sets it to the session's scratch folder; a host
+        # may set its own first.
+        self.edit_roots: Any = None
+
+    def extra_edit_roots(self) -> list[str]:
+        """:attr:`edit_roots` as a list, read when an edit is judged (the
+        session's id, and so its scratch folder, can arrive after the
+        engine is built). Empty when it cannot be worked out."""
+        roots = self.edit_roots
+        try:
+            return [os.fspath(root) for root in (roots() if callable(roots) else roots or ())]
+        except Exception:  # noqa: BLE001 - no extra folder, so the edit asks
+            return []
 
     def set_mode_rules(self, rules: list[Rule]) -> None:
         """Replace the rules a permission mode contributes.

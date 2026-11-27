@@ -82,22 +82,34 @@ model *reads* framing tokens even when they can't structurally escape.
   `.env.example`-style templates are exempt: the rule steps aside and the
   call is decided as any other is, so reading a template runs and editing
   one asks under `on_write`. `permission.protect_sensitive_files = false`
-  disables the set. A host that builds its own engine installs the same set
-  with `fluid.config.loader.sensitive_file_rules()`; AI Shuffle's native leg
-  does, for every permission mode.
+  disables the set. The rules read the policy when a call is judged, so a
+  session that switches into or out of `never_ask` loses or regains them at
+  once; under `never_ask` the call is the policy's own allow, which the
+  repeat guard still counts. A host that builds its own engine installs the
+  same set with `fluid.config.loader.sensitive_file_rules(active=...)`; AI
+  Shuffle's native leg does.
 - **Accept Edits approves project files only.** The mode's allow rules for
   `Edit`, `Write`, `MultiEdit` and `NotebookEdit` carry a guard
   (`fluid.permissions.edit_guard.edit_stays_in_project`), so they hold
   wherever they sit in the rule list. An edit is approved when the file, as
   the tool opens it (symbolic links followed), is inside the session's
-  working folder, a folder the host added or the session's scratch folder.
+  working folder, a folder the host added or the session's own scratch
+  folder. The scratch folder is the one the session's owner resolves for it
+  (`PermissionEngine.edit_roots`, set by the loop), never one read off the
+  path, so another session's scratch folder asks.
   Everything else falls through to the policy and asks: a path outside
   those folders, a link that leaves them, a hard-linked file (it may be a
   second name for a file elsewhere), a credential file, and a file that
   starts programs or configures a tool: anything under `.git`, `.fluid`,
   `.claude`, `.codex`, `.vscode`, `.idea`, `.husky` or `.devcontainer`,
-  shell startup files, `.gitconfig`, `.gitattributes`, `.mcp.json` and the
-  like (the lists are `PROTECTED_DIR_NAMES` and `PROTECTED_FILE_GLOBS`).
+  shell startup files, `.gitconfig`, `.gitattributes`, `.mcp.json`,
+  `fluid.toml` and the like (the lists are `PROTECTED_DIR_NAMES` and
+  `PROTECTED_FILE_GLOBS`). Both the name the call wrote and the file it
+  reaches are judged, so a link named `.env` that points at an ordinary
+  file asks. A session started inside one of those folders (`repo/.vscode`)
+  gets no approval at all. A request that lists several files (a delegated
+  agent reporting one edit over more than one target, `file_paths`) is
+  approved only when every file passes.
   Names are compared the way Windows and macOS open them (letter
   case, trailing dots and spaces, `:stream` suffixes, 8.3 short names), on
   every platform. A checkout under `.fluid/worktrees/<name>/` or

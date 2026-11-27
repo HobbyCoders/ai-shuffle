@@ -46,9 +46,13 @@ MODE_POLICY: dict[str, str] = {
 PERMISSION_MODES: tuple[str, ...] = tuple(MODE_POLICY)
 
 
-def accept_edits_rules() -> list[Rule]:
+def accept_edits_rules(extra_roots=None) -> list[Rule]:
     """Fresh allow rules for :data:`ACCEPT_EDITS_TOOLS`, each limited to edits
     of the project's own files by :func:`edit_stays_in_project`.
+
+    ``extra_roots`` names further folders the session may edit (a list, or a
+    callable returning one): its own scratch folder, which only the engine
+    that owns the session can name.
 
     Because the limit travels with the rule, it holds wherever the rule sits
     in the list: ahead of the credential-file asks or after them.
@@ -56,16 +60,22 @@ def accept_edits_rules() -> list[Rule]:
     A new list of new ``Rule`` objects each call, so an engine can track the
     rules it installed for a mode by identity and lift exactly those again.
     """
+    if extra_roots is None:
+        in_project = edit_stays_in_project
+    else:
+        def in_project(tool_input, cwd) -> bool:
+            return edit_stays_in_project(tool_input, cwd, extra_roots)
+
     return [
-        Rule(tool=tool, decision="allow", guard=edit_stays_in_project)
+        Rule(tool=tool, decision="allow", guard=in_project)
         for tool in sorted(ACCEPT_EDITS_TOOLS)
     ]
 
 
-def mode_rules(mode: str) -> list[Rule]:
+def mode_rules(mode: str, extra_roots=None) -> list[Rule]:
     """The rules ``mode`` implies on top of its policy: the edit allows for
     ``acceptEdits``, nothing for every other mode or policy name."""
-    return accept_edits_rules() if mode == "acceptEdits" else []
+    return accept_edits_rules(extra_roots) if mode == "acceptEdits" else []
 
 
 __all__ = [

@@ -34,13 +34,14 @@ from fluid.tools.registry import ToolSpec
 
 import app.core.query_engine as qe
 from app.core.permission_handler import permission_handler
-from app.core.provider.harness_adapter import HarnessAdapter
+from app.core.provider.harness_adapter import _PERMISSION_POLICY, HarnessAdapter
 from app.core.provider.types import PermissionRequestEvent, SessionOptions
 from app.core.session_modes import (
     ACCEPT_EDITS_TOOLS,
     COMPUTER_USE_REQUEST_ACCESS,
     effective_permission_mode,
     mode_approves_without_prompt,
+    session_edit_roots,
 )
 from tests.core.test_query_engine_permission_flows import (
     SID,
@@ -145,6 +146,47 @@ def test_accept_edits_approves_an_edit_in_a_folder_the_session_was_given():
         "acceptEdits", "Write", target, cwd=PROJECT, extra_roots=[uploads])
 
 
+def test_accept_edits_covers_the_sessions_own_scratch_folder_only(tmp_path, monkeypatch):
+    """The scratch folder is the one the host resolves for this session id
+    (the folder the session's scratch reminder names). It was read off the
+    path being edited, which made every session's scratch editable by every
+    other session and missed a state folder kept somewhere else."""
+    import app.core.harness_state as harness_state
+    from fluid.state import scratch_dir
+    from fluid.tools.registry import ToolCtx
+
+    state = tmp_path / "state-kept-elsewhere" / "proj"
+    monkeypatch.setattr(harness_state, "session_state_root", lambda session_id, cwd=None: state)
+
+    # The same folder the engine's reminder gives the session.
+    ctx = harness_state.bind_state_context(ToolCtx(cwd=PROJECT, session_id="ses-1"), lambda: "ses-1")
+    mine = scratch_dir(ctx)
+    assert harness_state.session_scratch_dir("ses-1", PROJECT) == str(mine)
+    assert harness_state.session_scratch_dir(None, PROJECT) is None
+
+    def approves(path, session_id="ses-1"):
+        return mode_approves_without_prompt(
+            "acceptEdits", "Write", {"file_path": str(path)}, cwd=PROJECT,
+            extra_roots=session_edit_roots(session_id, PROJECT, None))
+
+    assert approves(mine / "brief.md")
+    assert not approves(mine.parent / "ses-2" / "brief.md")
+    assert not approves(mine / "brief.md", session_id="ses-2")
+    assert not approves(mine / "brief.md", session_id=None)
+    assert not approves(state / "memory" / "facts.md")
+
+
+def test_session_edit_roots_keep_the_given_folders_when_the_lookup_fails(monkeypatch):
+    import app.core.harness_state as harness_state
+
+    def broken(session_id, cwd=None):
+        raise RuntimeError("database is away")
+
+    monkeypatch.setattr(harness_state, "session_state_root", broken)
+    assert session_edit_roots("ses-1", PROJECT, ["/uploads"])() == ["/uploads"]
+    assert session_edit_roots("ses-1", PROJECT, None)() == []
+
+
 def test_the_edit_class_set_is_fluids_and_names_only_file_editors():
     """One table: the app re-exports fluid's set rather than spelling it again,
     and it holds exactly Claude Code's file-edit tools."""
@@ -184,8 +226,7 @@ def _read_spec(name):
     return ToolSpec(name=name, description="", input_schema={}, risk="read")
 
 
-@pytest.mark.parametrize("mode", ["default", "acceptEdits", None, "bypassPermissions"])
-@pytest.mark.parametrize("tool, tool_input", [
+_CREDENTIAL_READS = [
     ("Read", {"file_path": ".env"}),
     ("Read", {"file_path": os.path.join(PROJECT, "deploy", ".env.production")}),
     ("Read", {"file_path": os.path.join(PROJECT, ".ENV")}),
@@ -193,15 +234,43 @@ def _read_spec(name):
     ("Read", {"file_path": "~/.aws/credentials"}),
     ("Grep", {"pattern": "TOKEN", "path": ".env"}),
     ("Glob", {"pattern": "*", "path": ".credential-keys/"}),
-])
+]
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", None])
+@pytest.mark.parametrize("tool, tool_input", _CREDENTIAL_READS)
 def test_native_engine_asks_before_reading_a_credential_file(mode, tool, tool_input):
     """A Read is a read-class call, which the policy runs with no prompt. The
     app's engine used to carry none of fluid's credential-file rules, so a
-    native session read ``.env`` and private keys unasked. The ask is installed
-    for every mode (the mode can change on a live engine): the app's approver
-    is what approves it under Bypass."""
+    native session read ``.env`` and private keys unasked."""
     engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=mode))
     assert engine.evaluate(_read_spec(tool), tool_input, cwd=PROJECT) == "ask"
+
+
+@pytest.mark.parametrize("tool, tool_input", _CREDENTIAL_READS)
+def test_native_engine_under_bypass_decides_a_credential_read_as_before(tool, tool_input):
+    """Bypass asks about nothing. The credential asks stand aside there, so the
+    call is the policy's own allow: an "ask" that the app then approved would
+    skip the loop's repeat guard, which counts allowed calls only."""
+    engine = HarnessAdapter()._build_permissions(
+        SessionOptions(model="gpt-5", permission_mode="bypassPermissions"))
+    verdict = engine.decide(_read_spec(tool), tool_input, cwd=PROJECT)
+    assert (verdict.decision, verdict.source) == ("allow", "policy")
+
+
+@pytest.mark.parametrize("start, policy, expected", [
+    ("bypassPermissions", "on_write", "ask"),
+    ("default", "never_ask", "allow"),
+    ("acceptEdits", "never_ask", "allow"),
+])
+def test_native_engine_credential_asks_follow_a_live_mode_change(start, policy, expected):
+    """The mode changes on a live engine (the hot swap sets the policy). The
+    asks read the policy when a call is judged, not when the engine was built."""
+    engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=start))
+    engine.approval_policy = policy
+    assert engine.evaluate(_read_spec("Read"), {"file_path": ".env"}, cwd=PROJECT) == expected
+    engine.approval_policy = _PERMISSION_POLICY[start]
+    assert engine.evaluate(_read_spec("Read"), {"file_path": ".env"}, cwd=PROJECT) != expected
 
 
 @pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions"])

@@ -111,3 +111,46 @@ async def test_set_permission_mode_op_swaps_policy_and_rules(tmp_path) -> None:
     await loop.submit(SetPermissionMode(mode="always_ask"))
     assert perms.approval_policy == "always_ask"
     assert perms.rules == []
+
+
+async def test_accept_edits_covers_the_sessions_own_scratch_folder_only(tmp_path, monkeypatch) -> None:
+    """The loop that owns the session names its scratch folder for the edit
+    allow. Another session's folder beside it still asks, and so does this
+    one's before the session has an id."""
+    from fluid.state import scratch_dir
+    from fluid.tools.registry import ToolCtx
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    project = tmp_path / "project"
+    project.mkdir()
+    perms = PermissionEngine("on_write")
+    ctx = ToolCtx(cwd=str(project))
+    loop = NativeLoop(provider=None, store=MemoryStore(), model="m", permissions=perms, ctx=ctx)
+    await loop.submit(SetPermissionMode(mode="acceptEdits"))
+
+    def verdict(path) -> str:
+        return perms.evaluate(_spec("Write"), {"file_path": str(path)}, cwd=str(project))
+
+    ctx.session_id = "ses_1"
+    mine = scratch_dir(ctx)
+    assert verdict(mine / "brief.md") == "allow"
+    assert verdict(mine.parent / "ses_2" / "brief.md") == "ask"
+    assert verdict(mine.parent.parent / "memory" / "facts.md") == "ask"
+
+    ctx.session_id = ""
+    assert perms.extra_edit_roots() == []
+    assert verdict(mine / "brief.md") == "ask"
+
+
+def test_a_host_that_names_its_own_edit_folders_keeps_them(tmp_path) -> None:
+    perms = PermissionEngine("on_write")
+    perms.edit_roots = [str(tmp_path / "uploads")]
+    NativeLoop(provider=None, store=MemoryStore(), model="m", permissions=perms)
+    assert perms.extra_edit_roots() == [str(tmp_path / "uploads")]
+
+    def broken():
+        raise RuntimeError("no folder")
+
+    perms.edit_roots = broken
+    assert perms.extra_edit_roots() == []  # the edit asks

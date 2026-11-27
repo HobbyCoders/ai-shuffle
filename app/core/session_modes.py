@@ -590,6 +590,30 @@ def turn_permission_mode(overrides: Optional[Mapping[str, Any]], session: Option
     return permission_mode_for_session_mode(mode, session.get("mode"))
 
 
+def session_edit_roots(session_id: Any, cwd: Any, add_dirs: Any = None):
+    """The folders outside its working folder a session may edit under Accept
+    Edits, as a callable for ``mode_approves_without_prompt``'s
+    ``extra_roots``: the folders the session was given (``add_dirs``) and its
+    own scratch folder. The scratch folder is the one the host resolves for
+    this session id, never one read off the path being edited, so another
+    session's scratch is not this session's to edit. Worked out only when an
+    edit lands outside the working folder; a lookup that fails adds nothing,
+    and the edit asks."""
+    def roots() -> list:
+        folders = list(add_dirs or ())
+        try:
+            from app.core.harness_state import session_scratch_dir
+
+            scratch = session_scratch_dir(session_id, cwd)
+        except Exception:  # noqa: BLE001 - no scratch folder known: ask
+            scratch = None
+        if scratch:
+            folders.append(scratch)
+        return folders
+
+    return roots
+
+
 def mode_approves_without_prompt(
     permission_mode: Any,
     tool_name: str,
@@ -611,7 +635,8 @@ def mode_approves_without_prompt(
     "The project's own files" is fluid's answer
     (:func:`fluid.permissions.edit_guard.edit_stays_in_project`), from the
     call's ``tool_input``, the session's working folder ``cwd`` and the
-    ``extra_roots`` the session may also write (its ``add_dirs``). An edit
+    ``extra_roots`` the session may also write (:func:`session_edit_roots`:
+    its ``add_dirs`` and its own scratch folder). An edit
     outside them, or to a file that configures a tool, starts programs or
     holds credentials, is not approved by the mode: ``~/.bashrc``,
     ``.git/hooks/pre-commit``, ``.claude/settings.json``. A caller that does

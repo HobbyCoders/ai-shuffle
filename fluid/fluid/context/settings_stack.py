@@ -240,18 +240,21 @@ def default_permission_mode(settings: dict[str, Any]) -> str | None:
     return None
 
 
-def default_mode_policy(settings: dict[str, Any]) -> tuple[str | None, list[Rule]]:
+def default_mode_policy(
+    settings: dict[str, Any], extra_roots: Any = None
+) -> tuple[str | None, list[Rule]]:
     """``permissions.defaultMode`` as ``(approval_policy, extra rules)``.
 
     The policy comes from ``fluid.permissions.modes.MODE_POLICY``; the rules
     are the allow entries ``acceptEdits`` implies for the edit-class tools
     (``ACCEPT_EDITS_TOOLS`` there), empty for every other mode. ``(None, [])``
-    when the mode is unset or unsupported.
+    when the mode is unset or unsupported. ``extra_roots`` is passed to
+    :func:`fluid.permissions.modes.mode_rules`.
     """
     mode = default_permission_mode(settings)
     if mode is None:
         return None, []
-    return MODE_POLICY[mode], mode_rules(mode)
+    return MODE_POLICY[mode], mode_rules(mode, extra_roots)
 
 
 def mcp_toggles(settings: dict[str, Any]) -> tuple[list[str], list[str]]:

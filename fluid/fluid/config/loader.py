@@ -556,8 +556,13 @@ def load_config(
 # ─── engine factory ──────────────────────────────────────────────────────────
 
 
-def sensitive_file_rules():
+def sensitive_file_rules(active=None):
     """Default ask-rules for credential files, per file-taking builtin.
+
+    ``active`` is an optional callable read each time a call is judged: while
+    it returns False the asks stand aside. A host passes one that is False
+    under ``never_ask`` (Bypass), where nothing asks, so the rules follow a
+    mode changed on a live engine.
 
     Prepended BEFORE user rules — last match wins, so one user rule allows a
     path through. Bash gets the same protection through its risk classifier
@@ -573,6 +578,8 @@ def sensitive_file_rules():
     Public because a host that builds its own engine installs the same rules
     (the app's native leg does).
     """
+    import dataclasses
+
     from fluid.permissions.rules import Rule, path_candidates
     from fluid.tools.hardening import (
         PROTECTED_WRITE_PREFIXES,
@@ -640,6 +647,14 @@ def sensitive_file_rules():
         for tool in ("Edit", "Write")
         for prefix in PROTECTED_WRITE_PREFIXES
     )
+    if active is not None:
+        def while_active(inner):
+            def guard(input, cwd) -> bool:
+                return bool(active()) and (inner is None or inner(input, cwd))
+
+            return guard
+
+        asks = [dataclasses.replace(rule, guard=while_active(rule.guard)) for rule in asks]
     return asks
 
 
@@ -668,20 +683,23 @@ def _build_permissions(config: HarnessConfig, settings: dict[str, Any] | None = 
 
     if settings is None:
         settings = _session_settings(config)
+    engine = PermissionEngine(config.permission.approval_policy)
     rules = []
-    if (
-        config.permission.protect_sensitive_files
-        and config.permission.approval_policy != "never_ask"
-    ):
-        rules.extend(_sensitive_file_rules())
-    _policy, mode_rules = default_mode_policy(settings)
+    if config.permission.protect_sensitive_files:
+        # Asked under every policy but ``never_ask``, read when a call is
+        # judged: the policy can change on a live engine.
+        rules.extend(sensitive_file_rules(
+            active=lambda: engine.approval_policy != "never_ask"
+        ))
+    _policy, mode_rules = default_mode_policy(settings, engine.extra_edit_roots)
     rules.extend(mode_rules)
     rules.extend(permission_rules(settings))
     rules.extend(
         Rule(tool=r.tool, decision=r.decision, input_globs=dict(r.input_globs))
         for r in config.permission.rules
     )
-    return PermissionEngine(config.permission.approval_policy, rules=rules)
+    engine.rules = rules
+    return engine
 
 
 def _build_provider_client(config: HarnessConfig, provider_name: str):

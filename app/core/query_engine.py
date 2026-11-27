@@ -2401,6 +2401,7 @@ async def _stream_to_websocket_turn(
                 from app.core.session_modes import (
                     effective_permission_mode,
                     mode_approves_without_prompt,
+                    session_edit_roots,
                 )
 
                 _perm_mode = effective_permission_mode(
@@ -2819,7 +2820,8 @@ async def _stream_to_websocket_turn(
                 # modes; Ask already applies them inside request_permission.
                 if not mode_approves_without_prompt(
                     _perm_mode, tool_name, tool_input,
-                    cwd=refs.get("cwd"), extra_roots=refs.get("add_dirs"),
+                    cwd=refs.get("cwd"),
+                    extra_roots=session_edit_roots(_sid, refs.get("cwd"), refs.get("add_dirs")),
                 ):
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")

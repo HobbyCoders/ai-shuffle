@@ -1356,6 +1356,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             learn_git_version()
         self.hooks = hooks
         self.ctx = ctx or ToolCtx()
+        if permissions is not None and getattr(permissions, "edit_roots", ...) is None:
+            # Accept Edits lets the session edit its own scratch folder,
+            # which only this loop can name (see _own_edit_roots).
+            permissions.edit_roots = self._own_edit_roots
         if registry is not None:
             # The ToolSearch builtin reaches the registry through the ctx.
             self.ctx.extra.setdefault("tool_registry", registry)
@@ -2083,7 +2087,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             if self.permissions is not None:
                 self.permissions.approval_policy = policy
-                self.permissions.set_mode_rules(mode_rules(mode))
+                self.permissions.set_mode_rules(mode_rules(
+                    mode, getattr(self.permissions, "extra_edit_roots", None)))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
         elif isinstance(op, Fork | Rewind) and self.turn_running:
@@ -5375,6 +5380,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         ):
             return False
         return not matches_tool_pattern(name, self.disallowed_tools)
+
+    def _own_edit_roots(self) -> list[str]:
+        """This session's scratch folder (``fluid.state.scratch_dir``), the
+        one folder outside the project its briefs and working files go to.
+        Empty until the session has an id: no other session's folder is
+        ever guessed."""
+        if not self.ctx.session_id:
+            return []
+        from fluid.state import scratch_dir
+
+        return [str(scratch_dir(self.ctx))]
 
     def _tool_wired(self, name: str) -> bool:
         """Permitted (:meth:`_tool_permitted`) AND backed by a wired capability.

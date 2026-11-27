@@ -1915,3 +1915,40 @@ async def test_a_model_the_agent_does_not_offer_is_named_in_the_turn(tmp_path: P
         assert served[0].turn_id == end.turn_id
     finally:
         await d.close()
+
+
+def test_an_edit_request_lists_every_file_it_reports() -> None:
+    """``file_path`` shows one file. An approver that judged that one alone
+    approved the whole request, so a request over more than one target lists
+    them all (``permissions.edit_guard`` judges each)."""
+    from fluid.permissions.edit_guard import edit_stays_in_project
+
+    mapper = TurnMapper(session_id="s", turn_id="t")
+
+    def diff(path: str) -> dict:
+        return {"type": "diff", "path": path, "oldText": "a", "newText": "b"}
+
+    def shown(**call) -> dict:
+        return mapper.tool_name_and_input({"toolCallId": "c", "kind": "edit", **call})[1]
+
+    one = shown(content=[diff("/work/src/a.py")], locations=[{"path": "/work/src/a.py"}])
+    assert one["file_path"] == "/work/src/a.py" and "file_paths" not in one
+
+    two = shown(content=[diff("/work/src/a.py"), diff("/home/me/.bashrc")])
+    assert two["file_path"] == "/work/src/a.py"
+    assert two["file_paths"] == ["/work/src/a.py", "/home/me/.bashrc"]
+    assert not edit_stays_in_project(two, "/work")
+
+    # A location the diffs do not cover, and a raw input naming another file.
+    located = shown(content=[diff("/work/src/a.py")], locations=[{"path": "/etc/hosts"}])
+    assert located["file_paths"] == ["/work/src/a.py", "/etc/hosts"]
+    raw = shown(rawInput={"file_path": "/work/src/a.py"}, content=[diff("/etc/hosts")])
+    assert raw["file_path"] == "/work/src/a.py" and raw["file_paths"] == ["/etc/hosts"]
+    assert not edit_stays_in_project(raw, "/work")
+
+    # Only edit requests carry the list.
+    read = mapper.tool_name_and_input({
+        "toolCallId": "c", "kind": "read",
+        "locations": [{"path": "/work/a.py"}, {"path": "/work/b.py"}],
+    })[1]
+    assert "file_paths" not in read

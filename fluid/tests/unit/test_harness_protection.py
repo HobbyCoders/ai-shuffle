@@ -266,3 +266,25 @@ def test_default_sensitive_rules_see_absolute_paths_via_cwd(tmp_path) -> None:
     target = str(tmp_path / "cfg" / ".." / ".env")
     assert engine.decide(read_spec, {"file_path": target}, cwd=str(tmp_path)).decision == "ask"
     assert engine.decide(read_spec, {"file_path": "README.md"}, cwd=str(tmp_path)).decision == "allow"
+
+
+def test_default_sensitive_rules_follow_a_policy_changed_on_a_live_engine(tmp_path) -> None:
+    """Nothing asks under ``never_ask``. The asks read the policy when a call
+    is judged, so a session that leaves ``never_ask`` gets them back and one
+    that enters it is decided (and counted by the repeat guard) as before."""
+    cwd = str(tmp_path)
+    read = ToolSpec(name="Read", description="", input_schema={}, risk="read")
+    call = {"file_path": ".env"}
+
+    engine = _build_permissions(_config(permission={"approval_policy": "never_ask"}))
+    assert engine.evaluate(read, call, cwd=cwd) == "allow"
+    engine.approval_policy = "on_write"
+    assert engine.evaluate(read, call, cwd=cwd) == "ask"
+    engine.approval_policy = "never_ask"
+    assert engine.evaluate(read, call, cwd=cwd) == "allow"
+
+    # With the asks standing aside no rule decides the call: it is the
+    # policy's own allow, the kind the loop's repeat guard counts (an "ask"
+    # the host then approves is not counted).
+    verdict = engine.decide(read, call, cwd=cwd)
+    assert (verdict.decision, verdict.source) == ("allow", "policy")
