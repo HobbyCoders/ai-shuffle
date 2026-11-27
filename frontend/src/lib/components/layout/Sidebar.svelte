@@ -263,7 +263,7 @@
 	}
 
 	function isCompacting(id: string): boolean {
-		return $compactingSessions.has(id) || (id === activeId && activeCompacting);
+		return id === activeId ? activeCompacting : $compactingSessions.has(id);
 	}
 
 	function projectLabel(s: Session): string {

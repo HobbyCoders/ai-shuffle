@@ -242,8 +242,13 @@ def compacting_session_ids(session_ids: List[str]) -> set:
                 "THEN e.payload->>'state' END FROM session_events e "
                 "WHERE e.session_id = s.id AND (e.event_type IN ("
                 "'system.compaction_status', 'system.compaction_boundary', "
-                "'turn.started', 'turn.parked', 'turn.completed', 'turn.aborted', "
-                "'transcript.rewound') OR (e.event_type = 'system.note' "
+                "'turn.parked', 'transcript.rewound') "
+                # A voice exchange or brief is its own turn, written mid-call:
+                # its start and end do not end the real turn's compaction.
+                "OR (e.event_type IN ('turn.started', 'turn.completed', 'turn.aborted') "
+                "AND COALESCE(e.turn_id, '') NOT LIKE 'voice-%%' "
+                "AND COALESCE(e.turn_id, '') NOT LIKE 'brief-%%') "
+                "OR (e.event_type = 'system.note' "
                 "AND e.payload->>'subtype' = 'compact_failed')) "
                 "ORDER BY e.seq DESC LIMIT 1) = 'started'",
                 tuple(ids),

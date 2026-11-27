@@ -521,7 +521,8 @@ def _append(session_id, *events):
     from app.db import session_events as session_events_db
 
     session_events_db.append_events(session_id, [
-        {"type": kind, "payload": payload} for kind, payload in events
+        {"type": event[0], "payload": event[1], "turn_id": event[2] if len(event) > 2 else None}
+        for event in events
     ])
 
 
@@ -541,6 +542,9 @@ def test_snapshot_marks_a_chat_compacting_until_its_compaction_ends(mock_db, clo
     assert row["compacting"] is True
     # Unrelated output during the compaction does not end it.
     _append("s1", ("system.note", {"subtype": "other"}))
+    # Nor does a voice exchange or brief written as its own turn meanwhile.
+    _append("s1", ("turn.started", {}, "voice-1"), ("turn.completed", {}, "voice-1"),
+            ("turn.completed", {}, "brief-1"))
     assert streaming_status.compacting_session_ids(["s1"]) == {"s1"}
 
     _append("s1", closing)
@@ -597,6 +601,11 @@ async def test_recorded_compaction_events_announce_start_and_end(monkeypatch):
     turn_recorder._announce_compaction("s1", [
         {"type": "system.compaction_status", "payload": {"state": "started"}},
         {"type": "system.compaction_boundary", "payload": {"subtype": "compact_boundary"}},
+    ])
+    # A voice exchange or brief written as its own turn decides nothing.
+    turn_recorder._announce_compaction("s1", [
+        {"type": "turn.started", "payload": {}, "turn_id": "voice-1"},
+        {"type": "turn.completed", "payload": {}, "turn_id": "brief-1"},
     ])
     turn_recorder._announce_compaction("s1", [{"type": "turn.completed", "payload": {}}])
     assert seen == [("s1", True), ("s1", False), ("s1", False)]

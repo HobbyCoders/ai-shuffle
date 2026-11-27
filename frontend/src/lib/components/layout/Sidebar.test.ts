@@ -1680,6 +1680,23 @@ describe('Sidebar streaming folds (R2)', () => {
 		expect(cardFrame('Active chat').textContent).not.toContain('Compacting');
 	});
 
+	it('the open chat follows its own feed, not the server frames', async () => {
+		// A frame said compacting, then the open chat's feed saw it end.
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true, activeTasks: [], liveCompaction: null });
+		mocks.streamingSessions.set(new Set(['active']));
+		mocks.compactingSessions.set(new Set(['active']));
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(cardFrame('Active chat').textContent).not.toContain('Compacting');
+
+		mocks.activeSession.set({
+			sessionId: 'active', isStreaming: true, activeTasks: [], liveCompaction: { phase: 'running' },
+		});
+		mocks.compactingSessions.set(new Set());
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Compacting');
+	});
+
 	it('still shows Working from the cross-device map alone', async () => {
 		mocks.activeSession.set({ sessionId: null, isStreaming: false, activeTasks: [] });
 		mocks.streamingSessions.set(new Set(['settled']));

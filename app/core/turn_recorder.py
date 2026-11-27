@@ -81,6 +81,8 @@ _COMPACTION_CLEARING_EVENTS = frozenset({
     "turn.started", "turn.parked", "turn.completed", "turn.aborted",
     "system.compaction_boundary", "transcript.rewound",
 })
+# Lifecycle events a transcript-only turn (voice-/brief-) writes; ignored above.
+_TURN_LIFECYCLE_EVENTS = frozenset({"turn.started", "turn.completed", "turn.aborted"})
 
 # Envelope fields of EventBase — everything else on a model is its payload.
 _ENVELOPE_FIELDS = {
@@ -148,10 +150,16 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
 def _announce_compaction(session_id: str, events: List[Dict[str, Any]]) -> None:
     """After a written batch: tell the owner's tabs a compaction started or
     stopped, so a chat in the background shows it too. Never raises."""
+    from app.db.session_questions import is_transcript_only_turn
+
     compacting = None
     for event in events:
         kind = event.get("type")
         payload = event.get("payload") or {}
+        if kind in _TURN_LIFECYCLE_EVENTS and is_transcript_only_turn(event.get("turn_id")):
+            # A voice exchange or brief is written as its own turn mid-call; like
+            # the reducer, it does not end the real turn's compaction.
+            continue
         if kind == "system.compaction_status":
             compacting = payload.get("state") == "started"
         elif kind in _COMPACTION_CLEARING_EVENTS or (
