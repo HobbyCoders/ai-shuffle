@@ -261,6 +261,9 @@ def validate_scenario(name: str, data: Any) -> dict:
             raise ScenarioError(f"{name} step {number}: reasoning must be a string")
         if "served_model" in step and not isinstance(step["served_model"], str):
             raise ScenarioError(f"{name} step {number}: served_model must be a string")
+        if "tps" in step and (isinstance(step["tps"], bool)
+                              or not isinstance(step["tps"], (int, float))):
+            raise ScenarioError(f"{name} step {number}: tps must be a number")
         for call in step.get("tool_calls") or []:
             if not isinstance(call, dict) or not isinstance(call.get("name"), str):
                 raise ScenarioError(f"{name} step {number}: each tool call needs a name")
@@ -652,7 +655,10 @@ class FakeAI:
         steps = scenario["steps"]
         step = steps[min(round_, len(steps) - 1)]
         plan = Plan(
-            tps=_number(params.get("tps"), _number(scenario.get("tps"), self.tps)),
+            # A step's own pace wins: one scenario can stream a long opener fast
+            # and the reply a reader follows at the tag's slower pace.
+            tps=_number(step.get("tps"),
+                        _number(params.get("tps"), _number(scenario.get("tps"), self.tps))),
             latency_ms=_number(params.get("latency_ms"),
                                _number(scenario.get("latency_ms"), self.latency_ms)),
             cut_after=step.get("cut_after_chars"),

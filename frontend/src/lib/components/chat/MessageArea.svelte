@@ -566,7 +566,7 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; thinkingShown: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
@@ -574,6 +574,7 @@
 			runningToolKey: '',
 			heldTurnKeys: null,
 			groupingEnabled: true,
+			thinkingShown: true,
 			model: {
 				items: [],
 				promptOccurrence: [],
@@ -615,6 +616,7 @@
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
+		const thinkingShown = chatPrefs?.showThinkingBlocks !== false;
 		if (
 			messages === _displayCache.messages
 			&& sessionId === _displayCache.sessionId
@@ -624,6 +626,7 @@
 			&& runningToolKey === _displayCache.runningToolKey
 			&& heldKeys === _displayCache.heldTurnKeys
 			&& groupingEnabled === _displayCache.groupingEnabled
+			&& thinkingShown === _displayCache.thinkingShown
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
 			// cached model so downstream {#each} skips re-diffing.
@@ -643,7 +646,8 @@
 			heldTurnKeys: heldKeys,
 			sessionId,
 			swarms: Object.values(sessionSwarms ?? {}),
-			groupingEnabled
+			groupingEnabled,
+			thinkingShown
 		});
 
 		_displayCache.messages = messages;
@@ -654,6 +658,7 @@
 		_displayCache.runningToolKey = runningToolKey;
 		_displayCache.heldTurnKeys = heldKeys;
 		_displayCache.groupingEnabled = groupingEnabled;
+		_displayCache.thinkingShown = thinkingShown;
 		_displayCache.model = model;
 		return model;
 	});

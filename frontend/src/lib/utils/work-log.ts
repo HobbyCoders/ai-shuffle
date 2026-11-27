@@ -985,6 +985,8 @@ export interface BuildOptions {
 	heldTurnKeys?: ReadonlySet<string>;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
+	/** User preference "Show thinking blocks"; false means reasoning rows draw nothing. */
+	thinkingShown?: boolean;
 	/** Session-scoped live/hydrated workflows, including updates before tool.result. */
 	swarms?: readonly SwarmSnapshot[];
 	sessionId?: string | null;
@@ -1133,7 +1135,17 @@ function runKeyOf(entry: Positioned): string {
 	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
 }
 
-function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: string | null): void {
+/**
+ * The call Stop cut off: the interrupt marks a running card failed without a
+ * result, while a real failure always lands its error text on the card. (A card
+ * a provider retry abandoned is marked the same way but never got its input.)
+ */
+function stoppedMidCall(message: ChatMessage): boolean {
+	return message.type === 'tool_use' && message.toolStatus === 'error'
+		&& message.toolResult === undefined && message.toolInput !== undefined;
+}
+
+function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: string | null, thinkingShown = true): void {
 	// Code-mode wrappers are not transcript rows: their dispatched tools are.
 	// Keep a streaming cell visible only until its first visible inner call arrives.
 	const lastVisibleIndex = turn.findLastIndex((entry) => !isHiddenCodeModeCell(entry.message));
@@ -1206,6 +1218,15 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	const runOf = new Map<Positioned, number>();
 	const hidden = new Set<Positioned>();
 	let runIndex = 0;
+	// A run folds only if its fold has something to show: reasoning alone, with
+	// thinking blocks turned off, would be a disclosure that opens onto nothing.
+	// Those rows keep their place, where the transcript draws nothing for them.
+	const foldRun = (folded: Positioned[], key: Positioned) => {
+		if (!folded.some((entry) => thinkingShown || entry.message.type !== 'thinking')) return;
+		for (const row of folded) hidden.add(row);
+		const rows = folded.map(({ message, index }) => ({ message, index }));
+		runs.push({ index: runIndex, key: runKeyOf(key), folded: rows, summary: summarizeWork(rows), compactSummary: phoneSummary(rows) });
+	};
 	let open: Positioned[] = [];
 	for (const entry of response) {
 		runOf.set(entry, runIndex);
@@ -1213,12 +1234,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 			open.push(entry);
 			continue;
 		}
-		const folded = open.filter(foldsWithRun);
-		for (const row of folded) hidden.add(row);
-		if (folded.length > 0) {
-			const rows = folded.map(({ message, index }) => ({ message, index }));
-			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: phoneSummary(rows) });
-		}
+		foldRun(open.filter(foldsWithRun), open[0]);
 		runIndex++;
 		open = [];
 	}
@@ -1228,14 +1244,12 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// agent delivered stays on screen, as a steer does: it was sent in for the
 	// reader, and folds once the agent's next prose ends the run. Nothing still
 	// streaming folds: a code-mode cell counts as routine whatever its state,
-	// and a streaming one is the only row that shows its work so far.
-	const current = open.filter((entry) =>
-		foldsWithRun(entry) && !agentDelivery(entry.message) && !entry.message.streaming);
-	for (const row of current) hidden.add(row);
-	if (current.length > 0) {
-		const rows = current.map(({ message, index }) => ({ message, index }));
-		runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: phoneSummary(rows) });
-	}
+	// and a streaming one is the only row that shows its work so far. The call
+	// Stop cut off stays too: the stopped turn is held open above what was not
+	// sent (#1147), showing what it was doing, and folds once the turn settles.
+	foldRun(open.filter((entry) =>
+		foldsWithRun(entry) && !agentDelivery(entry.message) && !entry.message.streaming
+		&& !stoppedMidCall(entry.message)), open[0]);
 
 	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
 	// A generated picture never folds here (it is the result), but the reply
@@ -1316,6 +1330,7 @@ export function createTranscriptModelBuilder() {
 			&& sameIds(options.runningToolIds, old.options.runningToolIds)
 			&& sameIds(options.heldTurnKeys, old.options.heldTurnKeys)
 			&& options.groupingEnabled === old.options.groupingEnabled
+			&& (options.thinkingShown ?? true) === (old.options.thinkingShown ?? true)
 			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
 		let model: TranscriptModel;
 		const onlyTailTextGrew = !!sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
@@ -1474,7 +1489,7 @@ interface TurnCacheEntry {
 }
 
 export interface TurnCache {
-	scope: { groupingEnabled: boolean; sessionId: string | null | undefined } | null;
+	scope: { groupingEnabled: boolean; thinkingShown: boolean; sessionId: string | null | undefined } | null;
 	turns: Map<string, TurnCacheEntry>;
 }
 
@@ -1522,6 +1537,7 @@ export function buildTranscriptModel(
 	cache?: TurnCache
 ): TranscriptModel {
 	const { isStreaming, groupingEnabled } = options;
+	const thinkingShown = options.thinkingShown ?? true;
 	const latestTurnUnsettled = options.latestTurnUnsettled ?? isStreaming;
 	const swarmOwned = swarmOwnedMessages(messages, options);
 	const handoffs = handoffEpisodes(messages);
@@ -1586,7 +1602,8 @@ export function buildTranscriptModel(
 
 	const scope = cache?.scope;
 	const reusable = !!cache && !!scope
-		&& scope.groupingEnabled === groupingEnabled && scope.sessionId === options.sessionId;
+		&& scope.groupingEnabled === groupingEnabled && scope.thinkingShown === thinkingShown
+		&& scope.sessionId === options.sessionId;
 	const previousTurns = reusable ? cache.turns : null;
 	const nextTurns = new Map<string, TurnCacheEntry>();
 	turns.forEach((turn, turnIndex) => {
@@ -1629,7 +1646,7 @@ export function buildTranscriptModel(
 		if (cache) nextTurns.set(key, { rows: turn, unsettled, items: items.slice(start) });
 	});
 	if (cache) {
-		cache.scope = { groupingEnabled, sessionId: options.sessionId };
+		cache.scope = { groupingEnabled, thinkingShown, sessionId: options.sessionId };
 		cache.turns = nextTurns;
 	}
 
@@ -1640,7 +1657,7 @@ export function buildTranscriptModel(
 		}
 
 		if (unsettledTurn) {
-			emitLiveTurn(turn, items, options.sessionId);
+			emitLiveTurn(turn, items, options.sessionId, thinkingShown);
 			return;
 		}
 

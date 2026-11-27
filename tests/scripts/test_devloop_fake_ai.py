@@ -381,6 +381,29 @@ def test_timing_knobs_come_from_tag_scenario_then_globals(tmp_path: Path) -> Non
         assert (slow.tps, slow.latency_ms) == (2, 0)
 
 
+def test_a_steps_own_pace_wins_over_the_tag_and_scenario(tmp_path: Path) -> None:
+    scenarios = tmp_path / "scenarios"
+    scenarios.mkdir()
+    (scenarios / "default.json").write_text(json.dumps({"steps": [{"text": "x"}]}))
+    (scenarios / "paced.json").write_text(json.dumps({"tps": 3, "steps": [{"tps": 400, "text": "x"}]}))
+    (scenarios / "unpaced.json").write_text(json.dumps({"tps": 3, "steps": [{"text": "x"}]}))
+    with FakeAI(scenarios, log_path=tmp_path / "log.jsonl", tps=99) as fake:
+        def plan(text: str):
+            recorded = fake_wire.Recorded("POST", "/v1/chat/completions", {},
+                                          {"messages": [{"role": "user", "content": text}]})
+            return fake.plan(recorded)[0]
+        assert plan("[script:paced tps=8]").tps == 400
+        assert plan("[script:unpaced tps=8]").tps == 8
+        assert plan("[script:unpaced]").tps == 3
+
+
+@pytest.mark.parametrize("tps", ["fast", True])
+def test_a_steps_pace_must_be_a_number(tmp_path: Path, tps: object) -> None:
+    (tmp_path / "bad.json").write_text(json.dumps({"steps": [{"text": "x", "tps": tps}]}))
+    with pytest.raises(ScenarioError, match="tps must be a number"):
+        Scenarios(tmp_path).load()
+
+
 def test_shipped_scenarios_all_load() -> None:
     assert set(Scenarios(SCENARIOS_DIR).load()) >= {
         "default", "long", "slow", "tool-bash", "tool-multi", "tool-background-stream",

@@ -2089,11 +2089,45 @@ describe('live runs', () => {
 	});
 
 	it('folds the current run as each row completes, before any boundary', () => {
-		const messages = [user('go'), tool(), tool({ toolStatus: 'error' }), tool(), tool({ toolStatus: 'running', streaming: true })];
+		const messages = [user('go'), tool(), tool({ toolStatus: 'error', toolResult: 'exit 1' }), tool(), tool({ toolStatus: 'running', streaming: true })];
 		const items = buildDisplayItems(messages, LIVE);
 		expect(runsOf(liveLog(items)!)).toEqual([[0, messages.slice(1, 4)]]);
 		expect(liveLog(items)!.runs![0].summary).toBe('Ran 3 commands, 1 failed');
 		expect(collapsedVisibleMessages(items)).toEqual([messages[0], messages[4]]);
+	});
+
+	it('keeps the call Stop cut off on screen while the stopped turn is held open', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, b] = [tool(), tool({ toolStatus: 'error', toolResult: 'exit 1' })];
+		const lead = text('Running the long suite now.');
+		const earlier = tool();
+		// What the interrupt leaves: failed, no longer streaming, and no result.
+		const stopped = tool({ toolStatus: 'error', streaming: false, toolInput: { command: 'sleep 60' } });
+		const items = buildDisplayItems([prompt, a, b, lead, earlier, stopped], { ...LIVE, isStreaming: false, latestTurnUnsettled: true });
+		const log = liveLog(items)!;
+		// Calls that had already folded stay folded; only the stopped one shows.
+		expect(runsOf(log)).toEqual([[0, [a, b]], [1, [earlier]]]);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, lead, stopped]);
+		// A card a provider retry abandoned never got its input: routine, it folds.
+		const abandoned = tool({ toolStatus: 'error', streaming: false, toolInput: undefined, partialToolInput: '{"comm' });
+		const retried = buildDisplayItems([prompt, lead, abandoned, tool({ toolStatus: 'running', streaming: true })], LIVE);
+		expect(runsOf(liveLog(retried)!)).toEqual([[1, [abandoned]]]);
+	});
+
+	it('opens no fold onto reasoning alone when thinking blocks are hidden', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const thought = msg({ type: 'thinking', content: 'Weighing the options.' });
+		const running = tool({ toolStatus: 'running', streaming: true });
+		const hiddenItems = buildDisplayItems([prompt, thought, running], { ...LIVE, thinkingShown: false });
+		expect(liveLog(hiddenItems)!.runs ?? []).toEqual([]);
+		expect(liveLog(hiddenItems)!.sequence.some((entry) => entry.foldsInRun)).toBe(false);
+		// Shown, the finished reasoning folds like any other finished row.
+		const shownItems = buildDisplayItems([prompt, thought, running], LIVE);
+		expect(runsOf(liveLog(shownItems)!)).toEqual([[0, [thought]]]);
+		// Hidden, it still folds along with work the fold can show.
+		const ran = tool();
+		const mixed = buildDisplayItems([prompt, thought, ran, running], { ...LIVE, thinkingShown: false });
+		expect(runsOf(liveLog(mixed)!)).toEqual([[0, [thought, ran]]]);
 	});
 
 	it('folds a failed tool with its run and counts it, keeping it in the expanded run', () => {
