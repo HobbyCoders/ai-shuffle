@@ -630,7 +630,10 @@ def test_report_stays_small(mock_db, tmp_path, monkeypatch):
             checkouts.archive_checkout_by_path(project["id"], str(ghost), runner_id=runner)
     result = wr.report(project["id"])
     assert result["total"] == 12 and result["projects"][0]["history_folded"] == 100
-    assert len(json.dumps(result)) < 12 * 400 + 1000
+    # Measure the report, not where pytest put its temp folder: every row repeats
+    # that path, and a Windows temp path is long and doubles its backslashes in JSON.
+    encoded = json.dumps(result).replace(json.dumps(str(tmp_path))[1:-1], "<tmp>")
+    assert len(encoded) < 12 * 400 + 1000
 
 
 # --- 7. Cadence ------------------------------------------------------------------
