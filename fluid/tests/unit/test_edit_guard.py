@@ -290,8 +290,9 @@ def test_a_protected_folder_that_links_to_an_ordinary_one_asks(project: Path) ->
     plain.mkdir()
     (plain / "settings.json").write_text("{}")
     _symlink(project / ".vscode", plain, folder=True)
-    assert _ok(project, "tooling/settings.json")
     assert not _ok(project, ".vscode/settings.json")
+    # The same file by its ordinary name is still the editor's settings.
+    assert not _ok(project, "tooling/settings.json")
 
 
 def test_an_ordinary_link_inside_the_project_is_still_approved(project: Path) -> None:
@@ -324,8 +325,55 @@ def test_a_session_started_in_a_protected_folder_that_is_a_link_asks(
     assert not edit_stays_in_project({"file_path": "settings.json"}, started)
     assert not edit_stays_in_project({"file_path": str(project / name / "settings.json")}, started)
     assert not edit_stays_in_project({"file_path": str(project / "plain" / "settings.json")}, started)
-    # The same folder under its ordinary name is project code.
-    assert edit_stays_in_project({"file_path": "settings.json"}, str(project / "plain"))
+
+
+@pytest.mark.parametrize("name", [".vscode", ".fluid", ".husky", ".devcontainer"])
+def test_a_folder_a_protected_name_links_to_asks_under_any_name(project: Path, name: str) -> None:
+    """``.vscode -> editor-config``: a file in ``editor-config`` is the
+    editor's settings whichever name the call or the session used, and no
+    name on the route says so."""
+    target = project / "editor-config"
+    (target / "deep").mkdir(parents=True)
+    _symlink(project / name, target, folder=True)
+    # From the project, by the ordinary name.
+    assert not _ok(project, "editor-config/settings.json")
+    assert not _ok(project, "editor-config/deep/tasks.json")
+    assert not _ok(project, str(target / "settings.json"))
+    # Started inside the folder itself, where the shell's physical working
+    # folder never shows the link's name.
+    assert not edit_stays_in_project({"file_path": "settings.json"}, str(target))
+    assert not edit_stays_in_project({"file_path": "deep/tasks.json"}, str(target / "deep"))
+    # The rest of the project is untouched by the link.
+    assert _ok(project, "src/app.py")
+    assert _ok(project, "README.md")
+
+
+def test_a_dangling_protected_link_asks_for_the_folder_it_names(project: Path) -> None:
+    """The link's folder does not exist yet: Write would create it, and the
+    file would then sit under the protected name."""
+    _symlink(project / ".vscode", project / "later", folder=True)
+    assert not _ok(project, "later/tasks.json")
+    assert _ok(project, "other/tasks.json")
+
+
+def test_a_protected_link_to_another_folder_leaves_its_neighbours_alone(project: Path) -> None:
+    (project / "a").mkdir()
+    (project / "b").mkdir()
+    _symlink(project / ".vscode", project / "a", folder=True)
+    assert not _ok(project, "a/x.json")
+    assert _ok(project, "b/x.json")
+
+
+def test_a_link_inside_a_host_added_folder_asks(project: Path, tmp_path: Path) -> None:
+    uploads = tmp_path / "uploads"
+    (uploads / "cfg").mkdir(parents=True)
+    (uploads / "plain").mkdir()
+    _symlink(uploads / ".vscode", uploads / "cfg", folder=True)
+    roots = [str(uploads)]
+    assert not edit_stays_in_project(
+        {"file_path": str(uploads / "cfg" / "tasks.json")}, str(project), roots)
+    assert edit_stays_in_project(
+        {"file_path": str(uploads / "plain" / "notes.md")}, str(project), roots)
 
 
 @pytest.mark.parametrize("parent", [".fluid", ".claude"])

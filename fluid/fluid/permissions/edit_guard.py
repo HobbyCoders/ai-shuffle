@@ -16,7 +16,8 @@ when the file the tool will open
   settings file (``.bashrc``, ``.gitconfig``, ``.mcp.json``, ...), and is not
   a credential file or under a protected install path;
 - is not a second name for a file that also lives somewhere else (a hard
-  link).
+  link), and is not in a folder that one of those protected names links to
+  from beside it (``.vscode -> editor-config``).
 
 Everything else is not denied, it asks, exactly as the default mode does.
 
@@ -184,6 +185,46 @@ def _is_second_name(path: str) -> bool:
     return os.path.isfile(path) and info.st_nlink > 1
 
 
+def _same_folder(link: str, folder: str) -> bool:
+    """True when ``link`` (a name that exists, or a dangling link) leads to
+    ``folder``, a real path."""
+    try:
+        if os.path.normcase(os.path.realpath(link)) == os.path.normcase(folder):
+            return True
+        return os.path.samefile(link, folder)
+    except (OSError, ValueError):
+        return False
+
+
+def _reached_by_protected_name(opened: str, top: str | None) -> bool:
+    """True when a folder on the way to ``opened`` (a real path) is what a
+    protected name beside it links to.
+
+    With ``repo/.vscode`` a link to ``repo/editor-config``, a file in
+    ``editor-config`` is also a file in ``.vscode``, whichever name the call
+    or the session used: the names on the route do not show it, so the links
+    beside each folder are read. Only a link next to the folder it points at
+    is seen; finding one anywhere else would take a walk of the whole tree.
+
+    The folders checked are the file's own, then each one above it, up to but
+    not including ``top`` (None: up to the filesystem root).
+    """
+    folder = os.path.dirname(opened)
+    top = None if top is None else os.path.normcase(top)
+    while True:
+        parent = os.path.dirname(folder)
+        if parent == folder or os.path.normcase(folder) == top:
+            return False
+        own = _plain_name(os.path.basename(folder))
+        for name in PROTECTED_DIR_NAMES:
+            if name == own:
+                continue  # The folder's own name is judged with the route.
+            beside = os.path.join(parent, name)
+            if os.path.lexists(beside) and _same_folder(beside, folder):
+                return True
+        folder = parent
+
+
 def _spelled_path(value: str, cwd: str) -> str | None:
     """``value`` as an absolute path with no link followed: the names the
     caller wrote, where :func:`_opened_path` gives the file they reach."""
@@ -258,15 +299,20 @@ def _path_allowed(
             return False
         if not _names_allow(parts, root_is_home=real == home):
             return False
-        if spelled == opened:
-            return True
-        # The spelling took another route (a link on the way). Its names
-        # must be allowed too, and it must stay in the same folder.
-        for base in (written, real):
-            named = _inside(spelled, base) if base is not None else None
-            if named is not None:
-                return _names_allow(named, root_is_home=real == home)
-        return False
+        if spelled != opened:
+            # The spelling took another route (a link on the way). Its names
+            # must be allowed too, and it must stay in the same folder.
+            named = next(
+                (found for base in (written, real) if base is not None
+                 and (found := _inside(spelled, base)) is not None),
+                None,
+            )
+            if named is None or not _names_allow(named, root_is_home=real == home):
+                return False
+        # Last, because it reads the disk: no folder on the way is one a
+        # protected name links to. The working folder is checked all the way
+        # up, like its names; a folder the host added from itself down.
+        return not _reached_by_protected_name(opened, None if is_project else real)
     return False
 
 

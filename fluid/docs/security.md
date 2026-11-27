@@ -108,7 +108,11 @@ model *reads* framing tokens even when they can't structurally escape.
   reaches are judged, so a link named `.env` that points at an ordinary
   file asks. A session started inside one of those folders (`repo/.vscode`)
   gets no approval at all, whether the folder is named that way or reached
-  through a link of that name. A request that lists several files (a
+  through a link of that name. A folder that one of those names links to
+  from beside it (`.vscode -> editor-config`) is treated as that folder
+  under every name, including for a session started inside it; a link to it
+  from elsewhere in the tree is not seen, since finding one would take a
+  walk of the whole project. A request that lists several files (a
   delegated agent reporting one edit over more than one target,
   `file_paths`) is approved only when every file passes; the delegated-agent
   mapping lists the targets for every request that can stand for an edit,
