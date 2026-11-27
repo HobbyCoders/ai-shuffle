@@ -186,7 +186,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		listInstallsMock.mockResolvedValue({ installs: [] });
 		getClusterGitStateMock.mockResolvedValue(null);
 		await fireEvent.click(runner!);
-		await waitFor(() => expect(container.querySelector('.runner-dropdown')?.textContent).toContain('Continue here'));
+		await waitFor(() => expect(container.querySelector('.runner-dropdown')?.textContent).toContain('Local'));
 	});
 	it.each(['cancel', 'confirm', 'navigate'])('requires confirmation before Git publication: %s', async (action) => {
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
@@ -196,7 +196,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		getClusterGitStateMock.mockResolvedValue(null);
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
-		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Continue here' }));
+		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Local' }));
 		expect(await view.findByRole('dialog')).toBeTruthy();
 		expect(view.getByText(/commit and push are not undone/)).toBeTruthy();
 		expect(adoptSession).not.toHaveBeenCalled();
@@ -230,7 +230,9 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
 		const destination = await view.findByRole('menuitemradio', { name: 'Other worker' });
-		expect(view.queryByRole('menuitemradio', { name: 'Continue here' })).toBeNull();
+		// This worker appears once, as the checked row; there is no continue-here row.
+		expect(view.getAllByRole('menuitemradio', { name: 'Local' })).toHaveLength(1);
+		expect(adoptSession).not.toHaveBeenCalled();
 		// Blocked rows stay focusable and announce why; they never start a move.
 		const offline = view.getByRole('menuitemradio', { name: 'Offline worker offline' }) as HTMLButtonElement;
 		expect(offline.disabled).toBe(false);
@@ -293,7 +295,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 			device_name: 'Other worker', device_online: true, is_remote: true, controllable: true }]);
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
-		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Continue here' }));
+		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Local' }));
 		await fireEvent.click(await view.findByRole('button', { name: 'Commit, push and continue' }));
 		return view;
 	}
@@ -530,7 +532,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		getClusterGitStateMock.mockResolvedValue(null);
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
-		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Continue here' }));
+		await fireEvent.click(await view.findByRole('menuitemradio', { name: 'Local' }));
 		expect(view.queryByRole('dialog')).toBeNull();
 		await waitFor(() => expect(adoptSession).toHaveBeenCalledExactlyOnceWith('remote'));
 	});
@@ -746,8 +748,8 @@ describe('worker presence dots', () => {
 		const chip = view.container.querySelector('.ctx-chip.runner');
 		expect(dotOf(chip)).toBe(online ? 'online' : 'offline');
 		await fireEvent.click(chip!);
-		// "Continue here" is this worker, which is always online.
-		expect(dotOf(await view.findByRole('menuitemradio', { name: 'Continue here' }))).toBe('online');
+		// The continue-here row is this worker, which is always online.
+		expect(dotOf(await view.findByRole('menuitemradio', { name: 'Local' }))).toBe('online');
 	});
 
 	it('turns a worker red and disabled when it goes offline while the menu is open', async () => {
@@ -796,21 +798,21 @@ describe('the active runner menu lists the current worker like the new-chat pick
 		expect(view.queryByRole('menu')).toBeNull();
 	});
 
-	it('shows the remote owner first as the checked row, then Continue here; picking the owner does not move', async () => {
+	it('shows the remote owner first as the checked row, then this worker by name; picking the owner does not move', async () => {
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
 			device_name: 'DesktopWorker', device_online: true, is_remote: true, controllable: true }]);
 		listInstallsMock.mockResolvedValue({ installs: [
-			{ id: 'local', is_self: true, online: true, device_name: 'Local' },
+			{ id: 'local', is_self: true, online: true, device_name: 'Home desktop' },
 			{ id: 'owner', is_self: false, online: true, device_name: 'DesktopWorker' },
 			{ id: 'pop', is_self: false, online: false, device_name: 'linux-worker' }
 		] });
 		getClusterGitStateMock.mockResolvedValue(null);
 		const view = render(ContextPillBar);
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
-		await view.findByRole('menuitemradio', { name: 'Continue here' });
+		await view.findByRole('menuitemradio', { name: 'Home desktop' });
 		const rows = view.getAllByRole('menuitemradio');
-		expect(rows.map((r) => r.querySelector('.worker-row-name')?.textContent)).toEqual(['DesktopWorker', 'Continue here', 'linux-worker']);
+		expect(rows.map((r) => r.querySelector('.worker-row-name')?.textContent)).toEqual(['DesktopWorker', 'Home desktop', 'linux-worker']);
 		expect(rows.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
 		await fireEvent.click(rows[0]);
 		expect(adoptSession).not.toHaveBeenCalled();
@@ -826,7 +828,7 @@ describe('the active runner menu lists the current worker like the new-chat pick
 		getClusterGitStateMock.mockResolvedValue(null);
 		const view = render(ContextPillBar);
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
-		await view.findByRole('menuitemradio', { name: 'Continue here' });
+		await view.findByRole('menuitemradio', { name: 'Local' });
 		return view.getAllByRole('menuitemradio');
 	};
 	const namesOf = (rows: HTMLElement[]) => rows.map((r) => r.querySelector('.worker-row-name')?.textContent);
@@ -839,7 +841,7 @@ describe('the active runner menu lists the current worker like the new-chat pick
 			{ id: 'worker-c', is_self: false, online: true, device_name: 'Laptop' }
 		] });
 		const rows = await openMenuRows();
-		expect(namesOf(rows)).toEqual(['Laptop', 'Continue here', 'Office PC']);
+		expect(namesOf(rows)).toEqual(['Laptop', 'Local', 'Office PC']);
 		expect(rows.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
 	});
 
@@ -850,7 +852,7 @@ describe('the active runner menu lists the current worker like the new-chat pick
 			{ id: 'worker-b', is_self: false, online: true, device_name: 'Office PC' }
 		] });
 		const rows = await openMenuRows();
-		expect(namesOf(rows)).toEqual(['Another worker', 'Continue here', 'Office PC']);
+		expect(namesOf(rows)).toEqual(['Another worker', 'Local', 'Office PC']);
 		expect(rows[0].getAttribute('aria-checked')).toBe('true');
 		expect(rows[0].textContent).toContain('offline');
 	});

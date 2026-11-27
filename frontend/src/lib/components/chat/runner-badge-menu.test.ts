@@ -79,6 +79,13 @@ describe('runnerBadgeMenuItems', () => {
 		expect(items.find((i) => i.id === 'continue-here')!.action).toEqual({ kind: 'adopt' });
 	});
 
+	it('names the continue-here row after this worker, like every other row', () => {
+		expect(runnerBadgeMenuItems(input()).find((i) => i.id === 'continue-here')!.label).toBe(self.device_name);
+		// Before the registry knows this worker, it reads as Local (as the runner chip does).
+		const unknownSelf = runnerBadgeMenuItems(input({ installs: [owner] })).find((i) => i.id === 'continue-here')!;
+		expect(unknownSelf.label).toBe('Local');
+	});
+
 	it('offers history-only Continue here for projectless sessions and explains Git publication', () => {
 		const noProject = runnerBadgeMenuItems(input({ hasProject: false })).find((i) => i.id === 'continue-here')!;
 		expect(noProject.disabled).toBe(false);
