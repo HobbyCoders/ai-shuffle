@@ -111,17 +111,30 @@ def git_probe(monkeypatch: pytest.MonkeyPatch):
         return subprocess.CompletedProcess(argv, answer["returncode"], answer["stdout"], "")
 
     monkeypatch.setattr(child_env.subprocess, "run", run)
-    child_env._git_answers_with_hardening.cache_clear()
+    child_env._GIT_ANSWERS.clear()
     yield calls, answer
-    child_env._git_answers_with_hardening.cache_clear()
+    child_env._GIT_ANSWERS.clear()
+
+
+def _asked() -> bool:
+    """The answer where the permission engine lets git be asked."""
+    with child_env.launch_context(None, may_ask_git=True):
+        return child_env.git_hardening_supported()
+
+
+def _rated(command: str) -> str:
+    from fluid.tools.builtins.bash_risk import classify
+
+    with child_env.launch_context(None, may_ask_git=True):
+        return classify({"command": command})
 
 
 def test_the_probe_asks_git_once_through_the_agent_shell(git_probe) -> None:
     from fluid.tools.shell import resolve_shell
 
     calls, _ = git_probe
-    assert child_env.git_hardening_supported() is True
-    assert child_env.git_hardening_supported() is True
+    assert _asked() is True
+    assert _asked() is True
     assert calls == [[*resolve_shell().argv_prefix, "git --version"]]
 
 
@@ -136,26 +149,96 @@ def test_the_probe_asks_git_once_through_the_agent_shell(git_probe) -> None:
     ],
 )
 def test_an_old_missing_or_silent_git_is_not_trusted(git_probe, answer) -> None:
-    from fluid.tools.builtins.bash_risk import classify
-
     _, current = git_probe
     current.update(answer)
-    assert child_env.git_hardening_supported() is False
-    assert classify({"command": "git status"}) == "write"
-    assert classify({"command": "ls"}) == "safe"
+    assert _asked() is False
+    assert _rated("git status") == "write"
+    assert _rated("ls") == "safe"
 
 
 def test_a_current_git_keeps_its_reads_unprompted(git_probe) -> None:
+    assert _rated("git status") == "safe"
+
+
+def test_git_is_not_started_unless_the_engine_allows_it(git_probe) -> None:
+    """Outside the permission engine (code mode's own look at a call's risk),
+    nothing is started: the answer is the one already known, or no."""
     from fluid.tools.builtins.bash_risk import classify
 
+    calls, _ = git_probe
+    assert child_env.git_hardening_supported() is False
+    assert classify({"command": "git status"}) == "write"
+    assert calls == []
+    assert _asked() is True
+    # Known now, so the same question costs nothing and starts nothing.
+    assert child_env.git_hardening_supported() is True
     assert classify({"command": "git status"}) == "safe"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "rule_decision"),
+    [
+        ("on_write", "deny"),
+        ("on_write", "ask"),
+        ("on_write", "allow"),
+        ("always_ask", None),
+        ("never_ask", None),
+    ],
+)
+def test_git_is_not_started_for_a_call_the_rating_does_not_decide(
+    git_probe, policy: str, rule_decision: str | None
+) -> None:
+    """A rule or the policy already settles these calls. Whatever git is
+    first on the worker's PATH, a folder the agent can write to included, it
+    is not started to rate a call that is denied or put to a person."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+    from fluid.tools.builtins.bash import SPEC as BASH_SPEC
+    from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
+
+    calls, _ = git_probe
+    rules = (
+        [Rule(tool="*", decision=rule_decision, input_globs={"command": "git status"})]
+        if rule_decision else []
+    )
+    expected = rule_decision or {"always_ask": "ask", "never_ask": "allow"}[policy]
+    for spec in (BASH_SPEC, MONITOR_SPEC):
+        verdict = PermissionEngine(policy, rules=list(rules)).decide(
+            spec, {"command": "git status"})
+        assert verdict.decision == expected
+    assert calls == []
+
+
+def test_a_git_installed_later_is_asked_again(
+    git_probe, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The answer belongs to the git file a PATH search finds. One that
+    appears earlier on PATH afterwards is another git."""
+    calls, current = git_probe
+    first = tmp_path / "first"
+    later = tmp_path / "later"
+    for folder in (first, later):
+        folder.mkdir()
+    name = "git.exe" if os.name == "nt" else "git"
+    (first / name).write_text("one")
+    (first / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{later}{os.pathsep}{first}")
+    assert _asked() is True
+    current.update({"stdout": "git version 2.30.2\n"})
+    assert _asked() is True
+    assert len(calls) == 1
+
+    (later / name).write_text("another")
+    (later / name).chmod(0o755)
+    assert child_env.git_hardening_supported() is False  # not known, not asked
+    assert _asked() is False
+    assert len(calls) == 2
 
 
 def test_the_probe_never_gets_a_sessions_settings(git_probe) -> None:
-    """The check runs before any permission rule is applied, so it asks the
-    worker's own git only: a session's ``PATH`` is not in what it starts."""
-    from fluid.tools.child_env import launch_context
-
+    """The check asks the worker's own git only: a session's ``PATH`` is not
+    in what it starts."""
     calls, _ = git_probe
     seen: list[dict[str, str]] = []
     real_run = child_env.subprocess.run
@@ -165,12 +248,13 @@ def test_the_probe_never_gets_a_sessions_settings(git_probe) -> None:
         return real_run(argv, **kwargs)
 
     child_env.subprocess.run = run  # the fixture's monkeypatch restores it
-    assert child_env.git_hardening_supported() is True
-    with launch_context({"PATH": "/opt/old-git/bin", "GIT_EXEC_PATH": "/opt/old-git/libexec"}):
+    assert _asked() is True
+    overlay = {"PATH": "/opt/old-git/bin", "GIT_EXEC_PATH": "/opt/old-git/libexec"}
+    with child_env.launch_context(overlay, may_ask_git=True):
         assert child_env.git_hardening_supported() is True
     assert len(calls) == 1
     assert seen[0].get("PATH") == child_env.scrub_child_env().get("PATH")
-    assert "GIT_EXEC_PATH" not in seen[0] or seen[0]["GIT_EXEC_PATH"] != "/opt/old-git/libexec"
+    assert seen[0].get("GIT_EXEC_PATH") != "/opt/old-git/libexec"
     # The git settings are part of what a shell gets, so of what is asked.
     assert _config(seen[0])[-len(AGENT_GIT_CONFIG):] == list(AGENT_GIT_CONFIG)
 
@@ -189,7 +273,7 @@ def test_the_probe_starts_the_way_agent_commands_do(git_probe, monkeypatch) -> N
         return ["runner", "--", *argv], "/home/agent", env
 
     monkeypatch.setattr(agent_runner, "wrap", wrap)
-    assert child_env.git_hardening_supported() is True
+    assert _asked() is True
     assert wrapped == [[*resolve_shell().argv_prefix, "git --version"]]
     assert calls == [["runner", "--", *resolve_shell().argv_prefix, "git --version"]]
 
@@ -395,7 +479,7 @@ def test_a_denied_git_command_starts_nothing_the_session_chose(
 
     overlay, ran = _recording_git(tmp_path / "other-git")
     deny = Rule(tool="*", decision="deny", input_globs={"command": "git status"})
-    child_env._git_answers_with_hardening.cache_clear()
+    child_env._GIT_ANSWERS.clear()
     try:
         for spec in (BASH_SPEC, MONITOR_SPEC):
             call = {"command": "git status"}
@@ -412,7 +496,45 @@ def test_a_denied_git_command_starts_nothing_the_session_chose(
             BASH_SPEC, {"command": "git status"}, cwd=str(tmp_path)).decision == "allow"
         assert not ran.exists()
     finally:
-        child_env._git_answers_with_hardening.cache_clear()
+        child_env._GIT_ANSWERS.clear()
+
+
+@needs_git
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in git is a POSIX script")
+@pytest.mark.parametrize("decision", ["deny", "ask"])
+def test_a_git_in_a_folder_the_agent_can_write_is_not_started_for_a_ruled_call(
+    tmp_path: Path, git_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, decision: str
+) -> None:
+    """No settings this time: the worker's own PATH starts with a folder the
+    agent can write to (``~/.local/bin`` in the Docker image), and a git was
+    installed there in an earlier, approved step. A rule denies ``git status``
+    or sends it to a person; rating the call starts nothing."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+    from fluid.tools.builtins.bash import SPEC as BASH_SPEC
+    from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
+
+    overlay, ran = _recording_git(tmp_path / "local-bin")
+    monkeypatch.setenv("PATH", overlay["PATH"])
+    rule = Rule(tool="*", decision=decision, input_globs={"command": "git status"})
+    child_env._GIT_ANSWERS.clear()
+    try:
+        for spec in (BASH_SPEC, MONITOR_SPEC):
+            for policy in ("on_write", "always_ask"):
+                verdict = PermissionEngine(policy, rules=[rule]).decide(
+                    spec, {"command": "git status"}, cwd=str(tmp_path))
+                assert verdict.decision == decision
+        # A policy that asks about everything starts nothing either.
+        assert PermissionEngine("always_ask").decide(
+            BASH_SPEC, {"command": "git status"}, cwd=str(tmp_path)).decision == "ask"
+        assert not ran.exists()
+        # Where read-only commands run on their own, that git is the worker's
+        # git: it is asked, it is too old, and the command goes to a person.
+        assert PermissionEngine("on_write").decide(
+            BASH_SPEC, {"command": "git status"}, cwd=str(tmp_path)).decision == "ask"
+        assert ran.read_text().strip() == "--version"
+    finally:
+        child_env._GIT_ANSWERS.clear()
 
 
 @needs_git

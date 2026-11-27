@@ -136,14 +136,20 @@ class PermissionEngine:
         rules see the resolved spelling of a relative path, and a risk hook
         the folder a shell command starts in. ``env`` is the
         session's settings ``env`` (``ctx.extra["settings_env"]``), which its
-        shells start with: a risk hook that depends on what a command finds
-        there (which git is first on PATH) is asked about that environment.
+        shells start with: a risk hook rates nothing read-only for a session
+        whose settings choose where programs are found.
         """
         from fluid.tools.child_env import launch_context
 
-        with launch_context(env, cwd):
-            risk = spec.effective_risk(input)
         rule = match_rule(self.rules, spec.name, input, cwd=cwd)
+        # Rating a call may start the worker's git to ask its version, and
+        # nothing may start for a call that then does not run on its own. So
+        # only where the rating is what decides: no rule matched, and the
+        # policy lets a read-only call run. A "yes" there starts the same git
+        # a moment later.
+        rating_decides = rule is None and self.approval_policy == "on_write"
+        with launch_context(env, cwd, may_ask_git=rating_decides):
+            risk = spec.effective_risk(input)
         if rule is not None:
             return Verdict(rule.decision, "rule", risk, rule)
         if self._session_allows(spec, input):

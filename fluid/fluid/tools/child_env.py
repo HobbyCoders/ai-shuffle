@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import functools
 import os
 import re
 import subprocess
@@ -232,17 +231,30 @@ _LAUNCH_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+# Whether rating this call may start the worker's git to ask its version
+# (:func:`git_hardening_supported`). Off unless the permission engine says the
+# answer can let the call run without a prompt.
+_LAUNCH_MAY_ASK_GIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "fluid_launch_may_ask_git", default=False
+)
+
+
 @contextlib.contextmanager
-def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None) -> Iterator[None]:
+def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None, *,
+                   may_ask_git: bool = False) -> Iterator[None]:
     """Rate tool calls for shells that get ``overlay`` on top of the host
     environment (a session's settings ``env``, or None) and start in ``cwd``
     (the session's working folder) unless the call names another. The overlay
-    is only read here, never used to start a process."""
+    is only read here, never used to start a process. ``may_ask_git`` lets the
+    rating start the worker's git once to learn its version; without it only
+    an answer already known is used."""
     env_token = _LAUNCH_OVERLAY.set(overlay or None)
     cwd_token = _LAUNCH_CWD.set(cwd or None)
+    git_token = _LAUNCH_MAY_ASK_GIT.set(bool(may_ask_git))
     try:
         yield
     finally:
+        _LAUNCH_MAY_ASK_GIT.reset(git_token)
         _LAUNCH_CWD.reset(cwd_token)
         _LAUNCH_OVERLAY.reset(env_token)
 
@@ -292,6 +304,28 @@ def launch_changes_program_lookup() -> bool:
     return changes_program_lookup(_LAUNCH_OVERLAY.get())
 
 
+# What git said, per shell, environment and git file found on PATH.
+_GIT_ANSWERS: dict[tuple[object, ...], bool] = {}
+
+
+def _git_on_path(env: Mapping[str, str]) -> tuple[str, int, int] | None:
+    """The git file a PATH search finds now, with its size and change time.
+
+    Part of the key an answer is kept under: a git installed later, earlier on
+    PATH or over the old one, is a different git and is asked again.
+    """
+    import shutil
+
+    found = shutil.which("git", path=env.get("PATH", os.defpath))
+    if found is None:
+        return None
+    try:
+        info = os.stat(found)
+    except OSError:
+        return None
+    return os.path.realpath(found), info.st_size, info.st_mtime_ns
+
+
 def git_hardening_supported() -> bool:
     """True when the worker's own git honours :data:`AGENT_GIT_CONFIG`.
 
@@ -300,14 +334,21 @@ def git_hardening_supported() -> bool:
     host's scrubbed environment and none of a session's settings: Git Bash on
     Windows puts its own git ahead of PATH, and that is the one asked.
 
-    Rating a call happens before any permission rule is applied, so it must
-    not run a program a session chose. A session whose settings ``env`` could
-    select another git is never asked about here; the classifier rates none
-    of its commands read-only instead (:func:`changes_program_lookup`).
+    Rating a call must not start a program the call itself could not start
+    without a prompt. So git is asked only inside a
+    :func:`launch_context` that allows it, which ``PermissionEngine.decide``
+    gives when no rule decides the call and the policy lets read-only
+    commands run: there a ``yes`` means the same git starts unprompted a
+    moment later. A call a rule denies or sends to a person, a policy that
+    asks for everything, and any caller outside the engine get the answer
+    already known, or False. A session whose settings ``env`` could select
+    another git is not asked about at all; the classifier rates none of its
+    commands read-only (:func:`changes_program_lookup`).
 
     False when git is missing, too old, or does not answer: the Bash
     classifier then rates no git command read-only, so each one asks instead
-    of running unprotected. The answer is kept for the life of the process.
+    of running unprotected. An answer is kept until the git a PATH search
+    finds changes.
     """
     from fluid.tools import agent_runner
     from fluid.tools.shell import resolve_shell
@@ -318,12 +359,19 @@ def git_hardening_supported() -> bool:
         )
     except OSError:
         return False
-    return _git_answers_with_hardening(tuple(argv), cwd, tuple(sorted(env.items())))
+    key = (tuple(argv), cwd, tuple(sorted(env.items())), _git_on_path(env))
+    known = _GIT_ANSWERS.get(key)
+    if known is not None:
+        return known
+    if not _LAUNCH_MAY_ASK_GIT.get():
+        return False
+    if len(_GIT_ANSWERS) >= 16:
+        _GIT_ANSWERS.clear()
+    answer = _GIT_ANSWERS[key] = _ask_git_version(argv, cwd, env)
+    return answer
 
 
-@functools.lru_cache(maxsize=8)
-def _git_answers_with_hardening(argv: tuple[str, ...], cwd: str | None,
-                                env_items: tuple[tuple[str, str], ...]) -> bool:
+def _ask_git_version(argv: list[str], cwd: str | None, env: Mapping[str, str]) -> bool:
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -331,7 +379,7 @@ def _git_answers_with_hardening(argv: tuple[str, ...], cwd: str | None,
         done = subprocess.run(  # noqa: S603 - fixed argv, no model or session input
             list(argv),
             cwd=cwd,
-            env=dict(env_items),
+            env=dict(env),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
