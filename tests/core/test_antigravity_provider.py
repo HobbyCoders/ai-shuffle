@@ -31,9 +31,13 @@ BASE = "/api/v1/antigravity"
 def fake_agy(tmp_path, monkeypatch):
     """The fake agent behind the binary override, with a private data dir."""
     if sys.platform == "win32":
-        # Windows runs a .cmd directly but cannot run a #!/bin/sh script.
+        # Windows runs a .cmd directly but cannot run a #!/bin/sh script. The
+        # base interpreter, not a venv's python.exe (a launcher that starts the
+        # real one as its child), so the fake agent's parent is this wrapper:
+        # it exits when the wrapper is killed (the fake agent is stdlib only).
         wrapper = tmp_path / "agy.cmd"
-        wrapper.write_text(f'@"{sys.executable}" "{FAKE}" %*\r\n')
+        python = getattr(sys, "_base_executable", None) or sys.executable
+        wrapper.write_text(f'@"{python}" "{FAKE}" %*\r\n')
     else:
         wrapper = tmp_path / "agy"
         wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE}" "$@"\n')
