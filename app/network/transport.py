@@ -1518,6 +1518,24 @@ def _untried_peer(ctx: engine.NetworkContext, peer_device_id: str) -> bool:
     return False
 
 
+def caught_up_since_start() -> bool:
+    """Whether this worker has heard from the peers it can reach since it started.
+
+    False while the startup outbox hold lasts, while the first state copy is
+    still arriving, and until our own sync pass has tried every active peer we
+    can dial (a reached peer's pass pulls its stream to the frontier it named).
+    True without a network. Automatic work that acts on replicated state (the
+    snooze wake) waits for this: until then that state can be hours old.
+    Runs in a worker thread (it reads members and presence).
+    """
+    ctx = engine.context()
+    if ctx is None:
+        return True
+    if ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
+        return False
+    return not _untried_peer(ctx, ctx.device_id)
+
+
 def release_hold_for_peer_view(peer_device_id: str, view: Any, *, own_exchange: bool = False) -> bool:
     """Open the outbox on what an authenticated peer that reached us holds of our stream.
 
