@@ -169,8 +169,22 @@ _STEER_BINDING_KEYS = ("model", "provider", "effort", "permission_mode", "worksp
 # turn started with an extra folder.
 _STEER_INHERITED_WHEN_ABSENT = frozenset({"workspace_project_ids"})
 
-# ``_steer_refusal`` reads the stored folders itself unless handed them.
+# The other binding keys a row may leave out, and the session column the run
+# path reads instead (``query_options``: the override, else the chat's stored
+# binding). A row naming none of them, such as "Message all active chats",
+# which sends only the text, joins only while the live turn runs on the chat's
+# stored value; without this it waited out every turn the composer started.
+_STEER_STORED_COLUMNS = {
+    "model": "model", "provider": "provider_id", "effort": "effort", "permission_mode": "permission_mode",
+}
+
+# ``_steer_refusal`` reads the stored folders and binding itself unless handed them.
 _UNREAD = object()
+
+
+def _binding_value(value: Any) -> Optional[str]:
+    """A scalar binding as the run path uses it: blank is no value."""
+    return (value.strip() or None) if isinstance(value, str) else (value or None)
 
 
 def _needs_upload_setup(payload: Optional[Dict[str, Any]]) -> bool:
@@ -2076,6 +2090,11 @@ class SessionRuntime:
         if (self.turn.get("overrides") or {}).get("workspace_project_ids") is not None:
             # What a row naming no folders inherits (``_steer_refusal``).
             stored_folders = await asyncio.to_thread(self._stored_workspace_ids)
+        stored_binding: Any = _UNREAD
+        if any(row.get("source") in _STEERABLE_SOURCES and self._inherits_stored_binding(row)
+               for row in rows):
+            # What a row naming no model / effort / ... runs on (``_steer_refusal``).
+            stored_binding = await asyncio.to_thread(self._stored_binding)
         # Read fresh for this sweep (the owner restoring or lifting the guard
         # mid-turn applies to the next steer), off the loop, and only for an
         # Antigravity agent with a row that would need it.
@@ -2091,6 +2110,7 @@ class SessionRuntime:
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
             refusal = self._steer_refusal(row, stored_workspace_ids=stored_folders,
+                                          stored_binding=stored_binding,
                                           guarded_now=guarded_now, prepares_uploads=True)
             if refusal is not None:
                 if row.get("id") not in self._steer_refusals_logged:
@@ -2531,6 +2551,32 @@ class SessionRuntime:
             )
             return None
 
+    def _stored_binding(self) -> Optional[Dict[str, Optional[str]]]:
+        """This chat's stored model / provider / effort / permission mode,
+        keyed like the overrides, or None when they cannot be read. Blocking
+        DB read."""
+        try:
+            from app.db import database as database_mod
+
+            session_row = database_mod.get_session(self.session_id) or {}
+            return {key: _binding_value(session_row.get(column))
+                    for key, column in _STEER_STORED_COLUMNS.items()}
+        except Exception:  # noqa: BLE001 — an unknown binding only refuses a steer.
+            logger.warning(
+                "SessionRuntime: could not read the run binding of %s",
+                self.session_id, exc_info=True,
+            )
+            return None
+
+    def _inherits_stored_binding(self, row: Dict[str, Any]) -> bool:
+        """Whether ``row`` leaves out a binding the live turn names, so
+        :meth:`_steer_refusal` needs the chat's stored binding for it."""
+        live_overrides = self.turn.get("overrides") or {}
+        row_overrides = row.get("overrides") or {}
+        return any(_binding_value(live_overrides.get(key)) is not None
+                   and _binding_value(row_overrides.get(key)) is None
+                   for key in _STEER_STORED_COLUMNS)
+
     async def _note_expanded(self, prompt: str) -> Optional[str]:
         """The text the engine gives the agent for ``prompt``, when a note
         reference changes it; else None.
@@ -2549,7 +2595,8 @@ class SessionRuntime:
 
     def _steer_refusal(
         self, row: Dict[str, Any], *, stored_workspace_ids: Any = _UNREAD,
-        guarded_now: Any = _UNREAD, prepares_uploads: bool = False,
+        stored_binding: Any = _UNREAD, guarded_now: Any = _UNREAD,
+        prepares_uploads: bool = False,
     ) -> Optional[str]:
         """Why ``row``'s prompt cannot join the LIVE turn, or None when it can.
 
@@ -2567,9 +2614,10 @@ class SessionRuntime:
           steer sweep does that itself (``prepares_uploads``,
           :meth:`_prepare_steer_uploads`); every other caller keeps the rule.
           A ``@Notes/<id>`` reference is always refused: turn setup expands it;
-        * a different model / effort / permission mode, or a different set of
-          workspace folders (a row that names none means the chat's stored
-          folders, and joins only while the live turn has that set);
+        * a different model / provider / effort / permission mode, or a
+          different set of workspace folders. A row that names none of one
+          means the chat's stored value, as the run path reads it, and joins
+          only while the live turn runs on that value;
         * a different profile — a message addressed to another agent.
 
         The answer names the rule (and for a binding, the key) and never any
@@ -2648,7 +2696,18 @@ class SessionRuntime:
                 if stored is None or set(stored) != live_ids:
                     return f"{key} differs"
                 continue
-            if (row_overrides.get(key) or None) != (live_overrides.get(key) or None):
+            row_value = _binding_value(row_overrides.get(key))
+            live_value = _binding_value(live_overrides.get(key))
+            if row_value is None and live_value is not None and key in _STEER_STORED_COLUMNS:
+                # The row runs on the chat's stored value, which the owner may
+                # have changed since this turn started: join only while the
+                # live turn still runs on it.
+                if stored_binding is _UNREAD:
+                    stored_binding = self._stored_binding()
+                if stored_binding is None or stored_binding.get(key) != live_value:
+                    return f"{key} differs"
+                continue
+            if row_value != live_value:
                 return f"{key} differs"
         return None
 
