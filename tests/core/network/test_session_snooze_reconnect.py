@@ -1,15 +1,18 @@
 """A snooze reaches a worker that comes (back) online."""
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.core import session_snooze
 from app.db import database, network as store
 from app.network import engine, transport
-from tests.core.network.harness import converge, exchange, join
+from tests.core.network.harness import converge, exchange, join, set_owner_pref
 from tests.core.network.test_control import _new_session
 from tests.core.network.test_session_snooze_replication import _patch, _snooze_of
+from tests.core.network.test_transport import ServedBy
 
 
 @pytest.fixture(autouse=True)
@@ -119,6 +122,7 @@ async def test_returning_worker_does_not_replay_a_stale_wake(workers, returning,
     # and its wake loop runs at once, on the copy it had before it left.
     late = _soon(60)
     with away.active():
+        store.touch_member(stayed.device_id, endpoints=["https://peer.example.com"])
         engine.hold_outbox(True)
         try:
             await session_snooze.wake_due_once(now=late)
@@ -138,25 +142,65 @@ async def test_returning_worker_does_not_replay_a_stale_wake(workers, returning,
         assert _snooze_of(worker, "s1") == expected, worker.name
 
 
-async def test_wake_waits_for_sync_then_fires(workers):
+async def test_wake_waits_for_a_full_pull(workers, monkeypatch):
+    """A pass the time budget cut short does not count; a full one does."""
     a, b = _pair(workers)
     with a.active():
         await _patch("s1", False, _soon(1))
     converge([a, b])
-    late = _soon(60)
+    for index in range(3):
+        set_owner_pref(a, f"backlog-{index}", index)
     with a.active():
-        engine.hold_outbox(True)
-        try:
+        await _patch("s1", False, _soon(240))  # the newest op: a short pull misses it
+        expected = _snooze_of(a, "s1")
+    served = ServedBy(a, "https://owner.example.com")
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 1)
+    monkeypatch.setattr(transport, "SYNC_PULL_SECONDS", 0)
+    late = _soon(60)
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            store.touch_member(a.device_id, endpoints=[served.base_url])
+            link = transport._links[a.device_id] = transport.PeerLink(a.device_id, [served.base_url])
+            assert not transport.caught_up_since_start()  # no pass yet
+            await link.sync_once(client, engine.context())
+            assert link.last_pass[1] == transport.PASS_BEHIND
             assert not transport.caught_up_since_start()
             assert await session_snooze.wake_due_once(now=late) == 0
-        finally:
-            engine.hold_outbox(False)
-        transport._tried_since_hold.add(b.device_id)  # our pass tried the peer
-        assert transport.caught_up_since_start()
-        assert await session_snooze.wake_due_once(now=late) == 1
+            await link.sync_once(client, engine.context(), catch_up=True)
+            assert link.last_pass[1] == transport.PASS_CURRENT
+            assert transport.caught_up_since_start()
+            assert await session_snooze.wake_due_once(now=late) == 0  # re-snoozed: not due
+            assert _snooze_of(b, "s1") == expected
+            # A pass from before this machine slept does not count.
+            link.last_pass = (time.time() - transport.PASS_FRESH_SECONDS[transport.PASS_CURRENT] - 1,
+                              transport.PASS_CURRENT)
+            assert not transport.caught_up_since_start()
+
+
+async def test_offline_peer_does_not_stop_wakes(workers):
+    """The only peer is off: the outbox stays held, but due chats still wake."""
+    a, b = _pair(workers)
+    with a.active():
+        await _patch("s1", False, _soon(1))
     converge([a, b])
-    for worker in (a, b):
-        assert _snooze_of(worker, "s1") == (True, None), worker.name
+
+    def refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        with a.active():
+            engine.hold_outbox(True)
+            try:
+                store.touch_member(b.device_id, endpoints=["https://mirror.example.com"])
+                link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
+                with pytest.raises(transport.PeerConnectFailed):
+                    await link.sync_once(client, engine.context())
+                assert link.last_pass[1] == transport.PASS_FAILED
+                assert transport.caught_up_since_start()
+                assert await session_snooze.wake_due_once(now=_soon(60)) == 1
+                assert _snooze_of(a, "s1") == (True, None)
+            finally:
+                engine.hold_outbox(False)
 
 
 async def test_new_worker_joining_sees_snooze(workers):

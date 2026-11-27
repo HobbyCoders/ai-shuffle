@@ -72,6 +72,12 @@ STATE_POLL_SECONDS = 1.0
 STATE_POLL_MAX_SECONDS = 10.0
 # A regular pass keeps pulling full batches for this long before it pushes.
 SYNC_PULL_SECONDS = 3.0
+# A link's last sync pass (``PeerLink.last_pass``) and how long each outcome
+# keeps counting for ``caught_up_since_start``: a connected peer is passed at
+# least every SYNC_IDLE_MAX_SECONDS, an offline one retried within
+# PEER_BACKOFF_MAX_SECONDS.
+PASS_CURRENT, PASS_BEHIND, PASS_FAILED = "current", "behind", "failed"
+PASS_FRESH_SECONDS = {PASS_CURRENT: 4 * SYNC_IDLE_MAX_SECONDS, PASS_FAILED: PEER_BACKOFF_MAX_SECONDS + 300.0}
 # Set for the launch barrier's requests only (a context variable, so the
 # background sync loop keeps its own timeouts): a dead address fails fast.
 connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
@@ -511,6 +517,8 @@ class PeerLink:
         self._stalled_streams: dict[tuple[str, str], dict] = {}
         self.backoff_until = 0.0
         self.failures = 0
+        # (wall time, PASS_*) of this link's last sync pass (``caught_up_since_start``).
+        self.last_pass: Optional[tuple[float, str]] = None
         # Set once an inbound contact has cut a failure streak's backoff short;
         # cleared by the next successful sync. One early redial per streak.
         self.contact_kick_used = False
@@ -821,6 +829,9 @@ class PeerLink:
             self.syncing = catch_up
             try:
                 return await self._sync_once(client, ctx, catch_up=catch_up)
+            except Exception:
+                self.last_pass = (time.time(), PASS_FAILED)
+                raise
             finally:
                 self.syncing = False
 
@@ -937,9 +948,7 @@ class PeerLink:
                     break  # nothing applied; the same batch would come back
                 marks = current
                 continue
-            caught_up = all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
-                            for origin, streams in target.items() for inc, seq in streams.items())
-            if caught_up:
+            if _reached(current, target):
                 break
             if current == marks:
                 # While the outbox is held, a peer op for a row with an
@@ -957,6 +966,9 @@ class PeerLink:
             # This is already the next request's committed frontier. A later
             # local write can safely be advertised on the following exchange.
             marks = current
+        # The time budget or a deferred state copy can end the pull short of
+        # the frontier the peer named; only a full pull counts as caught up.
+        self.last_pass = (time.time(), PASS_CURRENT if _reached(current, target) else PASS_BEHIND)
         ctx, _ = await self._compare_streams(client, ctx, theirs)
         # Stored addresses follow the same rule as dialed ones (``endpoints``).
         their_endpoints = exchange.get("endpoints")
@@ -1518,22 +1530,47 @@ def _untried_peer(ctx: engine.NetworkContext, peer_device_id: str) -> bool:
     return False
 
 
-def caught_up_since_start() -> bool:
-    """Whether this worker has heard from the peers it can reach since it started.
+def _reached(current: Dict[str, Dict[str, int]], target: Dict[str, Dict[str, int]]) -> bool:
+    """Whether local watermarks ``current`` cover every stream in ``target``."""
+    return all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
+               for origin, streams in target.items() for inc, seq in streams.items())
 
-    False while the startup outbox hold lasts, while the first state copy is
-    still arriving, and until our own sync pass has tried every active peer we
-    can dial (a reached peer's pass pulls its stream to the frontier it named).
-    True without a network. Automatic work that acts on replicated state (the
-    snooze wake) waits for this: until then that state can be hours old.
-    Runs in a worker thread (it reads members and presence).
+
+def caught_up_since_start() -> bool:
+    """Whether this worker holds what the peers it can reach hold.
+
+    Every active peer we can dial must have had a recent sync pass of ours:
+    one that pulled its stream to the frontier it named, or one that failed
+    (an offline peer: edits on either side of a partition meet by the usual
+    last-writer rule, as before). A pass cut short by the time budget, an
+    old pass (this machine slept; wall time, as monotonic time can stop in
+    a suspend), no pass yet, or a first state copy still arriving all mean
+    our copy may be hours old. True without a network. Automatic work that
+    acts on replicated state (the snooze wake) waits for this. Runs in a
+    worker thread (it reads members and presence).
     """
     ctx = engine.context()
     if ctx is None:
         return True
-    if ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
+    if ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return False
-    return not _untried_peer(ctx, ctx.device_id)
+    now = time.time()
+    presence = engine.all_presence()
+    for row in store.list_members(include_revoked=False):
+        device_id = row["device_id"]
+        member = ctx.member(device_id)
+        if device_id == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
+            continue
+        if not dial_endpoints(peer_endpoints(row, presence.get(device_id))):
+            continue
+        link = _links.get(device_id)
+        last = link.last_pass if link is not None else None
+        if last is None:
+            return False
+        at, outcome = last
+        if outcome == PASS_BEHIND or now - at > PASS_FRESH_SECONDS[outcome]:
+            return False
+    return True
 
 
 def release_hold_for_peer_view(peer_device_id: str, view: Any, *, own_exchange: bool = False) -> bool:
