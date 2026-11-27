@@ -717,8 +717,9 @@ def _shape(value: object, path: list[str] | None, captured: bool, depth: int = 0
                 item, path[1:] if on_path else None, captured, depth + 1)
         return shown
     if isinstance(value, list):
-        return [_shape(item, path[1:] if path is not None and path[0] == str(index) else None,
-                       captured, depth + 1)
+        # The index rule ``_pick`` uses: data.00.token is data.0.token.
+        on = int(path[0]) if path is not None and path[0].isdigit() else None
+        return [_shape(item, path[1:] if index == on else None, captured, depth + 1)
                 for index, item in enumerate(value[:10])]
     return value
 

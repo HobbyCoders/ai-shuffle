@@ -422,6 +422,16 @@ async def test_a_late_redaction_covers_a_value_cut_at_the_limit(broker):  # noqa
     assert value[:-4] not in again["body"]
 
 
+@pytest.mark.parametrize("field", ["data.0.token", "data.00.token"])
+async def test_a_capture_through_a_list_is_marked(broker, api, trust, bypass, field):  # noqa: F811
+    api.routes[("POST", "/client/v4/accounts/acct/tokens")] = ("200 OK", {"data": [{"token": NEW_TOKEN}]})
+    cloudflare, _ = await grants(broker, api)
+    result = await broker.run("chat", cloudflare, "http", {
+        "method": "POST", "path": "/accounts/acct/tokens", "body": "{}", "capture": field})
+    assert result["capture"]["captured"] is True
+    assert json.loads(result["body"])["shape"] == {"data": [{"token": "[captured]"}]}
+
+
 @pytest.mark.parametrize("field", ["", "a..b", ".a", "a b", "a/b", "x" * 65, ".".join("a" * 9)])
 def test_capture_fields_are_plain_dot_paths(field):
     with pytest.raises(AccessDenied, match="dot path"):
