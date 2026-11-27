@@ -1946,9 +1946,22 @@ def test_an_edit_request_lists_every_file_it_reports() -> None:
     assert raw["file_path"] == "/work/src/a.py" and raw["file_paths"] == ["/etc/hosts"]
     assert not edit_stays_in_project(raw, "/work")
 
-    # Only edit requests carry the list.
-    read = mapper.tool_name_and_input({
-        "toolCallId": "c", "kind": "read",
-        "locations": [{"path": "/work/a.py"}, {"path": "/work/b.py"}],
-    })[1]
-    assert "file_paths" not in read
+    # A request with no known kind is named by its title, which can be any
+    # of the edit tools an approver waves through.
+    for title in ("NotebookEdit", "MultiEdit", "Write", "SomethingElse"):
+        name, titled, _ = mapper.tool_name_and_input({
+            "toolCallId": "c", "title": title,
+            "locations": [{"path": "/work/a.ipynb"}, {"path": "/home/me/.bashrc"}],
+        })
+        assert name == title and titled["file_path"] == "/work/a.ipynb"
+        assert titled["file_paths"] == ["/work/a.ipynb", "/home/me/.bashrc"]
+        assert not edit_stays_in_project(titled, "/work")
+
+    # A kind that names a tool nobody approves as an edit carries no list.
+    for kind in ("read", "search", "execute", "fetch"):
+        other = mapper.tool_name_and_input({
+            "toolCallId": "c", "kind": kind, "title": "Edit",
+            "locations": [{"path": "/work/a.py"}, {"path": "/work/b.py"}],
+        })
+        assert other[0] not in {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+        assert "file_paths" not in other[1]

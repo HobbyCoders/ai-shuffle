@@ -107,9 +107,12 @@ model *reads* framing tokens even when they can't structurally escape.
   `PROTECTED_FILE_GLOBS`). Both the name the call wrote and the file it
   reaches are judged, so a link named `.env` that points at an ordinary
   file asks. A session started inside one of those folders (`repo/.vscode`)
-  gets no approval at all. A request that lists several files (a delegated
-  agent reporting one edit over more than one target, `file_paths`) is
-  approved only when every file passes.
+  gets no approval at all, whether the folder is named that way or reached
+  through a link of that name. A request that lists several files (a
+  delegated agent reporting one edit over more than one target,
+  `file_paths`) is approved only when every file passes; the delegated-agent
+  mapping lists the targets for every request that can stand for an edit,
+  whatever name it arrives under.
   Names are compared the way Windows and macOS open them (letter
   case, trailing dots and spaces, `:stream` suffixes, 8.3 short names), on
   every platform. A checkout under `.fluid/worktrees/<name>/` or

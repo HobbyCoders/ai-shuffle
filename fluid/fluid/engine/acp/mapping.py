@@ -39,9 +39,11 @@ KIND_TOOL_NAMES = {
     "think": "Think",
     "switch_mode": "SwitchMode",
 }
-# The names an edit request is shown under (``edit`` kind; a diff with no old
-# text becomes ``Write``).
-_EDIT_TOOL_NAMES = frozenset({"Edit", "Write"})
+# Names a request gets from its ``kind`` that never stand for a file edit an
+# approver could wave through. Every other name can: ``Edit``, the ``Write``
+# a new-file diff becomes, and whatever a request with no known kind puts in
+# its title (``NotebookEdit``, ``MultiEdit``).
+_NOT_AN_EDIT_NAME = frozenset(KIND_TOOL_NAMES.values()) - {"Edit"}
 PLAN_TOOL_NAME = "TodoWrite"
 _PLAN_STATUS = {"pending": "pending", "in_progress": "in_progress", "completed": "completed"}
 
@@ -236,7 +238,7 @@ class TurnMapper:
             first = locations[0] if isinstance(locations[0], Mapping) else {}
             if first.get("path"):
                 data["file_path"] = str(first["path"])
-        if name in _EDIT_TOOL_NAMES:
+        if name not in _NOT_AN_EDIT_NAME:
             # ``file_path`` shows one file. A request that reports more than
             # one target lists them all, so whoever approves it judges every
             # file and not the first alone (see permissions.edit_guard).

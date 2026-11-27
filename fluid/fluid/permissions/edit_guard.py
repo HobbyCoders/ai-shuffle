@@ -249,8 +249,12 @@ def _path_allowed(
         if parts is None:
             continue
         # A host adds a folder knowing where it is; the working folder is
-        # wherever the session was started.
-        if is_project and not _root_allows(real):
+        # wherever the session was started. It is judged as it resolves and
+        # as it was written: a ``.vscode`` that links to an ordinary folder
+        # is still the editor's settings folder.
+        if is_project and not all(
+            _root_allows(folder) for folder in (real, written) if folder is not None
+        ):
             return False
         if not _names_allow(parts, root_is_home=real == home):
             return False

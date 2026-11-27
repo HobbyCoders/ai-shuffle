@@ -312,6 +312,22 @@ def test_a_session_started_inside_a_protected_folder_asks(project: Path, inside:
         assert not edit_stays_in_project({"file_path": str(folder / name)}, str(folder))
 
 
+@pytest.mark.parametrize("name", [".vscode", ".claude", ".devcontainer"])
+def test_a_session_started_in_a_protected_folder_that_is_a_link_asks(
+    project: Path, name: str
+) -> None:
+    """The working folder resolves to an ordinary folder, so its real path
+    has no protected name; the name the session was started under does."""
+    (project / "plain").mkdir()
+    _symlink(project / name, project / "plain", folder=True)
+    started = str(project / name)
+    assert not edit_stays_in_project({"file_path": "settings.json"}, started)
+    assert not edit_stays_in_project({"file_path": str(project / name / "settings.json")}, started)
+    assert not edit_stays_in_project({"file_path": str(project / "plain" / "settings.json")}, started)
+    # The same folder under its ordinary name is project code.
+    assert edit_stays_in_project({"file_path": "settings.json"}, str(project / "plain"))
+
+
 @pytest.mark.parametrize("parent", [".fluid", ".claude"])
 def test_a_session_started_in_a_worktree_checkout_edits_its_code(project: Path, parent: str) -> None:
     checkout = project / parent / "worktrees" / "feat-x"
