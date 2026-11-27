@@ -131,8 +131,10 @@ RUN_STATE_NOTE = (
     "run_state is sampled now by the worker that runs the chat: working (a turn is running or queued), "
     "parked (waiting on its background work or a scheduled wake), permission (waiting for the owner to "
     "approve a tool), question (waiting for the owner's answer), idle (nothing running), failed (idle, "
-    "and its latest turn failed), unknown (not reported). Open one with SessionView; read its worker's "
-    "log with GetAppLogs(worker=..., search=<session id>).")
+    "and its latest turn failed), unknown (not reported). An entry with run_state_source='last published' "
+    "shows the state its worker last shared instead, which goes stale while that worker is offline. "
+    "Open one with SessionView; owner chats can read its worker's log with "
+    "GetAppLogs(worker=..., search=<session id>).")
 
 
 def _with_run_states(entries):
@@ -157,7 +159,10 @@ def _with_run_states(entries):
         summary = published.get(entry["id"]) or {}
         mirrored = (summary.get("state") if summary.get("owner_device_id")
                     and summary.get("owner_device_id") == entry.get("owner_device_id") else None)
-        state = local.get(entry["id"]) or mirrored
+        state = local.get(entry["id"])
+        if state is None and mirrored in session_runtime.STATES:
+            state = mirrored
+            entry["run_state_source"] = "last published"
         entry["run_state"] = state if state in session_runtime.STATES else "unknown"
     return entries
 

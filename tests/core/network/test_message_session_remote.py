@@ -140,6 +140,7 @@ async def test_listing_says_whether_each_chat_is_running_now(workers, monkeypatc
     assert {key: states[key] for key in ("target", "busy", "broken", "asking")} == {
         "target": "idle", "busy": "working", "broken": "failed", "asking": "permission"}
     assert "run_state is sampled now" in json.loads(result.text)["note"]
+    assert not any("run_state_source" in e for e in json.loads(result.text)["sessions"])
 
 
 async def test_an_older_worker_without_run_state_falls_back_to_its_published_summary(
@@ -165,12 +166,17 @@ async def test_an_older_worker_without_run_state_falls_back_to_its_published_sum
 
     monkeypatch.setattr(orch, "accept_peer_listing", old_listing)
     with b.active():
-        b.sql("DELETE FROM network_session_runtime WHERE session_id = 'target'")
+        # A summary some other worker published says nothing about this owner's chat.
+        b.sql("UPDATE network_session_runtime SET owner_device_id = 'old-owner' WHERE session_id = 'target'")
         result = await _tool("ListSessions", {"scope": "all"})
     assert not result.is_error, result.text
     states = _run_states(result)
     assert {key: states[key] for key in ("target", "busy", "broken")} == {
         "target": "unknown", "busy": "working", "broken": "failed"}
+    # A published state is labelled as such: it is not a fresh sample.
+    sources = {e["id"]: e.get("run_state_source") for e in json.loads(result.text)["sessions"]}
+    assert {key: sources[key] for key in ("target", "busy", "broken")} == {
+        "target": None, "busy": "last published", "broken": "last published"}
 
 
 async def test_discovery_and_message_before_catalog_replication(workers, monkeypatch, kicks):
