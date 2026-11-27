@@ -513,13 +513,21 @@ def chat_in_removal(row: Dict[str, Any], binding: Dict[str, Any]) -> bool:
             and row.get("instance_id") in (None, binding["runner"]))
 
 
-def _removal_chats(cursor, binding: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _removal_chats_where(binding: Dict[str, Any]) -> tuple:
+    """``(where, params)`` selecting the chats a removal deletes.
+
+    Every row it selects passes :func:`chat_in_removal`, so counting with it
+    gives the number of chats :func:`_removal_chats` returns.
+    """
     ids = binding["project_ids"]
-    cursor.execute(
-        "SELECT * FROM sessions WHERE (owner_device_id IS NULL OR owner_device_id = %s) "
-        f"AND project_id IN ({phs(len(ids))}) AND (instance_id IS NULL OR instance_id = %s) ORDER BY id",
-        (binding["device_id"], *ids, binding["runner"]),
-    )
+    where = ("(owner_device_id IS NULL OR owner_device_id = %s) "
+             f"AND project_id IN ({phs(len(ids))}) AND (instance_id IS NULL OR instance_id = %s)")
+    return where, (binding["device_id"], *ids, binding["runner"])
+
+
+def _removal_chats(cursor, binding: Dict[str, Any]) -> List[Dict[str, Any]]:
+    where, params = _removal_chats_where(binding)
+    cursor.execute(f"SELECT * FROM sessions WHERE {where} ORDER BY id", params)
     return [row for row in rows_to_list(cursor.fetchall()) if chat_in_removal(row, binding)]
 
 
@@ -553,6 +561,26 @@ def project_removal_plan(project_ids) -> Optional[Dict[str, Any]]:
         if binding is None:
             return None
         return {"binding": binding, "chats": _removal_chats(cursor, binding),
+                "worktrees": _removal_worktrees(cursor, binding["project_ids"])}
+
+
+def project_removal_summary(project_ids) -> Optional[Dict[str, Any]]:
+    """``{"chats": count, "worktrees": rows}`` of :func:`project_removal_plan`, or None.
+
+    Counts the chats in the database instead of loading their rows: the
+    Workers tab asks every worker for this once a minute, and a project with
+    thousands of chats took seconds to answer from full rows.
+    """
+    if not project_ids:
+        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        binding = _removal_binding(cursor, project_ids)
+        if binding is None:
+            return None
+        where, params = _removal_chats_where(binding)
+        cursor.execute(f"SELECT COUNT(*) AS n FROM sessions WHERE {where}", params)
+        return {"chats": int(cursor.fetchone()["n"]),
                 "worktrees": _removal_worktrees(cursor, binding["project_ids"])}
 
 

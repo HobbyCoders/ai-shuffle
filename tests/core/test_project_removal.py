@@ -230,6 +230,32 @@ async def test_unlinked_folder_project_keeps_shared_id_only_chats(mock_db, tmp_p
     assert database.get_session("shared-only")["project_v2_id"] == local
 
 
+def test_preview_counts_the_planned_chats_without_loading_them(project, monkeypatch):
+    """The Workers tab polls this on every worker: it counts in the database,
+    and the count is the number of chats the removal plan would delete."""
+    from app.db import projects
+
+    _, current, _ = project
+    for index in range(3):
+        database.create_session(f"legacy-{index}", "default", project_id="proj")
+    database.create_session("shared", "default", project_v2_id=current)
+    database.create_session("peer-legacy", "default", project_id="proj")
+    _set("peer-legacy", instance_id="other-worker")
+    database.create_session("mirror", "default", project_id="proj")
+    _set("mirror", owner_device_id="other-device")
+    # The plan's query leaves an empty owner out; the count must too.
+    database.create_session("blank-owner", "default", project_id="proj")
+    _set("blank-owner", owner_device_id="")
+
+    planned = [row["id"] for row in projects.project_removal_plan(["proj"])["chats"]]
+    monkeypatch.setattr(projects, "_removal_chats",
+                        lambda *a, **kw: pytest.fail("The preview must not load chat rows"))
+
+    assert project_removal.preview(["proj"])["chats"] == len(planned)
+    assert sorted(planned) == ["legacy-0", "legacy-1", "legacy-2"]
+    assert project_removal.preview(["missing"]) == {"chats": 0, "worktrees": []}
+
+
 def _claim_after_the_plan(monkeypatch, project_id):
     """Another worker claims the project row once its chats are planned."""
     from app.db import projects

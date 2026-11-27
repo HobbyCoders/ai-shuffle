@@ -30,18 +30,18 @@ def preview(project_ids: Iterable[str]) -> Dict[str, Any]:
     folders whose records go while the folders stay on disk.
     """
     from app.core.project_utils import get_worktree_working_dir
-    from app.db.projects import project_removal_plan
+    from app.db.projects import project_removal_summary
 
-    plan = project_removal_plan(list(project_ids))
-    if not plan:
+    summary = project_removal_summary(list(project_ids))
+    if not summary:
         return {"chats": 0, "worktrees": []}
     folders = []
-    for row in plan["worktrees"]:
+    for row in summary["worktrees"]:
         try:
             folders.append(get_worktree_working_dir(row))
         except ValueError:  # a corrupt row without a path has no folder to keep
             continue
-    return {"chats": len(plan["chats"]), "worktrees": sorted(set(folders))}
+    return {"chats": summary["chats"], "worktrees": sorted(set(folders))}
 
 
 async def remove_projects(project_ids: Iterable[str],
