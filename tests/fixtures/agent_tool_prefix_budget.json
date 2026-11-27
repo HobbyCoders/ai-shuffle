@@ -3,12 +3,12 @@
   "native": {
     "system": 24727,
     "compiled_eager": 53087,
-    "combined_full": 136469
+    "combined_full": 137511
   },
   "delegated": {
     "compiled_eager": 21392,
     "delegated_loaded_tools": 7327,
-    "combined_full": 113940
+    "combined_full": 114982
   },
   "SessionView": 1586,
   "Plan": 2005

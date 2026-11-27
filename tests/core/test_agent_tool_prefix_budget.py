@@ -19,6 +19,11 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Nov 2026: the delegated file-tool rules gain the pipe rule (net +68 after
 # shortening their override clause): delegated compiled_eager 21,324 -> 21,392
 # and combined_full 113,872 -> 113,940. Native unchanged.
+# Nov 2026: the Vault secret hand-off adds the deferred ChatCopySecret tool and
+# ChatHttpRequest's capture field (see test_prompt_catalog_budget.py):
+# combined_full +1,042 on both legs (native 136,469 -> 137,511; delegated
+# 113,940 -> 114,982). Native compiled_eager +16, still under its baseline;
+# delegated eager unchanged.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
