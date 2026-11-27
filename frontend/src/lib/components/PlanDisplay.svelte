@@ -91,7 +91,8 @@
 					<!-- Progress ring: completed share of all steps (cancelled never counts). -->
 					<svg class="plan-glyph" class:is-blocked={counts.blocked > 0} data-testid="plan-status-progress" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.6" aria-hidden="true">
 						<circle class="ring-track" cx="12" cy="12" r="9" />
-						<circle class="ring-fill" cx="12" cy="12" r="9" pathLength="100" stroke-dasharray={`${view.tasks.length ? (counts.completed / view.tasks.length) * 100 : 0} 100`} transform="rotate(-90 12 12)" />
+						<!-- A zero-length dash with a round cap still paints a dot, so 0% draws no fill. -->
+						{#if counts.completed}<circle class="ring-fill" cx="12" cy="12" r="9" pathLength="100" stroke-dasharray={`${(counts.completed / view.tasks.length) * 100} 100`} transform="rotate(-90 12 12)" />{/if}
 					</svg>
 				{/if}
 			</span>
