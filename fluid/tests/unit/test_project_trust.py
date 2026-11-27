@@ -495,29 +495,91 @@ def test_an_update_that_cannot_get_the_lock_changes_nothing(
     assert not is_project_trusted(project)
 
 
-def test_a_yes_is_for_the_folder_that_was_shown(
-    project: Path, tmp_path: Path, monkeypatch, capsys, requires_symlinks
-) -> None:
-    """The working folder is a link that is pointed at another checkout while
-    the question is open: the yes was for the first one, and the folder the
-    session would now run in has not been answered for."""
+def _linked_work_folder(tmp_path: Path) -> tuple[Path, Path]:
     mine = tmp_path / "mine"
     (mine / ".git").mkdir(parents=True)
     link = tmp_path / "work"
     link.symlink_to(mine, target_is_directory=True)
+    return mine, link
+
+
+def _repoint(link: Path, target: Path) -> None:
+    link.unlink()
+    link.symlink_to(target, target_is_directory=True)
+
+
+def test_a_yes_is_for_the_folder_that_was_shown(
+    project: Path, tmp_path: Path, monkeypatch, capsys, requires_symlinks
+) -> None:
+    """The working folder is a link that is pointed at another checkout while
+    the question is open. The run stays with the folder that was shown: its
+    links were followed once, before the question."""
+    from fluid.cli.__main__ import _resolve_config
+
+    mine, link = _linked_work_folder(tmp_path)
 
     def swap_then_yes(prompt: str = "") -> str:
-        link.unlink()
-        link.symlink_to(project, target_is_directory=True)
+        _repoint(link, project)
         return "y"
 
     monkeypatch.setattr("sys.stdin", _Terminal())
     monkeypatch.setattr("sys.stdout", _Terminal())
     monkeypatch.setattr("builtins.input", swap_then_yes)
-    assert _project_trusted(_args(link), ask=True) is False
-    assert "another project" in capsys.readouterr().err
+    config = _resolve_config(_args(link), ask=True)
+    assert config.cwd == os.path.realpath(mine)
+    assert config.permission.approval_policy == "on_write" and not config.mcp
+    assert is_project_trusted(mine)
     assert not is_project_trusted(project)
-    assert not is_project_trusted(mine)
+
+
+def test_a_link_changed_while_the_answer_is_saved_loads_the_folder_shown(
+    project: Path, tmp_path: Path, monkeypatch, capsys, requires_symlinks
+) -> None:
+    """The check before saving cannot see a link that changes during the
+    save. The config is loaded from the folder the question named, never from
+    wherever the ``--cwd`` link points afterwards."""
+    from fluid.cli.__main__ import _resolve_config
+    from fluid.config import trust
+
+    mine, link = _linked_work_folder(tmp_path)
+    save = trust.trust_project
+
+    def swap_then_save(cwd=None, *, root=None):
+        _repoint(link, project)
+        return save(cwd, root=root)
+
+    _on_a_terminal(monkeypatch, "y")
+    monkeypatch.setattr(trust, "trust_project", swap_then_save)
+    config = _resolve_config(_args(link), ask=True)
+    assert config.cwd == os.path.realpath(mine)
+    assert config.permission.approval_policy == "on_write"
+    assert not config.mcp and not config.hooks
+    assert not is_project_trusted(project)
+
+
+def test_a_project_that_changes_under_the_answer_is_left_out(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """A ``.git`` appears above the working folder while the answer is saved:
+    the folder now belongs to a project nobody answered for."""
+    from fluid.cli.__main__ import _resolve_config
+    from fluid.config import trust
+
+    outer = tmp_path / "outer"
+    work = outer / "unpacked"
+    _write(work / "fluid.toml", '[permission]\napproval_policy = "never_ask"\n')
+    _write(outer / ".fluid" / "config.toml", HOSTILE_TOML)
+    save = trust.trust_project
+
+    def plant_then_save(cwd=None, *, root=None):
+        (outer / ".git").mkdir()
+        return save(cwd, root=root)
+
+    _on_a_terminal(monkeypatch, "y")
+    monkeypatch.setattr(trust, "trust_project", plant_then_save)
+    config = _resolve_config(_args(work), ask=True)
+    assert "another project" in capsys.readouterr().err
+    assert not _took_over(config)
 
 
 # ─── git in an untrusted project ─────────────────────────────────────────────
@@ -541,11 +603,11 @@ def test_the_harness_starts_no_git_of_its_own_in_an_untrusted_project(
     the provisioning receipt and Glob's link listing go without git."""
     from fluid.context import environment, runtime_facts
     from fluid.tools.builtins._util import _LinkProbe
-    from fluid.tools.child_env import project_git_trusted
+    from fluid.tools.child_env import git_trusted_in
 
     assert main(["config", "--cwd", str(project)]) == 0
     capsys.readouterr()
-    assert not project_git_trusted()
+    assert not git_trusted_in(project)
     _no_program_may_start(monkeypatch)
     assert environment.git_context_parts(str(project)) is None
     assert not environment.is_git_work_tree(str(project))
@@ -561,11 +623,11 @@ def test_a_trusted_project_gets_git_with_the_agent_git_settings(
     import subprocess
 
     from fluid.context import environment
-    from fluid.tools.child_env import AGENT_GIT_CONFIG, project_git_trusted
+    from fluid.tools.child_env import AGENT_GIT_CONFIG, git_trusted_in
 
     assert main(["config", "--cwd", str(project), "--trust-project"]) == 0
     capsys.readouterr()
-    assert project_git_trusted()
+    assert git_trusted_in(project) and git_trusted_in(project / "src")
     seen: list[dict] = []
 
     def fake_run(argv, **kwargs):
@@ -585,19 +647,120 @@ def test_no_git_command_is_rated_read_only_in_an_untrusted_project(
     project: Path, monkeypatch, capsys
 ) -> None:
     from fluid.tools import child_env
-    from fluid.tools.builtins.bash_risk import is_read_only
 
     monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
+    (project / "sub").mkdir()
     reads = ("git status", "git log --oneline -5", "git diff", "git -C sub status",
              "git rev-parse HEAD", "git branch --show-current")
-    assert all(is_read_only(command) for command in reads)
+    assert all(_rated(command, project) == "safe" for command in reads)
     assert main(["config", "--cwd", str(project)]) == 0
     capsys.readouterr()
-    assert not any(is_read_only(command) for command in reads)
+    assert not any(_rated(command, project) == "safe" for command in reads)
     # Only git: the other read-only commands are what they were.
-    assert is_read_only("ls -la") and is_read_only("cat README.md")
+    assert _rated("ls -la", project) == "safe" and _rated("cat README.md", project) == "safe"
     assert main(["config", "--cwd", str(project), "--trust-project"]) == 0
-    assert all(is_read_only(command) for command in reads)
+    assert all(_rated(command, project) == "safe" for command in reads)
+
+
+def _rated(command: str, session_cwd: Path, call_cwd: Path | str | None = None) -> str:
+    """The Bash tool's risk for ``command`` in a session whose folder is
+    ``session_cwd``, as the permission engine asks for it."""
+    from fluid.tools.builtins.bash_risk import classify
+    from fluid.tools.child_env import launch_context
+
+    call: dict = {"command": command}
+    if call_cwd is not None:
+        call["cwd"] = str(call_cwd)
+    with launch_context(None, str(session_cwd)):
+        return classify(call)
+
+
+@pytest.fixture
+def two_checkouts(project: Path, tmp_path: Path, monkeypatch, capsys):
+    """A trusted session in ``mine``; ``project`` is another, untrusted
+    checkout next to it, and ``mine/vendor/dep`` is a third inside it."""
+    from fluid.tools import child_env
+
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
+    mine = tmp_path / "mine"
+    (mine / ".git").mkdir(parents=True)
+    (mine / "src").mkdir()
+    nested = mine / "vendor" / "dep"
+    (nested / ".git").mkdir(parents=True)
+    _write(nested / "AGENTS.md", "from the vendored checkout\n")
+    _write(nested / "README.md", "readme\n")
+    assert main(["config", "--cwd", str(mine), "--trust-project"]) == 0
+    capsys.readouterr()
+    return mine, project, nested
+
+
+def test_git_is_judged_by_the_checkout_it_opens_not_the_sessions(two_checkouts) -> None:
+    """Trusting one project says nothing about the next checkout: a call that
+    starts git in another one (the Bash ``cwd``, or ``git -C``) asks."""
+    mine, other, nested = two_checkouts
+    assert _rated("git status", mine) == "safe"
+    assert _rated("git status", mine, call_cwd=mine / "src") == "safe"
+    assert _rated("git -C src status", mine) == "safe"
+    assert _rated("git --no-pager -C src log -1", mine) == "safe"
+    # Another checkout, by the call's folder or by -C.
+    assert _rated("git status", mine, call_cwd=other) == "write"
+    assert _rated("git status", mine, call_cwd=nested) == "write"
+    assert _rated("git -C vendor/dep status", mine) == "write"
+    assert _rated("git -Cvendor/dep status", mine) == "write"
+    assert _rated("git -C src -C ../vendor/dep status", mine) == "write"
+    assert _rated(f"git -C ../{other.name} status", mine) == "write"
+    # A folder the check cannot establish asks: an absolute path (a POSIX
+    # shell on Windows spells those its own way) or one the shell expands.
+    assert _rated(f"git -C {mine} status", mine) == "write"
+    assert _rated("git -C $HOME status", mine) == "write"
+    assert _rated("git -C ~/x status", mine) == "write"
+    assert _rated("git -C 'src' status", mine) == "safe"  # quotes are the shell's
+    # No session folder to judge by: ask.
+    from fluid.tools.builtins.bash_risk import classify
+
+    assert classify({"command": "git status"}) == "write"
+
+
+def test_a_link_into_another_checkout_does_not_carry_the_trust(
+    two_checkouts, requires_symlinks
+) -> None:
+    mine, other, _nested = two_checkouts
+    (mine / "linked").symlink_to(other, target_is_directory=True)
+    assert _rated("git -C linked status", mine) == "write"
+    assert _rated("git status", mine, call_cwd=mine / "linked") == "write"
+
+
+def test_the_harness_starts_no_git_in_another_checkout(two_checkouts, monkeypatch) -> None:
+    from fluid.context import environment, runtime_facts
+    from fluid.tools.builtins._util import _LinkProbe
+
+    _mine, other, nested = two_checkouts
+    _no_program_may_start(monkeypatch)
+    for folder in (other, nested):
+        assert environment.git_context_parts(str(folder)) is None
+        assert not environment.is_git_work_tree(str(folder))
+        assert runtime_facts._receipt_path(folder) is None
+        assert _LinkProbe(folder).procs == []
+
+
+def test_a_checkout_inside_the_trusted_one_adds_no_instructions_on_a_read(
+    two_checkouts, tmp_path: Path, requires_symlinks
+) -> None:
+    """Reading a file injects its folder's instruction file. A separate
+    checkout placed inside the trusted one (a vendored clone, a submodule) is
+    another project and has not been answered for; so is one behind a link."""
+    from fluid.context.instructions import nested_instructions
+
+    mine, other, nested = two_checkouts
+    _write(mine / "src" / "AGENTS.md", "the project's own\n")
+    assert [f.content for f in nested_instructions(mine / "src" / "a.py")] == [
+        "the project's own\n"]
+    assert nested_instructions(nested / "README.md") == []
+    _write(nested / "docs" / "AGENTS.md", "deeper in the vendored checkout\n")
+    assert nested_instructions(nested / "docs" / "x.md") == []
+    (mine / "linked").symlink_to(other, target_is_directory=True)
+    assert nested_instructions(mine / "linked" / "README.md") == []
+    assert nested_instructions((mine / "linked" / "README.md").resolve()) == []
 
 
 # ─── what a session finds, through the real builders ─────────────────────────
@@ -712,4 +875,153 @@ def test_memory_backfill_says_when_a_projects_config_was_left_out(
     trust_project(project)
     memory_backfill._synthesizer(object())
     assert capsys.readouterr().err == ""
+
+
+# ─── the Claude child loads instruction files itself ─────────────────────────
+
+
+def _claude_engine(folder: Path, capsys, *extra: str):
+    """The engine a ``fluid`` run in ``folder`` builds for the Claude
+    provider: the CLI's own config step, then the loader's builder."""
+    from fluid.cli.__main__ import _resolve_config
+    from fluid.config.loader import build_engine
+    from fluid.store.base import MemoryStore
+
+    config = _resolve_config(argparse.Namespace(
+        cwd=str(folder), trust_project="--trust-project" in extra))
+    capsys.readouterr()
+    return build_engine(config, MemoryStore(), provider_name="claude")
+
+
+def test_the_claude_child_is_told_to_leave_out_the_folders_above(
+    tmp_path: Path, isolate_home: Path, capsys
+) -> None:
+    """Claude Code reads ``CLAUDE.md`` and ``.claude/`` rules from every
+    folder above the one it starts in. The trust answer was for one folder:
+    the ones above it (a shared download folder) are excluded by pattern."""
+    shared = tmp_path / "downloads"
+    _write(shared / "CLAUDE.md", "from the folder above\n")
+    child = shared / "unpacked"
+    _write(child / "CLAUDE.md", "the project's own\n")
+
+    engine = _claude_engine(child, capsys, "--trust-project")
+    real = os.path.realpath(shared).replace("\\", "/")
+    excludes = engine._settings_object()["claudeMdExcludes"]
+    assert f"{real}/*" in excludes and f"{real}/.claude/**" in excludes
+    # Nothing names the project's own folder or anything inside it.
+    own = os.path.realpath(child).replace("\\", "/")
+    assert not any(pattern.startswith(own) for pattern in excludes)
+    # The user's own Claude folder stays, and what the CLI is sent has them.
+    home = os.path.realpath(isolate_home).replace("\\", "/")
+    assert f"{home}/.claude/**" not in excludes
+    argv = engine._build_argv()
+    assert json.loads(argv[argv.index("--settings") + 1])["claudeMdExcludes"] == excludes
+
+
+def test_a_checkouts_bound_is_its_root_not_the_folder_started_in(
+    project: Path, capsys
+) -> None:
+    inner = project / "src" / "pkg"
+    inner.mkdir(parents=True)
+    engine = _claude_engine(inner, capsys, "--trust-project")
+    assert engine.project_bound == os.path.realpath(project)
+    own = os.path.realpath(project).replace("\\", "/")
+    assert not any(p.startswith(own) for p in engine._settings_object()["claudeMdExcludes"])
+
+
+def test_a_host_that_sets_no_bound_sends_no_excludes(project: Path) -> None:
+    from fluid.config.loader import build_engine
+    from fluid.store.base import MemoryStore
+
+    engine = build_engine(_load(project), MemoryStore(), provider_name="claude")
+    assert engine.project_bound is None
+    assert "claudeMdExcludes" not in engine._settings_object()
+    engine.cli_version = None
+    engine._check_project_bound()  # nothing to enforce
+
+
+def test_the_hosts_own_excludes_are_kept(project: Path, capsys) -> None:
+    engine = _claude_engine(project, capsys)
+    engine.settings = json.dumps({"claudeMdExcludes": ["**/vendor/**", 7]})
+    excludes = engine._settings_object()["claudeMdExcludes"]
+    assert excludes[0] == "**/vendor/**" and 7 not in excludes and len(excludes) > 1
+
+
+@pytest.mark.parametrize("version", [None, "", "garbage", "2.1.210 (Claude Code)",
+                                     "2.1.238 (Claude Code)", "1.0.128"])
+def test_a_claude_code_that_cannot_keep_the_bound_is_not_started(
+    project: Path, monkeypatch, capsys, version
+) -> None:
+    """Before 2.1.211 Claude Code loaded a project's path-scoped rules even
+    with the project left out of ``--setting-sources``; before 2.1.239 a
+    linked instruction file slipped past an exclude. An unknown version is
+    treated as old."""
+    import asyncio
+
+    from fluid.engine.delegated import ClaudeProjectGateError, _spawn_failure_message
+
+    engine = _claude_engine(project, capsys)
+
+    async def reported_version() -> None:
+        engine.cli_version = version
+
+    async def started(*args, **kwargs):
+        raise AssertionError("the Claude CLI was started")
+
+    monkeypatch.setattr(engine, "_version_guard", reported_version)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", started)
+    with pytest.raises(ClaudeProjectGateError) as caught:
+        asyncio.run(engine._ensure_process())
+    message = _spawn_failure_message(caught.value)
+    assert "2.1.239" in message and "claude update" in message
+    assert "spawn failed" not in message
+
+
+@pytest.mark.parametrize("version", ["2.1.239 (Claude Code)", "2.1.332 (Claude Code)", "3.0.0"])
+def test_a_current_claude_code_passes_the_bound_check(project: Path, capsys, version) -> None:
+    engine = _claude_engine(project, capsys)
+    engine.cli_version = version
+    engine._check_project_bound()
+
+
+def test_exclude_patterns_match_only_the_named_folders(tmp_path: Path) -> None:
+    from fluid.engine.delegated import project_bound_excludes
+
+    odd = tmp_path / "a (copy) [1] {x} what? st*r" / "proj"
+    odd.mkdir(parents=True)
+    patterns = project_bound_excludes(odd, windows=False)
+    real = os.path.realpath(tmp_path)
+    assert f"{real}/a [(]copy[)] [[]1[]] [{{]x[}}] what[?] st[*]r/*" in patterns
+    assert patterns[-2:] == ["/*", "/.claude/**"]  # the filesystem root is last
+    # The user's Claude folder is theirs, wherever it is.
+    config_dir = tmp_path / ".claude"
+    config_dir.mkdir()
+    kept = project_bound_excludes(odd, config_dir, windows=False)
+    assert f"{real}/.claude/**" not in kept and f"{real}/*" in kept
+    assert f"{real}/.claude/**" in patterns
+
+
+def test_exclude_patterns_on_windows_use_forward_slashes() -> None:
+    from fluid.engine.delegated import _glob_literal
+
+    assert _glob_literal(r"C:\Users\me\My (old) code", windows=True) == (
+        "C:/Users/me/My [(]old[)] code")
+    # Anywhere else a backslash is part of a name, and cannot be written.
+    assert _glob_literal("/srv/odd\\name", windows=False) is None
+
+
+def test_a_folder_name_that_cannot_be_excluded_stops_the_run(
+    tmp_path: Path, capsys
+) -> None:
+    from fluid.engine.delegated import ClaudeProjectGateError
+
+    if os.name == "nt":
+        pytest.skip("a backslash is a separator here")
+    child = tmp_path / "odd\\name" / "proj"
+    (child / ".git").mkdir(parents=True)
+    engine = _claude_engine(child, capsys)
+    engine.cli_version = "2.1.332 (Claude Code)"
+    assert "claudeMdExcludes" not in engine._settings_object()
+    with pytest.raises(ClaudeProjectGateError):
+        engine._check_project_bound()
 

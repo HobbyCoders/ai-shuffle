@@ -260,9 +260,74 @@ def _prompt_key(content: Any, question_ids: tuple[str, ...] = ()) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
+class ClaudeProjectGateError(RuntimeError):
+    """This Claude Code cannot be held to the project's own files.
+
+    Raised before the CLI is started when the loop was given a
+    ``project_bound`` and the installed Claude Code is too old (or its version
+    is unknown) to leave out the instruction files of other folders, or a
+    folder name cannot be written as an exclude pattern. A setup problem: the
+    message is written for the user.
+    """
+
+
+# The oldest Claude Code that keeps to a ``project_bound``. From 2.1.211 a
+# project left out of ``--setting-sources`` also stays out of the rules the
+# CLI loads while it works, and from 2.1.239 ``claudeMdExcludes`` matches a
+# linked instruction file under the name it was found by, not only its target.
+PROJECT_BOUND_SINCE = "2.1.239"
+
+# Characters with a meaning in the exclude patterns' glob syntax, written as a
+# one-character class so they match themselves.
+_GLOB_LITERAL = {char: f"[{char}]" for char in "()[]{}?*"}
+
+
+def _glob_literal(path: str, *, windows: bool | None = None) -> str | None:
+    """``path`` as a glob pattern that matches only itself, or None.
+
+    Patterns use forward slashes. A backslash is a folder separator on
+    Windows and an ordinary character anywhere else, where it cannot be
+    written so that every glob reader agrees: None.
+    """
+    if (os.name == "nt") if windows is None else windows:
+        path = path.replace("\\", "/")
+    elif "\\" in path:
+        return None
+    return "".join(_GLOB_LITERAL.get(char, char) for char in path)
+
+
+def project_bound_excludes(
+    bound: str | os.PathLike[str], config_dir: str | os.PathLike[str] | None = None,
+    *, windows: bool | None = None,
+) -> list[str] | None:
+    """``claudeMdExcludes`` patterns for every folder above ``bound``.
+
+    Claude Code reads ``CLAUDE.md``, ``CLAUDE.local.md`` and ``.claude/``
+    rules from each folder above the one it starts in. These patterns leave
+    out the ones above the trusted project, and keep the project's own.
+    ``config_dir`` is the user's Claude folder: its files are the user's own
+    and stay. None when a folder name cannot be written as a pattern.
+    """
+    real = os.path.realpath(os.fspath(bound))
+    own = os.path.realpath(os.fspath(config_dir)) if config_dir else None
+    patterns: list[str] = []
+    folder = os.path.dirname(real)
+    previous = real
+    while folder and folder != previous:
+        literal = _glob_literal(folder, windows=windows)
+        if literal is None:
+            return None
+        prefix = literal.rstrip("/")
+        patterns.append(f"{prefix}/*")
+        if own is None or os.path.realpath(os.path.join(folder, ".claude")) != own:
+            patterns.append(f"{prefix}/.claude/**")
+        previous, folder = folder, os.path.dirname(folder)
+    return patterns
+
+
 def _spawn_failure_message(exc: BaseException) -> str:
     """User-facing text for a CLI that could not be started."""
-    if isinstance(exc, ClaudeCliMissingError):
+    if isinstance(exc, (ClaudeCliMissingError, ClaudeProjectGateError)):
         return str(exc)
     return f"spawn failed: {exc!r}"
 
@@ -1032,6 +1097,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         settings: str | None = None,
         commit_attribution: bool = True,
         setting_sources: tuple[str, ...] | None = None,
+        project_bound: str | os.PathLike[str] | None = None,
         permissions: PermissionEngine | None = None,
         hooks: HookBus | None = None,
         tool_policy: Callable[
@@ -1256,6 +1322,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # omits the flag entirely, leaving the CLI on its own settings files.
         self.settings = settings
         self.setting_sources = setting_sources
+        # The folder whose own instruction files the CLI may load; nothing
+        # from the folders above it (the ``fluid`` CLI's project trust gate
+        # sets this; None leaves the CLI's own discovery alone). Enforced in
+        # ``_check_project_bound`` and ``_settings_object``.
+        self.project_bound = os.fspath(project_bound) if project_bound else None
         self.cli_version: str | None = None
         # The tool surface the child CLI announced in its `init` frame — the
         # names it will actually accept, MCP servers included. The CLI decides
@@ -1650,11 +1721,57 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return None
         from fluid.context.attribution import cli_attribution
 
-        return {
+        settings = {
             "skillListingMaxDescChars": SKILL_LISTING_DESC_CHARS,
             **parsed,
             "attribution": cli_attribution(self.commit_attribution),
         }
+        excludes = self._project_bound_excludes()
+        if excludes:
+            given = parsed.get("claudeMdExcludes")
+            kept = [p for p in given if isinstance(p, str)] if isinstance(given, list) else []
+            settings["claudeMdExcludes"] = [*kept, *(p for p in excludes if p not in kept)]
+        return settings
+
+    def _project_bound_excludes(self) -> list[str] | None:
+        """Exclude patterns for the folders above ``project_bound``.
+
+        ``[]`` without a bound; None when one cannot be written (the spawn
+        then stops in ``_check_project_bound``).
+        """
+        bound = getattr(self, "project_bound", None)
+        if not bound:
+            return []
+        config_dir = self._child_env().get("CLAUDE_CONFIG_DIR") or os.path.join(
+            os.path.expanduser("~"), ".claude",
+        )
+        try:
+            return project_bound_excludes(bound, config_dir)
+        except (OSError, ValueError):
+            return None
+
+    def _check_project_bound(self) -> None:
+        """Stop a spawn that could load files from outside ``project_bound``.
+
+        Called after ``_version_guard``. An unknown version stops it too: the
+        older CLIs load a project's rules whatever the flags say.
+        """
+        if not getattr(self, "project_bound", None):
+            return
+        if not _version_at_least(self.cli_version, PROJECT_BOUND_SINCE):
+            found = self.cli_version or "an unknown version"
+            raise ClaudeProjectGateError(
+                f"Claude Code {PROJECT_BOUND_SINCE} or newer is needed to keep "
+                f"other folders' instruction files out of this run (found "
+                f"{found}). Update it with `claude update`."
+            )
+        if self._project_bound_excludes() is None:
+            raise ClaudeProjectGateError(
+                "A folder above this project has a name Claude Code's exclude "
+                "patterns cannot express (a backslash), so the instruction "
+                "files above the project cannot be kept out. Move the project "
+                "or use another provider."
+            )
 
     async def aclose(self) -> None:
         """End the session and give back everything the loop holds.
@@ -2647,6 +2764,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # end them and remove its receipt before replacing either record.
             await self._stop_process(grace=1.0)
         await self._version_guard()
+        self._check_project_bound()
         spawn_kwargs: dict[str, Any] = {}
         if os.name != "nt":
             # Own session, so _stop_process can kill the CLI's whole process

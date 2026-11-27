@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError
@@ -79,18 +80,29 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
 def _resolve_config(args: argparse.Namespace, *, ask: bool = False) -> HarnessConfig:
     from fluid.config.trust import project_root
     from fluid.context.instructions import set_project_walk_bound
-    from fluid.tools.child_env import set_project_git_trusted
+    from fluid.tools.child_env import set_trusted_git_roots
 
-    cwd = getattr(args, "cwd", None)
-    trusted = _project_trusted(args, ask=ask)
-    # A folder's own ``.git`` names programs git runs on a status read too, so
-    # in an untrusted project the harness starts no git of its own and every
-    # git command asks. One process serves one project.
-    set_project_git_trusted(trusted)
-    # Outside a git checkout the project is the working folder alone: nothing
-    # above the folder the trust answer is for is searched for instruction
-    # files, commands, skills or agents.
-    set_project_walk_bound(project_root(cwd) or Path(cwd or Path.cwd()))
+    # One folder, with its links followed once, serves the question, the saved
+    # answer and the load: a ``--cwd`` that is a link cannot be pointed at
+    # another project between them.
+    given = getattr(args, "cwd", None)
+    cwd = os.path.realpath(given) if given else os.getcwd()
+    root = project_root(cwd)
+    trusted = _project_trusted(args, ask=ask, cwd=cwd)
+    if trusted and project_root(cwd) != root:
+        # The folder's project changed while the answer was taken or saved.
+        print("fluid: the working folder now leads to another project; "
+              "continuing without its files.", file=sys.stderr)
+        trusted = False
+    # A checkout's own ``.git`` names programs git runs on a status read too.
+    # The harness starts no git of its own, and rates no git command
+    # read-only, in any checkout but the trusted project's. One process
+    # serves one project.
+    set_trusted_git_roots([root or cwd] if trusted else [])
+    # Nothing above the folder the trust answer is for, and no other checkout
+    # inside it, is searched for instruction files, commands, skills or
+    # agents.
+    set_project_walk_bound(root or cwd)
     return load_config(
         cwd=cwd,
         overrides=_cli_overrides(args),
@@ -106,18 +118,24 @@ _TRUST_EXPLAINED = (
 )
 
 
-def _project_trusted(args: argparse.Namespace, *, ask: bool) -> bool:
+def _project_trusted(
+    args: argparse.Namespace, *, ask: bool, cwd: str | None = None,
+) -> bool:
     """Whether this run loads the project's own files (``fluid.config.trust``).
 
     Trust comes from the owner only: the saved record, the ``--trust-project``
     flag for one run, or a yes at the question. The question is asked once per
     project, on a terminal, by the commands that start a session (``ask``);
     everywhere else the project's files are left out and one line on stderr
-    says so. No environment variable or config value turns it on.
+    says so. No environment variable or config value turns it on. ``cwd`` is
+    the folder the caller resolved for this run; without it the ``--cwd``
+    argument is resolved here.
     """
     from fluid.config.trust import is_project_trusted, project_root, trust_project
 
-    cwd = getattr(args, "cwd", None)
+    if cwd is None:
+        given = getattr(args, "cwd", None)
+        cwd = os.path.realpath(given) if given else os.getcwd()
     if getattr(args, "trust_project", False) or is_project_trusted(cwd):
         return True
     root = project_root(cwd)
@@ -129,8 +147,8 @@ def _project_trusted(args: argparse.Namespace, *, ask: bool) -> bool:
             answer = ""
         if answer.strip().lower() in ("y", "yes"):
             # The yes is for the folder that was shown. If the working folder
-            # leads somewhere else by now (a link changed while the question
-            # was open), that other folder has not been answered for.
+            # belongs to another project by now (a ``.git`` appeared above it
+            # while the question was open), that one has not been answered for.
             if project_root(cwd) != root:
                 print("fluid: the working folder now leads to another project; "
                       "continuing without its files.", file=sys.stderr)

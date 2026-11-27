@@ -519,6 +519,35 @@ def set_project_walk_bound(root: str | os.PathLike[str] | None) -> None:
     _WALK_BOUND = None if root is None else Path(root).resolve()
 
 
+def project_walk_bound() -> Path | None:
+    """The folder a host bound the project walk to, or None."""
+    return _WALK_BOUND
+
+
+def _inside_bound_project(directory: Path) -> bool:
+    """Whether ``directory`` belongs to the project a host bound the walk to.
+
+    True for a host that set no bound. Otherwise the folder, with links
+    followed, must be the bound or lie under it with no ``.git`` of its own
+    on the way up: a separate checkout placed inside a trusted project (a
+    vendored copy, an unpacked archive) is another project, and reading a
+    file in it is not a trust decision.
+    """
+    bound = _WALK_BOUND
+    if bound is None:
+        return True
+    try:
+        d = directory.resolve()
+    except (OSError, RuntimeError):
+        return False
+    while True:
+        if d == bound:
+            return True
+        if os.path.lexists(d / ".git") or d.parent == d:
+            return False
+        d = d.parent
+
+
 def _walk_boundary(cwd: Path) -> Path:
     """The outermost directory the walk from ``cwd`` (resolved) reaches."""
     root = _git_root(cwd)
@@ -601,9 +630,13 @@ def nested_instructions(path: str | os.PathLike[str]) -> list[InstructionFile]:
     When the agent touches ``<subdir>/foo.py``, ``<subdir>``'s own native
     AGENTS files apply on top of the project stack. This returns those files;
     ``NativeLoop._dispatch_tool`` appends them to that call's tool result.
+    Nothing is returned for a folder outside the project a host bound the
+    walk to (:func:`set_project_walk_bound`).
     """
     p = Path(path)
     directory = p if p.is_dir() else p.parent
+    if not _inside_bound_project(directory):
+        return []
     return [
         InstructionFile(path=f.path, scope="nested", kind=f.kind, content=f.content)
         for f in _files_in_dir(directory, "nested")

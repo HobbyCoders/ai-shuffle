@@ -282,19 +282,34 @@ built-in defaults plus the user's own config.
   untrusted folder is judged by where it leads. A recorded path is compared
   as text and never resolved again, so a trusted folder that is moved away
   and replaced by a link to another folder is not trusted through the old
-  name, and no case folding is done. The answer at the question is saved for
-  the folder that was shown; two `fluid` processes that answer at once both
-  keep their answer (the update holds a lock file beside the record).
+  name, and no case folding is done. The working folder's links are followed
+  once, before the question: the question, the saved answer and the session
+  all use that one folder, so a `--cwd` that is a link cannot be pointed at
+  another project between them. Two `fluid` processes that answer at once
+  both keep their answer (the update holds a lock file beside the record).
 - The project's `.git` is part of it. git runs the programs `.git/config`
-  names even on a status read, so in an untrusted project the harness runs
-  no git of its own (the prompt has no git lines, file listing falls back to
-  a directory walk) and every git command the agent runs asks first.
-- Outside a git checkout the project is the trusted folder alone: nothing
-  above it is searched for instruction files, commands, skills or agents, so
-  a shared temp or download folder above an unpacked project has no say.
+  names even on a status read, so the harness runs no git of its own, and
+  rates no git command read-only, in any checkout but the trusted project's.
+  This is judged per call, by the checkout git would open: the session's
+  folder, the Bash call's `cwd`, or a `git -C` folder. In an untrusted
+  project that is every git command; in a trusted one it is a command aimed
+  at another checkout, including one nested inside the project (a vendored
+  clone, a submodule) or behind a link. A `-C` folder the check cannot
+  establish (an absolute path, a variable, `~`) asks. Without git the prompt
+  has no git lines and file listing falls back to a directory walk.
+- Nothing above the trusted folder is searched for instruction files,
+  commands, skills or agents: outside a git checkout the project is the
+  trusted folder alone, so a shared temp or download folder above an
+  unpacked project has no say. Reading a file inside another checkout that
+  sits in the project adds none of that checkout's instruction files to the
+  result either.
 - The Claude provider's child process reads settings and instruction files
   itself. It is started with the same scopes (`--setting-sources`), so it
-  leaves an untrusted project's files out too.
+  leaves an untrusted project's files out too, and with exclude patterns
+  (`claudeMdExcludes`) for every folder above the project, so those add
+  nothing. Both need Claude Code 2.1.239 or newer; with an older or unknown
+  version the CLI's Claude provider does not start and says which version it
+  needs.
 - Without a terminal there is no question. The project's files are left out
   and stderr says so, which is the safe result for a script or CI run in a
   checkout nobody vouched for.
@@ -336,6 +351,18 @@ runs in it as in a trusted project.
   app, can name programs that `git status` and `git diff` run without a
   prompt. Register or trust a folder that came with its own `.git` (an
   unpacked archive, a copied checkout) only after reading that file.
+- With the Claude provider, Claude Code decides which instruction files it
+  loads below the project. It loads a subfolder's `CLAUDE.md` when it reads
+  files there, and that includes a separate checkout placed inside a trusted
+  project; fluid's own engines leave such a checkout's files out, Claude
+  Code does not. The exclude patterns for the folders above the project were
+  checked against Claude Code 2.1.332 on Linux only; path matching on
+  Windows and macOS follows Claude Code's documentation and has not been
+  exercised.
+- A shell command that changes folder and then runs git (`cd other && git
+  status`) was never rated read-only and still asks. The per-checkout rule
+  covers the forms that were: a plain git command, the call's `cwd`, and
+  `git -C`.
 
 ## Override reference
 

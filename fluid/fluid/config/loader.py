@@ -1024,6 +1024,7 @@ def build_engine(
         ctx.extra.setdefault("session_view", store.session_slice)
 
     if pc.kind == "delegated_claude":
+        from fluid.context.instructions import project_walk_bound
         from fluid.engine.delegated import DelegatedLoop
 
         # The delegated leg gates fluid's builtins at the bundled bridge, so
@@ -1085,8 +1086,11 @@ def build_engine(
             journal=journal,
             mcp_servers=_mcp_server_map(config, disabled_mcp, child_env) or None,
             # The Claude child reads settings and instruction files itself:
-            # it gets the same sources, so an untrusted project's are left out.
+            # it gets the same sources, so an untrusted project's are left out,
+            # and the same upper bound as fluid's own walk, so the folders
+            # above the project add nothing (None outside the CLI).
             setting_sources=config.setting_sources,
+            project_bound=project_walk_bound(),
         )
 
     # Native providers.

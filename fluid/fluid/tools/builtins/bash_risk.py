@@ -84,6 +84,7 @@ with a trailing ``.exe`` stripped.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import posixpath
 import re
@@ -915,14 +916,62 @@ def _git_sets_banned_option(arg: str) -> bool:
     return any(arg.startswith(b) or b.startswith(name) for b in _GIT_BANNED_LONG)
 
 
+# The folder the command being rated starts in (the call's ``cwd``, else the
+# session's). ``classify`` sets it; the git check reads it.
+_CALL_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "bash_risk_call_cwd", default=None)
+
+# In a ``-C`` value, anything the shell or git could turn into another path:
+# an expansion, a pattern, a home shorthand, a backslash (a separator in one
+# shell and an escape in another).
+_GIT_DIR_UNSURE = re.compile(r"[*?\[\]{}$~`\\'\"!]")
+
+
+def _git_start_folder(args: list[str]) -> str | None:
+    """The folder git starts in for these arguments, or None when it cannot
+    be told: the call's folder, moved by each leading ``-C`` in turn.
+
+    Only a plain relative ``-C`` path is followed. An absolute one is spelled
+    differently per shell (``/c/x`` in Git Bash is ``C:\\x``), so it asks.
+    """
+    folder = _CALL_CWD.get()
+    if not folder:
+        return None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-C" and i + 1 < len(args):
+            value, i = args[i + 1], i + 2
+        elif a.startswith("-C") and len(a) > 2:
+            value, i = a[2:], i + 1
+        elif a == "--no-pager":
+            i += 1
+            continue
+        else:
+            break
+        if (not value or _GIT_DIR_UNSURE.search(value) or value.startswith("/")
+                or os.path.isabs(value) or re.match(r"[A-Za-z]:", value)):
+            return None
+        folder = os.path.join(folder, value)
+    return folder
+
+
 def _git_ok(args: list[str]) -> bool:
-    from fluid.tools.child_env import git_hardening_supported, project_git_trusted
+    from fluid.tools.child_env import (
+        git_hardening_supported,
+        git_trust_limited,
+        git_trusted_in,
+    )
 
     # git runs the programs a checkout's own ``.git`` names (filters, diff
-    # drivers, hooks), on ``git status`` too. In a project the owner has not
-    # trusted, no git command is rated read-only: each one asks.
-    if not project_git_trusted():
-        return False
+    # drivers, hooks), on ``git status`` too. Where the host names the
+    # checkouts its owner trusted, a git command is rated read-only only when
+    # the checkout it opens is one of them; in any other, and when the folder
+    # cannot be told, it asks.
+    if git_trust_limited():
+        folder = _git_start_folder(args)
+        if folder is None or not git_trusted_in(folder):
+            return False
     # The settings that stop git running a program a folder names
     # (child_env.harden_git_env) need git 2.38. On an older git, or when git
     # cannot be asked, no git command is rated read-only. This asks the
@@ -1882,9 +1931,14 @@ def classify(input: dict[str, Any]) -> str:
         # The session's settings choose where its shells find programs, or
         # what they run first: ``cat`` there need not be the worker's cat.
         return WRITE
-    if not is_read_only(command):
+    # The shell starts in the call's ``cwd``, or in the session's folder.
+    cwd = input.get("cwd") or launch_cwd()
+    token = _CALL_CWD.set(cwd if isinstance(cwd, str) else None)
+    try:
+        read_only = is_read_only(command)
+    finally:
+        _CALL_CWD.reset(token)
+    if not read_only:
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
-    # The shell starts in the call's ``cwd``, or in the session's folder.
-
-    return WRITE if _touches_sensitive_path(command, input.get("cwd") or launch_cwd()) else SAFE
+    return WRITE if _touches_sensitive_path(command, cwd) else SAFE

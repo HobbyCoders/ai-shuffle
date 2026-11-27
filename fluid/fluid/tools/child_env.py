@@ -24,7 +24,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 
 PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 
@@ -206,23 +206,71 @@ def harden_git_env(env: dict[str, str]) -> dict[str, str]:
 # ``.git`` safe: git runs the filters, diff drivers, signature programs and
 # hooks that ``.git`` names, on ``git status`` and ``git diff`` too, and no
 # option turns all of that off. So a folder's ``.git`` counts as the project's
-# own configuration. The ``fluid`` CLI switches this off for a project its
-# owner has not trusted (``fluid.config.trust``): the harness then runs no git
-# of its own there and the Bash classifier rates no git command read-only.
+# own configuration. The ``fluid`` CLI names the checkouts its owner has
+# trusted (``fluid.config.trust``): in any other checkout the harness runs no
+# git of its own and the Bash classifier rates no git command read-only. The
+# question is asked of the checkout git would open, not of the folder the
+# session started in: a trusted session can be pointed at another checkout.
 # A host that never calls the setter (the app, whose projects the owner
-# registered himself) keeps it on.
-_PROJECT_GIT_TRUSTED = True
+# registered himself) has no such list and git runs as before.
+_TRUSTED_GIT_ROOTS: tuple[str, ...] | None = None
 
 
-def set_project_git_trusted(trusted: bool) -> None:
-    """Say whether this process's project may have git run unprompted in it."""
-    global _PROJECT_GIT_TRUSTED
-    _PROJECT_GIT_TRUSTED = bool(trusted)
+def set_trusted_git_roots(roots: Iterable[str | os.PathLike[str]] | None) -> None:
+    """Name the checkouts git may run in unprompted; None lifts the limit."""
+    global _TRUSTED_GIT_ROOTS
+    _TRUSTED_GIT_ROOTS = (
+        None if roots is None else tuple(os.path.realpath(os.fspath(r)) for r in roots)
+    )
 
 
-def project_git_trusted() -> bool:
-    """False when git must not run in the project without the owner's say."""
-    return _PROJECT_GIT_TRUSTED
+def git_trust_limited() -> bool:
+    """True when a host named the checkouts git may run in unprompted."""
+    return _TRUSTED_GIT_ROOTS is not None
+
+
+def checkout_of(folder: str | os.PathLike[str]) -> str | None:
+    """The repository git opens when started in ``folder`` (a real path): the
+    nearest folder at or above it that holds a ``.git`` entry or is itself
+    shaped like a repository, or None when there is none.
+
+    This is the rule ``fluid.config.trust`` uses for a project's root. git
+    itself skips a ``.git`` that is not a repository and looks further up;
+    that only matters for a broken ``.git`` inside a trusted folder, whose
+    files the owner has already let configure the run.
+    """
+    current = os.fspath(folder)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")) or (
+            os.path.isfile(os.path.join(current, "HEAD"))
+            and os.path.isdir(os.path.join(current, "objects"))
+            and os.path.isdir(os.path.join(current, "refs"))
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def git_trusted_in(folder: str | os.PathLike[str] | None) -> bool:
+    """Whether git may run unprompted when started in ``folder``.
+
+    Always True for a host that named no checkouts. Otherwise the repository
+    git would open from there must be one of the named ones; a folder in no
+    repository at all gives git nothing to read. An unknown folder is not
+    trusted.
+    """
+    roots = _TRUSTED_GIT_ROOTS
+    if roots is None:
+        return True
+    if not folder:
+        return False
+    try:
+        checkout = checkout_of(os.path.realpath(os.fspath(folder)))
+    except (OSError, TypeError, ValueError):
+        return False
+    return checkout is None or checkout in roots
 
 
 # ``GIT_CONFIG_COUNT`` came with git 2.31 and ``safe.bareRepository`` with

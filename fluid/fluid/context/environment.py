@@ -16,7 +16,7 @@ import sys
 from fluid.context.time_awareness import RELATIVE_TIME_RULE, turn_time_lines
 from pathlib import Path
 
-from fluid.tools.child_env import harden_git_env, project_git_trusted, scrub_child_env
+from fluid.tools.child_env import git_trusted_in, harden_git_env, scrub_child_env
 from fluid.tools.shell import describe as describe_shell
 
 _GIT_TIMEOUT = 3.0  # seconds; env gathering must never stall a session start
@@ -24,10 +24,10 @@ _GIT_TIMEOUT = 3.0  # seconds; env gathering must never stall a session start
 
 def _run_git(cwd: str, *args: str) -> str | None:
     # git runs the programs a checkout's own ``.git`` names, on a status read
-    # too, so none is started in a project the owner has not trusted: the
+    # too, so none is started in a checkout the owner has not trusted: the
     # prompt goes without its git lines there. Elsewhere it gets the same
     # settings an agent's shell gets (no found bare repository, no fsmonitor).
-    if not project_git_trusted():
+    if not git_trusted_in(cwd):
         return None
     try:
         proc = subprocess.run(

@@ -66,9 +66,15 @@ without `project` and `local`, whichever layer named them: a user config,
 is the trust answer. System, user, environment and flag layers load as usual.
 
 The project is the git repository root, or the start directory outside a
-checkout, and a checkout nested inside a trusted folder is its own project.
+checkout, and a checkout nested inside a trusted folder is its own project:
+in a trusted project a git command aimed at such a checkout (or any other
+one, by the Bash call's `cwd` or `git -C`) still asks first, and reading a
+file in it adds none of its instruction files.
 Outside a checkout the `fluid` CLI searches the start directory alone for
 instruction files, commands, skills and agents, not the folders above it.
+The Claude provider is held to the same bound with Claude Code's own
+settings, which needs Claude Code 2.1.239 or newer; an older one is not
+started ([security.md](security.md) has the limits).
 Trust is recorded by real path in `~/.fluid/trusted_projects.json`, never
 inside the project, by one of:
 

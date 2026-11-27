@@ -186,9 +186,9 @@ def _project_switches_reset():
     them set for the next test."""
     yield
     from fluid.context.instructions import set_project_walk_bound
-    from fluid.tools.child_env import set_project_git_trusted
+    from fluid.tools.child_env import set_trusted_git_roots
 
-    set_project_git_trusted(True)
+    set_trusted_git_roots(None)
     set_project_walk_bound(None)
 
 
