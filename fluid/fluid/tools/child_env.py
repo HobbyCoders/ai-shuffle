@@ -231,30 +231,17 @@ _LAUNCH_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-# Whether rating this call may start the worker's git to ask its version
-# (:func:`git_hardening_supported`). Off unless the permission engine says the
-# answer can let the call run without a prompt.
-_LAUNCH_MAY_ASK_GIT: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "fluid_launch_may_ask_git", default=False
-)
-
-
 @contextlib.contextmanager
-def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None, *,
-                   may_ask_git: bool = False) -> Iterator[None]:
+def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None) -> Iterator[None]:
     """Rate tool calls for shells that get ``overlay`` on top of the host
     environment (a session's settings ``env``, or None) and start in ``cwd``
-    (the session's working folder) unless the call names another. The overlay
-    is only read here, never used to start a process. ``may_ask_git`` lets the
-    rating start the worker's git once to learn its version; without it only
-    an answer already known is used."""
+    (the session's working folder) unless the call names another. Both are
+    only read while a call is rated; rating starts no process."""
     env_token = _LAUNCH_OVERLAY.set(overlay or None)
     cwd_token = _LAUNCH_CWD.set(cwd or None)
-    git_token = _LAUNCH_MAY_ASK_GIT.set(bool(may_ask_git))
     try:
         yield
     finally:
-        _LAUNCH_MAY_ASK_GIT.reset(git_token)
         _LAUNCH_CWD.reset(cwd_token)
         _LAUNCH_OVERLAY.reset(env_token)
 
@@ -326,30 +313,12 @@ def _git_on_path(env: Mapping[str, str]) -> tuple[str, int, int] | None:
     return os.path.realpath(found), info.st_size, info.st_mtime_ns
 
 
-def git_hardening_supported() -> bool:
-    """True when the worker's own git honours :data:`AGENT_GIT_CONFIG`.
-
-    Asked through the shell a Bash command gets, started the way agent
+def _git_probe() -> tuple[list[str], str | None, dict[str, str], tuple[object, ...]] | None:
+    """How the worker's git is asked its version, and the key the answer is
+    kept under: through the shell a Bash command gets, started the way agent
     commands are (the spawn runner under Docker agent isolation), with the
-    host's scrubbed environment and none of a session's settings: Git Bash on
-    Windows puts its own git ahead of PATH, and that is the one asked.
-
-    Rating a call must not start a program the call itself could not start
-    without a prompt. So git is asked only inside a
-    :func:`launch_context` that allows it, which ``PermissionEngine.decide``
-    gives when no rule decides the call and the policy lets read-only
-    commands run: there a ``yes`` means the same git starts unprompted a
-    moment later. A call a rule denies or sends to a person, a policy that
-    asks for everything, and any caller outside the engine get the answer
-    already known, or False. A session whose settings ``env`` could select
-    another git is not asked about at all; the classifier rates none of its
-    commands read-only (:func:`changes_program_lookup`).
-
-    False when git is missing, too old, or does not answer: the Bash
-    classifier then rates no git command read-only, so each one asks instead
-    of running unprotected. An answer is kept until the git a PATH search
-    finds changes.
-    """
+    host's scrubbed environment and none of a session's settings. Git Bash on
+    Windows puts its own git ahead of PATH, and that is the one asked."""
     from fluid.tools import agent_runner
     from fluid.tools.shell import resolve_shell
 
@@ -358,17 +327,48 @@ def git_hardening_supported() -> bool:
             [*resolve_shell().argv_prefix, "git --version"], None, shell_env()
         )
     except OSError:
-        return False
+        return None
     key = (tuple(argv), cwd, tuple(sorted(env.items())), _git_on_path(env))
-    known = _GIT_ANSWERS.get(key)
-    if known is not None:
-        return known
-    if not _LAUNCH_MAY_ASK_GIT.get():
-        return False
+    return list(argv), cwd, dict(env), key
+
+
+def git_hardening_supported() -> bool:
+    """True when the worker's own git is known to honour
+    :data:`AGENT_GIT_CONFIG`.
+
+    A lookup, nothing more: rating a tool call happens before a rule, a hook
+    or a person has had a say on it, so it must not start a program. The
+    answer is the one :func:`learn_git_version` recorded for the git a PATH
+    search finds now. False when none was recorded (no session started yet,
+    or a git that appeared on PATH since), and when that git is missing, too
+    old or did not answer: the Bash classifier then rates no git command
+    read-only, so each one asks instead of running unprotected. A session
+    whose settings ``env`` could select another git is not looked up at all;
+    the classifier rates none of its commands read-only
+    (:func:`changes_program_lookup`).
+    """
+    probe = _git_probe()
+    return probe is not None and _GIT_ANSWERS.get(probe[3]) is True
+
+
+def learn_git_version() -> None:
+    """Ask the worker's git its version once and keep the answer.
+
+    For the moment a session starts, where no tool call is waiting on a rule,
+    a hook or a person: the host already runs this same git from this same
+    PATH for its own work. Never call it while a call is being rated. The
+    answer is kept per git file found on PATH, so a git installed later is
+    unknown, and its commands ask, until the next session starts.
+    """
+    probe = _git_probe()
+    if probe is None:
+        return
+    argv, cwd, env, key = probe
+    if key in _GIT_ANSWERS:
+        return
     if len(_GIT_ANSWERS) >= 16:
         _GIT_ANSWERS.clear()
-    answer = _GIT_ANSWERS[key] = _ask_git_version(argv, cwd, env)
-    return answer
+    _GIT_ANSWERS[key] = _ask_git_version(argv, cwd, env)
 
 
 def _ask_git_version(argv: list[str], cwd: str | None, env: Mapping[str, str]) -> bool:

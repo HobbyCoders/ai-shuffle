@@ -214,6 +214,14 @@ async def serve_registry_socket(
     Returns the started ``asyncio`` server; the caller owns its lifetime
     (``server.close()`` + ``await server.wait_closed()``).
     """
+    if permissions is not None:
+        # The session's tools start being served here, before any call: the
+        # place the worker's git is asked its version (see
+        # ``child_env.learn_git_version``). The gate only looks it up.
+        from fluid.tools.child_env import learn_git_version
+
+        await asyncio.to_thread(learn_git_version)
+
     ctx = ctx or ToolCtx()
     routes = http_routes if http_token else None
 

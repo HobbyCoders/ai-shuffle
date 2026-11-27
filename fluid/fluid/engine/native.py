@@ -1347,6 +1347,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.observe_service_tier = False
         self.registry = registry
         self.permissions = permissions
+        if permissions is not None:
+            # A session starts here, with no tool call waiting on a rule, a
+            # hook or a person: the one place the worker's git is asked its
+            # version. Rating a call later only looks the answer up.
+            from fluid.tools.child_env import learn_git_version
+
+            learn_git_version()
         self.hooks = hooks
         self.ctx = ctx or ToolCtx()
         if registry is not None:
