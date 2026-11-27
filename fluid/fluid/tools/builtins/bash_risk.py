@@ -720,8 +720,60 @@ def _printenv_ok(args: list[str]) -> bool:
 _JQ_ENV_RE = re.compile(r"\$ENV\b|(?<![\w.$\"])env(?![\w\"])")
 
 
+# Code jq loads from a file is code this check never reads. As with ``env``,
+# ``.include`` (a field) and ``"import"`` (a string) are not the keyword.
+_JQ_MODULE_RE = re.compile(
+    r"(?<![\w.$\"])(?:import|include|modulemeta|get_search_list)(?![\w\"])"
+)
+_JQ_FLAGS = frozenset({
+    "--raw-output", "--raw-output0", "--join-output", "--ascii-output",
+    "--compact-output", "--slurp", "--null-input", "--raw-input", "--sort-keys",
+    "--color-output", "--monochrome-output", "--tab", "--unbuffered", "--stream",
+    "--stream-errors", "--seq", "--exit-status", "--binary", "--args",
+    "--jsonargs", "--help", "--version", "--build-configuration",
+})
+# Long options that take the next words as their value.
+_JQ_VALUE_OPTIONS = {
+    "--indent": 1, "--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2,
+    "--argfile": 2,
+}
+
+
 def _jq_ok(args: list[str]) -> bool:
-    return not any(_JQ_ENV_RE.search(a) for a in args)
+    """A jq filter written on the command line that reads no environment.
+
+    The filter is the first word that is not an option or an option's value,
+    so the options are parsed to find it: only the ones listed here pass, and
+    a word jq would not know asks. ``-f``/``--from-file`` and
+    ``-L``/``--library-path`` take the filter or its modules from a file, and
+    ``import``/``include`` load one from inside the filter.
+    """
+    if any(_JQ_ENV_RE.search(a) or _JQ_MODULE_RE.search(a) for a in args):
+        return False
+    filter_seen = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        if a.startswith("--"):
+            if a in _JQ_VALUE_OPTIONS:
+                i += _JQ_VALUE_OPTIONS[a]
+                if i > len(args):
+                    return False
+            elif a not in _JQ_FLAGS:
+                return False
+        elif a.startswith("-") and len(a) > 1:
+            # Short flags bundle (-nr). -f and -L read code from a file.
+            if not re.fullmatch(r"-[A-Za-z]+", a) or "f" in a or "L" in a:
+                return False
+        elif not filter_seen:
+            if a == _GLOB_OPERAND:
+                return False  # a file name where the filter goes
+            filter_seen = True
+    # After ``--`` the next word is the filter when none came before.
+    return filter_seen or i >= len(args) or args[i] != _GLOB_OPERAND
 
 
 def _exact(*allowed: tuple[str, ...]) -> Check:
@@ -789,10 +841,34 @@ PACKAGE_MANAGER_READ_ONLY = {
 }
 
 
+# --output writes a file. --ext-diff and --textconv ask git to run the program
+# a repository's own config names (diff.external, diff.*.textconv).
+_GIT_BANNED_LONG = ("--output", "--ext-diff", "--textconv")
+
+
+def _git_sets_banned_option(arg: str) -> bool:
+    """True when ``arg`` is, or may be read as, one of ``_GIT_BANNED_LONG``.
+
+    git takes any unambiguous start of a long option (``--ext-d``,
+    ``--textc``, ``--outp=f``). Which starts are unambiguous depends on the
+    subcommand and the git version, so every start of a banned name counts:
+    ``--text`` asks although it is an option of its own.
+    """
+    if not arg.startswith("--") or len(arg) < 3:
+        return False
+    name = arg.split("=", 1)[0]
+    return any(arg.startswith(b) or b.startswith(name) for b in _GIT_BANNED_LONG)
+
+
 def _git_ok(args: list[str]) -> bool:
-    # --output writes a file. --ext-diff and --textconv ask git to run the
-    # program a repository's own config names (diff.external, diff.*.textconv).
-    if any(a.startswith(("--output", "--ext-diff", "--textconv")) for a in args):
+    from fluid.tools.child_env import git_hardening_supported
+
+    # The settings that stop git running a program a folder names
+    # (child_env.harden_git_env) need git 2.38. On an older git, or when git
+    # cannot be asked, no git command is rated read-only.
+    if not git_hardening_supported():
+        return False
+    if any(_git_sets_banned_option(a) for a in args):
         return False
     i = 0
     while i < len(args):
@@ -844,12 +920,38 @@ _DOLLAR_STAYS_LITERAL_BEFORE = frozenset(" \t|)")
 
 
 @dataclass(frozen=True)
+class _Word:
+    """One word of a command line, or one run of operator characters."""
+
+    raw: str  # as written, quotes kept
+    value: str  # with the quotes removed: what the program gets if nothing expands
+    operator: bool = False  # ``;``, ``&&``, ``|``, ``>`` ... outside quotes
+    quoted_operator: bool = False  # ``';'``, ``\;``: an argument, not a separator
+    dollar: bool = False  # ``$X``, ``"$X"``, ``$'..'``: text the shell fills in
+    # The literal text before the first unquoted glob character, None when the
+    # word has none. Every file name the shell expands the word to starts
+    # with it, so ``src/*.py`` cannot become a flag and ``*.py`` can (a file
+    # named ``-o.py``).
+    glob_prefix: str | None = None
+    brace_list: bool = False  # ``{a,b}`` or ``{1..3}`` outside quotes
+
+    @property
+    def varies(self) -> bool:
+        """The shell may run other words, or more or fewer, than this one."""
+        return self.dollar or self.glob_prefix is not None or self.brace_list
+
+
+@dataclass(frozen=True)
 class _Scan:
     """One command line as the shell reads it, before any word is run."""
 
     text: str  # the line without its comment
-    hazard: bool  # the shell would run words other than the ones written
-    words: tuple[str, ...]  # every word as written, quotes kept
+    words: tuple[_Word, ...]  # words and operator runs, in order
+
+    @property
+    def hazard(self) -> bool:
+        """The shell would run words other than the ones written, for any program."""
+        return any(w.dollar or w.quoted_operator for w in self.words)
 
 
 def _lines(command: str) -> list[str] | None:
@@ -858,11 +960,11 @@ def _lines(command: str) -> list[str] | None:
     Only a newline ends a line. ``str.splitlines`` also splits on vertical
     tab, form feed and the Unicode separators, which the shell keeps inside a
     word, so text after one was classified as a command of its own while the
-    shell ran it as arguments. Any other control character is refused: the
-    lexer and the shell disagree about those too (a lone carriage return is
-    whitespace to one and a letter to the other).
+    shell ran it as arguments. Every other control character is refused. A
+    carriage return is one of them, also before a newline: the shell keeps it
+    as a letter, so ``uniq a.txt \\r`` has a second operand (the file uniq
+    writes) that a reader which drops it never sees.
     """
-    command = command.replace("\r\n", "\n")
     if any((ch < " " and ch not in "\n\t") or ch == "\x7f" for ch in command):
         return None
     return command.split("\n")
@@ -874,53 +976,66 @@ def _scan_line(line: str) -> _Scan | None:
     ``shlex`` drops the quotes, so on its own it cannot tell an argument from
     shell syntax, and it is not a shell: it starts a comment at a ``#`` in the
     middle of a word. Every difference is a command the classifier never saw.
-    ``hazard`` is set when the shell would not run the words as written:
+    This is the one reader: the read-only check, the ``allow_always`` labels
+    and the allow rules all take their words from it, so none of them can
+    split a line differently from the others. Each word records how the shell
+    may change it before the program sees it (see :class:`_Word`):
 
     * ``$`` outside single quotes. ``-exe${x}c`` and ``$'-exec'`` are ``-exec``
       once expanded, ``.e${x}nv`` is ``.env``, and ``$GH_TOKEN`` is a secret.
     * A quoted or escaped word made only of operator characters (``';'``,
-      ``\\;``): an argument to the shell, a command separator to the lexer.
-    * A glob in a word that starts with ``-``: the shell may expand it to a
-      flag (``-exe*`` with a file of that name).
-    * A brace list that can produce a flag: ``{-exec,x}``, ``--outpu{t,x}=f``.
+      ``\\;``): an argument to the shell, a command separator to ``shlex``.
+    * A glob: zero, one or many file names, any of which may start with ``-``
+      unless the word has a literal start that rules it out. A leading ``^``
+      counts (zsh with EXTENDED_GLOB).
+    * A brace list: several words, built from pieces (``e{nv,x}``).
 
     Unbalanced quotes and a trailing backslash return None.
     """
-    hazard = False
-    words: list[str] = []
+    words: list[_Word] = []
     start: int | None = None  # where the current word began
     value: list[str] = []  # the word with its quotes removed
-    quoted = glob = brace_list = False
+    quoted = dollar = brace_list = False
+    glob_at: int | None = None  # len(value) at the word's first unquoted glob
     brace_at: int | None = None  # len(value) at the word's first unquoted {
     i, n = 0, len(line)
 
     def close(end: int) -> None:
-        nonlocal hazard, start, quoted, glob, brace_list, brace_at
+        nonlocal start, quoted, dollar, brace_list, glob_at, brace_at
         if start is None:
             return
         text = "".join(value)
-        if quoted and text and all(ch in _OPERATOR_CHARS for ch in text):
-            hazard = True
-        if glob and text.startswith("-"):
-            hazard = True
-        if brace_at is not None and brace_list:
-            prefix = text[:brace_at]
-            if not prefix or prefix.startswith("-"):
-                hazard = True
-        words.append(line[start:end])
+        words.append(_Word(
+            raw=line[start:end],
+            value=text,
+            quoted_operator=quoted and bool(text) and all(
+                ch in _OPERATOR_CHARS for ch in text
+            ),
+            dollar=dollar,
+            glob_prefix=None if glob_at is None else text[:glob_at],
+            brace_list=brace_at is not None and brace_list,
+        ))
         start = None
         value.clear()
-        quoted = glob = brace_list = False
-        brace_at = None
+        quoted = dollar = brace_list = False
+        glob_at = brace_at = None
 
     while i < n:
         ch = line[i]
-        if ch in " \t" or ch in _OPERATOR_CHARS:
+        if ch in " \t":
             close(i)
             i += 1
             continue
+        if ch in _OPERATOR_CHARS:
+            close(i)
+            end = i + 1
+            while end < n and line[end] in _OPERATOR_CHARS:
+                end += 1
+            words.append(_Word(raw=line[i:end], value=line[i:end], operator=True))
+            i = end
+            continue
         if ch == "#" and start is None:
-            return _Scan(line[:i], hazard, tuple(words))  # a comment
+            return _Scan(line[:i], tuple(words))  # a comment
         if start is None:
             start = i
         if ch == "\\":
@@ -955,16 +1070,17 @@ def _scan_line(line: str) -> _Scan | None:
                 if inner == "$":
                     after = line[i + 1] if i + 1 < n else " "
                     if after != '"' and after not in _DOLLAR_STAYS_LITERAL_BEFORE:
-                        hazard = True
+                        dollar = True
                 value.append(inner)
                 i += 1
             continue
         if ch == "$":
             after = line[i + 1] if i + 1 < n else " "
             if after not in _DOLLAR_STAYS_LITERAL_BEFORE:
-                hazard = True
-        elif ch in "*?[":
-            glob = True
+                dollar = True
+        elif ch in "*?[" or (ch == "^" and not value):
+            if glob_at is None:
+                glob_at = len(value)
         elif ch == "{":
             if brace_at is None:
                 brace_at = len(value)
@@ -973,7 +1089,7 @@ def _scan_line(line: str) -> _Scan | None:
         value.append(ch)
         i += 1
     close(n)
-    return _Scan(line, hazard, tuple(words))
+    return _Scan(line, tuple(words))
 
 
 def _posix_shell() -> bool:
@@ -982,49 +1098,103 @@ def _posix_shell() -> bool:
     Everything here reads POSIX syntax. cmd.exe does not: single quotes do not
     quote there (``git status 'a & calc'`` runs ``calc``), ``^`` is dropped
     from the middle of a word (``--outp^ut=f``) and ``%VAR%`` expands, so
-    nothing this module proves about a command holds under it.
+    nothing this module proves about a command holds under it. It also looks
+    for a bare program name in the working folder before PATH, so ``git`` can
+    be a ``git.cmd`` a repository ships. Nothing is rated read-only there, an
+    approval stays one-shot and no allow rule matches a command.
     """
     from fluid.tools.shell import resolve_shell
 
     return resolve_shell().posix
 
 
-# Under cmd.exe a command with any of these is not the list of words the
-# POSIX lexer reports (see _posix_shell).
-_CMD_SYNTAX_RE = re.compile(r"""['^%!]|\\\"""")
+def _split_commands(scan: _Scan) -> list[list[_Word]] | None:
+    """The simple commands of one scanned line, empty ones included.
+
+    None when the line has an operator that is not a plain separator: a
+    redirection, a background ``&``, a subshell, ``|&``.
+    """
+    groups: list[list[_Word]] = [[]]
+    for word in scan.words:
+        if not word.operator:
+            groups[-1].append(word)
+        elif word.value in _SEPARATORS:
+            groups.append([])
+        else:
+            return None
+    return groups
 
 
-def _lex(line: str) -> list[str] | None:
-    scan = _scan_line(line)
-    if scan is None:  # unbalanced quotes, trailing backslash
-        return None
-    lex = shlex.shlex(scan.text, posix=True, punctuation_chars=True)
-    lex.whitespace_split = True
-    lex.commenters = ""  # _scan_line removed the comment; ``a#b`` is a word
-    try:
-        return list(lex)
-    except ValueError:
-        return None
+# Stands in for a file name the shell puts where a glob was written. No check
+# accepts it as an awk program, a sed script, a jq filter, a subcommand or a
+# variable name, so a command passes with it only where a file may go.
+_GLOB_OPERAND = "@@"
+
+# Checks that look at each word on its own, wherever it sits: adding or
+# dropping operands between the words cannot change their answer.
+_WORDWISE_PROGRAMS = frozenset({"find", "rg", "file", "tree", "sort"})
 
 
-def _simple_command_ok(tokens: list[str]) -> bool:
+def _arguments_ok(program: str, check: Check, args: list[_Word]) -> bool:
+    """``check`` over the arguments the shell may hand ``program``.
+
+    A check reads the words as written. The shell hands the program other
+    words when one is a brace list or a glob, so those pass only where no
+    expansion can change the answer:
+
+    * a brace list never does: ``e{nv,x}`` is ``env`` to jq and nothing the
+      check saw;
+    * a glob that could expand to a flag never does (``*``, ``*.txt``,
+      ``-n*``: a file named ``-delete`` or ``-o.txt``);
+    * a glob with a literal start (``src/*.py``, ``./*``) expands to operands.
+      For the word-by-word checks that is enough. Every other check counts
+      words or reads one as a program, so the globs must close the command,
+      and the check must hold with none, one and two file names in their
+      place: ``uniq out/*`` writes its second match, ``awk x*`` runs its
+      first as a program, ``git -C sub* status`` takes its second as the
+      subcommand.
+    """
+    values = [w.value for w in args]
+    if any(w.brace_list for w in args):
+        return False
+    globs = [k for k, w in enumerate(args) if w.glob_prefix is not None]
+    if not globs:
+        return check(values)
+    if any(
+        not args[k].glob_prefix or args[k].glob_prefix.startswith("-") for k in globs
+    ):
+        return False
+    if program in _WORDWISE_PROGRAMS:
+        return check(values)
+    first = globs[0]
+    if len(globs) != len(args) - first:
+        return False
+    return all(check(values[:first] + [_GLOB_OPERAND] * count) for count in (0, 1, 2))
+
+
+def _simple_command_ok(words: list[_Word]) -> bool:
     # Leading VAR=value assignments pass only for inert variables; a bare
     # assignment is not a command.
-    while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
-        if not _inert_assignment(tokens[0]):
+    at = 0
+    while at < len(words) and _ENV_ASSIGNMENT.match(words[at].value):
+        if not _inert_assignment(words[at].value):
             return False
-        tokens = tokens[1:]
-    if not tokens:
+        at += 1
+    if at >= len(words):
         return False
+    # The assignments and the program are run as written, or not at all.
+    if any(w.glob_prefix is not None or w.brace_list for w in words[:at + 1]):
+        return False
+    name = words[at].value
     # A program named by path (./ls, scripts/cat, /tmp/x/grep, C:\bin\git.exe)
     # runs whatever file sits there, not the utility its basename suggests.
-    if re.search(r"[\\/]", tokens[0]):
+    if re.search(r"[\\/]", name):
         return False
-    program = _program_name(tokens[0])
+    program = _program_name(name)
     if program not in READ_ONLY_PROGRAMS:
         return False
     check = READ_ONLY_PROGRAMS[program]
-    return check is None or check(tokens[1:])
+    return check is None or _arguments_ok(program, check, words[at + 1:])
 
 
 def is_read_only(command: str) -> bool:
@@ -1045,44 +1215,99 @@ def is_read_only(command: str) -> bool:
             return False
         if not scan.text.strip():
             continue  # a comment line
-        tokens = _lex(line)
-        if tokens is None:
-            return False
-        current: list[str] = []
-        groups: list[list[str]] = []
-        for tok in tokens:
-            if tok in _SEPARATORS:
-                groups.append(current)
-                current = []
-                continue
-            if ">" in tok or "<(" in tok:
+        groups = _split_commands(scan)
+        if groups is None:
+            return False  # redirection, background &, subshells, |& and friends
+        for group in groups:
+            # A quoted ``>`` is an argument, and still asks, as it always has.
+            if any(">" in w.value or "<(" in w.value for w in group):
                 return False
-            if tok and all(ch in "();<>|&" for ch in tok):
-                return False  # background &, subshells, |& and friends
-            current.append(tok)
-        groups.append(current)
-        if not all(_simple_command_ok(g) for g in groups):
-            return False
+            if not _simple_command_ok(group):
+                return False
     return True
 
 
-def simple_commands(command: str) -> list[str] | None:
+def _command_word_literal(words: list[_Word]) -> bool:
+    """True when the shell runs the program this simple command names.
+
+    False when the word that names the program, or one before it, can expand
+    to something else: ``$X status``, ``g* status``, ``{git,rm} x``.
+    """
+    for word in words:
+        if word.brace_list or word.glob_prefix is not None:
+            return False
+        if not _ENV_ASSIGNMENT.match(word.value):
+            return not word.dollar
+        # An assignment's value is filled in but never split into words.
+    return True
+
+
+def _label_words_vary(words: list[_Word]) -> bool:
+    """True when the shell can replace a word that says what this command runs.
+
+    Those are the words :func:`_scope_label` reads: the assignments, the
+    program, a wrapper's duration, the program it wraps, the subcommand.
+    ``timeout $T git status`` runs ``rm`` when ``$T`` is ``5 rm``. A wrapper
+    with options hides which word is the program, so there any expansion
+    counts.
+    """
+    at = 0
+    while at < len(words) and _ENV_ASSIGNMENT.match(words[at].value):
+        # An assignment's value is filled in but never split into words.
+        if words[at].brace_list or words[at].glob_prefix is not None:
+            return True
+        at += 1
+    if at >= len(words):
+        return False
+    if words[at].varies:
+        return True
+    program = _program_name(words[at].value)
+    rest = words[at + 1:]
+    if program in WRAPPER_PROGRAMS and rest:
+        if rest[0].varies:
+            return True
+        if rest[0].value.startswith("-"):
+            return any(w.varies for w in rest)
+        return _label_words_vary(rest[1:] if program == "timeout" else rest)
+    if program in SUBCOMMAND_PROGRAMS and rest:
+        return rest[0].varies
+    return False
+
+
+def simple_commands(command: str, *, for_allow: bool = False) -> list[str] | None:
     """The simple commands of a command line, quoting kept, or None.
 
     ``git commit -m "a b" && rm -rf /`` -> ``['git commit -m "a b"', 'rm -rf /']``.
     Splits on ``&&``, ``||``, ``;``, ``|``, ``|&``, a background ``&`` and
     newlines. None when the line uses command substitution, a subshell or
-    process substitution, or cannot be lexed: the pieces it would run are not
+    process substitution, or cannot be read: the pieces it would run are not
     visible in the text, so a caller matching text against a policy must not
     treat the split as complete.
+
+    ``for_allow`` is for a caller about to let the command run on the
+    strength of its text. It adds three refusals: a control character the
+    shell and this reader may treat differently, a word naming what runs
+    that the shell can replace (``$X``, a glob, a brace list; see
+    :func:`_label_words_vary`), and cmd.exe, which does not read the line
+    the way this does. Without it the split is best effort and
+    as wide as it can be, which is what a deny or ask rule wants: the parts
+    of both readings of a control character, as a letter and as a line break.
     """
     if not command or not command.strip() or "$(" in command or "`" in command:
         return None
-    if not _posix_shell() and _CMD_SYNTAX_RE.search(command):
-        return None
-    lines = _lines(command)
-    if lines is None:
-        return None
+    if for_allow:
+        if not _posix_shell():
+            return None
+        lines = _lines(command)
+        return None if lines is None else _simple_command_texts(lines, for_allow=True)
+    parts = _simple_command_texts(command.split("\n"), for_allow=False)
+    if any(ch in command for ch in "\r\x0b\x0c\x1c\x1d\x1e\x85  "):
+        other = _simple_command_texts(command.splitlines(), for_allow=False)
+        parts = list(dict.fromkeys([*(parts or ()), *(other or ())])) or None
+    return parts
+
+
+def _simple_command_texts(lines: list[str], *, for_allow: bool) -> list[str] | None:
     out: list[str] = []
     for line in lines:
         if not line.strip():
@@ -1090,25 +1315,25 @@ def simple_commands(command: str) -> list[str] | None:
         scan = _scan_line(line)
         if scan is None:
             return None
-        lex = shlex.shlex(scan.text, posix=False, punctuation_chars=True)
-        lex.whitespace_split = True
-        lex.commenters = ""  # _scan_line removed the comment; ``a#b`` is a word
-        try:
-            tokens = list(lex)
-        except ValueError:
-            return None
-        current: list[str] = []
-        for tok in tokens:
-            if tok in _SEPARATORS or tok in ("&", "|&"):
-                if current:
-                    out.append(" ".join(current))
+        current: list[_Word] = []
+        groups: list[list[_Word]] = []
+        for word in scan.words:
+            if not word.operator:
+                current.append(word)
+            elif word.value in _SEPARATORS or word.value in ("&", "|&"):
+                groups.append(current)
                 current = []
-                continue
-            if tok and all(ch in "();<>|&" for ch in tok) and not set(tok) <= set("<>&"):
+            elif set(word.value) <= set("<>&"):
+                current.append(word)  # a redirection stays part of its command
+            else:
                 return None  # subshell parentheses, unknown operator soup
-            current.append(tok)
-        if current:
-            out.append(" ".join(current))
+        groups.append(current)
+        for group in groups:
+            if not group:
+                continue
+            if for_allow and _label_words_vary([w for w in group if not w.operator]):
+                return None
+            out.append(" ".join(w.raw for w in group))
     return out or None
 
 
@@ -1129,8 +1354,8 @@ SUBCOMMAND_PROGRAMS = frozenset((
 ))
 
 
-def _scope_label(tokens: list[str]) -> str | None:
-    """The approval label for one simple command's tokens.
+def _scope_label(words: list[_Word]) -> str | None:
+    """The approval label for one simple command's words.
 
     A wrapper labels as ``wrapper <label of the wrapped command>``; a
     subcommand program as ``program subcommand``; anything else as the
@@ -1141,17 +1366,31 @@ def _scope_label(tokens: list[str]) -> str | None:
     depth of wrapping: that runs whatever file sits there, so approving it
     must not cover the bare name or another path (and a relative path names
     a different file once the working directory changes); it stays one-shot.
+
+    None as well when a word the label is read from can expand: the
+    assignments, the program, a wrapper's duration, the wrapped program, the
+    subcommand. ``timeout $T git status`` runs ``rm`` when ``$T`` is ``5 rm``,
+    and a label of ``timeout git`` would have covered it. Words after those
+    may expand freely (``git commit -m "$MSG"``): they cannot change which
+    program runs.
     """
-    while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
-        tokens = tokens[1:]
-    if not tokens or re.search(r"[\\/]", tokens[0]):
+    at = 0
+    while at < len(words) and _ENV_ASSIGNMENT.match(words[at].value):
+        # An assignment's value is filled in but never split into words.
+        if words[at].brace_list or words[at].glob_prefix is not None:
+            return None
+        at += 1
+    if at >= len(words) or words[at].varies:
         return None
-    program = _program_name(tokens[0])
-    rest = tokens[1:]
+    name = words[at].value
+    if re.search(r"[\\/]", name):
+        return None
+    program = _program_name(name)
+    rest = words[at + 1:]
     if program in WRAPPER_PROGRAMS:
         if not rest:
             return program
-        if rest[0].startswith("-"):
+        if rest[0].varies or rest[0].value.startswith("-"):
             return None
         if program == "timeout":
             # ``timeout DURATION COMMAND``: the duration is not the program.
@@ -1161,40 +1400,34 @@ def _scope_label(tokens: list[str]) -> str | None:
         inner = _scope_label(rest)
         return None if inner is None else f"{program} {inner}"
     if program in SUBCOMMAND_PROGRAMS:
-        if rest and not rest[0].startswith("-"):
-            return f"{program} {rest[0].lower()}"
+        if rest and rest[0].varies:
+            return None
+        if rest and not rest[0].value.startswith("-"):
+            return f"{program} {rest[0].value.lower()}"
         return program
     return program
 
 
-def _simple_command_tokens(command: str) -> list[list[str]] | None:
-    """Token lists of every simple command, or None when they are not knowable."""
+def _simple_command_words(command: str) -> list[list[_Word]] | None:
+    """The words of every simple command, or None when they are not knowable."""
     if not command or not command.strip() or "$(" in command or "`" in command:
         return None
-    if not _posix_shell() and _CMD_SYNTAX_RE.search(command):
+    if not _posix_shell():
         return None
     lines = _lines(command)
     if lines is None:
         return None
-    out: list[list[str]] = []
+    out: list[list[_Word]] = []
     for line in lines:
         if not line.strip():
             continue
-        tokens = _lex(line)
-        if tokens is None:
+        scan = _scan_line(line)
+        if scan is None:
             return None
-        current: list[str] = []
-        for tok in tokens:
-            if tok in _SEPARATORS:
-                if current:
-                    out.append(current)
-                current = []
-                continue
-            if tok and all(ch in "();<>|&" for ch in tok):
-                return None
-            current.append(tok)
-        if current:
-            out.append(current)
+        groups = _split_commands(scan)
+        if groups is None:
+            return None
+        out.extend(group for group in groups if group)
     return out or None
 
 
@@ -1204,11 +1437,14 @@ def program_names(command: str) -> frozenset[str] | None:
     None when the command cannot be lexed or uses substitution/subshells,
     so callers fall back to the broadest scope rather than a wrong one.
     """
-    groups = _simple_command_tokens(command)
+    groups = _simple_command_words(command)
     if groups is None:
         return None
     names: set[str] = set()
-    for tokens in groups:
+    for words in groups:
+        if not _command_word_literal(words):
+            return None
+        tokens = [w.value for w in words]
         while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
             tokens = tokens[1:]
         if tokens:
@@ -1223,12 +1459,12 @@ def scope_labels(command: str) -> frozenset[str] | None:
     programs carry what they run (``sudo apt``, ``npm run``). None when any
     part cannot be labelled, so the approval is one-shot rather than wide.
     """
-    groups = _simple_command_tokens(command)
+    groups = _simple_command_words(command)
     if groups is None:
         return None
     labels: set[str] = set()
-    for tokens in groups:
-        label = _scope_label(list(tokens))
+    for words in groups:
+        label = _scope_label(list(words))
         if label is None:
             return None
         labels.add(label)
@@ -1254,7 +1490,13 @@ _SENSITIVE_EXAMPLE_PATHS = (
     ".aws/credentials", ".ssh/config",
     ".claude/.credentials.json", ".config/gh/hosts.yml",
     ".credential-keys/server.key", "chrome-profile/Default/Cookies",
-    "proc/self/environ",
+    "proc/self/environ", "proc/1/environ",
+)
+# What ``_names_process_environment`` covers, for a glob written from the root.
+_PROC_EXAMPLE_PATHS = (
+    "proc", "proc/self", "proc/1", "proc/thread-self",
+    "proc/self/environ", "proc/1/environ", "proc/thread-self/environ",
+    "proc/self/task/1", "proc/self/task/1/environ",
 )
 _GLOB_CHARS = frozenset("*?[{")
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
@@ -1310,6 +1552,8 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
         parts = [p for p in alt.replace("\\", "/").lower().split("/") if p]
         if not parts:
             continue
+        if alt.replace("\\", "/").startswith("/") and _glob_could_name_process(parts):
+            return True
         if any(fnmatchcase(name, parts[-1]) for name in _SENSITIVE_EXAMPLE_NAMES):
             return True
         for rep_path in _SENSITIVE_EXAMPLE_PATHS:
@@ -1322,7 +1566,48 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
     return False
 
 
-def _touches_sensitive_path(command: str) -> bool:
+def _glob_could_name_process(parts: list[str]) -> bool:
+    """True when a glob written from the root (``/proc/[0-9]*/environ``,
+    ``/pro?/self``, ``/**/environ``) can match a process folder or its
+    environment file. ``**`` stands for any number of folders in zsh and in
+    bash with globstar, so it is tried as none to three of them."""
+    from fnmatch import fnmatchcase
+
+    shapes = [parts]
+    if "**" in parts:
+        at = parts.index("**")
+        shapes = [parts[:at] + ["*"] * count + parts[at + 1:] for count in range(4)]
+    for shape in shapes:
+        for example in _PROC_EXAMPLE_PATHS:
+            names = example.split("/")
+            if len(names) == len(shape) and all(
+                fnmatchcase(name, glob) for name, glob in zip(names, shape)
+            ):
+                return True
+    return False
+
+
+def _climbs_through_a_folder(path: str) -> bool:
+    """True for ``a/../b``: a ``..`` after a named folder.
+
+    The kernel follows ``a`` when it is a link before it climbs, so the text
+    does not say where the path ends: ``/dev/fd/../environ`` is
+    ``/proc/self/environ``. A leading ``../..`` climbs from the working
+    folder and stays readable.
+    """
+    named = False
+    for part in path.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if named:
+                return True
+        else:
+            named = True
+    return False
+
+
+def _touches_sensitive_path(command: str, cwd: object = None) -> bool:
     """True when any argument names a credential file (``cat .env`` etc.).
 
     A read-only command is still an exfiltration read when its target is a
@@ -1337,6 +1622,11 @@ def _touches_sensitive_path(command: str) -> bool:
     """
     from fluid.tools.hardening import is_sensitive_path
 
+    base = _working_folder(cwd)
+    if base is not None and (
+        _names_process_environment(base) or is_sensitive_path(base + "/x")
+    ):
+        return True  # ``rg token`` with no operand reads the folder it runs in
     lines = _lines(command)
     if lines is None:
         return True
@@ -1344,7 +1634,10 @@ def _touches_sensitive_path(command: str) -> bool:
         scan = _scan_line(line)
         if scan is None:
             return True
-        for raw in scan.words:
+        for word in scan.words:
+            if word.operator:
+                continue
+            raw = word.raw
             if raw.startswith("-"):
                 # ``--file=.env``: the value is a path all the same.
                 if "=" not in raw:
@@ -1354,28 +1647,56 @@ def _touches_sensitive_path(command: str) -> bool:
                 literal = " ".join(shlex.split(raw))
             except ValueError:
                 return True
-            if is_sensitive_path(literal) or _names_process_environment(literal):
+            glob = _has_unquoted_glob(raw)
+            if _climbs_through_a_folder(literal):
                 return True
-            if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
-                return True
+            for path in _operand_spellings(literal, base):
+                if is_sensitive_path(path) or _names_process_environment(path):
+                    return True
+                if glob and _glob_could_name_sensitive_path(path):
+                    return True
     return False
+
+
+def _working_folder(cwd: object) -> str | None:
+    """The tool call's own ``cwd`` with forward slashes, or None."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    return cwd.strip().replace("\\", "/").rstrip("/") or "/"
+
+
+def _operand_spellings(literal: str, base: str | None) -> list[str]:
+    """``literal`` as written and, when relative, under the call's ``cwd``.
+
+    ``cat credentials`` with ``cwd`` ``~/.aws`` and ``cat self/environ`` with
+    ``cwd`` ``/proc`` name the same files as their absolute spellings.
+    """
+    spellings = [literal]
+    path = literal.replace("\\", "/")
+    if base is not None and path and not path.startswith(("/", "~")) and ":" not in path[:2]:
+        spellings.append(posixpath.normpath(posixpath.join(base, path)))
+    return spellings
 
 
 # /proc/<pid>/environ is the environment of a running process, and a shell
 # command's own environment carries credentials on purpose (see _env_ok). The
 # process folder itself counts: ``grep -r . /proc/self`` reads the same file.
-_PROC_ENVIRON_RE = re.compile(
-    r"^/proc(?:/(?:\d+|self|thread-self)(?:/task/[^/]+)?(?:/environ)?)?/?$"
-)
+# ``/proc/<pid>/root`` is ``/`` again, any number of times.
+_PROC_ROOT = r"(?:/proc/[^/]+/root)*"
+_PROC_PROCESS = r"(?:\d+|self|thread-self)(?:/task/[^/]+)?"
+_PROC_ENVIRON_RE = re.compile(rf"^{_PROC_ROOT}/proc(?:/{_PROC_PROCESS}(?:/environ)?)?/?$")
+# The file itself, whatever leads up to it: ``link/proc/self/environ``.
+_PROC_ENVIRON_FILE_RE = re.compile(rf"(?:^|/)proc/{_PROC_PROCESS}/environ$")
 
 
 def _names_process_environment(literal: str) -> bool:
-    path = literal.replace("\\", "/")
-    if not path.startswith("/"):
-        return False
-    return any(
-        _PROC_ENVIRON_RE.match(candidate) for candidate in {path, posixpath.normpath(path)}
-    )
+    path = posixpath.normpath(literal.replace("\\", "/"))
+    if _PROC_ENVIRON_FILE_RE.search(path):
+        return True
+    # A relative path that climbs out of its folder can end at the root:
+    # ``../../proc/self`` from two levels down is ``/proc/self``.
+    climbed = re.sub(r"^(?:\.\./)+", "/", path)
+    return bool(_PROC_ENVIRON_RE.match(climbed)) if climbed.startswith("/") else False
 
 
 def classify(input: dict[str, Any]) -> str:
@@ -1388,4 +1709,4 @@ def classify(input: dict[str, Any]) -> str:
     if not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
-    return WRITE if _touches_sensitive_path(command) else SAFE
+    return WRITE if _touches_sensitive_path(command, input.get("cwd")) else SAFE

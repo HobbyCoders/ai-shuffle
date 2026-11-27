@@ -34,6 +34,18 @@ from fluid.tools.builtins.bash import SPEC as BASH_SPEC
 from fluid.tools.builtins.bash_risk import classify, is_read_only
 from fluid.tools.registry import ToolCtx, ToolRegistry
 
+
+
+@pytest.fixture(autouse=True)
+def _git_honours_the_agent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verdict on a git command depends on the installed git (see
+    ``git_hardening_supported``). Pin it, so these tests say the same thing on
+    every machine; the old-git case sets it the other way."""
+    from fluid.tools import child_env
+
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
+
+
 # ─── classifier table ────────────────────────────────────────────────────────
 
 SAFE_COMMANDS = [
@@ -861,6 +873,10 @@ REWRITTEN_BY_THE_SHELL = [
     ("find . -maxdepth 0 ! -name a\x0cls -exec touch MARK {} +", "MARK"),
     ("find . -maxdepth 0 ! -name a ls -exec touch MARK {} +", "MARK"),
     ("ls a.txt\rtouch MARK", None),
+    # a carriage return is a letter to the shell: here a second file name,
+    # the one uniq writes
+    ("uniq a.txt \r", "\r"),
+    ("ls\r\ncat a.txt", None),
     # several words once expanded, one to the argument counter
     ("uniq *.txt", None),
     ("uniq a.txt{,.MARK}", "a.txt.MARK"),
@@ -881,15 +897,62 @@ REWRITTEN_BY_THE_SHELL = [
     ("head /proc/self/task/1/environ", None),
     ("cat /proc/*/environ", None),
     ("cat /proc/self/cwd/../environ", None),
+    ("cat /dev/fd/../environ", None),
+    ("cat /proc/[0-9]*/environ", None),
+    ("cat /pro?/self/environ", None),
     ("grep -r TOKEN /proc/self", None),
+    ("grep -r TOKEN /pro?/self", None),
+    # a credential file by another letter case (Windows, macOS)
+    ("cat .ENV", None),
+    ("cat ID_RSA", None),
     ("jq -n env", None),
     ("jq -n '$ENV.GH_TOKEN'", None),
+    # a jq program this check never reads
+    ("jq -f prog.jq a.json", None),
+    ("jq -nf prog.jq", None),
+    ("jq --from-file prog.jq a.json", None),
+    ("jq -L . 'import \"m\" as m; m::f' a.json", None),
+    ("jq 'include \"m\"; f' a.json", None),
+    ("jq --unknown-option . a.json", None),
     ("awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", None),
     # git runs the program the repository's own config names
     ("git diff --ext-diff", None),
     ("git log -p --ext-diff", None),
     ("git show --textconv HEAD", None),
+    # git takes any unambiguous start of a long option
+    ("git diff --ext-d", None),
+    ("git log -p --ext", None),
+    ("git show --textc HEAD", None),
+    ("git log -p --outp=MARK", None),
+    ("git log -p --o=MARK", None),
 ]
+
+# The same, where the hazard is in the files a clone ships: a glob expands to
+# their names, and a name can be a flag. (command, files to plant).
+REWRITTEN_BY_FILE_NAMES = [
+    ("sort *.txt", {"-oMARK.txt": ""}),
+    ("sort ?oMARK.txt", {"-oMARK.txt": ""}),
+    ("find . ?delete", {"-delete": "", "victim": "x\n"}),
+    ("find . *", {"-delete": ""}),
+    ("find . -maxdepth 1 -name a.txt [-]delete", {"-delete": ""}),
+    ("file *", {"-C": ""}),
+    ("tree *", {"-o": ""}),
+    ("rg needle *", {"--pre=sh": ""}),
+    # two file names where the check counted one word: uniq writes the second
+    ("uniq sub/*", {"sub/a": "x\n", "sub/b": "y\n"}),
+    ("uniq sub/a*", {"sub/a": "x\n", "sub/ab": "y\n"}),
+    # a file name where a program, a script or a subcommand goes
+    ("awk sub/*", {"sub/a": "BEGIN{system(\"touch MARK\")}"}),
+    ("sed sub/* a.txt", {"sub/a": "w MARK"}),
+    ("jq sub/* a.json", {"sub/a": "env"}),
+    ("git -C sub/* status", {"sub/a": ""}),
+    ("git sub/*", {"sub/a": ""}),
+]
+
+
+@pytest.mark.parametrize("command", [c for c, _ in REWRITTEN_BY_FILE_NAMES])
+def test_a_glob_that_can_change_the_command_is_not_read_only(command: str) -> None:
+    assert classify({"command": command}) == "write", command
 
 
 @pytest.mark.parametrize("command", [c for c, _ in REWRITTEN_BY_THE_SHELL])
@@ -914,7 +977,6 @@ STILL_READ_ONLY = [
     "ls a.txt#b",
     "echo hi # a trailing comment",
     "# a comment line\nls",
-    "ls\r\ncat a.txt",
     "git show stash@{0}",
     "git log HEAD@{1}",
     "grep -rn 'a;b' .",
@@ -923,6 +985,18 @@ STILL_READ_ONLY = [
     "printenv PATH",
     "find . -name '*.txt' -type f",
     "grep -n 'x{2,3}' a.txt",
+    # globs that cannot change what the command does
+    "grep -R --include=*.py needle .",
+    "cat sub/*.txt",
+    "head -n 2 *.txt",
+    "sort sub/*.txt",
+    "find sub/a* -name a",
+    "awk '{print $1}' sub/*.txt",
+    "sed -n 1p sub/*.txt",
+    "git diff HEAD~1 -- sub/*.py",
+    "jq --arg name value '.a' a.json",
+    "jq -r '.include, .import' a.json",
+    "cat ../a.txt",
 ]
 
 
@@ -931,31 +1005,144 @@ def test_everyday_reads_with_those_characters_stay_read_only(command: str) -> No
     assert classify({"command": command}) == "safe", command
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="runs a POSIX shell")
+SYNTHETIC_CREDENTIAL = "synthetic-credential-value"
+
+
+def _tree(root) -> dict[str, bytes | None]:
+    """Every entry under ``root`` with its contents (None for a folder)."""
+    return {
+        p.relative_to(root).as_posix(): (p.read_bytes() if p.is_file() else None)
+        for p in sorted(root.rglob("*"))
+    }
+
+
 @pytest.mark.parametrize(
-    "command",
-    [c for c, mark in REWRITTEN_BY_THE_SHELL if mark] + STILL_READ_ONLY,
+    ("command", "files"),
+    [(c, {}) for c, mark in REWRITTEN_BY_THE_SHELL if mark]
+    + REWRITTEN_BY_FILE_NAMES
+    + [(c, {}) for c in STILL_READ_ONLY],
 )
 def test_a_command_rated_safe_changes_nothing_when_the_shell_runs_it(
-    command: str, tmp_path
+    command: str, files: dict[str, str], tmp_path
 ) -> None:
     """The classifier's verdict checked against what a real shell does.
 
     Whatever the rating, the two must agree in one direction: a command the
-    classifier calls safe leaves the folder as it was. The cases above created
-    ``MARK`` while rated safe; the everyday reads guard the other side."""
-    shell = shutil.which("bash") or shutil.which("sh")
-    if shell is None:
-        pytest.skip("no POSIX shell")
-    (tmp_path / "a.txt").write_text("a\n")
-    (tmp_path / "a.json").write_text("{}\n")
-    before = sorted(p.name for p in tmp_path.iterdir())
-    subprocess.run(
-        [shell, "-c", command], cwd=tmp_path, capture_output=True, timeout=30,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
+    classifier calls safe leaves every file as it was (names and contents)
+    and prints no credential from its environment. The cases above created
+    or overwrote a file while rated safe; the everyday reads guard the other
+    side. Runs in the shell the Bash tool uses: Git Bash on Windows."""
+    from fluid.tools.shell import resolve_shell
+
+    shell = resolve_shell()
+    if not shell.posix:
+        pytest.skip("no POSIX shell (cmd.exe rates nothing read-only)")
+    planted = {"a.txt": "a\n", "a.json": "{}\n", **files}
+    for name, content in planted.items():
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_text(content)
+        except OSError:
+            pytest.skip(f"this filesystem cannot hold a file named {name!r}")
+    before = _tree(tmp_path)
+    done = subprocess.run(
+        [*shell.argv_prefix, command], cwd=tmp_path, capture_output=True, timeout=30,
+        env={**os.environ, "HOME": str(tmp_path), "GH_TOKEN": SYNTHETIC_CREDENTIAL},
     )
-    changed = sorted(p.name for p in tmp_path.iterdir()) != before
-    assert not (classify({"command": command}) == "safe" and changed), command
+    changed = _tree(tmp_path) != before
+    leaked = SYNTHETIC_CREDENTIAL.encode() in done.stdout + done.stderr
+    assert not (classify({"command": command}) == "safe" and (changed or leaked)), command
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd"),
+    [
+        ("cat self/environ", "/proc"),
+        ("cat environ", "/proc/self"),
+        ("cat environ", "/proc/1"),
+        ("grep -r TOKEN self", "/proc"),
+        ("grep -r TOKEN .", "/proc/self"),
+        ("cat ../self/environ", "/proc/1"),
+        ("cat credentials", "/home/sam/.aws"),
+        ("cat credentials", "C:\\Users\\sam\\.aws"),
+        ("cat hosts.yml", "/home/sam/.config/gh"),
+        ("rg token", "/data/.credential-keys"),
+    ],
+)
+def test_a_relative_operand_is_read_from_the_calls_own_working_folder(
+    command: str, cwd: str
+) -> None:
+    """``cwd`` is a field of the tool call, so the model picks it: ``cat
+    self/environ`` there is ``/proc/self/environ``."""
+    assert classify({"command": command}) == "safe"
+    assert classify({"command": command, "cwd": cwd}) == "write"
+    assert classify({"command": "cat notes.txt", "cwd": "/workspace/app"}) == "safe"
+
+
+def test_git_is_not_read_only_when_it_ignores_the_agent_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """git before 2.38 ignores the settings that stop it running a program a
+    folder names, without saying so. There every git command asks."""
+    from fluid.tools import child_env
+
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: False)
+    for command in ("git status", "git log --oneline", "git -C sub diff", "ls && git status"):
+        assert classify({"command": command}) == "write", command
+    assert classify({"command": "ls"}) == "safe"
+
+
+EXPANSION_WHERE_THE_PROGRAM_IS_NAMED = [
+    "timeout $T git status",  # $T can be "5 rm"
+    "timeout 5 $X status",
+    "timeout 5* git status",
+    "timeout {5,rm} git status",
+    "$X status",
+    "g* status",
+    "{git,rm} x",
+    "sudo $X list",
+    "npm $X",
+    "npm r* build",
+    "FOO={a,b} git status",
+    "env $X git status",
+]
+
+
+@pytest.mark.parametrize("command", EXPANSION_WHERE_THE_PROGRAM_IS_NAMED)
+def test_an_approval_does_not_cover_a_program_the_shell_fills_in(command: str) -> None:
+    """After "Always allow" on ``timeout 5 git status`` the label was
+    ``timeout git``, and ``timeout $T git status`` had the same label while
+    ``$T`` could hold a duration and another program."""
+    from fluid.tools.builtins.bash_risk import program_names, scope_labels, simple_commands
+
+    assert scope_labels(command) is None
+    assert simple_commands(command, for_allow=True) is None
+    if command.split()[0] not in ("timeout", "sudo", "npm", "env"):
+        assert program_names(command) is None
+
+    session = PermissionEngine("on_write")
+    for approved in ("timeout 5 git status", "git status", "npm run build", "sudo apt list"):
+        session.allow_always(BASH_SPEC.name, BASH_SPEC.scope_of({"command": approved}))
+    assert session.decide(BASH_SPEC, {"command": "timeout 9 git status"}).decision == "allow"
+    assert session.decide(BASH_SPEC, {"command": command}).decision == "ask"
+
+    allow_any_status = Rule(tool="Bash", decision="allow", input_globs={"command": "* status"})
+    engine = PermissionEngine("always_ask", rules=[allow_any_status])
+    if command.endswith(" status"):
+        assert engine.decide(BASH_SPEC, {"command": command}).decision == "ask"
+
+
+def test_expansion_after_the_program_keeps_its_approval() -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels, simple_commands
+
+    assert scope_labels('git commit -m "$MSG"') == frozenset({"git"})
+    assert scope_labels("npm run build -- $ARGS") == frozenset({"npm run"})
+    assert scope_labels("FOO=$BAR npm test") == frozenset({"npm test"})
+    assert scope_labels("timeout 5 git add src/*.py") == frozenset({"timeout git"})
+    assert simple_commands('git commit -m "$MSG"', for_allow=True) == ['git commit -m "$MSG"']
+    # A deny or ask rule still sees every part, expansion or not.
+    assert simple_commands("$X status && rm -rf y") == ["$X status", "rm -rf y"]
 
 
 def test_a_hash_inside_a_word_does_not_hide_the_next_command_from_rules() -> None:
@@ -977,27 +1164,54 @@ def test_a_hash_inside_a_word_does_not_hide_the_next_command_from_rules() -> Non
     session.allow_always(BASH_SPEC.name, BASH_SPEC.scope_of({"command": "ls -la build"}))
     assert session.decide(BASH_SPEC, {"command": command}).decision == "ask"
     # A vertical tab is a letter to the shell: the text after it is not a new
-    # line, so the comment that seems to start there is not one either.
-    assert scope_labels("ls a\x0b#x; rm -rf y") is None
-    assert simple_commands("ls a\x0b#x; rm -rf y") is None
+    # line, so the comment that seems to start there is not one either. No
+    # approval and no allow rule covers it; a deny rule sees ``rm`` whichever
+    # way the character is read.
+    odd = "ls a\x0b#x; rm -rf y"
+    assert scope_labels(odd) is None
+    assert simple_commands(odd, for_allow=True) is None
+    assert "rm -rf y" in simple_commands(odd)
+    deny_rm = Rule(tool="Bash", decision="deny", input_globs={"command": "rm *"})
+    for command in (odd, "ls a\rrm -rf y", "ls a\x0brm -rf y"):
+        assert PermissionEngine("never_ask", rules=[deny_rm]).decide(
+            BASH_SPEC, {"command": command}
+        ).decision == "deny", command
 
 
-def test_nothing_is_read_only_under_cmd_exe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nothing_is_read_only_or_approved_ahead_under_cmd_exe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Windows without Git Bash runs commands through cmd.exe, which does not
-    read POSIX syntax: single quotes do not quote and ``^`` vanishes from a
-    word. No proof made by a POSIX lexer holds there, so every command asks."""
+    read POSIX syntax: single quotes do not quote, ``^`` vanishes from a word,
+    a backslash is a path separator, and a bare ``git`` is ``git.cmd`` in the
+    working folder before it is the one on PATH. No proof made by a POSIX
+    reader holds there: every command asks, an approval covers that one call,
+    and no allow rule matches. Deny and ask rules still apply."""
     from fluid.tools import shell
-    from fluid.tools.builtins.bash_risk import scope_labels, simple_commands
+    from fluid.tools.builtins.bash_risk import program_names, scope_labels, simple_commands
 
     cmd = shell.ShellInfo(name="cmd", path="cmd.exe", argv_prefix=("cmd.exe", "/d", "/s", "/c"))
     monkeypatch.setattr(shell, "resolve_shell", lambda: cmd)
 
-    for command in ("git status", "ls", "git status 'a & calc'", "git log --outp^ut=f"):
+    commands = (
+        "git status", "ls", "git status 'a & calc'", "git log --outp^ut=f",
+        "echo %PATH%", "sub\\git status", "gi\\t status",
+    )
+    for command in commands:
         assert classify({"command": command}) == "write", command
-    # Rules and "Always allow" still work for text cmd.exe reads the same way…
-    assert simple_commands("git status && dir") == ["git status", "dir"]
-    assert scope_labels("git status") == frozenset({"git"})
-    # …and refuse to split text it reads differently.
-    for command in ("git status 'a & calc'", "git log --outp^ut=f", "echo %PATH%"):
-        assert simple_commands(command) is None, command
         assert scope_labels(command) is None, command
+        assert program_names(command) is None, command
+        assert simple_commands(command, for_allow=True) is None, command
+
+    allow_git = Rule(tool="Bash", decision="allow", input_globs={"command": "git *"})
+    engine = PermissionEngine("on_write", rules=[allow_git])
+    assert engine.decide(BASH_SPEC, {"command": "git status"}).decision == "ask"
+    # A call with no scope is approved for that call only (the engines never
+    # record it), and an approval recorded under Git Bash does not carry over.
+    assert BASH_SPEC.scope_of({"command": "git status"}) is None
+    engine.allow_always(BASH_SPEC.name, frozenset({"git"}))
+    assert engine.decide(BASH_SPEC, {"command": "git status"}).decision == "ask"
+
+    deny_rm = Rule(tool="Bash", decision="deny", input_globs={"command": "rm *"})
+    denied = PermissionEngine("never_ask", rules=[deny_rm])
+    assert denied.decide(BASH_SPEC, {"command": "dir && rm -rf x"}).decision == "deny"

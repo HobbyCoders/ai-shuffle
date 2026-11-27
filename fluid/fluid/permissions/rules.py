@@ -212,9 +212,12 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
 def _command_matches(value: str, pattern: str, decision: str) -> bool:
     from fluid.tools.builtins.bash_risk import simple_commands
 
-    parts = simple_commands(value)
     if decision == "allow":
+        # Stricter reading: the program each part names must be the one the
+        # shell runs, in a shell this module can read (not cmd.exe).
+        parts = simple_commands(value, for_allow=True)
         return bool(parts) and all(pattern_matches(part, pattern) for part in parts)
+    parts = simple_commands(value)
     if pattern_matches(value, pattern):
         return True
     return any(pattern_matches(part, pattern) for part in parts or ())

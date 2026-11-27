@@ -81,18 +81,38 @@ model *reads* framing tokens even when they can't structurally escape.
   are exempt. `permission.protect_sensitive_files = false` disables the set.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
-  file — `cat .env` does not sail under the read-only fast path. The same
-  holds for the process environment, which carries the provider keys and
-  `GH_TOKEN` on purpose: bare `env` and `printenv`, `printenv GH_TOKEN`,
-  `/proc/<pid>/environ`, awk's `ENVIRON` and jq's `env` all prompt.
+  file — `cat .env` does not sail under the read-only fast path. Letter case
+  is ignored (`.ENV` opens `.env` on Windows and macOS), a relative operand
+  is also read from the call's own `cwd` (`cat credentials` with `cwd`
+  `~/.aws`), and a `..` after a named folder asks, because that folder can
+  be a link. The same holds for the process environment, which carries the
+  provider keys and `GH_TOKEN` on purpose: bare `env` and `printenv`,
+  `printenv GH_TOKEN`, `/proc/<pid>/environ` (by any spelling, glob or
+  `cwd`), awk's `ENVIRON` and jq's `env` all prompt, and so does a jq program
+  the classifier cannot read (`-f`, `-L`, `import`, `include`).
 - The classifier rates a command read-only only when the shell runs the
   words as written. A `$` expansion outside single quotes (`-exe${x}c`,
-  `$'-exec'`, `.e${x}nv`, `$GH_TOKEN`), a glob or brace list that can become
-  a flag (`-exe*`, `{-exec,x}`), a quoted word made only of operator
-  characters (`';'`), a `#` inside a word and any control character other
-  than tab and newline make the command `write`. Under cmd.exe (Windows
-  without Git Bash) nothing is rated read-only, because the classifier reads
-  POSIX syntax and cmd.exe does not.
+  `$'-exec'`, `.e${x}nv`, `$GH_TOKEN`), a brace list, a quoted word made only
+  of operator characters (`';'`), a `#` inside a word and any control
+  character other than tab and newline (a carriage return included) make the
+  command `write`. A glob expands to file names a clone can choose, so for a
+  program with options that write or run something it passes only where no
+  file name can change the answer: `sort src/*.txt` is read-only, `sort *.txt`
+  asks (a file named `-oX.txt`), and so does `uniq out/*` (uniq writes its
+  second operand). Programs with no such option (`ls`, `cat`, `grep`, `wc`)
+  take any glob.
+- **Approvals and expansion.** "Always allow" is recorded per program
+  (`git`, `npm run`, `timeout git`). A command gets no label, so its approval
+  covers that call only, when the shell can replace a word the label is read
+  from: `$X status`, `timeout $T git status`, `npm $X`. An allow rule does
+  not match such a command either. Deny and ask rules match on the widest
+  reading of the text.
+- **cmd.exe (Windows without Git Bash).** The classifier reads POSIX syntax
+  and cmd.exe does not, and cmd.exe runs `git.cmd` from the working folder
+  before the `git` on PATH. There nothing is rated read-only, every approval
+  covers one call, and no allow rule matches a command. Deny and ask rules
+  still apply. Install Git for Windows to get the same behaviour as every
+  other platform.
 - **Git settings for agent shells.** `git status` is rated read-only, and git
   runs programs a repository's config names. Every shell that runs
   model-chosen commands (Bash, Monitor, a slash command's inline shell, the
@@ -101,10 +121,14 @@ model *reads* framing tokens even when they can't structurally escape.
   config, which outranks a repository's own file on Linux, macOS and Windows.
   A folder of plain files shaped like a repository, which a clone can ship,
   is no longer a repository to `git -C`, and no config can name a program for
-  a status read. A real bare repository still works with `--git-dir`. What
-  this does not cover: a checkout whose own `.git/config` is already hostile
-  can name a diff driver or a filter that `git diff` runs, so writes to
-  `.git` have to stay behind a prompt.
+  a status read. A real bare repository still works with `--git-dir`. These
+  settings need git 2.38; an older git ignores them without a word. The
+  classifier asks the shell's own git for its version once per process, and
+  when it is older, missing or silent, no git command is rated read-only:
+  each one prompts. `--output`, `--ext-diff` and `--textconv` prompt in any
+  shortened form (`--ext-d`). What this does not cover: a checkout whose own
+  `.git/config` is already hostile can name a diff driver or a filter that
+  `git diff` runs, so writes to `.git` have to stay behind a prompt.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,

@@ -102,6 +102,12 @@ def test_memory_rejects_credentials(tmp_path) -> None:
 
 def test_is_sensitive_path() -> None:
     assert is_sensitive_path(".env")
+    # One answer on every platform: ``.ENV`` opens ``.env`` on Windows and macOS.
+    assert is_sensitive_path(".ENV")
+    assert is_sensitive_path("src/.Env.Local")
+    assert is_sensitive_path("C:\\Users\\sam\\.SSH\\ID_RSA")
+    assert is_sensitive_path("Server.PEM")
+    assert not is_sensitive_path(".ENV.EXAMPLE")
     assert is_sensitive_path("src/.env.local")
     assert is_sensitive_path("/home/u/.ssh/id_rsa")
     assert is_sensitive_path("C:\\Users\\u\\.aws\\credentials")

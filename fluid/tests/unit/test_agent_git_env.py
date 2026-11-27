@@ -17,10 +17,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fluid.tools import child_env
 from fluid.tools.builtins.bash import handler as bash_handler
 from fluid.tools.child_env import (
     AGENT_GIT_CONFIG,
     claude_cli_env_with_overlay,
+    git_version_supports_hardening,
     harden_git_env,
 )
 from fluid.tools.registry import ToolCtx
@@ -72,6 +74,81 @@ def test_a_malformed_count_is_left_for_git_to_reject() -> None:
 def test_the_delegated_cli_inherits_the_settings() -> None:
     env = claude_cli_env_with_overlay(None, {"PATH": "/bin"})
     assert _config(env) == list(AGENT_GIT_CONFIG)
+
+
+# ─── a git too old for the settings ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("output", "supported"),
+    [
+        ("git version 2.47.3\n", True),
+        ("git version 2.38.0\n", True),
+        ("git version 2.47.0.windows.1\n", True),
+        ("git version 2.39.5 (Apple Git-154)\n", True),
+        ("git version 3.0.0\n", True),
+        ("git version 2.37.7\n", False),  # GIT_CONFIG_COUNT, no safe.bareRepository
+        ("git version 2.25.1\n", False),  # neither
+        ("git version 1.8.3.1\n", False),
+        ("", False),
+        ("bash: git: command not found\n", False),
+    ],
+)
+def test_which_git_versions_honour_the_settings(output: str, supported: bool) -> None:
+    assert git_version_supports_hardening(output) is supported
+
+
+@pytest.fixture
+def git_probe(monkeypatch: pytest.MonkeyPatch):
+    """Replace the ``git --version`` call; returns the list of commands run."""
+    calls: list[list[str]] = []
+    answer: dict[str, object] = {"stdout": "git version 2.47.3\n", "returncode": 0}
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        if answer.get("raise"):
+            raise answer["raise"]  # type: ignore[misc]
+        return subprocess.CompletedProcess(argv, answer["returncode"], answer["stdout"], "")
+
+    monkeypatch.setattr(child_env.subprocess, "run", run)
+    child_env.git_hardening_supported.cache_clear()
+    yield calls, answer
+    child_env.git_hardening_supported.cache_clear()
+
+
+def test_the_probe_asks_git_once_through_the_agent_shell(git_probe) -> None:
+    from fluid.tools.shell import resolve_shell
+
+    calls, _ = git_probe
+    assert child_env.git_hardening_supported() is True
+    assert child_env.git_hardening_supported() is True
+    assert calls == [[*resolve_shell().argv_prefix, "git --version"]]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"stdout": "git version 2.30.2\n", "returncode": 0},
+        {"stdout": "", "returncode": 127},
+        {"stdout": "git version 2.47.3\n", "returncode": 1},
+        {"raise": FileNotFoundError("sh")},
+        {"raise": subprocess.TimeoutExpired("git", 10)},
+    ],
+)
+def test_an_old_missing_or_silent_git_is_not_trusted(git_probe, answer) -> None:
+    from fluid.tools.builtins.bash_risk import classify
+
+    _, current = git_probe
+    current.update(answer)
+    assert child_env.git_hardening_supported() is False
+    assert classify({"command": "git status"}) == "write"
+    assert classify({"command": "ls"}) == "safe"
+
+
+def test_a_current_git_keeps_its_reads_unprompted(git_probe) -> None:
+    from fluid.tools.builtins.bash_risk import classify
+
+    assert classify({"command": "git status"}) == "safe"
 
 
 # ─── against the real git ────────────────────────────────────────────────────

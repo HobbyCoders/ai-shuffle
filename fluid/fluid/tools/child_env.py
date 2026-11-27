@@ -18,8 +18,11 @@ variables (comma separated) that should still reach children.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
+import subprocess
+import sys
 from collections.abc import Mapping
 
 PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
@@ -146,7 +149,9 @@ def _names(raw: str | None) -> list[str]:
 # Git settings every shell that runs model-chosen commands gets, as
 # command-scope config (``GIT_CONFIG_COUNT``, git 2.31+), which outranks a
 # repository's own config file. They work the same on Linux, macOS and
-# Windows; an older git ignores what it does not know.
+# Windows. An older git ignores what it does not know, which is why the Bash
+# classifier asks :func:`git_hardening_supported` before it rates a git
+# command read-only.
 #
 # ``git status`` is rated read-only and runs unprompted, but git runs the
 # program a repository's config names, and a folder of plain files (``HEAD``,
@@ -191,6 +196,55 @@ def harden_git_env(env: dict[str, str]) -> dict[str, str]:
         count += 1
     env["GIT_CONFIG_COUNT"] = str(count)
     return env
+
+
+# ``GIT_CONFIG_COUNT`` came with git 2.31 and ``safe.bareRepository`` with
+# 2.38. An older git reads neither and says nothing, so the settings above
+# protect nothing there.
+GIT_HARDENING_MIN_VERSION = (2, 38)
+_GIT_VERSION_RE = re.compile(r"\bgit version (\d+)\.(\d+)")
+
+
+def git_version_supports_hardening(version_output: str) -> bool:
+    """True when ``git --version`` output names a git that honours
+    :data:`AGENT_GIT_CONFIG` (``git version 2.47.0.windows.1``,
+    ``git version 2.39.5 (Apple Git-154)``)."""
+    match = _GIT_VERSION_RE.search(version_output or "")
+    if match is None:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= GIT_HARDENING_MIN_VERSION
+
+
+@functools.lru_cache(maxsize=1)
+def git_hardening_supported() -> bool:
+    """True when the git a shell command runs honours :data:`AGENT_GIT_CONFIG`.
+
+    Asked once per process, through the same shell and environment a Bash
+    command gets, so it is the git that command would find (Git Bash on
+    Windows puts its own git ahead of PATH). False when git is missing, too
+    old, or does not answer: the Bash classifier then rates no git command
+    read-only, so each one asks instead of running unprotected.
+    """
+    from fluid.tools.shell import resolve_shell
+
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, no model input
+            [*resolve_shell().argv_prefix, "git --version"],
+            env=scrub_child_env(None),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            check=False,
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and git_version_supports_hardening(done.stdout)
 
 
 def child_env_with_overlay(overlay: Mapping[str, str] | None,
