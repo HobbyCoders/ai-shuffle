@@ -693,7 +693,7 @@
 						{/if}
 						<!-- Same rows as the new-chat picker: the worker this session
 						     runs on first (checked; picking it just closes the menu),
-						     then Continue here for a remote session, then every peer. -->
+						     then this worker (continue here) for a remote session, then every peer. -->
 						<WorkerMenuList
 							items={runnerMenuLoading || runnerMenuError ? [] : runnerMenu}
 							role="menuitemradio"

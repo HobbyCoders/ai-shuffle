@@ -906,7 +906,7 @@ When several devices share one account, each session runs on one device at a tim
 
 ### POST /api/v1/sessions/{session_id}/adopt
 
-Run the session on this device from now on (**Continue here** in the device menu). The body is optional.
+Run the session on this device from now on (this device's own name in the device menu). The body is optional.
 
 Plain chat sessions with no project move by conversation history alone, with their question cards and scheduled wake-ups; the device menu offers the move in a saved chat too. On the receiving worker the chat runs in that worker's own workspace folder. Files in the old worker's workspace folder, including chat attachments, are not copied. A project whose folder is not a Git repository on either worker also moves by history alone: the receiving worker must already have that project's folder registered, the session then runs in that folder, and no files are copied. A folder that is a Git repository on one worker but not on the other is refused ("Use the same kind of folder on both workers"), and an owning worker on an older release is refused with a request to update it. For a session in a Git project, cross-worker resume requires a Git project with a single `origin` remote pointing to the same repository on both workers. GitHub and other Git hosts are supported. Both workers must be online, and the receiving worker must already have a clone of the project.
 

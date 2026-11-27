@@ -2,7 +2,7 @@
  * Menu items for the context-bar runner badge.
  *
  * The worker the session runs on comes first as the checked row (no action),
- * like Local in the new-chat picker. Continue here → POST /adopt.
+ * like Local in the new-chat picker. This worker's row (continue here) → POST /adopt.
  * Other runners → /move. Offline / ineligible rows are listed and greyed
  * via execution-mode-eligibility (same helpers as the Cloud accordion).
  */
@@ -42,7 +42,7 @@ export interface RunnerBadgeMenuItem {
 	action: RunnerBadgeMenuAction | null;
 	disabled: boolean;
 	title: string;
-	/** Drives the presence dot. "Continue here" is this worker, always online. */
+	/** Drives the presence dot. The "continue here" row is this worker, always online. */
 	online: boolean;
 	/** Trailing tag shared with the new-chat picker: "offline" or "no checkout". */
 	note: string | null;
@@ -88,7 +88,8 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 	if (input.isRemote) items.push(
 		{
 			id: 'continue-here',
-			label: 'Continue here',
+			// This worker, named like every other row and the runner chip.
+			label: selfWorkerName(input.installs),
 			action: { kind: 'adopt' },
 			disabled: false,
 			online: true,

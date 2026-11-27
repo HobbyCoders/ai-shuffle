@@ -117,7 +117,8 @@ async function expectFilterFollowsOwner(page, sessions) {
 async function expectMoveMenuFollowsOwner(page) {
 	await page.locator('.ctx-chip.runner:visible').first().click();
 	const rows = page.getByRole('menuitemradio');
-	await page.getByRole('menuitemradio', { name: 'Continue here' }).waitFor();
+	// The menu lists every row at once when it loads; the former worker is one of them.
+	await rows.locator('.worker-row-name', { hasText: FORMER }).first().waitFor();
 	const seen = await rows.evaluateAll((els) => els.map((el) => ({
 		name: el.querySelector('.worker-row-name')?.textContent?.trim() ?? '',
 		checked: el.getAttribute('aria-checked')
