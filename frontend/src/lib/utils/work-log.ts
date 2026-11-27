@@ -1718,7 +1718,9 @@ export function buildTranscriptModel(
 			);
 		// As in a live run: reasoning alone, with thinking blocks turned off,
 		// would fold into a disclosure that opens onto nothing, so nothing folds.
-		const foldsAnything = response.some((entry) => hides(entry) && (thinkingShown || entry.message.type !== 'thinking'));
+		// A hidden code-mode cell draws nothing either, so it does not count.
+		const foldsAnything = response.some((entry) => hides(entry) && !isHiddenCodeModeCell(entry.message)
+			&& (thinkingShown || entry.message.type !== 'thinking'));
 		const shouldHide = (entry: Positioned) => foldsAnything && hides(entry);
 		const folded = response
 			.filter(shouldHide)

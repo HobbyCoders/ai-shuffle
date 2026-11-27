@@ -2142,6 +2142,13 @@ describe('live runs', () => {
 		if (hiddenFold?.kind !== 'work_log') throw new Error('expected a work_log');
 		expect(hiddenFold.folded).toEqual([]);
 		expect(hiddenFold.sequence.some((entry) => entry.hiddenWhenCollapsed)).toBe(false);
+		// A code-mode cell draws nothing either, so it gives the fold nothing to show.
+		const cell = tool({ toolName: 'run_python', toolStatus: 'complete' });
+		const withCell = buildDisplayItems([prompt, thought, cell, answer], { ...SETTLED, thinkingShown: false });
+		const cellFold = withCell.find((item) => item.kind === 'work_log');
+		if (cellFold?.kind !== 'work_log') throw new Error('expected a work_log');
+		expect(cellFold.folded).toEqual([]);
+		expect(cellFold.sequence.some((entry) => entry.hiddenWhenCollapsed)).toBe(false);
 		const settledShown = buildDisplayItems([prompt, thought, answer], SETTLED);
 		const shownFold = settledShown.find((item) => item.kind === 'work_log');
 		if (shownFold?.kind !== 'work_log') throw new Error('expected a work_log');
