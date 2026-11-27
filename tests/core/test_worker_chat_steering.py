@@ -105,13 +105,14 @@ def _running_worker(session_id, permission_mode="bypassPermissions"):
 
 
 def _send(session_id, prompt="please also check the tests", *, payload=None,
-          profile_id=COMPOSER_PROFILE, overrides=COMPOSER_OVERRIDES):
+          profile_id=COMPOSER_PROFILE, overrides=COMPOSER_OVERRIDES, explicit_permission=False):
     """The submit ``chat_ws_handler.handle_query`` makes for a send to a busy
     session, stamped with the owner's caller as the socket stamps it (#641)."""
     with patch.object(turn_manager, "_kick"):
         turn_id = turn_manager.submit(
             session_id, "user", prompt=prompt, profile_id=profile_id,
             overrides=dict(overrides) if overrides else None,
+            explicit_permission=explicit_permission,
             payload={"deferred_user_record": True, **(payload or {})},
             caller=CALLER_AUTHENTICATED,
         )
@@ -346,6 +347,65 @@ def test_a_row_naming_no_folders_waits_when_the_chats_folders_changed_mid_turn(m
     # The same set in another order is the same folders.
     database.set_session_run_binding("moved", workspace_project_ids=["secrets", "docs"])
     assert runtime._steer_refusal(row) is None
+
+
+async def test_a_message_naming_no_model_joins_a_turn_running_on_the_chats_own(mock_db):
+    """"Message all active chats" sends only the text: no model, effort or
+    permission mode. Run as its own turn it would use the chat's saved ones
+    (``query_options``), so while the live turn runs on exactly those it joins
+    at the next tool boundary instead of waiting out the whole turn."""
+    database.create_session(session_id="busy", profile_id=None, title="t")
+    picked = {"model": "opus", "effort": "high", "permission_mode": "acceptEdits"}
+    # The composer's send saves its pick on the chat as it starts the turn.
+    started = _send("busy", "start the work", overrides=picked, explicit_permission=True)
+    turns_db.start_turn(started["id"])
+    live = turns_db.get_turn(started["id"])
+    session_runtime._live_runtimes["busy"] = session_runtime.SessionRuntime(live)
+
+    row = _send("busy", "wrap up and report", overrides=None)
+    assert not {"model", "effort", "permission_mode"} & set(row["overrides"] or {})
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        assert await session_runtime.try_steer_pending("busy") == 1
+    assert adapter.calls == [("wrap up and report", row["id"])]
+
+
+def test_a_message_naming_no_model_waits_when_the_chats_model_changed_mid_turn(mock_db):
+    """Naming no model means the chat's saved one. After the owner switched it
+    mid-turn the live turn no longer runs on it, so the message waits for its
+    own turn rather than be answered by the old model."""
+    database.create_session(session_id="switched", profile_id=None, title="t")
+    database.set_session_run_binding("switched", model="opus", effort="high", permission_mode="default")
+    live = _start("switched", "user", profile_id="coding",
+                  overrides={"model": "opus", "effort": "high", "permission_mode": "default"})
+    runtime = session_runtime.SessionRuntime(live)
+    row = {"id": "turn-x", "source": "user", "prompt": "hi", "payload": {}, "profile_id": "coding",
+           "overrides": {CALLER_KEY: CALLER_AUTHENTICATED}}
+    assert runtime._steer_refusal(row) is None
+
+    database.set_session_run_binding("switched", model="sonnet")
+    assert runtime._steer_refusal(row) == "model differs"
+    database.set_session_run_binding("switched", model="opus", effort="low")
+    assert runtime._steer_refusal(row) == "effort differs"
+    database.set_session_run_binding("switched", effort="high", permission_mode="bypassPermissions")
+    assert runtime._steer_refusal(row) == "permission_mode differs"
+    database.set_session_run_binding("switched", permission_mode="default")
+    assert runtime._steer_refusal(row) is None
+    # A row that NAMES another value is still refused, saved binding or not.
+    row["overrides"]["model"] = "sonnet"
+    assert runtime._steer_refusal(row) == "model differs"
+
+
+def test_a_message_naming_no_model_waits_when_the_chat_saved_none(mock_db):
+    """An older chat with no saved model would run the row on its legacy
+    fallback, which may not be the live turn's model: it keeps waiting."""
+    database.create_session(session_id="legacy", profile_id=None, title="t")
+    live = _start("legacy", "user", profile_id="coding", overrides={"model": "opus"})
+    runtime = session_runtime.SessionRuntime(live)
+    row = {"id": "turn-x", "source": "user", "prompt": "hi", "payload": {}, "profile_id": "coding",
+           "overrides": {}}
+    assert runtime._steer_refusal(row) == "model differs"
 
 
 async def test_a_worker_row_built_by_the_composer_is_refused_by_the_live_turn(mock_db):
