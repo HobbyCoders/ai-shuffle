@@ -23,10 +23,12 @@ Everything below is a rule the transcript builder (`frontend/src/lib/utils/work-
 **Now:** an unsettled turn renders every row flat (work-log.ts:607-622); `WorkLogGroup` live mode is dead code.
 
 **Rule:** the live turn is split into **runs** at every *protected* row (assistant prose, question, steer, worker card, failed tool, special tool). Within a run:
-- the **current** run (the one still receiving rows) is open: every row visible, newest at the bottom, live labels as today;
+- the **current** run (the one still receiving rows) folds as it goes: each row joins the run's live fold label the moment it completes, so under the label only what is still running shows (the active command, streaming thinking, a screenshot or generated media that never folds);
 - every **earlier** run collapses into the existing live fold label `+N tool calls · Read 3 · Ran 2` (WorkLogGroup:117-121), one click to open. Its protected row that ended the run stays visible under it.
 
-So a 40-step turn reads as: `[+9 steps] finding · [+12 steps] worker card · [open run: 3 rows] · Working…`. The same component tree is used for live and settled (one `WorkLogGroup` per run, `mode` flips), so per-row expansion survives the settle.
+Opening the current run's label shows its finished rows, and rows that finish while it is open join it in place.
+
+So a 40-step turn reads as: `[+9 steps] finding · [+12 steps] worker card · [+3 steps] active command · Working…`. The same component tree is used for live and settled (one `WorkLogGroup` per run, `mode` flips), so per-row expansion survives the settle.
 
 ---
 

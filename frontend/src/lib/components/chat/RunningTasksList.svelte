@@ -10,8 +10,10 @@
 	 *
 	 * variant="inline" sits under the last reply: a collapsible grouped list
 	 * (capped height past a handful of rows, with "Show all" for search and
-	 * filters). The phone shows the same row, with larger tap targets; its full
-	 * list is also Chat controls > Running tasks.
+	 * filters) under a "Background tasks" rule, so it never reads as a row of the
+	 * live work above it. A live turn's Working line (`lead`) sits above the rule.
+	 * The phone shows the same row, with larger tap targets; its full list is
+	 * also Chat controls > Running tasks.
 	 *
 	 * variant="sheet" is the full list as a modal: a full-height page on a phone
 	 * (swipe a row left to stop it), a centred panel on desktop. A sticky head
@@ -41,7 +43,7 @@
 	 * rows the user stopped here (so they read "Stopped" and name the worker
 	 * until the list closes).
 	 */
-	import { getContext, onDestroy, tick, untrack } from 'svelte';
+	import { getContext, onDestroy, tick, untrack, type Snippet } from 'svelte';
 	import { readable } from 'svelte/store';
 	import { TRANSCRIPT_ACTIONS, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import {
@@ -129,9 +131,18 @@
 		 * host also hears it when a row opens a transcript.
 		 */
 		onClose?: () => void;
+		/**
+		 * Inline only: the live turn's Working line, drawn above the "Background
+		 * tasks" rule so it closes the live work instead of trailing the tasks.
+		 * Its slot keeps its height while passed, so the line coming and going
+		 * between tool calls never moves the list.
+		 */
+		lead?: Snippet;
+		/** Inline only: whether the list draws anything (the host's Working line goes here then). */
+		listed?: boolean;
 	}
 
-	let { sessionId, variant = 'inline', presentation, onClose }: Props = $props();
+	let { sessionId, variant = 'inline', presentation, onClose, lead, listed = $bindable(false) }: Props = $props();
 	const interaction = getContext<TranscriptActions>(TRANSCRIPT_ACTIONS);
 	const actionsAllowed = interaction ?? readable(true);
 	const canAct = () => !interaction || interaction.isCurrent(sessionId);
@@ -246,6 +257,7 @@
 	const prefOnly = $derived(!hasRunning && liveWatches === 0 && !!$watches.preferredWorkerId);
 	/** Something to show: running work, a watch that is not stopped, or the preference. */
 	const hasContent = $derived(hasRunning || liveWatches > 0 || prefOnly);
+	$effect(() => { listed = variant === 'inline' && hasContent; });
 	const allRowCount = $derived(rows.length + watchRows.length);
 	/** The watch list has never loaded: an empty list here is unknown, not "none". */
 	const watchesUnknown = $derived($watches.error && !$watches.fetched);
@@ -1354,6 +1366,10 @@
 	     The full list (search, filters, swipe to stop) opens from "Show all"
 	     here and, on a phone, from Chat controls > Running tasks. -->
 	<div class="inline" class:touch={mobileShell} data-open={inlineOpen} data-transcript-task-row>
+		{#if lead}
+			<div class="inline-lead" data-testid="tasks-lead">{@render lead()}</div>
+		{/if}
+		<div class="inline-divider" aria-hidden="true"><span>Background tasks</span></div>
 		<div class="inline-head">
 			<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
 				data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
@@ -1574,6 +1590,28 @@
 
 	/* ── Compact (desktop inline) ───────────────────────────────────────────── */
 	.inline { flex-shrink: 0; font-size: 0.75rem; color: var(--muted-foreground); }
+	/* The Working line's slot: TurnActivity's own row height, held while the
+	   turn is live so the line appearing between tool calls moves nothing. */
+	.inline-lead { min-height: 30px; margin-bottom: 4px; }
+	/* A labelled rule: the tasks are their own area, not the live work's last row. */
+	.inline-divider {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin: 6px 0 4px;
+		font-size: 0.65625rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--muted-foreground);
+	}
+	.inline-divider::before, .inline-divider::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: color-mix(in oklch, var(--border) 85%, transparent);
+	}
+	.inline-divider span { flex: none; opacity: 0.85; }
 	.inline-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 	.inline-toggle {
 		display: inline-flex;

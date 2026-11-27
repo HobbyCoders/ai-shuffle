@@ -491,9 +491,12 @@ describe('WorkLogGroup', () => {
 			{ ...message, id: 'read-b', content: 'Read B' },
 			{ id: 'answer', role: 'assistant', type: 'text', content: 'Done.' }
 		];
-		// Live, the answer has not started: prose, finished or arriving, would end
-		// the run and fold `read-b`, while these tests want it in the current, open run.
-		const liveTurn = turn.filter((m) => m.id !== 'answer');
+		// Live, the answer has not started and `read-b` is still running: a finished
+		// row folds as it completes, and prose would end the run, while these tests
+		// want `read-b` on screen in the current run.
+		const liveTurn = turn
+			.filter((m) => m.id !== 'answer')
+			.map((m) => m.id === 'read-b' ? { ...m, toolStatus: 'running' as const, streaming: true } : m);
 		const logOf = (isStreaming: boolean, messages = isStreaming ? liveTurn : turn) => {
 			const item = buildTranscriptModel(messages, { isStreaming, groupingEnabled: true }).items
 				.find((entry) => entry.kind === 'work_log') as WorkLog;

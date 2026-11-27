@@ -8,8 +8,9 @@
  * - assistant prose is never withheld while a turn is live;
  * - a live turn folds its completed routine work run by run, between the prose
  *   and protected rows that stay on screen; the work after the latest prose
- *   stays flat until the turn settles, and new prose takes over as the latest
- *   the moment it starts, so the text being read does not jump when it ends;
+ *   folds as it goes, so each row joins the fold the moment it completes and
+ *   only what is still running shows below it, and new prose takes over as the
+ *   latest the moment it starts, so the text being read does not jump when it ends;
  * - once a turn settles, non-final commentary, reasoning, and routine tools fold
  *   behind one compact work row while the final answer remains visible;
  * - failed tool calls fold with the rest of the run and are counted in the work
@@ -125,7 +126,9 @@ function generatedMediaPlacement(
  * One earlier run of a live turn (spec §2): the routine rows between two
  * boundaries (protected rows and the prose that stays on screen), keyed by
  * the row it starts at. It renders as one live fold; the protected row that ended it
- * stays visible below. The current run (still receiving rows) has no entry.
+ * stays visible below. The current run (still receiving rows) has an entry
+ * once one of its rows has completed: its finished rows fold as they finish,
+ * and what is still running stays on screen.
  */
 export interface WorkLogRun {
 	/** Position among all runs of the turn, counting runs with nothing to fold. */
@@ -1037,11 +1040,11 @@ const isPromptRow = (entry: Positioned) => entry.message.role === 'user' && !age
 
 /**
  * The "Task completed" row a background-task wake opens with (the reducer marks
- * the wake prompt's cards). The wake stays in the turn it resumes, but it reads
- * like a mid-turn user message (#835): the row keeps its place, the prose
- * before it (the "running in the background" note) and the reply after it stay
- * on screen, so nothing above the reply folds away when the wake ends. A task
- * notice streamed inside a live turn is not a wake and folds as before.
+ * the wake prompt's cards). The wake stays in the turn it resumes, and for its
+ * prose it reads like a mid-turn user message (#835): the prose before it (the
+ * "running in the background" note) and the reply after it stay on screen, so
+ * nothing above the reply folds away when the wake ends. The row itself folds
+ * into the turn's work like any other task notice.
  */
 function isTaskWake(message: ChatMessage): boolean {
 	return isTaskResult(message) && message.metadata?.task_wake === true;
@@ -1096,7 +1099,8 @@ function askingLeadIns(response: Positioned[]): Set<Positioned> {
  * a new one (spec §6). Inside it the turn is cut into runs at every protected
  * row and at the completed prose that stays on screen: earlier runs fold
  * behind the live label, the row that ended each stays visible below it, and
- * the current run shows every row.
+ * the current run folds each row as it completes, so only what is still
+ * running shows under its label.
  */
 /**
  * The last prose before each steer is the answer the steer replied to, the
@@ -1170,8 +1174,8 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 	// completed prose does when the reader must keep seeing it: a finding, a
 	// question's lead-in, the latest word, or the prose a steer answered or
 	// that answers a steer. The routine work behind it folds, so a long live
-	// turn reads as prose between folds; only the work after the latest prose
-	// stays flat. A failed tool is routine work: it folds with its run and the
+	// turn reads as prose between folds; the work after the latest prose folds
+	// as each row completes. A failed tool is routine work: it folds with its run and the
 	// run's summary counts it ("…, 1 failed").
 	// A compaction card is part of the work around it, as in the settled turn:
 	// it never cuts a run in two, and once the turn has worked past it, it folds
@@ -1187,9 +1191,10 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		));
 	// Rows a folded run hides; anything else (a tool still running, a
 	// screenshot, streaming thinking) keeps its place between the folds.
-	// A wake's "Task completed" row stays in place, as a steer does.
+	// A wake's "Task completed" row folds with the work and the fold counts it
+	// ("got 1 task result"); the prose either side of it still stays.
 	const foldsWithRun = (entry: Positioned) =>
-		!terminal.has(entry) && !isTaskWake(entry.message) && (
+		!terminal.has(entry) && (
 			isCompletedRoutineWork(entry.message) ||
 			isGroupableSystem(entry.message) ||
 			compactedMidTurn.has(entry) ||
@@ -1216,6 +1221,20 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[], sessionId?: stri
 		}
 		runIndex++;
 		open = [];
+	}
+	// The current run folds as it goes: each row joins the fold the moment it
+	// completes, so below the latest word the reader sees one line for the
+	// finished work and only what is still running (spec §2). A message another
+	// agent delivered stays on screen, as a steer does: it was sent in for the
+	// reader, and folds once the agent's next prose ends the run. Nothing still
+	// streaming folds: a code-mode cell counts as routine whatever its state,
+	// and a streaming one is the only row that shows its work so far.
+	const current = open.filter((entry) =>
+		foldsWithRun(entry) && !agentDelivery(entry.message) && !entry.message.streaming);
+	for (const row of current) hidden.add(row);
+	if (current.length > 0) {
+		const rows = current.map(({ message, index }) => ({ message, index }));
+		runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: phoneSummary(rows) });
 	}
 
 	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
@@ -1640,8 +1659,9 @@ export function buildTranscriptModel(
 		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
 		const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
 		const response = turn.slice(prefix.length);
-		// A background-task wake reads as a steer here too (#835): its row and
-		// the prose either side of it stay on screen.
+		// A background-task wake reads as a steer here too (#835): the prose
+		// either side of it stays on screen. Its "Task completed" row itself is
+		// routine and folds into the turn's work, counted as a task result.
 		const isSteer = isSteerLike;
 		// The fold renders its gallery above the rows it keeps, so only media from
 		// before the first steer may join it; later media stays in its own rows,
@@ -1672,7 +1692,7 @@ export function buildTranscriptModel(
 			gallery.length > 1 ? { sources: new Set(gallery.map((item) => item.src)), entries: galleryEntries } : null
 		);
 		const shouldHide = (entry: Positioned) =>
-			!isSteer(entry) && (
+			!isPromptRow(entry) && (
 				isCompletedRoutineWork(entry.message, galleryEntries.has(entry), media.get(entry)?.shown) ||
 				isGroupableSystem(entry.message) ||
 				compactedMidTurn.has(entry) ||
