@@ -929,6 +929,36 @@ def test_a_checkouts_bound_is_its_root_not_the_folder_started_in(
     assert not any(p.startswith(own) for p in engine._settings_object()["claudeMdExcludes"])
 
 
+def test_a_process_folder_entered_through_a_link_is_resolved_too(
+    tmp_path: Path, monkeypatch, capsys, requires_symlinks
+) -> None:
+    """Without ``--cwd`` the folder is the process's own. On Windows that
+    keeps the junction or link it was entered through, and the Claude child
+    would walk up from the link's folder, past every exclude."""
+    from fluid.cli.__main__ import _resolve_config
+    from fluid.config.loader import build_engine
+    from fluid.store.base import MemoryStore
+
+    real_parent = tmp_path / "real"
+    proj = real_parent / "proj"
+    (proj / ".git").mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    _write(work / "CLAUDE.md", "beside the link\n")
+    link = work / "link"
+    link.symlink_to(proj, target_is_directory=True)
+    monkeypatch.setattr(os, "getcwd", lambda: str(link))
+
+    config = _resolve_config(argparse.Namespace(cwd=None, trust_project=True))
+    capsys.readouterr()
+    assert config.cwd == os.path.realpath(proj)
+    engine = build_engine(config, MemoryStore(), provider_name="claude")
+    assert engine.cwd == os.path.realpath(proj)
+    assert engine.project_bound == os.path.realpath(proj)
+    assert _project_trusted(argparse.Namespace(cwd=None), ask=False) is False
+    assert os.path.realpath(proj) in capsys.readouterr().err
+
+
 def test_a_host_that_sets_no_bound_sends_no_excludes(project: Path) -> None:
     from fluid.config.loader import build_engine
     from fluid.store.base import MemoryStore

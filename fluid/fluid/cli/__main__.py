@@ -84,9 +84,9 @@ def _resolve_config(args: argparse.Namespace, *, ask: bool = False) -> HarnessCo
 
     # One folder, with its links followed once, serves the question, the saved
     # answer and the load: a ``--cwd`` that is a link cannot be pointed at
-    # another project between them.
-    given = getattr(args, "cwd", None)
-    cwd = os.path.realpath(given) if given else os.getcwd()
+    # another project between them. The process's own folder is resolved
+    # too: on Windows it keeps the junction or link it was entered through.
+    cwd = os.path.realpath(getattr(args, "cwd", None) or os.getcwd())
     root = project_root(cwd)
     trusted = _project_trusted(args, ask=ask, cwd=cwd)
     if trusted and project_root(cwd) != root:
@@ -134,8 +134,7 @@ def _project_trusted(
     from fluid.config.trust import is_project_trusted, project_root, trust_project
 
     if cwd is None:
-        given = getattr(args, "cwd", None)
-        cwd = os.path.realpath(given) if given else os.getcwd()
+        cwd = os.path.realpath(getattr(args, "cwd", None) or os.getcwd())
     if getattr(args, "trust_project", False) or is_project_trusted(cwd):
         return True
     root = project_root(cwd)
