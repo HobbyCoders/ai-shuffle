@@ -28,12 +28,13 @@ import datetime
 import hashlib
 import hmac
 import ipaddress
+import json
 import re
 import ssl
 from dataclasses import dataclass
 from functools import partial
 from html.entities import html5
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 from cryptography import x509
@@ -646,6 +647,130 @@ async def perform(
     """Send one request with the credential header. ``also_redact`` names
     earlier credentials (a token replaced by a refresh) kept out of the result
     as well."""
+    result, _ = await perform_capturing(origin, header, secret, method, path, body, content_type,
+                                        pin=pin, also_redact=also_redact)
+    return result
+
+
+# ─── Secret hand-off: capture a value a service creates, deliver it elsewhere ──
+#
+# A service that creates a credential (a Cloudflare API token, a deploy key)
+# answers with its value once. With ``capture`` the broker takes that value out
+# of the response before anything is returned: the agent gets the response with
+# the value redacted and a short-lived handle, and the value can only be sent on
+# to a typed destination (a GitHub Actions secret) after the owner's one-shot
+# approval. Nothing is stored in the Vault or on disk.
+
+_CAPTURE_FIELD = re.compile(r"[A-Za-z0-9_$-]{1,64}(?:\.[A-Za-z0-9_$-]{1,64}){0,7}")
+CAPTURE_MIN, CAPTURE_MAX = 8, 16384
+_WITHHELD = "[withheld]"
+
+
+def capture_field(field: object) -> str:
+    """A dot path into a JSON response, such as ``result.value`` or ``data.0.token``."""
+    if not isinstance(field, str) or not _CAPTURE_FIELD.fullmatch(field):
+        raise AccessDenied(
+            "capture names a field of the JSON response as a dot path, such as result.value or data.0.token."
+        )
+    return field
+
+
+def _pick(document: object, field: str) -> object:
+    for key in field.split("."):
+        if isinstance(document, dict):
+            document = document.get(key)
+        elif isinstance(document, list) and key.isdigit() and int(key) < len(document):
+            document = document[int(key)]
+        else:
+            return None
+    return document
+
+
+def capturable(value: object) -> bool:
+    """Visible ASCII, spaces and line breaks: what ``redact`` finds in every form."""
+    return (isinstance(value, str) and CAPTURE_MIN <= len(value) <= CAPTURE_MAX
+            and all(0x20 <= ord(ch) <= 0x7E or ch in "\r\n" for ch in value))
+
+
+def _shape(value: object, depth: int = 0) -> object:
+    """The response's structure with every text value withheld, so a wrong
+    field can be corrected without the secret ever being shown."""
+    if isinstance(value, str):
+        return _WITHHELD
+    if depth >= 8:
+        return "[...]"
+    if isinstance(value, dict):
+        return {key: _shape(item, depth + 1) for key, item in list(value.items())[:50]}
+    if isinstance(value, list):
+        return [_shape(item, depth + 1) for item in value[:10]]
+    return value
+
+
+def _withheld(reason: str, document: object = None) -> bytes:
+    shown: dict = {"withheld": reason}
+    if document is not None:
+        shown["shape"] = _shape(document)
+    return json.dumps(shown).encode()
+
+
+GITHUB_SECRET_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,254}")
+_GITHUB_REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
+
+
+def github_secret_paths(repository: object, environment: object, name: object) -> tuple[str, str, dict]:
+    """The public-key and secret paths of a GitHub Actions secret, and the
+    target as the owner's approval card shows it."""
+    if not isinstance(repository, str) or not _GITHUB_REPOSITORY.fullmatch(repository) \
+            or repository.split("/")[1] in (".", ".."):
+        raise AccessDenied("repository is owner/name, such as example-org/website.")
+    environment = environment if isinstance(environment, str) else ""
+    if environment and (len(environment) > 255 or not _ascii(environment)
+                        or any(ch in environment for ch in "/\\%?#")
+                        or environment.strip() != environment):
+        raise AccessDenied("environment is a GitHub environment name without slashes, or blank for a repository secret.")
+    if not isinstance(name, str) or not GITHUB_SECRET_NAME.fullmatch(name) or name.upper().startswith("GITHUB_"):
+        raise AccessDenied("name is a secret name of letters, digits and underscores that does not start with GITHUB_.")
+    base = f"/repos/{repository}" + (f"/environments/{quote(environment, safe='')}/secrets" if environment
+                                     else "/actions/secrets")
+    return f"{base}/public-key", f"{base}/{name}", {
+        "repository": repository, "environment": environment, "name": name}
+
+
+def seal_for_github(public_key: object, value: str) -> str:
+    """Encrypt ``value`` to a repository or environment public key (a libsodium
+    sealed box, as GitHub requires). Only GitHub can open it."""
+    from nacl import exceptions, public
+
+    try:
+        key = base64.b64decode(public_key, validate=True) if isinstance(public_key, str) else b""
+        if len(key) != 32:
+            raise ValueError
+        sealed = public.SealedBox(public.PublicKey(key)).encrypt(value.encode())
+    except (ValueError, TypeError, exceptions.CryptoError):
+        raise AccessDenied("GitHub did not return a usable public key for this secret. Nothing was written.") from None
+    return base64.b64encode(sealed).decode("ascii")
+
+
+async def perform_capturing(
+    origin: Origin,
+    header: tuple[str, str],
+    secret: str,
+    method: str,
+    path: str,
+    body: str,
+    content_type: str,
+    pin: str = "",
+    also_redact: tuple[str, ...] = (),
+    capture: str = "",
+) -> tuple[dict, str | None]:
+    """``perform``, and with ``capture`` also the text at that field of a
+    successful JSON response, which the returned result never contains.
+
+    When the field cannot be taken (missing, not text, a cut or non-JSON
+    response) a successful response's body is withheld, because it may hold a
+    credential that is shown only once; only its structure is returned. An
+    unsuccessful response is returned as usual and captures nothing.
+    """
     url = request_url(origin, path)
     headers = {
         "Accept": "*/*",
@@ -709,6 +834,32 @@ async def perform(
         raise AccessDenied(
             "Could not complete a verified HTTPS request to the granted service."
         ) from None
+    captured = None
+    note = None
+    if capture and 200 <= status < 300:
+        document = None
+        try:
+            # The whole response is needed to read a field; a cut one is not parsed.
+            if not truncated and b"\0" not in kept:
+                document = json.loads(bytes(kept).decode("utf-8"))
+        except ValueError:
+            document = None
+        value = _pick(document, capture) if document is not None else None
+        if capturable(value):
+            captured = value
+            needles = sorted(set(needles).union(_needles(value, value)), key=len, reverse=True)
+            note = {"field": capture, "captured": True}
+        else:
+            reason = (f"{capture} is not a text value of 8 to {CAPTURE_MAX:,} visible characters in this response"
+                      if document is not None else "the response is not complete JSON")
+            note = {"field": capture, "captured": False, "reason": reason + "; nothing was captured"}
+            kept = bytearray(_withheld(
+                f"The body is withheld because {reason}, and it may hold a credential shown only once. "
+                "The service may already have created it.", document))
+            truncated = False
+    elif capture:
+        note = {"field": capture, "captured": False,
+                "reason": f"the service answered {status}; nothing was captured"}
     # Only occurrences starting inside the returned window matter. One written
     # as sent was read in full (``keep`` adds the longest); one behind escapes
     # may still be running where reading stopped, and the body is cut there.
@@ -720,9 +871,12 @@ async def perform(
     else:
         data = await asyncio.to_thread(partial(redact, bytes(kept), needles, LIMIT, cut=truncated))
     truncated = truncated or len(kept) > LIMIT
-    return {
+    result = {
         "status": status,
         "headers": {name: redact(value, needles).decode(charset, "replace") for name, value in returned.items()},
         "body": data.decode("utf-8", errors="replace"),
         "truncated": truncated,
     }
+    if note is not None:
+        result["capture"] = note
+    return result, captured

@@ -220,6 +220,9 @@
 		].filter(Boolean).join(' · ') || (error ? 'Unavailable right now' : 'Nothing shared with this chat')
 	);
 	const expiry = (at: number) => new Date(at * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	// Where a captured secret goes: a GitHub Actions secret of a repository or one of its environments.
+	const secretTarget = (a: Action) =>
+		`${a.arguments.repository ?? ''}${a.arguments.environment ? ` · ${a.arguments.environment}` : ''}`;
 	// What is waiting, for the phone shell's prompt dock and the sidebar (#1807).
 	const items = $derived<PendingAccessItem[]>([
 		...data.requests.map((r) => ({
@@ -233,6 +236,7 @@
 			kind: 'action' as const,
 			detail: a.operation === 'command' ? `$ ${a.arguments.command ?? ''}`
 				: a.operation === 'http' ? `${a.arguments.method ?? ''} ${a.arguments.path ?? ''}`
+				: a.operation === 'copy_secret' ? `Copy a secret to ${secretTarget(a)}`
 				: `Write ${a.arguments.path ?? ''}`,
 			subagent: a.subagent
 		}))
@@ -444,31 +448,46 @@
 				<div class="pa-icon" aria-hidden="true">
 					{#if action.operation === 'command'}
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-					{:else if action.operation === 'http'}
+					{:else if action.operation === 'http' || action.operation === 'copy_secret'}
 						{@render serviceIcon()}
 					{:else}
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.4-9.4a2 2 0 112.8 2.8L11.8 15H9v-2.8l8.6-8.6z" /></svg>
 					{/if}
 				</div>
 				<div class="pa-title">
-					<h3><span>{action.operation === 'command' ? `Run this on ${where}?` : action.operation === 'http' ? `Send this to ${where}?` : `Write this file on ${where}?`}</span></h3>
-					<p class="pa-subtitle">Once{grant ? `, ${action.operation === 'command' ? 'as' : action.operation === 'http' ? 'to' : 'in'} ${grant.target}` : ''}</p>
+					{#if action.operation === 'copy_secret'}
+						<h3><span>Copy a secret to GitHub?</span></h3>
+						<p class="pa-subtitle">Once, with {where}</p>
+					{:else}
+						<h3><span>{action.operation === 'command' ? `Run this on ${where}?` : action.operation === 'http' ? `Send this to ${where}?` : `Write this file on ${where}?`}</span></h3>
+						<p class="pa-subtitle">Once{grant ? `, ${action.operation === 'command' ? 'as' : action.operation === 'http' ? 'to' : 'in'} ${grant.target}` : ''}</p>
+					{/if}
 				</div>
 			</header>
 			<div class="pa-body">
-				{#if action.operation === 'command'}
+				{#if action.operation === 'copy_secret'}
+					<dl class="pa-mono pa-copy">
+						<dt>From</dt><dd>{action.arguments.secret}</dd>
+						<dt>Repository</dt><dd>{action.arguments.repository}</dd>
+						<dt>Environment</dt><dd>{action.arguments.environment || 'None (repository secret)'}</dd>
+						<dt>Secret</dt><dd>{action.arguments.name}</dd>
+					</dl>
+				{:else if action.operation === 'command'}
 					<pre class="pa-mono"><span class="prompt">$ </span>{action.arguments.command}</pre>
 				{:else if action.operation === 'http'}
 					<pre class="pa-mono"><span class="prompt">{action.arguments.method} </span>{action.arguments.path}{action.arguments.body ? `\n${action.arguments.content_type}\n\n${action.arguments.body}` : ''}</pre>
+					{#if action.arguments.capture}
+						<p class="pa-hint">The response’s <code>{action.arguments.capture}</code> is kept hidden from the agent, so it can only be copied on with your approval.</p>
+					{/if}
 				{:else}
 					<pre class="pa-mono"><span class="prompt">{action.arguments.path}</span>{`\n\n${action.arguments.content}`}</pre>
 				{/if}
-				<p class="pa-hint">{action.operation === 'command' ? 'It runs with that account’s authority and can change files on that machine. The next command asks again.' : action.operation === 'http' ? 'It is sent with the sign-in attached; the agent never sees the token or password. The next change asks again.' : 'It writes this text once. The next write asks again.'}</p>
+				<p class="pa-hint">{action.operation === 'copy_secret' ? 'The worker encrypts the value with GitHub’s key and writes it, replacing any secret of that name. The agent never sees it, and it is not saved in the Vault. Every copy asks, even in Bypass.' : action.operation === 'command' ? 'It runs with that account’s authority and can change files on that machine. The next command asks again.' : action.operation === 'http' ? 'It is sent with the sign-in attached; the agent never sees the token or password. The next change asks again.' : 'It writes this text once. The next write asks again.'}</p>
 			</div>
 			<div class="pa-section">
 				<div class="pa-actions">
 					<button class="card-btn-secondary" disabled={busy} onclick={() => decide(action.id, false)}>Deny</button>
-					<button class="card-btn-primary" disabled={busy} onclick={() => decide(action.id, true)}>{action.operation === 'command' ? 'Run once' : action.operation === 'http' ? 'Send once' : 'Write once'}</button>
+					<button class="card-btn-primary" disabled={busy} onclick={() => decide(action.id, true)}>{action.operation === 'copy_secret' ? 'Copy once' : action.operation === 'command' ? 'Run once' : action.operation === 'http' ? 'Send once' : 'Write once'}</button>
 				</div>
 			</div>
 		</section>

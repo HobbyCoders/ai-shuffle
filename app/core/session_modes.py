@@ -74,7 +74,7 @@ CHAT_MODE_MEMORY_TOOLS: List[str] = [
 CHAT_MODE_RESOURCE_TOOLS: List[str] = [
     f"mcp__chat-access__{name}" for name in (
         "RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand",
-        "ChatHttpRequest",
+        "ChatHttpRequest", "ChatCopySecret",
     )
 ]
 # The question card. It only asks the owner and reaches no file, shell or
@@ -794,7 +794,7 @@ PROACTIVE_DENIED_TOOLS = [
     "SettleSession", "UnsettleSession", "ArchiveSession",
     "TaskStop", "Remember", "Forget", "NotifyDevices", "ScheduleWakeup",
     "CronCreate", "CronDelete", "RequestChatAccess", "ChatRunCommand",
-    "ChatWriteFile", "ChatHttpRequest", "GenerateNativeImage", "GenerateNativeVideo", "Skill", "ToolSearch",
+    "ChatWriteFile", "ChatHttpRequest", "ChatCopySecret", "GenerateNativeImage", "GenerateNativeVideo", "Skill", "ToolSearch",
     "run_python", "list_tools", "search_tools", "read_tool_docs",
     "save_skill", "delete_skill", "save_plugin",
 ]

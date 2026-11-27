@@ -263,6 +263,8 @@ SERVER_RISK_MAPS: Mapping[str, Mapping[str, str]] = {
     "chat-access": {
         "RequestChatAccess": "safe", "ChatResources": "safe", "ChatListFiles": "safe", "ChatReadFile": "safe",
         "ChatWriteFile": "safe", "ChatRunCommand": "safe", "ChatHttpRequest": "safe",
+        # Asked on the Vault card in every permission mode.
+        "ChatCopySecret": "safe",
     },
 }
 

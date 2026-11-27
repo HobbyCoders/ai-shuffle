@@ -189,6 +189,11 @@
 
 .pa-mono .prompt { color: var(--muted-foreground); user-select: none; }
 
+/* A secret copy: where it comes from and where it goes, one row each. */
+.pa-copy { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.25rem 0.75rem; white-space: normal; }
+.pa-copy dt { color: var(--muted-foreground); }
+.pa-copy dd { margin: 0; min-width: 0; }
+
 /* Which saved sign-in to use: a list to pick from, with a new one last. */
 .pa-pick { display: grid; gap: 0.375rem; min-width: 0; }
 .pa-pick-legend, .pa-seg-legend { font-size: 0.75rem; font-weight: 500; color: var(--foreground); }

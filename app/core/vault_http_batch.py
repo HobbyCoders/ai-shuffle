@@ -15,7 +15,7 @@ from typing import Any
 from app.core.vault_files import AccessDenied
 
 LIMIT = 8
-FIELDS = ("grant_id", "method", "path", "body", "content_type")
+FIELDS = ("grant_id", "method", "path", "body", "content_type", "capture")
 SHAPE = (f"requests must be a list of 1 to {LIMIT} request objects, "
          "each with grant_id, method and path.")
 

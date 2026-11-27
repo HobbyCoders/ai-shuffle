@@ -84,7 +84,12 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # push, so every delegated file-tool rule now ends with DELEGATED_PIPE_RULE.
 # Shortening the rules' override clause paid back 37 of its 105 chars:
 # measured 21,530 -> 21,598 (+68), so the baseline moves by the same +68.
-MEASURED_FULL = 135_468
+# Vault secret hand-off (Nov 2026, owner request): ChatHttpRequest gains
+# capture and a deferred ChatCopySecret writes a captured value to a GitHub
+# Actions secret. Remeasured with scripts/measure_prompt_catalog.py on
+# 2026-11-27: pre-Plan full 136,343 -> 137,393 (+1,050 for the tool; main had
+# drifted from 135,468 within the allowance); eager and delegated unchanged.
+MEASURED_FULL = 137_393
 MEASURED_EAGER = 52_253
 MEASURED_DELEGATED_APPEND = 21_392
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327
@@ -243,7 +248,7 @@ def test_measurement_is_repeatable_and_deferred_catalog_is_not_sent() -> None:
     assert measure() == first
     compiled, catalog, specs = compile_fixture()
     # Project tools remain deferred; emulator schemas and ArchiveSession are gone.
-    assert len(specs) == 112
+    assert len(specs) == 113
     assert not any(s.name == "ArchiveSession" for s in specs)
     assert any(s.name == "SettleSession" for s in specs)
     for leaf in (
