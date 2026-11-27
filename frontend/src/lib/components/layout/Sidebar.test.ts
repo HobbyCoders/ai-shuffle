@@ -33,7 +33,7 @@ const mocks = vi.hoisted(() => {
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
 		projectCatalogReady: store(true),
-		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[] }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
+		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[]; liveCompaction?: { phase: string } | null }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
 		streamingSessions: store(new Set<string>()),
 		compactingSessions: store<ReadonlySet<string>>(new Set<string>()),
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
