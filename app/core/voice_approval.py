@@ -79,7 +79,7 @@ def classify_spoken_answer(text: str) -> str:
 # that mean a secret travels with the request. Neither is answered by voice.
 _SCREEN_TOOLS = frozenset({
     "RequestChatAccess", "ChatResources", "ChatRunCommand", "ChatWriteFile",
-    "ChatReadFile", "ChatListFiles", "ChatHttpRequest",
+    "ChatReadFile", "ChatListFiles", "ChatHttpRequest", "ChatCopySecret",
 })
 _SECRET_ARG = re.compile(
     r"secret|token|password|passwd|passphrase|api[_-]?key|credential|private[_-]?key|cookie|bearer",

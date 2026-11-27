@@ -208,6 +208,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | pygit2 | 1.20.1 | GPLv2 with linking exception | https://github.com/libgit2/pygit2 |
 | Pygments | 2.21.0 | BSD-2-Clause | https://pygments.org |
 | PyJWT | 2.15.0 | MIT | https://github.com/jpadilla/pyjwt |
+| PyNaCl | 1.6.2 | Apache-2.0 | https://github.com/pyca/pynacl/ |
 | pynput | 1.8.2+shuffle1 | GNU Lesser General Public License v3 (LGPLv3) | https://github.com/moses-palmer/pynput |
 | pyobjc-core | 12.2.2 | MIT | https://pypi.org/project/pyobjc-core/12.2.2/ |
 | pyobjc-framework-ApplicationServices | 12.2.2 | MIT | https://pypi.org/project/pyobjc-framework-ApplicationServices/12.2.2/ |

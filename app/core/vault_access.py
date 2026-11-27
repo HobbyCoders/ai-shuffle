@@ -377,11 +377,33 @@ class Action:
     decision: asyncio.Future
     attention_id: str | None = None
     away_deferred: bool = False
+    # Asked in every permission mode: Bypass neither skips nor releases it.
+    always: bool = False
 
     def public(self):
         return {key: getattr(self, key) for key in (
             "id", "grant_id", "operation", "arguments", "expires_at"
         )}
+
+
+@dataclass(repr=False)
+class Capture:
+    """A value a service created, held in this process's memory only.
+
+    Never stored, synced or shown. Only the session that captured it can send
+    it on, and only to a typed destination after the owner's approval. It ends
+    at expiry, on restart or when its session's ownership changes.
+    """
+    id: str
+    session_id: str
+    owner: tuple
+    value: str
+    source: str
+    expires_at: float
+    timer: asyncio.TimerHandle | None = None
+
+    def model_public(self):
+        return {"secret_id": self.id, "expires_at": self.expires_at}
 
 
 @dataclass
@@ -435,6 +457,10 @@ logger = logging.getLogger(__name__)
 
 # Preparation is a resumable card, not a blocked model/tool call or a grant.
 SERVICE_PREPARATION_SECONDS = 24 * 3600
+# A value captured from a service response (ChatHttpRequest capture) lives in
+# memory this long, for at most this many per chat, then is forgotten.
+CAPTURE_SECONDS = 15 * 60
+CAPTURE_LIMIT = 8
 CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4"
 
 # ChatResources is a read-only listing that must answer promptly. Its
@@ -733,6 +759,8 @@ async def deliver_outcome(request: AccessRequest, grant: Grant | None) -> None:
 class Broker:
     def __init__(self):
         self.grants: dict[str, Grant] = {}
+        self.captures: dict[str, Capture] = {}
+        self.capturing: dict[str, int] = {}  # capture requests in flight, per chat
         self.actions: dict[str, Action] = {}
         self.requests: dict[str, AccessRequest] = {}
         self._pending_lock = threading.RLock()
@@ -1568,6 +1596,11 @@ class Broker:
         pending = [r.model_pending() for r in self._live_requests(session_id, owner) if r.kind == "service"]
         if pending:
             result["pending_requests"] = pending
+        now = time.time()
+        captured = [c.model_public() for c in list(self.captures.values())
+                    if c.session_id == session_id and c.owner == owner and c.expires_at > now and c.value]
+        if captured:
+            result["captured_secrets"] = captured
         return result
 
     async def snapshot(self, session_id: str, row: dict | None = None):
@@ -1665,12 +1698,21 @@ class Broker:
         await self.get(session_id, action.grant_id)
         if action.decision.done():
             raise AccessDenied("This action is no longer awaiting approval.")
+        if allow and action.always:
+            # Asked in every mode and refused in Away: a card left open when
+            # the chat went Away is refused, not approved.
+            from app.core.away_mode import answers_questions_async, DEFERRED_MESSAGE
+            if await answers_questions_async(session_id):
+                await self.defer_pending_away(session_id)
+                raise AccessDenied(DEFERRED_MESSAGE)
+            if action.decision.done():
+                raise AccessDenied("This action is no longer awaiting approval.")
         action.decision.set_result(allow)
 
     async def resolve_mode_actions(self, session_id: str):
         """Release existing confirmations after an owner-applied switch to Bypass."""
         pending = [a for a in self.actions.values()
-                   if a.session_id == session_id and not a.decision.done()]
+                   if a.session_id == session_id and not a.decision.done() and not a.always]
         if not pending or not await session_bypasses_confirmation(session_id):
             return
         for action in pending:
@@ -1680,17 +1722,18 @@ class Broker:
                 # Expired/revoked/answered actions must never be revived.
                 continue
 
-    async def approve(self, grant: Grant, operation: str, arguments: dict, *, session_id: str | None = None):
+    async def approve(self, grant: Grant, operation: str, arguments: dict, *, session_id: str | None = None,
+                      always: bool = False):
         # The consumer owns this one-shot decision, not the session that granted
         # access. Inheriting a bypass parent's handle never inherits its bypass.
         session_id = session_id or grant.session_id
-        if await session_bypasses_confirmation(session_id):
+        if not always and await session_bypasses_confirmation(session_id):
             return
         if sum(a.session_id == session_id for a in self.actions.values()) >= 8:
             raise AccessDenied("Too many pending actions; resolve them in the Vault.")
         action = Action(uuid.uuid4().hex, grant.id, session_id, operation,
                         dict(arguments), min(grant.expires_at, time.time() + 240),
-                        asyncio.get_running_loop().create_future())
+                        asyncio.get_running_loop().create_future(), always=always)
         with self._pending_lock:
             self.actions[action.id] = action
         self._track_attention(action)
@@ -1746,11 +1789,32 @@ class Broker:
                 raise AccessDenied("Provide a content type such as application/json.")
             if method in vault_services.WRITE_METHODS and not grant.writable:
                 raise AccessDenied("This service grant is read-only: only GET and HEAD are allowed.")
+            capture = arguments.get("capture")
+            capture = vault_services.capture_field(capture) if capture not in (None, "") else ""
+            if capture:
+                self._capture_room(session_id)
             # The approval card shows exactly what is sent; the credential is never an argument.
             arguments = {"method": method, "path": path, "body": body,
                          "content_type": (content_type or "application/json") if body else ""}
+            if capture:
+                arguments["capture"] = capture
             if grant.plugin is not None:
                 # Refuse before asking for approval when the plugin changed.
+                await _current_plugin(grant)
+        elif operation == "copy_secret":
+            if grant.kind != "service" or not vault_services.is_github_api(grant.origin, grant.fingerprint):
+                # The card says GitHub: any other service could answer the
+                # public-key request with its own key and open what follows.
+                raise AccessDenied("Copy a secret with a writable service grant for https://api.github.com "
+                                   "(no path, verified by the system's certificates).")
+            if not grant.writable:
+                raise AccessDenied("This GitHub grant is read-only; writing a secret needs a writable grant.")
+            capture = await self._capture(session_id, arguments.get("secret_id"))
+            key_path, secret_path, target = vault_services.github_secret_paths(
+                arguments.get("repository"), arguments.get("environment"), arguments.get("name"))
+            vault_services.request_url(grant.origin, key_path)
+            arguments = {"secret": capture.source, "secret_id": capture.id, **target}
+            if grant.plugin is not None:
                 await _current_plugin(grant)
         elif operation in ("list", "read", "write"):
             if grant.kind != "folder" or grant.root is None:
@@ -1766,19 +1830,20 @@ class Broker:
                     raise AccessDenied("Provide UTF-8 text of at most 64 KiB.")
         else:
             raise AccessDenied("Unknown operation.")
-        if operation in ("command", "write") or (
+        if operation in ("command", "write", "copy_secret") or (
                 operation == "http" and arguments["method"] in vault_services.WRITE_METHODS):
-            await self.approve(grant, operation, arguments, session_id=session_id)
+            # Sending a secret on is asked every time, in Bypass too.
+            await self.approve(grant, operation, arguments, session_id=session_id,
+                               always=operation == "copy_secret")
         await self.get(session_id, grant_id)
-        if operation in ("command", "http"):
+        if operation in ("command", "http", "copy_secret"):
             if operation == "command":
                 work = self.remote_command(grant, arguments["command"])
-            elif grant.plugin is not None:
-                work = _plugin_http(grant, arguments)
+            elif operation == "copy_secret":
+                capture = await self._capture(session_id, arguments["secret_id"])
+                work = self._copy_to_github(grant, capture, key_path, secret_path, target)
             else:
-                work = vault_services.perform(grant.origin, grant.header, grant.secret, arguments["method"],
-                                             arguments["path"], arguments["body"], arguments["content_type"],
-                                             pin=grant.fingerprint)
+                work = self._http(session_id, grant, arguments)
             task = asyncio.create_task(work)
             grant.tasks.add(task)
             try:
@@ -1802,6 +1867,122 @@ class Broker:
             return {"entries": vault_files.listing(grant.root, arguments["path"])}
         vault_files.write(grant.root, arguments["path"], arguments["content"])
         return {"written": True}
+
+    async def _send(self, grant: Grant, method: str, path: str, body: str, content_type: str, *,
+                    also_redact: tuple[str, ...] = (), capture: str = "") -> tuple[dict, str | None]:
+        request = (method, path, body, content_type)
+        if grant.plugin is not None:
+            return await _plugin_http(grant, request, also_redact=also_redact, capture=capture)
+        return await vault_services.perform_capturing(grant.origin, grant.header, grant.secret, *request,
+                                                      pin=grant.fingerprint, also_redact=also_redact,
+                                                      capture=capture)
+
+    async def _http(self, session_id: str, grant: Grant, arguments: dict) -> dict:
+        """One ChatHttpRequest. Values this chat captured stay redacted from
+        every response, so no service can echo one back."""
+        capture = arguments.get("capture", "")
+        if capture:
+            # Reserved before sending: each capture request may mint a credential.
+            self._capture_room(session_id)
+            self.capturing[session_id] = self.capturing.get(session_id, 0) + 1
+        try:
+            result, value = await self._send(grant, arguments["method"], arguments["path"], arguments["body"],
+                                             arguments["content_type"], also_redact=self._held(session_id),
+                                             capture=capture)
+            if value is not None:
+                held = self._hold(session_id, await session_owner(session_id), value,
+                                  f"{grant.label}: {arguments['method']} {arguments['path']} → {capture}")
+                result["capture"] = {**result["capture"], **held.model_public()}
+        finally:
+            if capture:
+                self.capturing[session_id] -= 1
+                if not self.capturing[session_id]:
+                    del self.capturing[session_id]
+        # A value captured while this request was in flight was not in its redaction set.
+        return self.redact_held(session_id, result)
+
+    def _capture_room(self, session_id: str) -> None:
+        held = len(self._held(session_id)) + self.capturing.get(session_id, 0)
+        if held >= CAPTURE_LIMIT:
+            raise AccessDenied(f"This chat already holds or is capturing {CAPTURE_LIMIT} secrets; "
+                               "each lasts 15 minutes. Wait for one to expire.")
+
+    def redact_held(self, session_id: str, result: object) -> object:
+        """``result`` with every value this chat now holds redacted again."""
+        needles = vault_services.held_needles(self._held(session_id))
+        if not needles or not isinstance(result, dict):
+            return result
+        again = dict(result)
+        if isinstance(again.get("body"), str):
+            # A cut body may end inside a value: ``cut`` redacts that start too.
+            again["body"] = vault_services.redact(again["body"].encode(), needles,
+                                                  cut=again.get("truncated") is True).decode("utf-8", "replace")
+        if isinstance(again.get("headers"), dict):
+            again["headers"] = {name: vault_services.redact(value.encode(), needles).decode("utf-8", "replace")
+                                if isinstance(value, str) else value for name, value in again["headers"].items()}
+        return again
+
+    def _held(self, session_id: str) -> tuple[str, ...]:
+        now = time.time()
+        return tuple(c.value for c in list(self.captures.values())
+                     if c.session_id == session_id and c.expires_at > now and c.value)
+
+    def forget_captures(self, session_id: str) -> None:
+        """End every value this chat holds: its ownership is moving. Safe from
+        any thread (a handoff transaction): the value is cleared at once and
+        the entry falls away at its expiry."""
+        for capture in list(self.captures.values()):
+            if capture.session_id == session_id:
+                capture.value = ""
+
+    def _hold(self, session_id: str, owner: tuple, value: str, source: str) -> Capture:
+        capture = Capture("sec_" + uuid.uuid4().hex[:24], session_id, owner, value, source,
+                          time.time() + CAPTURE_SECONDS)
+        self.captures[capture.id] = capture
+        capture.timer = asyncio.get_running_loop().call_later(CAPTURE_SECONDS, self._drop, capture.id)
+        return capture
+
+    def _drop(self, capture_id: str) -> None:
+        capture = self.captures.pop(capture_id, None)
+        if capture is not None:
+            if capture.timer:
+                capture.timer.cancel()
+            capture.value = ""
+
+    async def _capture(self, session_id: str, secret_id: object) -> Capture:
+        capture = self.captures.get(secret_id) if isinstance(secret_id, str) else None
+        if capture is None or capture.session_id != session_id:
+            raise AccessDenied("No such captured secret in this chat. Capture one with ChatHttpRequest's capture "
+                               "field; captures last 15 minutes, stay with the chat that made them and end on restart.")
+        if (not capture.value or capture.expires_at <= time.time()
+                or capture.owner != await session_owner(session_id)):
+            self._drop(capture.id)
+            raise AccessDenied("The captured secret expired or this chat's owner changed. Create it again.")
+        return capture
+
+    async def _copy_to_github(self, grant: Grant, capture: Capture, key_path: str, secret_path: str,
+                              target: dict) -> dict:
+        """Encrypt the captured value to the repository's or environment's
+        public key and write it as a GitHub Actions secret."""
+        held = self._held(capture.session_id)
+        answer, _ = await self._send(grant, "GET", key_path, "", "", also_redact=held)
+        if answer["status"] != 200:
+            return {"written": False, **target, "step": "read the public key", "status": answer["status"],
+                    "body": answer["body"]}
+        try:
+            document = json.loads(answer["body"])
+            key_id, key = document["key_id"], document["key"]
+        except (ValueError, KeyError, TypeError):
+            key_id = key = None
+        if not isinstance(key_id, str) or not key_id or len(key_id) > 200:
+            raise AccessDenied("GitHub did not return a usable public key for this secret. Nothing was written.")
+        if not capture.value:
+            raise AccessDenied("The captured secret expired. Nothing was written.")
+        body = json.dumps({"encrypted_value": vault_services.seal_for_github(key, capture.value), "key_id": key_id})
+        result, _ = await self._send(grant, "PUT", secret_path, body, "application/json", also_redact=held)
+        written = result["status"] in (201, 204)
+        return {"written": written, **target, "status": result["status"],
+                **({} if written else {"step": "write the secret", "body": result["body"]})}
 
     async def remote_command(self, grant: Grant, command: str):
         async with asyncio.timeout(60):
@@ -1883,27 +2064,30 @@ def _sign_in_problem(service: str, exc: BaseException) -> AccessDenied:
     return AccessDenied(f"The sign-in for {service} could not be used. {exc}")
 
 
-async def _plugin_http(grant: Grant, arguments: dict) -> dict:
+async def _plugin_http(grant: Grant, request: tuple[str, str, str, str], *, also_redact: tuple[str, ...] = (),
+                       capture: str = "") -> tuple[dict, str | None]:
     """One request with the plugin service's access token. On a 401 the token
     is refreshed once and the request sent once more. The token is attached
     here and redacted from what is returned; it never reaches a tool result,
     an exception message or a log."""
     from app.core import plugin_oauth
     config = await _current_plugin(grant)
-    request = (arguments["method"], arguments["path"], arguments["body"], arguments["content_type"])
     try:
         token = await plugin_oauth.access_token_for_use(config)
     except plugin_oauth.PluginOAuthError as exc:
         raise _sign_in_problem(config.service, exc) from None
-    result = await vault_services.perform(grant.origin, ("Authorization", f"Bearer {token}"), token, *request)
+    result, captured = await vault_services.perform_capturing(
+        grant.origin, ("Authorization", f"Bearer {token}"), token, *request,
+        also_redact=also_redact, capture=capture)
     if result["status"] != 401:
-        return result
+        return result, captured
     try:
         fresh = await plugin_oauth.access_token_for_use(config, force_refresh=True)
     except plugin_oauth.PluginOAuthError as exc:
         raise _sign_in_problem(config.service, exc) from None
-    return await vault_services.perform(grant.origin, ("Authorization", f"Bearer {fresh}"), fresh, *request,
-                                       also_redact=(token,))
+    return await vault_services.perform_capturing(
+        grant.origin, ("Authorization", f"Bearer {fresh}"), fresh, *request,
+        also_redact=(token, *also_redact), capture=capture)
 
 
 async def _defer_if_away(session_id: str, action: str) -> None:

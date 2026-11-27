@@ -542,6 +542,7 @@ TOOL_LEVELS: Dict[str, Level] = {
     "mcp__chat-access__ChatWriteFile": HIGH,
     "mcp__chat-access__ChatRunCommand": HIGH,
     "mcp__chat-access__ChatHttpRequest": HIGH,
+    "mcp__chat-access__ChatCopySecret": HIGH,
     # Paid generation (spending outside the model calls themselves).
     "mcp__ai-tools__searchModels": LOW,
     **{
@@ -781,6 +782,7 @@ def _computer_access_consent(data: Mapping[str, Any], mode: Optional[str]) -> bo
 #: * ChatRunCommand, ChatWriteFile, other ChatHttpRequest methods: the broker's
 #:   one-shot card, outside Bypass. In Bypass the grant card promises no repeat
 #:   approval, so the owner gate asks as before.
+#: * ChatCopySecret: the broker's one-shot card in every mode, Bypass included.
 #: * computer-use request_access: the screen-access card on every request in
 #:   Ask and Accept Edits (a saved Allow rule skips it, as in other chats). In Bypass and Auto the gate stays, and the approver
 #:   shows that same card instead of a yes/no (``query_engine``).
@@ -793,6 +795,7 @@ OWN_CONSENT_TOOLS: Dict[str, Callable[[Mapping[str, Any], Optional[str]], bool]]
     "mcp__chat-access__ChatHttpRequest": _chat_http_consent,
     "mcp__chat-access__ChatRunCommand": _outside_bypass,
     "mcp__chat-access__ChatWriteFile": _outside_bypass,
+    "mcp__chat-access__ChatCopySecret": _always,
     "mcp__computer-use__request_access": _computer_access_consent,
 }
 

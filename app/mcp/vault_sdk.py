@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # needs every worker to read both names first, which is a change of its own.
 SERVER = "chat-access"
 NAMES = ("RequestChatAccess", "ChatResources", "ChatListFiles", "ChatReadFile", "ChatWriteFile", "ChatRunCommand",
-         "ChatHttpRequest")
+         "ChatHttpRequest", "ChatCopySecret")
 TOOL_NAMES = [f"mcp__{SERVER}__{name}" for name in NAMES]
 CHAT_GUIDANCE = """You are a general-purpose assistant, not a repository development agent. Do not
 create worktrees, develop project code, commit changes, or open pull requests.
@@ -44,6 +44,7 @@ _HTTP_FIELDS = {
     "path": {"type": "string"},
     "body": {"type": "string"},
     "content_type": {"type": "string"},
+    "capture": {"type": "string", "description": "Optional, e.g. result.value"},
 }
 HTTP_SCHEMA = {
     "type": "object",
@@ -123,6 +124,8 @@ def create_vault_server(session_id: str):
         results = []
         for index, outcome in enumerate(settled):
             ok, value = outcome if isinstance(outcome, tuple) else (False, FAILED)
+            # Another item may have captured a value this one echoed before it was held.
+            value = broker.redact_held(session_id, value) if ok else value
             results.append({"index": index, "ok": True, "result": value} if ok
                            else {"index": index, "ok": False, "error": value})
         return {"content": [{"type": "text", "text": json.dumps({"results": results})}]}
@@ -167,7 +170,7 @@ def create_vault_server(session_id: str):
     async def command(args):
         return await invoke("command", args)
 
-    @tool("ChatHttpRequest", "Send an HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted. For independent requests, pass requests (1-8 items with these fields) instead: they run concurrently and return {results: [{index, ok, result or error}]} in order once all finish; one failure does not stop the others.", HTTP_SCHEMA)
+    @tool("ChatHttpRequest", "Send an HTTPS request to a granted API service. The worker attaches the private credential; you never see it. path starts with / and stays under the granted address (query allowed). method is GET, HEAD, POST, PUT, PATCH or DELETE; pass body and content_type as empty strings when unused. Read-only grants allow GET/HEAD only. Other methods need a writable grant and, outside bypass permission mode, wait for one-shot approval. Redirects are not followed; the body is bounded to 64 KiB with known encodings of the credential redacted. For independent requests, pass requests (1-8 items with these fields) instead: they run concurrently and return {results: [{index, ok, result or error}]} in order once all finish; one failure does not stop the others. capture (a JSON field path, such as result.value) holds that one-line field of a 2xx response, such as a token just created, for ChatCopySecret as capture.secret_id; you get only the response's shape, never its values.", HTTP_SCHEMA)
     async def http(args):
         try:
             batch = vault_http_batch.items(args)
@@ -177,5 +180,19 @@ def create_vault_server(session_id: str):
             return await invoke("http", args)
         return await http_batch(batch)
 
-    tools = [request, resources, listing, read, write, command, http]
+    @tool("ChatCopySecret", "Write a secret captured by ChatHttpRequest (secret_id) to a GitHub Actions secret; you never see it. grant_id: a writable service grant for https://api.github.com. repository: owner/name. environment: blank for a repository secret. The worker encrypts and writes it after the owner's one-shot approval, asked in every mode (Away refuses). Captures live 15 minutes in memory for this chat and are never saved.", {
+        "type": "object",
+        "properties": {
+            "secret_id": {"type": "string"},
+            "grant_id": {"type": "string"},
+            "repository": {"type": "string"},
+            "environment": {"type": "string"},
+            "name": {"type": "string"},
+        },
+        "required": ["secret_id", "grant_id", "repository", "name"],
+    })
+    async def copy_secret(args):
+        return await invoke("copy_secret", args)
+
+    tools = [request, resources, listing, read, write, command, http, copy_secret]
     return patch_sdk_server(create_tool_server(name=SERVER, version="1.0.0", tools=tools), tools)
