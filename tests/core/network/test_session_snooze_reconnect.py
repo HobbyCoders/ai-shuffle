@@ -208,37 +208,97 @@ async def test_failed_push_keeps_a_short_pull_behind(workers, monkeypatch):
             assert not transport.caught_up_since_start()
 
 
-async def test_offline_peer_does_not_stop_wakes(workers):
+async def test_connection_lost_between_batches_stays_behind(workers, monkeypatch):
+    """The peer answered a full batch, then the connection dropped: not offline."""
+    a, b = _pair(workers)
+    with a.active():
+        await _patch("s1", False, _soon(1))
+    converge([a, b])
+    for index in range(3):
+        set_owner_pref(a, f"backlog-{index}", index)
+    served = ServedBy(a, "https://owner.example.com")
+    answer = served.handler
+    exchanges = []
+
+    def drop_after_first_exchange(request):
+        if exchanges:
+            raise httpx.ConnectError("connection refused", request=request)
+        if request.url.path == "/api/v1/network/peer/exchange":
+            exchanges.append(request)
+        return answer(request)
+
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 1)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(drop_after_first_exchange)) as client:
+        with b.active():
+            store.touch_member(a.device_id, endpoints=[served.base_url])
+            link = transport._links[a.device_id] = transport.PeerLink(a.device_id, [served.base_url])
+            with pytest.raises((transport.PeerError, httpx.HTTPError)):
+                await link.sync_once(client, engine.context())
+            assert len(exchanges) == 1
+            assert link.last_pass[1] == transport.PASS_BEHIND
+            assert not transport.caught_up_since_start()
+
+
+def _refused(request):
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+def _tunnel_worker_down(request):
+    return httpx.Response(transport.TUNNEL_WORKER_DOWN_STATUS, text="error code: 1033")
+
+
+@pytest.mark.parametrize("dial", [_refused, _tunnel_worker_down], ids=["refused", "tunnel-worker-down"])
+@pytest.mark.parametrize("sleep", ["long", "short"])
+async def test_offline_peer_does_not_stop_wakes(workers, dial, sleep):
     """The only peer is off: the outbox stays held, but due chats still wake."""
     a, b = _pair(workers)
     with a.active():
         await _patch("s1", False, _soon(1))
     converge([a, b])
 
-    def refuse(request):
-        raise httpx.ConnectError("connection refused", request=request)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(dial)) as client:
         with a.active():
             engine.hold_outbox(True)
             try:
                 store.touch_member(b.device_id, endpoints=["https://mirror.example.com"])
                 link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
-                with pytest.raises(transport.PeerConnectFailed):
+                with pytest.raises(transport.PeerError):
                     await link.sync_once(client, engine.context())
                 assert link.last_pass[1] == transport.PASS_OFFLINE
                 assert transport.caught_up_since_start()
                 # The machine sleeps after that dial: it no longer counts on resume.
-                transport._gate_checked_at = time.time() - transport.RESUME_GAP_SECONDS - 1
+                # A long sleep shows as a gap between sweeps; a short one as wall
+                # time running ahead of monotonic time (which a suspend stops).
+                if sleep == "long":
+                    transport._gate_checked_at = (time.time() - transport.RESUME_GAP_SECONDS - 1, time.monotonic())
+                else:
+                    transport._gate_checked_at = (time.time() - 20, time.monotonic() - 1)
                 assert not transport.caught_up_since_start()
                 assert await session_snooze.wake_due_once(now=_soon(60)) == 0
-                with pytest.raises(transport.PeerConnectFailed):
+                with pytest.raises(transport.PeerError):
                     await link.sync_once(client, engine.context())
                 assert transport.caught_up_since_start()
                 assert await session_snooze.wake_due_once(now=_soon(60)) == 1
                 assert _snooze_of(a, "s1") == (True, None)
             finally:
                 engine.hold_outbox(False)
+
+
+async def test_peer_answering_with_an_error_is_not_offline(workers):
+    """Only a tunnel's worker-down answer counts as offline, not any HTTP error."""
+    a, b = _pair(workers)
+
+    def bad_gateway(request):
+        return httpx.Response(502, text="bad gateway")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(bad_gateway)) as client:
+        with a.active():
+            store.touch_member(b.device_id, endpoints=["https://mirror.example.com"])
+            link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
+            with pytest.raises(transport.PeerError):
+                await link.sync_once(client, engine.context())
+            assert link.last_pass[1] == transport.PASS_BEHIND
+            assert not transport.caught_up_since_start()
 
 
 async def test_new_worker_joining_sees_snooze(workers):
