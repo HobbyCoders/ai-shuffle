@@ -82,8 +82,8 @@ import type {
 
 // The cross-device streaming map lives in its own module, so the session list
 // loader can seed it without importing this store (#1527).
-export { streamingSessions, type StreamingSessionInfo } from './streaming-sessions';
-import { streamingSessions } from './streaming-sessions';
+export { streamingSessions, compactingSessions, type StreamingSessionInfo } from './streaming-sessions';
+import { streamingSessions, compactingSessions } from './streaming-sessions';
 
 // ─── backgroundPermissions ────────────────────────────────────────────────────
 
@@ -794,6 +794,7 @@ const { handleMessage } = createMessageHandlers({
 	getState: () => _state,
 	wsSend: (data) => wsConn.send(data),
 	streamingSessions,
+	compactingSessions,
 	backgroundPermissions,
 	gitRefreshStatus: () => git.refreshStatus(),
 	gitRefreshDiffStats: () => git.refreshDiffStats(),

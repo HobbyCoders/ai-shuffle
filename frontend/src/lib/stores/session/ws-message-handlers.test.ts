@@ -19,6 +19,7 @@ import {
 } from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
 import { sessionTimestamp } from '$lib/components/layout/session-card-data';
+import { compactingSessions } from '../streaming-sessions';
 
 // Mock the side-effect services the error handlers call. Keeps this a true unit
 // test of message dispatch — isolated from the heavy active-session/layout
@@ -2085,6 +2086,50 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(deps.streamingSessions.set).toHaveBeenCalled();
+		});
+	});
+
+	describe('compacting chats (a background row says Compacting)', () => {
+		const compacting = () => [...compactingSessions.current].sort();
+
+		beforeEach(() => {
+			compactingSessions.set([]);
+			deps = createMockDeps({ compactingSessions });
+			handlers = createMessageHandlers(deps);
+		});
+
+		it('follows user_compaction_changed for any chat, not just the open one', () => {
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'other', compacting: true });
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'session-1', compacting: true });
+			expect(compacting()).toEqual(['other', 'session-1']);
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'other', compacting: false });
+			expect(compacting()).toEqual(['session-1']);
+			handlers.handleMessage({ type: 'user_compaction_changed', compacting: true });
+			expect(compacting()).toEqual(['session-1']);
+		});
+
+		it('takes the reconnect snapshot as the whole truth', () => {
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'stale', compacting: true });
+			handlers.handleMessage({
+				type: 'user_streaming_sessions',
+				sessions: [
+					{ session_id: 'a', project_id: null, compacting: true },
+					{ session_id: 'b', project_id: null, compacting: false },
+					{ session_id: 'c', project_id: null },
+				],
+				session_ids: ['a', 'b', 'c'],
+			});
+			expect(compacting()).toEqual(['a']);
+		});
+
+		it('clears when the chat stops working or is deleted, even without an "ended" frame', () => {
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'a', compacting: true });
+			handlers.handleMessage({ type: 'user_compaction_changed', session_id: 'b', compacting: true });
+			handlers.handleMessage({ type: 'user_streaming_changed', session_id: 'a', is_streaming: true });
+			expect(compacting()).toEqual(['a', 'b']);
+			handlers.handleMessage({ type: 'user_streaming_changed', session_id: 'a', is_streaming: false });
+			handlers.handleMessage({ type: 'user_session_deleted', session_id: 'b' });
+			expect(compacting()).toEqual([]);
 		});
 	});
 

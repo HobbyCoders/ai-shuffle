@@ -101,6 +101,11 @@ export interface MessageHandlerDeps {
 		update: (fn: (m: Map<string, StreamingSessionInfo>) => Map<string, StreamingSessionInfo>, sessionId?: string) => void;
 		set: (m: Map<string, StreamingSessionInfo>) => void;
 	};
+	/** Chats compacting right now (see `compactingSessions`). */
+	compactingSessions?: {
+		set: (ids: Iterable<string>) => void;
+		mark: (sessionId: string, compacting: boolean) => void;
+	};
 	backgroundPermissions: {
 		update: (fn: (m: Map<string, SessionAttention>) => Map<string, SessionAttention>) => void;
 	};
@@ -260,7 +265,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 } {
 	const {
 		update, getState, wsSend,
-		streamingSessions, backgroundPermissions,
+		streamingSessions, compactingSessions, backgroundPermissions,
 		gitRefreshStatus, gitRefreshDiffStats, gitRefreshPrState, gitGetProjectId, gitGetLoading,
 		appLoadSessions, appLoadApiUserSessions, mergeSessionPatch,
 		internal,
@@ -819,6 +824,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				next.delete(sessionId);
 				return next;
 			}, sessionId);
+			compactingSessions?.mark(sessionId, false);
 			scheduleSessionsReload();
 			if (getState().sessionId === sessionId) {
 				onNewChat();
@@ -887,6 +893,17 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				return newMap;
 			}, ssId);
+			// A compaction lives inside a turn: once the turn ends, it has too,
+			// even if its "ended" frame never arrived.
+			if (!isStreamingFlag) compactingSessions?.mark(ssId, false);
+			return;
+		}
+
+		// A chat started or stopped compacting. Only the open chat reads its own
+		// feed, so this is what lets a background row say Compacting.
+		if (msgType === 'user_compaction_changed') {
+			if (typeof data.session_id !== 'string' || !data.session_id) return;
+			compactingSessions?.mark(data.session_id, data.compacting === true);
 			return;
 		}
 
@@ -905,7 +922,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		}
 
 		if (msgType === 'user_streaming_sessions') {
-			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null; worktree_branch?: string | null }> | undefined;
+			const sessions = data.sessions as Array<{ session_id: string; project_id: string | null; worktree_id?: string | null; worktree_branch?: string | null; compacting?: boolean }> | undefined;
 			const sessionIds = data.session_ids as string[] | undefined;
 			const newMap = new Map<string, StreamingSessionInfo>();
 			if (sessions) {
@@ -922,6 +939,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 			}
 			streamingSessions.set(newMap);
+			// Replaces the set: an "ended" missed while disconnected must not
+			// leave a row saying Compacting.
+			compactingSessions?.set((sessions ?? []).filter((s) => s.compacting === true).map((s) => s.session_id));
 			return;
 		}
 

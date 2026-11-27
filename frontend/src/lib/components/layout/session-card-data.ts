@@ -72,7 +72,7 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 };
 
 /** The row's status word: a working session whose conversation is being
- *  compacted says so (only the open session knows — see Sidebar). */
+ *  compacted says so (see `isCompacting` in Sidebar). */
 export function runtimeStatusWord(status: SessionCardStatus, compacting = false): string {
 	return compacting && status === 'working' ? 'Compacting' : RUNTIME_STATUS_WORDS[status];
 }

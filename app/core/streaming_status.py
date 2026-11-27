@@ -77,6 +77,11 @@ _last_broadcast: Dict[str, Dict[str, Optional[str]]] = {}
 # believes are busy, and plain gateway-tick rechecks are diff-suppressed.
 _chains: Dict[str, "asyncio.Task"] = {}
 
+# Per-session compaction frame chains (see notify_compaction): the newest send.
+_compaction_chains: Dict[str, "asyncio.Task"] = {}
+# Sessions this process last said were compacting (see notify_compaction).
+_compacting_now: set = set()
+
 # Gateway-tick throttle state, both touched only on the event loop:
 #   _tick_last_fired: session_id -> loop time of the last tick-driven recheck.
 #   _tick_pending:    session_id -> the armed trailing-edge timer, if any.
@@ -215,12 +220,47 @@ def busy_session_ids(session_ids: List[str]) -> set:
         return set()
 
 
+def compacting_session_ids(session_ids: List[str]) -> set:
+    """Of ``session_ids``, those whose current turn is compacting right now.
+
+    Of the events that start or end a compaction (the set the chat's own
+    "Compacting context…" line follows), the session's newest is a
+    ``system.compaction_status`` saying ``started``. Callers pass busy sessions
+    only, so an abandoned "started" from a turn that died never reads as
+    compacting. Fails open (empty set): the sidebar then just says Working.
+    """
+    ids = list(dict.fromkeys(session_ids))
+    if not ids:
+        return set()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT s.id FROM sessions s WHERE s.id IN ("
+                + ", ".join(["%s"] * len(ids)) + ") AND ("
+                "SELECT CASE WHEN e.event_type = 'system.compaction_status' "
+                "THEN e.payload->>'state' END FROM session_events e "
+                "WHERE e.session_id = s.id AND (e.event_type IN ("
+                "'system.compaction_status', 'system.compaction_boundary', "
+                "'turn.started', 'turn.parked', 'turn.completed', 'turn.aborted', "
+                "'transcript.rewound') OR (e.event_type = 'system.note' "
+                "AND e.payload->>'subtype' = 'compact_failed')) "
+                "ORDER BY e.seq DESC LIMIT 1) = 'started'",
+                tuple(ids),
+            )
+            return {row["id"] for row in cursor.fetchall() or []}
+    except Exception:
+        logger.warning("[streaming_status] compacting_session_ids read failed", exc_info=True)
+        return set()
+
+
 def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
     """Busy sessions owned by this user, matching the per-session busy read.
 
     Connect-time snapshot shape:
-    ``[{"session_id", "project_id", "worktree_id", "worktree_branch"}, ...]``
-    (``worktree_branch`` = the legacy column, else the v2 ``sessions.branch``).
+    ``[{"session_id", "project_id", "worktree_id", "worktree_branch",
+    "compacting"}, ...]`` (``worktree_branch`` = the legacy column, else the v2
+    ``sessions.branch``; ``compacting`` = see :func:`compacting_session_ids`).
 
     Ownership follows the app's user model (see app/api/websocket.py):
     admin sessions have ``api_user_id`` NULL and broadcast under the constant
@@ -250,9 +290,12 @@ def get_user_streaming_sessions(user_id: str) -> List[Dict[str, Any]]:
             user_id, exc_info=True,
         )
         return []
+    # A page loaded mid-compaction learns it here: the live frame came before it.
+    compacting = compacting_session_ids([row["session_id"] for row in rows])
     return [
         {
             "session_id": row["session_id"],
+            "compacting": row["session_id"] in compacting,
             "project_id": row["project_id"],
             "worktree_id": row["worktree_id"],
             # Logical branch: legacy column first, then the v2 ``sessions.branch``
@@ -539,6 +582,68 @@ async def _send_streaming_changed(
         )
 
 
+def notify_compaction(session_id: str, compacting: bool) -> None:
+    """Tell every tab of the session's owner that it started or stopped compacting.
+
+    Only the open chat reads its own event feed, so without this a chat in the
+    background said Working through a whole compaction. Called once an event
+    that starts or ends a compaction is written; a stop is sent only for a
+    session this process said was compacting, so ordinary turn ends send
+    nothing. Each send waits for the session's previous one, so the frames
+    keep the events' order. Called on the event loop; never raises and never
+    blocks the writer.
+    """
+    try:
+        if compacting:
+            _compacting_now.add(session_id)
+        elif session_id in _compacting_now:
+            _compacting_now.discard(session_id)
+        else:
+            return
+        prev = _compaction_chains.get(session_id)
+        task = asyncio.get_running_loop().create_task(
+            _send_compaction_changed(session_id, compacting, prev))
+        task._log_destroy_pending = False  # type: ignore[attr-defined]
+        _compaction_chains[session_id] = task
+
+        def _forget(done: "asyncio.Task") -> None:
+            if _compaction_chains.get(session_id) is done:
+                _compaction_chains.pop(session_id, None)
+
+        task.add_done_callback(_forget)
+    except Exception:
+        logger.debug(
+            "[streaming_status] compaction notify failed for %s",
+            session_id, exc_info=True,
+        )
+
+
+async def _send_compaction_changed(
+    session_id: str, compacting: bool, prev: Optional["asyncio.Task"]
+) -> None:
+    try:
+        if prev is not None:
+            await asyncio.wait({prev})
+        info = _last_broadcast.get(session_id)
+        if info is None:
+            info = await asyncio.to_thread(_broadcast_info, session_id)
+        from app.core.sync_engine import sync_engine
+
+        await sync_engine._broadcast_user_message(  # noqa: SLF001 — existing send helper
+            user_id=info.get("user_id") or "admin",
+            message={
+                "type": "user_compaction_changed",
+                "session_id": session_id,
+                "compacting": compacting,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "[streaming_status] user_compaction_changed broadcast failed "
+            "for %s", session_id, exc_info=True,
+        )
+
+
 # ----------------------------------------------------------------------
 # Sweep reconciler + startup wiring
 # ----------------------------------------------------------------------
@@ -660,4 +765,11 @@ def _reset_state() -> None:
         except RuntimeError:
             pass  # task's loop already closed — nothing left to deliver to
     _chains.clear()
+    for task in _compaction_chains.values():
+        try:
+            task.cancel()
+        except RuntimeError:
+            pass
+    _compaction_chains.clear()
+    _compacting_now.clear()
     _loop = None

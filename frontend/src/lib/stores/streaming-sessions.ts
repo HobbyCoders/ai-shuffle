@@ -44,6 +44,35 @@ export const streamingSessions = {
 	},
 };
 
+const _compactingStore = createStore<ReadonlySet<string>>(new Set());
+
+/**
+ * Chats compacting their conversation right now, across the user's devices:
+ * the socket's snapshot on connect, then `user_compaction_changed`. Only the
+ * open chat reads its own feed, so this is how a row in the background can
+ * say Compacting instead of Working.
+ */
+export const compactingSessions = {
+	get current() { return _compactingStore.current; },
+	subscribe: _compactingStore.subscribe,
+	/** Whole state: the socket's snapshot. */
+	set: (ids: Iterable<string>) => {
+		const next = new Set(ids);
+		const cur = _compactingStore.current;
+		if (next.size === cur.size && [...next].every((id) => cur.has(id))) return;
+		_compactingStore.set(next);
+	},
+	/** One chat started (`true`) or stopped (`false`) compacting. */
+	mark: (sessionId: string, compacting: boolean) => {
+		const cur = _compactingStore.current;
+		if (cur.has(sessionId) === compacting) return;
+		const next = new Set(cur);
+		if (compacting) next.add(sessionId);
+		else next.delete(sessionId);
+		_compactingStore.set(next);
+	},
+};
+
 type ListedStreamingRow = Pick<Session, 'id' | 'project_id' | 'is_streaming'> &
 	Partial<Pick<Session, 'worktree_id' | 'worktree_branch' | 'branch'>>;
 

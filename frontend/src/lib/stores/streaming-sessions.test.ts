@@ -66,3 +66,26 @@ describe('seedStreamingFromList (#1527)', () => {
 		expect(seen).toEqual([]);
 	});
 });
+
+describe('compactingSessions', () => {
+	it('marks chats on and off, and the snapshot replaces the whole set', () => {
+		mod.compactingSessions.mark('a', true);
+		mod.compactingSessions.mark('b', true);
+		mod.compactingSessions.mark('a', false);
+		expect([...mod.compactingSessions.current]).toEqual(['b']);
+		mod.compactingSessions.set(['c']);
+		expect([...mod.compactingSessions.current]).toEqual(['c']);
+	});
+
+	it('does not notify for a change that changes nothing', () => {
+		mod.compactingSessions.set(['a']);
+		const seen: unknown[] = [];
+		const stop = mod.compactingSessions.subscribe((s) => seen.push(s));
+		seen.length = 0;
+		mod.compactingSessions.mark('a', true);
+		mod.compactingSessions.mark('b', false);
+		mod.compactingSessions.set(['a']);
+		stop();
+		expect(seen).toEqual([]);
+	});
+});

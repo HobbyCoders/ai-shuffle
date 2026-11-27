@@ -75,6 +75,12 @@ RUN_LEASE_RENEW_SECONDS = 20
 _COMPACTION_SUBTYPES = ("compact_boundary", "microcompact_boundary")
 # Pump ``system`` subtype recorded as system.compaction_status.
 _COMPACTION_STATUS_SUBTYPE = "compaction_status"
+# Events that end a compaction in progress — the same set the chat's own
+# "Compacting context…" line clears on (frontend v2 reducer).
+_COMPACTION_CLEARING_EVENTS = frozenset({
+    "turn.started", "turn.parked", "turn.completed", "turn.aborted",
+    "system.compaction_boundary", "transcript.rewound",
+})
 
 # Envelope fields of EventBase — everything else on a model is its payload.
 _ENVELOPE_FIELDS = {
@@ -135,6 +141,32 @@ def _notify_run_change(session_id: str, *, force: bool = False) -> None:
     except Exception:
         logger.debug(
             "[TurnRecorder] streaming_status notify failed for %s",
+            session_id, exc_info=True,
+        )
+
+
+def _announce_compaction(session_id: str, events: List[Dict[str, Any]]) -> None:
+    """After a written batch: tell the owner's tabs a compaction started or
+    stopped, so a chat in the background shows it too. Never raises."""
+    compacting = None
+    for event in events:
+        kind = event.get("type")
+        payload = event.get("payload") or {}
+        if kind == "system.compaction_status":
+            compacting = payload.get("state") == "started"
+        elif kind in _COMPACTION_CLEARING_EVENTS or (
+            kind == "system.note" and payload.get("subtype") == "compact_failed"
+        ):
+            compacting = False
+    if compacting is None:
+        return
+    try:
+        from app.core import streaming_status
+
+        streaming_status.notify_compaction(session_id, compacting)
+    except Exception:
+        logger.debug(
+            "[TurnRecorder] compaction broadcast failed for %s",
             session_id, exc_info=True,
         )
 
@@ -1579,6 +1611,7 @@ class TurnRecorder:
                     )
                     await asyncio.sleep(delay)
             self._last_append_at = time.monotonic()
+            _announce_compaction(self.session_id, events)
         except session_events_db.FenceViolation:
             self._mark_superseded(len(events))
         except asyncio.CancelledError:
@@ -1724,6 +1757,7 @@ async def _write_unfenced(session_id: str, events: List[Dict[str, Any]],
         for delay in (*_LOCK_RETRY_DELAYS_SECONDS, None):
             try:
                 await run_event_write(session_events_db.append_events, session_id, events)
+                _announce_compaction(session_id, events)
                 return
             except LockNotAvailable:
                 if delay is None:
