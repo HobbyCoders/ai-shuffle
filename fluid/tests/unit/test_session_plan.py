@@ -81,14 +81,18 @@ def test_plans_saved_under_older_larger_bounds_stay_updatable():
             del task["blocked_reason"]
     assert len(json.dumps(legacy).encode()) > plan.MAX_PAYLOAD
     # Text sent now must fit the new bounds (the MCP schema enforces them
-    # first), so a status update sends a short title; stored text not resent
-    # is kept as saved.
-    status_only = [{"id": t["id"], "title": "Short title", "status": "completed"} for t in legacy["tasks"][1:]]
+    # first). A status-only update omits title and keeps the stored text.
+    status_only = [{"id": t["id"], "status": "completed"} for t in legacy["tasks"][1:]]
     document, _, _, _ = plan.apply_update(legacy, [], {
         "action": "update", "request_id": "finish", "expected_revision": 3, "tasks": status_only})
     kept = {t["id"]: t for t in document["tasks"]}
     assert kept["t1"]["evidence"] == [long, long, long] and kept["t1"]["references"] == ["ref"] * 5
     assert kept["t0"]["blocked_reason"] == "r" * 450 and document["goal"] == "g" * 550
+    assert kept["t1"]["title"] == "t" * 180 and kept["t1"]["status"] == "completed"
+    # A new task still needs a title.
+    with pytest.raises(ValueError, match="title"):
+        plan.apply_update(document, [], {"action": "update", "request_id": "new", "expected_revision": 4,
+                                         "tasks": [{"id": "fresh", "status": "pending"}]})
     for change in ({"evidence": [long]}, {"title": "t" * 180}):
         with pytest.raises(ValueError, match="evidence|title"):
             plan.apply_update(document, [], {"action": "update", "request_id": "resend", "expected_revision": 4,
@@ -221,7 +225,7 @@ def test_deferred_plan_help_preserves_all_semantic_and_safety_rules():
         "Retry verbatim (last 64 receipts)", "on conflict get before editing",
         "Initial/rollover updates require goal, done_when, tasks",
         "rollover=true only after all old tasks completed/cancelled",
-        "host retains history", "IDs stable per generation", "Tasks require id/title/status",
+        "host retains history", "IDs stable per generation", "Tasks require id/status, title if new",
         "max 50/generation, 16KiB payload", "send only changed ones", "Dependencies must exist, be acyclic",
         "completed before dependents complete", "blocked needs blocked_reason",
         "Evidence/existing execution references optional, not proof",

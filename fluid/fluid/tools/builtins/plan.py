@@ -43,7 +43,7 @@ TASK_SCHEMA = {
                      "items": {"type": "string", "maxLength": LIST_BOUNDS["evidence"][1]}},
         "references": {"type": "array", "maxItems": LIST_BOUNDS["references"][0],
                        "items": {"type": "string", "maxLength": LIST_BOUNDS["references"][1]}},
-    }, "required": ["id", "title", "status"],
+    }, "required": ["id", "status"],
 }
 SPEC = ToolSpec(
     name="Plan", description=(
@@ -54,7 +54,7 @@ SPEC = ToolSpec(
         "Retry verbatim (last 64 receipts); on conflict get before editing. "
         "Initial/rollover updates require goal, done_when, tasks. rollover=true only "
         "after all old tasks completed/cancelled; host retains history; IDs stable "
-        "per generation. Tasks require id/title/status; max 50/generation, 16KiB payload. "
+        "per generation. Tasks require id/status, title if new; max 50/generation, 16KiB payload. "
         "Dependencies must exist, be acyclic and completed before dependents complete. "
         "blocked needs blocked_reason. Evidence/existing execution references optional, "
         "not proof. Batch meaningful transitions; keep blockers visible. Never starts "
@@ -71,7 +71,8 @@ SPEC = ToolSpec(
         "done_when": {"type": "string", "maxLength": DONE_WHEN_CHARS, "description": f"Acceptance, <={DONE_WHEN_CHARS} chars."},
         "tasks": {"type": "array", "maxItems": MAX_TASKS, "items": TASK_SCHEMA, "description": (
             "Up to 50 task objects. Required: id (matches " + ID_PATTERN + "), "
-            f"title (string <={TITLE_CHARS} chars), status (pending/in_progress/blocked/completed/cancelled). "
+            "status (pending/in_progress/blocked/completed/cancelled); "
+            f"title (string <={TITLE_CHARS} chars) for new IDs, omit to keep. "
             f"Optional: depends_on (<=10 ID strings), blocked_reason (string <={BLOCKED_CHARS} chars), "
             "evidence (<=2 strings, <=200 chars each), references (<=3 strings, <=100 chars each). "
             "Unknown fields rejected in tasks and top-level input."
@@ -143,7 +144,12 @@ def apply_update(document: dict, receipts: list, args: dict) -> tuple[dict, list
         if not isinstance(tid, str) or not re.fullmatch(ID_PATTERN, tid) or tid in seen:
             raise ValueError("Task IDs must be unique stable alphanumeric/_/- identifiers (1..64 characters)")
         seen.add(tid)
-        title = _text(task.get("title"), "title", TITLE_CHARS)
+        # Existing tasks may omit title (status-only updates keep the stored
+        # one, even if it was saved under older, larger bounds).
+        if "title" in task or tid not in tasks:
+            title = _text(task.get("title"), "title", TITLE_CHARS)
+        else:
+            title = tasks[tid]["title"]
         if task.get("status") not in STATUSES:
             raise ValueError("Invalid task status")
         current = {**tasks.get(tid, {}), **deepcopy(task), "title": title}

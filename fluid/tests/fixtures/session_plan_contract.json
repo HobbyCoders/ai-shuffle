@@ -1,7 +1,7 @@
 {
   "allowance_percent": 1,
   "description_chars": {
-    "Plan": 1040,
+    "Plan": 1048,
     "Note": 453
   },
   "schemas": {
@@ -91,7 +91,6 @@
             },
             "required": [
               "id",
-              "title",
               "status"
             ]
           }

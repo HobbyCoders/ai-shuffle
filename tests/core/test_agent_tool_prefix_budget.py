@@ -25,7 +25,8 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # 113,940 -> 114,982). Native compiled_eager +16, still under its baseline;
 # delegated eager unchanged.
 # Nov 2026: Plan's deferred help says to send only changed tasks, so updates
-# stop resending the whole plan; per-field limits shrink: Plan 2,005 -> 2,028.
+# stop resending the whole plan, and existing tasks may omit title; per-field
+# limits shrink: Plan 2,005 -> 2,062.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 
@@ -67,7 +68,9 @@ def test_plan_help_is_bounded_and_deferred(native):
     expected = GUIDANCE if native else GUIDANCE.replace("use Plan", "use mcp__fluid_bundled__Plan")
     assert compiled.text.count(expected) == 1
     spec = next(s for s in specs if s.name == "Plan")
-    assert spec.input_schema["properties"]["tasks"]["items"]["required"] == ["id", "title", "status"]
+    # Title is required for new IDs only (enforced in apply_update).
+    assert spec.input_schema["properties"]["tasks"]["items"]["required"] == ["id", "status"]
+    assert "for new IDs, omit to keep" in docs[0]
     paragraphs = [p.strip() for p in spec.description.split("\n\n") if p.strip()]
     assert len(paragraphs) == len(set(paragraphs))
     for contract in ("updates need expected_revision and unique request_id", "rollover=true",
