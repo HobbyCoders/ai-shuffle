@@ -217,10 +217,10 @@ def git_version_supports_hardening(version_output: str) -> bool:
     return (int(match.group(1)), int(match.group(2))) >= GIT_HARDENING_MIN_VERSION
 
 
-# The settings ``env`` of the session whose tool call is being rated. A
-# session can put another git first on PATH, so the question "does git honour
-# the settings" is asked of the environment that session's shells get, not of
-# the host's. Set by ``PermissionEngine.decide`` around the risk hook.
+# The settings ``env`` of the session whose tool call is being rated. Rating a
+# call never runs anything with it: it is only looked at, by
+# :func:`launch_changes_program_lookup`. Set by ``PermissionEngine.decide``
+# around the risk hook.
 _LAUNCH_OVERLAY: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
     "fluid_launch_env_overlay", default=None
 )
@@ -236,7 +236,8 @@ _LAUNCH_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None) -> Iterator[None]:
     """Rate tool calls for shells that get ``overlay`` on top of the host
     environment (a session's settings ``env``, or None) and start in ``cwd``
-    (the session's working folder) unless the call names another."""
+    (the session's working folder) unless the call names another. The overlay
+    is only read here, never used to start a process."""
     env_token = _LAUNCH_OVERLAY.set(overlay or None)
     cwd_token = _LAUNCH_CWD.set(cwd or None)
     try:
@@ -259,37 +260,77 @@ def shell_env(overlay: Mapping[str, str] | None = None) -> dict[str, str]:
     return harden_git_env(layered_env(dict(overlay) if overlay else None, base=scrub_child_env()))
 
 
-def git_hardening_supported(overlay: Mapping[str, str] | None = None) -> bool:
-    """True when the git a shell command runs honours :data:`AGENT_GIT_CONFIG`.
+# Settings ``env`` names that decide which program a command name runs, or
+# that make the shell, the dynamic loader or git run or read something else
+# first. Compared in upper case: Windows names are case-insensitive (``Path``).
+_LOOKUP_ENV_NAMES = frozenset({
+    "PATH", "PATHEXT", "COMSPEC",                       # where a name is found
+    "ENV", "BASH_ENV", "ZDOTDIR", "SHELLOPTS", "BASHOPTS",  # shell startup
+    "HOME", "USERPROFILE", "XDG_CONFIG_HOME",           # ~, and git's own config
+})
+_LOOKUP_ENV_PREFIXES = ("GIT_", "BASH_FUNC_", "LD_", "DYLD_", "MSYS", "CYGWIN")
 
-    Asked through the same shell and environment a Bash command gets
-    (:func:`shell_env` with the session's settings ``env``; :func:`launch_context`
-    supplies it when ``overlay`` is not given), so it is the git that command
-    would find: Git Bash on Windows puts its own git ahead of PATH, and a
-    session's settings can put another one there. The answer is kept per
-    shell and environment. False when git is missing, too old, or does not
-    answer: the Bash classifier then rates no git command read-only, so each
-    one asks instead of running unprotected.
+
+def changes_program_lookup(overlay: Mapping[str, str] | None) -> bool:
+    """True when a settings ``env`` can change which program a command runs.
+
+    The Bash classifier knows what the worker's own ``cat``, ``ls`` and
+    ``git`` do. A session whose settings put another folder on ``PATH``, name
+    a shell startup file, preload a library or reconfigure git runs something
+    this module has not looked at, so no command of that session is rated
+    read-only: each one asks. Nothing is executed to find out.
     """
+    for name in overlay or ():
+        upper = str(name).upper()
+        if upper in _LOOKUP_ENV_NAMES or upper.startswith(_LOOKUP_ENV_PREFIXES):
+            return True
+    return False
+
+
+def launch_changes_program_lookup() -> bool:
+    """:func:`changes_program_lookup` for the session whose call is being rated."""
+    return changes_program_lookup(_LAUNCH_OVERLAY.get())
+
+
+def git_hardening_supported() -> bool:
+    """True when the worker's own git honours :data:`AGENT_GIT_CONFIG`.
+
+    Asked through the shell a Bash command gets, started the way agent
+    commands are (the spawn runner under Docker agent isolation), with the
+    host's scrubbed environment and none of a session's settings: Git Bash on
+    Windows puts its own git ahead of PATH, and that is the one asked.
+
+    Rating a call happens before any permission rule is applied, so it must
+    not run a program a session chose. A session whose settings ``env`` could
+    select another git is never asked about here; the classifier rates none
+    of its commands read-only instead (:func:`changes_program_lookup`).
+
+    False when git is missing, too old, or does not answer: the Bash
+    classifier then rates no git command read-only, so each one asks instead
+    of running unprotected. The answer is kept for the life of the process.
+    """
+    from fluid.tools import agent_runner
     from fluid.tools.shell import resolve_shell
 
-    if overlay is None:
-        overlay = _LAUNCH_OVERLAY.get()
-    env = shell_env(overlay)
-    return _git_answers_with_hardening(
-        tuple(resolve_shell().argv_prefix), tuple(sorted(env.items()))
-    )
+    try:
+        argv, cwd, env = agent_runner.wrap(
+            [*resolve_shell().argv_prefix, "git --version"], None, shell_env()
+        )
+    except OSError:
+        return False
+    return _git_answers_with_hardening(tuple(argv), cwd, tuple(sorted(env.items())))
 
 
-@functools.lru_cache(maxsize=64)
-def _git_answers_with_hardening(argv_prefix: tuple[str, ...],
+@functools.lru_cache(maxsize=8)
+def _git_answers_with_hardening(argv: tuple[str, ...], cwd: str | None,
                                 env_items: tuple[tuple[str, str], ...]) -> bool:
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        done = subprocess.run(  # noqa: S603 - fixed argv, no model input
-            [*argv_prefix, "git --version"],
+        done = subprocess.run(  # noqa: S603 - fixed argv, no model or session input
+            list(argv),
+            cwd=cwd,
             env=dict(env_items),
             stdin=subprocess.DEVNULL,
             capture_output=True,

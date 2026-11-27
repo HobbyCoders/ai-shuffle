@@ -341,7 +341,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # host secrets first (see fluid.tools.child_env); settings env is a
     # deliberate hand-over and is layered on unchanged.
     # Git settings a repository's own config cannot override go on last.
-    # ``shell_env`` is also what the read-only check asks git's version of.
     env = shell_env(ctx.extra.get("settings_env"))
     # Ask the child not to colourise; anything that ignores the hint gets
     # its escapes stripped from the captured output below.

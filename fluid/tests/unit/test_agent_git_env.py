@@ -151,9 +151,11 @@ def test_a_current_git_keeps_its_reads_unprompted(git_probe) -> None:
     assert classify({"command": "git status"}) == "safe"
 
 
-def test_the_probe_runs_in_the_environment_the_sessions_shells_get(git_probe) -> None:
-    """One answer per environment: a session whose settings change PATH is
-    asked about again, with that PATH."""
+def test_the_probe_never_gets_a_sessions_settings(git_probe) -> None:
+    """The check runs before any permission rule is applied, so it asks the
+    worker's own git only: a session's ``PATH`` is not in what it starts."""
+    from fluid.tools.child_env import launch_context
+
     calls, _ = git_probe
     seen: list[dict[str, str]] = []
     real_run = child_env.subprocess.run
@@ -164,13 +166,71 @@ def test_the_probe_runs_in_the_environment_the_sessions_shells_get(git_probe) ->
 
     child_env.subprocess.run = run  # the fixture's monkeypatch restores it
     assert child_env.git_hardening_supported() is True
-    assert child_env.git_hardening_supported({"PATH": "/opt/old-git/bin"}) is True
-    assert child_env.git_hardening_supported({"PATH": "/opt/old-git/bin"}) is True
-    assert len(calls) == 2
-    assert seen[1]["PATH"] == "/opt/old-git/bin"
-    assert seen[0].get("PATH") != "/opt/old-git/bin"
-    # The git settings are part of what the shell gets, so of what is asked.
-    assert _config(seen[1])[-len(AGENT_GIT_CONFIG):] == list(AGENT_GIT_CONFIG)
+    with launch_context({"PATH": "/opt/old-git/bin", "GIT_EXEC_PATH": "/opt/old-git/libexec"}):
+        assert child_env.git_hardening_supported() is True
+    assert len(calls) == 1
+    assert seen[0].get("PATH") == child_env.scrub_child_env().get("PATH")
+    assert "GIT_EXEC_PATH" not in seen[0] or seen[0]["GIT_EXEC_PATH"] != "/opt/old-git/libexec"
+    # The git settings are part of what a shell gets, so of what is asked.
+    assert _config(seen[0])[-len(AGENT_GIT_CONFIG):] == list(AGENT_GIT_CONFIG)
+
+
+def test_the_probe_starts_the_way_agent_commands_do(git_probe, monkeypatch) -> None:
+    """Under Docker agent isolation every agent process goes through the
+    spawn runner; so does the question."""
+    from fluid.tools import agent_runner
+    from fluid.tools.shell import resolve_shell
+
+    calls, _ = git_probe
+    wrapped: list[list[str]] = []
+
+    def wrap(argv, cwd=None, env=None, **_):
+        wrapped.append(list(argv))
+        return ["runner", "--", *argv], "/home/agent", env
+
+    monkeypatch.setattr(agent_runner, "wrap", wrap)
+    assert child_env.git_hardening_supported() is True
+    assert wrapped == [[*resolve_shell().argv_prefix, "git --version"]]
+    assert calls == [["runner", "--", *resolve_shell().argv_prefix, "git --version"]]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PATH", "Path", "PATHEXT", "BASH_ENV", "ENV", "ZDOTDIR", "HOME", "USERPROFILE",
+        "XDG_CONFIG_HOME", "GIT_EXEC_PATH", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+        "GIT_PAGER", "BASH_FUNC_git%%", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES", "MSYS2_PATH_TYPE",
+    ],
+)
+def test_settings_that_choose_the_programs_leave_nothing_read_only(git_probe, name: str) -> None:
+    """A session whose settings say where programs are found, or what a shell
+    or git runs first, is not running the programs the check knows. Nothing
+    is started to find out; every command of that session asks."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as BASH_SPEC
+    from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
+
+    calls, _ = git_probe
+    engine = PermissionEngine("on_write")
+    overlay = {name: "/somewhere/else"}
+    for spec in (BASH_SPEC, MONITOR_SPEC):
+        for command in ("git status", "ls", "cat notes.txt"):
+            call = {"command": command}
+            assert engine.decide(spec, call, env=overlay).decision == "ask"
+            # The overlay does not outlive the call it was given for.
+            assert engine.decide(spec, call).decision == "allow"
+    assert all(argv[-1] == "git --version" for argv in calls) and len(calls) == 1
+
+
+def test_other_settings_keep_reads_unprompted(git_probe) -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as BASH_SPEC
+
+    engine = PermissionEngine("on_write")
+    overlay = {"NODE_ENV": "test", "DEBUG": "1", "EDITOR": "vim", "PATHFINDER": "x"}
+    for command in ("git status", "ls"):
+        assert engine.decide(BASH_SPEC, {"command": command}, env=overlay).decision == "allow"
 
 
 # ─── against the real git ────────────────────────────────────────────────────
@@ -309,60 +369,64 @@ async def test_the_bash_tool_applies_the_settings(
     assert not marker.exists()
 
 
+def _recording_git(folder: Path) -> tuple[dict[str, str], Path]:
+    """A settings ``env`` that puts a stand-in git first on PATH, and the file
+    the stand-in writes each time it is started."""
+    folder.mkdir()
+    ran = folder / "ran.log"
+    script = folder / "git"
+    script.write_text(f"#!/bin/sh\necho \"$@\" >> '{ran}'\necho 'git version 2.30.2'\n")
+    script.chmod(0o755)
+    return {"PATH": f"{folder}{os.pathsep}{os.environ['PATH']}"}, ran
+
+
 @needs_git
-@pytest.mark.skipif(os.name == "nt", reason="the stand-in old git is a POSIX script")
-def test_an_older_git_first_on_the_sessions_path_makes_git_ask(
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in git is a POSIX script")
+def test_a_denied_git_command_starts_nothing_the_session_chose(
     tmp_path: Path, git_env: dict[str, str]
 ) -> None:
-    """The worker's own git is current, but this session's settings put an
-    old one first on PATH, and that is the one its shells run. The check has
-    to ask that one: it ignores the settings without saying so."""
+    """A rule denies ``git status`` and the session's settings put another git
+    first on PATH. Rating the call comes before the rule, and it must not
+    start that git, not even to ask its version."""
     from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
     from fluid.tools.builtins.bash import SPEC as BASH_SPEC
     from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
 
-    old = tmp_path / "old-git"
-    old.mkdir()
-    script = old / "git"
-    script.write_text("#!/bin/sh\necho 'git version 2.30.2'\n")
-    script.chmod(0o755)
-    overlay = {"PATH": f"{old}{os.pathsep}{os.environ['PATH']}"}
-
+    overlay, ran = _recording_git(tmp_path / "other-git")
+    deny = Rule(tool="*", decision="deny", input_globs={"command": "git status"})
     child_env._git_answers_with_hardening.cache_clear()
     try:
-        assert child_env.git_hardening_supported() is True
-        assert child_env.git_hardening_supported(overlay) is False
-
-        engine = PermissionEngine("on_write")
         for spec in (BASH_SPEC, MONITOR_SPEC):
             call = {"command": "git status"}
-            assert engine.decide(spec, call).decision == "allow"
-            assert engine.decide(spec, call, env=overlay).decision == "ask"
-            # Only git depends on it.
-            assert engine.decide(spec, {"command": "ls"}, env=overlay).decision == "allow"
-            # The overlay does not outlive the call it was given for.
-            assert engine.decide(spec, call).decision == "allow"
+            denied = PermissionEngine("on_write", rules=[deny]).decide(
+                spec, call, cwd=str(tmp_path), env=overlay)
+            assert denied.decision == "deny" and denied.source == "rule"
+            # With no rule the call asks, and still nothing was started.
+            asked = PermissionEngine("on_write").decide(
+                spec, call, cwd=str(tmp_path), env=overlay)
+            assert asked.decision == "ask"
+        assert not ran.exists()
+        # Without those settings the worker's own git answers.
+        assert PermissionEngine("on_write").decide(
+            BASH_SPEC, {"command": "git status"}, cwd=str(tmp_path)).decision == "allow"
+        assert not ran.exists()
     finally:
         child_env._git_answers_with_hardening.cache_clear()
 
 
 @needs_git
-@pytest.mark.skipif(os.name == "nt", reason="the stand-in old git is a POSIX script")
-def test_the_bash_tool_runs_the_git_the_check_asked(
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in git is a POSIX script")
+def test_the_bash_tool_runs_the_git_the_sessions_settings_name(
     tmp_path: Path, git_env: dict[str, str]
 ) -> None:
-    """The other half: the handler starts its shell with the same settings
-    ``env`` the check was given, so the git it runs is the git that answered."""
+    """Why such a session asks: once a command is approved, its shell does
+    start with the settings ``env``, so the git it runs is the session's."""
     import asyncio
 
-    old = tmp_path / "old-git"
-    old.mkdir()
-    script = old / "git"
-    script.write_text("#!/bin/sh\necho 'stand-in git ran'\n")
-    script.chmod(0o755)
-    overlay = {"PATH": f"{old}{os.pathsep}{os.environ['PATH']}"}
-
+    overlay, ran = _recording_git(tmp_path / "other-git")
     ctx = ToolCtx(cwd=str(tmp_path))
     ctx.extra["settings_env"] = overlay
     outcome = asyncio.run(bash_handler({"command": "git --version"}, ctx))
-    assert "stand-in git ran" in outcome.text
+    assert "git version 2.30.2" in outcome.text
+    assert ran.read_text().strip() == "--version"

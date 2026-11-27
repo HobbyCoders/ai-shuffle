@@ -920,7 +920,9 @@ def _git_ok(args: list[str]) -> bool:
 
     # The settings that stop git running a program a folder names
     # (child_env.harden_git_env) need git 2.38. On an older git, or when git
-    # cannot be asked, no git command is rated read-only.
+    # cannot be asked, no git command is rated read-only. This asks the
+    # worker's own git, which is the one the command runs: ``classify`` has
+    # already turned away a session whose settings could pick another.
     if not git_hardening_supported():
         return False
     if any(_git_sets_banned_option(a) for a in args):
@@ -1869,10 +1871,15 @@ def classify(input: dict[str, Any]) -> str:
         return WRITE
     if not _posix_shell():
         return WRITE  # cmd.exe: this module cannot read the command
+    from fluid.tools.child_env import launch_changes_program_lookup, launch_cwd
+
+    if launch_changes_program_lookup():
+        # The session's settings choose where its shells find programs, or
+        # what they run first: ``cat`` there need not be the worker's cat.
+        return WRITE
     if not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
     # The shell starts in the call's ``cwd``, or in the session's folder.
-    from fluid.tools.child_env import launch_cwd
 
     return WRITE if _touches_sensitive_path(command, input.get("cwd") or launch_cwd()) else SAFE

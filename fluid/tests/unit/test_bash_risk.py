@@ -43,7 +43,7 @@ def _git_honours_the_agent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     every machine; the old-git case sets it the other way."""
     from fluid.tools import child_env
 
-    monkeypatch.setattr(child_env, "git_hardening_supported", lambda overlay=None: True)
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
 
 
 # ─── classifier table ────────────────────────────────────────────────────────
@@ -1093,12 +1093,18 @@ def test_a_command_rated_safe_changes_nothing_when_the_shell_runs_it(
     ],
 )
 def test_a_relative_operand_is_read_from_the_folder_the_shell_starts_in(
-    command: str, cwd: str
+    command: str, cwd: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``cwd`` is a field of the tool call, so the model picks it: ``cat
     self/environ`` there is ``/proc/self/environ``. Without one the shell
     starts in the session's folder, which reads the same files."""
     from fluid.tools.child_env import launch_context
+
+    # Linux's layout, on every machine that runs this: /dev/fd is a link into
+    # /proc/self there, and macOS and Windows resolve it differently.
+    monkeypatch.setattr(
+        os.path, "realpath", lambda path, **_: "/proc/self/fd" if path == "/dev/fd" else path
+    )
 
     assert classify({"command": command}) == "safe"
     assert classify({"command": command, "cwd": cwd}) == "write"
@@ -1122,7 +1128,7 @@ def test_git_is_not_read_only_when_it_ignores_the_agent_settings(
     folder names, without saying so. There every git command asks."""
     from fluid.tools import child_env
 
-    monkeypatch.setattr(child_env, "git_hardening_supported", lambda overlay=None: False)
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: False)
     for command in ("git status", "git log --oneline", "git -C sub diff", "ls && git status"):
         assert classify({"command": command}) == "write", command
     assert classify({"command": "ls"}) == "safe"

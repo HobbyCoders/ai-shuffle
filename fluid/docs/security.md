@@ -133,14 +133,22 @@ model *reads* framing tokens even when they can't structurally escape.
   is no longer a repository to `git -C`, and no config can name a program for
   a status read. A real bare repository still works with `--git-dir`. These
   settings need git 2.38; an older git ignores them without a word. The
-  classifier asks git for its version through the same shell and environment
-  the command gets, the session's settings `env` included, so a `PATH` that
-  puts another git first is the one that is checked. The answer is kept per
-  environment. When that git is older, missing or silent, no git command is
-  rated read-only: each one prompts. `--output`, `--ext-diff` and `--textconv` prompt in any
+  classifier asks the worker's own git for its version once, through the
+  shell Bash uses and with none of a session's settings. When that git is
+  older, missing or silent, no git command is rated read-only: each one
+  prompts. `--output`, `--ext-diff` and `--textconv` prompt in any
   shortened form (`--ext-d`). What this does not cover: a checkout whose own
   `.git/config` is already hostile can name a diff driver or a filter that
   `git diff` runs, so writes to `.git` have to stay behind a prompt.
+- **Settings that choose the programs.** The classifier knows what the
+  worker's own `cat`, `ls` and `git` do. A session whose settings `env` sets
+  `PATH`, `PATHEXT`, a shell startup file (`BASH_ENV`, `ENV`, `ZDOTDIR`),
+  `HOME`, a loader variable (`LD_*`, `DYLD_*`) or any `GIT_*` name runs
+  programs the classifier has not looked at, so none of that session's
+  commands is rated read-only: each one prompts, and "allow always" still
+  covers the program from then on. Rating a call runs nothing the session
+  chose, so a deny rule stops a command before anything of it starts. The
+  rule is the same on Linux, macOS and Windows.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,
