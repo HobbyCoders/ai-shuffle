@@ -9,9 +9,7 @@ and auto-denied because the run cannot prompt.
 import asyncio
 import json
 import os
-import shutil
 import subprocess
-import sys
 from collections.abc import AsyncIterator
 
 import pytest
