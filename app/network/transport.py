@@ -80,14 +80,46 @@ PASS_CURRENT, PASS_BEHIND, PASS_OFFLINE = "current", "behind", "offline"
 PASS_FRESH_SECONDS = {PASS_CURRENT: 4 * SYNC_IDLE_MAX_SECONDS, PASS_OFFLINE: PEER_BACKOFF_MAX_SECONDS + 300.0}
 # ``caught_up_since_start`` runs every 15 seconds (the snooze sweep). Between
 # two calls, a wall-clock gap over RESUME_GAP_SECONDS, or wall time running
-# RESUME_DRIFT_SECONDS ahead of monotonic time (which stops in a suspend on
-# Linux and macOS), means the machine slept: passes from before then no longer
+# RESUME_DRIFT_SECONDS ahead of awake time (``_awake_seconds``, which stops in a
+# suspend), means the machine slept: passes started before then no longer
 # count. A false alarm (a stalled loop, a clock step) only defers wakes to the
 # next pass.
 RESUME_GAP_SECONDS = 45.0
 RESUME_DRIFT_SECONDS = 5.0
-_gate_checked_at: Optional[tuple[float, float]] = None  # (wall, monotonic)
+_gate_checked_at: Optional[tuple[float, float]] = None  # (wall, awake)
 _resumed_at = 0.0
+
+
+def _windows_awake_clock():
+    """Windows' interrupt time without time spent asleep, or None elsewhere.
+
+    Python's monotonic clock on Windows keeps counting through a suspend;
+    ``QueryUnbiasedInterruptTime`` (100 ns units) does not.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        query = ctypes.windll.kernel32.QueryUnbiasedInterruptTime
+        value = ctypes.c_ulonglong()
+        if not query(ctypes.byref(value)):
+            return None
+    except (AttributeError, OSError):
+        return None
+
+    def awake() -> float:
+        reading = ctypes.c_ulonglong()
+        query(ctypes.byref(reading))
+        return reading.value / 1e7
+    return awake
+
+
+_windows_awake = _windows_awake_clock()
+
+
+def _awake_seconds() -> float:
+    """A clock that stops while the machine sleeps (monotonic on Linux and macOS)."""
+    return _windows_awake() if _windows_awake is not None else time.monotonic()
 # Set for the launch barrier's requests only (a context variable, so the
 # background sync loop keeps its own timeouts): a dead address fails fast.
 connect_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
@@ -539,7 +571,8 @@ class PeerLink:
         self._stalled_streams: dict[tuple[str, str], dict] = {}
         self.backoff_until = 0.0
         self.failures = 0
-        # (wall time, PASS_*) of this link's last sync pass (``caught_up_since_start``).
+        self._pass_started = 0.0
+        # (wall time the pass started, PASS_*) of this link's last sync pass (``caught_up_since_start``).
         self.last_pass: Optional[tuple[float, str]] = None
         # Set once an inbound contact has cut a failure streak's backoff short;
         # cleared by the next successful sync. One early redial per streak.
@@ -820,10 +853,10 @@ class PeerLink:
         if binding_refusal is not None:
             raise binding_refusal
         message = f"{type(last).__name__}: {last}"[:200] if last is not None else "unreachable"
-        if last is not None and connect_only:
-            raise PeerConnectFailed(message) from last
-        error = PeerError(message)
+        error = PeerConnectFailed(message) if last is not None and connect_only else PeerError(message)
         error.worker_down = last is not None and down_only
+        # Every address this peer has was tried and none has a running worker.
+        error.routes_down = error.worker_down and at is None
         raise error from last
 
     async def _issue_token(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
@@ -852,16 +885,24 @@ class PeerLink:
     async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
         async with self._sync_lock:
             self.syncing = catch_up
-            started = time.time()
+            # Outcomes are dated from the pass's start, so a pass that spans a
+            # suspend predates the resume and does not count (``caught_up_since_start``).
+            self._pass_started = time.time()
+            prior = self.last_pass
             try:
                 return await self._sync_once(client, ctx, catch_up=catch_up)
             except Exception as exc:
                 # Once the peer answered an exchange this pass recorded an
                 # outcome (``_sync_once``); a later failure keeps it. Before
-                # that, only a peer with no running worker is offline; one
-                # that answered and then failed leaves us behind it.
-                if self.last_pass is None or self.last_pass[0] < started:
-                    self.last_pass = (time.time(), PASS_OFFLINE if _worker_down(exc) else PASS_BEHIND)
+                # that, the peer is offline only when every address it has was
+                # tried and none has a running worker. One address failing that
+                # way (the one a cached token uses) is forgotten, so the next
+                # pass tries them all; until then we may be behind.
+                if self.last_pass is prior:
+                    offline = getattr(exc, "routes_down", False)
+                    if not offline and _worker_down(exc):
+                        self.base_url = self.token = None
+                    self.last_pass = (self._pass_started, PASS_OFFLINE if offline else PASS_BEHIND)
                 raise
             finally:
                 self.syncing = False
@@ -917,7 +958,7 @@ class PeerLink:
             if target is None:
                 # The peer answered: until this pass reaches its frontier we
                 # are behind it, whatever fails later in the pass.
-                self.last_pass = (time.time(), PASS_BEHIND)
+                self.last_pass = (self._pass_started, PASS_BEHIND)
             theirs = exchange.get("watermarks") or {}
             reported = exchange.get("generation") if exchange.get("retention_ack") == RETENTION_ACK else None
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")),
@@ -1003,7 +1044,7 @@ class PeerLink:
             marks = current
         # The time budget or a deferred state copy can end the pull short of
         # the frontier the peer named; only a full pull counts as caught up.
-        self.last_pass = (time.time(), PASS_CURRENT if _reached(current, target) else PASS_BEHIND)
+        self.last_pass = (self._pass_started, PASS_CURRENT if _reached(current, target) else PASS_BEHIND)
         ctx, _ = await self._compare_streams(client, ctx, theirs)
         # Stored addresses follow the same rule as dialed ones (``endpoints``).
         their_endpoints = exchange.get("endpoints")
@@ -1588,7 +1629,7 @@ def caught_up_since_start() -> bool:
     ctx = engine.context()
     if ctx is None:
         return True
-    now, mono = time.time(), time.monotonic()
+    now, mono = time.time(), _awake_seconds()
     if _gate_checked_at is not None:
         wall_gap = now - _gate_checked_at[0]
         if wall_gap > RESUME_GAP_SECONDS or wall_gap - (mono - _gate_checked_at[1]) > RESUME_DRIFT_SECONDS:

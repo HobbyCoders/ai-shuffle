@@ -270,9 +270,10 @@ async def test_offline_peer_does_not_stop_wakes(workers, dial, sleep):
                 # A long sleep shows as a gap between sweeps; a short one as wall
                 # time running ahead of monotonic time (which a suspend stops).
                 if sleep == "long":
-                    transport._gate_checked_at = (time.time() - transport.RESUME_GAP_SECONDS - 1, time.monotonic())
+                    transport._gate_checked_at = (time.time() - transport.RESUME_GAP_SECONDS - 1,
+                                                  transport._awake_seconds())
                 else:
-                    transport._gate_checked_at = (time.time() - 20, time.monotonic() - 1)
+                    transport._gate_checked_at = (time.time() - 20, transport._awake_seconds() - 1)
                 assert not transport.caught_up_since_start()
                 assert await session_snooze.wake_due_once(now=_soon(60)) == 0
                 with pytest.raises(transport.PeerError):
@@ -282,6 +283,79 @@ async def test_offline_peer_does_not_stop_wakes(workers, dial, sleep):
                 assert _snooze_of(a, "s1") == (True, None)
             finally:
                 engine.hold_outbox(False)
+
+
+async def test_worker_down_on_the_cached_route_tries_the_others(workers):
+    """A 530 on the address a cached token uses is not proof the peer is off:
+    another address it advertises may carry its newer edits."""
+    a, b = _pair(workers)
+    with a.active():
+        await _patch("s1", False, _soon(1))
+    converge([a, b])
+    with a.active():
+        await _patch("s1", False, _soon(240))
+        expected = _snooze_of(a, "s1")
+    tunnel = "https://tunnel.example.com"
+    alias = ServedBy(a, "https://alias.example.com")
+
+    def route(request):
+        if str(request.url).startswith(tunnel):
+            return httpx.Response(transport.TUNNEL_WORKER_DOWN_STATUS, text="error code: 1033")
+        return alias.handler(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(route)) as client:
+        with b.active():
+            store.touch_member(a.device_id, endpoints=[tunnel, alias.base_url])
+            link = transport._links[a.device_id] = transport.PeerLink(a.device_id, [tunnel, alias.base_url])
+            link.base_url, link.token, link.token_expires = tunnel, "cached", time.time() + 3600
+            with pytest.raises(transport.PeerError):
+                await link.sync_once(client, engine.context())
+            assert link.last_pass[1] == transport.PASS_BEHIND
+            assert link.token is None and link.base_url is None
+            assert not transport.caught_up_since_start()
+            assert await session_snooze.wake_due_once(now=_soon(60)) == 0
+            await link.sync_once(client, engine.context())
+            assert link.base_url == alias.base_url
+            assert link.last_pass[1] == transport.PASS_CURRENT
+            assert _snooze_of(b, "s1") == expected
+
+
+async def test_pass_spanning_a_sleep_does_not_count(workers):
+    """A pass started before the machine slept is dated before the resume."""
+    a, b = _pair(workers)
+    served = ServedBy(a, "https://owner.example.com")
+    slept = []
+
+    def sleep_during_exchange(request):
+        response = served.handler(request)
+        if request.url.path == "/api/v1/network/peer/exchange" and not slept:
+            # The machine slept while the answer was on its way; the sweep
+            # notices on resume, before this pass records its outcome.
+            slept.append(True)
+            with b.active():
+                time.sleep(0.01)
+                transport._gate_checked_at = (time.time() - 20, transport._awake_seconds() - 1)
+                assert not transport.caught_up_since_start()
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(sleep_during_exchange)) as client:
+        with b.active():
+            store.touch_member(a.device_id, endpoints=[served.base_url])
+            link = transport._links[a.device_id] = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())
+            assert slept and link.last_pass[1] == transport.PASS_CURRENT
+            assert not transport.caught_up_since_start()
+            time.sleep(0.01)
+            await link.sync_once(client, engine.context())
+            assert transport.caught_up_since_start()
+
+
+def test_awake_clock_is_monotonic_off_windows(monkeypatch):
+    monkeypatch.setattr(transport, "_windows_awake", None)
+    before = transport._awake_seconds()
+    assert abs(before - time.monotonic()) < 1
+    monkeypatch.setattr(transport, "_windows_awake", lambda: 12.5)
+    assert transport._awake_seconds() == 12.5
 
 
 async def test_peer_answering_with_an_error_is_not_offline(workers):
