@@ -136,7 +136,7 @@ function planCase(delegated) {
     await plan.getByRole('button', { name: /Expand plan/ }).focus();
     await page.keyboard.press('Enter');
    } else await plan.getByRole('button', { name: /Expand plan/ }).click();
-   await plan.getByText('Prove session-owned planning', { exact: false }).waitFor();
+   await plan.getByTestId('plan-goal-full').getByText('Prove session-owned planning', { exact: false }).waitFor();
    await plan.getByText('No real provider credential in private dev copy', { exact: true }).waitFor();
    expect((await plan.innerText()).includes('Model-reported · not independently verified'), 'status provenance stays explicit');
    expect(await plan.locator('[data-plan-task]').count() === 3, 'all produced tasks appear once');
@@ -196,7 +196,7 @@ const lifecycle = {
   expect(await revision(page, 3).getByText('All steps completed', { exact: true }).count() === 0, 'terminal with cancellation is not all-success');
   await revision(page, 4).getByRole('button', { name: /Expand plan/ }).click();
   await revision(page, 4).getByText('Snapshot · plan 2 · revision 4', { exact: true }).waitFor();
-  await revision(page, 4).getByText('Second controlled session goal', { exact: false }).waitFor();
+  await revision(page, 4).getByTestId('plan-goal-full').getByText('Second controlled session goal', { exact: false }).waitFor();
   await mark('historical Plan disclosure preserves the reader');
   const historical = revision(page, 3);
   await historical.getByRole('button', { name: /Collapse plan/ }).click();

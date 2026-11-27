@@ -1,5 +1,7 @@
 <script lang="ts">
 	/** Read-only rendering of ONE durable plan.updated snapshot, never a planner. */
+	import ToolIcon from './chat/ToolIcon.svelte';
+
 	interface PlanTask {
 		id: string;
 		title: string;
@@ -57,8 +59,6 @@
 		for (const task of view?.tasks ?? []) c[task.status]++;
 		return c;
 	});
-	const current = $derived(view?.tasks.find(t => t.status === 'in_progress') ??
-		view?.tasks.find(t => t.status === 'blocked') ?? view?.tasks.find(t => t.status === 'pending'));
 	const allCompleted = $derived(!!view?.tasks.length && counts.completed === view.tasks.length);
 
 	function toggle(event: MouseEvent) {
@@ -71,28 +71,37 @@
 	<p class="plan-unavailable" role="status">Plan details unavailable. Reload the chat to try again.</p>
 {:else if view.revision > 0}
 	<section class="plan" aria-label="Session plan" data-plan-revision={view.revision}>
+		<!-- Same row as a tool call (ToolUseMessage): icon, name, one-line preview,
+		     state on the right. Everything else lives behind the disclosure. -->
 		<button
-			type="button" class="plan-row" aria-expanded={expanded} aria-controls={detailsId}
-			aria-label={`${expanded ? 'Collapse' : 'Expand'} plan: ${view.goal}`}
+			type="button" class="plan-row" class:is-open={expanded} aria-expanded={expanded} aria-controls={detailsId}
+			aria-label={`${expanded ? 'Collapse' : 'Expand'} plan: ${view.goal}. ${counts.completed} of ${view.tasks.length} steps reported completed${counts.blocked ? `, ${counts.blocked} blocked` : ''}`}
 			onclick={toggle}
 		>
-			<span class="plan-bars" aria-hidden="true">
-				{#each view.tasks as task (task.id)}<i class={task.status}></i>{/each}
+			<ToolIcon name="TodoWrite" class="plan-icon" />
+			<span class="plan-name">Plan</span>
+			<span class="plan-goal" title={view.goal}>{view.goal}</span>
+			<span class="plan-right">
+				{#if counts.blocked}<span class="plan-blocked">{counts.blocked} blocked</span>{/if}
+				<span class="plan-count">{counts.completed}/{view.tasks.length}</span>
+				<svg class="plan-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+				{#if allCompleted}
+					<svg class="plan-glyph is-done" data-testid="plan-status-done" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+				{:else}
+					<!-- Progress ring: completed share of all steps (cancelled never counts). -->
+					<svg class="plan-glyph" class:is-blocked={counts.blocked > 0} data-testid="plan-status-progress" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke-width="2.6" aria-hidden="true">
+						<circle class="ring-track" cx="12" cy="12" r="9" />
+						<!-- A zero-length dash with a round cap still paints a dot, so 0% draws no fill. -->
+						{#if counts.completed}<circle class="ring-fill" cx="12" cy="12" r="9" pathLength="100" stroke-dasharray={`${(counts.completed / view.tasks.length) * 100} 100`} transform="rotate(-90 12 12)" />{/if}
+					</svg>
+				{/if}
 			</span>
-			<span class="plan-title"><span class="plan-label">Plan</span> {view.goal}</span>
-			<span class="plan-count" aria-label={`${counts.completed} of ${view.tasks.length} steps reported completed`}>{counts.completed}/{view.tasks.length}</span>
-			<svg class="plan-chevron" class:open={expanded} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
 		</button>
-		<div class="plan-summary">
-			{#if current}<span class="current">{current.title}</span>
-			{:else if allCompleted}<span>All steps completed</span>{/if}
-			{#if counts.blocked}<span class="blocked-count">{counts.blocked} blocked</span>{/if}
-			{#if counts.cancelled}<span>{counts.cancelled} cancelled</span>{/if}
-		</div>
-		<p class="plan-source">Model-reported · not independently verified</p>
 		{#if expanded}
 			<div id={detailsId} class="plan-details">
-				{#if view.done_when}<p class="acceptance"><span>Done when</span> {view.done_when}</p>{/if}
+				<!-- The row preview ellipsizes; the full goal wraps here (no hover on touch). -->
+				{#if view.goal}<div class="plan-section"><div class="plan-section-label">Goal</div><p class="acceptance" data-testid="plan-goal-full">{view.goal}</p></div>{/if}
+				{#if view.done_when}<div class="plan-section"><div class="plan-section-label">Done when</div><p class="acceptance">{view.done_when}</p></div>{/if}
 				{#if !view.tasks.length}<p class="empty">No steps reported yet.</p>{/if}
 				<ul class="plan-tasks">
 					{#each view.tasks as task (task.id)}
@@ -113,40 +122,45 @@
 						</li>
 					{/each}
 				</ul>
-				<p class="snapshot">Snapshot · plan {view.generation} · revision {view.revision}</p>
+				<p class="plan-foot">
+					{#if allCompleted}<span>All steps completed</span>{/if}
+					{#if counts.cancelled}<span>{counts.cancelled} cancelled</span>{/if}
+					<span>Model-reported · not independently verified</span>
+					<span>Snapshot · plan {view.generation} · revision {view.revision}</span>
+				</p>
 			</div>
 		{/if}
 	</section>
 {/if}
 
 <style>
+	/* Row and body mirror ToolUseMessage's .wlrow / .wl-body so a plan reads as one more tool row. */
 	.plan { width: 100%; min-width: 0; font-size: 12.5px; color: var(--foreground); }
-	.plan-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 36px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; transition: background-color 0.2s ease-out; }
+	.plan-row { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; transition: background-color 180ms ease-out; }
 	.plan-row:hover { background: var(--scrim); }
-	.plan-row:active { background: var(--muted); }
+	.plan-row:active { background: var(--active-overlay, var(--scrim)); }
 	.plan-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	.plan-row:disabled { opacity: 0.5; pointer-events: none; }
-	.plan-bars { display: flex; flex-wrap: wrap; gap: 2.5px; max-width: 20%; flex: none; }
-	.plan-bars i { width: 7px; height: 3px; border-radius: 2px; background: var(--border-strong); }
-	.plan-bars .completed { background: var(--emerald); }
-	.plan-bars .in_progress { background: var(--blue); }
-	.plan-bars .blocked { background: var(--warning); }
-	.plan-bars .cancelled { background: var(--subtle-foreground); }
-	.plan-title { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
-	.plan-label { color: var(--muted-foreground); margin-right: 5px; }
-	.plan-count { flex: none; color: var(--muted-foreground); font-variant-numeric: tabular-nums; font-size: 11px; }
-	.plan-chevron { flex: none; color: var(--muted-foreground); transition: transform 0.2s ease-out; }
-	.plan-chevron.open { transform: rotate(180deg); }
-	.plan-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 8px; color: var(--muted-foreground); line-height: 1.5; }
-	.current { overflow-wrap: anywhere; }
-	.blocked-count, .blocker { color: var(--warning); }
-	.plan-source, .snapshot { margin: 4px 8px 0; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
-	.plan-details { margin-top: 10px; }
-	.acceptance { margin: 0 8px 8px; line-height: 1.6; overflow-wrap: anywhere; }
-	.acceptance > span, .detail-label { color: var(--muted-foreground); }
-	.acceptance > span { margin-right: 6px; }
-	.plan-tasks { list-style: none; margin: 0; padding: 0; }
-	.plan-task { display: flex; align-items: flex-start; gap: 9px; padding: 6px 8px; border-radius: 8px; min-width: 0; }
+	.plan-row :global(.plan-icon) { color: var(--subtle-foreground); flex: none; width: 14px; height: 14px; }
+	.plan-name { flex: none; font-size: 12.5px; font-weight: 600; color: var(--foreground); white-space: nowrap; }
+	.plan-goal { min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.plan-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex: none; color: var(--subtle-foreground); }
+	.plan-count, .plan-blocked { font-family: var(--font-mono); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+	.plan-count { color: var(--subtle-foreground); }
+	.plan-blocked, .blocker { color: var(--warning); }
+	.plan-chevron { transition: transform 180ms ease-out; }
+	.plan-row.is-open .plan-chevron { transform: rotate(180deg); }
+	.plan-glyph.is-done { color: var(--emerald); }
+	.ring-track { stroke: var(--border-strong); }
+	.ring-fill { stroke: var(--emerald); stroke-linecap: round; }
+	.plan-glyph.is-blocked .ring-track { stroke: var(--warning); opacity: 0.45; }
+	.plan-details { margin: 2px 0 6px 14px; padding-left: 12px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+	.plan-section-label { font-size: 10px; font-weight: 600; letter-spacing: 0.075em; text-transform: uppercase; color: var(--subtle-foreground); margin-bottom: 4px; }
+	.acceptance { margin: 0; line-height: 1.6; overflow-wrap: anywhere; color: var(--muted-foreground); }
+	.detail-label { color: var(--muted-foreground); }
+	.plan-foot { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0; font-size: 11px; line-height: 1.5; color: var(--subtle-foreground); }
+	.plan-tasks { list-style: none; margin: 0 0 0 -6px; padding: 0; }
+	.plan-task { display: flex; align-items: flex-start; gap: 9px; padding: 4px 6px; border-radius: 7px; min-width: 0; }
 	.plan-task.is-current { background: var(--scrim); }
 	.task-mark { flex: 0 0 13px; text-align: center; line-height: 1.6; color: var(--muted-foreground); }
 	.task-mark.completed { color: var(--emerald); }
@@ -159,7 +173,8 @@
 	.evidence, .references { margin-top: 6px; }
 	.references { display: flex; flex-wrap: wrap; gap: 3px 8px; }
 	.references code { font-family: var(--font-mono); overflow-wrap: anywhere; }
-	.empty, .plan-unavailable { padding: 0 8px; color: var(--muted-foreground); font-size: 12px; }
+	.empty { margin: 0; color: var(--muted-foreground); font-size: 12px; }
+	.plan-unavailable { padding: 0 8px; color: var(--muted-foreground); font-size: 12px; }
 	@media (max-width: 639px), (pointer: coarse) { .plan-row { min-height: 44px; } }
 	@media (prefers-reduced-motion: reduce) { .plan-row, .plan-chevron { transition: none; } }
 </style>

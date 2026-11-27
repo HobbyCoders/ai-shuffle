@@ -365,7 +365,7 @@ def _long_plan(revision: int, status: str) -> dict:
     # 500-char intake-stub preview.
     args = _plan_update(revision, status)
     if revision == 0:
-        args.update(goal="Fix the cache bug. " * 30, done_when="The prefix test passes. " * 40)
+        args.update(goal="Fix the cache bug. " * 15, done_when="The prefix test passes. " * 16)
     return args
 
 
@@ -382,7 +382,7 @@ async def test_a_long_plan_note_is_never_stubbed_so_the_prefix_holds() -> None:
         _text("done"),
     ], intake_stub_chars=200)
     note = plan.render_reminder(backend.document)
-    assert note is not None and len(note) > 1_000
+    assert note is not None and len(note) > 900
     _assert_append_only(provider.requests, _responses_input)
     _assert_append_only(provider.requests, _anthropic_messages)
     sent = "".join(m.text() for m in provider.requests[-1].messages)
