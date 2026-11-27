@@ -180,6 +180,17 @@ def _hide_dirs_above_basetemp(basetemp, monkeypatch) -> None:
 
 
 @pytest.fixture
+def trusted_projects(monkeypatch):
+    """Every project folder counts as trusted (``fluid.config.trust``).
+
+    For tests of what a project's own config, settings and hooks do once they
+    load. Without it ``load_config`` leaves an untrusted project's files out,
+    which is what tests/unit/test_project_trust.py covers.
+    """
+    monkeypatch.setattr("fluid.config.trust.is_project_trusted", lambda cwd=None: True)
+
+
+@pytest.fixture
 def requires_symlinks(tmp_path):
     """Skip only link-dependent tests when this host cannot create symlinks."""
     target = tmp_path / "symlink-capability-target"

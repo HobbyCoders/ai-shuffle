@@ -76,8 +76,58 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
-def _resolve_config(args: argparse.Namespace) -> HarnessConfig:
-    return load_config(cwd=getattr(args, "cwd", None), overrides=_cli_overrides(args))
+def _resolve_config(args: argparse.Namespace, *, ask: bool = False) -> HarnessConfig:
+    return load_config(
+        cwd=getattr(args, "cwd", None),
+        overrides=_cli_overrides(args),
+        project_trusted=_project_trusted(args, ask=ask),
+    )
+
+
+# What an untrusted project's files could do, in the words of the question.
+_TRUST_EXPLAINED = (
+    "Its own files can change how fluid runs here: config (.fluid/config.toml,\n"
+    "fluid.toml), settings, hooks and MCP servers (programs that start with the\n"
+    "session), plugins, commands, skills, agents and instruction files."
+)
+
+
+def _project_trusted(args: argparse.Namespace, *, ask: bool) -> bool:
+    """Whether this run loads the project's own files (``fluid.config.trust``).
+
+    Trust comes from the owner only: the saved record, the ``--trust-project``
+    flag for one run, or a yes at the question. The question is asked once per
+    project, on a terminal, by the commands that start a session (``ask``);
+    everywhere else the project's files are left out and one line on stderr
+    says so. No environment variable or config value turns it on.
+    """
+    from fluid.config.trust import is_project_trusted, project_root, trust_project
+
+    cwd = getattr(args, "cwd", None)
+    if getattr(args, "trust_project", False) or is_project_trusted(cwd):
+        return True
+    root = project_root(cwd)
+    if ask and sys.stdin.isatty() and sys.stdout.isatty():
+        print(f"fluid: this project is not trusted yet: {root}\n{_TRUST_EXPLAINED}")
+        try:
+            answer = input("Trust this folder and load them? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() in ("y", "yes"):
+            try:
+                trust_project(cwd)
+            except OSError as exc:
+                # The answer still stands for this run; it could not be kept.
+                print(f"fluid: could not save the answer ({exc}); trusting for this run only.",
+                      file=sys.stderr)
+            return True
+        print("fluid: continuing without this project's files. "
+              "Run `fluid trust` here to load them.", file=sys.stderr)
+        return False
+    print(f"fluid: this project is not trusted, so its own files were not loaded: {root}\n"
+          "fluid: run `fluid trust` in it, or pass --trust-project for one run.",
+          file=sys.stderr)
+    return False
 
 
 # ─── one-shot run (testable seam) ────────────────────────────────────────────
@@ -325,6 +375,9 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="persistent skills root (default ~/.fluid/skills)")
     p.add_argument("--approval-policy", default=None,
                    choices=["never_ask", "on_write", "always_ask"])
+    p.add_argument("--trust-project", action="store_true", dest="trust_project",
+                   help="load this project's own config, hooks, MCP servers and other "
+                        "files for this run without saving the answer (see `fluid trust`)")
     p.add_argument("--resume", default=None, metavar="SESSION_ID",
                    help="pick up an existing session from the store")
     p.add_argument("--continue", action="store_true", dest="continue_last",
@@ -361,6 +414,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_config = sub.add_parser("config", help="print the resolved config")
     _add_common(p_config)
+
+    p_trust = sub.add_parser(
+        "trust",
+        help="let a project's own files (config, hooks, MCP servers, ...) configure fluid",
+    )
+    p_trust.add_argument("--cwd", default=None,
+                         help="a folder in the project (default: the current one)")
+    trust_action = p_trust.add_mutually_exclusive_group()
+    trust_action.add_argument("--remove", action="store_true",
+                              help="stop trusting the project")
+    trust_action.add_argument("--list", action="store_true", dest="list_trusted",
+                              help="print every trusted project")
 
     p_workflows = sub.add_parser("workflows", help="review grounded prose skill proposals (never auto-install)")
     workflows_sub = p_workflows.add_subparsers(dest="workflows_command", required=True)
@@ -448,6 +513,38 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_trust(args: argparse.Namespace) -> int:
+    from fluid.config.trust import (
+        project_root,
+        trust_file,
+        trust_project,
+        trusted_projects,
+        untrust_project,
+    )
+
+    if args.list_trusted:
+        for folder in trusted_projects():
+            print(folder)
+        return 0
+    root = project_root(args.cwd)
+    if root is None:
+        print("fluid: this is the home folder: its files are your user settings "
+              "and need no trust.", file=sys.stderr)
+        return 1
+    try:
+        if args.remove:
+            untrust_project(args.cwd)
+            print(f"No longer trusted: {root}")
+        else:
+            trust_project(args.cwd)
+            print(f"Trusted: {root}\nfluid now loads this project's own config, hooks, "
+                  "MCP servers and other files.")
+    except OSError as exc:
+        print(f"fluid: could not write {trust_file()}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_import_settings(args: argparse.Namespace) -> int:
     from fluid.context.settings_import import (
         apply_settings_import,
@@ -487,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_sessions(args)
     if args.command == "config":
         return _cmd_config(args)
+    if args.command == "trust":
+        return _cmd_trust(args)
     if args.command in {"import-settings", "import-claude", "import-codex"}:
         return _cmd_import_settings(args)
     if args.command == "workflows":
@@ -494,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return cmd_workflows(args, _resolve_config(args))
 
-    config = _resolve_config(args)
+    config = _resolve_config(args, ask=True)
     store_dir = getattr(args, "store", None)
     store = make_store(store_dir)
     try:

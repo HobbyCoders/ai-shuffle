@@ -828,9 +828,18 @@ class CliHost:
         if isinstance(registry, dict) and name in registry:
             return registry[name]
         from fluid.context.agents import discover_agents
+        from fluid.context.plugins import discover_plugins
 
+        cwd = ctx.cwd or self.config.cwd or "."
+        sources = self.config.setting_sources
         for definition in discover_agents(
-            ctx.cwd or self.config.cwd or ".", include_plugins=True
+            cwd,
+            # A session that leaves the project's files out (an untrusted
+            # folder) does not take a worker's prompt and tools from them, and
+            # its settings do not choose which plugins supply one.
+            include_project="project" in sources,
+            include_plugins=True,
+            plugins=discover_plugins(cwd, sources=sources),
         ):
             if definition.name == name:
                 return definition

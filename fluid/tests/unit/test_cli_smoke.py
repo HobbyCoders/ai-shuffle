@@ -275,11 +275,12 @@ def test_model_override_beats_provider_model_line(tmp_path) -> None:
     (tmp_path / ".fluid" / "config.toml").write_text(
         '[providers.openrouter]\nkind = "openrouter"\nmodel = "a/b"\n', encoding="utf-8"
     )
-    base = load_config(cwd=tmp_path, include_user=False, include_system=False)
+    base = load_config(cwd=tmp_path, include_user=False, include_system=False,
+                       project_trusted=True)
     assert base.model_for("openrouter") == "a/b"
     cli = load_config(cwd=tmp_path, include_user=False, include_system=False,
-                      overrides={"model_override": "x/y"})
+                      overrides={"model_override": "x/y"}, project_trusted=True)
     assert cli.model_for("openrouter") == "x/y"
     env = load_config(cwd=tmp_path, include_user=False, include_system=False,
-                      env={"FLUID_MODEL": "p/q"})
+                      env={"FLUID_MODEL": "p/q"}, project_trusted=True)
     assert env.model_for("openrouter") == "p/q"

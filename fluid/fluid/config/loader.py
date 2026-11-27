@@ -458,14 +458,27 @@ def load_config(
     env: dict[str, str] | None = None,
     include_system: bool = True,
     include_user: bool = True,
+    project_trusted: bool | None = None,
 ) -> HarnessConfig:
     """Merge every layer and materialize a :class:`HarnessConfig`.
 
     ``overrides`` is the highest-precedence layer — the CLI passes parsed flags
     here. ``cwd`` seeds project discovery and becomes the config's ``cwd`` unless
     a layer overrides it.
+
+    ``project_trusted`` says whether the project's own files may configure
+    the harness. None reads the owner's record (``fluid.config.trust``), so a
+    caller that never asks gets the safe answer for a folder nobody has
+    trusted. For an untrusted project its TOML layers are left out and the
+    ``project`` and ``local`` setting sources are switched off whatever layer
+    set them, so its settings.json, mcp.json, hooks.json, plugins, commands
+    and instruction files are not loaded either.
     """
+    from fluid.config.trust import PROJECT_SOURCES, is_project_trusted
+
     cwd_path = Path(cwd) if cwd is not None else Path.cwd()
+    if project_trusted is None:
+        project_trusted = is_project_trusted(cwd_path)
     merged: dict[str, Any] = deep_merge(BUILTIN_DEFAULTS, {"cwd": str(cwd_path)})
 
     # Parse the TOML layers up front: they are always applied (harness config
@@ -482,7 +495,12 @@ def load_config(
 
     # The project walk (git root → cwd inside a checkout, the cwd alone
     # outside one, home excluded), outer first, with each directory's TOML.
-    project_layers = [(d, _project_toml(d)) for d in project_dirs(cwd_path)]
+    # An untrusted project contributes none of it: its TOML could set the
+    # approval policy, add hooks and MCP servers, or point a provider at
+    # another host.
+    project_layers = (
+        [(d, _project_toml(d)) for d in project_dirs(cwd_path)] if project_trusted else []
+    )
     project_tomls = [toml for _d, toml in project_layers]
     env_layer = env_overrides(env)
 
@@ -495,6 +513,8 @@ def load_config(
     sources = set(_setting_sources_from(raw_sources))
     if not include_user:
         sources.discard("user")
+    if not project_trusted:
+        sources -= PROJECT_SOURCES
 
     # The settings.json stack feeds three things here: the defaultMode policy
     # layer (lowest, so every file/env/flag layer above still wins), the
@@ -549,6 +569,14 @@ def load_config(
     merged = deep_merge(merged, env_layer)
     if overrides:
         merged = deep_merge(merged, overrides)
+    if not project_trusted:
+        # The session's own gate, read by everything that discovers context
+        # later (instruction files, skills, agents, commands, plugins), must
+        # say the same thing whichever layer or flag named the sources.
+        merged["setting_sources"] = [
+            source for source in _setting_sources_from(merged.get("setting_sources"))
+            if source not in PROJECT_SOURCES
+        ]
 
     return HarnessConfig.from_dict(merged)
 

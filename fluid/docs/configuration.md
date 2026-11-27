@@ -19,9 +19,10 @@ key by key, scalars and lists replace, with one exception noted below.
    Windows, if present.
 4. User: `~/.fluid/mcp.json`, then `~/.fluid/hooks.json`, then
    `~/.fluid/config.toml`.
-5. Project: for each project directory, outer first: `<dir>/.fluid/mcp.json`,
-   then `<dir>/.fluid/hooks.json`, then `<dir>/.fluid/config.toml` or, if that
-   is absent, `<dir>/fluid.toml`.
+5. Project, only for a [trusted project](#project-trust): for each project
+   directory, outer first: `<dir>/.fluid/mcp.json`, then
+   `<dir>/.fluid/hooks.json`, then `<dir>/.fluid/config.toml` or, if that is
+   absent, `<dir>/fluid.toml`.
 6. Environment: the `FLUID_*` variables below.
 7. Command-line flags (`--provider`, `--model`, `--code-mode`, `--continual`,
    `--skills-dir`, `--approval-policy`, `--cwd`).
@@ -42,6 +43,45 @@ the same project config, MCP servers, and hooks as one started at the root,
 and a nearer directory's values win. Outside a git checkout only the start
 directory counts. The home directory is never a project directory, even when
 the start directory sits under it.
+
+### Project trust
+
+The project layer loads only for a project you have trusted. Until then the
+`fluid` CLI treats everything the project itself supplies as absent:
+
+- its config files (`.fluid/config.toml`, `fluid.toml`), so it cannot set the
+  approval policy, turn off `protect_sensitive_files`, add permission rules,
+  hooks or MCP servers, or choose a provider or model;
+- its `.fluid/mcp.json`, `.fluid/hooks.json`, `.fluid/settings.json` and
+  `.fluid/settings.local.json`;
+- its instruction files, skills, agents, slash commands, and the plugins its
+  settings enable.
+
+In terms of the keys below, `setting_sources` is reduced to what is left
+without `project` and `local`, whichever layer named them: a user config,
+`FLUID_SETTING_SOURCES` or a flag chooses which scopes load, but none of them
+is the trust answer. System, user, environment and flag layers load as usual.
+
+The project is the git repository root, or the start directory outside a
+checkout, and a checkout nested inside a trusted folder is its own project.
+Trust is recorded by resolved path in `~/.fluid/trusted_projects.json`, never
+inside the project, by one of:
+
+- answering yes when `fluid chat` or `fluid run` asks. They ask once per
+  project, and only when stdin and stdout are both a terminal;
+- `fluid trust` (see [cli.md](cli.md)), which also works in scripts;
+- `--trust-project`, which loads the project for that one run and records
+  nothing.
+
+Without a terminal nothing is asked: the project's files are left out and two
+lines on stderr say so. Trust is for the folder, not for its contents at the
+time, so files that arrive later (a `git pull`, a branch switch) load without
+a new question. The rule is the same on Linux, macOS and Windows; on a
+case-insensitive file system a path spelled with different case may be asked
+about again.
+
+This is the standalone CLI's rule. A harness embedder that builds its config
+with `load_config` gets the same default and can pass `project_trusted`.
 
 ## Top-level keys
 

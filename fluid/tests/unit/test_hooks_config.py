@@ -26,6 +26,9 @@ from fluid.store.base import MemoryStore
 from fluid.tools.inproc import create_inproc_server, tool
 from fluid.tools.registry import ToolRegistry
 
+# These tests are about what a project's own files do once they load.
+pytestmark = pytest.mark.usefixtures("trusted_projects")
+
 # ─── config parsing ──────────────────────────────────────────────────────────
 
 

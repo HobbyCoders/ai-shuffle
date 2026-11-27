@@ -20,6 +20,9 @@ from fluid.context.agents import discover_agents
 from fluid.context.compiler import PromptInputs, compile_prompt
 from fluid.context.instructions import discover_commands, discover_skills
 
+# These tests are about what a project's own files do once they load.
+pytestmark = pytest.mark.usefixtures("trusted_projects")
+
 SKILL_MD = "---\nname: {name}\ndescription: d\n---\nBODY"
 AGENT_MD = "---\nname: {name}\ndescription: d\n---\nPROMPT"
 

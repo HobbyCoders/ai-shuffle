@@ -253,6 +253,36 @@ allowlist remain as the model-facing layer with the friendlier messages.
 can deny or rewrite any call with organization-specific policy the harness
 can't know (path allowlists, secret scanners, audit logging).
 
+**10. Project trust** (`fluid/config/trust.py`). Every gate above is
+configurable, and a project's own files are one of the places it is
+configured from. A folder that was cloned or unpacked is someone else's
+content, so the `fluid` CLI loads nothing from it until its owner says the
+project is trusted: not its config files (which could set
+`approval_policy = "never_ask"`, turn off `protect_sensitive_files` or add
+allow rules), not its hooks and MCP servers (programs that start with the
+session), and not its settings, instruction files, skills, agents, commands
+or the plugins its settings enable. An untrusted project runs on the
+built-in defaults plus the user's own config.
+
+- Trust is the owner's answer and nothing else: a yes at the question
+  `fluid chat` and `fluid run` ask on a terminal, `fluid trust`, or
+  `--trust-project` for one run. No environment variable and no config value
+  grants it, so nothing the project or a process that sets variables for the
+  CLI controls can.
+- The answer is kept in `~/.fluid/trusted_projects.json`, keyed by the
+  project's resolved path (the git repository root, or the start directory
+  outside a checkout). A project cannot carry its own trust, a checkout
+  nested inside a trusted folder is asked about separately, and a link to an
+  untrusted folder is judged by where it leads.
+- Without a terminal there is no question. The project's files are left out
+  and stderr says so, which is the safe result for a script or CI run in a
+  checkout nobody vouched for.
+- A record that cannot be read trusts nothing.
+- The rule reads paths only, so it is the same on Linux, macOS and Windows.
+
+The AI Shuffle app does not load a project's fluid config files into its
+sessions; it configures them itself, so this layer is the CLI's.
+
 ## What this does not claim
 
 - Fencing and screening raise the cost of injection; they do not make a
@@ -270,6 +300,10 @@ can't know (path allowlists, secret scanners, audit logging).
   interpreter's own `.py` sources under `sys.path` stays possible because
   imports need it. A container-grade kernel remains future work
   (`docs/agent-experience.md`).
+- Project trust is for a folder, not for a version of its contents. Files
+  that reach a trusted project later (a pull, a branch switch, an edit by the
+  agent) load without a new question. Take the trust back with
+  `fluid trust --remove` before working on content you have not read.
 
 ## Override reference
 
@@ -279,4 +313,5 @@ can't know (path allowlists, secret scanners, audit logging).
 | `[[permission.rules]]` allow for a path | Override a default rule for that path (user rules come after defaults; last match wins). |
 | `permission.approval_policy = "never_ask"` | Opts out of all prompting, including the default sensitive-file rules. Fences, screening, defanging, and the memory secret guard still apply. |
 | `tools.disallowed = ["WebFetch", "WebSearch"]` | Remove the web surface entirely. |
+| `fluid trust` / `--trust-project` | Load a project's own config, hooks, MCP servers and other files (saved, or for one run). The knobs above count from a project's files only after this. |
 | `identity_file = false` / editing a blocked file | Screening blocks are recoverable by editing the file; nothing is deleted. |

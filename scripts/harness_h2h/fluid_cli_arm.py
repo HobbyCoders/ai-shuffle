@@ -32,7 +32,9 @@ async def run(args: argparse.Namespace) -> int:
         "model_override": args.model,
         "permission": {"approval_policy": "never_ask"},
     }
-    config = load_config(cwd=str(args.cwd), overrides=overrides)
+    # The runner builds the workspace itself, so its files are loaded the way
+    # the other arms load theirs (their headless modes skip the trust question).
+    config = load_config(cwd=str(args.cwd), overrides=overrides, project_trusted=True)
     client = MeteredClient(make_codex_client(args.token), args.calls, effort=args.effort)
     store = make_store(str(args.store))
     prompt = Path(args.prompt_file).read_text(encoding="utf-8")

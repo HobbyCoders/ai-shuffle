@@ -823,7 +823,17 @@ class Repl:
         from fluid.context.instructions import discover_skills
 
         cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
-        return format_skills(discover_skills(cwd))
+        return format_skills(discover_skills(cwd, include_project=self._project_files_on()))
+
+    def _project_files_on(self) -> bool:
+        """False when the session leaves the project's own files out (its
+        ``setting_sources`` have no ``project``: an untrusted folder, or a
+        config that says so)."""
+        extra = getattr(getattr(self.engine, "ctx", None), "extra", None)
+        sources = extra.get("setting_sources") if isinstance(extra, dict) else None
+        if sources is None:
+            sources = getattr(self.engine, "setting_sources", None)
+        return sources is None or "project" in sources
 
     def _render_user_command(self, name: str, arg: str):
         """Resolve a discovered command file to its rendered prompt, or None.
@@ -837,7 +847,10 @@ class Repl:
         from fluid.messages import Text
 
         cwd = getattr(getattr(self.engine, "ctx", None), "cwd", None) or "."
-        match = next((c for c in discover_commands(cwd) if c.name == name), None)
+        # A project's command file can run shell code when called, so it is
+        # found only when the session loads the project's files at all.
+        commands = discover_commands(cwd, include_project=self._project_files_on())
+        match = next((c for c in commands if c.name == name), None)
         if match is None:
             return None
         try:

@@ -9,6 +9,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from fluid.context.settings_stack import (
     default_permission_mode,
     enabled_plugins,
@@ -20,6 +22,9 @@ from fluid.context.settings_stack import (
     settings_env,
 )
 from fluid.permissions.rules import evaluate_rules
+
+# These tests are about what a project's own files do once they load.
+pytestmark = pytest.mark.usefixtures("trusted_projects")
 
 
 def _set_home(monkeypatch, home) -> None:
