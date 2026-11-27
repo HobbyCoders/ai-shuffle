@@ -184,7 +184,9 @@ model *reads* framing tokens even when they can't structurally escape.
   worker's own git is asked its version when a session starts (a native
   session when it is built, a delegated one when its tools start being
   served), through the shell Bash uses and with none of a session's
-  settings. Rating a tool call starts no process: it only looks that answer
+  settings. The question runs in the shell's own folder, never the project's,
+  and is not asked at all under cmd.exe, where nothing is rated read-only and
+  the working folder's `git.cmd` would answer. Rating a tool call starts no process: it only looks that answer
   up, because it runs before a rule, a hook or a person has had a say on the
   call. When the git is older, missing or silent, or is a git that appeared
   on `PATH` after the answer was taken, no git command is rated read-only:

@@ -392,16 +392,31 @@ def _git_probe() -> tuple[list[str], str | None, dict[str, str], tuple[object, .
     kept under: through the shell a Bash command gets, started the way agent
     commands are (the spawn runner under Docker agent isolation), with the
     host's scrubbed environment and none of a session's settings. Git Bash on
-    Windows puts its own git ahead of PATH, and that is the one asked."""
+    Windows puts its own git ahead of PATH, and that is the one asked.
+
+    None, so nothing is asked and no git command is rated read-only, under
+    ``cmd.exe``: the classifier rates nothing read-only there, and ``cmd``
+    looks for a program in the working folder before PATH, so the question
+    would start a ``git.cmd`` the project ships. The question is never asked
+    from the session's folder either: it runs in the shell's own folder, so a
+    PATH with ``.`` or an empty entry cannot make it start the project's
+    ``./git``."""
     from fluid.tools import agent_runner
     from fluid.tools.shell import resolve_shell
 
+    shell = resolve_shell()
+    if not shell.posix:
+        return None
     try:
         argv, cwd, env = agent_runner.wrap(
-            [*resolve_shell().argv_prefix, "git --version"], None, shell_env()
+            [*shell.argv_prefix, "git --version"], None, shell_env()
         )
     except OSError:
         return None
+    if cwd is None:
+        cwd = os.path.dirname(os.path.realpath(shell.path))
+        if not cwd or not os.path.isdir(cwd):
+            return None
     key = (tuple(argv), cwd, tuple(sorted(env.items())), _git_on_path(env))
     return list(argv), cwd, dict(env), key
 

@@ -307,6 +307,52 @@ def test_a_session_start_is_where_git_is_asked(git_probe, tmp_path: Path) -> Non
     assert len(calls) == 2 and child_env.git_hardening_supported() is True
 
 
+def test_nothing_is_asked_under_cmd_exe(git_probe, monkeypatch, tmp_path: Path) -> None:
+    """``cmd.exe`` looks for a program in the working folder before PATH, so
+    asking there would start a ``git.cmd`` the project ships. Nothing is
+    rated read-only under ``cmd`` anyway, so a session start asks nothing."""
+    from fluid.engine.native import NativeLoop
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.store.base import MemoryStore
+    from fluid.tools import shell
+    from fluid.tools.registry import ToolRegistry
+
+    calls, _ = git_probe
+    cmd = shell.ShellInfo(name="cmd", path="cmd.exe", argv_prefix=("cmd.exe", "/d", "/s", "/c"))
+    monkeypatch.setattr(shell, "resolve_shell", lambda: cmd)
+
+    child_env.learn_git_version()
+    NativeLoop(provider=None, store=MemoryStore(), model="m", registry=ToolRegistry(),
+               ctx=ToolCtx(cwd=str(tmp_path)), permissions=PermissionEngine("on_write"))
+    assert calls == []
+    assert child_env.git_hardening_supported() is False
+
+
+def test_the_probe_does_not_run_in_the_session_folder(
+    git_probe, monkeypatch, tmp_path: Path
+) -> None:
+    """The question runs in the shell's own folder, never the folder the
+    process happens to be in: with ``.`` or an empty entry on PATH, that
+    folder's ``./git`` would be the one started."""
+    from fluid.tools.shell import resolve_shell
+
+    calls, _ = git_probe
+    seen: list[object] = []
+    real_run = child_env.subprocess.run
+
+    def run(argv, **kwargs):
+        seen.append(kwargs.get("cwd"))
+        return real_run(argv, **kwargs)
+
+    child_env.subprocess.run = run  # the fixture's monkeypatch restores it
+    monkeypatch.chdir(tmp_path)
+    assert _asked() is True
+    assert len(calls) == 1
+    shell_folder = os.path.dirname(os.path.realpath(resolve_shell().path))
+    assert seen == [shell_folder]
+    assert os.path.realpath(str(tmp_path)) != shell_folder
+
+
 def test_the_probe_starts_the_way_agent_commands_do(git_probe, monkeypatch) -> None:
     """Under Docker agent isolation every agent process goes through the
     spawn runner; so does the question."""
