@@ -398,6 +398,24 @@ def test_a_worktree_reached_through_a_linked_settings_folder_is_project_code(
     assert not _ok(project, f"{real}/worktrees/notes.md")
 
 
+def test_a_home_dot_folder_that_is_a_link_asks_under_both_names(tmp_path: Path, project: Path) -> None:
+    """A session started in the home folder: every dot folder at its top
+    asks, with no worktree exception, and so does the folder one links to."""
+    home = tmp_path / "home"
+    checkout = home / "claude-data" / "worktrees" / "feature"
+    (checkout / "src").mkdir(parents=True)
+    (home / "code").mkdir()
+    _symlink(home / ".claude", home / "claude-data", folder=True)
+    for path in (
+        ".claude/worktrees/feature/src/app.py",
+        "claude-data/worktrees/feature/src/app.py",
+        "claude-data/settings.json",
+        str(checkout / "src" / "app.py"),
+    ):
+        assert not edit_stays_in_project({"file_path": path}, str(home)), path
+    assert edit_stays_in_project({"file_path": "code/app.py"}, str(home))
+
+
 def test_a_linked_folder_is_recognised_when_its_path_is_spelled_differently(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

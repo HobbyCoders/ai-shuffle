@@ -215,7 +215,7 @@ def _below_link(link: str, opened: str, route: list[tuple[str, list[str]]]) -> l
     return None
 
 
-def _reached_by_protected_name(opened: str, top: str | None) -> bool:
+def _reached_by_protected_name(opened: str, top: str | None, home_root: str | None) -> bool:
     """True when ``opened`` (a real path) is also a file under a protected
     name that no name on its own route shows.
 
@@ -223,8 +223,11 @@ def _reached_by_protected_name(opened: str, top: str | None) -> bool:
     ``tooling/editor`` is a file in ``.vscode`` whichever name the call or
     the session used. So each protected name in the file's folder and in
     every folder above it is read: when the file lies under what the name
-    leads to, the route through that name is judged like any other, which
-    keeps a ``<.fluid|.claude>/worktrees/<name>/`` checkout project code.
+    leads to, the route through that name is judged by the rule every other
+    route gets (:func:`_names_allow`). That keeps a ``<.fluid|.claude>/
+    worktrees/<name>/`` checkout project code, and keeps every dot folder at
+    the top of a home folder asking: ``home_root`` is the home folder when
+    it is the root the file was placed in, else None.
 
     Folders above ``top`` are not read (None: up to the filesystem root). A
     protected name that sits anywhere else in the tree is not seen; finding
@@ -241,15 +244,15 @@ def _reached_by_protected_name(opened: str, top: str | None) -> bool:
             break
         rest.insert(0, os.path.basename(folder))
         folder = parent
+    home_root = None if home_root is None else os.path.normcase(home_root)
     for folder, _rest in route:
+        in_home = os.path.normcase(folder) == home_root
         for name in PROTECTED_DIR_NAMES:
             link = os.path.join(folder, name)
             if not os.path.lexists(link):
                 continue
             below = _below_link(link, opened, route)
-            if below is not None and not _dirs_allow(
-                [name] + [_plain_name(part) for part in below]
-            ):
+            if below is not None and not _names_allow([name, *below], root_is_home=in_home):
                 return True
     return False
 
@@ -341,7 +344,9 @@ def _path_allowed(
         # Last, because it reads the disk: the file is not under a folder a
         # protected name links to. The working folder is checked all the way
         # up, like its names; a folder the host added from itself down.
-        return not _reached_by_protected_name(opened, None if is_project else real)
+        return not _reached_by_protected_name(
+            opened, None if is_project else real, real if real == home else None
+        )
     return False
 
 
