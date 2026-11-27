@@ -156,7 +156,7 @@ def test_a_protected_file_asks(project: Path, path: str) -> None:
     ".git /config",  # and a trailing space
     ".git::$INDEX_ALLOCATION/config",  # NTFS stream syntax
     "GIT~1/config",  # an 8.3 short name
-    ".g‌it/config",  # HFS+ ignores this code point
+    ".g\u200cit/config",  # HFS+ ignores this code point
     ".CLAUDE/settings.json",
     ".Bashrc",
     ".ENV",
