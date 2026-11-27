@@ -240,6 +240,26 @@ def test_default_sensitive_rules_see_alternate_path_spellings(spelling: str) -> 
     assert engine.decide(read_spec, {"file_path": spelling}).decision == "ask"
 
 
+@pytest.mark.parametrize("tool, tool_input", [
+    ("Read", {"file_path": ".ENV"}),
+    ("Read", {"file_path": "deploy/.Env.Production"}),
+    ("Read", {"file_path": "C:\\Users\\sam\\.SSH\\ID_RSA"}),
+    ("Read", {"file_path": "certs/Server.PEM"}),
+    ("Edit", {"file_path": ".ENV"}),
+    ("Write", {"file_path": ".Npmrc"}),
+    ("Grep", {"pattern": "KEY", "path": ".ENV"}),
+    ("Glob", {"pattern": "*", "path": ".Credential-Keys"}),
+])
+def test_default_sensitive_rules_ignore_letter_case(tool: str, tool_input: dict) -> None:
+    """Rule globs are case-sensitive, and ``.ENV`` opens ``.env`` on Windows
+    and on a default macOS volume: the same answer on every platform."""
+    engine = _build_permissions(_config())
+    spec = ToolSpec(name=tool, description="", input_schema={}, risk="safe")
+    assert engine.decide(spec, tool_input).decision == "ask"
+    template = {**tool_input, next(iter(k for k in tool_input if k != "pattern")): ".ENV.EXAMPLE"}
+    assert engine.decide(spec, template).decision == "allow"
+
+
 def test_default_sensitive_rules_see_absolute_paths_via_cwd(tmp_path) -> None:
     engine = _build_permissions(_config())
     read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")

@@ -2371,6 +2371,12 @@ async def _stream_to_websocket_turn(
             "session_id": session_id,
             "user_id": user_id,
             "provider_id": getattr(options, "aih_provider_id", None),
+            # Where the session works and what else it may write: Accept Edits
+            # approves an edit inside these only. A changed cwd rebuilds the
+            # client (``reconnect_option_names``); the reuse path re-stamps
+            # the extra folders every turn.
+            "cwd": getattr(options, "cwd", None),
+            "add_dirs": list(getattr(options, "add_dirs", None) or ()),
             # Reference count of prompts (questions + permissions) this session is
             # currently blocked on. Drives the user-level "awaiting input" indicator.
             "attention_count": 0,
@@ -2811,7 +2817,10 @@ async def _stream_to_websocket_turn(
                 # remembered Deny rule names it. Saved deny rules beat every
                 # mode short of Bypass, as Claude Code's deny rules beat its
                 # modes; Ask already applies them inside request_permission.
-                if not mode_approves_without_prompt(_perm_mode, tool_name):
+                if not mode_approves_without_prompt(
+                    _perm_mode, tool_name, tool_input,
+                    cwd=refs.get("cwd"), extra_roots=refs.get("add_dirs"),
+                ):
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
 
@@ -3201,6 +3210,7 @@ async def _stream_to_websocket_turn(
             if state.connect_options is not None:
                 state.connect_options.permission_mode = engine_mode
             state.callback_refs["permission_mode"] = permission_mode
+            state.callback_refs["add_dirs"] = list(getattr(options, "add_dirs", None) or ())
             if resume:
                 await state.adapter.send_resume()
             else:

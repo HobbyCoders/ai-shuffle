@@ -77,8 +77,34 @@ model *reads* framing tokens even when they can't structurally escape.
   keys, `*.pem`/`*.p12`/`*.pfx`, `.netrc`, `.npmrc`, `.pypirc`,
   `.git-credentials`, `~/.aws/credentials`) for `Read`/`Edit`/`Write`/
   `Grep`/`Glob`. They are prepended before user rules, so one
-  `[[permission.rules]]` allow overrides them; `.env.example`-style templates
-  are exempt. `permission.protect_sensitive_files = false` disables the set.
+  `[[permission.rules]]` allow overrides them. Letter case is ignored, as in
+  the Bash classifier below, so `.ENV` asks on every platform.
+  `.env.example`-style templates are exempt: the rule steps aside and the
+  call is decided as any other is, so reading a template runs and editing
+  one asks under `on_write`. `permission.protect_sensitive_files = false`
+  disables the set. A host that builds its own engine installs the same set
+  with `fluid.config.loader.sensitive_file_rules()`; AI Shuffle's native leg
+  does, for every permission mode.
+- **Accept Edits approves project files only.** The mode's allow rules for
+  `Edit`, `Write`, `MultiEdit` and `NotebookEdit` carry a guard
+  (`fluid.permissions.edit_guard.edit_stays_in_project`), so they hold
+  wherever they sit in the rule list. An edit is approved when the file, as
+  the tool opens it (symbolic links followed), is inside the session's
+  working folder, a folder the host added or the session's scratch folder.
+  Everything else falls through to the policy and asks: a path outside
+  those folders, a link that leaves them, a hard-linked file (it may be a
+  second name for a file elsewhere), a credential file, and a file that
+  starts programs or configures a tool: anything under `.git`, `.fluid`,
+  `.claude`, `.codex`, `.vscode`, `.idea`, `.husky` or `.devcontainer`,
+  shell startup files, `.gitconfig`, `.gitattributes`, `.mcp.json` and the
+  like (the lists are `PROTECTED_DIR_NAMES` and `PROTECTED_FILE_GLOBS`).
+  Names are compared the way Windows and macOS open them (letter
+  case, trailing dots and spaces, `:stream` suffixes, 8.3 short names), on
+  every platform. A checkout under `.fluid/worktrees/<name>/` or
+  `.claude/worktrees/<name>/` is project code. A session whose working
+  folder is the home folder or a filesystem root gets no approval for the
+  dot-folders there. The check is a permission preflight, not a filesystem
+  broker: the tool opens the file afterwards.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
   file — `cat .env` does not sail under the read-only fast path. Letter case

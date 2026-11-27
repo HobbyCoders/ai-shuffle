@@ -227,6 +227,29 @@ def test_native_engine_asks_only_for_high_calls_under_bypass():
     assert denying.decide(_spec("Bash"), {"command": "gh pr merge 1"}, cwd=ROOT).decision == "deny"
 
 
+def test_the_assistant_engine_takes_every_argument_fluids_gates_pass():
+    """fluid's gates (the native loop, code mode, the delegated tool bridge)
+    call ``decide`` with the session's working folder and settings
+    environment. The assistant's engine overrides ``decide``, so an argument
+    added to the base one has to be accepted here too, or every tool call in
+    an assistant session fails."""
+    import inspect
+
+    from fluid.permissions.engine import PermissionEngine
+
+    base = inspect.signature(PermissionEngine.decide).parameters
+    own = inspect.signature(ha._AssistantPermissionEngine.decide).parameters
+    assert set(base) <= set(own)
+
+    engine = ha._AssistantPermissionEngine(SCOPE, approval_policy="never_ask")
+    # The call the native gate makes (``fluid.engine.native``).
+    decided = engine.decide(_spec("Bash"), {"command": "pytest"}, cwd=ROOT, env={"CI": "1"})
+    assert decided.decision == "allow"
+    assert engine.decide(
+        _spec("Bash"), {"command": "gh pr merge 1"}, cwd=ROOT, env=None,
+    ).decision == "ask"
+
+
 def test_build_permissions_uses_the_assistant_engine_only_in_scope():
     adapter = ha.HarnessAdapter()
     scoped = SessionOptions(model="m", permission_mode="bypassPermissions", extra={"assistant_scope": SCOPE})

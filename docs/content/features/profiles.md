@@ -72,8 +72,12 @@ The permission mode decides when the agent asks you before using a tool. Pick it
 | --- | --- |
 | Ask | Tools that only read run straight away. Tools that change something ask you first |
 | Auto | Your provider checks each tool call and approves safe ones. Only on Claude models |
-| Accept Edits | File edits run without asking. Everything else asks, as in Ask |
+| Accept Edits | Edits to the files of the session's own folder run without asking. Everything else asks, as in Ask |
 | Bypass | Nothing asks. Use with care |
+
+Accept Edits covers the session's working folder, the folders the app adds to it (your uploads, for example) and the session's scratch folder. An edit anywhere else asks. So does an edit, inside the folder, of a file that starts programs, configures a tool or holds credentials: Git's own `.git` folder and files such as `.gitattributes`, agent settings folders such as `.claude` and `.fluid`, editor settings such as `.vscode`, shell startup files such as `.bashrc`, and `.env`.
+
+On every model except the built-in Claude models, reading a file that holds credentials (`.env` and its variants, private keys, `.netrc`, `.npmrc`, cloud and Git credential files) asks in Ask and Accept Edits. Template files such as `.env.example` are read without asking. The built-in Claude models apply the Claude Code CLI's own rules for reads.
 
 A session without a project offers the same modes, Accept Edits included, and they mean the same thing there. Attaching a project puts the session back on Ask.
 

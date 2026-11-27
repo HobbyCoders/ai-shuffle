@@ -1105,7 +1105,14 @@ class PermissionHandler:
                 state.callback_refs.get("permission_mode"),
                 delegated=getattr(state.adapter, "_is_delegated", False),
             )
-            if not mode_approves_without_prompt(mode, payload.get("tool_name", "")):
+            # The same folders the approver that raised the prompt read (see
+            # ``callback_refs`` in query_engine): switching to Accept Edits
+            # releases a waiting edit of a project file, not one outside it.
+            if not mode_approves_without_prompt(
+                mode, payload.get("tool_name", ""), payload.get("tool_input"),
+                cwd=state.callback_refs.get("cwd"),
+                extra_roots=state.callback_refs.get("add_dirs"),
+            ):
                 continue
             if payload.get("safety_check"):
                 # A safety check only a person may pass is never released by

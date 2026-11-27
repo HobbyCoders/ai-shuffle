@@ -123,7 +123,7 @@ Each run's session starts in the automation's `permission_mode`, the same modes 
 | Value | Composer label | What a run does |
 |-------|----------------|-----------------|
 | `default` | Ask | Every tool that needs approval asks first. Nobody watches an automation, so the request times out and the tool is denied |
-| `acceptEdits` | Accept Edits | File edits run without asking; every other tool asks (and is denied) |
+| `acceptEdits` | Accept Edits | Edits to files of the run's own folder run without asking; every other tool call asks (and is denied), including an edit outside that folder or of a protected file (see [Tool permissions](/docs/features/profiles)) |
 | `auto` | Auto | The provider checks each tool call and approves safe ones. Only Claude Code supports it; on other providers it runs as Ask |
 | `bypassPermissions` | Bypass | Every tool runs without asking, including shell commands |
 

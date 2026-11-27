@@ -556,20 +556,31 @@ def load_config(
 # ─── engine factory ──────────────────────────────────────────────────────────
 
 
-def _sensitive_file_rules():
+def sensitive_file_rules():
     """Default ask-rules for credential files, per file-taking builtin.
 
     Prepended BEFORE user rules — last match wins, so one user rule allows a
     path through. Bash gets the same protection through its risk classifier
     (a read-only command targeting a credential file classifies as write).
+
+    Template files (``.env.example`` and friends) hold no values and are meant
+    to be read. They match ``.env.*``, so each ask carries a guard that steps
+    aside for them. Stepping aside is not an allow: the call is then decided
+    as any other is, so editing a template still asks under the default
+    policy. (These used to be allow rules after the asks, which also let an
+    Edit or Write of a template run unprompted.)
+
+    Public because a host that builds its own engine installs the same rules
+    (the app's native leg does).
     """
-    from fluid.permissions.rules import Rule
+    from fluid.permissions.rules import Rule, path_candidates
     from fluid.tools.hardening import (
         PROTECTED_WRITE_PREFIXES,
         SENSITIVE_BASENAME_GLOBS,
         SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
         SENSITIVE_PATH_SUFFIXES,
+        is_sensitive_path,
     )
 
     # "*" prefixes make basename globs match directory-qualified inputs too
@@ -584,26 +595,55 @@ def _sensitive_file_rules():
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
     }
+
+    def not_a_template(field: str):
+        def guard(input, cwd) -> bool:
+            value = input.get(field) if isinstance(input, dict) else None
+            if not isinstance(value, str) or not value:
+                return True
+            # Every spelling, the link's target included: ``.env.example``
+            # linked to ``.env`` is the credential file.
+            raw, normalized = path_candidates(value, cwd)
+            names = {
+                spelling.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+                for spelling in raw | normalized
+            }
+            return not names <= SENSITIVE_EXCEPTIONS
+
+        return guard
+
+    def names_a_credential_file(field: str):
+        def guard(input, cwd) -> bool:
+            value = input.get(field) if isinstance(input, dict) else None
+            if not isinstance(value, str) or not value:
+                return False
+            raw, normalized = path_candidates(value, cwd)
+            return any(is_sensitive_path(spelling) for spelling in raw | normalized)
+
+        return guard
+
+    guards = {field: not_a_template(field) for field in set(field_by_tool.values())}
     asks = [
-        Rule(tool=tool, decision="ask", input_globs={field: glob})
+        Rule(tool=tool, decision="ask", input_globs={field: glob}, guard=guards[field])
         for tool, field in field_by_tool.items()
         for glob in globs
     ]
+    # Rule globs are case-sensitive, and ``.ENV`` opens ``.env`` on Windows and
+    # on a default macOS volume. One rule per tool asks for any letter case, so
+    # the protection is the same on every platform.
+    asks.extend(
+        Rule(tool=tool, decision="ask", guard=names_a_credential_file(field))
+        for tool, field in field_by_tool.items()
+    )
     asks.extend(
         Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
         for tool in ("Edit", "Write")
         for prefix in PROTECTED_WRITE_PREFIXES
     )
-    # Template files (.env.example and friends) hold no values and are meant
-    # to be read. They match ``.env.*`` above, so an allow rule after the
-    # asks lets them through; last match wins, and a user rule still comes
-    # after both.
-    allows = [
-        Rule(tool=tool, decision="allow", input_globs={field: f"*{name}"})
-        for tool, field in field_by_tool.items()
-        for name in sorted(SENSITIVE_EXCEPTIONS)
-    ]
-    return [*asks, *allows]
+    return asks
+
+
+_sensitive_file_rules = sensitive_file_rules
 
 
 def _session_settings(config: HarnessConfig) -> dict[str, Any]:

@@ -11,7 +11,7 @@ from app.api import sessions_permissions as api
 from app.core.permission_handler import permission_handler
 from app.core.session_pool import SessionState
 from tests.core.test_query_engine_permission_flows import (
-    SID, _callback, _ctx, _next_prompt, _allowed,
+    SID, _callback, _ctx, _next_prompt, _allowed, _session_file,
 )
 
 
@@ -169,20 +169,25 @@ async def test_access_checked_before_changing_permissions(monkeypatch):
     apply.assert_not_awaited()
 
 
-@pytest.mark.parametrize("tool,mode,releases", [
-    ("Bash", "bypassPermissions", True),
-    ("Write", "acceptEdits", True),
-    ("Bash", "acceptEdits", False),
-    ("mcp__computer-use__request_access", "bypassPermissions", False),
+@pytest.mark.parametrize("tool,mode,releases,target", [
+    ("Bash", "bypassPermissions", True, "x.py"),
+    ("Write", "acceptEdits", True, "x.py"),
+    # Accept Edits releases a waiting edit of the session's own files only.
+    ("Write", "acceptEdits", False, "../outside.py"),
+    ("Write", "acceptEdits", False, ".git/hooks/pre-commit"),
+    ("Write", "bypassPermissions", True, "../outside.py"),
+    ("Bash", "acceptEdits", False, "x.py"),
+    ("mcp__computer-use__request_access", "bypassPermissions", False, "x.py"),
 ])
-async def test_switch_releases_real_policy_prompts_only(tmp_path, live, tool, mode, releases):
+async def test_switch_releases_real_policy_prompts_only(tmp_path, live, tool, mode, releases, target):
     state, _ = live
     cb, broadcast, bounds = await _callback(tmp_path)
     # Use the refs captured by the REAL producer, not a seeded interaction.
     state.callback_refs = dict(zip(cb.__code__.co_freevars, [c.cell_contents for c in cb.__closure__]))["callback_refs"]
     with patch("app.core.query_engine.sync_engine", bounds.sync_engine), \
          patch("app.db.database.get_permission_rules", return_value=[]):
-        task = asyncio.create_task(cb(tool, {"file_path": "/x"}, _ctx(delegated=False)))
+        task = asyncio.create_task(
+            cb(tool, {"file_path": _session_file(tmp_path, target)}, _ctx(delegated=False)))
         try:
             prompt = await _next_prompt(broadcast)
             await api.apply_permission_mode(SID, mode)
@@ -193,7 +198,8 @@ async def test_switch_releases_real_policy_prompts_only(tmp_path, live, tool, mo
             assert _allowed(await asyncio.wait_for(task, 5)) == releases
             # The original callback now reads the live mode for subsequent tools.
             if releases:
-                assert _allowed(await cb("Write", {"file_path": "/y"}, _ctx(delegated=False)))
+                assert _allowed(await cb(
+                    "Write", {"file_path": _session_file(tmp_path, "y.py")}, _ctx(delegated=False)))
         finally:
             if not task.done():
                 task.cancel()

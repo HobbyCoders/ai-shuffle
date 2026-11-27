@@ -29,6 +29,7 @@ Three things make the field match more than a bare ``fnmatch``:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -237,9 +238,18 @@ class Rule:
     tool: str  # glob on tool name, e.g. "Bash", "mcp__*", "*"
     decision: str  # "allow" | "deny" | "ask"
     input_globs: dict[str, str] = field(default_factory=dict)  # field → glob on str(value)
+    # A further condition code decides, for what a glob cannot say:
+    # ``(input, cwd) -> bool``. The rule matches only when it returns True.
+    # The Accept Edits allows carry one (``permissions.edit_guard``), so the
+    # mode approves an edit inside the project and nothing else.
+    guard: Callable[[dict[str, Any], str | None], bool] | None = field(
+        default=None, repr=False
+    )
 
     def matches(self, name: str, input: dict[str, Any], *, cwd: str | None = None) -> bool:
         if not fnmatchcase(name, self.tool):
+            return False
+        if self.guard is not None and not self.guard(input, cwd):
             return False
         for key, pat in self.input_globs.items():
             value = str(input.get(key, ""))

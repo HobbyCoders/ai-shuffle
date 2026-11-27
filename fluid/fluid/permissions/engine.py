@@ -116,9 +116,15 @@ class PermissionEngine:
         self._mode_rules = list(rules)
         self.rules = [*self._mode_rules, *kept]
 
-    def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
-        """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
-        return self.decide(spec, input).decision
+    def evaluate(
+        self, spec: ToolSpec, input: dict[str, Any], *, cwd: str | None = None
+    ) -> str:
+        """Return ``allow`` | ``deny`` | ``ask`` for one tool call.
+
+        ``cwd`` is the session's working folder; a rule about paths (and the
+        Accept Edits allows) reads the call against it.
+        """
+        return self.decide(spec, input, cwd=cwd).decision
 
     def decide(
         self,
