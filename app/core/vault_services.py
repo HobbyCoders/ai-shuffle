@@ -706,10 +706,21 @@ def _shape(value: object, depth: int = 0) -> object:
     if depth >= 8:
         return "[...]"
     if isinstance(value, dict):
-        return {key: _shape(item, depth + 1) for key, item in list(value.items())[:50]}
+        shown: dict = {}
+        for key, item in list(value.items())[:50]:
+            # A service may key a map by the credential it issued.
+            shown[key if _plain_key(key) else f"[key {len(shown) + 1}]"] = _shape(item, depth + 1)
+        return shown
     if isinstance(value, list):
         return [_shape(item, depth + 1) for item in value[:10]]
     return value
+
+
+def _plain_key(key: str) -> bool:
+    """A field name a person wrote (``value``, ``expires_on``, ``keyId``), not
+    an identifier or credential: letters and underscores, mostly lowercase."""
+    return (re.fullmatch(r"[A-Za-z][A-Za-z_]{0,31}", key) is not None
+            and sum(ch.isupper() for ch in key) * 4 <= len(key))
 
 
 def _mark(shape: object, field: str) -> None:
@@ -876,7 +887,8 @@ async def perform_capturing(
             document = None
         value = _pick(document, capture) if document is not None else None
         shape = _shape(document) if document is not None else None
-        if capturable(value) and not (value in header[1] or any(n in value for n in needles)):
+        # The grant's own credential, as written or escaped, is not a new one.
+        if capturable(value) and value not in header[1] and redact(value.encode(), needles) == value.encode():
             captured = value
             _mark(shape, capture)
             needles = sorted(set(needles).union(_needles(value, value)), key=len, reverse=True)

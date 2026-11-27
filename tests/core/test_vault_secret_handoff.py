@@ -361,12 +361,60 @@ async def test_a_chat_changing_hands_ends_its_captures(broker, api, trust, bypas
     from app.network import handoff
 
     monkeypatch.setattr(vault_access, "broker", broker)
+    from app.db import base
+
+    committed = []
+    monkeypatch.setattr(base, "after_commit", lambda conn, callback: committed.append(callback))
     cloudflare, github = await grants(broker, api)
     secret_id = (await capture_token(broker, cloudflare))["capture"]["secret_id"]
-    handoff._forget_vault_captures("chat")  # called where a move flips ownership, both ways
+    handoff._forget_vault_captures(object(), "chat")  # called where a move flips ownership, both ways
+    # A move that rolls back keeps them: nothing happens before the commit.
+    assert broker._held("chat") and (await broker.resources("chat"))["captured_secrets"]
+    for callback in committed:
+        callback()
+    assert "captured_secrets" not in await broker.resources("chat")
     with pytest.raises(AccessDenied, match="expired"):
         await broker.run("chat", github, "copy_secret", copy_args(github, secret_id))
     assert not broker.actions and not broker._held("chat")
+
+
+async def test_a_credential_used_as_a_key_is_not_shown(broker, api, trust, bypass):  # noqa: F811
+    api.routes[("POST", "/client/v4/accounts/acct/tokens")] = ("200 OK", {"result": {
+        "id": "tok_0123456789abcdef", "tokens": {NEW_TOKEN: {"active": True}, "AbCdEfGhIjKlMnOpQr": 1}}})
+    cloudflare, _ = await grants(broker, api)
+    result = await broker.run("chat", cloudflare, "http", {
+        "method": "POST", "path": "/accounts/acct/tokens", "body": "{}", "capture": "result.id"})
+    assert NEW_TOKEN not in json.dumps(result) and "AbCdEf" not in json.dumps(result)
+    assert json.loads(result["body"])["shape"]["result"] == {
+        "id": "[captured]", "tokens": {"[key 1]": {"active": True}, "[key 2]": "[number]"}}
+
+
+@pytest.mark.parametrize("key, plain", [
+    ("value", True), ("expires_on", True), ("keyId", True), ("result", True),
+    ("tok_0123", False), ("AbCdEfGhIjKlMnOp", False), ("a" * 33, False), ("has-dash", False)])
+def test_only_plain_field_names_appear_in_a_shape(key, plain):
+    assert vault_services._plain_key(key) is plain
+
+
+async def test_an_escaped_echo_of_the_grants_credential_is_not_captured(broker, api, trust, bypass):  # noqa: F811
+    from urllib.parse import quote
+
+    from tests.core.test_vault_services import SECRET
+
+    api.routes[("POST", "/client/v4/accounts/acct/tokens")] = ("200 OK", {"result": {
+        "value": quote(SECRET, safe="")}})
+    cloudflare, _ = await grants(broker, api)
+    result = await capture_token(broker, cloudflare)
+    assert result["capture"]["captured"] is False and "signs in with" in result["capture"]["reason"]
+    assert not broker.captures
+
+
+async def test_a_late_redaction_covers_a_value_cut_at_the_limit(broker):  # noqa: F811
+    value = "test-only-held-value-0123456789"
+    broker._hold("chat", await vault_access.session_owner("chat"), value, "earlier")
+    again = broker.redact_held("chat", {"status": 200, "headers": {}, "body": "echo " + value[:-1],
+                                        "truncated": True})
+    assert value[:-4] not in again["body"]
 
 
 @pytest.mark.parametrize("field", ["", "a..b", ".a", "a b", "a/b", "x" * 65, ".".join("a" * 9)])

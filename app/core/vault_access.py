@@ -1598,7 +1598,7 @@ class Broker:
             result["pending_requests"] = pending
         now = time.time()
         captured = [c.model_public() for c in list(self.captures.values())
-                    if c.session_id == session_id and c.owner == owner and c.expires_at > now]
+                    if c.session_id == session_id and c.owner == owner and c.expires_at > now and c.value]
         if captured:
             result["captured_secrets"] = captured
         return result
@@ -1914,7 +1914,9 @@ class Broker:
             return result
         again = dict(result)
         if isinstance(again.get("body"), str):
-            again["body"] = vault_services.redact(again["body"].encode(), needles).decode("utf-8", "replace")
+            # A cut body may end inside a value: ``cut`` redacts that start too.
+            again["body"] = vault_services.redact(again["body"].encode(), needles,
+                                                  cut=again.get("truncated") is True).decode("utf-8", "replace")
         if isinstance(again.get("headers"), dict):
             again["headers"] = {name: vault_services.redact(value.encode(), needles).decode("utf-8", "replace")
                                 if isinstance(value, str) else value for name, value in again["headers"].items()}
