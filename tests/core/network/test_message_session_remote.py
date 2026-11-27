@@ -106,6 +106,79 @@ async def test_lists_active_chats_on_another_online_worker(workers, monkeypatch,
     assert ("POST", "/api/v1/network/peer/control/orchestration-peers") in served.requests
 
 
+def _run_states(result):
+    return {entry["id"]: entry["run_state"] for entry in json.loads(result.text)["sessions"]}
+
+
+def _busy_and_failed(worker):
+    """On ``worker``: "busy" holds a live run, "broken"'s latest turn failed."""
+    from app.db import runs
+    _chat(worker, "busy", title="Busy there")
+    _chat(worker, "broken", title="Broken there")
+    with worker.active():
+        runs.claim_run("busy", "test-owner", 600)
+        turn = turns.enqueue_turn("broken", "user", prompt="again", profile_id="default")
+        turns.start_turn(turn["id"])
+        turns.settle_turn(turn["id"], "aborted", "error", error="HTTP 400")
+
+
+async def test_listing_says_whether_each_chat_is_running_now(workers, monkeypatch, kicks):
+    """An agent asked about a stuck chat sees, here or on another worker, whether
+    it is working, waiting on the owner, idle or failed."""
+    from app.db import interactions
+    a, b, served = network(workers, monkeypatch)
+    _chat(a, "target")
+    _busy_and_failed(a)
+    _chat(b, "asking", title="Waiting here")
+    with b.active():
+        interactions.create_interaction("asking", "permission", {}, None)
+    converge([a, b])
+    with b.active():
+        result = await _tool("ListSessions", {"scope": "all"})
+    assert not result.is_error, result.text
+    states = _run_states(result)
+    assert {key: states[key] for key in ("target", "busy", "broken", "asking")} == {
+        "target": "idle", "busy": "working", "broken": "failed", "asking": "permission"}
+    assert "run_state is sampled now" in json.loads(result.text)["note"]
+    assert not any("run_state_source" in e for e in json.loads(result.text)["sessions"])
+
+
+async def test_an_older_worker_without_run_state_falls_back_to_its_published_summary(
+        workers, monkeypatch, kicks):
+    from app.network import catalog
+    a, b, served = network(workers, monkeypatch)
+    _chat(a, "target")
+    _busy_and_failed(a)
+    with a.active():
+        catalog.publish_owned()
+    converge([a, b])
+    listing = orch.accept_peer_listing
+
+    def old_listing(body, from_device):
+        result = listing(body, from_device)
+        for entry in result["sessions"]:
+            # An older release sends no state; a bad value is not believed either.
+            if entry["id"] == "target":
+                entry["run_state"] = "exploded"
+            else:
+                entry.pop("run_state", None)
+        return result
+
+    monkeypatch.setattr(orch, "accept_peer_listing", old_listing)
+    with b.active():
+        # A summary some other worker published says nothing about this owner's chat.
+        b.sql("UPDATE network_session_runtime SET owner_device_id = 'old-owner' WHERE session_id = 'target'")
+        result = await _tool("ListSessions", {"scope": "all"})
+    assert not result.is_error, result.text
+    states = _run_states(result)
+    assert {key: states[key] for key in ("target", "busy", "broken")} == {
+        "target": "unknown", "busy": "working", "broken": "failed"}
+    # A published state is labelled as such: it is not a fresh sample.
+    sources = {e["id"]: e.get("run_state_source") for e in json.loads(result.text)["sessions"]}
+    assert {key: sources[key] for key in ("target", "busy", "broken")} == {
+        "target": None, "busy": "last published", "broken": "last published"}
+
+
 async def test_discovery_and_message_before_catalog_replication(workers, monkeypatch, kicks):
     a, b, served = network(workers, monkeypatch)
     _chat(a, "target")  # Published, but deliberately not converged to b.
