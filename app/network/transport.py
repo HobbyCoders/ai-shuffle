@@ -1609,9 +1609,18 @@ def _untried_peer(ctx: engine.NetworkContext, peer_device_id: str) -> bool:
 
 
 def _reached(current: Dict[str, Dict[str, int]], target: Dict[str, Dict[str, int]]) -> bool:
-    """Whether local watermarks ``current`` cover every stream in ``target``."""
-    return all(int(current.get(origin, {}).get(str(inc), 0)) >= int(seq)
-               for origin, streams in target.items() for inc, seq in streams.items())
+    """Whether local watermarks ``current`` cover every stream in ``target``.
+
+    A stream from an incarnation older than the newest one we hold for its
+    origin (the origin restored from a backup) is never applied, so it does
+    not count, as in ``_note_stalled_pull``."""
+    for origin, streams in target.items():
+        local = current.get(origin, {})
+        highest = max((int(inc) for inc in local), default=0)
+        for inc, seq in streams.items():
+            if int(inc) >= highest and int(local.get(str(inc), 0)) < int(seq):
+                return False
+    return True
 
 
 def caught_up_since_start() -> bool:
@@ -1637,9 +1646,12 @@ def caught_up_since_start() -> bool:
         if wall_gap > RESUME_GAP_SECONDS or wall_gap - (mono - _gate_checked_at[1]) > RESUME_DRIFT_SECONDS:
             _resumed_at = now
             # A LAN that failed before the sleep (another network, say) may
-            # work now: probe it on the next pass before calling a peer offline.
+            # work now, and a backoff from before the sleep is stale: sync
+            # every peer now, on every route, before calling one offline.
             for link in list(_links.values()):
                 link.lan_retry_at = 0.0
+                link.reset_backoff()
+            _kick_from_thread()
     _gate_checked_at = (now, mono)
     if ctx.bootstrap_state != engine.BOOTSTRAP_READY:
         return False

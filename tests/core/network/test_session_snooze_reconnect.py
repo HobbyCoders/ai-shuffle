@@ -350,21 +350,44 @@ async def test_pass_spanning_a_sleep_does_not_count(workers):
             assert transport.caught_up_since_start()
 
 
-async def test_resume_ends_the_lan_reprobe_wait(workers):
-    """A LAN that failed before the sleep (another network) is probed again
-    before the peer can be called offline."""
+async def test_resume_ends_the_lan_reprobe_wait_and_backoff(workers, monkeypatch):
+    """A LAN that failed before the sleep (another network) is probed again,
+    and a backoff from before the sleep is dropped, so the gate reopens on the
+    next pass instead of after the backoff."""
+    kicks = []
+    monkeypatch.setattr(transport, "_kick_from_thread", lambda: kicks.append(1))
     a, b = _pair(workers)
     with a.active():
         store.touch_member(b.device_id, endpoints=["https://mirror.example.com"])
         link = transport._links[b.device_id] = transport.PeerLink(b.device_id, ["https://mirror.example.com"])
         link.lan_endpoints = ["http://192.168.1.20:8000"]
         link._lan_failed(OSError("no route"))
+        for _ in range(4):
+            link.note_failure()
         assert link.lan_retry_at > time.monotonic()
+        assert link.backoff_until > time.monotonic()
         transport.caught_up_since_start()
-        assert link.lan_retry_at > time.monotonic()  # no sleep: the wait stands
+        # No sleep: the waits stand.
+        assert link.lan_retry_at > time.monotonic() and link.backoff_until > time.monotonic()
+        assert kicks == []
         transport._gate_checked_at = (time.time() - 20, transport._awake_seconds() - 1)
         transport.caught_up_since_start()
         assert link.lan_retry_at == 0.0
+        assert link.backoff_until == 0.0 and link.failures == 0
+        assert kicks == [1]
+
+
+def test_superseded_incarnation_does_not_hold_the_gate():
+    """An origin restored from a backup moves to a new incarnation; the old
+    one is never applied again, so a peer still advertising it does not leave
+    us behind forever."""
+    current = {"dev-c": {"2": 7}}
+    assert transport._reached(current, {"dev-c": {"1": 50, "2": 7}})
+    assert not transport._reached(current, {"dev-c": {"1": 50, "2": 8}})
+    # Without a newer incarnation, the old stream still has to be pulled.
+    assert not transport._reached({"dev-c": {"1": 40}}, {"dev-c": {"1": 50}})
+    assert not transport._reached({}, {"dev-c": {"1": 1}})
+    assert transport._reached({"dev-c": {"1": 50}}, {"dev-c": {"1": 50}})
 
 
 def test_awake_clock_is_monotonic_off_windows(monkeypatch):
