@@ -83,13 +83,16 @@ model *reads* framing tokens even when they can't structurally escape.
   `write` (→ prompts under `on_write`) when any argument names a credential
   file — `cat .env` does not sail under the read-only fast path. Letter case
   is ignored (`.ENV` opens `.env` on Windows and macOS), a relative operand
-  is also read from the call's own `cwd` (`cat credentials` with `cwd`
-  `~/.aws`), and a `..` after a named folder asks, because that folder can
-  be a link. The same holds for the process environment, which carries the
+  is also read from the folder the shell starts in (the call's own `cwd`,
+  else the session's working folder: `cat credentials` in `~/.aws`), and a
+  `..` after a named folder asks, in an operand or in `cwd`, because that
+  folder can be a link. The same holds for the process environment, which carries the
   provider keys and `GH_TOKEN` on purpose: bare `env` and `printenv`,
-  `printenv GH_TOKEN`, `/proc/<pid>/environ` (by any spelling, glob or
-  `cwd`), awk's `ENVIRON` and jq's `env` all prompt, and so does a jq program
-  the classifier cannot read (`-f`, `-L`, `import`, `include`).
+  `printenv GH_TOKEN`, `/proc/<pid>/environ` (by any spelling or `cwd`, and
+  any glob that can select a process folder), awk's `ENVIRON` and jq's `env`
+  all prompt, and so does a jq program the classifier cannot read (`-f`,
+  `-L`, `import`, `include`, a `#` comment). jq words are read where jq
+  reads them: `include"m";` and `"\(env)"` count, `.env` and `"env"` do not.
 - The classifier rates a command read-only only when the shell runs the
   words as written. A `$` expansion outside single quotes (`-exe${x}c`,
   `$'-exec'`, `.e${x}nv`, `$GH_TOKEN`), a brace list, a quoted word made only
@@ -104,9 +107,16 @@ model *reads* framing tokens even when they can't structurally escape.
 - **Approvals and expansion.** "Always allow" is recorded per program
   (`git`, `npm run`, `timeout git`). A command gets no label, so its approval
   covers that call only, when the shell can replace a word the label is read
-  from: `$X status`, `timeout $T git status`, `npm $X`. An allow rule does
-  not match such a command either. Deny and ask rules match on the widest
-  reading of the text.
+  from: `$X status`, `timeout $T git status`, `npm $X`. With options before
+  the subcommand (`npm --prefix web run build`) the label is the bare program
+  and any expanding word after them makes the approval one-shot. An allow
+  rule does not match such a command either. Deny and ask rules match on the
+  widest reading of the text. Monitor's `command` is read by the same rules
+  as Bash's, under any server prefix.
+- **Monitor's script fallback.** Monitor runs a script that lost its exec bit
+  through `sh`, but only when the command names it by path (`./launch.sh`).
+  A bare name is the program on PATH, as the permission check read it; a
+  file of that name in the working folder is never run in its place.
 - **cmd.exe (Windows without Git Bash).** The classifier reads POSIX syntax
   and cmd.exe does not, and cmd.exe runs `git.cmd` from the working folder
   before the `git` on PATH. There nothing is rated read-only, every approval
@@ -123,9 +133,11 @@ model *reads* framing tokens even when they can't structurally escape.
   is no longer a repository to `git -C`, and no config can name a program for
   a status read. A real bare repository still works with `--git-dir`. These
   settings need git 2.38; an older git ignores them without a word. The
-  classifier asks the shell's own git for its version once per process, and
-  when it is older, missing or silent, no git command is rated read-only:
-  each one prompts. `--output`, `--ext-diff` and `--textconv` prompt in any
+  classifier asks git for its version through the same shell and environment
+  the command gets, the session's settings `env` included, so a `PATH` that
+  puts another git first is the one that is checked. The answer is kept per
+  environment. When that git is older, missing or silent, no git command is
+  rated read-only: each one prompts. `--output`, `--ext-diff` and `--textconv` prompt in any
   shortened form (`--ext-d`). What this does not cover: a checkout whose own
   `.git/config` is already hostile can name a diff driver or a filter that
   `git diff` runs, so writes to `.git` have to stay behind a prompt.

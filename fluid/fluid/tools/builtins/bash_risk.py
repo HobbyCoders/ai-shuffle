@@ -84,6 +84,7 @@ with a trailing ``.exe`` stripped.
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
 import shlex
@@ -715,16 +716,70 @@ def _printenv_ok(args: list[str]) -> bool:
     return True
 
 
-# ``env`` and ``$ENV`` are how a jq program reads the process environment;
-# ``.env`` (a field) and ``"env"`` (a string) are not.
-_JQ_ENV_RE = re.compile(r"\$ENV\b|(?<![\w.$\"])env(?![\w\"])")
+# ``env`` and ``$ENV`` are how a jq program reads the process environment.
+# ``import``/``include`` load code from a file this check never reads, and
+# ``modulemeta``/``get_search_list`` read about such files.
+_JQ_OUTSIDE_WORDS = frozenset({
+    "env", "$ENV", "import", "include", "modulemeta", "get_search_list",
+})
+_JQ_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*")
 
 
-# Code jq loads from a file is code this check never reads. As with ``env``,
-# ``.include`` (a field) and ``"import"`` (a string) are not the keyword.
-_JQ_MODULE_RE = re.compile(
-    r"(?<![\w.$\"])(?:import|include|modulemeta|get_search_list)(?![\w\"])"
-)
+def _jq_reads_outside(text: str) -> bool:
+    """True when jq code in ``text`` can read the environment or load a file.
+
+    The words are read where jq reads them: outside string literals, and
+    inside a string's ``\\(...)`` interpolation, which is code again. So
+    ``include"mod";`` and ``"\\(env)"`` count, while ``.env`` (a field),
+    ``"env"`` (a string) and ``$environment`` (another name) do not. A ``#``
+    outside a string starts a comment, and jq versions disagree on where one
+    ends, so a comment asks; so does a string that never closes.
+    """
+    i, n = 0, len(text)
+    in_string = False
+    depth = 0
+    resume_string_at: list[int] = []  # paren depth at each open interpolation
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == "\\":
+                if i + 1 < n and text[i + 1] == "(":
+                    resume_string_at.append(depth)
+                    depth += 1
+                    in_string = False
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "#":
+            return True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if resume_string_at and resume_string_at[-1] == depth:
+                resume_string_at.pop()
+                in_string = True
+        else:
+            match = _JQ_NAME_RE.match(text, i)
+            if match is not None:
+                name = match.group(0)
+                before = text[i - 1] if i else ""
+                field = before == "." and (i < 2 or text[i - 2] != ".")
+                if before == "$":
+                    name = "$" + name
+                if not field and name in _JQ_OUTSIDE_WORDS:
+                    return True
+                i = match.end()
+                continue
+        i += 1
+    return in_string or bool(resume_string_at)
+
+
 _JQ_FLAGS = frozenset({
     "--raw-output", "--raw-output0", "--join-output", "--ascii-output",
     "--compact-output", "--slurp", "--null-input", "--raw-input", "--sort-keys",
@@ -748,7 +803,7 @@ def _jq_ok(args: list[str]) -> bool:
     ``-L``/``--library-path`` take the filter or its modules from a file, and
     ``import``/``include`` load one from inside the filter.
     """
-    if any(_JQ_ENV_RE.search(a) or _JQ_MODULE_RE.search(a) for a in args):
+    if any(_jq_reads_outside(a) for a in args):
         return False
     filter_seen = False
     i = 0
@@ -1270,6 +1325,10 @@ def _label_words_vary(words: list[_Word]) -> bool:
             return any(w.varies for w in rest)
         return _label_words_vary(rest[1:] if program == "timeout" else rest)
     if program in SUBCOMMAND_PROGRAMS and rest:
+        if rest[0].value.startswith("-"):
+            # ``npm --prefix web $X``: which word is the subcommand depends on
+            # options this module does not parse, so any expansion counts.
+            return any(w.varies for w in rest)
         return rest[0].varies
     return False
 
@@ -1372,7 +1431,8 @@ def _scope_label(words: list[_Word]) -> str | None:
     subcommand. ``timeout $T git status`` runs ``rm`` when ``$T`` is ``5 rm``,
     and a label of ``timeout git`` would have covered it. Words after those
     may expand freely (``git commit -m "$MSG"``): they cannot change which
-    program runs.
+    program runs. When options come before the subcommand, every later word
+    counts, because any of them may be the subcommand.
     """
     at = 0
     while at < len(words) and _ENV_ASSIGNMENT.match(words[at].value):
@@ -1400,9 +1460,14 @@ def _scope_label(words: list[_Word]) -> str | None:
         inner = _scope_label(rest)
         return None if inner is None else f"{program} {inner}"
     if program in SUBCOMMAND_PROGRAMS:
+        if rest and rest[0].value.startswith("-"):
+            # Options first (``npm --prefix web run build``): the subcommand
+            # is somewhere after them, so the label is the bare program and
+            # no later word may be one the shell fills in.
+            return None if any(w.varies for w in rest) else program
         if rest and rest[0].varies:
             return None
-        if rest and not rest[0].value.startswith("-"):
+        if rest:
             return f"{program} {rest[0].value.lower()}"
         return program
     return program
@@ -1490,13 +1555,6 @@ _SENSITIVE_EXAMPLE_PATHS = (
     ".aws/credentials", ".ssh/config",
     ".claude/.credentials.json", ".config/gh/hosts.yml",
     ".credential-keys/server.key", "chrome-profile/Default/Cookies",
-    "proc/self/environ", "proc/1/environ",
-)
-# What ``_names_process_environment`` covers, for a glob written from the root.
-_PROC_EXAMPLE_PATHS = (
-    "proc", "proc/self", "proc/1", "proc/thread-self",
-    "proc/self/environ", "proc/1/environ", "proc/thread-self/environ",
-    "proc/self/task/1", "proc/self/task/1/environ",
 )
 _GLOB_CHARS = frozenset("*?[{")
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
@@ -1552,7 +1610,7 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
         parts = [p for p in alt.replace("\\", "/").lower().split("/") if p]
         if not parts:
             continue
-        if alt.replace("\\", "/").startswith("/") and _glob_could_name_process(parts):
+        if _glob_could_name_process(parts, rooted=alt.replace("\\", "/").startswith("/")):
             return True
         if any(fnmatchcase(name, parts[-1]) for name in _SENSITIVE_EXAMPLE_NAMES):
             return True
@@ -1566,25 +1624,111 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
     return False
 
 
-def _glob_could_name_process(parts: list[str]) -> bool:
-    """True when a glob written from the root (``/proc/[0-9]*/environ``,
-    ``/pro?/self``, ``/**/environ``) can match a process folder or its
-    environment file. ``**`` stands for any number of folders in zsh and in
-    bash with globstar, so it is tried as none to three of them."""
+def _glob_matches_name(glob: str, name: str) -> bool:
+    """Can the one-folder glob ``glob`` expand to ``name``."""
     from fnmatch import fnmatchcase
 
+    if "[:" in glob or "[=" in glob or "[." in glob:
+        return True  # a POSIX class fnmatch does not read: assume it can
+    return fnmatchcase(name, glob)
+
+
+def _glob_matches_a_number(glob: str) -> bool:
+    """Can the one-folder glob ``glob`` expand to a name made of digits.
+
+    Every process has such a folder under ``/proc`` and their numbers are not
+    known ahead, so this asks about the pattern rather than trying samples:
+    each fixed character must be a digit and each ``[...]`` must admit one.
+    """
+    from fnmatch import fnmatchcase
+
+    if not glob:
+        return False
+    if "[:" in glob or "[=" in glob or "[." in glob:
+        return True
+    i, n = 0, len(glob)
+    while i < n:
+        ch = glob[i]
+        if ch in "*?":
+            i += 1
+            continue
+        if ch == "[":
+            close = glob.find("]", i + 2)  # a ``]`` right after ``[`` is a member
+            if close != -1:
+                group = glob[i: close + 1]
+                if not any(fnmatchcase(digit, group) for digit in "0123456789") and not (
+                    group.startswith("[^")  # bash also reads ``^`` as "not"
+                ):
+                    return False
+                i = close + 1
+                continue
+        if not ch.isdigit():
+            return False
+        i += 1
+    return True
+
+
+def _glob_names_a_process(glob: str) -> bool:
+    return (
+        _glob_matches_a_number(glob)
+        or _glob_matches_name(glob, "self")
+        or _glob_matches_name(glob, "thread-self")
+    )
+
+
+def _process_tail(parts: list[str]) -> bool:
+    """``parts`` after ``proc/<process>``: nothing (the process folder), its
+    ``environ``, or the same under ``task/<thread>``."""
+    if not parts:
+        return True
+    if len(parts) == 1:
+        return _glob_matches_name(parts[0], "environ") or _glob_matches_name(parts[0], "task")
+    if not _glob_matches_name(parts[0], "task"):
+        return False
+    return len(parts) == 2 or (len(parts) == 3 and _glob_matches_name(parts[2], "environ"))
+
+
+def _glob_could_name_process(parts: list[str], *, rooted: bool) -> bool:
+    """True when a glob (``/proc/[0-9]*/environ``, ``/pro?/self``,
+    ``/**/environ``, ``proc/1*/environ``) can match a process folder or its
+    environment file: the paths ``_names_process_environment`` covers.
+
+    ``**`` stands for any number of folders in zsh and in bash with globstar,
+    so it is tried as none to three of them.
+    """
     shapes = [parts]
     if "**" in parts:
         at = parts.index("**")
         shapes = [parts[:at] + ["*"] * count + parts[at + 1:] for count in range(4)]
-    for shape in shapes:
-        for example in _PROC_EXAMPLE_PATHS:
-            names = example.split("/")
-            if len(names) == len(shape) and all(
-                fnmatchcase(name, glob) for name, glob in zip(names, shape)
-            ):
-                return True
-    return False
+    return any(_shape_names_process(shape, rooted=rooted) for shape in shapes)
+
+
+def _shape_names_process(parts: list[str], *, rooted: bool) -> bool:
+    # The file itself, whatever leads up to it: ``link/proc/1*/environ``.
+    for at in range(len(parts)):
+        if (
+            len(parts) - at >= 3
+            and _glob_matches_name(parts[at], "proc")
+            and _glob_names_a_process(parts[at + 1])
+            and _glob_matches_name(parts[-1], "environ")
+            and _process_tail(parts[at + 2:])
+        ):
+            return True
+    if not rooted:
+        return False
+    # From the root: ``/proc``, a process folder, or what is under it.
+    # ``/proc/<any>/root`` is ``/`` again, any number of times.
+    at = 0
+    while True:
+        if at >= len(parts) or not _glob_matches_name(parts[at], "proc"):
+            return False
+        rest = parts[at + 1:]
+        if not rest or (_glob_names_a_process(rest[0]) and _process_tail(rest[1:])):
+            return True
+        if len(rest) >= 2 and _glob_matches_name(rest[1], "root"):
+            at += 3
+            continue
+        return False
 
 
 def _climbs_through_a_folder(path: str) -> bool:
@@ -1622,11 +1766,12 @@ def _touches_sensitive_path(command: str, cwd: object = None) -> bool:
     """
     from fluid.tools.hardening import is_sensitive_path
 
-    base = _working_folder(cwd)
-    if base is not None and (
-        _names_process_environment(base) or is_sensitive_path(base + "/x")
-    ):
-        return True  # ``rg token`` with no operand reads the folder it runs in
+    bases = _working_folders(cwd)
+    if bases is None:
+        return True
+    for base in bases:
+        if _names_process_environment(base) or is_sensitive_path(base + "/x"):
+            return True  # ``rg token`` with no operand reads the folder it runs in
     lines = _lines(command)
     if lines is None:
         return True
@@ -1650,7 +1795,7 @@ def _touches_sensitive_path(command: str, cwd: object = None) -> bool:
             glob = _has_unquoted_glob(raw)
             if _climbs_through_a_folder(literal):
                 return True
-            for path in _operand_spellings(literal, base):
+            for path in _operand_spellings(literal, bases):
                 if is_sensitive_path(path) or _names_process_environment(path):
                     return True
                 if glob and _glob_could_name_sensitive_path(path):
@@ -1658,14 +1803,32 @@ def _touches_sensitive_path(command: str, cwd: object = None) -> bool:
     return False
 
 
-def _working_folder(cwd: object) -> str | None:
-    """The tool call's own ``cwd`` with forward slashes, or None."""
+def _working_folders(cwd: object) -> list[str] | None:
+    """The folder the shell starts in (the call's ``cwd``, else the session's),
+    as written and as the kernel resolves it, with forward slashes. Empty
+    when neither is known; None when the text does not say where it is.
+
+    A relative operand is read from this folder, and ``..`` in it climbs from
+    where the folder really is: with ``cwd`` ``/dev/fd``, ``../environ`` is
+    ``/proc/self/environ``. So links in ``cwd`` are followed here, and a
+    ``cwd`` that itself climbs through a named folder (``/dev/fd/..``) asks.
+    """
     if not isinstance(cwd, str) or not cwd.strip():
+        return []
+    written = cwd.strip().replace("\\", "/").rstrip("/") or "/"
+    if _climbs_through_a_folder(written):
         return None
-    return cwd.strip().replace("\\", "/").rstrip("/") or "/"
+    folders = [written]
+    try:
+        resolved = os.path.realpath(cwd.strip()).replace("\\", "/").rstrip("/") or "/"
+    except (OSError, ValueError):
+        return None
+    if resolved not in folders:
+        folders.append(resolved)
+    return folders
 
 
-def _operand_spellings(literal: str, base: str | None) -> list[str]:
+def _operand_spellings(literal: str, bases: list[str]) -> list[str]:
     """``literal`` as written and, when relative, under the call's ``cwd``.
 
     ``cat credentials`` with ``cwd`` ``~/.aws`` and ``cat self/environ`` with
@@ -1673,8 +1836,8 @@ def _operand_spellings(literal: str, base: str | None) -> list[str]:
     """
     spellings = [literal]
     path = literal.replace("\\", "/")
-    if base is not None and path and not path.startswith(("/", "~")) and ":" not in path[:2]:
-        spellings.append(posixpath.normpath(posixpath.join(base, path)))
+    if path and not path.startswith(("/", "~")) and ":" not in path[:2]:
+        spellings.extend(posixpath.normpath(posixpath.join(base, path)) for base in bases)
     return spellings
 
 
@@ -1709,4 +1872,7 @@ def classify(input: dict[str, Any]) -> str:
     if not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
-    return WRITE if _touches_sensitive_path(command, input.get("cwd")) else SAFE
+    # The shell starts in the call's ``cwd``, or in the session's folder.
+    from fluid.tools.child_env import launch_cwd
+
+    return WRITE if _touches_sensitive_path(command, input.get("cwd") or launch_cwd()) else SAFE

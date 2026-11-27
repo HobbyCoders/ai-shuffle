@@ -111,9 +111,9 @@ def git_probe(monkeypatch: pytest.MonkeyPatch):
         return subprocess.CompletedProcess(argv, answer["returncode"], answer["stdout"], "")
 
     monkeypatch.setattr(child_env.subprocess, "run", run)
-    child_env.git_hardening_supported.cache_clear()
+    child_env._git_answers_with_hardening.cache_clear()
     yield calls, answer
-    child_env.git_hardening_supported.cache_clear()
+    child_env._git_answers_with_hardening.cache_clear()
 
 
 def test_the_probe_asks_git_once_through_the_agent_shell(git_probe) -> None:
@@ -149,6 +149,28 @@ def test_a_current_git_keeps_its_reads_unprompted(git_probe) -> None:
     from fluid.tools.builtins.bash_risk import classify
 
     assert classify({"command": "git status"}) == "safe"
+
+
+def test_the_probe_runs_in_the_environment_the_sessions_shells_get(git_probe) -> None:
+    """One answer per environment: a session whose settings change PATH is
+    asked about again, with that PATH."""
+    calls, _ = git_probe
+    seen: list[dict[str, str]] = []
+    real_run = child_env.subprocess.run
+
+    def run(argv, **kwargs):
+        seen.append(dict(kwargs["env"]))
+        return real_run(argv, **kwargs)
+
+    child_env.subprocess.run = run  # the fixture's monkeypatch restores it
+    assert child_env.git_hardening_supported() is True
+    assert child_env.git_hardening_supported({"PATH": "/opt/old-git/bin"}) is True
+    assert child_env.git_hardening_supported({"PATH": "/opt/old-git/bin"}) is True
+    assert len(calls) == 2
+    assert seen[1]["PATH"] == "/opt/old-git/bin"
+    assert seen[0].get("PATH") != "/opt/old-git/bin"
+    # The git settings are part of what the shell gets, so of what is asked.
+    assert _config(seen[1])[-len(AGENT_GIT_CONFIG):] == list(AGENT_GIT_CONFIG)
 
 
 # ─── against the real git ────────────────────────────────────────────────────
@@ -285,3 +307,62 @@ async def test_the_bash_tool_applies_the_settings(
     # And with the planted folder as the command's working directory.
     await bash_handler({"command": "git status"}, ToolCtx(cwd=str(repo / "planted")))
     assert not marker.exists()
+
+
+@needs_git
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in old git is a POSIX script")
+def test_an_older_git_first_on_the_sessions_path_makes_git_ask(
+    tmp_path: Path, git_env: dict[str, str]
+) -> None:
+    """The worker's own git is current, but this session's settings put an
+    old one first on PATH, and that is the one its shells run. The check has
+    to ask that one: it ignores the settings without saying so."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as BASH_SPEC
+    from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
+
+    old = tmp_path / "old-git"
+    old.mkdir()
+    script = old / "git"
+    script.write_text("#!/bin/sh\necho 'git version 2.30.2'\n")
+    script.chmod(0o755)
+    overlay = {"PATH": f"{old}{os.pathsep}{os.environ['PATH']}"}
+
+    child_env._git_answers_with_hardening.cache_clear()
+    try:
+        assert child_env.git_hardening_supported() is True
+        assert child_env.git_hardening_supported(overlay) is False
+
+        engine = PermissionEngine("on_write")
+        for spec in (BASH_SPEC, MONITOR_SPEC):
+            call = {"command": "git status"}
+            assert engine.decide(spec, call).decision == "allow"
+            assert engine.decide(spec, call, env=overlay).decision == "ask"
+            # Only git depends on it.
+            assert engine.decide(spec, {"command": "ls"}, env=overlay).decision == "allow"
+            # The overlay does not outlive the call it was given for.
+            assert engine.decide(spec, call).decision == "allow"
+    finally:
+        child_env._git_answers_with_hardening.cache_clear()
+
+
+@needs_git
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in old git is a POSIX script")
+def test_the_bash_tool_runs_the_git_the_check_asked(
+    tmp_path: Path, git_env: dict[str, str]
+) -> None:
+    """The other half: the handler starts its shell with the same settings
+    ``env`` the check was given, so the git it runs is the git that answered."""
+    import asyncio
+
+    old = tmp_path / "old-git"
+    old.mkdir()
+    script = old / "git"
+    script.write_text("#!/bin/sh\necho 'stand-in git ran'\n")
+    script.chmod(0o755)
+    overlay = {"PATH": f"{old}{os.pathsep}{os.environ['PATH']}"}
+
+    ctx = ToolCtx(cwd=str(tmp_path))
+    ctx.extra["settings_env"] = overlay
+    outcome = asyncio.run(bash_handler({"command": "git --version"}, ctx))
+    assert "stand-in git ran" in outcome.text

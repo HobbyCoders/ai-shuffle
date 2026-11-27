@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,16 +121,28 @@ class PermissionEngine:
         return self.decide(spec, input).decision
 
     def decide(
-        self, spec: ToolSpec, input: dict[str, Any], *, cwd: str | None = None
+        self,
+        spec: ToolSpec,
+        input: dict[str, Any],
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Verdict:
         """Like :meth:`evaluate`, but says where the decision came from.
 
         The policy axis keys off the call's *effective* risk — the tool's
         ``classify_risk`` hook when it has one (Bash reports read-only
         commands as safe), its static ``risk`` otherwise. ``cwd`` lets path
-        rules see the resolved spelling of a relative path.
+        rules see the resolved spelling of a relative path, and a risk hook
+        the folder a shell command starts in. ``env`` is the
+        session's settings ``env`` (``ctx.extra["settings_env"]``), which its
+        shells start with: a risk hook that depends on what a command finds
+        there (which git is first on PATH) is asked about that environment.
         """
-        risk = spec.effective_risk(input)
+        from fluid.tools.child_env import launch_context
+
+        with launch_context(env, cwd):
+            risk = spec.effective_risk(input)
         rule = match_rule(self.rules, spec.name, input, cwd=cwd)
         if rule is not None:
             return Verdict(rule.decision, "rule", risk, rule)

@@ -504,7 +504,8 @@ async def _gate_call(
         hook_reason = decision.note
     spec = registry.get(name)
     if permissions is not None and spec is not None:
-        decided = permissions.decide(spec, args, cwd=ctx.cwd)
+        decided = permissions.decide(
+            spec, args, cwd=ctx.cwd, env=ctx.extra.get("settings_env"))
         verdict = decided.decision
         deny_message: str | None = decided.deny_message()
         if hook_permission == "allow" and verdict != "deny":

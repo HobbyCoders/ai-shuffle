@@ -43,7 +43,7 @@ def _git_honours_the_agent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     every machine; the old-git case sets it the other way."""
     from fluid.tools import child_env
 
-    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: True)
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda overlay=None: True)
 
 
 # ─── classifier table ────────────────────────────────────────────────────────
@@ -913,7 +913,23 @@ REWRITTEN_BY_THE_SHELL = [
     ("jq --from-file prog.jq a.json", None),
     ("jq -L . 'import \"m\" as m; m::f' a.json", None),
     ("jq 'include \"m\"; f' a.json", None),
+    # jq needs no space between the keyword and the module's quoted name
+    ("jq 'include\"m\"; f' a.json", None),
+    ("jq 'import\"m\"as m; m::f' a.json", None),
+    ("jq '. as $x|include\"m\"; f' a.json", None),
+    # code inside a string's interpolation is code
+    ("jq -n '\"\\(env)\"'", None),
+    ("jq -n '\"a \\(\"b \\($ENV.GH_TOKEN)\")\"'", None),
     ("jq --unknown-option . a.json", None),
+    # a process folder by pattern: the numbers are not known ahead
+    ("cat /proc/[2-9]*/environ", None),
+    ("cat /proc/??/environ", None),
+    ("cat /proc/[0-9][0-9]*/environ", None),
+    ("cat /proc/*/task/*/environ", None),
+    ("grep -a TOKEN /proc/[1-9]*/environ", None),
+    ("cat /proc/[a-z]*/environ", None),  # self
+    # jq versions disagree on where a comment ends, so one asks
+    ("jq '.a # import env' a.json", None),
     ("awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", None),
     # git runs the program the repository's own config names
     ("git diff --ext-diff", None),
@@ -996,7 +1012,10 @@ STILL_READ_ONLY = [
     "git diff HEAD~1 -- sub/*.py",
     "jq --arg name value '.a' a.json",
     "jq -r '.include, .import' a.json",
+    "jq '\"import this, include that, env\"' a.json",
     "cat ../a.txt",
+    "cat /proc/cpu*",
+    "cat /proc/[c-m]*/environ",  # no process folder starts with these letters
 ]
 
 
@@ -1068,16 +1087,32 @@ def test_a_command_rated_safe_changes_nothing_when_the_shell_runs_it(
         ("cat credentials", "C:\\Users\\sam\\.aws"),
         ("cat hosts.yml", "/home/sam/.config/gh"),
         ("rg token", "/data/.credential-keys"),
+        # the kernel follows /dev/fd before it climbs: this is /proc/self
+        ("cat environ", "/dev/fd/.."),
+        ("cat ../environ", "/dev/fd"),
     ],
 )
-def test_a_relative_operand_is_read_from_the_calls_own_working_folder(
+def test_a_relative_operand_is_read_from_the_folder_the_shell_starts_in(
     command: str, cwd: str
 ) -> None:
     """``cwd`` is a field of the tool call, so the model picks it: ``cat
-    self/environ`` there is ``/proc/self/environ``."""
+    self/environ`` there is ``/proc/self/environ``. Without one the shell
+    starts in the session's folder, which reads the same files."""
+    from fluid.tools.child_env import launch_context
+
     assert classify({"command": command}) == "safe"
     assert classify({"command": command, "cwd": cwd}) == "write"
     assert classify({"command": "cat notes.txt", "cwd": "/workspace/app"}) == "safe"
+
+    with launch_context(None, cwd):
+        assert classify({"command": command}) == "write"
+        # the call's own folder wins over the session's
+        assert classify({"command": "cat notes.txt", "cwd": "/workspace/app"}) == "safe"
+    assert classify({"command": command}) == "safe"
+
+    engine = PermissionEngine("on_write")
+    assert engine.decide(BASH_SPEC, {"command": command}, cwd=cwd).decision == "ask"
+    assert engine.decide(BASH_SPEC, {"command": command}, cwd="/workspace/app").decision == "allow"
 
 
 def test_git_is_not_read_only_when_it_ignores_the_agent_settings(
@@ -1087,7 +1122,7 @@ def test_git_is_not_read_only_when_it_ignores_the_agent_settings(
     folder names, without saying so. There every git command asks."""
     from fluid.tools import child_env
 
-    monkeypatch.setattr(child_env, "git_hardening_supported", lambda: False)
+    monkeypatch.setattr(child_env, "git_hardening_supported", lambda overlay=None: False)
     for command in ("git status", "git log --oneline", "git -C sub diff", "ls && git status"):
         assert classify({"command": command}) == "write", command
     assert classify({"command": "ls"}) == "safe"
@@ -1106,6 +1141,12 @@ EXPANSION_WHERE_THE_PROGRAM_IS_NAMED = [
     "npm r* build",
     "FOO={a,b} git status",
     "env $X git status",
+    # options before the subcommand: any later word may be the subcommand
+    "npm --prefix web $X",
+    "npm --prefix $D run build",
+    "npm --prefix web r* build",
+    "make -C sub $T",
+    "timeout 5 npm --prefix web $X",
 ]
 
 
@@ -1118,11 +1159,14 @@ def test_an_approval_does_not_cover_a_program_the_shell_fills_in(command: str) -
 
     assert scope_labels(command) is None
     assert simple_commands(command, for_allow=True) is None
-    if command.split()[0] not in ("timeout", "sudo", "npm", "env"):
+    if command.split()[0] not in ("timeout", "sudo", "npm", "env", "make"):
         assert program_names(command) is None
 
     session = PermissionEngine("on_write")
-    for approved in ("timeout 5 git status", "git status", "npm run build", "sudo apt list"):
+    for approved in (
+        "timeout 5 git status", "git status", "npm run build", "sudo apt list",
+        "npm --prefix web run build", "make -C sub build", "timeout 5 npm --prefix web test",
+    ):
         session.allow_always(BASH_SPEC.name, BASH_SPEC.scope_of({"command": approved}))
     assert session.decide(BASH_SPEC, {"command": "timeout 9 git status"}).decision == "allow"
     assert session.decide(BASH_SPEC, {"command": command}).decision == "ask"
@@ -1140,6 +1184,9 @@ def test_expansion_after_the_program_keeps_its_approval() -> None:
     assert scope_labels("npm run build -- $ARGS") == frozenset({"npm run"})
     assert scope_labels("FOO=$BAR npm test") == frozenset({"npm test"})
     assert scope_labels("timeout 5 git add src/*.py") == frozenset({"timeout git"})
+    # Options first: the label is the bare program, kept while every word is fixed.
+    assert scope_labels("npm --prefix web run build") == frozenset({"npm"})
+    assert scope_labels("npm --prefix web run test") == frozenset({"npm"})
     assert simple_commands('git commit -m "$MSG"', for_allow=True) == ['git commit -m "$MSG"']
     # A deny or ask rule still sees every part, expansion or not.
     assert simple_commands("$X status && rm -rf y") == ["$X status", "rm -rf y"]
@@ -1215,3 +1262,35 @@ def test_nothing_is_read_only_or_approved_ahead_under_cmd_exe(
     deny_rm = Rule(tool="Bash", decision="deny", input_globs={"command": "rm *"})
     denied = PermissionEngine("never_ask", rules=[deny_rm])
     assert denied.decide(BASH_SPEC, {"command": "dir && rm -rf x"}).decision == "deny"
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Monitor", "mcp__builtins__Monitor"])
+def test_an_allow_rule_reads_a_monitor_command_as_strictly_as_a_bash_one(
+    tool: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Monitor hands its ``command`` to the same shell. Its allow rules were
+    matched as plain text, so ``git *`` covered ``git status && rm -rf x``
+    and, under cmd.exe, a ``git.cmd`` in the working folder."""
+    from dataclasses import replace
+
+    from fluid.tools import shell
+    from fluid.tools.builtins.monitor import SPEC as MONITOR_SPEC
+
+    spec = BASH_SPEC if tool == "Bash" else replace(MONITOR_SPEC, name=tool)
+    allow_git = Rule(tool=tool, decision="allow", input_globs={"command": "git *"})
+    engine = PermissionEngine("always_ask", rules=[allow_git])
+    assert engine.decide(spec, {"command": "git status"}).decision == "allow"
+    for command in ("git status && rm -rf x", "git status; $X", "git status #\nrm -rf x"):
+        assert engine.decide(spec, {"command": command}).decision == "ask", command
+
+    deny_rm = Rule(tool=tool, decision="deny", input_globs={"command": "rm *"})
+    denied = PermissionEngine("never_ask", rules=[deny_rm])
+    assert denied.decide(spec, {"command": "ls && rm -rf x"}).decision == "deny"
+
+    cmd = shell.ShellInfo(name="cmd", path="cmd.exe", argv_prefix=("cmd.exe", "/d", "/s", "/c"))
+    monkeypatch.setattr(shell, "resolve_shell", lambda: cmd)
+    assert engine.decide(spec, {"command": "git status"}).decision == "ask"
+    assert PermissionEngine("on_write", rules=[allow_git]).decide(
+        spec, {"command": "git status"}
+    ).decision == "ask"
+    assert denied.decide(spec, {"command": "dir && rm -rf x"}).decision == "deny"

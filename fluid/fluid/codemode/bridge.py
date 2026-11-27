@@ -300,7 +300,8 @@ class HostBridge:
         # PermissionEngine: allow / deny / ask, plus the doom-loop guard. A
         # hook's allow answers the prompt, never a configured deny; as on the
         # native gate it also answers the repeat guard's prompt.
-        decided = self._permissions.decide(spec, tool_input, cwd=self._ctx.cwd)
+        decided = self._permissions.decide(
+            spec, tool_input, cwd=self._ctx.cwd, env=self._ctx.extra.get("settings_env"))
         verdict = decided.decision
         if hook_permission == "allow" and verdict != "deny":
             verdict = "allow"

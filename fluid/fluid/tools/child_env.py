@@ -18,12 +18,14 @@ variables (comma separated) that should still reach children.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
 PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 
@@ -215,25 +217,80 @@ def git_version_supports_hardening(version_output: str) -> bool:
     return (int(match.group(1)), int(match.group(2))) >= GIT_HARDENING_MIN_VERSION
 
 
-@functools.lru_cache(maxsize=1)
-def git_hardening_supported() -> bool:
+# The settings ``env`` of the session whose tool call is being rated. A
+# session can put another git first on PATH, so the question "does git honour
+# the settings" is asked of the environment that session's shells get, not of
+# the host's. Set by ``PermissionEngine.decide`` around the risk hook.
+_LAUNCH_OVERLAY: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
+    "fluid_launch_env_overlay", default=None
+)
+
+
+# The folder that session's shells start in when the call names none.
+_LAUNCH_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "fluid_launch_cwd", default=None
+)
+
+
+@contextlib.contextmanager
+def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None) -> Iterator[None]:
+    """Rate tool calls for shells that get ``overlay`` on top of the host
+    environment (a session's settings ``env``, or None) and start in ``cwd``
+    (the session's working folder) unless the call names another."""
+    env_token = _LAUNCH_OVERLAY.set(overlay or None)
+    cwd_token = _LAUNCH_CWD.set(cwd or None)
+    try:
+        yield
+    finally:
+        _LAUNCH_CWD.reset(cwd_token)
+        _LAUNCH_OVERLAY.reset(env_token)
+
+
+def launch_cwd() -> str | None:
+    """The working folder of the session whose tool call is being rated."""
+    return _LAUNCH_CWD.get()
+
+
+def shell_env(overlay: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a Bash or Monitor shell starts with: the host's,
+    scrubbed, the session's settings ``env`` on top, then the git settings."""
+    from fluid.context.settings_stack import layered_env
+
+    return harden_git_env(layered_env(dict(overlay) if overlay else None, base=scrub_child_env()))
+
+
+def git_hardening_supported(overlay: Mapping[str, str] | None = None) -> bool:
     """True when the git a shell command runs honours :data:`AGENT_GIT_CONFIG`.
 
-    Asked once per process, through the same shell and environment a Bash
-    command gets, so it is the git that command would find (Git Bash on
-    Windows puts its own git ahead of PATH). False when git is missing, too
-    old, or does not answer: the Bash classifier then rates no git command
-    read-only, so each one asks instead of running unprotected.
+    Asked through the same shell and environment a Bash command gets
+    (:func:`shell_env` with the session's settings ``env``; :func:`launch_context`
+    supplies it when ``overlay`` is not given), so it is the git that command
+    would find: Git Bash on Windows puts its own git ahead of PATH, and a
+    session's settings can put another one there. The answer is kept per
+    shell and environment. False when git is missing, too old, or does not
+    answer: the Bash classifier then rates no git command read-only, so each
+    one asks instead of running unprotected.
     """
     from fluid.tools.shell import resolve_shell
 
+    if overlay is None:
+        overlay = _LAUNCH_OVERLAY.get()
+    env = shell_env(overlay)
+    return _git_answers_with_hardening(
+        tuple(resolve_shell().argv_prefix), tuple(sorted(env.items()))
+    )
+
+
+@functools.lru_cache(maxsize=64)
+def _git_answers_with_hardening(argv_prefix: tuple[str, ...],
+                                env_items: tuple[tuple[str, str], ...]) -> bool:
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv, no model input
-            [*resolve_shell().argv_prefix, "git --version"],
-            env=scrub_child_env(None),
+            [*argv_prefix, "git --version"],
+            env=dict(env_items),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

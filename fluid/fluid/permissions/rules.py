@@ -209,6 +209,15 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
     return opened is not None and any(fnmatchcase(c, p) for c in opened for p in patterns)
 
 
+# Tools whose ``command`` field is a line for the shell. A host can register
+# its own under a server prefix (``mcp__builtins__Monitor``).
+SHELL_COMMAND_TOOLS = frozenset({"Bash", "Monitor"})
+
+
+def runs_shell_command(tool_name: str) -> bool:
+    return tool_name.rsplit("__", 1)[-1] in SHELL_COMMAND_TOOLS
+
+
 def _command_matches(value: str, pattern: str, decision: str) -> bool:
     from fluid.tools.builtins.bash_risk import simple_commands
 
@@ -236,7 +245,7 @@ class Rule:
             value = str(input.get(key, ""))
             if key in PATH_FIELDS:
                 ok = _path_matches(value, pat, self.decision, cwd)
-            elif name == "Bash" and key == "command":
+            elif key == "command" and runs_shell_command(name):
                 ok = _command_matches(value, pat, self.decision)
             else:
                 ok = pattern_matches(value, pat)
