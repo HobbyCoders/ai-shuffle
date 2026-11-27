@@ -8,7 +8,8 @@ clears it.
 Three things wake a snoozed chat, all through the same shared membership
 write (:func:`app.network.session_active.write_wake`):
 
-* the wake loop (:func:`maintain_snoozes`) when its time arrives;
+* the wake loop (:func:`maintain_snoozes`) when its time arrives, once this
+  worker has caught up with the peers it can reach (:func:`wake_due_once`);
 * the chat asking the owner for something (a permission or approval prompt,
   an ask-user question or a Vault request), via
   :func:`wake_for_attention`;
@@ -191,8 +192,19 @@ def wake_soon(session_id: Optional[str]) -> None:
 
 
 async def wake_due_once(now: Optional[datetime] = None) -> int:
-    """One pass of the wake loop. Returns how many chats woke."""
+    """One pass of the wake loop. Returns how many chats woke.
+
+    Nothing wakes until this worker's last sync with each peer it can reach
+    pulled everything that peer holds, or found it offline
+    (``transport.caught_up_since_start``): a worker back from hours away would
+    otherwise wake chats from its old copy, and that wake, signed after the
+    edits its peers made meanwhile (a later snooze, a settle), would replace
+    them everywhere.
+    """
     from app.db.async_database import run_sync
+    from app.network import transport
+    if not await run_sync(transport.caught_up_since_start):
+        return 0
     woke = 0
     for item in await run_sync(due_snoozes, now):
         try:
