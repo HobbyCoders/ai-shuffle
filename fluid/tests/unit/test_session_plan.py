@@ -80,26 +80,21 @@ def test_plans_saved_under_older_larger_bounds_stay_updatable():
         if task["blocked_reason"] is None:
             del task["blocked_reason"]
     assert len(json.dumps(legacy).encode()) > plan.MAX_PAYLOAD
-    # A status-only update may resend the stored title, goal and lists unchanged.
-    status_only = [{"id": t["id"], "title": t["title"], "status": "completed"} for t in legacy["tasks"][1:]]
-    status_only[0]["evidence"] = [long, long, long]
+    # Text sent now must fit the new bounds (the MCP schema enforces them
+    # first), so a status update sends a short title; stored text not resent
+    # is kept as saved.
+    status_only = [{"id": t["id"], "title": "Short title", "status": "completed"} for t in legacy["tasks"][1:]]
     document, _, _, _ = plan.apply_update(legacy, [], {
-        "action": "update", "request_id": "finish", "expected_revision": 3, "goal": "g" * 550,
-        "tasks": [*status_only, {"id": "t0", "title": "t" * 180, "status": "blocked", "blocked_reason": "r" * 450}]})
+        "action": "update", "request_id": "finish", "expected_revision": 3, "tasks": status_only})
     kept = {t["id"]: t for t in document["tasks"]}
     assert kept["t1"]["evidence"] == [long, long, long] and kept["t1"]["references"] == ["ref"] * 5
     assert kept["t0"]["blocked_reason"] == "r" * 450 and document["goal"] == "g" * 550
-    assert kept["t2"]["title"] == "t" * 180
-    # New long text is held to the new bound.
-    for change in ({"evidence": ["n" * 450]}, {"title": "n" * 180}):
+    for change in ({"evidence": [long]}, {"title": "t" * 180}):
         with pytest.raises(ValueError, match="evidence|title"):
             plan.apply_update(document, [], {"action": "update", "request_id": "resend", "expected_revision": 4,
                                              "tasks": [{"id": "t1", "title": "x", "status": "completed", **change}]})
-    with pytest.raises(ValueError, match="goal"):
-        plan.apply_update(document, [], {"action": "update", "request_id": "goal", "expected_revision": 4,
-                                         "goal": "n" * 550})
     # A new generation carries no old text, so rollover gets the current 16KiB bound.
-    done = [{"id": "t0", "title": "t" * 180, "status": "cancelled"}]
+    done = [{"id": "t0", "title": "Short title", "status": "cancelled"}]
     finished, _, _, _ = plan.apply_update(document, [], {
         "action": "update", "request_id": "cancel", "expected_revision": 4, "tasks": done})
     assert len(json.dumps(finished).encode()) > plan.MAX_PAYLOAD
