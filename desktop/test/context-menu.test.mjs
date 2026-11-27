@@ -10,6 +10,7 @@ function menu(overrides = {}) {
   let handler, template, popup;
   const replacements = [];
   const dictionary = [];
+  const copied = [];
   const win = {
     webContents: {
       on(event, callback) {
@@ -22,12 +23,16 @@ function menu(overrides = {}) {
   };
   vm.runInNewContext(source, {
     exports,
+    URL,
     require(name) {
       assert.equal(name, 'electron');
-      return { Menu: { buildFromTemplate(items) {
-        template = items;
-        return { popup(options) { popup = options; } };
-      } } };
+      return {
+        clipboard: { writeText(text) { copied.push(text); } },
+        Menu: { buildFromTemplate(items) {
+          template = items;
+          return { popup(options) { popup = options; } };
+        } },
+      };
     },
   });
   exports.attachTextContextMenu(win);
@@ -44,7 +49,7 @@ function menu(overrides = {}) {
     ...overrides,
   };
   handler({}, params);
-  return { template, popup, params, win, replacements, dictionary };
+  return { template, popup, params, win, replacements, dictionary, copied };
 }
 
 const editingRoles = ['undo', 'redo', 'cut', 'copy', 'paste', 'pasteAndMatchStyle', 'delete', 'selectAll'];
@@ -94,6 +99,35 @@ test('read-only selections never offer spelling mutations', () => {
 
 test('non-text targets do not open a menu', () => {
   assert.equal(menu({ isEditable: false, editFlags: { canSelectAll: false } }).template, undefined);
+});
+
+const readOnly = { isEditable: false, editFlags: { canCopy: false, canSelectAll: false } };
+
+test('a web link opens a menu that copies its address, even with no text to select', () => {
+  const m = menu({ ...readOnly, linkURL: 'https://example.com/docs?page=2#top' });
+  assert.equal(m.template[0].label, 'Copy Link Address');
+  assert.equal(m.template[1].type, 'separator');
+  assert.deepEqual(roles(m), ['copy', 'selectAll']);
+  m.template[0].click();
+  assert.deepEqual(m.copied, ['https://example.com/docs?page=2#top']);
+});
+
+test('a link inside selected or editable text keeps the text commands after the link item', () => {
+  const selected = menu({ isEditable: false, selectionText: 'docs', linkURL: 'http://example.com/' });
+  assert.equal(selected.template[0].label, 'Copy Link Address');
+  assert.deepEqual(roles(selected), ['copy', 'selectAll']);
+  const editable = menu({ linkURL: 'https://example.com/', misspelledWord: 'teh', dictionarySuggestions: ['the'] });
+  assert.deepEqual(Array.from(editable.template.slice(0, 5), item => item.label ?? item.type),
+    ['the', 'separator', 'Add to dictionary', 'separator', 'Copy Link Address']);
+  assert.deepEqual(roles(editable), editingRoles);
+});
+
+test('script, data and malformed links are not offered for copying', () => {
+  for (const linkURL of ['javascript:alert(1)', 'data:text/html,hi', 'file:///etc/passwd', 'not a url', '']) {
+    assert.equal(menu({ ...readOnly, linkURL }).template, undefined, linkURL);
+    const m = menu({ isEditable: false, selectionText: 'text', linkURL });
+    assert.equal(m.template.some(item => item.label === 'Copy Link Address'), false, linkURL);
+  }
 });
 
 test('popup retains the originating window, frame, coordinates and source', () => {

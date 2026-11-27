@@ -1,10 +1,22 @@
-import { Menu, type BrowserWindow, type MenuItemConstructorOptions } from 'electron';
+import { clipboard, Menu, type BrowserWindow, type MenuItemConstructorOptions } from 'electron';
 
-/** Native text editing for every document loaded in an application window. */
+/** A web link worth copying: http(s) only, never script, data or app-internal schemes. */
+export function copyableLink(url: string): string | null {
+	if (!url) return null;
+	try {
+		const { protocol } = new URL(url);
+		return protocol === 'http:' || protocol === 'https:' ? url : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Native text editing and link copying for every document loaded in an application window. */
 export function attachTextContextMenu(win: BrowserWindow): void {
 	win.webContents.on('context-menu', (_event, params) => {
 		const { editFlags, isEditable, selectionText } = params;
-		if (!isEditable && !selectionText && !editFlags.canSelectAll) return;
+		const link = copyableLink(params.linkURL);
+		if (!link && !isEditable && !selectionText && !editFlags.canSelectAll) return;
 
 		const template: MenuItemConstructorOptions[] = isEditable
 			? [
@@ -24,6 +36,13 @@ export function attachTextContextMenu(win: BrowserWindow): void {
 					{ type: 'separator' },
 					{ role: 'selectAll', enabled: editFlags.canSelectAll }
 				];
+
+		if (link) {
+			template.unshift(
+				{ label: 'Copy Link Address', click: () => clipboard.writeText(link) },
+				{ type: 'separator' }
+			);
+		}
 
 		// Electron draws the underline, but custom menus must expose Chromium's
 		// suggestions explicitly. Keep these tied to the word that was clicked.

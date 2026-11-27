@@ -87,6 +87,7 @@ class ChatActivity : NativeScreen() {
     private var reloadOnSession = true
     private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
+    private lateinit var linkMenu: ChatLinkMenu
     private var switchJob: Job? = null
     private var needsFailover = false
     /** The native worker-name bar (back, name, menu); hidden while the page draws its own. */
@@ -178,6 +179,7 @@ class ChatActivity : NativeScreen() {
             if (it == ChatDownloads.SAVED_MESSAGE) savedNotice.show(it) else { status.text = it }
         }
         downloads.install()
+        linkMenu = ChatLinkMenu(this, web, ::validDocument).also { it.install() }
         installShellBridge()
         // The page is the worker's own origin and authenticates with the Bearer token;
         // no third-party cookies. A Cloudflare Access worker's CF cookie (installed below)
@@ -685,6 +687,7 @@ class ChatActivity : NativeScreen() {
         cancelPagePermissions()
         switchJob?.cancel()
         if (::downloads.isInitialized) downloads.close()
+        if (::linkMenu.isInitialized) linkMenu.close()
         bootstrap?.remove(); bootstrap = null
         if (shellBridgeInstalled && ::web.isInitialized) runCatching { WebViewCompat.removeWebMessageListener(web, MobileUi.SHELL_BRIDGE) }
         if (::web.isInitialized) {
