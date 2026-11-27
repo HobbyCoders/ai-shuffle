@@ -125,6 +125,50 @@ def _list_entry(row):
     return entry
 
 
+#: What ``run_state`` says, for the tool note: an agent asked about a "stuck"
+#: chat needs to know whether it is running, waiting or done before it digs.
+RUN_STATE_NOTE = (
+    "run_state is sampled now by the worker that runs the chat: working (a turn is running or queued), "
+    "parked (waiting on its background work or a scheduled wake), permission (waiting for the owner to "
+    "approve a tool), question (waiting for the owner's answer), idle (nothing running), failed (idle, "
+    "and its latest turn failed), unknown (not reported). Open one with SessionView; read its worker's "
+    "log with GetAppLogs(worker=..., search=<session id>).")
+
+
+def _with_run_states(entries):
+    """Set ``run_state`` on listing entries (in place), never failing the listing.
+
+    A chat this worker runs is sampled now. Another worker's chat reads the
+    summary that worker last published, when it is that worker's own.
+    """
+    from app.network import runners, session_runtime
+    ids = [e["id"] for e in entries if e.get("run_state") is None]
+    if not ids:
+        return entries
+    try:
+        local = session_runtime.owned_states(runners.own_device_id(), session_ids=ids)
+        published = session_runtime.for_sessions([i for i in ids if i not in local])
+    except Exception:  # noqa: BLE001 - a listing without states beats no listing
+        log.warning("ListSessions: could not read run states", exc_info=True)
+        local, published = {}, {}
+    for entry in entries:
+        if entry.get("run_state") is not None:
+            continue
+        summary = published.get(entry["id"]) or {}
+        mirrored = (summary.get("state") if summary.get("owner_device_id")
+                    and summary.get("owner_device_id") == entry.get("owner_device_id") else None)
+        state = local.get(entry["id"]) or mirrored
+        entry["run_state"] = state if state in session_runtime.STATES else "unknown"
+    return entries
+
+
+def _peer_run_state(entry):
+    """The state a peer reported for its own chat, or None (older peer, bad value)."""
+    from app.network.session_runtime import STATES
+    state = entry.get("run_state") if isinstance(entry, dict) else None
+    return state if isinstance(state, str) and state in STATES else None
+
+
 def _principal(session_id):
     from app.db import mobile_tool_identity
     return mobile_tool_identity.read(session_id)
@@ -265,8 +309,10 @@ def list_sessions(session_id, data):
         ) != (caller.get("project_v2_id") or caller.get("project_id")):
             continue
         result.append(_list_entry(row))
+    _with_run_states(result)
     return {"sessions": result, "next_offset": offset + len(rows) if len(rows) == 100 else None,
-            "note": "Active means open in the sidebar, not necessarily generating. No transcripts or credentials included."}
+            "note": "Active means open in the sidebar, not necessarily generating. "
+                    + RUN_STATE_NOTE + " No transcripts or credentials included."}
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +443,9 @@ def _mirrored_peers(session_id, data, answers):
             if scope == "project" and not _same_project(entry, caller):
                 continue
             out.append({**_list_entry(entry), "owner_device_id": worker["device_id"],
-                        "worker": worker["device_name"]})
-    return out
+                        "worker": worker["device_name"], "run_state": _peer_run_state(entry)})
+    # An older peer reports no state: fall back to the summary it publishes.
+    return _with_run_states(out)
 
 
 async def _discover_remote_peer(session_id, target_id):
@@ -459,9 +506,10 @@ def accept_peer_listing(body, from_device):
     else:
         rows = sessions.get_sessions(api_user_id="", active_only=True, limit=100)
     return {"enforces_owner_labels": True,
-            "sessions": [_list_entry(row) for row in rows
-                         if _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
-                         and _owner(row) == _OWNER_CHAT]}
+            "sessions": _with_run_states(
+                [_list_entry(row) for row in rows
+                 if _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
+                 and _owner(row) == _OWNER_CHAT])}
 
 
 async def handle_peer_listing(body, from_device):

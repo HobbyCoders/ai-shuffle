@@ -33,19 +33,23 @@ def prune_owned(*, stop=None, ctx=None, session_ids=None):
         keys=("session_id",), stop=stop)
 
 
-def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]] = None) -> int:
-    """Refresh and publish owned runtime summaries (only ``session_ids``, if given)."""
+def _only(column: str, params: tuple) -> str:
+    return f" AND {column} IN ({', '.join(['%s'] * len(params))})" if params else ""
+
+
+def owned_states(device_id: Optional[str], *, session_ids: Optional[List[str]] = None) -> Dict[str, str]:
+    """``{session_id: state}`` sampled now for the chats this worker runs.
+
+    ``device_id``: this worker's network id (None when not networked; rows
+    with no owner are matched on the install id either way). ``session_ids``
+    limits the read; an empty list reads nothing.
+    """
     from app.network.catalog import _my_instance_id
-
-    if session_ids is not None and not session_ids:
-        return 0
-    only_params = tuple(session_ids or ())
-
-    def only(column: str) -> str:
-        return f" AND {column} IN ({', '.join(['%s'] * len(only_params))})" if only_params else ""
-
     from app.db.wakeups import armed_wake_sql
 
+    if session_ids is not None and not session_ids:
+        return {}
+    only_params = tuple(session_ids or ())
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -71,18 +75,25 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
             FROM sessions s
             WHERE (s.owner_device_id = %s OR
                 (s.owner_device_id IS NULL AND s.instance_id = %s))
-        """ + only("s.id"), (ctx.device_id, _my_instance_id(), *only_params))
-        summaries = [dict(r) for r in cursor.fetchall()]
+        """ + _only("s.id", only_params), (device_id, _my_instance_id(), *only_params))
+        states = {r["id"]: r["state"] for r in cursor.fetchall()}
 
-    failed = turns.sessions_with_failed_latest_turn([r["id"] for r in summaries if r["state"] == "idle"])
-    for row in summaries:
-        if row["id"] in failed:
-            row["state"] = "failed"
+    failed = turns.sessions_with_failed_latest_turn([sid for sid, state in states.items() if state == "idle"])
+    return {sid: "failed" if sid in failed else state for sid, state in states.items()}
+
+
+def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]] = None) -> int:
+    """Refresh and publish owned runtime summaries (only ``session_ids``, if given)."""
+    if session_ids is not None and not session_ids:
+        return 0
+    only_params = tuple(session_ids or ())
+    summaries = [{"id": sid, "state": state}
+                 for sid, state in owned_states(ctx.device_id, session_ids=session_ids).items()]
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id, owner_device_id, state FROM network_session_runtime WHERE 1 = 1" + only("session_id"),
-                       only_params)
+        cursor.execute("SELECT session_id, owner_device_id, state FROM network_session_runtime WHERE 1 = 1"
+                       + _only("session_id", only_params), only_params)
         previous = {r["session_id"]: dict(r) for r in cursor.fetchall()}
         for row in summaries:
             old = previous.get(row["id"], {})

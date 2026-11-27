@@ -124,8 +124,10 @@ def start_session_spec(model_examples=()) -> ToolSpec:
 SPECS = (
     (ToolSpec(name="ListSessions", description=(
         "Find active top-level peer chats owned by the same user, including idle chats "
-        "in the Active sidebar. Returns IDs, titles, projects, models and status, not "
-        "transcripts. Judge relevance before messaging. For the owner's chats, state='active' "
+        "in the Active sidebar. Returns IDs, titles, projects, models, status and run_state "
+        "(working, parked, permission, question, idle, failed: whether it is generating, "
+        "waiting or done right now), not transcripts. Use it first when the owner says a chat "
+        "is stuck or misbehaving. Judge relevance before messaging. For the owner's chats, state='active' "
         "(the first page) also lists active chats on the owner's other online workers, with "
         "worker and owner_device_id; MessageSession relays to them. "
         "Default scope is this project; use scope='all' for relevant cross-project work. "
