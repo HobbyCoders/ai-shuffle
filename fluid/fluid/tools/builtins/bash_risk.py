@@ -84,9 +84,11 @@ with a trailing ``.exe`` stripped.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 SAFE = "safe"
@@ -304,6 +306,8 @@ def _awk_ok(args: list[str]) -> bool:
     for a in args:
         if "system(" in a or "getline" in a or "|" in a:
             return False
+        if "ENVIRON" in a:
+            return False  # the process environment, credentials included
         if a.split("=", 1)[0] in _AWK_FILE_FLAGS or (
             a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
         ):
@@ -674,9 +678,14 @@ def _sed_script_ok(script: str) -> bool:
 def _uniq_ok(args: list[str]) -> bool:
     # A second positional is the output file. ``-`` (stdin) and anything
     # after ``--`` are positionals too: ``uniq - out`` writes ``out``.
+    #
+    # A glob or a brace list is one word here and several once the shell has
+    # expanded it: ``uniq *.txt`` with two matches overwrites the second.
     positional = 0
     options_done = False
     for a in args:
+        if any(ch in a for ch in "*?[{"):
+            return False
         if options_done or a == "-" or not a.startswith("-"):
             positional += 1
         elif a == "--":
@@ -685,7 +694,34 @@ def _uniq_ok(args: list[str]) -> bool:
 
 
 def _env_ok(args: list[str]) -> bool:
-    return not args or args == ["--help"]
+    # Bare ``env`` prints the whole environment, and a shell command inherits
+    # the credentials in child_env.ALLOWED_CREDENTIAL_NAMES on purpose
+    # (GH_TOKEN, the provider keys), so printing it is a credential read.
+    return args in (["--help"], ["--version"])
+
+
+def _printenv_ok(args: list[str]) -> bool:
+    # ``printenv PATH`` is a plain read. Bare ``printenv`` is the whole
+    # environment, and a name that reads as a credential is one.
+    from fluid.tools.child_env import ALLOWED_CREDENTIAL_NAMES, is_host_secret
+
+    if not args:
+        return False
+    for name in args:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            return False
+        if name.upper() in ALLOWED_CREDENTIAL_NAMES or is_host_secret(name):
+            return False
+    return True
+
+
+# ``env`` and ``$ENV`` are how a jq program reads the process environment;
+# ``.env`` (a field) and ``"env"`` (a string) are not.
+_JQ_ENV_RE = re.compile(r"\$ENV\b|(?<![\w.$\"])env(?![\w\"])")
+
+
+def _jq_ok(args: list[str]) -> bool:
+    return not any(_JQ_ENV_RE.search(a) for a in args)
 
 
 def _exact(*allowed: tuple[str, ...]) -> Check:
@@ -709,7 +745,7 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
     "which": None, "where": None, "type": None,
-    "env": _env_ok, "printenv": None,
+    "env": _env_ok, "printenv": _printenv_ok,
     "date": _date_ok, "whoami": None, "uname": None,
     # tree -o writes its listing to a file; -R (with -H) writes 00Tree.html
     # into every directory. tree takes option values from the next word, so
@@ -730,7 +766,7 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,
     "sed": _sed_ok,
     "basename": None, "dirname": None, "realpath": None, "readlink": None,
-    "jq": None,
+    "jq": _jq_ok,
 }
 
 # git subcommand → check over the subcommand's own arguments.
@@ -754,7 +790,9 @@ PACKAGE_MANAGER_READ_ONLY = {
 
 
 def _git_ok(args: list[str]) -> bool:
-    if any(a.startswith("--output") for a in args):
+    # --output writes a file. --ext-diff and --textconv ask git to run the
+    # program a repository's own config names (diff.external, diff.*.textconv).
+    if any(a.startswith(("--output", "--ext-diff", "--textconv")) for a in args):
         return False
     i = 0
     while i < len(args):
@@ -799,12 +837,173 @@ def _program_name(token: str) -> str:
     return name.removesuffix(".exe")
 
 
+_OPERATOR_CHARS = frozenset("();<>|&")
+# What may follow a ``$`` the shell leaves alone (``grep 'a$' f`` needs no
+# help, ``grep "a$|b$" f`` and ``grep a$ f`` do).
+_DOLLAR_STAYS_LITERAL_BEFORE = frozenset(" \t|)")
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """One command line as the shell reads it, before any word is run."""
+
+    text: str  # the line without its comment
+    hazard: bool  # the shell would run words other than the ones written
+    words: tuple[str, ...]  # every word as written, quotes kept
+
+
+def _lines(command: str) -> list[str] | None:
+    """The lines the shell splits ``command`` into, or None.
+
+    Only a newline ends a line. ``str.splitlines`` also splits on vertical
+    tab, form feed and the Unicode separators, which the shell keeps inside a
+    word, so text after one was classified as a command of its own while the
+    shell ran it as arguments. Any other control character is refused: the
+    lexer and the shell disagree about those too (a lone carriage return is
+    whitespace to one and a letter to the other).
+    """
+    command = command.replace("\r\n", "\n")
+    if any((ch < " " and ch not in "\n\t") or ch == "\x7f" for ch in command):
+        return None
+    return command.split("\n")
+
+
+def _scan_line(line: str) -> _Scan | None:
+    """Read ``line`` the way a POSIX shell does. None when it cannot be read.
+
+    ``shlex`` drops the quotes, so on its own it cannot tell an argument from
+    shell syntax, and it is not a shell: it starts a comment at a ``#`` in the
+    middle of a word. Every difference is a command the classifier never saw.
+    ``hazard`` is set when the shell would not run the words as written:
+
+    * ``$`` outside single quotes. ``-exe${x}c`` and ``$'-exec'`` are ``-exec``
+      once expanded, ``.e${x}nv`` is ``.env``, and ``$GH_TOKEN`` is a secret.
+    * A quoted or escaped word made only of operator characters (``';'``,
+      ``\\;``): an argument to the shell, a command separator to the lexer.
+    * A glob in a word that starts with ``-``: the shell may expand it to a
+      flag (``-exe*`` with a file of that name).
+    * A brace list that can produce a flag: ``{-exec,x}``, ``--outpu{t,x}=f``.
+
+    Unbalanced quotes and a trailing backslash return None.
+    """
+    hazard = False
+    words: list[str] = []
+    start: int | None = None  # where the current word began
+    value: list[str] = []  # the word with its quotes removed
+    quoted = glob = brace_list = False
+    brace_at: int | None = None  # len(value) at the word's first unquoted {
+    i, n = 0, len(line)
+
+    def close(end: int) -> None:
+        nonlocal hazard, start, quoted, glob, brace_list, brace_at
+        if start is None:
+            return
+        text = "".join(value)
+        if quoted and text and all(ch in _OPERATOR_CHARS for ch in text):
+            hazard = True
+        if glob and text.startswith("-"):
+            hazard = True
+        if brace_at is not None and brace_list:
+            prefix = text[:brace_at]
+            if not prefix or prefix.startswith("-"):
+                hazard = True
+        words.append(line[start:end])
+        start = None
+        value.clear()
+        quoted = glob = brace_list = False
+        brace_at = None
+
+    while i < n:
+        ch = line[i]
+        if ch in " \t" or ch in _OPERATOR_CHARS:
+            close(i)
+            i += 1
+            continue
+        if ch == "#" and start is None:
+            return _Scan(line[:i], hazard, tuple(words))  # a comment
+        if start is None:
+            start = i
+        if ch == "\\":
+            if i + 1 >= n:
+                return None  # a line continuation: the next line joins this one
+            value.append(line[i + 1])
+            quoted = True
+            i += 2
+            continue
+        if ch == "'":
+            end = line.find("'", i + 1)
+            if end < 0:
+                return None
+            value.extend(line[i + 1:end])
+            quoted = True
+            i = end + 1
+            continue
+        if ch == '"':
+            quoted = True
+            i += 1
+            while True:
+                if i >= n:
+                    return None
+                inner = line[i]
+                if inner == '"':
+                    i += 1
+                    break
+                if inner == "\\" and i + 1 < n and line[i + 1] in '"\\$`':
+                    value.append(line[i + 1])
+                    i += 2
+                    continue
+                if inner == "$":
+                    after = line[i + 1] if i + 1 < n else " "
+                    if after != '"' and after not in _DOLLAR_STAYS_LITERAL_BEFORE:
+                        hazard = True
+                value.append(inner)
+                i += 1
+            continue
+        if ch == "$":
+            after = line[i + 1] if i + 1 < n else " "
+            if after not in _DOLLAR_STAYS_LITERAL_BEFORE:
+                hazard = True
+        elif ch in "*?[":
+            glob = True
+        elif ch == "{":
+            if brace_at is None:
+                brace_at = len(value)
+        elif brace_at is not None and (ch == "," or line[i:i + 2] == ".."):
+            brace_list = True
+        value.append(ch)
+        i += 1
+    close(n)
+    return _Scan(line, hazard, tuple(words))
+
+
+def _posix_shell() -> bool:
+    """False when commands run through cmd.exe (Windows without Git Bash).
+
+    Everything here reads POSIX syntax. cmd.exe does not: single quotes do not
+    quote there (``git status 'a & calc'`` runs ``calc``), ``^`` is dropped
+    from the middle of a word (``--outp^ut=f``) and ``%VAR%`` expands, so
+    nothing this module proves about a command holds under it.
+    """
+    from fluid.tools.shell import resolve_shell
+
+    return resolve_shell().posix
+
+
+# Under cmd.exe a command with any of these is not the list of words the
+# POSIX lexer reports (see _posix_shell).
+_CMD_SYNTAX_RE = re.compile(r"""['^%!]|\\\"""")
+
+
 def _lex(line: str) -> list[str] | None:
-    lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+    scan = _scan_line(line)
+    if scan is None:  # unbalanced quotes, trailing backslash
+        return None
+    lex = shlex.shlex(scan.text, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    lex.commenters = ""  # _scan_line removed the comment; ``a#b`` is a word
     try:
         return list(lex)
-    except ValueError:  # unbalanced quotes
+    except ValueError:
         return None
 
 
@@ -834,10 +1033,18 @@ def is_read_only(command: str) -> bool:
         return False
     if "$(" in command or "`" in command:
         return False
-    for line in command.splitlines():
+    lines = _lines(command)
+    if lines is None:
+        return False
+    for line in lines:
         line = re.sub(r"(?<!\S)2>&1(?!\S)", " ", line)
         if not line.strip():
             continue
+        scan = _scan_line(line)
+        if scan is None or scan.hazard:
+            return False
+        if not scan.text.strip():
+            continue  # a comment line
         tokens = _lex(line)
         if tokens is None:
             return False
@@ -871,12 +1078,21 @@ def simple_commands(command: str) -> list[str] | None:
     """
     if not command or not command.strip() or "$(" in command or "`" in command:
         return None
+    if not _posix_shell() and _CMD_SYNTAX_RE.search(command):
+        return None
+    lines = _lines(command)
+    if lines is None:
+        return None
     out: list[str] = []
-    for line in command.splitlines():
+    for line in lines:
         if not line.strip():
             continue
-        lex = shlex.shlex(line, posix=False, punctuation_chars=True)
+        scan = _scan_line(line)
+        if scan is None:
+            return None
+        lex = shlex.shlex(scan.text, posix=False, punctuation_chars=True)
         lex.whitespace_split = True
+        lex.commenters = ""  # _scan_line removed the comment; ``a#b`` is a word
         try:
             tokens = list(lex)
         except ValueError:
@@ -955,8 +1171,13 @@ def _simple_command_tokens(command: str) -> list[list[str]] | None:
     """Token lists of every simple command, or None when they are not knowable."""
     if not command or not command.strip() or "$(" in command or "`" in command:
         return None
+    if not _posix_shell() and _CMD_SYNTAX_RE.search(command):
+        return None
+    lines = _lines(command)
+    if lines is None:
+        return None
     out: list[list[str]] = []
-    for line in command.splitlines():
+    for line in lines:
         if not line.strip():
             continue
         tokens = _lex(line)
@@ -1033,6 +1254,7 @@ _SENSITIVE_EXAMPLE_PATHS = (
     ".aws/credentials", ".ssh/config",
     ".claude/.credentials.json", ".config/gh/hosts.yml",
     ".credential-keys/server.key", "chrome-profile/Default/Cookies",
+    "proc/self/environ",
 )
 _GLOB_CHARS = frozenset("*?[{")
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
@@ -1115,24 +1337,45 @@ def _touches_sensitive_path(command: str) -> bool:
     """
     from fluid.tools.hardening import is_sensitive_path
 
-    lex = shlex.shlex(command, posix=False)
-    lex.whitespace_split = True
-    try:
-        raw_tokens = list(lex)
-    except ValueError:
-        return False
-    for raw in raw_tokens[1:]:
-        if raw.startswith("-"):
-            continue
-        try:
-            literal = " ".join(shlex.split(raw))
-        except ValueError:
+    lines = _lines(command)
+    if lines is None:
+        return True
+    for line in lines:
+        scan = _scan_line(line)
+        if scan is None:
             return True
-        if is_sensitive_path(literal):
-            return True
-        if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
-            return True
+        for raw in scan.words:
+            if raw.startswith("-"):
+                # ``--file=.env``: the value is a path all the same.
+                if "=" not in raw:
+                    continue
+                raw = raw.split("=", 1)[1]
+            try:
+                literal = " ".join(shlex.split(raw))
+            except ValueError:
+                return True
+            if is_sensitive_path(literal) or _names_process_environment(literal):
+                return True
+            if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
+                return True
     return False
+
+
+# /proc/<pid>/environ is the environment of a running process, and a shell
+# command's own environment carries credentials on purpose (see _env_ok). The
+# process folder itself counts: ``grep -r . /proc/self`` reads the same file.
+_PROC_ENVIRON_RE = re.compile(
+    r"^/proc(?:/(?:\d+|self|thread-self)(?:/task/[^/]+)?(?:/environ)?)?/?$"
+)
+
+
+def _names_process_environment(literal: str) -> bool:
+    path = literal.replace("\\", "/")
+    if not path.startswith("/"):
+        return False
+    return any(
+        _PROC_ENVIRON_RE.match(candidate) for candidate in {path, posixpath.normpath(path)}
+    )
 
 
 def classify(input: dict[str, Any]) -> str:
@@ -1140,6 +1383,8 @@ def classify(input: dict[str, Any]) -> str:
     command = input.get("command")
     if not isinstance(command, str):
         return WRITE
+    if not _posix_shell():
+        return WRITE  # cmd.exe: this module cannot read the command
     if not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.

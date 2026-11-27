@@ -143,6 +143,56 @@ def _names(raw: str | None) -> list[str]:
     return [p.strip() for p in (raw or "").split(",") if p.strip()]
 
 
+# Git settings every shell that runs model-chosen commands gets, as
+# command-scope config (``GIT_CONFIG_COUNT``, git 2.31+), which outranks a
+# repository's own config file. They work the same on Linux, macOS and
+# Windows; an older git ignores what it does not know.
+#
+# ``git status`` is rated read-only and runs unprompted, but git runs the
+# program a repository's config names, and a folder of plain files (``HEAD``,
+# ``config``, ``objects/``, ``refs/``) is a repository to git: a clone can
+# ship one, and ``git -C that/folder status`` then ran its ``core.fsmonitor``
+# command.
+#
+# * ``safe.bareRepository=explicit`` (git 2.38+): git refuses a bare-shaped
+#   folder it merely found; one named with ``--git-dir`` still works, and so
+#   do normal checkouts and linked worktrees.
+# * ``core.fsmonitor=false``: no config file can name a program for the
+#   status reads (the app's own git calls already set this, see #436).
+AGENT_GIT_CONFIG: tuple[tuple[str, str], ...] = (
+    ("safe.bareRepository", "explicit"),
+    ("core.fsmonitor", "false"),
+)
+
+
+def harden_git_env(env: dict[str, str]) -> dict[str, str]:
+    """Append :data:`AGENT_GIT_CONFIG` to ``env``'s git config and return it.
+
+    Entries already present are kept and ours go after them, so ours win.
+    Calling it twice adds nothing. A malformed ``GIT_CONFIG_COUNT`` is left
+    alone: git rejects it, so every git command fails closed.
+    """
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        return env
+    if count < 0:
+        return env
+    # The value git would use for each key now: the last entry wins.
+    current = {
+        env.get(f"GIT_CONFIG_KEY_{i}", "").lower(): env.get(f"GIT_CONFIG_VALUE_{i}")
+        for i in range(count)
+    }
+    for key, value in AGENT_GIT_CONFIG:
+        if current.get(key.lower()) == value:
+            continue
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+    return env
+
+
 def child_env_with_overlay(overlay: Mapping[str, str] | None,
                            environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The inherited environment (scrubbed), minus the names the overlay's
@@ -167,7 +217,8 @@ def claude_cli_env_with_overlay(overlay: Mapping[str, str] | None,
     if any(is_claude_auth(k) for k in (overlay or {})) and (overlay or {}).get("ANTHROPIC_API_KEY"):
         env["ANTHROPIC_API_KEY"] = overlay["ANTHROPIC_API_KEY"]
     _restore_host_oauth_token(env, overlay, environ)
-    return env
+    # The CLI's own Bash tool inherits this environment.
+    return harden_git_env(env)
 
 
 def _restore_host_oauth_token(env: dict[str, str], overlay: Mapping[str, str] | None,

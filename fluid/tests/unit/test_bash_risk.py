@@ -8,6 +8,10 @@ and auto-denied because the run cannot prompt.
 
 import asyncio
 import json
+import os
+import shutil
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 
 import pytest
@@ -83,7 +87,7 @@ SAFE_COMMANDS = [
     "whoami && uname -a",
     "date",
     "printenv PATH",
-    "env",
+    "env --help",
     "jq '.name' package.json",
     "tree -L 2",
     "basename /a/b/c.txt",
@@ -686,7 +690,7 @@ def test_program_names_collects_every_program() -> None:
     from fluid.tools.builtins.bash_risk import program_names
 
     assert program_names("cat a | grep b && ls") == frozenset({"cat", "grep", "ls"})
-    assert program_names('"C:\\Program Files\\Git\bin\\git.exe" status') == frozenset({"git"})
+    assert program_names('"C:\\Program Files\\Git\\bin\\git.exe" status') == frozenset({"git"})
     assert program_names("FOO=1 git log") == frozenset({"git"})
     assert program_names("echo $(rm x)") is None
     assert program_names("") is None
@@ -820,3 +824,180 @@ def test_allow_always_on_npm_run_does_not_cover_npm_install() -> None:
     assert engine.decide(bash_spec, {"command": "npm run test"}).source == "session"
     assert engine.decide(bash_spec, {"command": "npm install evil"}).decision == "ask"
     assert engine.decide(bash_spec, {"command": "npm run build && rm -rf /"}).decision == "ask"
+
+
+# ─── the shell reads a command differently from the lexer ────────────────────
+#
+# Each command below was "safe" and ran without a prompt under on_write. The
+# shell rewrote the text after the classifier had read it (an expansion that
+# spells a banned flag or a credential file), or the lexer and the shell split
+# the line in different places (a ``#`` inside a word, a quoted ``;``, a
+# vertical tab), so a second command ran that no check had seen. The marker is
+# the file the command creates when the shell runs it; ``None`` for a read.
+
+REWRITTEN_BY_THE_SHELL = [
+    # parameter expansion and ANSI-C quoting spell the banned flag
+    ("find . -maxdepth 0 -exe${x}c touch MARK {} +", "MARK"),
+    ("find . -maxdepth 0 $'-exec' touch MARK {} +", "MARK"),
+    ("sort $'-o' MARK a.txt", "MARK"),
+    ("sort -${x}o MARK a.txt", "MARK"),
+    ('sort "-${x}o" MARK a.txt', "MARK"),
+    ('sort $"-o" MARK a.txt', "MARK"),
+    # brace lists that produce a flag
+    ("find . -maxdepth 0 {-exec,touch,MARK,{},+}", "MARK"),
+    ("sort {-o,MARK} a.txt", "MARK"),
+    ("sort ''{-o,MARK} a.txt", "MARK"),
+    ("sort -{o,b} MARK a.txt", "MARK"),
+    # a glob that the shell may expand to a flag
+    ("find . -maxdepth 0 -exe* touch MARK {} +", None),
+    # an argument to the shell, a separator to the lexer
+    ("find . ';' ls -maxdepth 0 -exec touch MARK {} +", "MARK"),
+    ("find . \\; ls -maxdepth 0 -exec touch MARK {} +", "MARK"),
+    # a comment to the lexer, a word to the shell
+    ("ls a.txt#; touch MARK", "MARK"),
+    ("ls 'a.txt'#; touch MARK", "MARK"),
+    # one line to the shell, two to str.splitlines
+    ("find . -maxdepth 0 ! -name a\x0bls -exec touch MARK {} +", "MARK"),
+    ("find . -maxdepth 0 ! -name a\x0cls -exec touch MARK {} +", "MARK"),
+    ("find . -maxdepth 0 ! -name a ls -exec touch MARK {} +", "MARK"),
+    ("ls a.txt\rtouch MARK", None),
+    # several words once expanded, one to the argument counter
+    ("uniq *.txt", None),
+    ("uniq a.txt{,.MARK}", "a.txt.MARK"),
+    # credential files and the environment, spelled so the name check missed
+    ("cat .e${x}nv", None),
+    ("cat $'.env'", None),
+    ('cat ".e""nv"', None),
+    ("cat x#y .env", None),
+    ("grep --file=.env x", None),
+    ("echo $GH_TOKEN", None),
+    ('echo "$GH_TOKEN"', None),
+    ("env", None),
+    ("printenv", None),
+    ("printenv GH_TOKEN", None),
+    ("printenv ANTHROPIC_API_KEY", None),
+    ("cat /proc/self/environ", None),
+    ("cat /proc/1234/environ", None),
+    ("head /proc/self/task/1/environ", None),
+    ("cat /proc/*/environ", None),
+    ("cat /proc/self/cwd/../environ", None),
+    ("grep -r TOKEN /proc/self", None),
+    ("jq -n env", None),
+    ("jq -n '$ENV.GH_TOKEN'", None),
+    ("awk 'BEGIN{print ENVIRON[\"GH_TOKEN\"]}'", None),
+    # git runs the program the repository's own config names
+    ("git diff --ext-diff", None),
+    ("git log -p --ext-diff", None),
+    ("git show --textconv HEAD", None),
+]
+
+
+@pytest.mark.parametrize("command", [c for c, _ in REWRITTEN_BY_THE_SHELL])
+def test_text_the_shell_rewrites_is_not_read_only(command: str) -> None:
+    assert classify({"command": command}) == "write", command
+    decision = PermissionEngine("on_write").decide(BASH_SPEC, {"command": command})
+    assert decision.decision == "ask"
+
+
+# Everyday reads that use the same characters and must keep running unprompted.
+STILL_READ_ONLY = [
+    "grep 'foo$' a.txt",
+    'grep "foo$" a.txt',
+    'grep -E "a$|b$" a.txt',
+    "grep foo$ a.txt",
+    "awk '{print $1}' a.txt",
+    "sed -n '$p' a.txt",
+    "ls *.txt",
+    "ls *.{txt,md}",
+    "cat a{,}.txt",
+    "wc -l *.txt",
+    "ls a.txt#b",
+    "echo hi # a trailing comment",
+    "# a comment line\nls",
+    "ls\r\ncat a.txt",
+    "git show stash@{0}",
+    "git log HEAD@{1}",
+    "grep -rn 'a;b' .",
+    "jq '.environment' a.json",
+    "cat /proc/cpuinfo",
+    "printenv PATH",
+    "find . -name '*.txt' -type f",
+    "grep -n 'x{2,3}' a.txt",
+]
+
+
+@pytest.mark.parametrize("command", STILL_READ_ONLY)
+def test_everyday_reads_with_those_characters_stay_read_only(command: str) -> None:
+    assert classify({"command": command}) == "safe", command
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs a POSIX shell")
+@pytest.mark.parametrize(
+    "command",
+    [c for c, mark in REWRITTEN_BY_THE_SHELL if mark] + STILL_READ_ONLY,
+)
+def test_a_command_rated_safe_changes_nothing_when_the_shell_runs_it(
+    command: str, tmp_path
+) -> None:
+    """The classifier's verdict checked against what a real shell does.
+
+    Whatever the rating, the two must agree in one direction: a command the
+    classifier calls safe leaves the folder as it was. The cases above created
+    ``MARK`` while rated safe; the everyday reads guard the other side."""
+    shell = shutil.which("bash") or shutil.which("sh")
+    if shell is None:
+        pytest.skip("no POSIX shell")
+    (tmp_path / "a.txt").write_text("a\n")
+    (tmp_path / "a.json").write_text("{}\n")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    subprocess.run(
+        [shell, "-c", command], cwd=tmp_path, capture_output=True, timeout=30,
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
+    )
+    changed = sorted(p.name for p in tmp_path.iterdir()) != before
+    assert not (classify({"command": command}) == "safe" and changed), command
+
+
+def test_a_hash_inside_a_word_does_not_hide_the_next_command_from_rules() -> None:
+    """``ls a#; rm -rf x`` runs ``rm``. The lexer read ``#; rm -rf x`` as a
+    comment, so an allow rule for ``ls`` and an "Always allow" on ``ls`` both
+    covered it."""
+    from fluid.tools.builtins.bash_risk import scope_labels, simple_commands
+
+    command = "ls a#; rm -rf x"
+    assert simple_commands(command) == ["ls a#", "rm -rf x"]
+    assert scope_labels(command) == frozenset({"ls", "rm"})
+
+    allow_ls = Rule(tool="Bash", decision="allow", input_globs={"command": "ls *"})
+    engine = PermissionEngine("on_write", rules=[allow_ls])
+    assert engine.decide(BASH_SPEC, {"command": "ls a"}).decision == "allow"
+    assert engine.decide(BASH_SPEC, {"command": command}).decision == "ask"
+
+    session = PermissionEngine("on_write")
+    session.allow_always(BASH_SPEC.name, BASH_SPEC.scope_of({"command": "ls -la build"}))
+    assert session.decide(BASH_SPEC, {"command": command}).decision == "ask"
+    # A vertical tab is a letter to the shell: the text after it is not a new
+    # line, so the comment that seems to start there is not one either.
+    assert scope_labels("ls a\x0b#x; rm -rf y") is None
+    assert simple_commands("ls a\x0b#x; rm -rf y") is None
+
+
+def test_nothing_is_read_only_under_cmd_exe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows without Git Bash runs commands through cmd.exe, which does not
+    read POSIX syntax: single quotes do not quote and ``^`` vanishes from a
+    word. No proof made by a POSIX lexer holds there, so every command asks."""
+    from fluid.tools import shell
+    from fluid.tools.builtins.bash_risk import scope_labels, simple_commands
+
+    cmd = shell.ShellInfo(name="cmd", path="cmd.exe", argv_prefix=("cmd.exe", "/d", "/s", "/c"))
+    monkeypatch.setattr(shell, "resolve_shell", lambda: cmd)
+
+    for command in ("git status", "ls", "git status 'a & calc'", "git log --outp^ut=f"):
+        assert classify({"command": command}) == "write", command
+    # Rules and "Always allow" still work for text cmd.exe reads the same way…
+    assert simple_commands("git status && dir") == ["git status", "dir"]
+    assert scope_labels("git status") == frozenset({"git"})
+    # …and refuse to split text it reads differently.
+    for command in ("git status 'a & calc'", "git log --outp^ut=f", "echo %PATH%"):
+        assert simple_commands(command) is None, command
+        assert scope_labels(command) is None, command

@@ -145,9 +145,12 @@ def child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     CLI children. Explicit caller overlays remain deliberate handovers.
     UTF-8 defaults do not override an operator setting.
     """
-    from fluid.tools.child_env import child_env_with_overlay
+    from fluid.tools.child_env import child_env_with_overlay, harden_git_env
 
-    env = child_env_with_overlay(extra)
+    # Agent-started shells (Monitor, background commands) get the same git
+    # settings as the Bash tool: a repository's config cannot name a program
+    # for a status read, and a planted bare-shaped folder is not a repository.
+    env = harden_git_env(child_env_with_overlay(extra))
     if _IS_WINDOWS:
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")

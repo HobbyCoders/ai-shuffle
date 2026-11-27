@@ -76,7 +76,7 @@ from fluid.events.ops import (
 from fluid.store.base import new_id
 from fluid.context.settings_stack import layered_env
 from fluid.tools.builtins._util import strip_ansi
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import harden_git_env, scrub_child_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
@@ -465,8 +465,9 @@ class CliHost:
             # dev server that colourises its output makes the summary
             # unsearchable. Anything that ignores the hint gets its escapes
             # stripped as the stream is read (see _supervise).
-            env=dict(layered_env(ctx.extra.get("settings_env"), base=scrub_child_env()),
-                     NO_COLOR="1", FORCE_COLOR="0"),
+            env=harden_git_env(dict(
+                layered_env(ctx.extra.get("settings_env"), base=scrub_child_env()),
+                NO_COLOR="1", FORCE_COLOR="0")),
             **spawn_kwargs,
         )
         # POSIX: the new process group runs below the host's priority so a

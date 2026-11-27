@@ -81,7 +81,30 @@ model *reads* framing tokens even when they can't structurally escape.
   are exempt. `permission.protect_sensitive_files = false` disables the set.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
-  file — `cat .env` does not sail under the read-only fast path.
+  file — `cat .env` does not sail under the read-only fast path. The same
+  holds for the process environment, which carries the provider keys and
+  `GH_TOKEN` on purpose: bare `env` and `printenv`, `printenv GH_TOKEN`,
+  `/proc/<pid>/environ`, awk's `ENVIRON` and jq's `env` all prompt.
+- The classifier rates a command read-only only when the shell runs the
+  words as written. A `$` expansion outside single quotes (`-exe${x}c`,
+  `$'-exec'`, `.e${x}nv`, `$GH_TOKEN`), a glob or brace list that can become
+  a flag (`-exe*`, `{-exec,x}`), a quoted word made only of operator
+  characters (`';'`), a `#` inside a word and any control character other
+  than tab and newline make the command `write`. Under cmd.exe (Windows
+  without Git Bash) nothing is rated read-only, because the classifier reads
+  POSIX syntax and cmd.exe does not.
+- **Git settings for agent shells.** `git status` is rated read-only, and git
+  runs programs a repository's config names. Every shell that runs
+  model-chosen commands (Bash, Monitor, a slash command's inline shell, the
+  delegated CLI's Bash, the app's background commands) gets
+  `safe.bareRepository=explicit` and `core.fsmonitor=false` as command-scope
+  config, which outranks a repository's own file on Linux, macOS and Windows.
+  A folder of plain files shaped like a repository, which a clone can ship,
+  is no longer a repository to `git -C`, and no config can name a program for
+  a status read. A real bare repository still works with `--git-dir`. What
+  this does not cover: a checkout whose own `.git/config` is already hostile
+  can name a diff driver or a filter that `git diff` runs, so writes to
+  `.git` have to stay behind a prompt.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,

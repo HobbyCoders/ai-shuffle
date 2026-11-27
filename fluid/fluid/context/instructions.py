@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import harden_git_env, scrub_child_env
 
 log = logging.getLogger(__name__)
 
@@ -951,7 +951,7 @@ def _run_inline_bash(command: str, cwd: str, timeout: float) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
-            env=scrub_child_env(),
+            env=harden_git_env(scrub_child_env()),
         )
         return proc.stdout.decode(errors="replace").strip()
     except subprocess.TimeoutExpired:
