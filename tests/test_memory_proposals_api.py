@@ -70,6 +70,28 @@ def test_list_shows_text_kind_quote_sessions_and_expiry(world):
     assert owner["scope_label"] == "All projects" and owner["sessions"] == [{"id": "ses_gone", "title": None}]
 
 
+def test_list_shows_the_rule_line_of_an_act_time_proposal(world):
+    """A rule about a command carries the line accepting it would index: the
+    reflection's summary, else the derived first sentence; a words-only
+    proposal has none."""
+    client, root = world
+    root.mkdir(parents=True, exist_ok=True)
+    inbox = reflection.ProposalInbox(root)
+    given = inbox.propose(kind="project", text="Run `make release` only from main. Tags go first.",
+                          scope="global", session="ses_1", when="When running `make release`",
+                          summary="Release from main only.")
+    derived = inbox.propose(kind="project", text="Run `make check` before pushing. It catches lint.",
+                            scope="global", session="ses_1", when="When running `make check`")
+    words = propose(root, "The owner likes short replies.", kind="owner_fact", scope="global")
+    items = {i["id"]: i for i in client.get(BASE).json()["items"]}
+    assert items[given["id"]]["act_time"] is True
+    assert items[given["id"]]["summary"] == "Release from main only."
+    assert items[given["id"]]["derived_summary"] is None
+    assert items[derived["id"]]["summary"] is None
+    assert items[derived["id"]]["derived_summary"] == "Run `make check` before pushing."
+    assert items[words["id"]]["summary"] is None and items[words["id"]]["derived_summary"] is None
+
+
 def test_accept_saves_an_agent_saved_fact_and_closes_the_proposal(world):
     client, root = world
     row = propose(root)

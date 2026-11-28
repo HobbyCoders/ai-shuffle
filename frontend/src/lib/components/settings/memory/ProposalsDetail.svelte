@@ -77,8 +77,16 @@
 				<RowGroup title="Waiting for you" count={count}>
 					<ul class="pr-list">
 						{#each proposals.items as p (p.id)}
+								{@const rule = p.summary || p.derived_summary}
 							<li class="pr-item" data-testid="memory-proposal">
 								<p class="pr-text">{p.text}</p>
+									{#if rule}
+										<!-- The line agents read before the command or edit once it's saved. -->
+										<p class="pr-meta pr-rule" data-testid="proposal-rule">
+											<span class="pr-rule-label">Rule before acting:</span>
+											{rule}{#if !p.summary}<span class="pr-derived">{' (from its first sentence)'}</span>{/if}
+										</p>
+									{/if}
 								{#if p.quote}
 									<blockquote class="pr-quote"><span class="st-vh">You said: </span>“{p.quote}”</blockquote>
 								{/if}
@@ -163,6 +171,14 @@
 	.pr-meta {
 		margin: 6px 0 0;
 		font-size: 12px;
+		color: var(--st-mfg);
+	}
+	.pr-rule {
+		color: var(--st-fg);
+		overflow-wrap: anywhere;
+	}
+	.pr-rule-label,
+	.pr-derived {
 		color: var(--st-mfg);
 	}
 	.pr-chats {

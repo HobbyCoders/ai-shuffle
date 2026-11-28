@@ -412,8 +412,15 @@ IDENTITY_TEXT_CHARS = 120
 # tool's result. The characters their summaries add share this allowance
 # per snapshot, on top of MAX_PROMPT_CHARS (a summary never displaces another
 # fact's when-line); past it a rule falls back to its plain when-line (memory
-# health counts them). Their when-lines claim index room ahead of the rest.
-ACT_SUMMARY_CHARS = 1500
+# health counts them). Owner-kept rules take the room first, then the most
+# recently active. Their when-lines claim index room ahead of the rest
+# (an unconfirmed tool harvest keeps its rank position).
+ACT_SUMMARY_CHARS = 2400
+
+
+def _last_active(entry) -> float:
+    """Last save or Recall of a fact (the activity half of facts.usefulness)."""
+    return max(float(entry.updated_at or 0), float(entry.last_recalled_at or 0))
 
 # Sub-heading for ALWAYS memories (owner-saved, always=true) at the top of
 # # Memory, in full. Only they carry this authority; the index below keeps
@@ -2078,6 +2085,9 @@ class SkillStore:
         # Act-time rules: all of them (index room goes to them first), those
         # listed with their summary, and those past ACT_SUMMARY_CHARS.
         act_ids: set[str] = set()
+        # Those claiming index room first: an unconfirmed tool harvest keeps
+        # its rank order, so a recalled fact still outranks it.
+        act_first: set[str] = set()
         act_summary_ids: list[str] = []
         act_unfit: list[str] = []
         act_room = ACT_SUMMARY_CHARS
@@ -2085,6 +2095,7 @@ class SkillStore:
         # to ACT_SUMMARY_CHARS, not to the index budget, so stating a rule up
         # front never pushes another fact's when-line out of the index.
         act_extra: dict[str, int] = {}
+        act_slots: list[tuple[int, str, str]] = []  # (index position, label, hint)
         from fluid.codemode.facts import is_superseded
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
@@ -2133,20 +2144,29 @@ class SkillStore:
                     text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
                 identity.append((entry, f"- {label} {text}{hint}"))
                 continue
-            line = when_line(entry)
             if is_act_time(vars(entry)):
                 act_ids.add(entry.id)
-                summary = summary_line(entry)
-                listed = act_line(entry) if summary else line
-                extra = len(listed) - len(line)
-                if summary and 0 < extra <= act_room and not screen_findings(summary):
-                    act_room -= extra
-                    act_extra[entry.id] = extra
-                    act_summary_ids.append(entry.id)
-                    line = listed
-                else:
-                    act_unfit.append(entry.id)
-            index.append((entry, f"- {label} {line}{hint}"))
+                if not hint:
+                    act_first.add(entry.id)
+                act_slots.append((len(index), label, hint))
+            index.append((entry, f"- {label} {when_line(entry)}{hint}"))
+        # Summaries get ACT_SUMMARY_CHARS in this order: rules the owner kept
+        # (saved at the user's request) first, then the most recently active
+        # (last save or Recall); a summary too long for the room left is
+        # skipped for a shorter one further down.
+        act_slots.sort(key=lambda slot: (not index[slot[0]][0].protected,
+                                         -_last_active(index[slot[0]][0]), index[slot[0]][0].id))
+        for pos, label, hint in act_slots:
+            entry = index[pos][0]
+            summary, line = summary_line(entry), when_line(entry)
+            extra = len(act_line(entry)) - len(line) if summary else 0
+            if summary and 0 < extra <= act_room and not screen_findings(summary):
+                act_room -= extra
+                act_extra[entry.id] = extra
+                act_summary_ids.append(entry.id)
+                index[pos] = (entry, f"- {label} {act_line(entry)}{hint}")
+            else:
+                act_unfit.append(entry.id)
         identity.sort(key=lambda item: item[0].key != "profile.name")  # stable: rank order after
         # ALWAYS memories in full within their own budget; one that does not
         # fit (a replica merged past it) is listed first in the index instead
@@ -2176,7 +2196,7 @@ class SkillStore:
         # shape an action is worth more here than one Recall can fetch later.
         for entry, line in index:
             cost = len(line) + 1 - act_extra.get(entry.id, 0)
-            if entry.id in act_ids and cost <= remaining:
+            if entry.id in act_first and cost <= remaining:
                 remaining -= cost
                 kept.add(entry.id)
         full = False
@@ -2186,12 +2206,13 @@ class SkillStore:
             # Recall finds it. Without a task it is listed last. In rank
             # order: once one line does not fit, the rest are counted, so a
             # short low-ranked line never jumps a longer relevant one.
-            if entry.id in act_ids:
+            if entry.id in act_first:
                 continue
             if terms and off_domain(entry):
                 continue
-            if not full and len(line) + 1 <= remaining:
-                remaining -= len(line) + 1
+            cost = len(line) + 1 - act_extra.get(entry.id, 0)
+            if not full and cost <= remaining:
+                remaining -= cost
                 kept.add(entry.id)
             else:
                 full = True
@@ -2226,6 +2247,8 @@ class SkillStore:
             "act_time": len(act_ids),
             "act_summary_ids": [i for i in act_summary_ids if i in kept],
             "act_unfit": len(act_unfit),
+            # Characters the shown summaries add, on top of MAX_PROMPT_CHARS.
+            "act_summary_chars": sum(act_extra[i] for i in act_summary_ids if i in kept),
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────

@@ -250,7 +250,8 @@ def _proposal_item(row, project_names, titles):
         "kind_label": reflection.KIND_LABELS.get(row["kind"], "Memory"),
         "quote": row.get("quote") or None,
         "when": row.get("when") or None,
-        "summary": row.get("summary") or None,
+        # The rule line accepting it would put in the index, as for a memory.
+        **_act_fields(row),
         "scope": scope,
         "scope_label": _scope_label(scope, project_names),
         "sessions": [{"id": sid, "title": titles.get(sid)} for sid in sessions],

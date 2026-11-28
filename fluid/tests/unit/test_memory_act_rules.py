@@ -217,6 +217,28 @@ def test_summaries_past_the_cap_fall_back_to_the_when_line(tmp_path, monkeypatch
     assert "2 act-time rules of 4 did not fit" in signal["reason"]
 
 
+def test_past_the_cap_owner_kept_rules_come_first_then_the_most_recent(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(facts.time, "time", lambda: clock[0])
+    store = SkillStore(tmp_path)
+
+    def rule(name, protected):
+        clock[0] += 1000
+        return store.save_memory(f"Deploy rule for {name}: wait for CI.", protected=protected,
+                                 when=f"When deploying service {name}",
+                                 triggers={"command": [f"deploy-{name}"]},
+                                 summary=f"Wait for CI before deploying {name}.")
+    old_owner, new_owner, newest_agent = rule("aa", True), rule("bb", True), rule("cc", False)
+    extra = len(facts.act_line(vars(new_owner))) - len(facts.when_line(vars(new_owner)))
+    monkeypatch.setattr(skills, "ACT_SUMMARY_CHARS", extra)
+    assert store.memory_snapshot_plan()["act_summary_ids"] == [new_owner.id]
+    monkeypatch.setattr(skills, "ACT_SUMMARY_CHARS", 2 * extra)
+    plan = store.memory_snapshot_plan()
+    assert plan["act_summary_ids"] == [new_owner.id, old_owner.id] and plan["act_unfit"] == 1
+    # The agent-saved rule is the most recent, yet only spare room reaches it.
+    assert newest_agent.id not in plan["act_summary_ids"]
+
+
 def test_health_reports_every_rule_listed_when_under_the_cap(tmp_path):
     store = SkillStore(tmp_path)
     assert "No saved rule" in next(s for s in health_check(store)["signals"]

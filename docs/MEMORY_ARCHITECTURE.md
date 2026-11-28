@@ -131,9 +131,12 @@ saved without a summary shows the derived line and asks for `summary=` with
 the memory ID to correct it. Reflection proposals carry a `summary` too.
 
 The characters summaries add to their when-lines share `ACT_SUMMARY_CHARS`
-(1,500) per snapshot, charged on top of the index budget, so a summary never
-pushes another fact's when-line out. Act-time when-lines claim index room
-ahead of the rest, in rank order. A rule past the allowance is listed by its
+(2,400) per snapshot, charged on top of the index budget, so a summary never
+pushes another fact's when-line out. Rules the owner kept take that room
+first, then the most recently active (last save or Recall); a summary too
+long for what is left is skipped for a shorter one. Act-time when-lines claim index room
+ahead of the rest, in rank order; an unconfirmed tool harvest keeps its rank
+position instead, so a recalled fact still outranks it. A rule past the allowance is listed by its
 plain when-line, and memory health's `act_rules` signal (a note, never an
 attention) counts how many did not fit. Both legs render the same section
 through the adapter's `_memory_section`.

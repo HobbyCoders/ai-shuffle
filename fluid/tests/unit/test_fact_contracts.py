@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from fluid.codemode import facts
+from fluid.codemode import facts, skills
 from fluid.codemode.skills import SkillStore, MAX_MEMORIES
 from fluid.codemode.continual import Synthesizer
 from fluid.tools.builtins import remember, recall, forget
@@ -179,7 +179,11 @@ def test_six_live_shaped_unprotected_facts_all_render_under_a_protected_flood(tm
     assert shown == list(range(6))
     assert "Explicit project note" in out  # protected still fills the rest
     body = out.split("\n\n")[1]
-    assert len(body) <= facts.MAX_PROMPT_CHARS
+    # Act-time summaries (the env.* harvests here) have their own allowance
+    # on top of the index budget; every other character stays within it.
+    extra = store.memory_snapshot_plan(scope)["act_summary_chars"]
+    assert extra <= skills.ACT_SUMMARY_CHARS
+    assert len(body) - extra <= facts.MAX_PROMPT_CHARS
 
 
 def test_a_fact_larger_than_the_budget_is_not_reported_as_no_facts(tmp_path, monkeypatch):

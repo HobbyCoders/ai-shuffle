@@ -1,6 +1,6 @@
 /**
  * Settings > Memory > Proposed memories against a mocked API: the row's
- * count, each proposal's text, kind, quote, chats and expiry, Accept saving a
+ * count, each proposal's text, kind, quote, rule line, chats and expiry, Accept saving a
  * memory (and refreshing the list), Dismiss, and a proposal another worker
  * already decided.
  */
@@ -89,6 +89,20 @@ it('lists each proposal with its kind, quote, chats and expiry', async () => {
 	expect(first).toContain('A chat on another worker or since deleted');
 	expect(items[1].textContent).not.toContain('“');
 	expect(screen.getByText(/shared with all your workers/i)).toBeTruthy();
+});
+
+it('shows the rule line an act-time proposal would be listed with before acting', async () => {
+	inbox = [
+		proposal({ act_time: true, summary: 'Run make release only from main.' }),
+		proposal({ id: 'p2', text: 'Run make check first. It catches lint.', act_time: true, summary: null, derived_summary: 'Run make check first.' }),
+		proposal({ id: 'p3', text: 'The owner likes short replies.', act_time: false, summary: null, derived_summary: null })
+	];
+	await show('proposals');
+	const items = await screen.findAllByTestId('memory-proposal');
+	const rule = (i: number) => items[i].querySelector('[data-testid="proposal-rule"]')?.textContent?.replace(/\s+/g, ' ').trim();
+	expect(rule(0)).toBe('Rule before acting: Run make release only from main.');
+	expect(rule(1)).toBe('Rule before acting: Run make check first. (from its first sentence)');
+	expect(rule(2)).toBeUndefined();
 });
 
 it('accepts a proposal into a saved memory and refreshes the memory list', async () => {
