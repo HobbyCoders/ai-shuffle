@@ -240,6 +240,13 @@ _USER_KINDS = ("user", "remember")
 _PROVENANCE_MATCH = 0.5
 
 
+def _historical_answer(m: Any) -> bool:
+    """A "both stand" answer to the retired model conflict review (memory v3
+    phase 3a): history Recall and Settings list, never current memory a
+    learner pass reads or edits."""
+    return str(m.key or "").startswith("memory.coexist.")
+
+
 def _memory_tags(text: str) -> list[tuple[str | None, str | None, str, str | None]]:
     """``(id, scope, body, problem)`` for every ``<memory>`` tag in ``text``.
 
@@ -1891,7 +1898,8 @@ class Synthesizer:
         # user's words behind them (their quote check), not here.
         # A settled conflict stays out too: this pass can archive what it lists.
         everything = [m for m in self._store.memories()
-                      if not (m.conflicted or m.conflict_settled) and not is_rule_key(m.key)]
+                      if not (m.conflicted or m.conflict_settled) and not is_rule_key(m.key)
+                      and not _historical_answer(m)]
         # Grouped by scope and key/topic so a fact sits beside the facts that
         # could supersede it, and read from a rotating offset so a store too
         # large for one pass is reviewed in full over successive passes
@@ -2065,7 +2073,7 @@ class Synthesizer:
         memories = [
             m for m in self._store.memories()
             if (m.scope == "global" or (project is not None and m.scope == project))
-            and not is_rule_key(m.key)
+            and not is_rule_key(m.key) and not _historical_answer(m)
         ]
         if not memories:
             lines.append("(empty)")

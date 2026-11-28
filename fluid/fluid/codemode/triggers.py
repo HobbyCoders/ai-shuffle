@@ -42,7 +42,12 @@ from functools import lru_cache
 from typing import Any, NamedTuple
 
 from fluid.codemode.behavior import is_rule_key
-from fluid.codemode.facts import always_applies, derived_when, is_superseded
+from fluid.codemode.facts import (
+    always_applies,
+    derived_when,
+    is_superseded,
+    written_when,
+)
 from fluid.codemode.relevance import _STOP, _recall_text, _recall_words
 
 # Identity facts render by their text in every snapshot (mirrors the set in
@@ -432,11 +437,15 @@ def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
 
 
 def _owner_rule(entry: Mapping[str, Any]) -> bool:
-    """A live rule the owner kept, of the kinds a session reads as guidance."""
+    """A live rule the owner kept, of the kinds a session reads as guidance,
+    whose text and when-line pass memory's injection screen."""
+    from fluid.context.screening import screen_findings
     key = str(entry.get("key") or "")
     return bool(entry.get("protected")) and not (
         is_superseded(entry) or entry.get("conflicted") or entry.get("retired_at")
-        or key in IDENTITY_KEYS or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX))
+        or key in IDENTITY_KEYS or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX)
+        or screen_findings(str(entry.get("text") or ""))
+        or screen_findings(str(entry.get("when") or "")))
 
 
 def _shared_trigger(a: Triggers, b: Triggers) -> bool:
@@ -451,28 +460,37 @@ def _shared_trigger(a: Triggers, b: Triggers) -> bool:
     return bool(phrases) or len(singles) >= 2
 
 
-def possible_conflicts(entries: Iterable[Mapping[str, Any]],
-                       about: str | None = None) -> list[tuple[str, str]]:
+# Curly apostrophes, so "Don’t" reads as a negation like "Don't".
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
+def possible_conflicts(entries: Iterable[Mapping[str, Any]], about: str | None = None,
+                       project: str | None = None) -> list[tuple[str, str]]:
     """Pairs of owner rules (ids) that may contradict each other: in
     overlapping scopes, sharing a trigger, and exactly one of the two texts
     says "not", "never", "avoid" or the like. Deterministic and cheap; a hint
-    for the owner, never a verdict. With ``about``, only pairs with that id."""
+    for the owner, never a verdict. With ``about``, only pairs with that id;
+    with ``project``, only global rules and that project's."""
     rules = []
     for entry in entries:
+        scope = str(entry.get("scope") or "global")
+        if project is not None and scope not in ("global", project):
+            continue
         if _owner_rule(entry):
-            triggers = with_explicit(derive_triggers(entry.get("when"), entry.get("text"), entry.get("key")),
+            text = str(entry.get("text") or "")
+            triggers = with_explicit(derive_triggers(written_when(dict(entry)), text, entry.get("key")),
                                      entry.get("triggers"))
-            rules.append((str(entry.get("id")), str(entry.get("scope") or "global"),
-                          bool(_NEGATION.search(str(entry.get("text") or ""))), triggers))
-    out = []
-    for i, (a_id, a_scope, a_neg, a_trig) in enumerate(rules):
-        for b_id, b_scope, b_neg, b_trig in rules[i + 1:]:
-            if about is not None and about not in (a_id, b_id):
-                continue
-            if (a_neg != b_neg and (a_scope == b_scope or "global" in (a_scope, b_scope))
-                    and _shared_trigger(a_trig, b_trig)):
-                out.append((a_id, b_id))
-    return out
+            rules.append((str(entry.get("id")), scope,
+                          bool(_NEGATION.search(text.translate(_APOSTROPHES))), triggers))
+
+    def pairs(a, b) -> bool:
+        return (a[2] != b[2] and (a[1] == b[1] or "global" in (a[1], b[1]))
+                and _shared_trigger(a[3], b[3]))
+
+    if about is not None:
+        saved = next((r for r in rules if r[0] == about), None)
+        return [(about, r[0]) for r in rules if saved and r[0] != about and pairs(saved, r)]
+    return [(a[0], b[0]) for i, a in enumerate(rules) for b in rules[i + 1:] if pairs(a, b)]
 
 
 _CLAUSE = re.compile(r"[.;:!?\n]+(?:\s|$)")

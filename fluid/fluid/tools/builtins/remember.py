@@ -143,7 +143,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
                  "belongs in the working record (WorkingRecord) or session notes (Note).")
     if saved.protected:
         try:
-            text += await asyncio.to_thread(_conflict_note, store, saved)
+            text += await asyncio.to_thread(_conflict_note, store, saved,
+                                            ctx.extra.get("memory_project"))
         except Exception:  # noqa: BLE001 — a hint never fails a committed save
             pass
     return ToolOutcome(text=text + _receipt_notes(receipt))
@@ -172,12 +173,14 @@ def _words_only(saved: Any) -> bool:
         return False
 
 
-def _conflict_note(store: Any, saved: Any) -> str:
+def _conflict_note(store: Any, saved: Any, project: str | None = None) -> str:
     """Owner rules that share a trigger with the saved one and disagree on a
-    negation (triggers.possible_conflicts). A hint only, never a verdict."""
+    negation (triggers.possible_conflicts), from global rules and this
+    session's project only, as Recall sees them. A hint only, never a verdict."""
     from fluid.codemode import triggers as jit
     live = {m.id: m for m in store.memories()}
-    pairs = jit.possible_conflicts([vars(m) for m in live.values()], about=saved.id)
+    pairs = jit.possible_conflicts([vars(m) for m in live.values()], about=saved.id,
+                                   project=project)
     others = [live[b if a == saved.id else a] for a, b in pairs][:3]
     if not others:
         return ""
