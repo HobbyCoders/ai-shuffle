@@ -153,15 +153,41 @@ async def check_github_auth() -> None:
         )
 
 
-async def gitlab_repo_for_path(working_dir: Optional[str]) -> Optional[str]:
+async def gitlab_repo_for_path(
+    working_dir: Optional[str], service: Optional[GitLabService] = None,
+) -> Optional[str]:
     """The GitLab project path of *working_dir*'s origin, when GitLab is connected.
 
+    Pass the pinned view an operation will act through, so the remote is
+    matched against the same server its requests go to.
     Cheap when GitLab is not connected (one file read, no git call), so the
     GitHub path stays exactly as it was for owners who never connect GitLab.
     """
-    if not working_dir or not await asyncio.to_thread(gitlab_service.is_authenticated):
+    service = service or gitlab_service
+    if not working_dir or not await asyncio.to_thread(service.is_authenticated):
         return None
-    return await asyncio.to_thread(gitlab_service.get_repo_from_remote, working_dir)
+    return await asyncio.to_thread(service.get_repo_from_remote, working_dir)
+
+
+async def gitlab_forge_for_path(working_dir: Optional[str]) -> Tuple[Optional[GitLabService], Optional[str]]:
+    """``(pinned GitLab view, repo)`` when *working_dir*'s origin is on the
+    connected server, else ``(None, None)``."""
+    pinned = gitlab_service.pinned()
+    repo = await gitlab_repo_for_path(working_dir, pinned)
+    return (pinned, repo) if repo else (None, None)
+
+
+async def number_for_fan_out(number: int, url: Optional[str]) -> Optional[int]:
+    """The PR number to match other chats by after a merge or close.
+
+    Without the PR's URL (its re-read failed), a bare number would also hit
+    the other forge's PR with that number once GitLab is connected, so the
+    update then waits for reconciliation instead. GitHub-only owners keep
+    the old number match.
+    """
+    if url or not await asyncio.to_thread(gitlab_service.is_authenticated):
+        return number
+    return None
 
 
 async def resolve_forge_for_project(request: Request, project_id: str) -> Tuple[Any, str]:
@@ -172,9 +198,8 @@ async def resolve_forge_for_project(request: Request, project_id: str) -> Tuple[
     """
     if await asyncio.to_thread(gitlab_service.is_authenticated):
         project_path = await get_project_path_async(request, project_id)
-        service = gitlab_service.pinned()
-        repo = await gitlab_repo_for_path(project_path)
-        if repo:
+        service, repo = await gitlab_forge_for_path(project_path)
+        if service and repo:
             return service, repo
     await check_github_auth()
     return github_service, await get_repo_for_project(request, project_id)
@@ -271,13 +296,13 @@ async def get_github_status(
     if await asyncio.to_thread(gitlab_service.is_authenticated):
         try:
             project_path = await get_project_path_async(request, project_id)
-            gl_repo = await gitlab_repo_for_path(project_path)
+            gl_service, gl_repo = await gitlab_forge_for_path(project_path)
         except HTTPException:
-            gl_repo = None
-        if gl_repo:
+            gl_service, gl_repo = None, None
+        if gl_service and gl_repo:
             response = GitHubStatusResponse(authenticated=True, repo=gl_repo, provider="gitlab")
             try:
-                response.repo_info = await asyncio.to_thread(gitlab_service.get_repo_info, gl_repo)
+                response.repo_info = await asyncio.to_thread(gl_service.get_repo_info, gl_repo)
                 if response.repo_info is None:
                     response.error = "GitLab cannot see this project with the saved token"
             except GitHubCliError as e:
@@ -399,8 +424,8 @@ async def create_pull_request(
     if body.session_id:
         from app.api.git_helpers import get_working_dir_async
         working_dir = await get_working_dir_async(project_id, session_id=body.session_id)
-        repo = await gitlab_repo_for_path(working_dir)
-        service = gitlab_service if repo else github_service
+        gitlab_view, repo = await gitlab_forge_for_path(working_dir)
+        service = gitlab_view or github_service
         if not repo:
             await check_github_auth()
             repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
@@ -535,7 +560,7 @@ async def merge_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=number,
+        pr_number=await number_for_fan_out(number, url),
         pr_url=url,
         pr_state="merged",
     )
@@ -587,7 +612,7 @@ async def close_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=number,
+        pr_number=await number_for_fan_out(number, url),
         pr_url=url,
         pr_state="closed",
     )

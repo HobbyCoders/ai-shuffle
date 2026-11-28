@@ -657,11 +657,10 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
             return False
 
         try:
-            from app.api.github import gitlab_repo_for_path
-            from app.core.gitlab_service import gitlab_service
+            from app.api.github import gitlab_forge_for_path
 
-            repo = await gitlab_repo_for_path(working_dir)
-            forge: Any = gitlab_service if repo else github_service
+            gitlab_view, repo = await gitlab_forge_for_path(working_dir)
+            forge: Any = gitlab_view or github_service
             if not repo:
                 repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
         except Exception:

@@ -193,6 +193,46 @@ def test_a_helper_left_behind_cannot_answer_for_another_server(env):
     assert len(list(service.config_dir.glob("git-credential-*"))) == 1
 
 
+def _fill_url(url: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-c", "credential.interactive=never", "credential", "fill"],
+        input=f"url={url}\n\n", capture_output=True, text=True, timeout=30,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+    )
+
+
+def test_two_servers_under_paths_of_one_domain_keep_their_tokens_apart(env):
+    """git matches the helper's path prefix, so switching from /old to /new
+    on the same domain never hands /old the new server's token."""
+    service, api, _tmp = env
+    old, new = "https://git.example.com/old", "https://git.example.com/new"
+    api.extra_hosts.update({old, new})
+    api.valid_tokens.add("glpat-other-0002")
+    service.login(TOKEN, old)
+    assert f"password={TOKEN}" in _fill_url(f"{old}/acme/app.git").stdout
+    service.login("glpat-other-0002", new)
+    for url in (f"{old}/acme/app.git", "https://git.example.com/newer/acme/app.git"):
+        answer = _fill_url(url).stdout
+        assert "glpat-other-0002" not in answer and TOKEN not in answer
+    assert "password=glpat-other-0002" in _fill_url(f"{new}/acme/app.git").stdout
+
+
+def test_connect_without_git_reports_a_setup_error_and_disconnect_still_works(env, monkeypatch):
+    service, _api, _tmp = env
+    service.login(TOKEN, HOST)
+
+    def no_git(*_args, **_kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(service, "_git_config", no_git)
+    before = service.account_file.read_text()
+    result = service.login(TOKEN, HOST)
+    assert result["success"] is False and "could not be saved" in result["error"]
+    assert service.account_file.read_text() == before
+    assert service.logout() == {"success": True}
+    assert not service.is_authenticated()
+
+
 def test_failed_git_setup_keeps_the_previous_connection(env, monkeypatch):
     service, api, _tmp = env
     service.login(TOKEN, HOST)
@@ -238,6 +278,8 @@ def test_a_pinned_view_refuses_a_server_changed_mid_operation(env):
     with pytest.raises(GitLabApiError, match="changed during this operation"):
         pinned.get_pull("acme/app", 4)
     assert len(api.calls) == calls  # nothing reached the new server
+    # Its remote matching stays on the server it was bound to.
+    assert pinned.host() == HOST
     assert service.get_pull("acme/app", 4).number == 4  # the shared service follows the switch
 
 

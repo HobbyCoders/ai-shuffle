@@ -438,21 +438,24 @@
 		activeSessionRow?.is_remote ?? false
 	);
 
+	// The PR / merge request actions need the account for THIS checkout's
+	// forge. GitHub's side is the store's hysteresis-guarded flag; GitLab's is
+	// a saved-token check, which does not blip, so it is used as is.
+	const forgeAuthenticated = $derived(
+		forgeSignedIn($gitPrState?.provider, { github: $githubSignedIn, gitlab: $gitlabAuthenticated })
+	);
 	const activeGithubAvailable = $derived(selectedWorkerTarget ? false : activeIsRemote
 		? $gitPrState?.has_github === true
-		: $githubFeaturesAvailable);
+		: forgeSignedIn($gitPrState?.provider, { github: $githubFeaturesAvailable, gitlab: $gitlabAuthenticated }));
 
 	// GitHub auth verdicts feed the git store's hysteresis guard rather than
 	// gating the UI directly: `gh auth status` is a subprocess that transiently
 	// fails under load, and a single blip used to blank the whole git surface
 	// for up to two minutes (G10c). The store only believes a `false` after two
-	// consecutive failures ≥60s apart.
-	// The PR / merge request actions need the account for THIS checkout's forge.
-	const forgeAuthenticated = $derived(
-		forgeSignedIn($gitPrState?.provider, { github: $githubSignedIn, gitlab: $gitlabAuthenticated })
-	);
+	// consecutive failures ≥60s apart. Only GitHub's own verdict goes in: a
+	// GitLab sign-in must not hold the GitHub flag up for a GitHub checkout.
 	$effect(() => {
-		git.setGithubAuth(forgeAuthenticated);
+		git.setGithubAuth($githubSignedIn);
 	});
 
 	// A parked turn is not streaming, but its Monitor/Task can still own the

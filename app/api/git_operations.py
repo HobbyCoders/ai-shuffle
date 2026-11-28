@@ -1027,11 +1027,9 @@ async def _prepare_operation(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not determine the current branch")
 
         # get_repo_from_remote shells out to git — keep it off the event loop.
-        from app.api.github import gitlab_repo_for_path
-        from app.core.gitlab_service import gitlab_service
-        pinned = gitlab_service.pinned()
-        repo = await gitlab_repo_for_path(working_dir)
-        if repo:
+        from app.api.github import gitlab_forge_for_path
+        pinned, repo = await gitlab_forge_for_path(working_dir)
+        if pinned and repo:
             op.forge = pinned
         else:
             repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
@@ -1340,12 +1338,12 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
         # Both of these shell out (git remote / gh auth status) — keep them off
         # the event loop. is_authenticated is cached inside github_service, so
         # this is normally a dict lookup rather than a process spawn.
-        from app.api.github import gitlab_repo_for_path
-        from app.core.gitlab_service import gitlab_service
+        from app.api.github import gitlab_forge_for_path
+        from app.core.gitlab_service import GitLabService
 
-        forge: Any = gitlab_service
-        repo = await gitlab_repo_for_path(working_dir)
-        authenticated = bool(repo)  # gitlab_repo_for_path implies GitLab is connected
+        gitlab_view, repo = await gitlab_forge_for_path(working_dir)
+        forge: Any = gitlab_view
+        authenticated = bool(repo)  # a GitLab match implies GitLab is connected
         if not repo:
             forge = github_service
             repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
@@ -1354,7 +1352,7 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
             )
         if repo and authenticated:
             result["has_github"] = True
-            result["provider"] = "gitlab" if forge is gitlab_service else "github"
+            result["provider"] = "gitlab" if isinstance(forge, GitLabService) else "github"
             try:
                 pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch, forge)
                 if pr is None:

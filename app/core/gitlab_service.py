@@ -195,6 +195,9 @@ class GitLabService:
         return self.load_account() is not None
 
     def host(self) -> Optional[str]:
+        """The connected server; for a pinned view, the server it was bound to."""
+        if self._pinned_host is not None:
+            return self._pinned_host or None
         account = self.load_account()
         return account["host"] if account else None
 
@@ -225,14 +228,18 @@ class GitLabService:
         return f"!f() {{ test \"$1\" = get && cat '{path}'; }}; f"
 
     def _git_config_text(self, host: str) -> str:
-        """The app-owned config: a helper scoped to *host*, nothing else."""
+        """The app-owned config: a helper scoped to *host*, nothing else.
+
+        The section is the full server URL, path included: git matches a
+        path prefix on whole segments, so a server at ``/gitlab`` never hands
+        its token to another one on the same domain (``/other``).
+        """
         def quoted(value: str) -> str:
             return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-        parts = urlsplit(host)
         return (
             "# Written by AI Shuffle for its GitLab connection; removed on disconnect.\n"
-            f"[credential {quoted(f'{parts.scheme}://{parts.netloc}')}]\n"
+            f"[credential {quoted(host)}]\n"
             # The empty helper first clears helpers configured before this
             # file is included (a system credential manager would otherwise
             # answer first); the owner's own entries are never rewritten.
@@ -262,6 +269,12 @@ class GitLabService:
         included file is gone git ignores a dangling include."""
         if self._include_registered():
             self._git_config("--fixed-value", "--unset-all", "include.path", self.git_config_file.as_posix())
+
+    def _unregister_include_quietly(self) -> None:
+        try:
+            self._unregister_include()
+        except Exception as exc:  # noqa: BLE001 (git missing or hung: the include dangles harmlessly)
+            logger.warning("Could not remove the GitLab include from git config (%s)", type(exc).__name__)
 
     def _credential_files(self) -> List[Path]:
         try:
@@ -318,8 +331,11 @@ class GitLabService:
             # so the app never reports Connected for an unfinished sign-in.
             files = (credential_file, self.git_config_file, self.account_file)
             backups = {path: self._read_or_none(path) for path in files}
-            was_registered = self._include_registered()
+            # Until git answers, assume the line is ours to keep: a failed
+            # probe must not remove an include an earlier sign-in added.
+            was_registered = True
             try:
+                was_registered = self._include_registered()
                 self._write_private(credential_file, f"username={username}\npassword={token}\n")
                 self._write_private(self.git_config_file, self._git_config_text(host))
                 self._register_include()
@@ -331,7 +347,7 @@ class GitLabService:
                 logger.warning("GitLab sign-in could not be saved (%s)", type(exc).__name__)
                 self._restore(backups)
                 if not was_registered:
-                    self._unregister_include()
+                    self._unregister_include_quietly()
                 return {"success": False, "error": "GitLab accepted the token, but it or the git credentials could not be saved. Retry connecting."}
             # The included config now names only this server; drop the
             # previous server's token.
@@ -372,7 +388,7 @@ class GitLabService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GitLab sign-out failed (%s)", type(exc).__name__)
                 return {"success": False, "error": "Could not remove the saved GitLab token."}
-            self._unregister_include()
+            self._unregister_include_quietly()
         self.invalidate_repos_cache()
         self._project_cache.invalidate()
         return {"success": True}

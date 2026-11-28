@@ -108,6 +108,20 @@ def test_list_get_create_merge_close_go_to_gitlab(env):
     assert _gh_repo_calls(env) == []
 
 
+def test_a_failed_reread_after_close_leaves_a_github_pr_with_that_number_alone(env):
+    database.create_project("p2", "Other", None, str(env.repo))
+    database.create_session(session_id="s-gh", profile_id="default", project_id="p2")
+    github_url = "https://github.com/acme/other/pull/5"
+    database.update_session_pr_state("s-gh", pr_number=5, pr_url=github_url, pr_state="open")
+    env.api.route("PUT", f"{MRS}/5", 200, mr(5, "closed"))
+    env.api.route("GET", f"{MRS}/5", 500, {"message": "boom"})
+
+    closed = env.client.delete(f"{BASE}/pulls/5")
+    assert closed.status_code == 200, closed.text
+    row = database.get_session("s-gh")
+    assert (row["pr_url"], row["pr_state"]) == (github_url, "open")
+
+
 def test_gitlab_failure_is_502_not_an_empty_list(env):
     env.api.route("GET", MRS, 500, {"message": "boom"})
     response = env.client.get(f"{BASE}/pulls")
