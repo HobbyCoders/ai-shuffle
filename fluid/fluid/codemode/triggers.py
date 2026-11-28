@@ -42,7 +42,12 @@ from functools import lru_cache
 from typing import Any, NamedTuple
 
 from fluid.codemode.behavior import is_rule_key
-from fluid.codemode.facts import always_applies, derived_when, is_superseded
+from fluid.codemode.facts import (
+    always_applies,
+    derived_when,
+    is_superseded,
+    written_when,
+)
 from fluid.codemode.relevance import _STOP, _recall_text, _recall_words
 
 # Identity facts render by their text in every snapshot (mirrors the set in
@@ -429,6 +434,64 @@ def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
         if triggers:
             out.append(TriggerFact(str(entry.get("id")), when or derived_when(text), triggers, len(text)))
     return out
+
+
+def _owner_rule(entry: Mapping[str, Any], when: str | None) -> bool:
+    """A live rule the owner kept, of the kinds a session reads as guidance,
+    whose text and written when-line pass memory's injection screen."""
+    from fluid.context.screening import screen_findings
+    key = str(entry.get("key") or "")
+    return bool(entry.get("protected")) and not (
+        is_superseded(entry) or entry.get("conflicted") or entry.get("retired_at")
+        or key in IDENTITY_KEYS or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX)
+        or screen_findings(str(entry.get("text") or "")) or screen_findings(when or ""))
+
+
+def _shared_trigger(a: Triggers, b: Triggers) -> bool:
+    """The two fire in the same situation: a command, path or named tool in
+    common, a two-word phrase in common, or two strong words in common."""
+    if (set(a.command) & set(b.command)
+            or set(a.paths + a.explicit_paths) & set(b.paths + b.explicit_paths)
+            or set(a.explicit_tools) & set(b.explicit_tools)):
+        return True
+    phrases = {w for w in a.words if " " in w} & {w for w in b.words if " " in w}
+    singles = {w for w in _singles(a) if _strong(w)} & set(_singles(b))
+    return bool(phrases) or len(singles) >= 2
+
+
+# Curly apostrophes, so "Don’t" reads as a negation like "Don't".
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
+def possible_conflicts(entries: Iterable[Mapping[str, Any]], about: str | None = None,
+                       project: str | None = None) -> list[tuple[str, str]]:
+    """Pairs of owner rules (ids) that may contradict each other: in
+    overlapping scopes, sharing a trigger, and exactly one of the two texts
+    says "not", "never", "avoid" or the like. Deterministic and cheap; a hint
+    for the owner, never a verdict. With ``about``, only pairs with that id;
+    with ``project``, only global rules and that project's (``"global"``:
+    global rules only)."""
+    rules = []
+    for entry in entries:
+        scope = str(entry.get("scope") or "global")
+        if project is not None and scope not in ("global", project):
+            continue
+        when = written_when(dict(entry))
+        if _owner_rule(entry, when):
+            text = str(entry.get("text") or "")
+            triggers = with_explicit(derive_triggers(when, text, entry.get("key")),
+                                     entry.get("triggers"))
+            rules.append((str(entry.get("id")), scope,
+                          bool(_NEGATION.search(text.translate(_APOSTROPHES))), triggers))
+
+    def pairs(a, b) -> bool:
+        return (a[2] != b[2] and (a[1] == b[1] or "global" in (a[1], b[1]))
+                and _shared_trigger(a[3], b[3]))
+
+    if about is not None:
+        saved = next((r for r in rules if r[0] == about), None)
+        return [(about, r[0]) for r in rules if saved and r[0] != about and pairs(saved, r)]
+    return [(a[0], b[0]) for i, a in enumerate(rules) for b in rules[i + 1:] if pairs(a, b)]
 
 
 _CLAUSE = re.compile(r"[.;:!?\n]+(?:\s|$)")

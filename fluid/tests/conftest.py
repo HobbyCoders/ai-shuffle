@@ -140,7 +140,6 @@ def _no_real_claude_on_path():
 
 @pytest.fixture(autouse=True)
 def isolate_home(tmp_path_factory, monkeypatch):
-    from fluid.cli import workflows
     from fluid.codemode import skills
 
     home = tmp_path_factory.mktemp("home")
@@ -148,10 +147,8 @@ def isolate_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     # HOME alone is too late: collection imports skills.py, which caches this
-    # path, and the workflows CLI keeps its own imported alias. Give both the
-    # same per-test root; later imports also see the patched source value.
-    for module in (skills, workflows):
-        monkeypatch.setattr(module, "DEFAULT_SKILLS_ROOT", home / ".fluid" / "skills")
+    # path. Give it the per-test root; later imports see the patched value.
+    monkeypatch.setattr(skills, "DEFAULT_SKILLS_ROOT", home / ".fluid" / "skills")
     _hide_dirs_above_basetemp(tmp_path_factory.getbasetemp(), monkeypatch)
     return home
 
@@ -233,8 +230,8 @@ def codemode_marker(tmp_path, request):
 @pytest.fixture(autouse=True)
 def _continuous_learner_unless_marked(request, monkeypatch):
     """Memory v3 session reflection is the default learner; the tests written
-    for the continuous learner (passes per turn, consolidation, backfill,
-    workflows) drive it through its rollback switch. Reflection tests carry
+    for the continuous learner (passes per turn, consolidation) drive it
+    through its rollback switch. Reflection tests carry
     ``@pytest.mark.memory_reflection`` and see the default."""
     if request.node.get_closest_marker("memory_reflection") is None:
         monkeypatch.setenv("FLUID_MEMORY_LEARNER", "continuous")

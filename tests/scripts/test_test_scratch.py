@@ -332,7 +332,7 @@ def test_fluid_pytest_owns_scratch(tmp_path, explicit, from_fluid):
         f"    pathlib.Path({str(record)!r}).write_text(json.dumps([str(base), receipt]))\n"
     )
     cwd = ROOT / "fluid" if from_fluid else ROOT
-    test = ROOT / "fluid/tests/unit/test_workflow_proposals.py"
+    test = ROOT / "fluid/tests/unit/test_test_isolation.py"
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(ROOT / "fluid")])}
     # local_ci and hosted jobs clear addopts; scratch must still be configured.
     command = [sys.executable, "-m", "pytest", "-p", "scratch_observer", str(test),
@@ -368,7 +368,7 @@ def test_fluid_pytest_without_app_scripts(tmp_path, missing):
         f"        if fullname == {missing!r}:\n"
         "            raise ModuleNotFoundError('app scripts unavailable', name=fullname)\n"
         "sys.meta_path.insert(0, WithoutAppScripts())\n"
-        "result = pytest.main(['tests/unit/test_workflow_proposals.py', '-o', 'addopts=',\n"
+        "result = pytest.main(['tests/unit/test_test_isolation.py', '-o', 'addopts=',\n"
         f"                      '--basetemp', {str(tmp_path / 'standalone-base')!r}, '-q'])\n"
         "assert 'scripts.ci.test_scratch' not in sys.modules\n"
         "raise SystemExit(result)\n"
@@ -379,7 +379,7 @@ def test_fluid_pytest_without_app_scripts(tmp_path, missing):
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "21 passed" in result.stdout
+    assert "14 passed" in result.stdout
 
 
 @pytest.mark.parametrize("parallel", [False, True])

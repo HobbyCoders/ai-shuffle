@@ -105,7 +105,7 @@ LABELS = {
     "curation": "Curation",
     "protected": "Your saved facts",
     "saves": "Saving",
-    "proposals": "Questions for you",
+    "conflicts": "Possible conflicts",
     "when": "Memory when-lines",
     "delivery": "Just-in-time delivery",
 }
@@ -349,7 +349,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     protected_signal, protected_ids, lost = _protected_signal(doc, previous, now)
     signals.append(protected_signal)
     signals.append(_saves_signal(store, now))
-    signals.append(_proposals_signal(store, live, now))
+    signals.append(_conflicts_signal(live))
     signals.append(_when_signal(store, live + _local(doc, "archived")))
     signals.append(_delivery_signal(store))
     attention = [s for s in signals if s["state"] == "attention"]
@@ -582,22 +582,13 @@ def _learner_state(store, now, detail, budget_note, pending, recent_user, passes
 
 
 def _when_signal(store, entries: list[dict]) -> dict:
-    """Facts without a written when-line (listed by a derived one), and
-    whether the backfill that writes them keeps failing."""
-    from fluid.codemode.memory_backfill import ATTENTION_FAILURES
+    """Facts without a written when-line (listed by a derived one). A count,
+    never an attention: triggers are set when a fact is saved."""
     from fluid.codemode.facts import written_when
     no_when = sum(1 for e in entries if not written_when(e))
-    try:
-        failures = int(store.backfill_backoff().get("failures") or 0)
-    except Exception:  # noqa: BLE001 — unreadable meta: report the count only
-        failures = 0
-    if no_when and failures >= ATTENTION_FAILURES:
-        return _signal("when", True,
-                       f"{no_when} memories have no when-line and the last {failures} "
-                       "backfill attempts failed.", missing=no_when, backfill_failures=failures)
     reason = (f"{no_when} memories still have no when-line" if no_when
               else "All memories have a when-line.")
-    return _signal("when", False, reason, missing=no_when, backfill_failures=failures)
+    return _signal("when", False, reason, missing=no_when)
 
 
 def _delivery_signal(store) -> dict:
@@ -869,24 +860,19 @@ def _saves_signal(store, now) -> dict:
     return _signal("saves", False, "Saves are writing normally.", **detail)
 
 
-def _proposals_signal(store, live, now) -> dict:
-    """What the learner is waiting to ask the owner: pairs of user-kept
-    rules its model found to contradict each other. Informational: the
-    sessions ask, so this never raises attention."""
-    from fluid.codemode.conflict_review import open_conflicts
-    try:
-        conflicts = len(open_conflicts(live, store.root))
-    except Exception:  # noqa: BLE001 — an unreadable verdict file has nothing to ask
-        conflicts = 0
-    detail = {"conflicts": conflicts}
-    if not conflicts:
-        return _signal("proposals", False, "Nothing is waiting for your answer.", **detail)
-    pairs = _plural(conflicts, "pair of saved rules that contradict each other",
-                    "pairs of saved rules that contradict each other")
-    waiting = "is" if conflicts == 1 else "are"
-    return _signal("proposals", False,
-                   f"{pairs} {waiting} waiting for your answer; sessions ask you about them.",
-                   **detail)
+def _conflicts_signal(live) -> dict:
+    """Pairs of user-kept rules that share a trigger and disagree on a
+    negation (triggers.possible_conflicts). Deterministic and informational:
+    a hint for the owner, never attention."""
+    from fluid.codemode.triggers import possible_conflicts
+    pairs = possible_conflicts(live)
+    detail = {"conflicts": len(pairs), "pairs": [list(p) for p in pairs[:10]]}
+    if not pairs:
+        return _signal("conflicts", False, "No saved rules look contradictory.", **detail)
+    return _signal("conflicts", False,
+                   f"{_plural(len(pairs), 'pair')} of your saved rules may contradict: each pair "
+                   "fires in the same situation and only one side says not or never.",
+                   note=True, **detail)
 
 
 # ─── the scheduled run ─────────────────────────────────────────────────────

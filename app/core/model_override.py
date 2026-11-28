@@ -770,7 +770,6 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         from app.core.fluid_memory import owner_root, store_for_owner
         from app.db import database
         from fluid.codemode.facts import is_superseded, usefulness, visible_on
-        from fluid.codemode.conflict_review import COEXIST_KEY_PREFIX
         from fluid.context.screening import screen_findings
 
         row = database.get_session(session_id)
@@ -786,8 +785,9 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
         local = doc["store_id"]
         live = [entry for entry in doc["entries"]
                 if entry.get("protected") is True
-                # Lifecycle/control answers are Recall-only, never routing authority.
-                and not str(entry.get("key") or "").startswith(COEXIST_KEY_PREFIX)
+                # Old "both stand" answers (the retired conflict review) are
+                # Recall-only, never routing authority.
+                and not str(entry.get("key") or "").startswith("memory.coexist.")
                 and entry.get("provenance", "session") != "tool"
                 and not is_superseded(entry) and not entry.get("conflicted")
                 and not entry.get("retired_at")
@@ -795,9 +795,6 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
                 and entry.get("scope", "global") in scopes
                 and isinstance(entry.get("text"), str) and entry["text"].strip()
                 and not screen_findings(entry["text"])]
-        # An open conflict question never revokes an owner's words: both
-        # rules remain usable authority. The session is told to follow the
-        # newer one and ask the owner which applies.
         live.sort(key=lambda entry: (-usefulness(entry), str(entry.get("id"))))
         return [store._facts._entry(entry) for entry in live]
     except Exception:  # noqa: BLE001 — an unreadable store authorizes nothing
