@@ -393,13 +393,25 @@ def test_every_contract_model_reports_its_group_levels():
 # Every model of a group reports the same levels (above), so the wire path runs
 # every group with every pick, rotating through the group's models, and each
 # pick and group under both effort sources (all pairs, tests/_pairwise.py).
+# Then every model that has not yet reached the wire with an accepted pick runs
+# once more with its group's highest level, so no model is left untested on the
+# wire (a group can have more models than picks).
 MATRIX_CASES = []
 _seen = {}
+_on_wire = set()
 for (kind, models, levels), pick, source in pairwise(WIRE_CONTRACTS, WIRE_PICKS, ("session", "override")):
-    _n = _seen[id(models)] = _seen.get(id(models), -1) + 1
+    _n = _seen[(kind, models)] = _seen.get((kind, models), -1) + 1
     model = models[_n % len(models)]
-    MATRIX_CASES.append(pytest.param(kind, model, levels, pick, _expected(kind, levels, pick), source,
+    expected = _expected(kind, levels, pick)
+    if expected is not None or not levels:
+        _on_wire.add((kind, model))
+    MATRIX_CASES.append(pytest.param(kind, model, levels, pick, expected, source,
                                      id=f"{kind}-{model}-{pick}-{source}"))
+for _i, (kind, model, levels) in enumerate((kind, model, levels) for kind, models, levels in WIRE_CONTRACTS
+                                           for model in models if (kind, model) not in _on_wire):
+    source = ("session", "override")[_i % 2]
+    MATRIX_CASES.append(pytest.param(kind, model, levels, levels[-1], levels[-1], source,
+                                     id=f"{kind}-{model}-{levels[-1]}-{source}"))
 
 
 def test_wire_matrix_covers_native_catalog():
@@ -409,6 +421,10 @@ def test_wire_matrix_covers_native_catalog():
         assert {model for route, models, _ in WIRE_CONTRACTS if route == kind
                 for model in models} == set(table)
     assert set(WIRE_PICKS) >= {None, *EFFORT_LEVELS}
+    # Every contract model reaches the wire with a pick its route accepts.
+    accepted = {(case.values[0], case.values[1]) for case in MATRIX_CASES
+                if case.values[4] is not None or not case.values[2]}
+    assert accepted == {(kind, model) for kind, models, _ in WIRE_CONTRACTS for model in models}
 
 
 @pytest.mark.asyncio
