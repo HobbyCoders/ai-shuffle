@@ -1350,9 +1350,12 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
             authenticated = (
                 await asyncio.to_thread(github_service.is_authenticated) if repo else False
             )
+        # Name the forge even when its account is signed out, so the header
+        # asks for THAT account and a GitLab sign-in cannot enable Create PR
+        # on a GitHub checkout.
+        result["provider"] = "gitlab" if isinstance(forge, GitLabService) else "github"
         if repo and authenticated:
             result["has_github"] = True
-            result["provider"] = "gitlab" if isinstance(forge, GitLabService) else "github"
             try:
                 pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch, forge)
                 if pr is None:

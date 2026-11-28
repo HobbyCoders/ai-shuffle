@@ -177,17 +177,15 @@ async def gitlab_forge_for_path(working_dir: Optional[str]) -> Tuple[Optional[Gi
     return (pinned, repo) if repo else (None, None)
 
 
-async def number_for_fan_out(number: int, url: Optional[str]) -> Optional[int]:
+def number_for_fan_out(number: int, url: Optional[str]) -> Optional[int]:
     """The PR number to match other chats by after a merge or close.
 
-    Without the PR's URL (its re-read failed), a bare number would also hit
-    the other forge's PR with that number once GitLab is connected, so the
-    update then waits for reconciliation instead. GitHub-only owners keep
-    the old number match.
+    Without the PR's URL (its re-read failed), a bare number also matches
+    another repository's or forge's PR with that number, including MR links
+    saved before GitLab was disconnected. The update then waits for
+    reconciliation instead of marking the wrong chat.
     """
-    if url or not await asyncio.to_thread(gitlab_service.is_authenticated):
-        return number
-    return None
+    return number if url else None
 
 
 async def resolve_forge_for_project(request: Request, project_id: str) -> Tuple[Any, str]:
@@ -560,7 +558,7 @@ async def merge_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=await number_for_fan_out(number, url),
+        pr_number=number_for_fan_out(number, url),
         pr_url=url,
         pr_state="merged",
     )
@@ -612,7 +610,7 @@ async def close_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=await number_for_fan_out(number, url),
+        pr_number=number_for_fan_out(number, url),
         pr_url=url,
         pr_state="closed",
     )

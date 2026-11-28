@@ -18,7 +18,7 @@ from app.api import github_repos
 from app.core import config
 from app.core.gitlab_service import gitlab_service
 from app.db import database
-from app.core.github_service import github_service
+from app.core.github_service import GitHubCliError, github_service
 from tests.git_flow_helpers import build_git_app, github_repo, reset_git_state
 from tests.git_repo_helpers import git, hermetic_git_env
 from tests.gitlab_stub import HOST, TOKEN, FakeGitLab, mr, save_account
@@ -122,6 +122,27 @@ def test_a_failed_reread_after_close_leaves_a_github_pr_with_that_number_alone(e
     assert (row["pr_url"], row["pr_state"]) == (github_url, "open")
 
 
+def test_a_failed_github_reread_leaves_a_saved_mr_alone_after_gitlab_disconnects(env, monkeypatch):
+    database.create_session(session_id="s-gl", profile_id="default", project_id="p1")
+    gitlab_url = f"{HOST}/acme/app/-/merge_requests/5"
+    database.update_session_pr_state("s-gl", pr_number=5, pr_url=gitlab_url, pr_state="open")
+    gitlab_service.logout()
+    git(env.repo, "remote", "set-url", "origin", "https://github.com/acme/app.git")
+    reset_git_state()
+    env.gh.signed = True
+    monkeypatch.setattr(github_service, "close_pull", lambda *_a, **_k: (True, None))
+
+    def reread_fails(*_args, **_kwargs):
+        raise GitHubCliError("gh pr view failed")
+
+    monkeypatch.setattr(github_service, "get_pull", reread_fails)
+
+    closed = env.client.delete(f"{BASE}/pulls/5")
+    assert closed.status_code == 200, closed.text
+    row = database.get_session("s-gl")
+    assert (row["pr_url"], row["pr_state"]) == (gitlab_url, "open")
+
+
 def test_gitlab_failure_is_502_not_an_empty_list(env):
     env.api.route("GET", MRS, 500, {"message": "boom"})
     response = env.client.get(f"{BASE}/pulls")
@@ -169,6 +190,15 @@ def test_pr_state_after_disconnect_is_no_forge(env):
     gitlab_service.logout()
     data = env.client.get("/api/v1/projects/p1/git/pr-state").json()
     assert data["has_github"] is False
+
+
+def test_pr_state_names_github_for_a_signed_out_github_checkout(env):
+    # Only GitLab is connected; the header must ask for the GitHub account.
+    git(env.repo, "remote", "set-url", "origin", "https://github.com/acme/app.git")
+    reset_git_state()
+    data = env.client.get("/api/v1/projects/p1/git/pr-state").json()
+    assert (data["has_github"], data["provider"]) == (False, "github")
+    assert _gh_repo_calls(env) == []
 
 
 # =============================================================================
