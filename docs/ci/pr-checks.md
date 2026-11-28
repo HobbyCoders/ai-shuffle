@@ -1277,39 +1277,19 @@ also independently supports safe ancestors and rechecks its own pointer.
 
 ## Before a stable release
 
-- A full pass on Linux (`local/full-suite`, above) and on Windows: on
-  DesktopWorker, `python scripts/local_ci.py full --step --attest` (repeated
-  until it prints `COMPLETE`, see above) also posts `local/windows-suite`. The ship-release
-  skill checks both statuses on the release commit. Without DesktopWorker, the
-  owner can run the same suite on a GitHub-hosted Windows runner (free in public
-  repositories): `gh workflow run windows-suite.yml --ref main` on the release
-  commit. `ship_release_status.py` counts a successful run the owner dispatched
-  on main at the candidate as `local/windows-suite`, and the release notes name
-  the run. The hosted run is split into parallel parts
-  (`scripts/ci/windows_parts.py`: eight backend parts, frontend, desktop, and the rest),
-  so it takes the time of the slowest part. A failed part does not stop the
-  others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
-  run's newest attempt counts. A failed pytest command there reruns just its
-  failed tests once, and only when test failures were its sole fault (not a
-  collection error, an interrupted or killed run, or a failed scratch cleanup);
-  a test that then passes is reported as flaky in the job summary and should
-  still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
-  `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
-  the release notes. Edge never waits for Windows.
-- Main stays open during a release. A suite run starts on main's tip and can
-  keep going after main moves on:
-  - the one-shot `full --attest` posts its status on the revision it tested;
-  - a staged `full --step --attest` that has already started finishes its
-    later chunks on that revision, as long as it is still on public main's
-    first-parent history.
-
-  Once the suites and live smoke have passed on one merged revision,
-  `ship_release_status.py --candidate <sha>` checks every gate on that
-  revision instead of main's tip. Tag that SHA. Later merges ship in the next
+- Main CI must have passed on the release commit: the push run of `ci.yml`
+  (the full suite, on GitHub) on that exact commit, with its `CI` job green.
+  `release.yml` checks this in its preflight and again before each staged
+  activation (`release_preflight.verify_suite`). An owner `local/full-suite`
+  success counts too, and an owner `local/full-suite` failure vetoes the
+  commit. No local Linux or Windows pass is required; `windows-suite.yml`
+  and `local_ci.py full` remain optional diagnostics.
+- Main stays open during a release. A cancelled main run (a newer merge
+  replaced it) does not count, so tag a commit whose run finished green:
+  `ship_release_status.py` names the newest one, and
+  `ship_release_status.py --candidate <sha>` checks every gate (main CI, live
+  smoke) on that revision instead of main's tip. Later merges ship in the next
   release and never reset the gates, so no session has to hold its merges.
-  One limit: a gate that is still missing on a pinned revision behind main
-  can't be produced afterwards, because new runs start on the tip. Pin a
-  revision that already passed, or test the tip.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
 - The Linux `backend-linux` local suite runs both container runtime and image
