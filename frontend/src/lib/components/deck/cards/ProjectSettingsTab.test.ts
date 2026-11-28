@@ -1,4 +1,4 @@
-/** Project settings drawer: identity, and the project's one danger zone. */
+/** The project's Settings tab: identity, and the project's one danger zone. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 vi.mock('$lib/stores/auth.svelte', async () => ({ isAdmin: (await import('svelte/store')).writable(true) }));
@@ -15,18 +15,19 @@ vi.mock('$lib/api/project-workers', async (importOriginal) => ({
 	getProjectRemovalPreview: vi.fn()
 }));
 import type { Writable } from 'svelte/store';
-import ProjectSettingsDrawer from './ProjectSettingsDrawer.svelte';
+import ProjectSettingsTab from './ProjectSettingsTab.svelte';
 import { forgetProject } from '$lib/api/project-workers';
 import { appData } from '$lib/stores/app-data.svelte';
 
 const ref = { project_v2_id: 'pv2-demo' };
-const base = { projectName: 'Demo', projectRef: ref, kind: 'git' as const, selfName: 'Home server', onClose: vi.fn() };
+const base = { projectName: 'Demo', projectRef: ref, kind: 'git' as const, isGit: true, remote: 'https://example.com/acme/demo.git', selfName: 'Home server' };
+const tab = () => document.querySelector('[data-ui-project-settings]') as HTMLElement;
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
-describe('Project settings drawer', () => {
+describe('Project settings tab', () => {
 	it('has one danger zone with this worker’s removal, and no raw path box', async () => {
-		render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-		const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+		render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+		const drawer = tab();
 		expect(within(drawer).getAllByRole('heading', { name: 'Danger zone' })).toHaveLength(1);
 		expect(within(drawer).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
 		expect(within(drawer).queryByPlaceholderText('Project path')).toBeNull();
@@ -36,9 +37,9 @@ describe('Project settings drawer', () => {
 	it('forgets a project no worker holds, then hands it back', async () => {
 		vi.mocked(forgetProject).mockResolvedValue({ ok: true, project_v2_id: 'pv2-demo' });
 		const onRemoved = vi.fn();
-		render(ProjectSettingsDrawer, { ...base, localProjectId: null, orphaned: true, onRemoved });
+		render(ProjectSettingsTab, { ...base, localProjectId: null, orphaned: true, onRemoved });
 
-		const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+		const drawer = tab();
 		expect(within(drawer).queryByRole('button', { name: 'Remove project and chats' })).toBeNull();
 		await fireEvent.click(within(drawer).getByRole('button', { name: 'Forget project' }));
 		expect(forgetProject).toHaveBeenCalledWith(ref);
@@ -47,23 +48,41 @@ describe('Project settings drawer', () => {
 
 	it('sends folder changes to this worker’s row', async () => {
 		const onOpenSelf = vi.fn();
-		const onClose = vi.fn();
-		render(ProjectSettingsDrawer, { ...base, onClose, localProjectId: null, orphaned: false, workerTable: true, onOpenSelf, onRemoved: vi.fn() });
+		render(ProjectSettingsTab, { ...base, localProjectId: null, orphaned: false, workerTable: true, onOpenSelf, onRemoved: vi.fn() });
 		await fireEvent.click(screen.getByRole('button', { name: 'Open Home server' }));
-		expect(onClose).toHaveBeenCalled();
-		expect(onOpenSelf).toHaveBeenCalled();
+		expect(onOpenSelf).toHaveBeenCalledOnce();
 	});
 
 	it('sends this worker’s removal to its row when the worker table has one, instead of a second removal', async () => {
 		const onRemoveSelf = vi.fn();
-		const onClose = vi.fn();
-		render(ProjectSettingsDrawer, { ...base, onClose, localProjectId: 'demo', orphaned: false, workerTable: true, onOpenSelf: vi.fn(), onRemoveSelf, onRemoved: vi.fn() });
-		const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+		render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, workerTable: true, onOpenSelf: vi.fn(), onRemoveSelf, onRemoved: vi.fn() });
+		const drawer = tab();
 		expect(within(drawer).getAllByRole('heading', { name: 'Danger zone' })).toHaveLength(1);
 		expect(within(drawer).queryByRole('button', { name: 'Remove project and chats' })).toBeNull();
 		await fireEvent.click(within(drawer).getByRole('button', { name: 'Remove from Home server…' }));
-		expect(onClose).toHaveBeenCalled();
 		expect(onRemoveSelf).toHaveBeenCalledOnce();
+	});
+
+	it('shows the repository as a row and opens the change for every worker from it', async () => {
+		const onChangeRepository = vi.fn();
+		render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onChangeRepository, onRemoved: vi.fn() });
+		expect(within(tab()).getByText('https://example.com/acme/demo.git')).toBeTruthy();
+		await fireEvent.click(within(tab()).getByRole('button', { name: 'Change the repository on all workers' }));
+		expect(onChangeRepository).toHaveBeenCalledOnce();
+		expect(within(tab()).getByRole('combobox', { name: 'Group for Demo' })).toBeTruthy();
+	});
+
+	it('offers to set a repository no worker reported, and has no repository row for a plain folder', async () => {
+		const onChangeRepository = vi.fn();
+		const view = render(ProjectSettingsTab, { ...base, remote: null, localProjectId: null, orphaned: false, onChangeRepository, onRemoved: vi.fn() });
+		expect(within(tab()).getByText('Not reported')).toBeTruthy();
+		await fireEvent.click(within(tab()).getByRole('button', { name: 'Set the repository on all workers' }));
+		expect(onChangeRepository).toHaveBeenCalledOnce();
+		view.unmount();
+
+		render(ProjectSettingsTab, { ...base, kind: 'folder' as const, isGit: false, remote: null, localProjectId: null, orphaned: false, onChangeRepository, onRemoved: vi.fn() });
+		expect(within(tab()).queryByRole('button', { name: /the repository on all workers/ })).toBeNull();
+		expect(within(tab()).queryByText('Repository')).toBeNull();
 	});
 
 	describe('without a worker table', () => {
@@ -72,8 +91,8 @@ describe('Project settings drawer', () => {
 
 		it('changes this worker’s folder here, through the guarded local update', async () => {
 			vi.mocked(appData.updateProject).mockResolvedValue(undefined as never);
-			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = tab();
 			expect(within(drawer).queryByRole('button', { name: 'Open Home server' })).toBeNull();
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
 			const field = within(drawer).getByLabelText('New folder on Home server') as HTMLInputElement;
@@ -84,8 +103,8 @@ describe('Project settings drawer', () => {
 		});
 
 		it('refuses to save over a folder that changed elsewhere meanwhile', async () => {
-			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = tab();
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
 			await fireEvent.input(within(drawer).getByLabelText('New folder on Home server'), { target: { value: '/workspace/example/demo-moved' } });
 			(await projectsStore()).set([{ id: 'demo', name: 'Demo', path: '/workspace/example/demo-elsewhere' }]);
@@ -103,8 +122,8 @@ describe('Project settings drawer', () => {
 			vi.mocked(appData.loadProjects).mockImplementation(async () => {
 				store.set([{ id: 'demo', name: 'Demo', path: '/workspace/example/demo-elsewhere', folder_revision: 'b'.repeat(64) }]);
 			});
-			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = tab();
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
 			await fireEvent.input(within(drawer).getByLabelText('New folder on Home server'), { target: { value: '/workspace/example/demo-moved' } });
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
@@ -120,8 +139,8 @@ describe('Project settings drawer', () => {
 			vi.mocked(appData.updateProject).mockResolvedValue(undefined as never);
 			const store = await projectsStore();
 			store.set([{ id: 'demo', name: 'Demo', path: '/workspace/example/demo', folder_revision: 'a'.repeat(64) }]);
-			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = tab();
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
 			store.set([{ id: 'demo', name: 'Demo renamed', path: '/workspace/example/demo', folder_revision: 'c'.repeat(64) }]);
 			await fireEvent.input(within(drawer).getByLabelText('New folder on Home server'), { target: { value: '/workspace/example/demo-moved' } });
@@ -132,8 +151,8 @@ describe('Project settings drawer', () => {
 
 		it('puts the keyboard back on the folder field after a rejected save', async () => {
 			vi.mocked(appData.updateProject).mockRejectedValue({ detail: 'Folder not found.' });
-			render(ProjectSettingsDrawer, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
-			const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+			render(ProjectSettingsTab, { ...base, localProjectId: 'demo', orphaned: false, onRemoved: vi.fn() });
+			const drawer = tab();
 			await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
 			const field = within(drawer).getByLabelText('New folder on Home server') as HTMLInputElement;
 			await fireEvent.input(field, { target: { value: '/workspace/example/missing' } });

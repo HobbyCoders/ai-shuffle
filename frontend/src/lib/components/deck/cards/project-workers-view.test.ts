@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectWorker, RepositoryChangeResponse, RepositoryChangeWorker } from '$lib/api/project-workers';
 import {
-	middleTruncate,
+	repositorySlug,
 	workerStatus,
 	errorAction,
 	heldByNoWorker,
@@ -257,12 +257,16 @@ describe('worker table status cell', () => {
 	])('%#: reads %s', (worker, kind, tone, label) => {
 		expect(workerStatus(worker, kind as 'git' | 'folder')).toEqual({ tone, label });
 	});
-	it('shortens a long folder in the middle, keeping its root and its name', () => {
-		expect(middleTruncate('/workspace/example/demo', 40)).toBe('/workspace/example/demo');
-		const short = middleTruncate('/workspace/example/clients/acme/projects/demo-app', 24);
-		expect(short).toHaveLength(24);
-		expect(short.startsWith('/workspace/')).toBe(true);
-		expect(short.endsWith('demo-app')).toBe(true);
-		expect(short).toContain('…');
+	it.each([
+		['https://example.com/acme/demo.git', 'acme/demo'],
+		['https://example.com/acme/demo/', 'acme/demo'],
+		['git@example.com:acme/demo.git', 'acme/demo'],
+		['ssh://git@example.com:2222/acme/demo', 'acme/demo'],
+		['https://example.com/team/tools/demo.git?ref=main', 'tools/demo'],
+		['example.com/acme/demo', 'acme/demo'],
+		['/srv/git/demo.git', 'git/demo'],
+		['demo', 'demo']
+	])('names a repository %s by its last two path parts', (remote, slug) => {
+		expect(repositorySlug(remote)).toBe(slug);
 	});
 });

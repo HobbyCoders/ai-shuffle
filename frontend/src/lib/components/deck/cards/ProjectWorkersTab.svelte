@@ -1,12 +1,12 @@
 <script lang="ts">
 	/**
-	 * ProjectWorkersTab — the project's worker table (GET /projects/workers):
-	 * one compact row per approved worker with its status, folder, branch and
-	 * when it was last seen. Status carries the row's own action: Retry for a
-	 * failed setup, Set up (or Set up when online) where the project is missing.
+	 * ProjectWorkersTab — the project's workers (GET /projects/workers): one
+	 * row per approved worker with its status, folder, branch and whether it is
+	 * online. Status carries the row's own action: Retry for a failed setup,
+	 * Set up (or Set up when online) where the project is missing.
 	 *
-	 * Selecting a row opens that worker's inspector (beside the table; a sheet
-	 * on a phone, where the table is a list), in the states of the mockup:
+	 * A row opens that worker's details under it (one worker at a time, the
+	 * same on a phone), in these states:
 	 *
 	 *   ready           folder with Change folder, branch · clean / N changed files, New chat here, Remove
 	 *   missing         editable folder (suggested), what a setup does, Set up, Use a folder already there…
@@ -17,21 +17,20 @@
 	 * This worker's removal is the local one (ProjectLocalRemoval); another
 	 * worker's counts its chats with a fresh read before Remove is offered.
 	 *
-	 * Above the table, a banner names the online workers that lack the project
+	 * Above the rows, a banner names the online workers that lack the project
 	 * with "Set up on all missing". While any setup is queued or running the
 	 * list is re-read every 2 s; the `projects` resources_changed signal also
 	 * refreshes it. Owner/admin only actions; API users never see folders.
 	 */
 	import { onDestroy, tick, untrack } from 'svelte';
-	import { ChevronRight, MessageSquarePlus, MonitorSmartphone, RotateCw, X } from 'lucide-svelte';
-	import { RowGroup, SettingRow, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
+	import { ChevronDown, MessageSquarePlus, RotateCw } from 'lucide-svelte';
+	import { RowGroup, SettingRow, EmptyDetail, InlineBanner, PathText } from '$lib/components/layout/view';
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 	import { removalCheckError, removalConfirmText } from './project-removal';
 	import ProjectLocalRemoval from './ProjectLocalRemoval.svelte';
-	import ProjectSheet from './ProjectSheet.svelte';
 	import {
 		browseWorkerFolder,
 		cancelProjectSetup,
@@ -57,7 +56,6 @@
 		hasProject,
 		heldByNoWorker,
 		isRunning,
-		middleTruncate,
 		seenAgo,
 		workerStatus
 	} from './project-workers-view';
@@ -67,10 +65,8 @@
 		projectName: string;
 		/** This worker's legacy id for the project, when it is here. */
 		localProjectId: string | null;
-		/** The worker whose inspector is open (a header chip or the parent can set it). */
+		/** The worker whose details are open (its row opens them; the parent can too). */
 		selectedInstallId?: string | null;
-		/** Phone layout: the table is a list and the inspector a sheet. */
-		stacked?: boolean;
 		/** The project's workers changed (a setup started, finished or was removed). */
 		onChanged?: () => void;
 		/** Each answer of the worker list (the parent learns this worker's row from it). */
@@ -88,43 +84,43 @@
 		 * registration, so such an answer shows nothing and `onUnavailable` runs.
 		 */
 		expectLocalId?: string | null;
-		/** Project settings sent the owner here: open this worker's removal confirmation in its inspector. */
+		/** The Settings tab sent the owner here: open this worker's removal confirmation in its details. */
 		askSelfRemoval?: boolean;
 		/** The request above was taken (so a later remount does not ask again). */
 		onSelfRemovalAsked?: () => void;
 	}
 
-	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), stacked = false, onChanged, onLoaded, onUnavailable, expectLocalId = null, askSelfRemoval = false, onSelfRemovalAsked }: Props = $props();
+	let { projectRef, projectName, localProjectId, selectedInstallId = $bindable(null), onChanged, onLoaded, onUnavailable, expectLocalId = null, askSelfRemoval = false, onSelfRemovalAsked }: Props = $props();
 
 	let data = $state<ProjectWorkersResponse | null>(null);
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	/**
-	 * The last action's failure. One started from a worker's inspector names that
-	 * worker and shows there (on a phone the page banner sits behind its sheet);
-	 * one started from the page (Set up on all missing) has no worker and shows on the page.
+	 * The last action's failure. One started from a worker's details names that
+	 * worker and shows there; one started from the page (Set up on all missing)
+	 * has no worker and shows on the page.
 	 */
 	let actionError = $state<{ installId: string | null; message: string } | null>(null);
 	/**
-	 * Project settings sent the owner to this worker's removal: its confirmation
+	 * The Settings tab sent the owner to this worker's removal: its confirmation
 	 * opens at once. A new id per request, so asking again after Cancel asks again.
 	 */
 	let askLocal = $state(0);
 	let askLocalSeq = 0;
 	/**
-	 * This worker's removal confirmation is open. Held here, above the
-	 * aside/phone-sheet switch, so resizing across the breakpoint keeps it open
-	 * (the removal row remounts); cleared with every other removal state.
-	 * Its running request and failure are held here too: a remount mid-DELETE
-	 * keeps Remove disabled, and the failure lands in the row on screen. The
-	 * request alone clears `localRemoving`, so nothing can send a second one.
+	 * This worker's removal confirmation is open; cleared with every other
+	 * removal state. Its running request and failure are held here too, above
+	 * the details that mount with their row: closing and reopening them
+	 * mid-DELETE keeps Remove disabled, and the failure lands in the row on
+	 * screen. The request alone clears `localRemoving`, so nothing can send a
+	 * second one.
 	 */
 	let localConfirming = $state(false);
 	let localRemoving = $state(false);
 	let localRemovalError = $state<string | null>(null);
 	/** Folder field per worker (seeded from the suggestion, then the owner's edits). */
 	let folders = $state<Record<string, string>>({});
-	/** Workers whose inspector is in "use a folder already there" mode. */
+	/** Workers whose details are in "use a folder already there" mode. */
 	let adopting = $state<Record<string, boolean>>({});
 	/** Request in flight per worker (set up, cancel, remove). */
 	let busy = $state<Record<string, boolean>>({});
@@ -150,7 +146,6 @@
 	const anyRunning = $derived(workers.some((w) => isRunning(w)));
 	const orphaned = $derived(heldByNoWorker(workers));
 	const selected = $derived(workers.find((w) => w.install_id === selectedInstallId) ?? null);
-	const inspecting = $derived(!!selected && !stacked);
 
 	function nameList(names: string[]): string {
 		if (names.length <= 1) return names[0] ?? '';
@@ -234,9 +229,10 @@
 		if (pollTimer) clearTimeout(pollTimer);
 	});
 
-	// A worker was selected (a row, a header chip): bring its inspector into
-	// view and focus it, once per selection (not on every poll, which would
-	// pull focus out of a folder field).
+	// The parent opened a worker (the Settings tab's removal): bring its details
+	// into view and focus them, once per selection (not on every poll, which
+	// would pull focus out of a folder field). A row the owner pressed keeps
+	// the focus itself (see select).
 	let focusedFor: string | null = null;
 	const loaded = $derived(!!data);
 	$effect(() => {
@@ -246,7 +242,6 @@
 		focusedFor = id;
 		void tick().then(() => {
 			const el = document.getElementById(`pw-card-${id}`);
-			// Beside the table it is already in view; below it (narrow panes) bring its top up.
 			const top = el?.getBoundingClientRect().top ?? 0;
 			if (top < 0 || top > window.innerHeight - 80) el?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
 			el?.focus({ preventScroll: true });
@@ -254,7 +249,7 @@
 	});
 
 	// Settings' "Remove from <this worker>": once the list is here, open this
-	// worker's inspector with its removal confirmation already asking.
+	// worker's details with its removal confirmation already asking.
 	$effect(() => {
 		if (!askSelfRemoval || !data) return;
 		const self = data.workers.find((w) => w.is_self);
@@ -270,14 +265,17 @@
 
 	function select(id: string | null) {
 		if (id === selectedInstallId) return;
-		const previous = selectedInstallId;
 		editing = null;
 		askLocal = 0;
 		cancelRemove();
-		if (id) leftSheet = false;
+		// The row that was pressed keeps the keyboard; its details open under it.
+		focusedFor = id;
 		selectedInstallId = id;
-		// Closing the inspector hands focus back to the row that opened it.
-		if (!id && previous) void tick().then(() => document.getElementById(`pw-row-${previous}`)?.focus());
+	}
+
+	/** A row opens its worker's details, and closes them when they are open. */
+	function toggle(id: string) {
+		select(id === selectedInstallId ? null : id);
 	}
 
 	function errMessage(e: unknown, fallback: string): string {
@@ -285,7 +283,7 @@
 		return typeof err.detail === 'string' ? err.detail : err.message || fallback;
 	}
 
-	/** Record a failed action: on its worker's inspector, or on the page when the page started it. */
+	/** Record a failed action: in its worker's details, or on the page when the page started it. */
 	function failed(installId: string | null, message: string) {
 		actionError = { installId, message };
 	}
@@ -426,24 +424,7 @@
 		data = { ...data, workers: data.workers.map((w) => (w.install_id === id ? { ...w, ...patch } : w)) };
 	}
 
-	/**
-	 * Before an inspector action opens something outside the Projects page: on a
-	 * phone the inspector is a sheet above everything, so close it, or what opens
-	 * sits behind it. Focus goes with what opens, not back to the row (unlike select).
-	 */
-	let leftSheet = false;
-	const sheetReturnsFocus = () => !leftSheet;
-	function leaveSheet() {
-		if (!stacked) return;
-		leftSheet = true;
-		editing = null;
-		askLocal = 0;
-		cancelRemove();
-		selectedInstallId = null;
-	}
-
 	function newChatHere(w: ProjectWorkerDetail) {
-		leaveSheet();
 		activeSession.newChat();
 		activeSession.setProject(localProjectId ?? '', data?.project_v2_id ?? null, { user: true });
 		activeSession.setDeviceIntent(w.is_self ? null : { id: w.install_id, name: w.device_name });
@@ -460,13 +441,11 @@
 		const action = errorAction(w.setup?.error_code, w.device_name);
 		if (!action) return;
 		if (action.kind === 'folder') return focusFolder(w.install_id);
-		if (w.is_self) {
-			leaveSheet();
-			layout.openFeaturePage('settings', 'category=integrations&item=github');
-		} else githubHelp = githubHelp === w.install_id ? null : w.install_id;
+		if (w.is_self) layout.openFeaturePage('settings', 'category=integrations&item=github');
+		else githubHelp = githubHelp === w.install_id ? null : w.install_id;
 	}
 
-	/** A row's own action (Retry, Set up): it opens the inspector too, so the result shows there. */
+	/** A row's own action (Retry, Set up): it opens the details too, so the result shows there. */
 	function rowSetUp(e: MouseEvent, w: ProjectWorkerDetail) {
 		e.stopPropagation();
 		select(w.install_id);
@@ -490,14 +469,9 @@
 		return `Clones ${remote} using ${w.device_name}'s own GitHub sign-in. Never overwrites an existing folder.`;
 	}
 
+	/** Online, or offline and when it was last seen (the row's first line). */
 	function presence(w: ProjectWorkerDetail): string {
-		return [w.is_self ? 'This worker' : '', w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ')].filter(Boolean).join(' · ');
-	}
-
-	function lastSeen(w: ProjectWorkerDetail): string {
-		if (w.online) return 'Now';
-		const ago = seenAgo(w.last_seen);
-		return ago ? ago.replace(/^seen /, '').replace(/^just now$/, 'Just now') : '—';
+		return w.online ? 'Online' : ['Offline', seenAgo(w.last_seen)].filter(Boolean).join(' · ');
 	}
 
 	/** The folder this worker has (or will have) for the project. */
@@ -522,14 +496,15 @@
 	{/if}
 {/snippet}
 
-{#snippet inspector(w: ProjectWorkerDetail)}
+<!-- A worker's details, under its row: flat rows of the Workers card (no card of their own). -->
+{#snippet details(w: ProjectWorkerDetail)}
 	{@const running = isRunning(w)}
 	{@const has = hasProject(w.state)}
 	{@const failed = w.state === 'failed'}
 	{@const action = failed ? errorAction(w.setup?.error_code, w.device_name) : null}
 	{@const check = confirmingRemove === w.install_id && removalCheck?.installId === w.install_id ? removalCheck : null}
 	{@const fresh = check?.detail ?? null}
-	<article id="pw-card-{w.install_id}" class="pw-card" tabindex="-1" aria-label={w.device_name} data-worker-state={w.state}>
+	<section id="pw-card-{w.install_id}" class="pw-card" tabindex="-1" aria-label="{w.device_name} details" data-worker-state={w.state}>
 		{#snippet statusDetail()}
 			{#if running}
 				{@const p = w.setup?.progress}
@@ -549,89 +524,83 @@
 			{/if}
 		{/snippet}
 		{#if actionError && actionError.installId === w.install_id}
-			<InlineBanner>{actionError.message}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>
+			<div class="pw-card-banner"><InlineBanner>{actionError.message}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner></div>
 		{/if}
-		<RowGroup title="Status">
-			<SettingRow label={running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}
-				hint={presence(w)} wrapHint expanded={running || w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
-				{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel setup</button>
-				{:else if has}
-					{#if w.online}<button class="st-btn primary" onclick={() => newChatHere(w)} disabled={busy[w.install_id]}><MessageSquarePlus />New chat here</button>{/if}
-				{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
-				{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>
-				{:else if !running && $isAdmin}
-					{#if !w.online}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up when online</button>
-					{:else if failed}
-						{#if action}<button class="st-btn" onclick={() => onErrorAction(w)}>{action.label}</button>{/if}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}><RotateCw />Retry</button>
-					{:else if adopting[w.install_id]}<button class="st-btn primary" onclick={() => setUp(w, 'adopt')} disabled={busy[w.install_id] || !(folders[w.install_id] ?? '').trim()}>Use this folder</button><button class="st-btn" onclick={() => (adopting = { ...adopting, [w.install_id]: false })}>Back</button>
-					{:else}<button class="st-btn primary" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up {placeName(w)}</button><button class="st-btn" onclick={() => { adopting = { ...adopting, [w.install_id]: true }; void tick().then(() => focusFolder(w.install_id)); }}>Use a folder already there…</button>{/if}
+		<SettingRow label={running ? (kind === 'folder' ? 'Setting up…' : 'Cloning…') : has ? 'Ready' : w.state === 'queued_offline' ? `Waiting for ${w.device_name}` : failed ? (kind === 'folder' ? "Couldn't set it up" : "Couldn't clone") : w.state === 'unknown' ? `Couldn't check ${w.device_name}` : `Not set up ${w.is_self ? 'on this worker' : 'here'}`}
+			hint={has ? (w.online ? `Start a chat in ${projectName} on ${w.is_self ? 'this worker' : w.device_name}.` : `${w.device_name} is offline.`) : undefined} wrapHint expanded={running || w.state === 'queued_offline' || w.state === 'unknown' || failed ? statusDetail : undefined}>
+			{#if running && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Cancel setup</button>
+			{:else if has}
+				{#if w.online}<button class="st-btn" onclick={() => newChatHere(w)} disabled={busy[w.install_id]}><MessageSquarePlus />New chat here</button>{/if}
+			{:else if w.state === 'queued_offline' && $isAdmin && w.setup?.op_id}<button class="st-btn" onclick={() => cancel(w)} disabled={busy[w.install_id]}>Withdraw</button>
+			{:else if w.state === 'unknown'}<button class="st-btn" onclick={() => load()}><RotateCw />Check again</button>
+			{:else if !running && $isAdmin}
+				{#if !w.online}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up when online</button>
+				{:else if failed}
+					{#if action}<button class="st-btn" onclick={() => onErrorAction(w)}>{action.label}</button>{/if}<button class="st-btn" onclick={() => setUp(w)} disabled={busy[w.install_id]}><RotateCw />Retry</button>
+				{:else if adopting[w.install_id]}<button class="st-btn primary" onclick={() => setUp(w, 'adopt')} disabled={busy[w.install_id] || !(folders[w.install_id] ?? '').trim()}>Use this folder</button><button class="st-btn" onclick={() => (adopting = { ...adopting, [w.install_id]: false })}>Back</button>
+				{:else}<button class="st-btn primary" onclick={() => setUp(w)} disabled={busy[w.install_id]}>Set up {placeName(w)}</button><button class="st-btn" onclick={() => { adopting = { ...adopting, [w.install_id]: true }; void tick().then(() => focusFolder(w.install_id)); }}>Use a folder already there…</button>{/if}
+			{/if}
+		</SettingRow>
+		{#if !has && !running && w.state !== 'queued_offline' && w.state !== 'unknown'}
+			{#if $isAdmin && w.online}
+				<SettingRow label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} hint={setupHint(w)} wrapHint>
+					{#snippet expanded()}
+						<form id="pw-folder-{w.install_id}" onsubmit={(e) => { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); }}>
+							<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); } }} value={folders[w.install_id] ?? ''} oninput={(v) => (folders = { ...folders, [w.install_id]: v })} mono width="full" placeholder={w.suggested_folder ?? data?.default_folder} label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} disabled={busy[w.install_id]} />
+						</form>
+					{/snippet}
+				</SettingRow>
+			{:else if !w.online}<SettingRow label="Worker offline" wrapHint hint={`Turn ${w.device_name} on to set it up — or queue it and it runs when ${w.device_name} comes back.`} />{/if}
+		{/if}
+		{#if githubHelp === w.install_id}<SettingRow label="GitHub sign-in" wrapHint hint={`On ${w.device_name}, open AI Shuffle, go to Settings → Integrations → GitHub and sign in. Then press Retry here.`} />{/if}
+		{#if has || running}
+			<SettingRow label="Folder" hint={folderOf(w) || 'Not reported'} hintMono wrapHint>
+				{#if $isAdmin && has && editing?.installId !== w.install_id && (w.folder_revision || !w.online)}
+					<button id={`pw-change-${w.install_id}`} class="st-btn" title={w.online ? `Choose another folder on ${w.device_name}` : `${w.device_name} is offline`} disabled={!!editing || !w.online || !w.folder_revision || busy[w.install_id] || !!loadError} onclick={() => openFolderEditor(w)}>Change folder</button>
 				{/if}
 			</SettingRow>
-			{#if !has && !running && w.state !== 'queued_offline' && w.state !== 'unknown'}
-				{#if $isAdmin && w.online}
-					<SettingRow label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} hint={setupHint(w)} wrapHint>
-						{#snippet expanded()}
-							<form id="pw-folder-{w.install_id}" onsubmit={(e) => { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); }}>
-								<TextField onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); setUp(w, adopting[w.install_id] ? 'adopt' : 'auto'); } }} value={folders[w.install_id] ?? ''} oninput={(v) => (folders = { ...folders, [w.install_id]: v })} mono width="full" placeholder={w.suggested_folder ?? data?.default_folder} label={adopting[w.install_id] ? `Folder already on ${w.device_name}` : `Folder on ${w.device_name}`} disabled={busy[w.install_id]} />
-							</form>
-						{/snippet}
-					</SettingRow>
-				{:else if !w.online}<SettingRow label="Worker offline" wrapHint hint={`Turn ${w.device_name} on to set it up — or queue it and it runs when ${w.device_name} comes back.`} />{/if}
-			{/if}
-			{#if githubHelp === w.install_id}<SettingRow label="GitHub sign-in" wrapHint hint={`On ${w.device_name}, open AI Shuffle, go to Settings → Integrations → GitHub and sign in. Then press Retry here.`} />{/if}
-		</RowGroup>
-		{#if has || running}
-			<RowGroup title="Folder">
-				<SettingRow label="Folder" hint={folderOf(w) || 'Not reported'} hintMono wrapHint>
-					{#if $isAdmin && has && editing?.installId !== w.install_id && (w.folder_revision || !w.online)}
-						<button id={`pw-change-${w.install_id}`} class="st-btn" title={w.online ? `Choose another folder on ${w.device_name}` : `${w.device_name} is offline`} disabled={!!editing || !w.online || !w.folder_revision || busy[w.install_id] || !!loadError} onclick={() => openFolderEditor(w)}>Change folder</button>
-					{/if}
+			{#if editing?.installId === w.install_id && $isAdmin}
+				{@const draft = editing}
+				{@const stale = w.online && w.state === 'ready' && w.folder_revision !== draft.revision}
+				{@const unavailable = !w.online || w.state !== 'ready' || !!loadError}
+				<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${w.device_name}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
+					{#snippet expanded()}
+						<form class="flex flex-col gap-2" onsubmit={(event) => { event.preventDefault(); void saveFolder(w); }}>
+							<div class="project-controls" data-change-folder-input>
+								<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${w.device_name}`} disabled={busy[w.install_id] || unavailable || stale} />
+								<button type="button" class="st-btn" disabled={busy[w.install_id] || unavailable || stale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>
+							</div>
+							{#if draft.browsing && !unavailable && !stale && !busy[w.install_id]}
+								<DirectoryBrowser browse={(path) => browseWorkerFolder(w.install_id, projectRef, path)} selectedPath={draft.folder} onSelect={(path) => { draft.folder = path; draft.browsing = false; }} />
+							{/if}
+							{#if stale}<p class="project-error" role="alert">The registered folder changed. Cancel and reopen to edit the current folder.</p>
+							{:else if unavailable}<p class="project-error" role="alert">This worker's folder is unavailable. Check its status before saving.</p>{/if}
+							{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
+							<div class="project-controls">
+								<button type="button" class="st-btn" disabled={busy[w.install_id]} onclick={() => closeFolderEditor(w.install_id)}>Cancel</button>
+								<button type="submit" class="st-btn primary" disabled={busy[w.install_id] || unavailable || stale || !draft.folder.trim() || draft.folder.trim() === w.folder}>{busy[w.install_id] ? 'Saving…' : 'Save folder'}</button>
+							</div>
+						</form>
+					{/snippet}
 				</SettingRow>
-				{#if editing?.installId === w.install_id && $isAdmin}
-					{@const draft = editing}
-					{@const stale = w.online && w.state === 'ready' && w.folder_revision !== draft.revision}
-					{@const unavailable = !w.online || w.state !== 'ready' || !!loadError}
-					<SettingRow label="Change folder" wrapHint hint={`Choose an existing folder on ${w.device_name}. No files are moved or copied. New chats and the next turn in chats without worktrees use the new folder. Existing worktrees stay where they are; keep their original checkout in place.`}>
-						{#snippet expanded()}
-							<form class="flex flex-col gap-2" onsubmit={(event) => { event.preventDefault(); void saveFolder(w); }}>
-								<div class="project-controls" data-change-folder-input>
-									<TextField bind:value={draft.folder} width="full" mono pathDisplay label={`New folder on ${w.device_name}`} disabled={busy[w.install_id] || unavailable || stale} />
-									<button type="button" class="st-btn" disabled={busy[w.install_id] || unavailable || stale} aria-expanded={draft.browsing} onclick={() => (draft.browsing = !draft.browsing)}>Browse</button>
-								</div>
-								{#if draft.browsing && !unavailable && !stale && !busy[w.install_id]}
-									<DirectoryBrowser browse={(path) => browseWorkerFolder(w.install_id, projectRef, path)} selectedPath={draft.folder} onSelect={(path) => { draft.folder = path; draft.browsing = false; }} />
-								{/if}
-								{#if stale}<p class="project-error" role="alert">The registered folder changed. Cancel and reopen to edit the current folder.</p>
-								{:else if unavailable}<p class="project-error" role="alert">This worker's folder is unavailable. Check its status before saving.</p>{/if}
-								{#if draft.error}<p class="project-error" role="alert">{draft.error}</p>{/if}
-								<div class="project-controls">
-									<button type="button" class="st-btn" disabled={busy[w.install_id]} onclick={() => closeFolderEditor(w.install_id)}>Cancel</button>
-									<button type="submit" class="st-btn primary" disabled={busy[w.install_id] || unavailable || stale || !draft.folder.trim() || draft.folder.trim() === w.folder}>{busy[w.install_id] ? 'Saving…' : 'Save folder'}</button>
-								</div>
-							</form>
-						{/snippet}
-					</SettingRow>
-				{/if}
-				{#if kind === 'git'}<SettingRow label="Branch" hint={branchLine(w) || (running ? 'Pending setup' : 'Not reported')} />{/if}
-			</RowGroup>
+			{/if}
+			{#if kind === 'git'}<SettingRow label="Branch" hint={branchLine(w) || (running ? 'Pending setup' : 'Not reported')} />{/if}
 		{/if}
 		{#if has && $isAdmin && editing?.installId !== w.install_id && (w.is_self ? !!localProjectId : w.online)}
-			<RowGroup title="Remove">
-				{#if w.is_self && localProjectId}
-					<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onAsked={() => (askLocal = 0)} bind:confirming={localConfirming} bind:removing={localRemoving} bind:error={localRemovalError} onRemoved={localRemoved} />
-				{:else}
-					<SettingRow label="Remove project" wrapHint
-						hint={confirmingRemove !== w.install_id ? `Removes ${projectName} and its chats from ${w.device_name}. Files stay on disk.`
-							: fresh ? removalConfirmText(projectName, w.device_name, { chats: fresh.removal_chats ?? null, worktrees: fresh.removal_worktree_count ?? null })
-							: check?.error ? `Remove ${projectName} from ${w.device_name}?` : 'Counting the chats this removes…'}
-						expanded={check?.error || fresh?.removal_worktrees?.length ? removalDetail : undefined}>
-						{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={cancelRemove} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id] || !fresh}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
-						{:else}<button class="st-btn danger" onclick={() => askRemove(w)}>Remove project and chats from {w.device_name}</button>{/if}
-					</SettingRow>
-				{/if}
-			</RowGroup>
+			{#if w.is_self && localProjectId}
+				<ProjectLocalRemoval projectId={localProjectId} {projectName} where={w.device_name} ask={askLocal} onAsked={() => (askLocal = 0)} bind:confirming={localConfirming} bind:removing={localRemoving} bind:error={localRemovalError} onRemoved={localRemoved} />
+			{:else}
+				<SettingRow label="Remove project" wrapHint
+					hint={confirmingRemove !== w.install_id ? `Removes ${projectName} and its chats from ${w.device_name}. Files stay on disk.`
+						: fresh ? removalConfirmText(projectName, w.device_name, { chats: fresh.removal_chats ?? null, worktrees: fresh.removal_worktree_count ?? null })
+						: check?.error ? `Remove ${projectName} from ${w.device_name}?` : 'Counting the chats this removes…'}
+					expanded={check?.error || fresh?.removal_worktrees?.length ? removalDetail : undefined}>
+					{#if confirmingRemove === w.install_id}<button class="st-btn" onclick={cancelRemove} disabled={busy[w.install_id]}>Cancel</button><button class="st-btn danger" onclick={() => remove(w)} disabled={busy[w.install_id] || !fresh}>{busy[w.install_id] ? 'Removing…' : 'Remove'}</button>
+					{:else}<button class="st-btn danger" onclick={() => askRemove(w)}>Remove project and chats from {w.device_name}</button>{/if}
+				</SettingRow>
+			{/if}
 		{/if}
-	</article>
+	</section>
 {/snippet}
 
 <div data-ui-project-workers={loading ? 'loading' : loadError ? 'error' : 'ready'}>
@@ -639,10 +608,10 @@
 	{:else if loadError && !data}
 		<InlineBanner>{loadError}{#snippet actions()}<button class="st-btn" onclick={() => { loading = true; void load(); }}>Try again</button>{/snippet}</InlineBanner>
 	{:else if data}
-		<!-- A worker's own failure shows in its open inspector (on a phone the page sits behind its sheet). -->
+		<!-- A worker's own failure shows in its open details. -->
 		{#if actionError && !(actionError.installId && actionError.installId === selected?.install_id)}<InlineBanner>{actionError.message}{#snippet actions()}<button class="st-btn" onclick={() => (actionError = null)}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 		{#if $isAdmin && orphaned}
-			<InlineBanner tone="info">No worker has this project any more. You can take it off the Projects list from Project settings; its chats keep it and nothing on disk is touched.</InlineBanner>
+			<InlineBanner tone="info">No worker has this project any more. You can take it off the Projects list from the Settings tab; its chats keep it and nothing on disk is touched.</InlineBanner>
 		{/if}
 		{#if $isAdmin && missingOnline.length > 0}
 			{@const names = nameList(missingOnline.map(w => w.device_name))}
@@ -652,76 +621,33 @@
 			</InlineBanner>
 		{/if}
 		{#if !workers.length}<EmptyDetail title="No other workers" message="Pair a worker in Settings to run this project there too." />
-		{:else if stacked}
-			<ul class="pw-list" aria-label="Workers">
-				{#each workers as w (w.install_id)}
-					<li data-worker-state={w.state}>
-						<button id="pw-row-{w.install_id}" type="button" class="pw-list-row" aria-haspopup="dialog" onclick={() => select(w.install_id)}>
-							<MonitorSmartphone class="pw-list-icon" aria-hidden="true" />
-							<span class="pw-list-main">
-								<span class="pw-list-name">{w.device_name}{#if w.is_self}<span class="pw-tag">This worker</span>{/if}</span>
-								<span class="pw-list-sub" class:st-mono={!!folderOf(w)}>{folderOf(w) ? middleTruncate(folderOf(w) ?? '', 34) : presence(w)}</span>
-							</span>
-							{@render statusCell(w)}
-							<ChevronRight class="pw-list-chev" aria-hidden="true" />
-						</button>
-					</li>
-				{/each}
-			</ul>
-			{#if selected}
-				<ProjectSheet steady title={selected.device_name} subtitle={presence(selected)} initial=".pw-card" returnFocus={sheetReturnsFocus} onClose={() => select(null)}>
-					{@render inspector(selected)}
-				</ProjectSheet>
-			{/if}
 		{:else}
-			<div class="pw-layout" class:inspecting>
-				<div class="pw-table-wrap">
-					<table class="pw-table" aria-label="Workers">
-						<thead>
-							<tr>
-								<th scope="col">Worker</th>
-								<th scope="col">Status</th>
-								<th scope="col">Folder</th>
-								{#if kind === 'git' && !inspecting}<th scope="col">Branch</th>{/if}
-								{#if !inspecting}<th scope="col">Last seen</th>{/if}
-							</tr>
-						</thead>
-						<tbody>
-							{#each workers as w (w.install_id)}
-								{@const folder = folderOf(w)}
-								<!-- The row is a large click target; its first cell's button is the keyboard path. -->
-								<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-								<tr class:selected={w.install_id === selectedInstallId} data-worker-state={w.state} onclick={() => select(w.install_id)}>
-									<td>
-										<button id="pw-row-{w.install_id}" type="button" class="pw-row-btn" aria-pressed={w.install_id === selectedInstallId} aria-label="{w.device_name}: open its details" onclick={(e) => { e.stopPropagation(); select(w.install_id); }}>
-											<span class="pw-row-name">{w.device_name}</span>
-										</button>
-										<span class="pw-row-sub">{[w.is_self ? 'This worker' : '', w.online ? 'Online' : 'Offline'].filter(Boolean).join(' · ')}</span>
-									</td>
-									<td><div class="pw-cell-status">{@render statusCell(w)}{@render rowAction(w)}</div></td>
-									<td class="pw-cell-folder st-mono" title={folder ?? undefined}>{folder ? middleTruncate(folder, inspecting ? 28 : 40) : '—'}</td>
-									{#if kind === 'git' && !inspecting}<td class="pw-cell-branch">{branchLine(w) ?? '—'}</td>{/if}
-									{#if !inspecting}<td class="pw-cell-seen">{lastSeen(w)}</td>{/if}
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-					<p class="st-footnote">Select a worker to manage its copy. Each worker keeps its own copy{kind === 'folder' ? '' : ' and clones with its own GitHub sign-in'}; removing a project from a worker leaves its files on disk.</p>
-				</div>
-				{#if selected}
-					<aside class="pw-inspector" aria-label="{selected.device_name} details">
-						<header class="pw-inspector-head">
-							<MonitorSmartphone aria-hidden="true" />
-							<div class="pw-inspector-title">
-								<h3>{selected.device_name}{#if selected.is_self}<span class="pw-tag">This worker</span>{/if}</h3>
-								<p class="project-muted">{selected.online ? 'Online' : ['Offline', seenAgo(selected.last_seen)].filter(Boolean).join(' · ')}</p>
+			<RowGroup title="Workers" count={workers.length}>
+				<div class="pw-rows">
+					{#each workers as w (w.install_id)}
+						{@const folder = folderOf(w)}
+						{@const branch = kind === 'git' ? branchLine(w) : null}
+						{@const open = w.install_id === selectedInstallId}
+						<div class="pw-item" class:open data-worker-state={w.state}>
+							<!-- The row is a large click target; its button is the keyboard path. -->
+							<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+							<div class="pw-row" onclick={() => toggle(w.install_id)}>
+								<button id="pw-row-{w.install_id}" type="button" class="pw-row-btn" aria-expanded={open} aria-controls={open ? `pw-card-${w.install_id}` : undefined} onclick={(e) => { e.stopPropagation(); toggle(w.install_id); }}>
+									<span class="pw-row-line"><span class="pw-row-name" title={w.device_name}>{w.device_name}</span>{#if w.is_self}<span class="pw-tag">This worker</span>{/if}<span class="pw-row-seen">{presence(w)}</span></span>
+									{#if folder || branch}
+										<span class="pw-row-sub">{#if folder}<span class="pw-row-folder"><PathText path={folder} /></span>{/if}{#if branch}<span class="pw-row-branch">{branch}</span>{/if}</span>
+									{/if}
+								</button>
+								{@render statusCell(w)}
+								<span class="pw-row-action">{@render rowAction(w)}</span>
+								<ChevronDown class="pw-chev" aria-hidden="true" />
 							</div>
-							<button type="button" class="st-btn icon" aria-label="Close {selected.device_name} details" title="Close" onclick={() => select(null)}><X /></button>
-						</header>
-						{@render inspector(selected)}
-					</aside>
-				{/if}
-			</div>
+							{#if open}{@render details(w)}{/if}
+						</div>
+					{/each}
+				</div>
+			</RowGroup>
+			<p class="st-footnote">Open a worker to manage its copy. Each worker keeps its own copy{kind === 'folder' ? '' : ' and clones with its own GitHub sign-in'}; removing a project from a worker leaves its files on disk.</p>
 		{/if}
 	{/if}
 </div>

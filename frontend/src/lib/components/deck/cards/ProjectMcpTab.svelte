@@ -9,7 +9,7 @@
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import { RowGroup, SettingRow, PanelSearch, EmptyDetail, InlineBanner } from '$lib/components/layout/view';
-	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil } from 'lucide-svelte';
+	import { Search, Server, Globe, FolderGit2, FolderLock, Download, Trash2, Pencil, Plus } from 'lucide-svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -234,7 +234,13 @@
 		{/if}
 	</SettingRow>
 {/snippet}
-{#if totalServers > 3}<PanelSearch bind:value={searchQuery} label="Search MCP servers" placeholder="Search MCP servers" />{/if}
+<!-- With no server yet, the empty state below offers the add instead. -->
+{#if listed && totalServers > 0}
+	<div class="project-toolbar">
+		{#if totalServers > 3}<PanelSearch bind:value={searchQuery} label="Search MCP servers" placeholder="Search MCP servers" />{/if}
+		<button class="st-btn project-toolbar-end" onclick={openAddForm}><Plus />Add server</button>
+	</div>
+{/if}
 {#if $mcpError}<InlineBanner>{$mcpError}{#snippet actions()}<button class="st-btn sm" onclick={() => mcp.clearError()}>Dismiss</button>{/snippet}</InlineBanner>{/if}
 {#if !listed && !$mcpError}<p class="project-muted" role="status">Loading MCP servers…</p>{/if}
 {#if filteredUserServers().length}<RowGroup title="Global MCP servers">{#snippet actions()}<code class="project-muted">~/.claude.json</code>{/snippet}{#each filteredUserServers() as server (server.name)}{@render serverRow(server, false)}{/each}</RowGroup>{/if}

@@ -2,41 +2,37 @@
 	/** Projects uses the shared master/detail view; project and worker actions stay local to this page. */
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, DetailPane, EmptyDetail, ListItem, Segmented, InlineBanner } from '$lib/components/layout/view';
+	import { groups as groupsStore } from '$lib/stores/groups.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
 	import { loadProjectsOverview, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
-	import { Plus, FolderOpen, FolderGit2, Settings, GitBranch } from 'lucide-svelte';
+	import { Plus, FolderOpen, FolderGit2 } from 'lucide-svelte';
 	import ProjectWorkersTab from './ProjectWorkersTab.svelte';
-	import ProjectWorkerChips from './ProjectWorkerChips.svelte';
 	import ProjectResourcesTab, { type ResourceId } from './ProjectResourcesTab.svelte';
-	import ProjectSettingsDrawer from './ProjectSettingsDrawer.svelte';
+	import ProjectSettingsTab from './ProjectSettingsTab.svelte';
 	import ProjectRepositoryDialog from './ProjectRepositoryDialog.svelte';
-	import ProjectGroupChip from './ProjectGroupChip.svelte';
 	import ProjectNewChat from './ProjectNewChat.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
-	import { isAdmin } from '$lib/stores/auth.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ProjectKind, ProjectOverviewRow, ProjectRef, ProjectWorker, ProjectWorkersResponse } from '$lib/api/project-workers';
 	import { SETUP_POLL_MS } from '$lib/stores/project-setup';
-	import { hasProject, heldByNoWorker, isOnThisWorker, isRunning, missingCount, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
+	import { hasProject, heldByNoWorker, isOnThisWorker, isRunning, missingCount, repositorySlug, selfWorker, filterGeometry, workerFilterSlot, startFilterDeadline, type FilterGeometry } from './project-workers-view';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
 	import './project-tabs.css';
 
-	let stacked = $state(false);
 	let mounted = $state(false);
 	onMount(() => { mounted = true; });
 	/** The selected row's key: its logical id when known, else this worker's id. */
 	let selectedKey = $state<string | null>(null);
 
-	// The detail's two views: the worker table and this worker's resources.
-	type DetailTab = 'workers' | 'resources';
+	// The detail's three views: its workers, this worker's resources, its settings.
+	type DetailTab = 'workers' | 'resources' | 'settings';
 	let activeTab = $state<DetailTab>('workers');
-	/** The worker whose inspector is open (a row or a header chip chose it). */
+	/** The worker whose details are open in Workers. */
 	let selectedInstallId = $state<string | null>(null);
-	/** The resource open in Resources (null on a phone: the list of four). */
-	let resourceSection = $state<ResourceId | null>(null);
-	let showSettings = $state(false);
+	/** The resource open in Resources. */
+	let resourceSection = $state<ResourceId>('mcp');
 	let showRepoDialog = $state(false);
 
 	// Add project modal state
@@ -196,7 +192,7 @@
 	 * the overview has not listed) its local id, so its folder still changes in
 	 * the one safe editor. When the Workers API has no answer for that local id
 	 * (an older worker), or answers for another checkout of the same origin,
-	 * Project settings changes the folder instead.
+	 * the Settings tab changes the folder instead.
 	 */
 	const workersRef = $derived.by((): ProjectRef | null => {
 		if (!overviewOn || !selectedRow) return null;
@@ -215,23 +211,38 @@
 	}
 	const overviewSelf = $derived(selectedRow ? selfWorker(selectedRow.workers) : null);
 	const selfInstallId = $derived(overviewSelf?.install_id ?? (tableSelf && tableSelf.key === selectedRow?.key ? tableSelf.installId : null));
-	/** This worker's inspector can remove its copy (it holds the project, and the page has a worker table). */
+	/** This worker's details can remove its copy (it holds the project, and the page has a Workers tab). */
 	const selfRowRemoves = $derived(showWorkersTab && !!selectedRow?.localId && !!selfInstallId
 		&& (overviewSelf ? hasProject(overviewSelf.state) : !!tableSelf?.has));
 	let askSelfRemoval = $state(false);
 	const orphaned = $derived(!!selectedRow && heldByNoWorker(selectedRow.workers));
 	const isGit = $derived(selectedRow?.kind === 'git' || (!!selectedRow?.remote && selectedRow.kind !== 'folder'));
 
-	// Without the worker table (no overview for this row, or not loaded yet) the
-	// detail shows its resources; the chosen tab comes back once the table can show.
-	const shownTab = $derived<DetailTab>(showWorkersTab ? activeTab : 'resources');
+	// Without the Workers tab (no overview for this row, or not loaded yet) the
+	// detail opens on its resources; the chosen tab comes back once Workers can show.
+	const shownTab = $derived<DetailTab>(!showWorkersTab && activeTab === 'workers' ? 'resources' : activeTab);
+
+	/** The header's one line under the name: where it comes from, its chats, its group. */
+	const selectedGroup = $derived.by(() => {
+		const id = selectedRow?.localId;
+		const name = id ? ($groupsStore?.projects?.assignments ?? {})[id] : '';
+		return name && ($groupsStore?.projects?.groups ?? []).some((g) => g.name === name) ? name : '';
+	});
+	function chatCount(n: number): string {
+		return `${n} chat${n === 1 ? '' : 's'}`;
+	}
+	const detailSubtitle = $derived.by(() => {
+		const row = selectedRow;
+		if (!row) return '';
+		const source = isGit ? (row.remote ? repositorySlug(row.remote) : 'Git repository') : 'Local folder';
+		return [source, chatCount(row.sessionCount), selectedGroup].filter(Boolean).join(' · ');
+	});
 
 	function handleRowClick(row: ListRow, tab?: DetailTab, installId: string | null = null) {
 		selectedKey = row.key;
 		activeTab = tab ?? 'workers';
 		selectedInstallId = installId;
-		resourceSection = null;
-		showSettings = false;
+		resourceSection = 'mcp';
 		showRepoDialog = false;
 		askSelfRemoval = false;
 	}
@@ -242,8 +253,7 @@
 		selectedKey = localId;
 		activeTab = 'workers';
 		selectedInstallId = null;
-		resourceSection = null;
-		showSettings = false;
+		resourceSection = 'mcp';
 		showRepoDialog = false;
 		askSelfRemoval = false;
 	}
@@ -251,31 +261,29 @@
 	function handleBack() {
 		selectedKey = null;
 		selectedInstallId = null;
-		resourceSection = null;
-		showSettings = false;
+		resourceSection = 'mcp';
 		showRepoDialog = false;
 	}
 
-	/** Open this worker's row in the table: where its folder changes and a setup starts. */
+	/** Open this worker's row in Workers: where its folder changes and a setup starts. */
 	function openSelf() {
 		activeTab = 'workers';
 		selectedInstallId = selfInstallId;
 	}
 
-	/** Settings' "Remove from <this worker>": its inspector opens with the removal asking. */
+	/** Settings' "Remove from <this worker>": its details open with the removal asking. */
 	function removeSelf() {
 		openSelf();
 		askSelfRemoval = true;
 	}
 
 	function projectGone() {
-		showSettings = false;
 		handleBack();
 		void loadProjectsOverview();
 	}
 
 	function rowMeta(row: ListRow): string {
-		return [row.defaultBranch, `${row.sessionCount} session${row.sessionCount === 1 ? '' : 's'}`, !row.onHere ? `Not on ${selfName}` : ''].filter(Boolean).join(' · ');
+		return [row.defaultBranch, chatCount(row.sessionCount), !row.onHere ? `Not on ${selfName}` : ''].filter(Boolean).join(' · ');
 	}
 
 	// Wait for the actual viewport before desktop auto-selection. Phone opens the list.
@@ -294,14 +302,15 @@
 		const row = allRows.find(r => r.key === id || r.localId === id);
 		if (row) { handledItem = id; untrack(() => handleRowClick(row)); }
 	});
-	const detailTabs = $derived(showWorkersTab ? [
-		{ id: 'workers', label: 'Workers', count: detailMissing > 0 ? `${detailMissing} missing` : undefined },
-		{ id: 'resources', label: 'Resources', title: remoteOnly ? `${selectedRow?.name} isn't on ${selfName}. Set it up here to edit its resources.` : undefined }
-	] : undefined);
+	const detailTabs = $derived([
+		...(showWorkersTab ? [{ id: 'workers', label: 'Workers', count: detailMissing > 0 ? `${detailMissing} missing` : undefined }] : []),
+		{ id: 'resources', label: 'Resources', title: remoteOnly ? `${selectedRow?.name} isn't on ${selfName}. Set it up here to edit its resources.` : undefined },
+		{ id: 'settings', label: 'Settings' }
+	]);
 
 </script>
 
-<ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
+<ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack}>
 	{#snippet panel()}
 		<ViewPanel title="Projects" count={allRows.length} loading={listPending}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}
@@ -336,51 +345,31 @@
 		{#if selectedRow}
 			{@const row = selectedRow}
 			{@const ref = overviewOn && row.projectV2Id ? { project_v2_id: row.projectV2Id } : null}
-			{#snippet settingsButton()}
-				<button type="button" class="st-btn icon" aria-label="Project settings" title="Project settings" aria-haspopup="dialog" onclick={() => (showSettings = true)}><Settings /></button>
-			{/snippet}
-			<DetailPane width="data" name={row.name} icon={row.kind === 'git' ? FolderGit2 : FolderOpen} onBack={back} backLabel="Projects"
-				tabs={detailTabs} tab={shownTab} onTabChange={(tab) => { activeTab = tab as DetailTab; }} phonePrimary="inline" phoneMenu={settingsButton}>
-				{#snippet subtitle()}
-					<span class="project-idline" data-ui-project-identity>
-						{#if isGit}
-							<!-- Every Git project offers the change, a missing remote too (it takes a URL). -->
-							{@const repoLabel = row.remote || 'Repository not reported'}
-							{#if $isAdmin && ref}
-								<button type="button" class="project-chip" aria-label={row.remote ? `Repository ${row.remote}. Change it on all workers` : 'Repository not reported. Set it on all workers'} title="Change the repository on all workers" onclick={() => (showRepoDialog = true)}>
-									<GitBranch aria-hidden="true" /><span class="project-chip-value" class:st-mono={!!row.remote}>{repoLabel}</span>
-								</button>
-							{:else}<span class="project-chip static"><GitBranch aria-hidden="true" /><span class="project-chip-value" class:st-mono={!!row.remote}>{repoLabel}</span></span>{/if}
-						{/if}
-						{#if selectedProject}<ProjectGroupChip projectId={selectedProject.id} projectName={row.name} />{/if}
-						{#if row.workers.length}<ProjectWorkerChips workers={row.workers} kind={row.kind} projectName={row.name}
-							onOpen={(w) => { activeTab = 'workers'; selectedInstallId = w.install_id; }} />{/if}
-					</span>
-				{/snippet}
+			<DetailPane width="reading" name={row.name} onBack={back} backLabel="Projects"
+				tabs={detailTabs} tab={shownTab} onTabChange={(tab) => { activeTab = tab as DetailTab; }} phonePrimary="inline">
+				{#snippet subtitle()}<span class="project-subtitle" data-ui-project-subtitle>{detailSubtitle}</span>{/snippet}
 				{#snippet primary()}
-					{#if !stacked}{@render settingsButton()}{/if}
 					<ProjectNewChat workers={ref ? row.workers : null} kind={row.kind} localProjectId={row.localId} projectV2Id={row.projectV2Id} />
 				{/snippet}
 				{#snippet banner()}
-					{#if row.localId && !liveRow}<InlineBanner>This project was deleted elsewhere. Any unsaved fields remain available in Project settings until you leave.</InlineBanner>{/if}
+					{#if row.localId && !liveRow}<InlineBanner>This project was deleted elsewhere. Any unsaved fields remain available in the Settings tab until you leave.</InlineBanner>{/if}
 				{/snippet}
 				{#key row.key}
 				{#if shownTab === 'workers' && workersRef}
 					{@const key = row.key}
-					<ProjectWorkersTab projectRef={workersRef} projectName={row.name} localProjectId={row.localId} {stacked} bind:selectedInstallId
+					<ProjectWorkersTab projectRef={workersRef} projectName={row.name} localProjectId={row.localId} bind:selectedInstallId
 						onChanged={() => void loadProjectsOverview()} onLoaded={(res) => tableLoaded(key, res)}
 						onUnavailable={row.projectV2Id ? undefined : () => { noWorkersFor = key; }} expectLocalId={row.projectV2Id ? null : row.localId}
 						{askSelfRemoval} onSelfRemovalAsked={() => { askSelfRemoval = false; }} />
+				{:else if shownTab === 'settings'}
+					<ProjectSettingsTab projectName={row.name} localProjectId={selectedProject?.id ?? null} projectRef={ref} kind={row.kind} {isGit} remote={row.remote} {selfName} {orphaned}
+						workerTable={showWorkersTab} onOpenSelf={showWorkersTab && selfInstallId ? openSelf : undefined}
+						onRemoveSelf={selfRowRemoves ? removeSelf : undefined} onChangeRepository={ref ? () => (showRepoDialog = true) : undefined} onRemoved={projectGone} />
 				{:else}
-					<ProjectResourcesTab projectId={selectedProject?.id ?? null} projectName={row.name} {selfName} {stacked} bind:section={resourceSection} onSetUpHere={showWorkersTab && selfInstallId ? openSelf : undefined} />
+					<ProjectResourcesTab projectId={selectedProject?.id ?? null} projectName={row.name} {selfName} bind:section={resourceSection} onSetUpHere={showWorkersTab && selfInstallId ? openSelf : undefined} />
 				{/if}
 				{/key}
 			</DetailPane>
-			{#if showSettings}
-				<ProjectSettingsDrawer projectName={row.name} localProjectId={selectedProject?.id ?? null} projectRef={ref} kind={row.kind} {selfName} {orphaned}
-					workerTable={showWorkersTab} onOpenSelf={showWorkersTab && selfInstallId ? openSelf : undefined}
-					onRemoveSelf={selfRowRemoves ? removeSelf : undefined} onRemoved={projectGone} onClose={() => (showSettings = false)} />
-			{/if}
 			{#if showRepoDialog && ref}
 				<ProjectRepositoryDialog projectRef={ref} remote={row.remote} onClose={() => (showRepoDialog = false)} onChanged={() => void loadProjectsOverview()} />
 			{/if}

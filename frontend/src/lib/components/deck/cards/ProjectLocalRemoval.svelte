@@ -4,8 +4,8 @@
 	 * what the removal deletes when the confirmation opens (the project's
 	 * session count spans every worker; the removal does not), keeps Remove
 	 * disabled until that count arrives, and lists the worktree folders that
-	 * stay on disk. It lives in this worker's row of the worker table, or in
-	 * Project settings when the page has no worker table.
+	 * stay on disk. It lives in this worker's details in the Workers tab, or
+	 * in the Settings tab when the page has no Workers tab.
 	 */
 	import { tick, untrack } from 'svelte';
 	import { SettingRow } from '$lib/components/layout/view';
@@ -20,17 +20,17 @@
 		/** The worker's name, for the question; null names no worker. */
 		where: string | null;
 		/**
-		 * Project settings sent the owner here: each new non-zero request id opens
+		 * The Settings tab sent the owner here: each new non-zero request id opens
 		 * the confirmation with a fresh count (a second request after Cancel asks again).
 		 */
 		ask?: number;
-		/** The request was taken: clear it so a remount (desktop ↔ phone) does not ask again. */
+		/** The request was taken: clear it so a remount does not ask again. */
 		onAsked?: () => void;
 		/**
 		 * Whether the confirmation is open. Bind it from a parent that remounts
-		 * this row (the worker inspector moving between its aside and phone
-		 * sheet) so an open confirmation survives; Cancel clears it, so a
-		 * cancelled one never reopens.
+		 * this row (a worker's details closing and reopening) so an open
+		 * confirmation survives; Cancel clears it, so a cancelled one never
+		 * reopens.
 		 */
 		confirming?: boolean;
 		/**
@@ -95,10 +95,10 @@
 		}
 	}
 
-	// Mounted with the confirmation already open (a layout switch remounted
-	// this row): count again, behind a disabled Remove, rather than reuse a
-	// number from before the remount. A request still running keeps Remove
-	// disabled through `removing`; a failure already shown stays shown.
+	// Mounted with the confirmation already open (the parent kept it across a
+	// remount of this row): count again, behind a disabled Remove, rather than
+	// reuse a number from before the remount. A request still running keeps
+	// Remove disabled through `removing`; a failure already shown stays shown.
 	if (untrack(() => confirming)) void askRemove(false);
 
 	let asked = 0;

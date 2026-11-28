@@ -53,7 +53,7 @@ await runJourney({
 			await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: 'Projects', exact: true }).click();
 			await page.getByRole('button', { name: `Open ${name}`, exact: true }).click();
 			await page.getByRole('tab', { name: /^Workers/ }).click();
-			// A worker's row opens its inspector (beside the table, or a sheet on a phone).
+			// A worker's row opens its details under it.
 			await page.locator(`[id="pw-row-${worker.install_id}"]`).click();
 			await page.locator(`[id="pw-card-${worker.install_id}"]`).getByRole('button', { name: 'Change folder' }).waitFor();
 		},

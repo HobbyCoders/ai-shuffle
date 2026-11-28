@@ -103,12 +103,17 @@ export function workerStatus(worker: ProjectWorker, kind: ProjectKind | null | u
 	}
 }
 
-/** A long path shortened in the middle so both its root and its folder name stay readable. */
-export function middleTruncate(path: string, max: number): string {
-	if (path.length <= max || max < 5) return path;
-	const keep = max - 1;
-	const tail = Math.ceil(keep / 2);
-	return `${path.slice(0, keep - tail)}…${path.slice(path.length - tail)}`;
+/**
+ * A repository as "owner/name", the way it is said aloud: the last two parts
+ * of its address without ".git". An address with no such parts is returned
+ * as it is.
+ */
+export function repositorySlug(remote: string): string {
+	const trimmed = remote.trim().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\.git$/i, '');
+	// scp-style "git@host:owner/name" has no scheme; its path starts after the colon.
+	const path = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i, '') : trimmed.replace(/^[^/:]+:/, '');
+	const parts = path.split(/[/\\]/).filter(Boolean);
+	return parts.length >= 2 ? parts.slice(-2).join('/') : remote.trim();
 }
 
 /** Workers that lack the project and are online now (a setup would start at once). */

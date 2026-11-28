@@ -1,8 +1,7 @@
 /**
- * Worker table: one compact row per worker with its status, folder and
- * branch; selecting a row opens that worker's inspector (beside the table,
- * or as a sheet on a phone), where its folder is changed and its copy
- * removed.
+ * Workers tab: one row per worker with its status, folder and branch. A row
+ * opens that worker's details under it (the same at every width), where its
+ * folder is changed and its copy removed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
@@ -37,7 +36,13 @@ const response = (workers: ReturnType<typeof worker>[], remote = 'github.com/exa
 	project_v2_id: 'pv2-demo', name: 'Demo', kind: 'git' as const, remote, default_folder: 'demo', workers
 });
 const ref = { project_v2_id: 'pv2-demo' };
-const openRow = async (name: string) => fireEvent.click(await screen.findByRole('button', { name: `${name}: open its details` }));
+/** A worker's row button: its name starts with the worker's name. */
+const rowButton = (name: string) => screen.findByRole('button', { name: new RegExp(`^${name}`) }).then((b) => b as HTMLButtonElement);
+const openRow = async (name: string) => fireEvent.click(await rowButton(name));
+const details = (name: string) => screen.getByRole('region', { name: `${name} details` });
+const items = () => [...document.querySelectorAll<HTMLElement>('.pw-item')];
+/** The open details (at most one worker's). */
+const openDetails = () => [...document.querySelectorAll<HTMLElement>('.pw-card')];
 
 beforeEach(() => {
 	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -45,7 +50,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-describe('Worker table', () => {
+describe('Worker rows', () => {
 	const mixed = response([
 		worker('self', 'Home server', 'ready', { changed_files: 2, dirty: true }),
 		worker('desk', 'Desktop', 'setting_up', { setup: { op_id: 'op-1', status: 'running', progress: 40, error: null } }),
@@ -58,23 +63,28 @@ describe('Worker table', () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		const table = await screen.findByRole('table', { name: 'Workers' });
-		const rows = within(table).getAllByRole('row').slice(1);
+		expect(await screen.findByRole('heading', { name: /Workers/ })).toBeTruthy();
+		const rows = items();
 		expect(rows.map((r) => r.getAttribute('data-worker-state'))).toEqual(['ready', 'setting_up', 'failed', 'queued_offline', 'missing']);
-		expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Worker', 'Status', 'Folder', 'Branch', 'Last seen']);
+		// No table, side panel or sheet at any width: rows of one card.
+		expect(screen.queryByRole('table')).toBeNull();
+		expect(screen.queryByRole('complementary')).toBeNull();
 
-		expect(rows[0].textContent).toContain('This worker · Online');
+		expect(rows[0].textContent).toContain('This worker');
+		expect(rows[0].textContent).toContain('Online');
 		expect(rows[0].textContent).toContain('Ready');
-		expect(rows[0].querySelector('.pw-cell-folder')?.getAttribute('title')).toBe('/workspace/example/self/demo');
+		expect(rows[0].querySelector('.pw-row-folder [title]')?.getAttribute('title')).toBe('/workspace/example/self/demo');
 		expect(rows[0].textContent).toContain('main');
 		expect(rows[1].textContent).toContain('Cloning 40%');
 		expect(rows[2].textContent).toContain('Failed');
 		expect(within(rows[2]).getByRole('button', { name: 'Retry' })).toBeTruthy();
+		expect(rows[3].textContent).toContain('Offline');
 		expect(rows[3].textContent).toContain('Queued until online');
 		expect(rows[4].textContent).toContain('Not set up');
 		expect(within(rows[4]).getByRole('button', { name: 'Set up' })).toBeTruthy();
 
-		// One folder editor per worker, in its inspector; never a raw path box.
+		// Every row starts closed; the folder editor lives in a worker's details.
+		expect(openDetails()).toHaveLength(0);
 		expect(screen.queryByPlaceholderText('Project path')).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Change folder' })).toBeNull();
 	});
@@ -98,54 +108,76 @@ describe('Worker table', () => {
 		expect(screen.getByRole('button', { name: 'Set up on all missing' })).toBeTruthy();
 	});
 
-	it('opens the selected worker beside the table and drops the Branch and Last seen columns', async () => {
+	it('opens a worker under its row, one at a time, and the same row closes it', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		await openRow('Home server');
-		const inspector = screen.getByRole('complementary', { name: 'Home server details' });
-		expect(within(inspector).getByRole('button', { name: 'New chat here' })).toBeTruthy();
-		expect(within(inspector).getByRole('button', { name: 'Change folder' })).toBeTruthy();
-		expect(within(screen.getByRole('table')).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Worker', 'Status', 'Folder']);
-		expect(screen.getByRole('button', { name: 'Home server: open its details' }).getAttribute('aria-pressed')).toBe('true');
+		const row = await rowButton('Home server');
+		expect(row.getAttribute('aria-expanded')).toBe('false');
+		row.focus();
+		await fireEvent.click(row);
+		const open = details('Home server');
+		expect(row.getAttribute('aria-expanded')).toBe('true');
+		expect(row.getAttribute('aria-controls')).toBe(open.id);
+		// The details sit inside the row's own item, not beside the list.
+		expect(open.closest('.pw-item')).toBe(row.closest('.pw-item'));
+		expect(within(open).getByRole('button', { name: 'New chat here' })).toBeTruthy();
+		// The row that was pressed keeps the keyboard.
+		await new Promise((r) => setTimeout(r, 0));
+		expect(document.activeElement).toBe(row);
 
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Change folder' }));
-		expect(within(inspector).getByRole('textbox', { name: 'New folder on Home server' })).toBeTruthy();
-		expect(within(inspector).getByRole('button', { name: 'Browse' })).toBeTruthy();
+		await fireEvent.click(within(open).getByRole('button', { name: 'Change folder' }));
+		expect(within(open).getByRole('textbox', { name: 'New folder on Home server' })).toBeTruthy();
+		expect(within(open).getByRole('button', { name: 'Browse' })).toBeTruthy();
 
-		await fireEvent.click(screen.getByRole('button', { name: 'Close Home server details' }));
-		expect(screen.queryByRole('complementary')).toBeNull();
-		expect(screen.getAllByRole('columnheader')).toHaveLength(5);
+		await openRow('Laptop');
+		expect(openDetails()).toHaveLength(1);
+		expect(details('Laptop')).toBeTruthy();
+		expect(row.getAttribute('aria-expanded')).toBe('false');
+
+		await openRow('Laptop');
+		expect(openDetails()).toHaveLength(0);
 	});
 
-	it('explains a failure, a running setup and a queued one in the inspector', async () => {
+	it('opens and closes a row from anywhere on it', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await rowButton('Home server');
+		await fireEvent.click(items()[0].querySelector('.pw-status')!);
+		expect(details('Home server')).toBeTruthy();
+		await fireEvent.click(items()[0].querySelector('.pw-status')!);
+		expect(openDetails()).toHaveLength(0);
+	});
+
+	it('explains a failure, a running setup and a queued one in the details', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await openRow('Desktop');
-		let inspector = screen.getByRole('complementary', { name: 'Desktop details' });
-		expect(within(inspector).getByRole('progressbar', { name: 'Setting up on Desktop' })).toBeTruthy();
-		expect(inspector.textContent).toContain('You can leave this page');
-		expect(within(inspector).getByRole('button', { name: 'Cancel setup' })).toBeTruthy();
+		let open = details('Desktop');
+		expect(within(open).getByRole('progressbar', { name: 'Setting up on Desktop' })).toBeTruthy();
+		expect(open.textContent).toContain('You can leave this page');
+		expect(within(open).getByRole('button', { name: 'Cancel setup' })).toBeTruthy();
 
 		await openRow('Laptop');
-		inspector = screen.getByRole('complementary', { name: 'Laptop details' });
-		expect(inspector.textContent).toContain('Folder exists.');
-		expect(within(inspector).getByRole('button', { name: 'Retry' })).toBeTruthy();
+		open = details('Laptop');
+		expect(open.textContent).toContain('Folder exists.');
+		expect(within(open).getByRole('button', { name: 'Retry' })).toBeTruthy();
 
 		await openRow('Storage box');
-		inspector = screen.getByRole('complementary', { name: 'Storage box details' });
-		expect(inspector.textContent).toContain('It sets up when Storage box comes back online.');
-		expect(within(inspector).getByRole('button', { name: 'Withdraw' })).toBeTruthy();
+		open = details('Storage box');
+		expect(open.textContent).toContain('It sets up when Storage box comes back online.');
+		expect(within(open).getByRole('button', { name: 'Withdraw' })).toBeTruthy();
 	});
 
-	it('cancels a running setup from its inspector', async () => {
+	it('cancels a running setup from its details', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		vi.mocked(cancelProjectSetup).mockResolvedValue(undefined as never);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await openRow('Desktop');
-		await fireEvent.click(within(screen.getByRole('complementary', { name: 'Desktop details' })).getByRole('button', { name: 'Cancel setup' }));
+		await fireEvent.click(within(details('Desktop')).getByRole('button', { name: 'Cancel setup' }));
 		expect(cancelProjectSetup).toHaveBeenCalledWith('op-1');
 	});
 
@@ -154,17 +186,17 @@ describe('Worker table', () => {
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await openRow('Home server');
-		const inspector = screen.getByRole('complementary', { name: 'Home server details' });
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Change folder' }));
-		await fireEvent.input(within(inspector).getByRole('textbox', { name: 'New folder on Home server' }), { target: { value: '/workspace/example/other' } });
+		const open = details('Home server');
+		await fireEvent.click(within(open).getByRole('button', { name: 'Change folder' }));
+		await fireEvent.input(within(open).getByRole('textbox', { name: 'New folder on Home server' }), { target: { value: '/workspace/example/other' } });
 
 		// Another device moved it meanwhile: the next read brings a new revision.
 		const moved = { ...mixed, workers: mixed.workers.map((w) => (w.install_id === 'self' ? { ...w, folder: '/workspace/example/moved', folder_revision: 'rev-2' } : w)) };
 		vi.mocked(getProjectWorkers).mockResolvedValue(moved);
 		await vi.mocked(watchResources).mock.calls[0][1]();
 
-		expect(await within(inspector).findByRole('alert')).toHaveProperty('textContent', 'The registered folder changed. Cancel and reopen to edit the current folder.');
-		const save = within(inspector).getByRole('button', { name: 'Save folder' }) as HTMLButtonElement;
+		expect(await within(open).findByRole('alert')).toHaveProperty('textContent', 'The registered folder changed. Cancel and reopen to edit the current folder.');
+		const save = within(open).getByRole('button', { name: 'Save folder' }) as HTMLButtonElement;
 		expect(save.disabled).toBe(true);
 		await fireEvent.submit(save.closest('form')!);
 		expect(changeWorkerFolder).not.toHaveBeenCalled();
@@ -175,91 +207,52 @@ describe('Worker table', () => {
 		vi.mocked(startProjectSetup).mockResolvedValue({ op_id: 'op-9', status: 'running' } as never);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		const row = (await screen.findAllByRole('row')).find((r) => r.getAttribute('data-worker-state') === 'missing')!;
+		await rowButton('Spare');
+		const row = items().find((r) => r.getAttribute('data-worker-state') === 'missing')!;
 		await fireEvent.click(within(row).getByRole('button', { name: 'Set up' }));
 		// The default folder, as suggested; the worker opens so its progress shows.
 		expect(startProjectSetup).toHaveBeenCalledWith(ref, { install_id: 'spare', folder: 'demo', mode: 'auto' });
-		expect(screen.getByRole('complementary', { name: 'Spare details' })).toBeTruthy();
+		expect(details('Spare')).toBeTruthy();
 	});
 
-	it('lists workers as rows on a phone and opens the inspector as a sheet', async () => {
-		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
-		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
-
-		const list = await screen.findByRole('list', { name: 'Workers' });
-		expect(screen.queryByRole('table')).toBeNull();
-		expect(within(list).getAllByRole('listitem')).toHaveLength(5);
-		await fireEvent.click(within(list).getByText('Laptop').closest('button')!);
-		const sheet = await screen.findByRole('dialog', { name: 'Laptop' });
-		expect(within(sheet).getByRole('button', { name: 'Retry' })).toBeTruthy();
-	});
-
-	it('closes the phone sheet when New chat here opens the chat, so the chat is not behind it', async () => {
+	it('starts a chat on a worker from its details', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		const { layout } = await import('$lib/stores/layout.svelte');
-		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		const list = await screen.findByRole('list', { name: 'Workers' });
-		const row = within(list).getByText('Home server').closest('button')!;
-		// Closing the sheet on its own still hands focus back to the row.
-		row.focus();
-		await fireEvent.click(row);
-		let sheet = await screen.findByRole('dialog', { name: 'Home server' });
-		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
-		await fireEvent.click(within(sheet).getByRole('button', { name: 'Close Home server' }));
-		await waitFor(() => expect(document.activeElement).toBe(row));
-
-		await fireEvent.click(row);
-		sheet = await screen.findByRole('dialog', { name: 'Home server' });
-		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
-		await fireEvent.click(within(sheet).getByRole('button', { name: 'New chat here' }));
-
+		await openRow('Home server');
+		await fireEvent.click(within(details('Home server')).getByRole('button', { name: 'New chat here' }));
 		expect(layout.openChat).toHaveBeenCalledWith(null);
-		await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Home server' })).toBeNull());
-		// The new chat keeps focus: the focused row that opened the sheet doesn't take it back.
-		await new Promise((r) => setTimeout(r, 0));
-		expect(document.activeElement).not.toBe(row);
 	});
 
-	it('closes the phone sheet before This worker’s GitHub sign-in opens Settings; a remote worker’s help stays in its sheet', async () => {
+	it('sends This worker’s GitHub sign-in to Settings; a remote worker’s help stays in its details', async () => {
 		const githubFailed = (id: string, name: string) => worker(id, name, 'failed', { setup: { op_id: `op-${id}`, status: 'error', progress: null, error: null, error_code: 'github_auth' } });
 		vi.mocked(getProjectWorkers).mockResolvedValue(response([githubFailed('self', 'Home server'), githubFailed('desk', 'Desktop')]));
 		const { layout } = await import('$lib/stores/layout.svelte');
-		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		const list = await screen.findByRole('list', { name: 'Workers' });
-		const row = within(list).getByText('Home server').closest('button')!;
-		row.focus();
-		await fireEvent.click(row);
-		const sheet = await screen.findByRole('dialog', { name: 'Home server' });
-		await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true));
-		await fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to GitHub on Home server' }));
-
+		await openRow('Home server');
+		await fireEvent.click(within(details('Home server')).getByRole('button', { name: 'Sign in to GitHub on Home server' }));
 		expect(layout.openFeaturePage).toHaveBeenCalledWith('settings', 'category=integrations&item=github');
-		await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Home server' })).toBeNull());
-		await new Promise((r) => setTimeout(r, 0));
-		expect(document.activeElement).not.toBe(row);
 
-		// Another worker's sign-in can't be done from here: its help shows inside its sheet.
-		await fireEvent.click(within(list).getByText('Desktop').closest('button')!);
-		const remote = await screen.findByRole('dialog', { name: 'Desktop' });
+		// Another worker's sign-in can't be done from here: its help shows in its details.
+		await openRow('Desktop');
+		const remote = details('Desktop');
 		await fireEvent.click(within(remote).getByRole('button', { name: 'Sign in to GitHub on Desktop' }));
 		expect(within(remote).getByText(/On Desktop, open AI Shuffle, go to Settings → Integrations → GitHub/)).toBeTruthy();
-		expect(screen.getByRole('dialog', { name: 'Desktop' })).toBe(remote);
 		expect(layout.openFeaturePage).toHaveBeenCalledTimes(1);
 	});
 
-	it('shows a failed Retry inside the phone sheet, not on the page behind its scrim', async () => {
+	it('shows a failed Retry in that worker’s open details, not on the page as well', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(mixed);
 		vi.mocked(startProjectSetup).mockRejectedValue({ status: 409, detail: 'Folder exists.' });
-		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
-		const list = await screen.findByRole('list', { name: 'Workers' });
-		await fireEvent.click(within(list).getByText('Laptop').closest('button')!);
-		const sheet = await screen.findByRole('dialog', { name: 'Laptop' });
-		await fireEvent.click(within(sheet).getByRole('button', { name: 'Retry' }));
+		await openRow('Laptop');
+		const open = details('Laptop');
+		await fireEvent.click(within(open).getByRole('button', { name: 'Retry' }));
 
-		expect(await within(sheet).findByText(/Couldn't start the setup on Laptop: Folder exists\./)).toBeTruthy();
+		expect(await within(open).findByText(/Couldn't start the setup on Laptop: Folder exists\./)).toBeTruthy();
 		expect(screen.getAllByText(/Couldn't start the setup on Laptop/)).toHaveLength(1);
 	});
 
@@ -269,25 +262,27 @@ describe('Worker table', () => {
 			if (opts.install_id === 'spare') throw { status: 502, detail: 'Spare did not answer' };
 			return { op_id: 'op-9', status: 'running' } as never;
 		});
-		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', stacked: true });
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await fireEvent.click(await screen.findByRole('button', { name: 'Set up on all missing' }));
 		const message = await screen.findByText(/Couldn't start the setup on Spare: Spare did not answer/);
-		expect(message.closest('[role="dialog"]')).toBeNull();
+		expect(message.closest('.pw-card')).toBeNull();
 	});
 });
 
-describe('Project settings asks for this worker’s removal', () => {
-	it('opens this worker’s inspector with its removal already counting, once', async () => {
+describe('The Settings tab asks for this worker’s removal', () => {
+	it('opens this worker’s details with its removal already counting, once', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]));
 		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
 		const onSelfRemovalAsked = vi.fn();
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true, onSelfRemovalAsked });
 
-		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
-		expect(await within(inspector).findByRole('button', { name: 'Remove' })).toBeTruthy();
+		const open = await screen.findByRole('region', { name: 'Here details' });
+		expect(await within(open).findByRole('button', { name: 'Remove' })).toBeTruthy();
 		expect(getProjectRemovalPreview).toHaveBeenCalledWith('demo');
 		expect(onSelfRemovalAsked).toHaveBeenCalledOnce();
+		// The page opened these details, so they take the keyboard.
+		await waitFor(() => expect(open.contains(document.activeElement)).toBe(true));
 	});
 
 	it('asks again with a fresh count when Settings sends the owner back after Cancel', async () => {
@@ -297,137 +292,92 @@ describe('Project settings asks for this worker’s removal', () => {
 			.mockResolvedValueOnce({ project_id: 'demo', chats: 3, worktrees: [] });
 		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true });
 
-		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
-		expect(within(inspector).queryByRole('button', { name: 'Remove' })).toBeNull();
+		const open = await screen.findByRole('region', { name: 'Here details' });
+		expect(await within(open).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(open).getByRole('button', { name: 'Cancel' }));
+		expect(within(open).queryByRole('button', { name: 'Remove' })).toBeNull();
 
 		// The parent clears its request once taken; the owner asks from Settings again.
 		await rerender({ askSelfRemoval: false });
 		await rerender({ askSelfRemoval: true });
-		expect(await within(inspector).findByText(/its 3 chats\?/)).toBeTruthy();
+		expect(await within(open).findByText(/its 3 chats\?/)).toBeTruthy();
 		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(2);
 	});
 
-	it('does not ask again after Cancel when the inspector moves into the phone sheet', async () => {
+	it('does not ask again after Cancel when the details close and reopen', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]));
 		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
 		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo', askSelfRemoval: true });
 
-		const inspector = await screen.findByRole('complementary', { name: 'Here details' });
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
+		const open = await screen.findByRole('region', { name: 'Here details' });
+		expect(await within(open).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(open).getByRole('button', { name: 'Cancel' }));
+		await rerender({ askSelfRemoval: false });
 
-		// Desktop → phone remounts the inspector inside a sheet.
-		await rerender({ askSelfRemoval: false, stacked: true });
-		const sheet = await screen.findByRole('dialog', { name: 'Here' });
-		expect(within(sheet).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
-		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
+		await openRow('Here');
+		expect(openDetails()).toHaveLength(0);
+		await openRow('Here');
+		const reopened = details('Here');
+		expect(within(reopened).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(within(reopened).queryByRole('button', { name: 'Remove' })).toBeNull();
 		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
 	});
 });
 
-describe('This worker’s open removal confirmation across a layout switch', () => {
+describe('This worker’s removal when its details close and reopen', () => {
 	const self = () => response([worker('self', 'Here', 'ready'), worker('peer', 'Tower', 'ready')]);
 	// clearAllMocks keeps queued once-answers; a failed test must not hand them to the next.
 	beforeEach(() => { vi.mocked(getProjectRemovalPreview).mockReset(); vi.mocked(appData.deleteProject).mockReset(); });
 
-	it('stays open when the inspector moves into the phone sheet and back, re-counting each time behind a disabled Remove', async () => {
-		vi.mocked(getProjectWorkers).mockResolvedValue(self());
-		let answer: (v: { project_id: string; chats: number; worktrees: string[] }) => void = () => {};
-		vi.mocked(getProjectRemovalPreview)
-			.mockResolvedValueOnce({ project_id: 'demo', chats: 2, worktrees: [] })
-			.mockImplementationOnce(() => new Promise((r) => { answer = r; }))
-			.mockResolvedValueOnce({ project_id: 'demo', chats: 0, worktrees: [] });
-		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
-
-		await openRow('Here');
-		const inspector = screen.getByRole('complementary', { name: 'Here details' });
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-
-		// Desktop → phone without Cancel: the sheet shows the same confirmation, counting afresh.
-		await rerender({ stacked: true });
-		const sheet = await screen.findByRole('dialog', { name: 'Here' });
-		const remove = await within(sheet).findByRole('button', { name: 'Remove' });
-		expect((remove as HTMLButtonElement).disabled).toBe(true);
-		expect(within(sheet).getByText('Counting the chats this removes…')).toBeTruthy();
-		expect(within(sheet).queryByRole('button', { name: 'Remove project and chats' })).toBeNull();
-		answer({ project_id: 'demo', chats: 3, worktrees: [] });
-		expect(await within(sheet).findByText(/its 3 chats\?/)).toBeTruthy();
-		expect((within(sheet).getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false);
-
-		// And back to desktop: still open; a zero count still says so.
-		await rerender({ stacked: false });
-		const aside = await screen.findByRole('complementary', { name: 'Here details' });
-		expect(await within(aside).findByText(/This removes no chats\./)).toBeTruthy();
-		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(3);
-	});
-
-	it('does not reopen a cancelled confirmation on a layout switch', async () => {
-		vi.mocked(getProjectWorkers).mockResolvedValue(self());
-		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
-		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
-
-		await openRow('Here');
-		const inspector = screen.getByRole('complementary', { name: 'Here details' });
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Cancel' }));
-
-		await rerender({ stacked: true });
-		const sheet = await screen.findByRole('dialog', { name: 'Here' });
-		expect(within(sheet).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
-		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
-		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
-	});
-
-	it('keeps a running removal running across a layout switch: no second request, and its failure shows in the new row', async () => {
-		vi.mocked(getProjectWorkers).mockResolvedValue(self());
-		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
-		let fail: (e: unknown) => void = () => {};
-		vi.mocked(appData.deleteProject).mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
-		const { rerender } = render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
-
-		await openRow('Here');
-		const inspector = screen.getByRole('complementary', { name: 'Here details' });
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove' }));
-		expect(appData.deleteProject).toHaveBeenCalledOnce();
-
-		// Desktop → phone while the DELETE runs: the sheet still shows it running.
-		await rerender({ stacked: true });
-		const sheet = await screen.findByRole('dialog', { name: 'Here' });
-		const running = await within(sheet).findByRole('button', { name: 'Removing…' });
-		expect((running as HTMLButtonElement).disabled).toBe(true);
-		expect((within(sheet).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true);
-		expect(within(sheet).queryByRole('button', { name: 'Remove' })).toBeNull();
-		await fireEvent.click(running);
-		expect(appData.deleteProject).toHaveBeenCalledOnce();
-
-		// The first request fails: the row the owner is looking at says so.
-		fail({ detail: 'The project is busy.' });
-		expect((await within(sheet).findByRole('alert')).textContent).toBe('The project is busy.');
-		expect((within(sheet).getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false);
-		expect(appData.deleteProject).toHaveBeenCalledOnce();
-	});
-
-	it('forgets the open confirmation when the inspector closes', async () => {
+	it('forgets an open confirmation when the details close, or another worker opens', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(self());
 		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await openRow('Here');
-		const inspector = screen.getByRole('complementary', { name: 'Here details' });
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Remove project and chats' }));
-		expect(await within(inspector).findByText(/its 2 chats\?/)).toBeTruthy();
-		await fireEvent.click(within(inspector).getByRole('button', { name: 'Close Here details' }));
+		await fireEvent.click(within(details('Here')).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(details('Here')).findByText(/its 2 chats\?/)).toBeTruthy();
+		await openRow('Here');
 
 		await openRow('Here');
-		const reopened = screen.getByRole('complementary', { name: 'Here details' });
-		expect(within(reopened).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(within(details('Here')).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
 		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+
+		await fireEvent.click(within(details('Here')).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(details('Here')).findByText(/its 2 chats\?/)).toBeTruthy();
+		await openRow('Tower');
+		await openRow('Here');
+		expect(within(details('Here')).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
+		expect(within(details('Here')).queryByRole('button', { name: 'Remove' })).toBeNull();
+		expect(getProjectRemovalPreview).toHaveBeenCalledTimes(2);
+	});
+
+	it('keeps a running removal running while its details are closed: no second request, and its failure shows in the reopened row', async () => {
+		vi.mocked(getProjectWorkers).mockResolvedValue(self());
+		vi.mocked(getProjectRemovalPreview).mockResolvedValue({ project_id: 'demo', chats: 2, worktrees: [] });
+		let fail: (e: unknown) => void = () => {};
+		vi.mocked(appData.deleteProject).mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
+
+		await openRow('Here');
+		await fireEvent.click(within(details('Here')).getByRole('button', { name: 'Remove project and chats' }));
+		expect(await within(details('Here')).findByText(/its 2 chats\?/)).toBeTruthy();
+		await fireEvent.click(within(details('Here')).getByRole('button', { name: 'Remove' }));
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
+
+		// Closed and reopened while the DELETE runs: removal cannot be asked again.
+		await openRow('Here');
+		await openRow('Here');
+		const again = within(details('Here')).getByRole('button', { name: 'Remove project and chats' }) as HTMLButtonElement;
+		expect(again.disabled).toBe(true);
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
+		expect(getProjectRemovalPreview).toHaveBeenCalledOnce();
+
+		// The request fails: the row the owner is looking at says so, and offers it again.
+		fail({ detail: 'The project is busy.' });
+		expect((await within(details('Here')).findByRole('alert')).textContent).toBe('The project is busy.');
+		expect((within(details('Here')).getByRole('button', { name: 'Remove project and chats' }) as HTMLButtonElement).disabled).toBe(false);
+		expect(appData.deleteProject).toHaveBeenCalledOnce();
 	});
 });
 
@@ -444,17 +394,18 @@ describe('Another local checkout of the same origin', () => {
 
 		await waitFor(() => expect(onUnavailable).toHaveBeenCalledOnce());
 		expect(onLoaded).not.toHaveBeenCalled();
-		expect(screen.queryByRole('button', { name: 'Home server: open its details' })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Home server/ })).toBeNull();
+		expect(items()).toHaveLength(0);
 		expect(screen.queryByText('/workspace/example/self/demo')).toBeNull();
 		expect(changeWorkerFolder).not.toHaveBeenCalled();
 	});
 
-	it('shows the worker table when the answer names the checkout it was read for', async () => {
+	it('shows the worker rows when the answer names the checkout it was read for', async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(firstCheckout as never);
 		const onUnavailable = vi.fn();
 		render(ProjectWorkersTab, { projectRef: { project_id: 'demo' }, projectName: 'Demo', localProjectId: 'demo', expectLocalId: 'demo', onUnavailable });
 
-		expect(await screen.findByRole('button', { name: 'Home server: open its details' })).toBeTruthy();
+		expect(await rowButton('Home server')).toBeTruthy();
 		expect(onUnavailable).not.toHaveBeenCalled();
 	});
 });
@@ -522,12 +473,12 @@ describe('Remove project and chats from a worker', () => {
 		expect(removeButton().disabled).toBe(false);
 	});
 
-	it("puts this worker's removal in its own inspector, behind the same fresh count", async () => {
+	it("puts this worker's removal in its own details, behind the same fresh count", async () => {
 		vi.mocked(getProjectWorkers).mockResolvedValue(stale);
 		render(ProjectWorkersTab, { projectRef: ref, projectName: 'Demo', localProjectId: 'demo' });
 
 		await openRow('Here');
-		const inspector = screen.getByRole('complementary', { name: 'Here details' });
+		const inspector = details('Here');
 		expect(within(inspector).getByRole('button', { name: 'Remove project and chats' })).toBeTruthy();
 		expect(within(inspector).queryByRole('button', { name: 'Remove project and chats from Here' })).toBeNull();
 	});
