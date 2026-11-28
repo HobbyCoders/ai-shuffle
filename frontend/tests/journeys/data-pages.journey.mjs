@@ -342,14 +342,14 @@ await runJourney({
    await workspace.getByRole('button',{name:'Projects',exact:true}).click();
    await page.getByRole('button',{name:'Open Dev sandbox',exact:true}).click();
    await page.getByRole('tab',{name:'Workers',exact:true}).click();
-   await page.locator('tr[data-worker-state="ready"], li[data-worker-state="ready"]').first().waitFor();
+   await page.locator('.pw-item[data-worker-state="ready"]').first().waitFor();
   },
   async act({page,mark}) {
    await mark('each worker is one compact row');
-   const rows=page.locator('tr[data-worker-state], li[data-worker-state]');
-   const heights=await rows.evaluateAll(els=>els.map(el=>el.getBoundingClientRect().height));
+   const rows=page.locator('.pw-item[data-worker-state]');
+   const heights=await rows.locator('.pw-row').evaluateAll(els=>els.map(el=>el.getBoundingClientRect().height));
    expect(heights.length>0&&heights.every(h=>h>0&&h<=72),'S4: worker rows stay compact '+JSON.stringify(heights));
-   await mark('this worker\'s inspector carries its one removal');
+   await mark('this worker\'s details open under its row and carry its one removal');
    await rows.filter({hasText:'This worker'}).first().locator('button[id^="pw-row-"]').click();
    const card=page.locator('.pw-card');
    await card.waitFor();

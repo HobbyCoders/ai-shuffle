@@ -14,17 +14,17 @@ await runJourney({
 			await gotoApp(page, status);
 			await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Projects', exact: true }).click();
 			await page.getByRole('button', { name: 'Open Dev sandbox', exact: true }).click();
-			await page.getByRole('button', { name: 'Project settings', exact: true }).click();
+			await page.getByRole('tab', { name: 'Settings', exact: true }).click();
 			await page.getByPlaceholder('Project name').waitFor();
 		},
 		async act({ page, mark }) {
 			await mark('dirty project A without saving');
 			await page.getByPlaceholder('Project name').fill('Unsaved project A');
-			await page.keyboard.press('Escape');
-			await page.getByPlaceholder('Project name').waitFor({ state: 'detached' });
 			await mark('switch to project B');
 			await page.getByRole('button', { name: 'Open Dev other', exact: true }).click();
-			await page.getByRole('button', { name: 'Project settings', exact: true }).click();
+			await page.getByRole('heading', { level: 2, name: 'Dev other', exact: true }).waitFor();
+			await page.getByRole('tab', { name: 'Settings', exact: true }).click();
+			await page.getByPlaceholder('Project name').waitFor();
 			expect(await page.getByPlaceholder('Project name').inputValue() === 'Dev other', 'B never inherits A’s unsaved name');
 		}
 	}, {

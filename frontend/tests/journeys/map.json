@@ -241,7 +241,7 @@
 		{
 			"why": "content-first data destinations keep their shared phone header, ranges, states and filters reachable",
 			"journeys": ["data-pages"],
-			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/rows/ListItem.svelte"]
+			"globs": ["frontend/tests/journeys/data-pages.journey.mjs", "frontend/src/lib/components/deck/cards/StatsCard.svelte", "frontend/src/lib/components/deck/cards/PrInboxCard.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/components/settings/shell/PreferencePage.svelte", "frontend/src/lib/components/settings/rows/ListItem.svelte", "frontend/src/lib/components/deck/cards/ProjectWorkersTab.svelte"]
 		},
 		{
 			"why": "note writing, autosave, Preview and moved actions remain reachable in responsive and native shells",
@@ -261,7 +261,7 @@
 		{
 			"why": "responsive feature details keep one usable browser Back step across repeated desktop/stacked transitions",
 			"journeys": ["view-shell-back"],
-			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte", "frontend/src/lib/components/deck/cards/ProjectCard.svelte", "frontend/src/lib/components/deck/cards/ProjectSettingsTab.svelte"]
 		},
 		{
 			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, every search result opened marks its phrase, and a phrase match ranks first in the Docs panel and in Spotlight",
@@ -555,7 +555,7 @@
 			]
 		},
 		{
-			"why": "cross-worker project sync: worker chips, the Workers tab, New project's worker picker and Set up & send",
+			"why": "cross-worker project sync: the Projects page's Workers, Resources and Settings tabs, New project's worker picker and Set up & send",
 			"journeys": ["project-workers", "worker-folder-change"],
 			"globs": [
 				"frontend/tests/journeys/project-workers.journey.mjs",
@@ -576,6 +576,9 @@
 				"frontend/src/lib/stores/project-setup*",
 				"frontend/src/lib/components/deck/cards/ProjectCard.svelte",
 				"frontend/src/lib/components/deck/cards/ProjectWorker*",
+				"frontend/src/lib/components/deck/cards/ProjectResourcesTab.svelte",
+				"frontend/src/lib/components/deck/cards/ProjectSettingsTab.svelte",
+				"frontend/src/lib/components/deck/cards/project-tabs.css",
 				"frontend/src/lib/components/deck/cards/project-workers-view.ts",
 				"frontend/src/lib/components/AddProjectModal.svelte",
 				"frontend/src/lib/components/layout/NewChatSetupCallout.svelte",

@@ -27,9 +27,9 @@ Creation follows the same approval rules as other app configuration writes: Ask 
 
 ## Projects across workers
 
-A new project appears in connected workers' project catalogs as soon as it is added; you do not need to start a chat first. Each worker still needs its own copy of the folder before a chat can run there. The Projects page shows one chip per worker on every project: ready, missing (dashed), setting up, failed, or offline. Select a chip to open that worker in the project's worker table.
+A new project appears in connected workers' project catalogs as soon as it is added; you do not need to start a chat first. Each worker still needs its own copy of the folder before a chat can run there. Open a project on the Projects page to see its workers: its **Workers** tab counts the ones that still lack it.
 
-A project's **Workers** tab is a table with one row per worker: its status, folder, branch and when it was last seen. Select a row to open that worker's details beside the table (on a phone, as a sheet). From there you can:
+A project's **Workers** tab lists one row per worker: its status (ready, not set up, setting up, failed or offline), folder, branch and when it was last seen. Select a row to open that worker's details under it; select it again to close them. From there you can:
 
 - **Set up** the project on a worker that doesn't have it, or **Set up on all missing** (**Set up here** when only this worker lacks it).
 - Choose an existing folder on that worker instead of a new one. A folder that already holds the same repository is used as it is.
@@ -37,9 +37,11 @@ A project's **Workers** tab is a table with one row per worker: its status, fold
 - Cancel a setup that is still running.
 - **Remove project and chats from** a worker. This drops that worker's record of the project; its files stay.
 
-The project's repository and group sit beside its name. **Change repository** points every worker's copy at another repository at once. The group menu moves the project to another group; **No group** takes only this project out of its group, and **Delete group** is a separate, confirmed action. **New chat** starts a chat on this worker, or on any worker that has the project ready. **Project settings** (the gear) holds the name, version control and the project's one danger zone.
+Under the project's name is one line with its repository, how many chats it has and its group. **New chat** starts a chat on this worker, or on any worker that has the project ready.
 
-The **Resources** tab holds the project's MCP servers, agents, hooks and memory on this worker. A project that isn't on this worker yet offers to set it up here instead.
+The **Settings** tab holds the project's name, repository, group, version control, folders and its one danger zone. **Change…** on the Repository row points every worker's copy at another repository at once. The Group row moves the project to another group; **No group** takes only this project out of its group, and deleting a group is a separate, confirmed action.
+
+The **Resources** tab holds the project's MCP servers, agents, hooks and memory on this worker, one at a time behind a switch at the top. A project that isn't on this worker yet offers to set it up here instead.
 
 Setting up a Git project clones its remote on that worker, with that worker's own GitHub sign-in. A project that isn't a Git repository uses the worker's folder of that name as it is, or gets an empty folder when there is none. Setup never overwrites anything: for a Git project, a folder that already holds something else is refused, and you can choose another. If a worker is offline, the setup waits and runs when it is back.
 
@@ -98,7 +100,7 @@ A chat's branch belongs to that chat. When an agent in a chat on its own branch 
 
 ## Per-project settings
 
-Each project has its own tabs for:
+A project's **Resources** tab has a section for each of:
 
 - **MCP servers** only for this project;
 - **Agents** stored in the project;

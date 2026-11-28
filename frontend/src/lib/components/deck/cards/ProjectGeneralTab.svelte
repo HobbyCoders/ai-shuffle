@@ -1,10 +1,10 @@
 <script lang="ts">
 	/**
-	 * Project identity (Project settings): name, id, version control and where
-	 * its folders are. Each worker has its own folder, changed from that
-	 * worker's row; the group is the chip beside the project's name.
+	 * Project identity (the Settings tab): name, id, repository, group, version
+	 * control and where its folders are. Each worker has its own folder, changed
+	 * from that worker's row.
 	 */
-	import { tick, untrack } from 'svelte';
+	import { tick, untrack, type Snippet } from 'svelte';
 	import { getGitStatus } from '$lib/api/git';
 	import { git } from '$lib/stores/git.svelte';
 	import InitRepoModal from '$lib/components/git/InitRepoModal.svelte';
@@ -14,6 +14,7 @@
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import { isAdmin } from '$lib/stores/auth.svelte';
+	import ProjectGroupRow from './ProjectGroupRow.svelte';
 	import './project-tabs.css';
 
 	interface Props {
@@ -27,9 +28,11 @@
 		 */
 		editFolderHere?: boolean;
 		selfName?: string;
+		/** The project's Repository row (it belongs to every worker, so the page owns it). */
+		repository?: Snippet;
 	}
 
-	let { projectId, onOpenFolders, editFolderHere = false, selfName = 'this worker' }: Props = $props();
+	let { projectId, onOpenFolders, editFolderHere = false, selfName = 'this worker', repository }: Props = $props();
 
 	// Get current project data
 	const project = $derived($projects.find(p => p.id === projectId));
@@ -125,7 +128,7 @@
 			// the folder changed elsewhere shows and locks the editor.
 			if (err.status === 409) void appData.loadProjects();
 			// Saving disabled the focused control; put the keyboard back on the field
-			// (inside Settings, so Escape still closes it) to correct the folder.
+			// to correct the folder.
 			draft.saving = false;
 			await tick();
 			if (folderDraft === draft) folderForm?.querySelector<HTMLInputElement>('input')?.focus();
@@ -162,6 +165,8 @@
 				<button class="st-btn icon" onclick={copyId} title={copied ? 'Copied' : 'Copy project ID'} aria-label={copied ? 'Copied' : 'Copy project ID'}>{#if copied}<Check />{:else}<Copy />{/if}</button>
 			</SettingRow>
 		{/if}
+		{@render repository?.()}
+		{#if project}<ProjectGroupRow {projectId} projectName={project.name} />{/if}
 		{#if canInitialize}
 			<SettingRow label="Version control" hint="This folder is not a Git repository."><button class="st-btn" onclick={() => (showInitRepoModal = true)}>Initialize Git repository</button></SettingRow>
 		{/if}

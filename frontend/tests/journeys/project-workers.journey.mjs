@@ -12,10 +12,10 @@
 //
 // Cases:
 //   fail-open           an older worker (the overview answers 404): the plain
-//                       list it always was, no chips, no filter.
-//   chip-sets-up        the dashed Desktop chip on "Dev sandbox" opens that
-//                       worker's inspector, whose Set up starts a setup there;
-//                       the chip spins, then reads ready.
+//                       list it always was, no Workers tab, no filter.
+//   row-sets-up         Desktop's row on "Dev sandbox" opens that worker's
+//                       details under it, whose Set up starts a setup there;
+//                       the row's status shows the progress, then reads ready.
 //   remote-only-detail  "couch-cash" is on other workers only: still listed,
 //                       opens on the Workers tab and says it isn't here yet;
 //                       its one "Set up here" sets it up here.
@@ -264,7 +264,7 @@ await runJourney({
 				await page.getByRole('heading', { level: 2, name: PROJECT, exact: true }).waitFor();
 				await mark('open Resources > Memory and create or edit project instructions');
 				await page.getByRole('tab', { name: 'Resources', exact: true }).click();
-				// A side nav on desktop, a drill-in list on a phone: both name the resource first.
+				// One switch at every width: MCP, Agents, Hooks, Memory.
 				await page.locator('[data-ui-project-resources]').getByRole('button', { name: /^Memory( |$)/ }).click();
 				const memory = page.getByRole('region', { name: 'Project memory', exact: true });
 				await memory.waitFor();
@@ -301,13 +301,13 @@ await runJourney({
 				await projectRow(page, PROJECT).waitFor({ timeout: 30_000 });
 				await page.waitForTimeout(1500);
 				expect((await listMode(page)) === 'local', 'an older worker shows the plain project list');
-				expect((await page.getByRole('group', { name: /^Workers with / }).count()) === 0, 'no worker chips without the overview');
+				expect((await page.getByRole('tab', { name: /^Workers/ }).count()) === 0, 'no Workers tab without the overview');
 				expect((await page.getByRole('group', { name: 'Show projects' }).count()) === 0, 'no worker filter without the overview');
 			},
 			allow: [{ kind: 'failed_requests', status: 404, url: /\/projects\/overview(\?|$)/, reason: 'the older worker this case simulates has no overview route (the fail-open path under test)' }]
 		},
 		{
-			name: 'chip-sets-up',
+			name: 'row-sets-up',
 			async setup(ctx) {
 				await simulateWorkers(ctx.page);
 				await gotoApp(ctx.page, ctx.status);
@@ -316,21 +316,23 @@ await runJourney({
 				await mark('open Projects');
 				await openProjects(page, variant);
 				await page.locator('[data-ui-projects="overview"]').waitFor({ timeout: 30_000 });
-				await projectRow(page, PROJECT).click();
-				const chips = page.getByRole('group', { name: `Workers with ${PROJECT}` });
-				await chips.getByRole('button', { name: /^Studio: / }).waitFor();
 				if (!isPhone(variant)) expect(await page.getByRole('group', { name: 'Show projects' }).isVisible(), 'the All workers / On this worker filter shows');
+				await projectRow(page, PROJECT).click();
+				const item = (id) => page.locator('.pw-item').filter({ has: page.locator(`[id="pw-row-${id}"]`) });
+				await item('studio').waitFor({ timeout: 20_000 });
+				expect((await item('Desktop').getAttribute('data-worker-state')) === 'missing', 'Desktop starts without the project');
 
-				await mark('the dashed Desktop chip opens its worker; Set up there');
-				await chips.getByRole('button', { name: /^Desktop\b/ }).click();
+				await mark("Desktop's row opens its details under it; Set up there");
+				await page.locator('#pw-row-Desktop').click();
 				const card = page.locator('#pw-card-Desktop');
 				await card.waitFor();
+				expect((await page.locator('.pw-card').count()) === 1, 'one worker is open at a time');
 				await card.getByRole('button', { name: /^Set up / }).first().click();
-				await chips.getByRole('button', { name: /^Desktop · cloning/ }).waitFor({ timeout: 10_000 });
+				await item('Desktop').locator('.pw-status--busy').waitFor({ timeout: 10_000 });
 				const started = await page.evaluate(() => window.__projectSetups.map((s) => s.install_id));
 				expect(started.length === 1 && started[0] === 'Desktop', `one setup started on Desktop, got ${JSON.stringify(started)}`);
 				// The 2 s poll carries it to ready.
-				await chips.getByRole('button', { name: 'Desktop: Desktop has this project' }).waitFor({ timeout: 20_000 });
+				await page.locator('.pw-item[data-worker-state="ready"]').filter({ has: page.locator('#pw-row-Desktop') }).waitFor({ timeout: 20_000 });
 				await page.waitForTimeout(1500);
 			}
 		},
@@ -381,23 +383,14 @@ await runJourney({
 				expect((await workersTab.getAttribute('aria-selected')) === 'true', 'it opens on the Workers tab');
 				await page.getByText(/^couch-cash isn't on .+ yet\./).first().waitFor();
 				await page.locator('[data-ui-project-workers="ready"]').waitFor({ timeout: 20_000 });
-				if (isPhone(variant)) {
-					// The phone list has no row actions: Retry lives in the failed worker's sheet.
-					await mark('open the failed worker');
-					await page.locator('li[data-worker-state="failed"]').getByRole('button').click();
-					const sheet = page.getByRole('dialog', { name: 'Desktop' });
-					await sheet.getByRole('button', { name: 'Retry' }).waitFor();
-					await sheet.getByRole('button', { name: 'Close Desktop' }).click();
-					await sheet.waitFor({ state: 'detached' });
-				} else {
-					await page.locator('tr[data-worker-state="failed"]').getByRole('button', { name: 'Retry' }).waitFor();
-				}
+				// A failed worker's row offers Retry at every width.
+				await page.locator('.pw-item[data-worker-state="failed"] .pw-row').getByRole('button', { name: 'Retry' }).waitFor();
 
 				// The Workers tab says it once; with only this worker missing, its action is "Set up here".
 				expect(await page.getByText(/have this project yet/).count() === 0, 'no second "not here" callout');
 				await mark('Set up here');
 				await page.getByRole('button', { name: 'Set up here', exact: true }).click();
-				await page.locator('tr[data-worker-state="ready"], li[data-worker-state="ready"]').filter({ hasText: 'This worker' }).waitFor({ timeout: 20_000 });
+				await page.locator('.pw-item[data-worker-state="ready"]').filter({ hasText: 'This worker' }).waitFor({ timeout: 20_000 });
 				await mark('Resources offers the setup while it is not here, and the resources once it is');
 				await page.getByRole('tab', { name: 'Resources', exact: true }).click();
 				await page.locator('[data-ui-project-resources]').waitFor();

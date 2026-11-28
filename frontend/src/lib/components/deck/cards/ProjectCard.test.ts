@@ -42,6 +42,7 @@ vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/
 import ProjectCard from './ProjectCard.svelte';
 import ProjectWorkersTab from './ProjectWorkersTab.svelte';
 import { appData, projects } from '$lib/stores/app-data.svelte';
+import { groups as groupsStore } from '$lib/stores/groups.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
@@ -49,6 +50,12 @@ const list = projects as unknown as Writable<any[]>;
 const view = activeView as unknown as Writable<any>;
 const overview = projectsOverview as Writable<any[]>;
 const supported = projectsOverviewSupported as Writable<boolean>;
+const groupState = groupsStore as unknown as Writable<any>;
+/** Open the Settings tab and return its content. */
+const openSettings = async () => {
+ await fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+ return document.querySelector('[data-ui-project-settings]') as HTMLElement;
+};
 beforeEach(() => {
  platform.set('desktop'); page.state = {};
  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -56,17 +63,20 @@ beforeEach(() => {
  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
  list.set([{ id: 'one', name: 'One', path: '/one', session_count: 2 }, { id: 'two', name: 'Two', path: '/two' }]);
  view.set({ type: 'project' }); overview.set([]); supported.set(false);
+ groupState.set({ projects: { groups: [], assignments: {} } });
 });
 afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('Projects master/detail', () => {
- it('has no raw path box, puts the one danger zone in Project settings and offers New chat', async () => {
+ it('has no raw path box, puts the one danger zone in the Settings tab and offers New chat', async () => {
   render(ProjectCard);
   await screen.findByRole('heading', { level: 2, name: 'One' });
   expect(screen.queryByPlaceholderText('Project path')).toBeNull();
   expect(screen.queryByRole('heading', { name: 'Danger zone' })).toBeNull();
   expect(screen.getByRole('button', { name: 'New chat' })).toBeTruthy();
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
-  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  // Settings is a tab of the page, not a drawer over it.
+  const drawer = await openSettings();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('true');
   expect(within(drawer).getAllByRole('heading', { name: 'Danger zone' })).toHaveLength(1);
   expect(within(drawer).queryByPlaceholderText('Project path')).toBeNull();
   const removal = within(drawer).getByText('Files stay on disk.', { exact: false }).closest('.st-row');
@@ -74,15 +84,17 @@ describe('Projects master/detail', () => {
  });
  it('discards A’s dirty name when switching to B, but preserves same-project refreshes', async () => {
   render(ProjectCard);
-  await fireEvent.click(await screen.findByRole('button', { name: 'Project settings' }));
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  await openSettings();
   const name = screen.getByPlaceholderText('Project name');
   await fireEvent.input(name, { target: { value: 'Unsaved A' } });
   list.set([{ id: 'one', name: 'Refreshed A', path: '/refreshed-a' }, { id: 'two', name: 'Two', path: '/two' }]);
   await tick();
   expect(screen.getByDisplayValue('Unsaved A')).toBeTruthy();
   await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
-  expect(screen.queryByRole('dialog', { name: 'Project settings' })).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
+  // A project opens on its first tab, not on the one the last project was left on.
+  expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('false');
+  await openSettings();
   expect((screen.getByPlaceholderText('Project name') as HTMLInputElement).value).toBe('Two');
   await fireEvent.input(screen.getByPlaceholderText('Project name'), { target: { value: 'Saved B' } });
   await fireEvent.keyDown(screen.getByPlaceholderText('Project name'), { key: 'Enter' });
@@ -135,7 +147,9 @@ describe('Projects master/detail', () => {
   expect(screen.getByRole('tab', { name: /^Workers/ }).getAttribute('aria-selected')).toBe('true');
   // The chat starts where the project is: Peer.
   expect(screen.getByRole('button', { name: 'New chat on Peer' })).toBeTruthy();
-  expect(screen.getByRole('button', { name: 'Repository github.com/example/remote. Change it on all workers' })).toBeTruthy();
+  // One plain line under the name: where it comes from, not a row of chips.
+  expect(document.querySelector('[data-ui-project-subtitle]')?.textContent).toBe('example/remote · 0 chats');
+  expect(screen.queryByRole('button', { name: /^Repository/ })).toBeNull();
   expect(screen.queryByRole('heading', { name: 'Danger zone' })).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'On Here' }));
   expect(screen.queryByRole('button', { name: 'Open Remote (not on Here)' })).toBeNull();
@@ -148,9 +162,10 @@ describe('Projects master/detail', () => {
    { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
   ] }]);
   render(ProjectCard);
-  const chip = await screen.findByRole('button', { name: 'Repository not reported. Set it on all workers' });
-  expect(chip.textContent).toContain('Repository not reported');
-  await fireEvent.click(chip);
+  await screen.findByRole('heading', { level: 2, name: 'Bare' });
+  const settings = await openSettings();
+  expect(within(settings).getByText('Not reported')).toBeTruthy();
+  await fireEvent.click(within(settings).getByRole('button', { name: 'Set the repository on all workers' }));
   const dialog = screen.getByRole('dialog', { name: 'Change repository on all workers' });
   expect(dialog.textContent).toContain('None');
  });
@@ -165,10 +180,24 @@ describe('Projects master/detail', () => {
   const props = workersTab.mock.calls.at(-1)![1] as { projectRef: unknown };
   expect(props.projectRef).toEqual({ project_id: 'one' });
   // The one folder editor is the worker table's: Settings sends folder changes there.
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
-  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).queryByRole('button', { name: 'Change folder' })).toBeNull();
+  expect(within(await openSettings()).queryByRole('button', { name: 'Change folder' })).toBeNull();
  });
- it('changes the folder in Project settings when this worker has no worker list for a local project', async () => {
+ it('closes an open worker row when the owner changes tab, so coming back does not pull the keyboard into it', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  // The Workers tab opens a row through its bound selection.
+  const first = workersTab.mock.calls.at(-1)![1] as { selectedInstallId: string | null };
+  first.selectedInstallId = 'peer';
+  expect(first.selectedInstallId).toBe('peer');
+  await fireEvent.click(screen.getByRole('tab', { name: 'Resources' }));
+  await fireEvent.click(screen.getByRole('tab', { name: /^Workers/ }));
+  expect((workersTab.mock.calls.at(-1)![1] as { selectedInstallId: string | null }).selectedInstallId).toBeNull();
+ });
+ it('changes the folder in the Settings tab when this worker has no worker list for a local project', async () => {
   supported.set(true);
   overview.set([]);
   const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
@@ -179,14 +208,13 @@ describe('Projects master/detail', () => {
   props.onUnavailable?.();
   await tick();
   expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
-  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  const drawer = await openSettings();
   await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
   await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/one-moved' } });
   await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
   expect(appData.updateProject).toHaveBeenCalledWith('one', { path: '/workspace/example/one-moved' });
  });
- it('changes a second local checkout of one origin in Project settings, never through the first one’s workers', async () => {
+ it('changes a second local checkout of one origin in the Settings tab, never through the first one’s workers', async () => {
   supported.set(true);
   // One and Two are both clones of github.com/example/one on this worker; the
   // overview lists the logical project once, under One.
@@ -207,19 +235,17 @@ describe('Projects master/detail', () => {
   props.onUnavailable?.();
   await tick();
   expect(screen.queryByRole('tab', { name: /^Workers/ })).toBeNull();
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
-  const drawer = screen.getByRole('dialog', { name: 'Project settings' });
+  const drawer = await openSettings();
   await fireEvent.click(within(drawer).getByRole('button', { name: 'Change folder' }));
   await fireEvent.input(within(drawer).getByLabelText(/^New folder on/), { target: { value: '/workspace/example/two-moved' } });
   await fireEvent.click(within(drawer).getByRole('button', { name: 'Save folder' }));
   expect(appData.updateProject).toHaveBeenCalledWith('two', { path: '/workspace/example/two-moved' });
   expect(appData.updateProject).not.toHaveBeenCalledWith('one', expect.anything());
  });
- it('changes the folder in Project settings when the overview is unavailable', async () => {
+ it('changes the folder in the Settings tab when the overview is unavailable', async () => {
   render(ProjectCard);
   await screen.findByRole('heading', { level: 2, name: 'One' });
-  await fireEvent.click(screen.getByRole('button', { name: 'Project settings' }));
-  expect(within(screen.getByRole('dialog', { name: 'Project settings' })).getByRole('button', { name: 'Change folder' })).toBeTruthy();
+  expect(within(await openSettings()).getByRole('button', { name: 'Change folder' })).toBeTruthy();
  });
  it('opens Change repository as one dialog for every worker', async () => {
   supported.set(true);
@@ -227,8 +253,14 @@ describe('Projects master/detail', () => {
    { install_id: 'peer', device_name: 'Peer', is_self: false, online: true, state: 'ready' }
   ] }]);
   render(ProjectCard);
-  await fireEvent.click(await screen.findByRole('button', { name: /^Repository github.com\/example\/remote/ }));
-  expect(screen.getByRole('dialog', { name: 'Change repository on all workers' })).toBeTruthy();
+  await screen.findByRole('heading', { level: 2, name: 'Remote' });
+  const settings = await openSettings();
+  expect(within(settings).getByText('github.com/example/remote')).toBeTruthy();
+  await fireEvent.click(within(settings).getByRole('button', { name: 'Change the repository on all workers' }));
+  // Closing the dialog leaves the owner on the Settings tab it was opened from.
+  await fireEvent.keyDown(screen.getByRole('dialog', { name: 'Change repository on all workers' }), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.getByRole('tab', { name: 'Settings' }).getAttribute('aria-selected')).toBe('true');
  });
  it('closes the detail of a project with no copy here once it leaves the list (a failed first clone)', async () => {
   supported.set(true); list.set([]);
@@ -239,6 +271,28 @@ describe('Projects master/detail', () => {
   expect(await screen.findByRole('heading', { level: 2, name: 'New clone' })).toBeTruthy();
   overview.set([]);
   await waitFor(() => expect(screen.queryByRole('heading', { level: 2, name: 'New clone' })).toBeNull());
+ });
+ it('names the source, the chats and the group in one plain line, and moves the group to Settings', async () => {
+  groupState.set({ projects: { groups: [{ name: 'Work', collapsed: false }], assignments: { one: 'Work' } } });
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  expect(document.querySelector('[data-ui-project-subtitle]')?.textContent).toBe('Local folder · 2 chats · Work');
+  expect(screen.queryByRole('button', { name: /^Group: / })).toBeNull();
+  const settings = await openSettings();
+  expect((within(settings).getByRole('combobox', { name: 'Group for One' }) as HTMLSelectElement).value).toBe('Work');
+ });
+ it('switches resources with one segmented control and starts each project on its first resource', async () => {
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  const resources = () => document.querySelector('[data-ui-project-resources]') as HTMLElement;
+  expect(resources().getAttribute('data-ui-project-resources')).toBe('mcp');
+  const switcher = within(resources()).getByRole('group', { name: 'Project resources' });
+  expect(within(switcher).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['MCP', 'Agents', 'Hooks', 'Memory']);
+  await fireEvent.click(within(switcher).getByRole('button', { name: 'Hooks' }));
+  expect(resources().getAttribute('data-ui-project-resources')).toBe('hooks');
+  expect(within(switcher).getByRole('button', { name: 'Hooks' }).getAttribute('aria-pressed')).toBe('true');
+  await fireEvent.click(screen.getByRole('button', { name: 'Open Two' }));
+  expect(resources().getAttribute('data-ui-project-resources')).toBe('mcp');
  });
  it('shows the filled New project action when empty', async () => {
   list.set([]); render(ProjectCard); await tick();

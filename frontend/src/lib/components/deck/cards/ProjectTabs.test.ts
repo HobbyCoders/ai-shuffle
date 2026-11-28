@@ -14,7 +14,7 @@ vi.mock('$lib/stores/projectMemory.svelte', async () => {
 vi.mock('$lib/api/projectMemory', () => ({ previewMemoryImport: actions.preview, applyMemoryImport: vi.fn() }));
 vi.mock('$lib/stores/hooks.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { hooks: { loadAll: actions.load, updateHook: actions.toggle, deleteHook: actions.remove, testHook: actions.test, clearError: vi.fn() }, projectHooks: writable([]), pluginHooks: writable([]), hooksLoading: writable(false), hooksError: writable(null), hookTesting: writable({}), hookSaving: writable({}), hookStats: writable({ totalCustom: 1, totalPlugin: 0 }) };
+ return { hooks: { loadAll: actions.load, updateHook: actions.toggle, deleteHook: actions.remove, testHook: actions.test, clearError: vi.fn() }, projectHooks: writable([]), pluginHooks: writable([]), hooksLoading: writable(false), hooksError: writable(null), hookTesting: writable({}), hookSaving: writable({}) };
 });
 import ProjectAgentsTab from './ProjectAgentsTab.svelte';
 import ProjectHooksTab from './ProjectHooksTab.svelte';
