@@ -20,35 +20,52 @@ imports do not leak into the vendored library.
 Since Memory v3 phase 3b each store is `<store root>/memory.db` (stdlib
 `sqlite3`). Tables: `facts` (one row per live or archived fact: id, state,
 list position, scope, protected and always flags, `updated_at`, `uses`,
-`last_recalled_at`, and the fact's JSON body), `revisions` (retained earlier
+`last_recalled_at`, `last_delivered_at`, and the fact's JSON body; the usage
+columns are only ever raised, with `MAX()`), `revisions` (retained earlier
 values, one row each), `tombstones` (one row per forgotten fact), `deliveries`
 (just-in-time deliveries, re-arms and Recalls: local usage, never replicated)
 and `meta` (owner, store id, budgets, loss counters, the schema version, the
 import marker). The journal is WAL; where WAL cannot be set up (some network
 and FUSE filesystems) the store uses `journal_mode=DELETE`. Connections wait up
-to 10 seconds for a busy store (`busy_timeout`); transactions are short.
+to 10 seconds for a busy store (`busy_timeout`); transactions are short. The
+tables are created in one `BEGIN IMMEDIATE` transaction, and a busy or locked
+store is reported as busy, never taken for a filesystem without WAL.
 
-**Migration.** The first open of a store whose database has no import marker
-imports `memories.json` (and a pre-3b `jit_deliveries.jsonl`) in one
-`BEGIN IMMEDIATE` transaction that also writes the marker (`sqlite.imported`
-in `meta`, with the counts). A crash mid-import rolls the whole transaction
-back, so the next open starts again; a second process waits on the write lock
-and then finds the marker and imports nothing. A store with neither file gets
-its database at its first write; reading it creates nothing.
+**Migration.** Reading never imports: until the database exists, reads come
+from `memories.json` directly. The first write (a save, a merge, maintenance,
+a delivery or a Recall usage write on an existing store) of a store whose
+database has no import marker imports `memories.json` (and a pre-3b
+`jit_deliveries.jsonl`) in one `BEGIN IMMEDIATE` transaction that also writes
+the marker (`sqlite.imported` in `meta`, with the counts). The document's
+`schema` and `owner` are checked first: a document written by a newer build or
+for another owner is never imported. A crash mid-import rolls the whole
+transaction back, so the next write starts again; a second process waits on
+the write lock and then finds the marker and imports nothing. A database
+without the marker is never treated as imported, and one whose marker cannot
+be read (a corrupt file) keeps failing; it is never read as an empty store.
+A store with neither file gets its database at its first write.
 `memories.json` and the delivery log are never modified or deleted: they stay
-as a backup for at least one release. If the import fails (the file does not
-parse, a newer schema, another owner, a full disk), the store serves the facts
-read-only from `memories.json` when it parses, refuses every write with "Memory
-storage could not be upgraded (…); nothing was saved", and memory health
-raises a `capacity` alert naming the reason. Nothing is dropped; the import is
-retried on every open until it succeeds.
+as a backup for at least one release. If the import or the database setup
+fails (the file does not parse, a newer schema, another owner, a full disk),
+the files it created (`memory.db`, `-wal`, `-shm`) are removed, the store
+serves the facts read-only from `memories.json` when it parses (and fails
+every read with a storage error when it does not), refuses every write,
+Recall usage and delivery row with "Memory storage could not be upgraded (…);
+nothing was saved", and memory health raises a `capacity` alert naming the
+reason. Nothing is dropped; the import is retried on every write until it
+succeeds.
 
 **Downgrade.** `python -m fluid.codemode.fact_db export <store dir> <file>`
 writes a `memories.json` document an older build reads (live, archive,
 revisions, tombstones, plus the deletion filter older builds expect).
-`python -m fluid.codemode.fact_db downgrade <store dir>` (app stopped) writes it
-in place and moves `memory.db` aside, so an older build reads it and a newer
-one imports it again. `status <store dir>` prints the storage state. Changes an
+`python -m fluid.codemode.fact_db downgrade <store dir>` (app stopped) first
+copies the existing `memories.json` (the pre-3b backup) to
+`memories.json.pre-downgrade-<time>`, then moves `memory.db` and its `-wal`
+and `-shm` files to `memory.db.downgraded-<time>` (retrying a few times while
+Windows reports the file in use), and only then writes the document in place,
+so an older build reads it and a newer one imports it again. If a move or the
+write fails, the files already moved are put back and the command reports
+that the store is unchanged. `status <store dir>` prints the storage state. Changes an
 older build makes to `memories.json` while `memory.db` exists are not seen by
 a newer build; downgrade first.
 
@@ -187,8 +204,9 @@ Each delivery is recorded only on this worker, as a row in the store's
 the fact ID, the trigger kind (command, path, tool or words), the session,
 the time, and whether it was on time or late; compaction re-arms are rows
 too. The insert waits at most one second for a busy store and is otherwise
-dropped, so recording never slows or fails a tool call. Rows older than 365
-days are pruned. A pre-3b `jit_deliveries.jsonl` (and its rotated
+dropped, so recording never slows or fails a tool call. Rows older than 90
+days (or past the newest 50,000) are pruned; a fact keeps its latest delivery
+and Recall times on its own row, so pruning never shortens its life. A pre-3b `jit_deliveries.jsonl` (and its rotated
 `jit_deliveries.1.jsonl`) is imported once with the store and then left as it
 is. A delivery counts toward its fact's value (see "Automatic lifecycle").
 Totals, per-fact counts (the 200 most recently delivered facts) and the last
@@ -349,7 +367,8 @@ file instead of calling Skill. A successful Read of a discovered skill's
 
 Hard limits and expiry are enforced by code at ingestion and maintenance, not by
 a cleanup prompt. The app runs maintenance every five minutes even without an
-active chat or learning model. Reads also apply overdue retention.
+active chat or learning model. Reads are read-only: they show a fact past its
+expiry as archived, and the next write or maintenance pass records it.
 
 Current per-owner defaults:
 
@@ -463,6 +482,23 @@ presence is unknown), each worker also keeps writing the older whole-store
 record (`memory-v2:<device>:<owner-hash>`); once every other worker advertises
 it, that record is marked deleted. A receiver merges every live whole-store
 record, whoever published it, so mixed-version networks keep converging.
+
+**Mixed networks and the export size.** A worker from before phase 3b refuses
+one store's records when together they pass 2 MiB in a merge, and an unbounded
+SQLite archive can grow past that. So a 3b worker advertises
+`memory_sqlite_store` in its signed presence, and while any other active
+worker does not (or its presence is unknown), its exports (the per-fact
+records and the whole-store record alike) are trimmed to 1.5 MiB: live facts
+and the newest 256 tombstones always, then archived facts, owner-kept ones
+first and then by the later of their last change and retirement, so a fact
+retired just now still travels. The deletion filter still covers every
+tombstone, so the shorter list resurrects nothing. Once every worker
+advertises the capability, exports carry everything. The trade-off: while an
+older worker is on the network, the oldest archived facts of a very large store
+reach no other worker until it updates (main did the same by dropping them
+for good); nothing is deleted, and an older worker never refuses a whole
+sender.
+
 Received records are committed before they are written to the files, so each
 worker re-applies every peer's live memory record once at network start (a
 crash between the two) and again on the next publish pass after a write failed
@@ -518,7 +554,12 @@ wire nothing changed: the barrier record still carries tombstones and a
 `forgotten` filter, built at publish time from the tombstone rows and the
 imported filter, so an older worker (which keeps only its newest 256
 tombstones) still never resurrects a forgotten fact. A filter received from an
-older worker fences that merge and is not stored. A restore gets a new ID.
+older worker is not stored: it fences every record for that owner in the same
+apply batch, whichever peer sent it and in any order, and a fact it drops gets
+an ID-only tombstone row, so a later copy from another peer cannot bring it
+back. Storage errors while applying (a busy store, a full disk, a store that
+failed to import) are retried on the next publish pass; only a malformed
+record is refused for good. A restore gets a new ID.
 Transport operation-log retention is owned by the network subsystem.
 
 ### Concurrency map
@@ -536,7 +577,11 @@ connection is never shared between threads or with a forked child, is
 dropped after any SQLite error and when the database file is replaced
 (compared by device and inode), and a nested use on the same thread opens a
 private one. Autocommit mode means an idle connection holds no snapshot, so
-every read sees the latest commit from any process. The `downgrade` command
+every read sees the latest commit from any process. Every reader below that
+says "lock-free" uses a read-only snapshot: it takes neither `.memory.lock`
+nor a write transaction, never imports, and never writes (expiry is projected,
+not recorded). Each process remembers that a store file is set up by its
+device and inode, so a replaced file is set up again. The `downgrade` command
 closes its connections before it moves the database aside (Windows cannot
 rename an open file).
 
@@ -544,9 +589,9 @@ rename an open file).
 |---|---|---|
 | Native Fluid agent: Remember, Forget, harvests, corrections | App server (or a standalone `fluid` process) | `.memory.lock`, then one `BEGIN IMMEDIATE` transaction that writes only the changed rows |
 | Delegated Claude Code: memory tools through the bundled MCP bridge (`app/mcp/builtin_tools.py` → `app/core/fluid_memory.py`) | App server: the bridge is an in-process tool server | Same as the native agent |
-| Recall (both legs) | App server or standalone `fluid` | Lock-free snapshot read, then a usage write: one short transaction (one row update per fact plus a usage row), waiting at most 1 second and dropped if the store stays busy. A concurrent structural write keeps the higher count (`MAX`) |
+| Recall (both legs) | App server or standalone `fluid` | Lock-free snapshot read, then a usage write: one short transaction (one row update per live fact plus a usage row; unknown or archived ids write nothing), waiting at most 1 second and dropped if the store stays busy. A concurrent structural write keeps the higher count (`MAX`) |
 | Prompt index render, just-in-time candidates | App server or standalone `fluid` | Lock-free read (WAL snapshot); cached on the store stamp |
-| Just-in-time delivery log | Wherever the agent loop runs | One insert transaction, 1-second wait, dropped if busy; never fails a tool call |
+| Just-in-time delivery log | Wherever the agent loop runs | One transaction (the delivery rows plus `MAX()` on each fact's `last_delivered_at`), 1-second wait, dropped if busy; never fails a tool call |
 | Settings > Memory API (`app/api/memories.py`) | App server | Reads lock-free; edits, deletes and scoping go through `FactStore` under `.memory.lock` |
 | Replication export and import (`app/network/memory_records.py`) | App server (network task) | Export is a lock-free read; a received batch merges under `.memory.lock` in one transaction |
 | Learner, reflection and proposal acceptance (`continual.py`, `reflection.py`) | App server background tasks | Reads lock-free; a write (accepted proposal, consolidation) is a structural write under `.memory.lock`. `proposals.json` keeps its own lock file |
