@@ -22,8 +22,13 @@ Fairness notes:
 
 - Docker running (Docker Desktop with WSL2 on Windows).
 - [uv](https://docs.astral.sh/uv/) installed.
-- Harbor: `uv tool install harbor`
+- Harbor 0.25 or newer: `uv tool install harbor` (the adapter was last checked
+  against 0.27.0; older releases keep the model connection class elsewhere and
+  fail on import).
 - `ANTHROPIC_API_KEY` set in the environment.
+
+Two Harbor flags are easy to mix up: `-l N` limits the run to N tasks, while
+`-k N` runs every selected task N times. A smoke run wants `-l`.
 
 ## 1. Build the fluid wheel
 
@@ -49,7 +54,7 @@ fluid on 5 tasks with a cheap model (run from the repo root — `PYTHONPATH=.`
 lets Harbor import the adapter):
 
 ```bash
-PYTHONPATH=. harbor run -d terminal-bench/terminal-bench-2 -a benchmarks.harbor.fluid_agent:FluidAgent -m anthropic/claude-haiku-4-5 -k 5
+PYTHONPATH=. harbor run -d terminal-bench/terminal-bench-2 -a benchmarks.harbor.fluid_agent:FluidAgent -m anthropic/claude-haiku-4-5 -l 5
 ```
 
 PowerShell equivalent: `$env:PYTHONPATH = "."` first, then the same
@@ -171,5 +176,6 @@ available, not inferred from the transcript.
 ## Cost warning
 
 Full Terminal-Bench 2.0 with a Sonnet-class model costs roughly $50–150+ per
-trial. Iterate on Haiku with `-k 5`/`-k 10` until everything is green, then
-commit to full paired trials.
+trial. Iterate on Haiku with `-l 5`/`-l 10` until everything is green, then
+commit to full paired trials. Do not use `-k` for this: `-k 5` runs all 89
+tasks five times each.
