@@ -213,6 +213,44 @@ LFS_PASSTHROUGH_CONFIG = (
 APP_WORKTREES_EXCLUDE = ".fluid/worktrees/"
 WORKTREE_ADD_FAILED_MARKER = "ai-shuffle-worktree-add-failed"
 
+# `git worktree add` writes every tracked file, one after another. On Windows
+# that is most of the wait when a chat opens on a new branch: a 6,000-file
+# repository took 2.6s, and 1.0s with Git's parallel checkout. More than eight
+# workers gained nothing in that measurement.
+PARALLEL_CHECKOUT_WORKERS = 8
+_IS_WINDOWS = os.name == "nt"
+
+
+def parallel_checkout_env(run_git, main_dir: str) -> Optional[Dict[str, str]]:
+    """Environment that turns on parallel checkout for one git call, or None.
+
+    Windows only, where file creation is the slow part; Git's own guidance is
+    that spinning disks and small machines do better with the sequential
+    default, and Linux and macOS were not measured. A ``checkout.workers`` set
+    in any Git config (repository, user or system) is the user's choice and is
+    left alone. Git older than 2.32 ignores the key; a repository under
+    ``checkout.thresholdForParallelism`` (100 files) is checked out as before.
+    """
+    if not _IS_WINDOWS:
+        return None
+    workers = min(PARALLEL_CHECKOUT_WORKERS, os.cpu_count() or 1)
+    if workers < 2:
+        return None
+    from fluid.tools.child_env import scrub_child_env
+
+    try:
+        # Exit 1 is "not set"; anything else is a setting or a config problem.
+        if run_git(main_dir, ["config", "--get", "checkout.workers"], timeout=10).returncode != 1:
+            return None
+        env = scrub_child_env()
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except Exception:  # noqa: BLE001 - tuning only; the checkout runs without it
+        return None
+    env[f"GIT_CONFIG_KEY_{count}"] = "checkout.workers"
+    env[f"GIT_CONFIG_VALUE_{count}"] = str(workers)
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    return env
+
 
 def exclude_app_worktrees(main_dir: str, path: Optional[str] = None) -> None:
     """Keep the app's ``.fluid/worktrees/`` out of *main_dir*'s ``git status``.
@@ -660,7 +698,8 @@ class GitWorktreeMixin:
             else:
                 args.extend(["--", path, branch])
 
-            result = self._run_git(main_dir, args, timeout=30)
+            result = self._run_git(main_dir, args, timeout=30,
+                                   env=parallel_checkout_env(self._run_git, main_dir))
             if result.returncode == 0:
                 logger.debug(f"Added worktree at {path} for branch {branch}")
                 return True, None
