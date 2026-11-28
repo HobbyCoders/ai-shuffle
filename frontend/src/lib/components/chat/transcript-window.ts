@@ -20,6 +20,14 @@
  * when a shift also unmounts rows at the opposite edge. */
 export interface TranscriptRange { readonly start: number; readonly end: number }
 
+/** Whether a jump to `index` can scroll to what is mounted. The target alone is
+ * not enough: the reader came for the reply after it, and a prompt that ends
+ * the mounted slice (its reply is over the content budget) would be shown bare
+ * above "Show newer messages". */
+export function jumpTargetMounted(range: TranscriptRange, index: number, count: number): boolean {
+	return index >= range.start && Math.min(count, index + 2) <= range.end;
+}
+
 /** Read the actual native selection before a range shift, including reverse
  * selections and endpoints outside the list. Resolve row keys against the
  * current model: a prepend must not pin the old numerical indices. */
@@ -121,10 +129,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	const weighted = !!cost && Number.isFinite(budget);
 	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
 	let selectionLimited = false;
-	/** A jump that mounted the reply after its target over the budget (see
-	 * windowAround). Automatic repricing keeps that pair as it is; any other
-	 * navigation releases it. */
-	let jumpPair = false;
+	/** The range a jump mounted when the reply after its target is over the
+	 * budget (see windowAround). Automatic repricing keeps that pair for as long
+	 * as it is still the mounted range; navigating to any other range ends it. */
+	let jumpPair: TranscriptRange | null = null;
 	function commit(start: number, end: number, readingIndex?: number | null): TranscriptRange {
 		selectionLimited = false;
 		const selected = getPinnedRange?.();
@@ -190,20 +198,22 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		return { start, end };
 	}
 	function move(start: number): TranscriptRange {
-		jumpPair = false;
 		const next = startingRange(start);
 		return commit(next.start, next.end);
 	}
 	function endingAt(end: number): TranscriptRange {
-		jumpPair = false;
 		const next = endingRange(end);
 		return commit(next.start, next.end);
 	}
 	function reprice(checkReadingKey = false): TranscriptRange {
 		// The reader asked for this prompt and its reply. Neither fits the usual
 		// forward fill, so repricing would drop the prompt again at the next turn
-		// boundary of a chat that is still running.
-		if (jumpPair && range.end <= count && range.end - range.start === 2 && charge(range.start) <= budget) return range;
+		// boundary of a chat that is still running. Paging that left the range
+		// as it was (no older row fits beside the reply) does not end the pair.
+		if (jumpPair) {
+			if (range.start === jumpPair.start && range.end === jumpPair.end && range.end <= count && charge(range.start) <= budget) return range;
+			jumpPair = null;
+		}
 		const next = startingRange(range.start);
 		// Most streaming updates keep the entire mounted slice. Do not
 		// force a DOM/layout read on each token just to rediscover that fact.
@@ -224,7 +234,6 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
 	function extendOlder({ preserveReading = false }: { preserveReading?: boolean } = {}): TranscriptRange {
 		followsTail = false;
-		jumpPair = false;
 		if (!weighted && !preserveReading) return move(range.start - step);
 		if (!range.start) return range;
 		// Scroll-edge paging is speculative, not permission to replace what the
@@ -266,7 +275,6 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		extendOlder,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
-			jumpPair = false;
 			const previous = range;
 			let next = startingRange(range.start + shift());
 			if (weighted && previous.end < count && (next.end <= previous.end || next.start >= previous.end)) {
@@ -301,7 +309,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 				else right = false;
 			}
 			const committed = commit(start, end);
-			jumpPair = paired && used > budget && committed.start === index && committed.end === index + 2;
+			jumpPair = paired && used > budget && committed.start === index && committed.end === index + 2 ? committed : null;
 			return committed;
 		},
 		/** Saved scrollTop is relative to this exact bounded range, not cap/2. */

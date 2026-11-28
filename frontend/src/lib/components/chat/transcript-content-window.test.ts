@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createTranscriptWindow, dominantReadingIndex, type TranscriptRange } from './transcript-window';
+import { createTranscriptWindow, dominantReadingIndex, jumpTargetMounted, type TranscriptRange } from './transcript-window';
 
 describe('nested transcript mount budget', () => {
  it('does not evict the dominant growing reply when automatic older paging follows a reprice', () => {
@@ -263,6 +263,45 @@ describe('nested transcript mount budget', () => {
   const single = createTranscriptWindow({ cap: 1, cost: i => costs[i], budget: 12000 });
   single.setItemCount(costs.length);
   expect(single.windowAround(0)).toEqual({ start: 0, end: 1 });
+ });
+
+ it('a jump to a later prompt keeps its oversize reply through a scroll-edge page that changes nothing', () => {
+  // Turn 2 has the long reply; the reader is looking at it (row 3).
+  const costs = [70, 300, 70, 20000, 70, 300];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000, getReadingIndex: () => 3 });
+  window.setItemCount(costs.length);
+  // Jumping to turn 1 stops right before that reply: turn 2's prompt ends the slice.
+  const first = window.windowAround(0);
+  expect(first).toEqual({ start: 0, end: 3 });
+  expect(jumpTargetMounted(first, 0, costs.length)).toBe(true);
+  // So a jump to turn 2 may not treat its mounted prompt as arrived.
+  expect(jumpTargetMounted(first, 2, costs.length)).toBe(false);
+  const pair = window.windowAround(2);
+  expect(pair).toEqual({ start: 2, end: 4 });
+  expect(jumpTargetMounted(pair, 2, costs.length)).toBe(true);
+  // A slight upward scroll asks for older rows; none fits beside the reply.
+  expect(window.loadOlder({ preserveReading: true })).toBe(pair);
+  // The running chat then reprices: the pair is still what the reader asked for.
+  window.onStreamingChange(true);
+  costs.push(70);
+  expect(window.setItemCount(costs.length, { followTail: false })).toBe(pair);
+  // "Show earlier messages" leaves the pair, and repricing no longer holds it.
+  const earlier = window.loadOlder();
+  expect(earlier).not.toEqual(pair);
+  costs.push(300);
+  const repriced = window.setItemCount(costs.length, { followTail: false });
+  expect(repriced.end - repriced.start === 2 && repriced.start === 2).toBe(false);
+ });
+
+ it('a jump target counts as mounted only together with the row after it', () => {
+  const range = { start: 4, end: 8 };
+  expect(jumpTargetMounted(range, 3, 20)).toBe(false);
+  expect(jumpTargetMounted(range, 4, 20)).toBe(true);
+  expect(jumpTargetMounted(range, 6, 20)).toBe(true);
+  expect(jumpTargetMounted(range, 7, 20)).toBe(false);
+  expect(jumpTargetMounted(range, 8, 20)).toBe(false);
+  // The last row of the transcript has nothing after it to wait for.
+  expect(jumpTargetMounted(range, 7, 8)).toBe(true);
  });
 
  it('pins the selected span in either direction without accumulating mounted history', () => {

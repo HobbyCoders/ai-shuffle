@@ -104,6 +104,7 @@
 		createTranscriptWindow,
 		selectedRowRange,
 		dominantReadingIndex,
+		jumpTargetMounted,
 		transcriptItemCost,
 		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
@@ -1068,7 +1069,7 @@
 	}
 
 	async function ensureItemMounted(itemIndex: number): Promise<void> {
-		if (itemIndex < 0 || (itemIndex >= mountedStart && itemIndex < mountedEnd)) return;
+		if (itemIndex < 0 || jumpTargetMounted({ start: mountedStart, end: mountedEnd }, itemIndex, displayItems.length)) return;
 		applyMountedRange(transcriptWindow.windowAround(itemIndex), false);
 		await tick();
 	}
@@ -3090,6 +3091,7 @@
 					startedAt={liveTurnStartedAt}
 					compaction={$activeSession.liveCompaction ?? null}
 					working={showGapIndicator}
+					ruled={!tasksListShown}
 				/>
 			{/if}
 
