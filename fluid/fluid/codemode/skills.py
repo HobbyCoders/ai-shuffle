@@ -406,6 +406,14 @@ MAX_MEMORY_CHARS = 2000  # one memory: a fact or one rule with its exceptions, n
 # snapshot by its text, cut to this many characters (the stored fact and its
 # Recall result stay whole).
 IDENTITY_TEXT_CHARS = 120
+# Act-time rules (a command, path or tool trigger; triggers.is_act_time) are
+# listed as ``- [id …] <when-line>: <summary>`` so the rule is in context
+# before the agent decides the action: just-in-time text arrives only with a
+# tool's result. The characters their summaries add share this allowance
+# per snapshot, on top of MAX_PROMPT_CHARS (a summary never displaces another
+# fact's when-line); past it a rule falls back to its plain when-line (memory
+# health counts them). Their when-lines claim index room ahead of the rest.
+ACT_SUMMARY_CHARS = 1500
 
 # Sub-heading for ALWAYS memories (owner-saved, always=true) at the top of
 # # Memory, in full. Only they carry this authority; the index below keeps
@@ -814,6 +822,9 @@ class MemoryEntry:
     # Explicit just-in-time triggers ({"command": [...], "paths": [...],
     # "tools": [...]}, see fluid.codemode.facts.validate_triggers), or None.
     triggers: dict | None = dataclass_field(default=None, hash=False)
+    # An act-time rule's written index line (fluid.codemode.facts
+    # .validate_summary), or None; summary_line derives one at render.
+    summary: str | None = None
 
 
 def checkout_identity(checkout: str | None) -> str | None:
@@ -2024,8 +2035,10 @@ class SkillStore:
         from fluid.context.screening import screen_findings
 
         from fluid.codemode.facts import (
-            ALWAYS_CHARS, MAX_PROMPT_CHARS, always_applies, usefulness, when_line,
+            ALWAYS_CHARS, MAX_PROMPT_CHARS, act_line, always_applies, summary_line, usefulness,
+            when_line,
         )
+        from fluid.codemode.triggers import is_act_time
 
         out_of_scope = 0
         held = 0
@@ -2062,6 +2075,16 @@ class SkillStore:
         always: list[tuple[MemoryEntry, str]] = []
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
+        # Act-time rules: all of them (index room goes to them first), those
+        # listed with their summary, and those past ACT_SUMMARY_CHARS.
+        act_ids: set[str] = set()
+        act_summary_ids: list[str] = []
+        act_unfit: list[str] = []
+        act_room = ACT_SUMMARY_CHARS
+        # Characters each listed summary adds to its plain when-line: charged
+        # to ACT_SUMMARY_CHARS, not to the index budget, so stating a rule up
+        # front never pushes another fact's when-line out of the index.
+        act_extra: dict[str, int] = {}
         from fluid.codemode.facts import is_superseded
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
@@ -2110,7 +2133,20 @@ class SkillStore:
                     text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
                 identity.append((entry, f"- {label} {text}{hint}"))
                 continue
-            index.append((entry, f"- {label} {when_line(entry)}{hint}"))
+            line = when_line(entry)
+            if is_act_time(vars(entry)):
+                act_ids.add(entry.id)
+                summary = summary_line(entry)
+                listed = act_line(entry) if summary else line
+                extra = len(listed) - len(line)
+                if summary and 0 < extra <= act_room and not screen_findings(summary):
+                    act_room -= extra
+                    act_extra[entry.id] = extra
+                    act_summary_ids.append(entry.id)
+                    line = listed
+                else:
+                    act_unfit.append(entry.id)
+            index.append((entry, f"- {label} {line}{hint}"))
         identity.sort(key=lambda item: item[0].key != "profile.name")  # stable: rank order after
         # ALWAYS memories in full within their own budget; one that does not
         # fit (a replica merged past it) is listed first in the index instead
@@ -2135,8 +2171,14 @@ class SkillStore:
         identity.sort(key=lambda item: item[0].key != "profile.name")
         index = overflow + index
         remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned + identity)
-        shown_index: list[tuple[MemoryEntry, str]] = []
-        omitted: list[MemoryEntry] = []
+        kept: set[str] = set()
+        # Act-time rules claim room first (in rank order): a rule that must
+        # shape an action is worth more here than one Recall can fetch later.
+        for entry, line in index:
+            cost = len(line) + 1 - act_extra.get(entry.id, 0)
+            if entry.id in act_ids and cost <= remaining:
+                remaining -= cost
+                kept.add(entry.id)
         full = False
         for entry, line in index:
             # Biography (profile.*/business.* the session's task does not
@@ -2144,14 +2186,17 @@ class SkillStore:
             # Recall finds it. Without a task it is listed last. In rank
             # order: once one line does not fit, the rest are counted, so a
             # short low-ranked line never jumps a longer relevant one.
+            if entry.id in act_ids:
+                continue
             if terms and off_domain(entry):
-                omitted.append(entry)
-            elif not full and len(line) + 1 <= remaining:
+                continue
+            if not full and len(line) + 1 <= remaining:
                 remaining -= len(line) + 1
-                shown_index.append((entry, line))
+                kept.add(entry.id)
             else:
                 full = True
-                omitted.append(entry)
+        shown_index = [(e, line) for e, line in index if e.id in kept]
+        omitted = [e for e, _ in index if e.id not in kept]
         # Identity lines lead the index, then rules with an unconfirmed
         # replacement; withheld-entry notes close it.
         shown = shown_always + identity + [p for p in pinned if p[0].superseded_by] + shown_index + [
@@ -2175,6 +2220,12 @@ class SkillStore:
             # may retrieve omitted index lines, never withheld/conflicted/
             # foreign-checkout text via this field.
             "eligible_lines": [line for _, line in shown_always + identity + index],
+            # Act-time rules in scope; those listed with their summary (the
+            # rule reached the session before any action); those that fell
+            # back to the plain when-line past ACT_SUMMARY_CHARS.
+            "act_time": len(act_ids),
+            "act_summary_ids": [i for i in act_summary_ids if i in kept],
+            "act_unfit": len(act_unfit),
         }
 
     # ─── consolidation bookkeeping (see Synthesizer.consolidate) ─────────

@@ -14,7 +14,7 @@ from app.api.auth import require_admin
 from app.core.fluid_memory import store_for_owner
 from app.db.async_database import run_sync
 from app.db.projects import get_projects_by_ids
-from fluid.codemode import behavior, facts, reflection
+from fluid.codemode import behavior, facts, reflection, triggers
 from fluid.codemode.skills import MAX_MEMORY_CHARS
 from fluid.codemode.transactions import file_transaction
 
@@ -50,6 +50,8 @@ class MemoryUpdate(BaseModel):
 
     text: StrictStr
     when: StrictStr | None
+    # An act-time rule's index line; omitted or null keeps it, "" clears it.
+    summary: StrictStr | None = None
     expected_revision: int = Field(ge=1, strict=True)
     expected_metadata_version: StrictStr = Field(min_length=1, max_length=_VERSION_CHARS)
 
@@ -76,6 +78,7 @@ def _metadata_version(entry):
     # because a store that predates store_id gets a new random one on each read.
     # Usage counters are left out: a Recall must not make a form stale.
     state = [entry.get("when") or "", entry.get("when_basis"), bool(entry.get("always")),
+             entry.get("summary") or "",
              [facts.metadata_stamp(entry, field) for field in facts.METADATA_FIELDS],
              sorted((entry.get("clock") or {}).values()), facts.open_conflict(entry),
              sorted(entry.get("alternatives") or []), entry.get("superseded_by"),
@@ -111,6 +114,7 @@ def _item(entry, status, project_names):
                         project_names.get(scope[8:], "Other project") if scope.startswith("project:")
                         else "Other project"),
         "always": facts.always_applies(entry),
+        **_act_fields(entry),
         "needs_review": bool(facts.open_conflict(entry) or (
             entry.get("superseded_by") and not facts.is_superseded(entry))),
         "this_worker_only": bool(entry.get("worker")),
@@ -122,6 +126,16 @@ def _item(entry, status, project_names):
     }
 
 
+def _act_fields(entry):
+    # An act-time rule (a command, path or tool trigger) is listed in the
+    # # Memory index with its summary: the written one, else one derived from
+    # the text, which the form shows as its placeholder.
+    act_time = triggers.is_act_time(entry)
+    summary = entry.get("summary") or None
+    return {"act_time": act_time, "summary": summary,
+            "derived_summary": facts.derived_summary(entry.get("text")) if act_time and not summary else None}
+
+
 def _list():
     store = store_for_owner("local", initialize=False)
     doc = store._facts.snapshot(read_only=True)
@@ -130,7 +144,8 @@ def _list():
     names = _project_names([entry for entry, _ in rows])
     items = [_item(entry, status, names) for entry, status in rows]
     items.sort(key=lambda item: item["updated_at"] or 0, reverse=True)
-    return {"items": items, "limits": {"text_chars": MAX_MEMORY_CHARS, "when_chars": facts.MAX_WHEN_CHARS}}
+    return {"items": items, "limits": {"text_chars": MAX_MEMORY_CHARS, "when_chars": facts.MAX_WHEN_CHARS,
+                                       "summary_chars": facts.MAX_SUMMARY_CHARS}}
 
 
 def _find(store, memory_id):
@@ -149,7 +164,8 @@ def _update(memory_id, body):
         _require_metadata_version(_find(store, memory_id), body.expected_metadata_version)
         saved = store.save_memory(body.text, memory_id=memory_id,
                                   expected_revision=body.expected_revision,
-                                  protected=True, provenance="user", when=body.when)
+                                  protected=True, provenance="user", when=body.when,
+                                  **({"summary": body.summary} if body.summary is not None else {}))
         # The stored row, not the returned MemoryEntry, carries the metadata stamps.
         entry = _find(store, saved.id)
         return _item(entry, "active", _project_names([entry]))
@@ -183,11 +199,16 @@ def _store_error(exc):
         "Memory contains a credential; save its location, not its value": "Memory text looks like a secret. Save its location, not its value.",
         "when contains a credential": "The when line looks like a secret. Save its location, not its value.",
         "when matches an injection pattern": "The when line contains unsafe instructions. Describe when the memory applies instead.",
+        "summary contains a credential": "The summary looks like a secret. Save its location, not its value.",
+        "summary matches an injection pattern": "The summary contains unsafe instructions. State the rule instead.",
+        "summary must be one line": "The summary must be one line.",
     }
     if message in validation:
         return HTTPException(422, validation[message])
     if message.startswith(f"when must contain 1–{facts.MAX_WHEN_CHARS} characters:"):
         return HTTPException(422, f"The when line must contain 1–{facts.MAX_WHEN_CHARS} characters.")
+    if message.startswith(f"summary must be at most {facts.MAX_SUMMARY_CHARS} characters"):
+        return HTTPException(422, f"The summary must be at most {facts.MAX_SUMMARY_CHARS} characters.")
     if message.startswith("Memory has too many concurrent writers;"):
         return HTTPException(409, "This memory has conflicting changes. Refresh it and try again.")
     # Never include exception text/tracebacks: a storage decoder or validator
@@ -229,6 +250,7 @@ def _proposal_item(row, project_names, titles):
         "kind_label": reflection.KIND_LABELS.get(row["kind"], "Memory"),
         "quote": row.get("quote") or None,
         "when": row.get("when") or None,
+        "summary": row.get("summary") or None,
         "scope": scope,
         "scope_label": _scope_label(scope, project_names),
         "sessions": [{"id": sid, "title": titles.get(sid)} for sid in sessions],

@@ -3059,6 +3059,7 @@ class HarnessAdapter(ProviderAdapter):
             section = store.render_memory_section(project, checkout=self._options.cwd,
                                                   task_query=getattr(self, "_memory_initial_task", ""),
                                                   model=self._options.model or self._current_model or "")
+            self._jit_note_index(section)
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
@@ -3102,6 +3103,19 @@ class HarnessAdapter(ProviderAdapter):
             self._jit = jit
         return jit
 
+    def _jit_note_index(self, section: Optional[str]) -> None:
+        """Tell just-in-time delivery which index lines this session holds
+        (both legs render the section here), so an act-time rule whose
+        summary was listed is logged as its detail, not a late miss."""
+        if not section:
+            return
+        try:
+            jit = self._jit_session()
+            if jit is not None:
+                jit.note_index(section)
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+            logger.debug("[HarnessAdapter] memory index note failed", exc_info=True)
+
     async def _jit_post_tool(self, event: str, payload: Dict[str, Any]) -> Optional[HookDecision]:
         """Facts whose triggers the call's input matches, with its result.
 
@@ -3109,7 +3123,8 @@ class HarnessAdapter(ProviderAdapter):
         bundled tools) sends the call's input with PostToolUse. A model
         reads new context only in its next request, which follows the
         call; reading a fact before the call runs would mean holding the
-        call, so these deliveries are recorded as late. The delivery is an
+        call, so these deliveries are recorded as late (or as detail when
+        the rule's summary was in the session's index). The delivery is an
         attachment: it counts once the gate has put it where the model
         reads it (in code mode, the cell's own result)."""
         try:

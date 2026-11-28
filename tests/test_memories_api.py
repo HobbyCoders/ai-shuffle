@@ -70,6 +70,7 @@ def test_missing_store_is_empty_without_creating_any_files(world):
     assert response.status_code == 200
     assert response.json() == {"items": [], "limits": {
         "text_chars": MAX_MEMORY_CHARS, "when_chars": facts.MAX_WHEN_CHARS,
+        "summary_chars": facts.MAX_SUMMARY_CHARS,
     }}
     assert not root.exists()
 
@@ -110,6 +111,7 @@ def test_list_shape_tiers_archive_worker_visibility_and_read_only(world):
         "always": True, "needs_review": True, "this_worker_only": False,
         "created_at": user.created_at, "updated_at": 9_999_999_999,
         "last_recalled_at": None, "expires_at": None, "uses": 0,
+        "summary": None, "derived_summary": None, "act_time": False,
     }
     assert by_id[agent.id]["tier"] == "agent"
     assert by_id[agent.id]["scope_label"] == "Garden"
@@ -183,6 +185,35 @@ def test_edit_promotes_shares_and_bumps_revision(world):
     assert client.get(BASE).json()["items"] == [item]
     assert edit(client, entry, text="A stale correction.").status_code == 409
     assert remove(client, entry.id, entry.revision).status_code == 409
+
+
+def test_act_time_rule_shows_and_edits_its_summary(world):
+    """A fact with a command trigger is an act-time rule: the list marks it,
+    offers the derived line until one is written, and the edit form saves,
+    keeps (summary omitted) and clears it."""
+    client, root = world
+    store = store_at(root)
+    rule = save(store, "Never deploy while CI is running. Check the run list first.",
+                when="When deploying the site", triggers={"command": ["make deploy"]})
+    plain = save(store, "The owner prefers concise status reports.", when="When reporting")
+    by_id = {item["id"]: item for item in client.get(BASE).json()["items"]}
+    assert by_id[rule.id]["act_time"] is True and by_id[rule.id]["summary"] is None
+    assert by_id[rule.id]["derived_summary"] == "Never deploy while CI is running."
+    assert by_id[plain.id]["act_time"] is False and by_id[plain.id]["derived_summary"] is None
+    written = edit(client, rule, summary="Not while CI is still running; wait for green first.")
+    assert written.status_code == 200
+    item = written.json()
+    assert item["summary"] == "Not while CI is still running; wait for green first."
+    assert item["derived_summary"] is None
+    rule = next(m for m in store_at(root).memories() if m.id == rule.id)
+    kept = edit(client, rule, text=rule.text + " Hotfixes too.")
+    assert kept.status_code == 200 and kept.json()["summary"] == item["summary"]
+    rule = next(m for m in store_at(root).memories() if m.id == rule.id)
+    secret = edit(client, rule, summary="Use token ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8")
+    assert secret.status_code == 422 and "secret" in secret.json()["detail"]
+    cleared = edit(client, rule, summary="")
+    assert cleared.status_code == 200 and cleared.json()["summary"] is None
+    assert cleared.json()["derived_summary"] == "Never deploy while CI is running."
 
 
 def test_when_only_edit_makes_copies_opened_before_it_stale(world):

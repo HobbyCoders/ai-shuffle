@@ -421,6 +421,23 @@ def words_only(triggers: Triggers) -> bool:
         triggers.command or triggers.paths or triggers.explicit_paths or triggers.tools)
 
 
+def acts(triggers: Triggers) -> bool:
+    """A command, path or tool trigger: the fact shapes an action, so it must
+    be in context before the agent decides one (just-in-time text arrives
+    only with the tool's result)."""
+    return bool(triggers.command or triggers.paths or triggers.explicit_paths or triggers.tools)
+
+
+def is_act_time(entry: Mapping[str, Any]) -> bool:
+    """A delivery candidate whose effective triggers (derived plus explicit)
+    include a command, path or tool. The ``# Memory`` index states such a
+    rule up front as ``When <when>: <summary>``."""
+    if not is_candidate(entry):
+        return False
+    return acts(with_explicit(derive_triggers(str(entry.get("when") or ""), str(entry.get("text") or ""),
+                                              entry.get("key")), entry.get("triggers")))
+
+
 def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
     """Delivery candidates with derived and explicit triggers, from store
     entry dicts."""

@@ -127,6 +127,24 @@ async def test_only_a_placed_delivery_counts(jit_adapter):
     assert jit_delivery.counts(store)["totals"] == {"late": 1, "command": 1}
 
 
+@pytest.mark.asyncio
+async def test_an_indexed_act_rule_is_logged_as_detail_not_late(jit_adapter):
+    """Both legs render the # Memory section through _memory_section; an
+    act-time rule listed there with its summary reached the model before the
+    call, so the tool-time text is its detail. After compaction the index is
+    noted again only when re-sent: until then a match counts late."""
+    adapter, store = jit_adapter
+    section = adapter._memory_section()
+    assert "When publishing commits: Pushes go through the merge queue" in section
+    first = await adapter._hooks.emit(POST_TOOL_USE, PUSH_CALL)
+    assert PUSH in _context(first)  # the full text still rides the result
+    assert jit_delivery.counts(store)["totals"] == {"detail": 1, "command": 1}
+    await adapter._hooks.emit(PRE_COMPACT, {})
+    again = await adapter._hooks.emit(POST_TOOL_USE, {**PUSH_CALL, "tool_use_id": "t2"})
+    assert PUSH in _context(again)
+    assert jit_delivery.counts(store)["totals"] == {"detail": 1, "late": 1, "command": 2}
+
+
 def test_kill_switch_defaults_on_and_is_not_a_setting(monkeypatch):
     monkeypatch.delenv("FLUID_MEMORY_JIT", raising=False)
     assert jit_delivery.switched_on()

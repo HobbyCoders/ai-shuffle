@@ -28,7 +28,11 @@ the session rules around it:
   then it is pending: not offered again, and released if the gate drops it.
 - **Record.** Each delivery is appended to a local log (DELIVERY_LOG, never
   replicated): fact id, trigger kind, session, time and whether it arrived
-  on time (before the work it is about) or late (after the matching call).
+  on time (before the work it is about), late (after the matching call)
+  or detail: after the matching call, but the rule's one-line summary was
+  already in the session's ``# Memory`` index (an act-time rule, see
+  :meth:`SessionDelivery.note_index`), so the rule itself was on time and
+  this is its full text.
   The session's compaction re-arms are logged too, so a session resumed in
   a new process does not repeat a fact it already has
   (:meth:`SessionDelivery.restore`).
@@ -45,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -70,7 +75,8 @@ MAX_RECENT = 200
 MAX_FACT_ROWS = 200
 # Seconds a tool call or turn waits for candidates on a cache miss.
 READ_TIMEOUT = 0.25
-ON_TIME, LATE = "on_time", "late"
+ON_TIME, LATE, DETAIL = "on_time", "late", "detail"
+_INDEX_ID = re.compile(r"^- \[(\S+) r\d+[;\]]")
 HEADING = "# Memory for this step"
 _OVERFLOW = "Also matching (Recall by id): "
 KILL_SWITCH = "FLUID_MEMORY_JIT"
@@ -193,6 +199,9 @@ class Delivery:
     overflow: tuple[str, ...] = ()
     more: int = 0
     timing: str = LATE
+    # Late facts whose summary line was in the session's index: logged as
+    # DETAIL, not LATE (see SessionDelivery.note_index).
+    detail: frozenset[str] = frozenset()
     _session: "SessionDelivery | None" = field(default=None, repr=False, compare=False)
     _settled: bool = field(default=False, repr=False, compare=False)
 
@@ -222,6 +231,8 @@ class SessionDelivery:
     delivered: set[str] = field(default_factory=set)
     named: set[str] = field(default_factory=set)
     pending: set[str] = field(default_factory=set)
+    # Index lines this session was given, by fact id (note_index).
+    index_lines: dict[str, str] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _restored: bool = field(default=False, repr=False)
 
@@ -246,8 +257,24 @@ class SessionDelivery:
             self.delivered.clear()
             self.named.clear()
             self.pending.clear()
+            # The index may be summarised away too; the after-compaction
+            # snapshot notes it again (note_index).
+            self.index_lines.clear()
             self._restored = True
         _append(self.store, [{"at": time.time(), "event": "rearm", "session": self.session_id}])
+
+    def note_index(self, section: str | None) -> None:
+        """Take note of the ``# Memory`` section this session was given. A
+        later tool delivery of a fact whose summary line is in it (an
+        act-time rule, listed ``When <when>: <summary>``) is its detail, not
+        a late miss: the rule reached the model before the call."""
+        lines = {}
+        for line in str(section or "").splitlines():
+            found = _INDEX_ID.match(line)
+            if found:
+                lines[found.group(1)] = line
+        with self._lock:
+            self.index_lines.update(lines)
 
     def on_tool(self, name: str, tool_input: Mapping[str, Any] | None, *,
                 timing: str = LATE, what: str = "this call") -> Delivery | None:
@@ -303,8 +330,10 @@ class SessionDelivery:
             if not chosen and not listed and not more:
                 return None
             body = head + lines + ([overflow_line] if overflow_line else [])
+            detail = frozenset(i for i in chosen if timing == LATE
+                               and _summary_indexed(prepared.by_id[i], self.index_lines.get(i)))
             delivery = Delivery("\n".join(body), tuple((i, kinds[i]) for i in chosen),
-                                tuple(listed), more, timing, _session=self)
+                                tuple(listed), more, timing, detail, _session=self)
             self.pending.update(chosen)
         if commit:
             delivery.commit()
@@ -317,11 +346,22 @@ class SessionDelivery:
             fresh = [(i, k) for i, k in delivery.delivered if i not in self.delivered]
             self.delivered.update(ids)
             self.named.update(delivery.overflow)
-        record(self.store, self.session_id, fresh, delivery.timing)
+        record(self.store, self.session_id, [f for f in fresh if f[0] not in delivery.detail],
+               delivery.timing)
+        record(self.store, self.session_id, [f for f in fresh if f[0] in delivery.detail], DETAIL)
 
     def _release(self, delivery: Delivery) -> None:
         with self._lock:
             self.pending.difference_update(i for i, _ in delivery.delivered)
+
+
+def _summary_indexed(entry: Mapping[str, Any], line: str | None) -> bool:
+    """The fact's summary line (written or derived) is in its index line."""
+    if not line:
+        return False
+    from fluid.codemode.facts import summary_line
+    summary = summary_line(entry)
+    return bool(summary) and summary in line
 
 
 def _size(lines: list[str]) -> int:
@@ -477,13 +517,13 @@ def session_delivered(store: Any, session_id: str) -> set[str]:
 
 
 def counts(store: Any) -> dict:
-    """Totals over the retained log: ``totals`` (on_time, late and per
-    kind), ``facts`` (per fact id, the MAX_FACT_ROWS most recently
+    """Totals over the retained log: ``totals`` (on_time, late, detail
+    and per kind), ``facts`` (per fact id, the MAX_FACT_ROWS most recently
     delivered), ``recent`` (the last MAX_RECENT deliveries) and ``since``
     (the oldest retained delivery's time, or None)."""
     try:
         deliveries = [r for r in _rows(store) if isinstance(r.get("fact"), str)
-                      and r.get("timing") in (ON_TIME, LATE)]
+                      and r.get("timing") in (ON_TIME, LATE, DETAIL)]
     except Exception:  # noqa: BLE001
         return {}
     totals: dict[str, int] = {}
