@@ -22,6 +22,8 @@ tests/core/test_jq_shim checks the copies match.
 import sys
 import json
 import argparse
+import contextlib
+import contextvars
 import io
 import math
 import os
@@ -29,7 +31,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
