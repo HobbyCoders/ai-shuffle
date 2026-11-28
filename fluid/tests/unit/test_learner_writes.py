@@ -63,12 +63,6 @@ def reply_text(text: str, *, output_tokens: int = 60, input_tokens: int = 9000):
     return chunks
 
 
-def reply_when_lines(request):
-    """The maintenance call has a different output contract from synthesis."""
-    records = json.loads(prompt_of(request))
-    return reply_text(json.dumps({e["id"]: "When running repository tests" for e in records}))(request)
-
-
 def reply_reasoning_only(output_tokens: int = 900):
     """A reasoning model that spends its output on thinking and says nothing."""
     def chunks(request):
@@ -174,7 +168,7 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_the_fact_store(tmp
     provider = FakeInference(reply_text(
         '<memory scope="project">The user runs pytest with PYTHONPATH=fluid '
         'from the repository root.</memory>'
-    ), reply_text('{"conflicts": []}'), reply_when_lines)
+    ))
     synth = Synthesizer(provider, "gpt-test", store, project=PROJECT, session_model="gpt-test")
     run_session(store, synth, fact=fact)
     await settle(synth)
@@ -186,11 +180,9 @@ async def test_desktop_store_pass_sees_the_journal_and_writes_the_fact_store(tmp
     assert "older facts not listed" in prompt
     assert " explicit: Fact " in prompt  # explicit saves are marked read-only
     # Explicit facts cannot be merged or retired, so these do not make a
-    # consolidation call due. They are reviewed for contradictions (one
-    # call) and can receive metadata-only when-lines.
-    assert len(provider.requests) == 3
-    assert [r["kind"] for r in log_rows(store)] == ["synthesis", "memory_conflicts", "memory_backfill"]
-    assert log_rows(store)[-1]["consumed"] == 40
+    # consolidation call due; nothing else runs after the pass.
+    assert len(provider.requests) == 1
+    assert [r["kind"] for r in log_rows(store)] == ["synthesis"]
 
     learned = [e for e in memories_doc(store)["entries"] if not e.get("protected")]
     assert [e["text"] for e in learned] == [
@@ -251,13 +243,11 @@ async def test_provider_rejection_is_logged_backs_off_and_skips_consolidation(
     fixed = FakeInference(
         reply_text("<memory>The user prefers the bundled interpreter.</memory>"),
         reply_text("NO_CHANGES"),
-        reply_when_lines,
     )
     healed = Synthesizer(fixed, "gpt-codex", store, project=PROJECT)
     changed = await healed._run_safe()
     assert changed and changed[0].startswith("memory:")
-    assert len(fixed.requests) == 3  # synthesis, consolidation, when-line backfill
-    assert log_rows(store)[-1]["kind"] == "memory_backfill"
+    assert len(fixed.requests) == 2  # synthesis, consolidation
     assert store.learner_backoff("gpt-codex") == {}
     assert store.last_consolidated_at() > 0
     assert any(
@@ -552,15 +542,10 @@ async def test_user_forget_during_a_pass_does_not_strand_the_cursor(tmp_path) ->
                         project=PROJECT, min_new_entries=1)
     apply = synth._apply
 
-    async def apply_while_the_user_forgets(
-        text: str, group: list[dict[str, Any]], *,
-        workflow_entries: list[dict[str, Any]] | None = None,
-    ) -> list[str]:
+    async def apply_while_the_user_forgets(text: str, group: list[dict[str, Any]]) -> list[str]:
         # Another session's Forget lands while this pass applies its output.
-        # This ordinary cell pass must not receive retained workflow evidence.
-        assert workflow_entries == []
         store.delete_memory(fact.id, explicit=True)
-        return await apply(text, group, workflow_entries=workflow_entries)
+        return await apply(text, group)
 
     synth._apply = apply_while_the_user_forgets
     await synth.run()

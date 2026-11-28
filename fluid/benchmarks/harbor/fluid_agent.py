@@ -22,7 +22,7 @@ comparison protocol):
         -d terminal-bench/terminal-bench-2 \
         -a benchmarks.harbor.fluid_agent:FluidAgent \
         -m anthropic/claude-haiku-4-5 \
-        -k 5
+        -l 5
 
 Agent kwargs (pass with ``--agent-kwarg key=value``):
     code_mode=true    run fluid with --code-mode (code-as-actions kernel)
@@ -47,7 +47,7 @@ from harbor.agents.installed.base import (
     CliFlag,
     with_prompt_template,
 )
-from harbor.agents.model_connection import ModelConnectionSpec
+from harbor.agents.agent_auth_resolution import ModelConnectionSpec
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
@@ -66,11 +66,12 @@ _CONTAINER_METRICS = f"/logs/agent/{_METRICS_FILE}"
 class FluidAgent(BaseInstalledAgent):
     """Runs fluid's native API loop inside the Terminal-Bench task container."""
 
-    # passthrough: the provider is inferred from the model prefix
-    # (anthropic/..., openrouter/...) and the matching provider env var
-    # (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ...) is resolved and passed
-    # through unchanged — which is exactly the name fluid reads.
-    MODEL_CONNECTION = ModelConnectionSpec(passthrough=True)
+    # The default spec infers the provider from the model prefix
+    # (anthropic/..., openrouter/...) and resolves the matching provider env
+    # var (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, ...) under its own name,
+    # which is exactly the name fluid reads. Harbor 0.25 moved this class and
+    # dropped the old ``passthrough`` option; this needs Harbor 0.25 or newer.
+    MODEL_CONNECTION = ModelConnectionSpec()
 
     CLI_FLAGS = [
         CliFlag("code_mode", cli="--code-mode", type="bool",

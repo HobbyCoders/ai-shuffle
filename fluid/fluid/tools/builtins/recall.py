@@ -117,7 +117,6 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
     successor = _local_ids(store) if any(e.superseded_by for e, _ in hits) else {}
     lines: list[str] = []
     seen: set[str] = set()
-    answers = _answer_states(store, project) if any(_is_answer(e) for e, _ in hits) else {}
     for entry, archived in hits:
         seen.update({entry.id, f"{entry.origin}:{entry.id.split(':')[-1]}"})
         findings = screen_findings(entry.text) + screen_findings(entry.when or "")
@@ -130,8 +129,7 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
             tags.insert(1, f"when: {entry.when}")
         if entry.always and not _is_answer(entry):
             tags.append("always applies")
-        label = _memory_label(entry, archived, answers)
-        lines.append(f"- [{label}] {entry.text}  ({', '.join(tags)})")
+        lines.append(f"- [{_memory_label(entry)}] {entry.text}  ({', '.join(tags)})")
         if entry.conflicted and not _is_answer(entry):
             lines.append(f"  Unresolved conflict; ask the user for the current fact, then correct "
                          f"[{entry.id}] revision {entry.revision} with Remember.")
@@ -140,38 +138,18 @@ def _fetch(ids: list[str], store: Any, project: str | None = None) -> ToolOutcom
         where = " in this project" if project is not None else ""
         lines.append("No memory with id " + ", ".join(f"[{i}]" for i in missing) + where
                      + " (it may have been forgotten); search by keyword instead.")
-    lines.extend(_owner_questions(store, project, hits))
     return ToolOutcome(text="\n".join(lines), is_error=not hits)
 
 
-def _owner_questions(store, project, hits):
-    """The open conflicts (fluid.codemode.conflict_review) a recalled rule is
-    part of: the two clashing passages and how the owner's answer is saved."""
-    from fluid.codemode.conflict_review import conflict_lines, session_conflicts
-    try:
-        return conflict_lines(session_conflicts(store, project),
-                              about={str(e.id) for e, _ in hits})
-    except Exception:  # noqa: BLE001 — a broken verdict file never fails a Recall
-        return []
-
-
 def _is_answer(entry: Any) -> bool:
+    """A "both stand" answer to the retired model conflict review (memory v3
+    phase 3a): kept and findable, but history, never an owner rule."""
     return str(entry.key or "").startswith("memory.coexist.")
 
 
-def _answer_states(store: Any, project: str | None) -> dict[str, bool]:
-    from fluid.codemode.conflict_review import coexistence_answer_states, session_facts
-    return coexistence_answer_states(session_facts(store, project))
-
-
-def _memory_label(entry: Any, archived: bool, answers: dict[str, bool]) -> str:
-    if not _is_answer(entry):
-        return entry.id
-    state = ("current exact-pair coexistence answer; not a general owner rule"
-             if answers.get(entry.key) and not archived else
-             "stale coexistence answer; historical only; does not resolve any current question")
-    # Put validity BEFORE the historical answer, including if output is clipped.
-    return f"{entry.id}; {state}"
+def _memory_label(entry: Any) -> str:
+    # The status goes BEFORE the historical answer, so clipping keeps it.
+    return f"{entry.id}; historical conflict-review answer, not an owner rule" if _is_answer(entry) else entry.id
 
 
 def _tags(entry: Any, archived: bool, successor: dict[str, str]) -> list[str]:
@@ -227,11 +205,10 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
     conflicts = [e for e in store.memories() if e.conflicted and e.provenance != "tool"
                  and (project is None or e.scope in ("global", project))
                  and score(e.text + " " + (e.key or ""))]
-    # Concurrent owner wordings under one exact-pair key agree on closure.
-    # Make them retrievable, without the generic instruction to re-ask.
+    # Two workers' wordings of one old "both stand" answer stay findable,
+    # without the instruction to re-ask the owner.
     memory_hits.extend((e, False) for e in conflicts[:limit] if _is_answer(e)
                        and all(found.id != e.id for found, _ in memory_hits))
-    answers = _answer_states(store, project) if any(_is_answer(e) for e, _ in memory_hits) else {}
     for entry in conflicts[:limit]:
         if _is_answer(entry):
             continue
@@ -259,9 +236,7 @@ def _lookup(query: str, limit: int, store: Any, project: str | None) -> ToolOutc
             if entry.always and not _is_answer(entry):
                 tags.append("always applies")
             suffix = f"  ({', '.join(tags)})" if tags else ""
-            label = _memory_label(entry, archived, answers)
-            lines.append(f"- [{label}] {entry.text}{suffix}")
-        lines.extend(_owner_questions(store, project, memory_hits))
+            lines.append(f"- [{_memory_label(entry)}] {entry.text}{suffix}")
 
     skill_hits: list[tuple[int, Any, bool]] = []
     try:

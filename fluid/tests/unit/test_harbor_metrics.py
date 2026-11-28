@@ -34,7 +34,7 @@ def adapter(monkeypatch):
             "BaseInstalledAgent": object, "CliFlag": Mock(),
             "with_prompt_template": lambda func: func,
         },
-        "harbor.agents.model_connection": {"ModelConnectionSpec": Mock()},
+        "harbor.agents.agent_auth_resolution": {"ModelConnectionSpec": Mock()},
         "harbor.environments.base": {"BaseEnvironment": object},
         "harbor.models.agent.context": {"AgentContext": object},
     }.items():
@@ -48,6 +48,28 @@ def adapter(monkeypatch):
     agent = module.FluidAgent()
     agent.logger = Mock()
     return agent
+
+
+def test_adapter_resolves_the_provider_key_on_installed_harbor(tmp_path, monkeypatch):
+    # The stubbed fixture cannot see Harbor move or change its API: it kept
+    # passing after Harbor 0.25 moved ModelConnectionSpec and dropped an option
+    # the adapter passed. This runs the adapter on the real package wherever
+    # Harbor is installed (it is not part of Fluid's own test environment).
+    pytest.importorskip("harbor")
+    path = Path(__file__).resolve().parents[2] / "benchmarks/harbor/fluid_agent.py"
+    spec = spec_from_file_location("fluid_harbor_adapter_real", path)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "placeholder")
+    agent = module.FluidAgent(
+        logs_dir=tmp_path, model_name="openrouter/anthropic/claude-haiku-4.5",
+    )
+    access = agent.model_connection
+    assert access.provider == "openrouter"
+    assert access.api_key == "placeholder"
+    assert dict(access.env) == {"OPENROUTER_API_KEY": "placeholder"}
 
 
 def test_transcript_alone_cannot_report_metrics(adapter, tmp_path):

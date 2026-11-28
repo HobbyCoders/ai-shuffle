@@ -30,8 +30,9 @@ most one model call, and only when the session gave a reason to.
   for the owner, never a reason to save.
 
 The worker-wide rollback switch ``FLUID_MEMORY_LEARNER=continuous`` brings
-back the continuous learner (skills, consolidation, when-line backfill and
-workflow proposals included). Phase 3 deletes it.
+back the continuous learner (skills and consolidation; phase 3a removed its
+when-line backfill, conflict review and workflow proposals). A later phase
+deletes it.
 """
 from __future__ import annotations
 

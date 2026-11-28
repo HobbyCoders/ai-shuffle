@@ -257,10 +257,7 @@ synthesis-log row records the model, billing and prompt limit used.
 - Any other `<proposal kind="owner_preference|owner_fact|project">` goes to
   the inbox. An unverified quote is dropped.
 
-Skills, consolidation, the when-line backfill (`memory_backfill.py`) and
-workflow proposals (`workflows.py`) do not run in reflection mode. The rule
-conflict review (`conflict_review.py`) still runs after a reflection that did
-not fail.
+Skills and consolidation do not run in reflection mode.
 
 **Inbox.** `proposals.json` beside the store holds this worker's open
 proposals and the owner's decisions. A proposal has an id (a hash of kind,
@@ -347,60 +344,6 @@ These sessions list skills by their `SKILL.md` path and the model reads the
 file instead of calling Skill. A successful Read of a discovered skill's
 `SKILL.md` counts as a load in `~/.fluid/skills/.usage.json`.
 
-## Grounded prose workflow proposals
-
-Python helper synthesis remains separate from prose `SKILL.md` workflows.
-**Partial feature: automatic proposals are currently inert in normal per-session
-use.** Each session's closing synthesis consumes its own journal slice; the next
-session cannot combine its evidence with a retained accepted episode from that
-previous pass. Only a single synthesis slice containing both complete accepted
-sessions can currently produce a proposal. There is no retained cross-pass
-accepted-episode index yet; issue #206 remains open. Promotion also fails closed
-when source evidence has been reaped or changed. Same-slice producer tests do
-not establish normal cross-session learning.
-
-In that same-slice case, Synthesizer can queue at most two workflow proposals
-per pass; it never installs one. The conservative first slice requires two distinct project-scoped journal
-sessions with successful execution, a completion reply and an explicit user
-receipt `workflow accepted: <name>`. Tool output cannot provide that receipt.
-`workflow corrected: <name>` or `workflow rejected: <name>` blocks the workflow.
-These receipts support evidence; they are **not** installation approval. Natural
-language corrections must also be considered during owner review. Ordinary
-fact/helper passes include no workflow-proposal instructions: that prompt cost
-is added only after two distinct user-accepted episodes for the same workflow
-appear in the project slice. Full evidence validation still gates the queue.
-
-Proposals retain owner/project identity, exact content digests and bounded
-source episodes/hashes. Content and evidence pass secret/injection screening;
-capability metadata and executable substitutions are rejected. Installed skill
-names and near-identical descriptions are checked at proposal time when the
-host supplies the working directory, and always checked again at promotion.
-The per-owner queue/audit holds at most 32 records and 256 KiB including rejected
-and promoted records. Capacity exhaustion refuses new proposals, not old audit.
-There is no automatic skill target count, deletion or overwrite.
-
-Standalone Fluid's local owner can inspect with `fluid workflows list` and
-`fluid workflows show <digest>`, then `fluid workflows approve <digest> --cwd
-<project>` (or `reject`). Supply `--skills-dir` when using a custom store. Approval
-requires an interactive terminal and typing the full digest after reviewing the
-complete source work, scope, exceptions and successful outcomes. **This is a
-convenience gate, not authentication.** Approval refuses shells with the app's
-`AI_SHUFFLE_MANAGED_BY` attribution marker, `AIS_SESSION_ID`, or a nonempty
-`CLAUDECODE`, even with a fabricated TTY. These ambient markers are not a security
-boundary: arbitrary local code can remove them or write skill files directly.
-Authenticated in-app owner approval is still required for a real identity gate. Source evidence
-is revalidated; stale/reaped/corrected evidence fails closed. Approval creates a
-new `.fluid/skills/<name>/SKILL.md` exclusively in the same project, with no tool
-grants or permission bypass. A fresh native/delegated session uses ordinary
-skill discovery and the Skill loader, not a new injection surface.
-
-API-owner and application-ID project promotion is deliberately refused by this
-local CLI: an authenticated application approval UI and project-location binding
-remain product work. No API-owner proposal may install into shared global
-roots. Global promotion and replacing an owner-authored skill are not supported.
-Pending proposals are inert until this explicit local-owner approval; production
-skills must not be installed merely to test the learner.
-
 ## Automatic lifecycle
 
 Hard limits and expiry are enforced by code at ingestion and maintenance, not by
@@ -417,12 +360,12 @@ Current per-owner defaults:
 | Expiry | An expired agent fact moves to the archive (above). User-saved facts never expire |
 | Retained fact revisions | At most 2, for at most 30 days |
 | Fact text | 2,000 characters (one fact, or one rule with its exceptions); oversize saves fail rather than truncate meaning |
-| When-line (`when`) | 1–140 characters, one line, screened for credentials and injection patterns: the situation in which a future agent should load the fact ("When choosing a model for a subagent"), not a summary. Required by Remember for a new fact; a correction keeps the old one unless a new one is given. A fact without one (older stores, the learner, harvests) is listed by a line derived from its text at render time (first sentence or clause, at most 100 characters), never stored. A bounded learner backfill (40 facts per call, 3 calls per UTC day, at most half the daily budget) writes missing ones as metadata only, with its own retry backoff (1 hour doubling to 24 hours); memory health asks for attention after 3 failed attempts in a row |
+| When-line (`when`) | 1–140 characters, one line, screened for credentials and injection patterns: the situation in which a future agent should load the fact ("When choosing a model for a subagent"), not a summary. Required by Remember for a new fact; a correction keeps the old one unless a new one is given. A fact without one (older stores, the learner, harvests) is listed by a line derived from its text at render time (first sentence or clause, at most 100 characters), never stored. Memory health counts facts that have none |
 | ALWAYS flag (`always`) | Only on a user-saved fact, at the owner's request: rendered in full in every session. The ALWAYS memories visible in one project (global plus that project's) share 3,000 characters of text; a save past that is refused with the list of current ones |
 | Metadata merge | `when` and `always` are metadata with their own stamps (`when_at`/`always_at`: hybrid timestamp and store id). Replicas settle each field on its newest stamp, independently of the fact's text revision clock, so a metadata edit never bumps the revision, never turns a concurrent text edit into a conflict, and never loses another worker's edit of the other field. A missing stamp (older stores and replicas) is the oldest |
 | Recall by id | `Recall(ids=[...])`, at most 10 ids, local or global: full text, when-line and labels, live or archived. Scoped like keyword Recall: global facts and the session's project; another project's id is reported as not found in this project |
 | Prompt fact lines | The stable, task-independent base is an index: ALWAYS memories in full within their own 3,000 characters, then identity facts (`profile.name`, `profile.preferred_name`, `profile.pronouns`, `profile.language`, `profile.github_username`) always listed by their text cut to 120 characters, then one `- [id rN; source] <when-line>` line per other fact in scope, in 10,000 characters shared by the identity lines, the index and conflict/withheld notes. Index order: facts the task names, then the session's project, then the most useful. The model Recalls a fact by id for its text; an index-only line is not a use for memory health's usage signal or its unconfirmed-harvest repair. An additional task slice delivers at most 1,000 new fact-line characters per owner turn and at most 2,000 held total, requiring two distinct whole-word matches. It never displaces base facts. When full, oldest-admitted task-only facts that no longer match the current query can yield space to a new two-term match; matching facts and all base facts are preserved. Admission age is recovered from the provenance-marked chain, not a query log. Topic-driven changes have an 8,000-character cumulative allowance since the trusted full snapshot (including change-list wrappers and retired IDs), then explicit Recall is the fallback until a genuine restore/base update. This bounds 100-turn topic-switch history to the initial snapshot plus 8,000 characters, rather than buying another base snapshot on every switch. Actual source corrections, deletion, safety and scope removals reconcile even after the novelty allowance is spent. Task-only changes never cause a full base re-send. All selection follows owner, scope, checkout, conflict and injection screening; archived facts still require explicit Recall. No query log, model call or embeddings. Additions use the existing provenance-marked user-tail memory/change-list chain and its compaction preservation, never the cached system prefix. A closing note counts what is left out that Recall finds in that session: live facts omitted for space and archived facts in scope ("(144 saved facts omitted for space and 12 archived; Recall finds them by keyword.)"). Other projects' facts and setup receipts for other checkouts have their own notes; another worker's environment facts are neither shown nor counted |
-| Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, unsynthesized lines (never explicit ones, never the slice a running pass is reading) are dropped down to half the cap with a warning, lowest value first and oldest first within each tier: successful read-only cells and calls, then other successful cells and calls, and last failed cells and calls, friction, and user and assistant prose. Every dropped line marks its session's workflow episode incomplete first. `journal_loss.json` counts the drops in `dropped_unsynthesized` and per kind in `dropped_by_kind` (`cell`, `tool`, `user`, `assistant`, `friction`, `other`; records from older builds have the total only); events may still be skipped under lock contention |
+| Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, unsynthesized lines (never explicit ones, never the slice a running pass is reading) are dropped down to half the cap with a warning, lowest value first and oldest first within each tier: successful read-only cells and calls, then other successful cells and calls, and last failed cells and calls, friction, and user and assistant prose. `journal_loss.json` counts the drops in `dropped_unsynthesized` and per kind in `dropped_by_kind` (`cell`, `tool`, `user`, `assistant`, `friction`, `other`; records from older builds have the total only); events may still be skipped under lock contention |
 | Model-assisted inference | A daily call budget per store that follows how the pass is billed: 200 attempted calls per UTC day when the learner's provider row is a flat-rate subscription (ChatGPT/Codex, SuperGrok: the rows `credential_gate.subscription_provider_model` treats as subscriptions), 48 for an API-key, metered or unknown provider. The decision is per learner, from the provider its passes use, so one store served by both kinds claims each pass against that pass's own limit. The owner policy setting `learner_daily_calls` (`PUT /api/v1/settings/owner-policy`; 0 = automatic, the default; fluid's own config key is `learner_daily_calls`) overrides either, clamped to 4–1,000, and is read at pass time, so a change applies from the next pass without a restart. Calls kept for consolidation scale with the budget (2 of 48, 8 of 200, at most 10). Each synthesis-log row records the budget that applied (`budget`: `daily`, `reserved`, `source` = `setting`, `subscription_default` or `metered_default`). The calls are spread over the day: by a given time a store may have used 2 calls plus its share of the day so far, a pass starts at least 15 minutes after the previous call (with a bigger budget, proportionally less, never under a minute), and it runs ahead of that pace only while the journal is past 60% of its cap; a pending Remember entry is not paced until a pass has read it. A pass makes one call per project in its slice and stops the slice before a project the day's remaining calls cannot pay for; when a later project's call fails or is refused, the entries the answered projects cover are still consumed. Input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice of up to 400 lines, then the skill library) when the learner model's context window is unknown or small, as for most local models; a known window raises it, up to 96,000. Successful read-only calls and cells (Read, Glob, Grep, LS, TaskList, ToolSearch) are consumed without being shown, unless they contain a top-level function/class definition or a lambda assigned to a name, import a saved skill, cannot be parsed safely, or name a path outside the session's working directory and the temp directory (home config, notes, another checkout); other working cells are shown with code and output clipped to their head and tail, failed ones whole. Output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
 | Deletion records (tombstones) | One row per forgotten fact, kept and replicated for 365 days, no count limit. A store imported from an older version keeps its 16 KiB deletion filter read-only, so what it fenced stays fenced |
 
@@ -453,61 +396,28 @@ reported as an empty completion.
 ## Contradictions between owner rules
 
 Two rules the owner asked to keep can contradict each other after the owner
-changes their mind. Nothing matches words to find that. The learner's model
-reviews the rules (`fluid/fluid/codemode/conflict_review.py`) after a synthesis
-pass: one call for up to 12 rules that are new or reworded since their last
-review, shown beside the other owner rules of the same scope and worker. A
-scope that does not fit one prompt takes several calls, related rules first,
-and a rule counts as reviewed only once it has been shown beside every other
-rule of its scope. New wording is the rule's text, scope, always flag or a
-when-line the owner wrote; a when-line the backfill generates reviews nothing
-again and keeps every verdict. Profile, career and business facts, tool
-harvests, facts withheld by screening and anything that is not owner-kept are
-never sent.
+changes their mind. A deterministic check (`possible_conflicts` in
+`fluid/fluid/codemode/triggers.py`, no model call) flags a pair of live
+owner-kept rules in overlapping scopes when they fire in the same situation (a
+command, path or named tool in common, a two-word phrase in common, or two
+strong words in common) and only one of the two texts says "not", "never",
+"avoid" or the like. It is a hint, never a verdict, and takes no rule's
+authority away. It shows in two places: the Remember receipt of an owner save
+names up to three such rules ("Possible conflict: ..."), and Memory health's
+"Possible conflicts" signal counts the pairs. The owner settles one by
+correcting, replacing or forgetting a rule.
 
-The model is told that most sets contain no conflict, that a narrower rule
-beside a general one, added detail, history, or rules for different jobs or
-projects are not conflicts, and to report none when unsure. A claim counts
-only when it names two shown rules of which one is under review and quotes
-one passage from each that stands in that rule: whole words in the rule's own
-spelling and capitals (only spacing, typographic quote and dash forms and the
-capital of the first letter are forgiven). A second call then looks at the
-claimed pairs alone, three at a time, and must agree; a claim it has no room
-for, or that the budget refuses, is kept and gets its second look in a later
-pass, and nothing is shown until then. Anything else is dropped and counted
-in the pass log row
-(`memory_conflicts` in `.synthesis-log.jsonl`, which never holds rule text).
-A result is stored only for the wording the model was shown: a rule edited or
-merged from a replica while the model answered is reviewed again.
-
-Verdicts live in `conflict-review.json` beside the store, local to the worker
-and not replicated: which wording of each rule was reviewed, the open pairs
-with their two passages, claims waiting for their second look and the
-progress of a scope too large for one call. Rewording, forgetting or
-replacing either rule closes its pair and sends the reworded rule to review
-again. The review spends the learner's shared daily call budget, at most 4
-calls a day (first and second looks together), and stops while half of that
-budget is spent; with no model or no budget
-nothing is asked. A failed or unreadable answer reviews nothing and waits on
-its own backoff (one hour, doubling to a day) without failing the learner.
-
-A session is not sent a question paragraph. The `# Memory` line of each rule
-in an open pair ends with `(owner question: conflicts with [id]; Recall both
-before relying on either)`, and Recall of either rule prints the two passages,
-tells the agent to follow the newer rule meanwhile and to ask the owner once.
-At most 3 pairs are open at a time; Memory health counts them. The owner
-settles a pair by correcting, replacing or forgetting a rule, or by saying
-both stand: that answer is saved under the pair's `memory.coexist.v2.` key,
-replicates like any fact, and holds until either rule is reworded (a when-line
-the backfill generates afterwards is not a rewording). A conflict never takes
-a rule's authority away; for model routing the host still accepts a model
-named by either rule.
+Memory v3 phase 3a removed the model conflict review that ran here before.
+Its verdict file, `conflict-review.json`, is left on disk and no longer read.
+Its "both stand" answers, saved under `memory.coexist.` keys, stay in the
+store: they replicate like any fact, Recall labels them historical, and they
+never render in a prompt or count as model-routing authority.
 
 ## Self-maintenance
 
 `fluid/fluid/codemode/memory_health.py` checks each store without a model. The
 app's maintenance loop runs it once an hour per store and again after a
-curation pass (`app/core/fluid_memory.py`). It reports nine signals, each
+curation pass (`app/core/fluid_memory.py`). It reports signals, each
 healthy or needing attention with one sentence: whether the learner produces
 facts given recent sessions and whether it keeps up with the journal (attention
 when more than 10% of the entries taken in over three days were dropped unread,
@@ -517,7 +427,8 @@ ran out, as the store records them, are named either way), facts never recalled 
 harvests and how often they are rewritten, duplicate groups, capacity (it warns
 at 90% of the 512 user-saved facts, before saves are refused), how much
 each project's snapshot leaves out, failed curation passes, user-saved facts
-lost without a Forget, and failed saves. The result is kept in
+lost without a Forget, failed saves, owner rules that may contradict (see
+above), facts with no written when-line, and just-in-time deliveries. The result is kept in
 `memory-health.json` beside the store; it is local to the worker and is not
 replicated.
 

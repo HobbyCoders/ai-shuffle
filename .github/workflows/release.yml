@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      # actions: read lets release_preflight.py verify the main CI run on the tag's commit.
+      actions: read
       contents: read
       pull-requests: read
       statuses: read
@@ -94,7 +96,7 @@ jobs:
           if [ -n "$PROMOTE_TAG" ] && [ "$PROMOTE_TAG" != "$RELEASE_TAG" ]; then
             echo '::error::Promotion must use the exact version and workflow tag'; exit 1
           fi
-      - name: Check protected release source and connector bytes
+      - name: Check protected release source, main CI on the tag and connector bytes
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
@@ -569,6 +571,7 @@ jobs:
       contents: write
       pull-requests: read
       statuses: read
+      actions: read
     env:
       RELEASE_CANDIDATE_CHECKOUT: ${{ github.workspace }}/release-candidate
     defaults:
@@ -747,6 +750,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
+      actions: read
       id-token: write
       attestations: write
     concurrency:
@@ -844,6 +848,7 @@ jobs:
       packages: write
       pull-requests: read
       statuses: read
+      actions: read
       attestations: read
     concurrency:
       group: desktop-source-publish
@@ -903,6 +908,7 @@ jobs:
       packages: read
       pull-requests: read
       statuses: read
+      actions: read
       attestations: read
     concurrency:
       group: android-play-internal

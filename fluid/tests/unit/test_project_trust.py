@@ -362,7 +362,7 @@ def test_no_question_without_a_terminal_or_for_a_command_that_starts_no_session(
     # pytest's captured stdin is not a terminal.
     assert _project_trusted(_args(project), ask=True) is False
     assert "not trusted" in capsys.readouterr().err
-    # On a terminal, `fluid config` and `fluid workflows` still do not ask.
+    # On a terminal, `fluid config` still does not ask.
     monkeypatch.setattr("sys.stdin", _Terminal())
     monkeypatch.setattr("sys.stdout", _Terminal())
     assert _project_trusted(_args(project), ask=False) is False
@@ -841,40 +841,6 @@ def test_inside_a_checkout_the_walk_still_starts_at_the_git_root(
     capsys.readouterr()
     files = [f.path for f in discover_project_instruction_files(inner)]
     assert files == [str(project / "AGENTS.md"), str(inner / "AGENTS.md")]
-
-
-def test_a_workflow_proposal_is_compared_with_the_skills_the_session_loads(
-    project: Path,
-) -> None:
-    from fluid.codemode.workflows import WorkflowProposals
-
-    _write(project / ".fluid" / "skills" / "release-notes" / "SKILL.md",
-           "---\nname: release-notes\ndescription: write the release notes\n---\nbody\n")
-    check = WorkflowProposals._deduplicate
-    with pytest.raises(ValueError):
-        check(project, "release-notes", "something else entirely")
-    with pytest.raises(ValueError):
-        check(project, "release-notes", "something else entirely",
-              _load(project, project_trusted=True).setting_sources)
-    # An untrusted project's skills have no say.
-    check(project, "release-notes", "something else entirely", _load(project).setting_sources)
-
-
-def test_memory_backfill_says_when_a_projects_config_was_left_out(
-    project: Path, monkeypatch, capsys
-) -> None:
-    from fluid.codemode import continual, memory_backfill
-    from fluid.config import loader
-
-    monkeypatch.chdir(project)
-    monkeypatch.setattr(loader, "_build_provider_client", lambda config, name: object())
-    monkeypatch.setattr(continual, "Synthesizer", lambda *args, **kwargs: (args, kwargs))
-    memory_backfill._synthesizer(object())
-    err = capsys.readouterr().err
-    assert "not a trusted project" in err and str(project) in err
-    trust_project(project)
-    memory_backfill._synthesizer(object())
-    assert capsys.readouterr().err == ""
 
 
 # ─── the Claude child loads instruction files itself ─────────────────────────

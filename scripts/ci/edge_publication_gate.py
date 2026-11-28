@@ -5,7 +5,8 @@ successful hosted CI run on the exact main revision. Hosted evidence
 must come from this repository's main workflow, including its aggregate job.
 Only the newest attested unpublished first-parent revision is eligible; later
 untested changes wait for their own exact-revision evidence. One pass covers
-its ancestors. Stable release requirements are unchanged.
+its ancestors. Stable releases reuse ``suite_status`` for the tagged commit
+(``release_preflight.verify_suite``).
 
 Run only from a checkout of protected main. This script reads GitHub
 metadata; it does not receive signing or Cloudflare keys.

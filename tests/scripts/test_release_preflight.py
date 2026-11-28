@@ -162,6 +162,45 @@ def test_release_requires_protected_main_and_a_merged_pr(monkeypatch, protected,
             checks.verify_merged_pr("release")
 
 
+RELEASE_SHA = "c" * 40
+
+
+def _main_ci_api(conclusion="success", aggregate="success", owner_statuses=(), runs=None):
+    """GitHub API replies for the release commit's main CI run, as hosted_status reads them."""
+    repository = {"id": 1, "full_name": checks.REPOSITORY}
+    run = {"id": 9, "workflow_id": 7, "path": ".github/workflows/ci.yml", "head_sha": RELEASE_SHA,
+           "head_branch": "main", "event": "push", "status": "completed", "conclusion": conclusion,
+           "run_attempt": 1, "repository": repository, "head_repository": repository}
+    replies = {
+        f"commits/{RELEASE_SHA}/statuses?per_page=100&page=1": list(owner_statuses),
+        f"actions/workflows/ci.yml/runs?branch=main&head_sha={RELEASE_SHA}&per_page=100":
+            {"workflow_runs": [run] if runs is None else runs},
+        "actions/runs/9": run,
+        "": repository,
+        "actions/workflows/ci.yml": {"id": 7, "path": ".github/workflows/ci.yml"},
+        "actions/runs/9/attempts/1/jobs?per_page=100&page=1":
+            {"jobs": [{"name": "CI", "status": "completed", "conclusion": aggregate}]},
+    }
+    return replies.__getitem__
+
+
+def test_a_green_main_ci_run_on_the_release_commit_passes():
+    assert checks.verify_suite(RELEASE_SHA, _main_ci_api()).startswith("Hosted CI run 9, attempt 1 passed on ccccccccc")
+
+
+@pytest.mark.parametrize("api", [
+    _main_ci_api(conclusion="cancelled"),
+    _main_ci_api(conclusion="failure"),
+    _main_ci_api(aggregate="failure"),
+    _main_ci_api(runs=[]),
+    # An owner failure vetoes the commit even when CI was green.
+    _main_ci_api(owner_statuses=[{"context": "local/full-suite", "state": "failure", "creator": {"id": 76577322}}]),
+], ids=["cancelled", "failed", "aggregate-failed", "no-run", "owner-veto"])
+def test_a_release_commit_without_a_green_main_ci_run_is_refused(api):
+    with pytest.raises(ValueError, match="Main CI has not passed on ccccccccc"):
+        checks.verify_suite(RELEASE_SHA, api)
+
+
 def test_checked_in_version_surfaces_and_tag_agree():
     version = checks.verify_versions(ROOT)
     assert checks.verify_versions(ROOT, f"v{version}") == version

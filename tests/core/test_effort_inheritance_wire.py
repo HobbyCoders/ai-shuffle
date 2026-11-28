@@ -15,6 +15,7 @@ from app.core import provider_agent as pa
 from app.core.model_effort import EFFORT_LEVELS, effort_preference_key
 from app.core.provider import harness_adapter as ha
 from app.db import database, model_providers, turns
+from tests._pairwise import pairwise
 from tests.core.test_effort_wire import provider, test_picker_to_wire as assert_wire
 
 
@@ -31,6 +32,15 @@ CHILD_ROUTES = [
     ("custom", "local-reasoner", ("none", "low", "medium", "high"), ("none", "low", "medium", "high"), "medium"),
     ("custom", "local-model", (), (), None),
 ]
+SOURCES = ("session", "turn", "spawn", "remembered")
+# The expected effort depends on the route and the pick, and on the source only
+# when nothing was picked (a session row with no pick keeps the route default;
+# the other sources inherit the caller's "low"). Every value pair runs, plus
+# both no-pick outcomes on every route.
+CHILD_CASES = list(dict.fromkeys([
+    *pairwise(CHILD_ROUTES, (None, *EFFORT_LEVELS), SOURCES),
+    *((route, None, source) for route in CHILD_ROUTES for source in ("session", "spawn")),
+]))
 
 
 @pytest.fixture
@@ -61,9 +71,9 @@ def child_runtime(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,model,catalog,levels,default", CHILD_ROUTES)
-@pytest.mark.parametrize("pick", [None, *EFFORT_LEVELS])
-@pytest.mark.parametrize("source", ["session", "turn", "spawn", "remembered"])
+@pytest.mark.parametrize("kind,model,catalog,levels,default,pick,source", [
+    pytest.param(*route, pick, source, id=f"{route[0]}-{route[1]}-{pick}-{source}")
+    for route, pick, source in CHILD_CASES])
 async def test_child_inheritance_to_transport(
     child_runtime: None,
     mock_db: Connection,

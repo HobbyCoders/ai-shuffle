@@ -923,15 +923,6 @@
 			]
 		},
 		{
-			"why": "a stored conflict between two owner rules and the keep-both answer reach real session prompts",
-			"journeys": ["owner-memory-question"],
-			"globs": [
-				"fluid/fluid/codemode/conflict_review.py",
-				"fluid/fluid/codemode/skills.py",
-				"fluid/fluid/tools/builtins/recall.py"
-			]
-		},
-		{
 			"why": "native harness context: the once-per-segment scratch reminder and the compactor's fold that keeps it",
 			"journeys": ["native-scratch-context"],
 			"globs": [
