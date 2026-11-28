@@ -9,6 +9,10 @@ import re
 import sys
 from typing import Any
 
+# ``shell_env`` reads the settings layers when a command starts. Load that
+# module with the tool, as before, so a host that gives up its access to the
+# code after importing it (a privilege drop) still finds it.
+import fluid.context.settings_stack  # noqa: F401
 from fluid.tools import agent_runner
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
