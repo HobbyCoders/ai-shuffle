@@ -27,7 +27,8 @@
 		whenTranscriptSettled,
 		type GitLoadOptions
 	} from '$lib/stores/git.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth.svelte';
+	// GitHub or GitLab: either one makes the PR / merge request actions usable.
+	import { sourceControlAuthenticated as githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
 	import { createPullRequest } from '$lib/api/github';

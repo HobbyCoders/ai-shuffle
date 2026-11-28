@@ -49,6 +49,7 @@
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 	import GitHubRepoPicker from '$lib/components/git/GitHubRepoPicker.svelte';
+	import { gitlabAuthenticated } from '$lib/stores/auth.svelte';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -471,9 +472,9 @@
 		}
 	}
 
-	function openGitHubSettings() {
+	function openGitHubSettings(provider: 'github' | 'gitlab' = 'github') {
 		onClose();
-		layout.openFeaturePage('settings', 'category=integrations&item=github');
+		layout.openFeaturePage('settings', `category=integrations&item=${provider}`);
 	}
 
 	function openExisting(localId: string) {
@@ -519,7 +520,7 @@
 			<div class="ui-dialog-header">
 				<div>
 					<h3 id="add-project-title" class="ui-dialog-title">New project</h3>
-					<p class="ui-dialog-subtitle">Add a folder, or clone a repo from GitHub.</p>
+					<p class="ui-dialog-subtitle">Add a folder, or clone a repo from {$gitlabAuthenticated ? 'GitHub or GitLab' : 'GitHub'}.</p>
 				</div>
 				<button class="ui-button ghost icon" onclick={onClose} aria-label="Close">
 					<X size={16} strokeWidth={1.5} />
@@ -548,7 +549,7 @@
 
 			<fieldset class="form-set" disabled={adding}>
 			<Segmented label="Source" selection="radio" stretch bind:value={source} disabled={adding}
-				options={[{ value: 'folder', label: `Folder on ${selfName}`, icon: Folder }, { value: 'github', label: 'Clone from GitHub', icon: Github }]} />
+				options={[{ value: 'folder', label: `Folder on ${selfName}`, icon: Folder }, { value: 'github', label: $gitlabAuthenticated ? 'Clone a repository' : 'Clone from GitHub', icon: Github }]} />
 
 			{#if source === 'folder'}
 				<div class="ui-field">

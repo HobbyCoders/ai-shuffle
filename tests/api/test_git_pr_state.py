@@ -204,6 +204,7 @@ class TestPrStateEndpoint:
             "merged_head_sha": None,
             "pr_lookup_failed": False,
             "stale": False,
+            "provider": "github",
         }
 
     def test_no_remote_degrades(self, pr_client, mock_github_service):
@@ -216,6 +217,7 @@ class TestPrStateEndpoint:
             "merged_head_sha": None,
             "pr_lookup_failed": False,
             "stale": False,
+            "provider": "github",
         }
 
     def test_successful_lookup_is_not_flagged(self, pr_client):

@@ -671,7 +671,7 @@ describe('GitHeaderActions panel rows', () => {
 			await openPanel();
 			expect(row('Create PR').disabled).toBe(true);
 			expect(queryRow('Ship It')).toBeNull();
-			expect(within(panel()).getByText('Needs GitHub')).toBeTruthy();
+			expect(within(panel()).getByText('Needs GitHub or GitLab')).toBeTruthy();
 		});
 
 		it('still offers the LOCAL actions when GitHub is unavailable', async () => {
@@ -753,6 +753,25 @@ describe('GitHeaderActions panel rows', () => {
 		await openPanel();
 		const link = within(panel()).getByRole('link', { name: 'Open PR #42 on GitHub' }) as HTMLAnchorElement;
 		expect(link.href).toBe('http://x/pr/42');
+	});
+
+	it('names a GitLab merge request and offers no GitHub-only auto-merge', async () => {
+		cleanAheadBranch();
+		setSnapshot({ ...mocks.gitSnapshot.value, prState: { current_branch: 'feature/x', open_pr: null, provider: 'gitlab' } });
+		renderHeader({ sessionId: 's1', openPR: { number: 7, title: 'My MR', url: 'http://gl/acme/app/-/merge_requests/7' } });
+		await openPanel();
+		const link = within(panel()).getByRole('link', { name: 'Open MR !7 on GitLab' }) as HTMLAnchorElement;
+		expect(link.href).toBe('http://gl/acme/app/-/merge_requests/7');
+		expect(within(panel()).getByText('Open merge request')).toBeTruthy();
+		expect(within(panel()).queryByText(/Merge when green/)).toBeNull();
+	});
+
+	it('keeps auto-merge for a GitHub pull request in a session', async () => {
+		cleanAheadBranch();
+		renderHeader({ sessionId: 's1', openPR: { number: 7, title: 'My PR', url: 'http://x/pr/7' } });
+		await openPanel();
+		expect(within(panel()).getByRole('link', { name: 'Open PR #7 on GitHub' })).toBeTruthy();
+		expect(within(panel()).getByText(/Merge when green/)).toBeTruthy();
 	});
 
 	it('enables Create PR when differsFromBase even with zero commits ahead', async () => {

@@ -42,7 +42,8 @@
 	import { beginHandoffPendingRead, handoffPending, recordHandoffPending } from '$lib/stores/handoff-pending';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
-	import { githubAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
+	// GitHub or GitLab: either one makes branch and PR controls usable.
+	import { sourceControlAuthenticated as githubAuthenticated, isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { canMoveSession } from './session-move';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';

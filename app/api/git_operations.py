@@ -132,6 +132,13 @@ class Operation:
     # is retained for the task's lifetime (asyncio only holds a weak reference,
     # so an un-referenced task can be garbage-collected mid-flight).
     task: Optional["asyncio.Task"] = field(default=None, repr=False)
+    # The forge service for this checkout's origin (GitLab when its connected
+    # server owns the remote); None means GitHub.
+    forge: Any = field(default=None, repr=False)
+
+    @property
+    def forge_service(self) -> Any:
+        return self.forge if self.forge is not None else github_service
 
     def set_step(
         self,
@@ -213,7 +220,7 @@ def _is_already_merged(error: Optional[str]) -> bool:
     return "already merged" in low or "already been merged" in low
 
 
-def _find_open_pr_for_branch(repo: str, branch: str):
+def _find_open_pr_for_branch(repo: str, branch: str, service: Any = None):
     """Return the open PullRequest whose head is *branch*, else None.
 
     Blocking (spawns ``gh pr list``) — always call through ``asyncio.to_thread``.
@@ -223,7 +230,7 @@ def _find_open_pr_for_branch(repo: str, branch: str):
     ``None``: the two are different facts and the caller must not cache the
     second as the first.
     """
-    pulls = github_service.list_pulls(repo, state="open", head=branch, limit=1)
+    pulls = (service or github_service).list_pulls(repo, state="open", head=branch, limit=1)
     for pr in pulls:
         if pr.head_branch == branch:
             return pr
@@ -901,7 +908,7 @@ async def _execute_ship(
                 op.status = "error"
                 return
             pr, err = await asyncio.to_thread(
-                github_service.create_pull, repo, title, body, feature_branch, base_branch, draft
+                op.forge_service.create_pull, repo, title, body, feature_branch, base_branch, draft
             )
             if not pr:
                 op.set_step("create_pr", STEP_ERROR, error=err or "Failed to create pull request")
@@ -958,12 +965,12 @@ async def _merge_step(op: Operation, repo: str, pr_number: int, merge_method: st
     op.set_step("merge", STEP_RUNNING)
     from app.api.github import require_idle_pull_branches
     try:
-        await require_idle_pull_branches(op.project_id, repo, pr_number, working_dir=working_dir, service=github_service)
+        await require_idle_pull_branches(op.project_id, repo, pr_number, working_dir=working_dir, service=op.forge_service)
     except HTTPException as exc:
         op.set_step("merge", STEP_ERROR, error=str(exc.detail))
         op.status = "error"
         return False
-    ok, err = await asyncio.to_thread(github_service.merge_pull, repo, pr_number, merge_method)
+    ok, err = await asyncio.to_thread(op.forge_service.merge_pull, repo, pr_number, merge_method)
     if ok:
         op.set_step("merge", STEP_DONE)
         return True
@@ -1020,11 +1027,17 @@ async def _prepare_operation(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Could not determine the current branch")
 
         # get_repo_from_remote shells out to git — keep it off the event loop.
-        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        from app.api.github import gitlab_repo_for_path
+        from app.core.gitlab_service import gitlab_service
+        repo = await gitlab_repo_for_path(working_dir)
+        if repo:
+            op.forge = gitlab_service
+        else:
+            repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
         if not repo:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                detail="Could not determine GitHub repository. Ensure the project has a GitHub remote.",
+                detail="Could not determine the GitHub or GitLab repository. Ensure the project has a GitHub or GitLab remote.",
             )
     except BaseException:
         _operations.pop(op.id, None)
@@ -1063,7 +1076,7 @@ async def finish(
     try:
         # list_pulls shells out to gh — keep it off the event loop.
         try:
-            pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch)
+            pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, current_branch, op.forge)
         except GitHubCliError as e:
             # Never downgrade "couldn't ask" to "no PR": that would tell the
             # user to create a duplicate PR while GitHub is merely unreachable.
@@ -1149,7 +1162,7 @@ async def ship(
         # list_pulls shells out to gh — keep it off the event loop.
         try:
             existing_pr = await asyncio.to_thread(
-                _find_open_pr_for_branch, repo, current_branch
+                _find_open_pr_for_branch, repo, current_branch, op.forge
             )
         except GitHubCliError as e:
             # Unknown PR state: opening a second PR for this branch (or failing
@@ -1326,17 +1339,26 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
         # Both of these shell out (git remote / gh auth status) — keep them off
         # the event loop. is_authenticated is cached inside github_service, so
         # this is normally a dict lookup rather than a process spawn.
-        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
-        authenticated = (
-            await asyncio.to_thread(github_service.is_authenticated) if repo else False
-        )
+        from app.api.github import gitlab_repo_for_path
+        from app.core.gitlab_service import gitlab_service
+
+        forge: Any = gitlab_service
+        repo = await gitlab_repo_for_path(working_dir)
+        authenticated = bool(repo)  # gitlab_repo_for_path implies GitLab is connected
+        if not repo:
+            forge = github_service
+            repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+            authenticated = (
+                await asyncio.to_thread(github_service.is_authenticated) if repo else False
+            )
         if repo and authenticated:
             result["has_github"] = True
+            result["provider"] = "gitlab" if forge is gitlab_service else "github"
             try:
-                pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch)
+                pr = await asyncio.to_thread(_find_open_pr_for_branch, repo, branch, forge)
                 if pr is None:
                     merged = await asyncio.to_thread(
-                        github_service.list_pulls, repo, state="merged", head=branch, limit=1
+                        forge.list_pulls, repo, state="merged", head=branch, limit=1
                     )
                     if (
                         merged
@@ -1346,7 +1368,7 @@ async def _read_pr_state(working_dir: str, branch: str, cache_key: str, project_
                         pr = merged[0]
                     else:
                         pr = await asyncio.to_thread(
-                            find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
+                            find_pull_for_checkout_fallback, forge, repo, branch, working_dir,
                             session_id=session_id, project_id=project_id,
                         )
             except Exception as e:  # noqa: BLE001 — GitHubCliError, or anything else

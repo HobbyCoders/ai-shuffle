@@ -21,10 +21,13 @@ from pydantic import BaseModel
 from app.api.auth import require_admin
 from app.core.export_redaction import redact_export_text
 from app.core.github_service import GitHubCliError, github_service
+from app.core.gitlab_service import gitlab_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/github", tags=["GitHub"])
+# The same picker contract for the GitLab account connected in Settings.
+gitlab_router = APIRouter(prefix="/api/v1/gitlab", tags=["GitLab"])
 
 MAX_PER_PAGE = 100
 
@@ -88,6 +91,10 @@ async def list_github_repos(
             detail=f"GitHub could not list your repositories: {detail}",
         )
 
+    return _page(repos, truncated, q, page, per_page)
+
+
+def _page(repos: list, truncated: bool, q: str, page: int, per_page: int) -> GitHubReposResponse:
     terms = [t for t in q.lower().split() if t]
     matched = [r for r in repos if _matches(r, terms)] if terms else repos
     start = (page - 1) * per_page
@@ -101,3 +108,28 @@ async def list_github_repos(
         has_more=start + per_page < len(matched),
         truncated=truncated,
     )
+
+
+@gitlab_router.get("/repos", response_model=GitHubReposResponse)
+async def list_gitlab_repos(
+    q: str = Query(default="", max_length=200, description="Filter by name, group or description"),
+    page: int = Query(default=1, ge=1, le=1000),
+    per_page: int = Query(default=30, ge=1, le=MAX_PER_PAGE),
+    refresh: bool = Query(default=False, description="Refetch instead of using the cached list"),
+    token: str = Depends(require_admin),
+):
+    """Projects the connected GitLab account is a member of (``connected: false`` when none)."""
+    if not await asyncio.to_thread(gitlab_service.is_authenticated):
+        return GitHubReposResponse(
+            connected=False, items=[], total=0, page=page, per_page=per_page, has_more=False,
+        )
+    try:
+        repos, truncated = await asyncio.to_thread(gitlab_service.list_user_repos, refresh=refresh)
+    except GitHubCliError as exc:
+        detail = redact_export_text(exc.stderr or str(exc))
+        logger.warning("Could not list GitLab projects: %s", detail)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GitLab could not list your projects: {detail}",
+        )
+    return _page(repos, truncated, q, page, per_page)

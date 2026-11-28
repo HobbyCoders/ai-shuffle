@@ -467,6 +467,8 @@ export interface AuthStatus {
 	 *  refused with `reason` (reason only for callers signed in to the worker). */
 	agent_gate?: AgentGateStatus;
 	github_authenticated: boolean;
+	/** A GitLab token is saved on this worker (older backends omit it). */
+	gitlab_authenticated?: boolean;
 	onboarding_complete: boolean;
 	username: string | null;
 }

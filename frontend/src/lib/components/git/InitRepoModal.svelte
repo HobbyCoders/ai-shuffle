@@ -117,9 +117,9 @@
 		error = null;
 	}
 
-	function openGitHubSettings() {
+	function openGitHubSettings(provider: 'github' | 'gitlab' = 'github') {
 		onClose();
-		layout.openFeaturePage('settings', 'category=integrations&item=github');
+		layout.openFeaturePage('settings', `category=integrations&item=${provider}`);
 	}
 
 	function handleKeydown(e: KeyboardEvent) {

@@ -40,6 +40,8 @@ export interface GitHubStatus {
         open_issues_count?: number;
     } | null;
     error: string | null;
+    /** Which forge answers for this project (older backends omit it: GitHub). */
+    provider?: 'github' | 'gitlab';
 }
 
 export interface CreatePullRequestRequest {
@@ -200,4 +202,22 @@ export async function listGitHubRepos(
     qs.set('per_page', String(params.perPage ?? 30));
     if (params.refresh) qs.set('refresh', 'true');
     return api.get<GitHubRepoPage>(`/github/repos?${qs}`, options);
+}
+
+export type RepoProvider = 'github' | 'gitlab';
+
+/**
+ * Projects the server's GitLab connection can clone, in the same shape as
+ * the GitHub list (`full_name` is the GitLab project path).
+ */
+export async function listGitLabRepos(
+    params: { q?: string; page?: number; perPage?: number; refresh?: boolean } = {},
+    options?: { signal?: AbortSignal }
+): Promise<GitHubRepoPage> {
+    const qs = new URLSearchParams();
+    if (params.q?.trim()) qs.set('q', params.q.trim());
+    qs.set('page', String(params.page ?? 1));
+    qs.set('per_page', String(params.perPage ?? 30));
+    if (params.refresh) qs.set('refresh', 'true');
+    return api.get<GitHubRepoPage>(`/gitlab/repos?${qs}`, options);
 }

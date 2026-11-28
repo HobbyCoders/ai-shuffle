@@ -21,12 +21,16 @@ vi.mock('$lib/api/client', () => ({
 	getErrorMessage: (e: { detail?: string; message?: string }, f: string) => e?.detail || e?.message || f
 }));
 const gh = vi.hoisted(() => ({ status: vi.fn(), web: vi.fn(), token: vi.fn(), cancel: vi.fn(), logout: vi.fn() }));
+const gl = vi.hoisted(() => ({ status: vi.fn(), token: vi.fn(), logout: vi.fn() }));
 vi.mock('$lib/api/auth', () => ({
 	getGithubAuthStatus: gh.status,
 	startGithubWebLogin: gh.web,
 	loginGithubWithToken: gh.token,
 	cancelGithubWebLogin: gh.cancel,
-	logoutGithub: gh.logout
+	logoutGithub: gh.logout,
+	getGitlabAuthStatus: gl.status,
+	loginGitlabWithToken: gl.token,
+	logoutGitlab: gl.logout
 }));
 const copyText = vi.hoisted(() => vi.fn());
 vi.mock('$lib/utils/clipboard', () => ({ copyText, COPY_ERROR_MESSAGE: 'Could not copy' }));
@@ -101,6 +105,8 @@ beforeEach(() => {
 	);
 	gh.status.mockResolvedValue({ authenticated: true, user: 'octocat', config_dir: '/home/app/.config/gh' });
 	gh.logout.mockResolvedValue({ success: true });
+	gl.status.mockResolvedValue({ authenticated: false, user: null, host: null, error: null });
+	gl.logout.mockResolvedValue({ success: true });
 	copyText.mockResolvedValue(undefined);
 });
 afterEach(() => cleanup());
@@ -113,12 +119,13 @@ async function open(item?: string, tab?: string) {
 }
 
 describe('list', () => {
-	it('lists GitHub and every API user, named for assistive tech', async () => {
+	it('lists GitHub, GitLab and every API user, named for assistive tech', async () => {
 		await open();
 		expect(screen.getByRole('button', { name: /GitHub/ }).textContent).toContain('@octocat');
+		expect(screen.getByRole('button', { name: /GitLab/ }).textContent).toContain('Not connected');
 		expect(screen.getByRole('button', { name: /Discord Bot/ }).textContent).toContain('Agent default, 1 agent');
 		expect(screen.getByRole('button', { name: /Home Assistant/ }).textContent).toContain('Disabled');
-		expect(screen.getByText('3')).toBeTruthy();
+		expect(screen.getByText('4')).toBeTruthy();
 		expect(searchSource().map((s) => s.title)).toContain('Discord Bot');
   expect(screen.queryByRole('searchbox')).toBeNull();
   expect(screen.getByRole('button', { name: /Discord Bot/ }).closest('.st-card')).toBeTruthy();
@@ -377,6 +384,58 @@ describe('GitHub', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect token' }));
 		expect((await screen.findByRole('alert')).textContent).toBe('GitHub sign-in could not be confirmed. Please retry.');
 		expect(gh.token).toHaveBeenCalledWith('tok');
+	});
+});
+
+describe('GitLab', () => {
+	it('connects a token for the typed server and shows connected only after reading it back', async () => {
+		gl.token.mockResolvedValue({ success: true, user: 'octo', host: 'https://gitlab.example.com' });
+		gl.status
+			.mockResolvedValueOnce({ authenticated: false, user: null, host: null, error: null })
+			.mockResolvedValue({ authenticated: true, user: 'octo', host: 'https://gitlab.example.com', error: null });
+		await open('gitlab');
+		const server = (await screen.findByPlaceholderText('https://gitlab.com')) as HTMLInputElement;
+		expect(screen.getByRole('link', { name: /Create a token/ }).getAttribute('href')).toContain(
+			'https://gitlab.com/-/user_settings/personal_access_tokens'
+		);
+		await fireEvent.input(server, { target: { value: 'https://gitlab.example.com' } });
+		await fireEvent.input(screen.getByPlaceholderText('glpat-…'), { target: { value: ' glpat-x ' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect token' }));
+		await waitFor(() => expect(gl.token).toHaveBeenCalledWith('glpat-x', 'https://gitlab.example.com'));
+		expect(await screen.findByText('Git push, merge requests and cloning')).toBeTruthy();
+		expect(screen.getByRole('button', { name: /GitLab/ }).textContent).toContain('@octo');
+	});
+
+	it('shows the server error and stays disconnected when the token is rejected', async () => {
+		gl.token.mockResolvedValue({ success: false, error: 'GitLab rejected this token.' });
+		await open('gitlab');
+		await fireEvent.input(await screen.findByPlaceholderText('glpat-…'), { target: { value: 'bad' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect token' }));
+		expect((await screen.findByRole('alert')).textContent).toBe('GitLab rejected this token.');
+		expect(screen.getByRole('button', { name: 'Connect token' })).toBeTruthy();
+	});
+
+	it('disconnects only after "Forget the GitLab token?"', async () => {
+		gl.status.mockResolvedValue({ authenticated: true, user: 'octo', host: 'https://gitlab.example.com', error: null });
+		await open('gitlab');
+		expect(await screen.findByText('https://gitlab.example.com')).toBeTruthy();
+		gl.status.mockResolvedValue({ authenticated: false, user: null, host: null, error: null });
+		await fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+		expect(gl.logout).not.toHaveBeenCalled();
+		expect(screen.getByText('Forget the GitLab token?')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+		await waitFor(() => expect(gl.logout).toHaveBeenCalledOnce());
+		expect(await screen.findByRole('button', { name: 'Connect token' })).toBeTruthy();
+	});
+
+	it('flags a saved token the server no longer accepts', async () => {
+		gl.status.mockResolvedValue({
+			authenticated: true, user: 'octo', host: 'https://gitlab.example.com',
+			error: 'GitLab no longer accepts the saved token. Reconnect it.'
+		});
+		await open('gitlab');
+		expect((await screen.findByRole('alert')).textContent).toContain('no longer accepts');
+		expect(screen.getByRole('button', { name: /GitLab/ }).textContent).toContain('Needs attention');
 	});
 });
 

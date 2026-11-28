@@ -533,10 +533,11 @@ _MAX_LISTED_REFRESH = 10
 
 
 def _repo_owns_url(repo: str, url: Optional[str]) -> bool:
-    """Whether a PR URL belongs to ``owner/name`` (no URL: assume it does)."""
+    """Whether a PR (or GitLab MR) URL belongs to ``repo`` (no URL: assume it does)."""
     if not url:
         return True
-    return f"/{repo.lower()}/pull/" in url.lower()
+    low = url.lower()
+    return f"/{repo.lower()}/pull/" in low or f"/{repo.lower()}/-/merge_requests/" in low
 
 
 async def _refresh_listed_open_prs(
@@ -650,7 +651,13 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
             return False
 
         try:
-            repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+            from app.api.github import gitlab_repo_for_path
+            from app.core.gitlab_service import gitlab_service
+
+            repo = await gitlab_repo_for_path(working_dir)
+            forge: Any = gitlab_service if repo else github_service
+            if not repo:
+                repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
         except Exception:
             logger.debug("PR reconcile: repo lookup failed for %s", session_id, exc_info=True)
             return False
@@ -661,11 +668,11 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
         try:
             if branch:
                 pr = await asyncio.to_thread(
-                    _find_pull_for_branch, github_service, repo, branch
+                    _find_pull_for_branch, forge, repo, branch
                 )
                 if pr is None and checkout_available:
                     pr = await asyncio.to_thread(
-                        find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
+                        find_pull_for_checkout_fallback, forge, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
                         bypass_negative_cache=force, match_content=True,
                     )
@@ -673,7 +680,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                     and _repo_owns_url(repo, session.get("pr_url"))):
                 # Discovery may miss a renamed branch. A known PR remains
                 # refreshable without consulting the refused checkout's HEAD.
-                pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
+                pr = await asyncio.to_thread(forge.get_pull, repo, int(pr_number))
         except GitHubCliError:
             logger.debug("PR reconcile: gh lookup failed for %s", session_id, exc_info=True)
             return False
@@ -699,7 +706,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                 )
         if listed_open:
             ok = await _refresh_listed_open_prs(
-                github_service, repo, session, pr.number if pr is not None else None
+                forge, repo, session, pr.number if pr is not None else None
             ) and ok
         return ok
     except Exception:

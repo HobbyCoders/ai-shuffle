@@ -188,6 +188,19 @@ def _no_fal_rates_across_tests():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_gitlab_account(tmp_path_factory, monkeypatch):
+    """GitLab reads its token from the app data folder, which tests share
+    with the developer's real install. Every test starts with no GitLab
+    account; a test that wants one writes it into this empty folder."""
+    from app.core.gitlab_service import gitlab_service
+
+    monkeypatch.setattr(gitlab_service, "_config_dir_override", tmp_path_factory.mktemp("gitlab-config"))
+    gitlab_service.invalidate_repos_cache()
+    gitlab_service._project_cache.invalidate()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_session_admission_across_tests():
     """Which engine holds a session is per process; a test's engines end with it."""
     admission = sys.modules.get("app.core.provider.session_admission")

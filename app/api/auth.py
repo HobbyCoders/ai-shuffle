@@ -49,6 +49,15 @@ def _has_provider_credential_safe() -> bool:
         return False
 
 
+def _gitlab_connected_safe() -> bool:
+    """A GitLab token is saved on this worker (a file read; never raises)."""
+    try:
+        from app.core.gitlab_service import gitlab_service
+        return gitlab_service.is_authenticated()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _agent_gate_safe(cli: dict) -> dict:
     """``credential_gate.status_payload`` that never breaks ``/auth/status``."""
     try:
@@ -493,6 +502,7 @@ async def get_auth_status(request: Request, response: Response = None):
         "claude_token_valid": claude_authenticated,
         "claude_cli": cli,
         "github_authenticated": github_authenticated,
+        "gitlab_authenticated": await run_sync(_gitlab_connected_safe),
         "onboarding_complete": auth_service.is_onboarding_complete(),
         "username": username,
     }
@@ -791,6 +801,58 @@ async def github_logout(token: str = Depends(require_admin)):
     """Logout from GitHub CLI"""
     result = await run_sync(auth_service.github_logout)
     _invalidate_github_auth_caches(False if result.get("success") else None)
+    return result
+
+
+# =========================================================================
+# GitLab (personal access token; gitlab.com or a self-managed server)
+# =========================================================================
+
+def _gitlab_account_changed() -> None:
+    """A GitLab sign-in/out changes which forge answers for some checkouts."""
+    try:
+        from app.api.git_operations import _invalidate_pr_state_cache
+        _invalidate_pr_state_cache()
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not drop cached PR state after a GitLab change", exc_info=True)
+
+
+@router.get("/gitlab/status")
+async def gitlab_auth_status(token: str = Depends(require_auth)):
+    """Saved GitLab account, checked live against its server."""
+    from app.core.gitlab_service import gitlab_service
+    return await run_sync(gitlab_service.auth_info)
+
+
+@router.post("/gitlab/login")
+async def gitlab_login(request: Request, token: str = Depends(require_admin)):
+    """Connect GitLab with a personal access token.
+
+    Body: ``{"token": "...", "host": "https://gitlab.com"}`` (host optional).
+    """
+    from app.core.gitlab_service import gitlab_service
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    gl_token = body.get("token") if isinstance(body, dict) else None
+    host = body.get("host") if isinstance(body, dict) else None
+    if not isinstance(gl_token, str) or not gl_token.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GitLab token is required")
+    if host is not None and not isinstance(host, str):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GitLab server must be text")
+    result = await run_sync(gitlab_service.login, gl_token.strip(), host)
+    if result.get("success"):
+        _gitlab_account_changed()
+    return result
+
+
+@router.post("/gitlab/logout")
+async def gitlab_logout(token: str = Depends(require_admin)):
+    """Disconnect GitLab: forget the token and its git credential helper."""
+    from app.core.gitlab_service import gitlab_service
+    result = await run_sync(gitlab_service.logout)
+    _gitlab_account_changed()
     return result
 
 
