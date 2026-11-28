@@ -1401,7 +1401,8 @@ def _capabilities() -> dict:
         capabilities = detect_capabilities()
     except Exception:  # noqa: BLE001
         capabilities = {}
-    return {**capabilities, CAPABILITY: 1, memory_records.CAPABILITY: 1}
+    return {**capabilities, CAPABILITY: 1, memory_records.CAPABILITY: 1,
+            memory_records.STORE_CAPABILITY: 1}
 
 
 
