@@ -431,7 +431,9 @@ def _apply(ids, ctx, manifest) -> int:
     records = [r for r in records if not authored_plugins.is_record(r["id"])]
     from fluid.codemode.skills import atomic_write_text
     fact_groups = {}
+    snapshots = []  # merged after every barrier of the batch is collected
     barriers = {}  # owner -> OR of every older peer's barrier in this batch
+    older = _older_store(ctx)
     for record in records:
         rid = record["id"]
         try:
@@ -465,6 +467,7 @@ def _apply(ids, ctx, manifest) -> int:
                     payload = json.loads(record.get("content") or "{}")
                     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
                         raise ValueError("Invalid memory fact record")
+                    _keep_older_barrier(payload, older(_device_of(rid)))
                     key = (payload.get("schema"), payload.get("owner"), payload.get("store_id"))
                     fact_groups.setdefault(key, []).append((rid, payload))
                     _note_barrier(barriers, payload)
@@ -472,9 +475,11 @@ def _apply(ids, ctx, manifest) -> int:
             if rid.startswith(SNAPSHOT_PREFIX):
                 if not record.get("deleted"):
                     payload = json.loads(record.get("content") or "{}")
-                    _store(payload.get("owner"))._facts.merge(payload)
+                    if not isinstance(payload, dict):
+                        raise ValueError("Invalid memory replica")
+                    _keep_older_barrier(payload, older(_device_of(rid)))
+                    snapshots.append((rid, payload))
                     _note_barrier(barriers, payload)
-                    applied += 1
                 continue
             # Legacy records are read during upgrade but are never republished.
             # Legacy deletion was ambiguous (it could mean archive); it is not
@@ -496,16 +501,97 @@ def _apply(ids, ctx, manifest) -> int:
             applied += 1
         except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
             _rejected(rid, exc)
+    if snapshots or fact_groups:
+        # A copy can arrive in a later batch than the barrier that forgot it.
+        for payload in _standing_barriers(older, {r["id"] for r in records}):
+            _note_barrier(barriers, payload)
+    # Whole-store records merge after the loop, like fact groups, so each one
+    # merges behind every older peer's barrier for its owner, whatever order
+    # the records arrived in.
+    for rid, payload in snapshots:
+        try:
+            _with_barrier(payload, barriers.get(payload.get("owner")))
+            _store(payload.get("owner"))._facts.merge(payload)
+            applied += 1
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+            _rejected(rid, exc)
     for (_schema, owner, _store_id), group in fact_groups.items():
         applied += _merge_fact_group(owner, group, barriers.get(owner))
     return applied
 
 
+def _device_of(rid: str) -> str:
+    """The publishing device of a ``memory-fact:``/``memory-barrier:``/
+    ``memory-v2:`` record."""
+    return rid.split(":", 2)[1] if rid.count(":") >= 2 else ""
+
+
+def _older_store(ctx):
+    """A test: does this device predate the SQLite store? Its Bloom barrier
+    is then its record of what it forgot. A worker that advertises
+    :data:`STORE_CAPABILITY` sends every tombstone as a row, so its filter
+    (at most the one its store imported) is not applied. Unknown presence
+    counts as older, as everywhere here."""
+    try:
+        presence = engine.all_presence()
+    except Exception:  # noqa: BLE001 - unknown means treat every peer as older
+        log.warning("Could not read peer capabilities; applying every memory barrier", exc_info=True)
+        return lambda device: True
+    return lambda device: device != ctx.device_id and not _supports(presence.get(device), STORE_CAPABILITY)
+
+
+def _standing_barriers(older, skip):
+    """The live barrier of every older peer outside this batch (``skip``):
+    its ``memory-barrier:`` record, or its whole-store record when it
+    publishes none (it predates per-fact records)."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM network_memory_records WHERE deleted = FALSE AND "
+                    "(id LIKE %s OR id LIKE %s)", (BARRIER_PREFIX + "%", SNAPSHOT_PREFIX + "%"))
+        found = [r["id"] for r in cur.fetchall()]
+        with_barrier = {rid[len(BARRIER_PREFIX):] for rid in found if rid.startswith(BARRIER_PREFIX)}
+        wanted = [rid for rid in found if rid not in skip and older(_device_of(rid))
+                  and (rid.startswith(BARRIER_PREFIX) or rid[len(SNAPSHOT_PREFIX):] not in with_barrier)]
+        if not wanted:
+            return []
+        cur.execute("SELECT id, content FROM network_memory_records WHERE id IN (%s)"
+                    % ",".join(["%s"] * len(wanted)), tuple(wanted))
+        rows = list(cur.fetchall())
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row.get("content") or "{}")
+        except ValueError:
+            continue  # refused when that record itself is applied
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def _keep_older_barrier(payload, older: bool) -> None:
+    """Drop the Bloom barrier of a record from a worker on the SQLite store."""
+    if not older and isinstance(payload, dict):
+        payload.pop("forgotten", None)
+
+
+def _with_barrier(payload, bits) -> None:
+    """OR the owner's collected barrier into a whole-store record's."""
+    if bits is None:
+        return
+    own = payload.get("forgotten")
+    if own:
+        mine = bytes.fromhex(own)  # merge() refuses a malformed one
+        if len(mine) == len(bits):
+            bits = bytes(x | y for x, y in zip(mine, bits))
+    payload["forgotten"] = bits.hex()
+
+
 def _note_barrier(barriers, payload) -> None:
     """OR an older peer's deletion barrier into its owner's: every peer
-    group of that owner merges behind all of them, so one peer's copy cannot
-    bring back what another forgot (the merge keeps each drop as a
-    tombstone; this build keeps no barrier)."""
+    group and whole-store record of that owner merges behind all of them, so
+    one peer's copy cannot bring back what another forgot. A Bloom match is
+    probabilistic, so the merge keeps such a copy out with a local fence,
+    never a replicated tombstone (``FactStore.merge``)."""
     hexed = payload.get("forgotten") if isinstance(payload, dict) else None
     if not hexed or not isinstance(hexed, str):
         return

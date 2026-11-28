@@ -127,6 +127,74 @@ def test_a_trimmed_export_stays_under_what_an_older_worker_accepts(root):
     assert kept.id in ids and "m4099" in ids and "m100" not in ids
 
 
+class _Records:
+    """``network_memory_records`` as ``_apply`` and ``_standing_barriers``
+    query it: {id: payload}."""
+
+    def __init__(self, rows):
+        self.rows = {rid: json.dumps(p) for rid, p in rows.items()}
+        self.result = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql, params=()):
+        if "LIKE" in sql:
+            self.result = [{"id": rid} for rid in sorted(self.rows)
+                           if any(rid.startswith(p[:-1]) for p in params)]
+        else:
+            self.result = [{"id": rid, "kind": "fact", "deleted": False, "content": self.rows[rid]}
+                           for rid in params if rid in self.rows]
+
+    def fetchall(self):
+        return self.result
+
+
+def _apply(monkeypatch, rows, batch, peers):
+    ctx = _network(monkeypatch, peers)
+    monkeypatch.setattr(memory_records, "get_db", lambda: _Records(rows))
+    return memory_records._apply(sorted(batch), ctx, {})
+
+
+def _forgetting(payload, store_id):
+    """An older peer's record that forgot every fact of ``payload`` long ago:
+    no tombstone, only its Bloom barrier."""
+    return dict(payload, store_id=store_id, entries=[], tombstones=[],
+                forgotten=_wire_barrier("", [{"id": e["id"], "origin": e["origin"]}
+                                             for e in payload["entries"]]))
+
+
+def test_whole_store_records_merge_behind_every_older_barrier_in_any_order(root, tmp_path, monkeypatch):
+    payload = _peer(tmp_path / "b", "Peer A forgot this long ago.")._facts.export()
+    # A's record sorts first, before the store holds the fact: merged inline,
+    # it would fence nothing and B's copy would bring the fact back.
+    rows = {"memory-v2:peer-a:h": _forgetting(payload, "peer-a"), "memory-v2:peer-b:h": payload}
+    _apply(monkeypatch, rows, rows, {"peer-a": None, "peer-b": None})
+    assert not SkillStore(root).memories() and not SkillStore(root).archived_memories()
+
+
+def test_a_copy_arriving_after_the_older_peers_barrier_stays_out(root, tmp_path, monkeypatch):
+    group, payload = _records(_peer(tmp_path / "b", "Peer A forgot this long ago."))
+    rows = {"memory-barrier:peer-a:h": _forgetting(payload, "peer-a"), **dict(group)}
+    # The barrier was applied in an earlier batch; this one brings only B's copy.
+    _apply(monkeypatch, rows, dict(group), {"peer-a": None, "peer-b": NEW})
+    assert not SkillStore(root).memories()
+
+
+def test_a_filter_from_a_worker_on_the_sqlite_store_is_not_applied(root, tmp_path, monkeypatch):
+    group, payload = _records(_peer(tmp_path / "b", "Nobody forgot this."))
+    rows = {"memory-barrier:peer-a:h": _forgetting(payload, "peer-a"), **dict(group)}
+    _apply(monkeypatch, rows, rows, {"peer-a": NEW, "peer": NEW})
+    assert [e.text for e in SkillStore(root).memories()] == ["Nobody forgot this."]
+    assert not SkillStore(root)._facts.export()["tombstones"]
+
+
 def test_a_malformed_barrier_does_not_fence_other_records(root):
     barriers = {}
     memory_records._note_barrier(barriers, {"owner": "local", "forgotten": "zz"})
