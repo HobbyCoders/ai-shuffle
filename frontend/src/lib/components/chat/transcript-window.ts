@@ -20,6 +20,14 @@
  * when a shift also unmounts rows at the opposite edge. */
 export interface TranscriptRange { readonly start: number; readonly end: number }
 
+/** Whether a jump to `index` can scroll to what is mounted. The target alone is
+ * not enough: the reader came for the reply after it, and a prompt that ends
+ * the mounted slice (its reply is over the content budget) would be shown bare
+ * above "Show newer messages". */
+export function jumpTargetMounted(range: TranscriptRange, index: number, count: number): boolean {
+	return index >= range.start && index < count && Math.min(count, index + 2) <= range.end;
+}
+
 /** Read the actual native selection before a range shift, including reverse
  * selections and endpoints outside the list. Resolve row keys against the
  * current model: a prepend must not pin the old numerical indices. */
@@ -121,6 +129,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	const weighted = !!cost && Number.isFinite(budget);
 	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
 	let selectionLimited = false;
+	/** The range a jump mounted when the reply after its target is over the
+	 * budget (see windowAround). Automatic repricing keeps that pair for as long
+	 * as it is still the mounted range; navigating to any other range ends it. */
+	let jumpPair: TranscriptRange | null = null;
 	function commit(start: number, end: number, readingIndex?: number | null): TranscriptRange {
 		selectionLimited = false;
 		const selected = getPinnedRange?.();
@@ -186,14 +198,29 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		return { start, end };
 	}
 	function move(start: number): TranscriptRange {
+		jumpPair = null;
 		const next = startingRange(start);
 		return commit(next.start, next.end);
 	}
 	function endingAt(end: number): TranscriptRange {
+		jumpPair = null;
 		const next = endingRange(end);
 		return commit(next.start, next.end);
 	}
 	function reprice(checkReadingKey = false): TranscriptRange {
+		// The reader asked for this prompt and its reply. Neither fits the usual
+		// forward fill, so repricing would drop the prompt again at the next turn
+		// boundary of a chat that is still running. Paging that left the range
+		// as it was (no older row fits beside the reply) does not end the pair.
+		// It holds only while it is still that range and still over the budget:
+		// the same indices in another chat, or a reply that has since shrunk,
+		// are priced the normal way.
+		if (jumpPair) {
+			const held = range.start === jumpPair.start && range.end === jumpPair.end && range.end <= count
+				&& charge(range.start) <= budget && charge(range.start) + charge(range.start + 1) > budget;
+			if (held) return range;
+			jumpPair = null;
+		}
 		const next = startingRange(range.start);
 		// Most streaming updates keep the entire mounted slice. Do not
 		// force a DOM/layout read on each token just to rediscover that fact.
@@ -233,6 +260,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		// reading key. Dropping only newer rows is not paging: the next streaming
 		// reprice re-adds them, and the slice then flips every frame at the top.
 		if (preserveReading && paged.start >= previous.start) range = previous;
+		if (range !== previous) jumpPair = null;
 		return range;
 	}
 	return {
@@ -255,6 +283,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		extendOlder,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
+			jumpPair = null;
 			const previous = range;
 			let next = startingRange(range.start + shift());
 			if (weighted && previous.end < count && (next.end <= previous.end || next.start >= previous.end)) {
@@ -272,6 +301,14 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			followsTail = false;
 			if (!weighted) return move(index - Math.floor(cap / 2));
 			let start = index, end = index + 1, used = charge(index);
+			// A jump lands on a prompt, and the reader came for what follows it.
+			// When the reply alone is over the budget it would otherwise be left
+			// out, and the view shows a bare prompt above "Show newer messages".
+			// That reply is mounted on its own anyway once asked for, so admit the
+			// one row after a target that fits, whatever it costs, before spending
+			// the rest on neighbours. An oversize target still stands alone.
+			const paired = used <= budget && end < count && cap > 1;
+			if (paired) used += charge(end++);
 			let left = true, right = true;
 			while (end - start < cap && (left || right)) {
 				if (left && start > 0 && used + charge(start - 1) <= budget) { used += charge(--start); }
@@ -280,7 +317,9 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 				if (right && end < count && used + charge(end) <= budget) { used += charge(end++); }
 				else right = false;
 			}
-			return commit(start, end);
+			const committed = commit(start, end);
+			jumpPair = paired && used > budget && committed.start === index && committed.end === index + 2 ? committed : null;
+			return committed;
 		},
 		/** Saved scrollTop is relative to this exact bounded range, not cap/2. */
 		restoreRange(saved: TranscriptRange): TranscriptRange { followsTail = false; return move(saved.start); },

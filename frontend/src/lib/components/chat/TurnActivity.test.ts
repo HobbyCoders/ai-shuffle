@@ -88,4 +88,13 @@ describe('TurnActivity', () => {
 		render(TurnActivity, { props: { compaction: compaction(), working: false } });
 		expect(screen.getByRole('status').textContent).toContain('Compacting context…');
 	});
+
+	it('draws its rule unless the list below it brings one', () => {
+		render(TurnActivity, { props: { startedAt: null } });
+		expect(screen.getByRole('status').classList.contains('ruled')).toBe(true);
+		cleanup();
+		// Above the running-tasks list, whose own rule is the only line wanted.
+		render(TurnActivity, { props: { compaction: compaction(), working: false, ruled: false } });
+		expect(screen.getByRole('status').classList.contains('ruled')).toBe(false);
+	});
 });
