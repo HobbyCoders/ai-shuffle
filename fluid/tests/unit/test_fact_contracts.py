@@ -449,6 +449,7 @@ def test_legacy_archive_migration_is_atomic_and_idempotent(tmp_path):
     assert len(store.memories()) == 1
     assert len(store.archived_memories()) == 1
     assert store.archived_memories()[0].provenance == "tool"
+    store._facts.snapshot()  # reads never write; the first writer imports
     assert not archive.exists()
     assert len(SkillStore(tmp_path).archived_memories()) == 1
 

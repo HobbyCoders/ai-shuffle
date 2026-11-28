@@ -327,7 +327,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     """Compute every signal. Read-only; the caller decides what to persist."""
     now = time.time() if now is None else now
     previous = previous or {}
-    doc = store._facts.snapshot()
+    doc = store._facts.snapshot(read_only=True)
     live = _local(doc)
     plans = _snapshot_plans(store, [e for e in live if not e.get("conflicted")])
     learner = _learner_signal(store, now, learning_enabled, previous)

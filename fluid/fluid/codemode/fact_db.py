@@ -26,13 +26,19 @@ used where the filesystem supports it, else the rollback journal.
 Migration. The first open imports ``memories.json`` (and an existing
 ``jit_deliveries.jsonl``) in one transaction and records ``sqlite.imported``,
 so it runs once, a crash leaves nothing half imported, and two processes
-opening together import once. ``memories.json`` is never written or removed
-here: it stays as the backup. If the import fails the store reads from the
-JSON file and refuses writes (``FactDB.failure``, shown by memory health).
+opening together import once. A database without that marker is never
+served. ``memories.json`` is never written or removed here: it stays as the
+backup. If the import fails (a document of a newer schema or another owner,
+an unreadable file, a full disk) the database file the attempt created is
+removed again, the store reads from the JSON file and refuses every write
+(``FactDB.failure``, shown by memory health); a JSON file that does not parse
+fails the read instead of serving an empty store.
 
 Downgrade: ``python -m fluid.codemode.fact_db export <store> <file>`` writes a
-``memories.json`` document an older build reads; ``downgrade <store>`` writes
-it in place and moves the database aside (stop the app first).
+``memories.json`` document an older build reads; ``downgrade <store>`` moves
+the database aside, then writes it in place, keeping the previous
+``memories.json`` as ``memories.json.pre-downgrade-<time>`` (stop the app
+first).
 """
 from __future__ import annotations
 
@@ -57,7 +63,11 @@ BUSY_TIMEOUT_MS = 10_000
 # Usage writes (a Recall's count, a delivery row) ride a tool call: they wait
 # this long for a busy store, then are dropped rather than slow the call.
 USAGE_TIMEOUT_MS = 1_000
-# Usage events older than this are pruned (the lifecycle looks back 90 days).
+# Usage events older than this are pruned. They feed only a fact's value
+# (deliveries plus Recalls in the last 60 days) and a session's re-arm
+# bookkeeping; a fact's latest delivery and Recall are columns on its row
+# (``last_delivered_at``, ``last_recalled_at``), so pruning never shortens
+# its life.
 DELIVERY_RETENTION = 90 * 86400
 MAX_DELIVERY_ROWS = 50_000
 USAGE_FIELDS = ("uses", "last_recalled_at")
@@ -78,6 +88,7 @@ CREATE TABLE IF NOT EXISTS facts(
     updated_at REAL NOT NULL,
     uses INTEGER NOT NULL DEFAULT 0,
     last_recalled_at REAL NOT NULL DEFAULT 0,
+    last_delivered_at REAL NOT NULL DEFAULT 0,
     body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS facts_order ON facts(state, pos);
 CREATE TABLE IF NOT EXISTS revisions(
@@ -93,11 +104,21 @@ CREATE INDEX IF NOT EXISTS deliveries_session ON deliveries(session, seq);
 CREATE INDEX IF NOT EXISTS deliveries_at ON deliveries(at);
 """
 
-# One transaction: one fsync instead of one per statement.
-_DDL_ONCE = "BEGIN;" + _DDL + "COMMIT;"
+# One transaction: one fsync instead of one per statement. IMMEDIATE takes
+# the write lock up front (waiting out the busy timeout) instead of failing
+# at once when another process holds it while this one upgrades a read lock.
+_DDL_ONCE = "BEGIN IMMEDIATE;" + _DDL + "COMMIT;"
 
+# database path -> why its import failed in this process (FactDB.failure).
+_failures: dict[str, str] = {}
 _ready_guard = threading.Lock()
-_ready: dict[str, str] = {}  # database path -> journal mode, once per process
+# database path -> (file identity, journal mode) once per process; a file
+# replaced under the same name (a restore, a downgrade and re-upgrade) has
+# another identity and is prepared again.
+_ready: dict[str, tuple[tuple[int, int] | None, str]] = {}
+# Connections a forked child inherited: kept referenced so the child's
+# garbage collector never closes the parent's SQLite handles.
+_inherited: list = []
 
 # Open connections, one per store per thread, reused across operations.
 # Opening a connection rereads the schema and maps the WAL index, and closing
@@ -125,10 +146,23 @@ def _file_ident(path: Path) -> tuple[int, int] | None:
 
 def _thread_pool() -> dict[str, _Pooled]:
     # A forked child must not use its parent's connections (SQLite forbids
-    # it); it abandons them rather than closing them.
+    # it); it abandons them rather than closing them, and keeps them
+    # referenced so collecting them cannot close the parent's handles.
     if getattr(_pool, "pid", None) != os.getpid():
+        if getattr(_pool, "cons", None):
+            _inherited.append(_pool.cons)
         _pool.pid, _pool.cons = os.getpid(), {}
     return _pool.cons
+
+
+def _busy(exc: BaseException) -> bool:
+    """Whether a SQLite error is lock contention (worth waiting out), not a
+    property of the file or the filesystem."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (5, 6)  # SQLITE_BUSY, SQLITE_LOCKED
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
 
 
 def release_connections() -> None:
@@ -171,14 +205,24 @@ def _fact_row(entry: dict) -> tuple[str, list[str], int, float]:
 
 
 class FactDB:
-    """The SQLite file of one store. Opens a connection per operation."""
+    """The SQLite file of one store. Each thread reuses one cached
+    connection to it (see ``_checkout``).
 
-    def __init__(self, root: Path):
+    ``owner``, when given, is checked against the document before an
+    import: a ``memories.json`` of another owner is never imported."""
+
+    def __init__(self, root: Path, owner: str | None = None):
         self.root = Path(root)
         self.path = self.root / DB_NAME
         self.legacy = self.root / LEGACY_NAME
-        # Why the import failed in this process (None: it did not fail).
-        self.failure: str | None = None
+        self.owner = owner
+
+    @property
+    def failure(self) -> str | None:
+        """Why this store's import last failed in this process (None: it did
+        not, or it has succeeded since). Kept per file, not per instance, so
+        every store object in the process (health, the Settings API) sees it."""
+        return _failures.get(str(self.path))
 
     # ─── connections ─────────────────────────────────────────────────────
     def exists(self) -> bool:
@@ -192,36 +236,125 @@ class FactDB:
         con.execute("PRAGMA secure_delete=ON")
         return con
 
-    def _prepare_file(self) -> None:
-        """Create the tables and pick a journal mode, once per process."""
-        key = str(self.path)
-        if key in _ready and self.path.exists():
+    def _ready_mode(self) -> str | None:
+        """The journal mode this process prepared the file in, if the file
+        on disk is still the one it prepared."""
+        cached = _ready.get(str(self.path))
+        if cached is None:
+            return None
+        ident = _file_ident(self.path)
+        return cached[1] if ident is not None and cached[0] == ident else None
+
+    @staticmethod
+    def _imported(con: sqlite3.Connection) -> bool | None:
+        """Whether the file holds the import marker; None if unreadable."""
+        try:
+            return FactDB._meta(con, "sqlite.imported") is not None
+        except sqlite3.OperationalError as exc:
+            return False if "no such table" in str(exc) else None
+        except sqlite3.Error:
+            return None
+
+    def _schema(self, con: sqlite3.Connection) -> str:
+        """Pick the journal mode and create the tables; returns the mode."""
+        try:
+            mode = str(con.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+            if mode != "wal":
+                raise sqlite3.OperationalError(f"journal mode stayed {mode}")
+            con.executescript(_DDL_ONCE)
+        except sqlite3.OperationalError as exc:
+            if _busy(exc):
+                raise  # another process holds the lock: not a WAL problem
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            # Network and some FUSE filesystems cannot share WAL's memory
+            # index. The rollback journal needs only locks. (A failure WAL is
+            # not the cause of, a full disk say, fails again below.)
+            _log.warning("Memory store %s cannot use WAL (%s); using the rollback journal",
+                         self.path, exc)
+            mode = str(con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
+            con.executescript(_DDL_ONCE)
+        self._upgrade(con)
+        return mode
+
+    @staticmethod
+    def _upgrade(con: sqlite3.Connection) -> None:
+        """Add columns a database created before them lacks."""
+        columns = {row[1] for row in con.execute("PRAGMA table_info(facts)")}
+        if "last_delivered_at" not in columns:
+            with FactDB._transaction(con):
+                con.execute("ALTER TABLE facts ADD COLUMN last_delivered_at REAL NOT NULL DEFAULT 0")
+                con.execute("UPDATE facts SET last_delivered_at=COALESCE((SELECT MAX(at) FROM deliveries "
+                            "WHERE deliveries.fact_id=facts.id AND source='jit'), 0)")
+
+    def _remove_files(self, ident: tuple[int, int] | None) -> None:
+        """Remove a database this process created for an import that failed,
+        so no empty store is left to pass for an imported one. Only the file
+        it created (same identity): another process may have made a new one.
+        On Windows an open file cannot be removed; it stays without the
+        import marker and the next open imports again."""
+        if ident is None or _file_ident(self.path) != ident:
             return
-        with _ready_guard:
-            if key in _ready and self.path.exists():
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                Path(f"{self.path}{suffix}").unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _log.warning("Could not remove %s%s after a failed import", self.path, suffix)
                 return
-            self.root.mkdir(parents=True, exist_ok=True)
-            mode = "wal"
-            con = self._connect()
+
+    def _prepare_file(self, *, create: bool) -> bool:
+        """Create the tables, pick a journal mode and import the legacy
+        document, once per process per file. False when the database is
+        absent and ``create`` is False.
+
+        A store whose import has not committed is never served from the
+        database: any failure on the way (the document, a full disk, a
+        read-only folder) raises MigrationError, and a database file this
+        call created is removed again."""
+        if self._ready_mode() is not None:
+            return True
+        with _ready_guard:
+            if self._ready_mode() is not None:
+                return True
+            existed = self.path.exists()
+            if not existed and not create:
+                return False
+            # An existing file is "unknown" until its marker is read: a store
+            # that may hold imported facts never falls back to the (older)
+            # memories.json; its errors are storage errors.
+            imported: bool | None = None if existed else False
+            ident = None
+            con = None
             try:
                 try:
-                    mode = str(con.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
-                    if mode != "wal":
-                        raise sqlite3.OperationalError(f"journal mode stayed {mode}")
-                    con.executescript(_DDL_ONCE)
-                except sqlite3.OperationalError as exc:
-                    # Network and some FUSE filesystems cannot share WAL's
-                    # memory index. The rollback journal needs only locks.
-                    _log.warning("Memory store %s cannot use WAL (%s); using the rollback journal",
-                                 self.path, exc)
-                    con.close()
+                    self.root.mkdir(parents=True, exist_ok=True)
                     con = self._connect()
-                    mode = str(con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
-                    con.executescript(_DDL_ONCE)
-                self._migrate(con)
-            finally:
-                con.close()
-            _ready[key] = mode
+                    ident = None if existed else _file_ident(self.path)
+                    if existed:
+                        imported = self._imported(con)
+                        if imported is None:
+                            raise sqlite3.DatabaseError("memory.db cannot be read")
+                    mode = self._schema(con)
+                    if not imported:
+                        self._migrate(con)
+                finally:
+                    if con is not None:
+                        con.close()
+            except MigrationError:
+                self._remove_files(ident)
+                raise
+            except (sqlite3.Error, OSError) as exc:
+                if imported is not False or _busy(exc):
+                    # Imported or unreadable: an ordinary storage error. Busy:
+                    # another process holds the file (it may be importing
+                    # it), so it is neither removed nor called failed.
+                    raise
+                self._remove_files(ident)
+                raise MigrationError(f"memory.db could not be set up ({exc})") from exc
+            _ready[str(self.path)] = (_file_ident(self.path), mode)
+            return True
 
     @contextmanager
     def connection(self, *, create: bool,
@@ -229,15 +362,16 @@ class FactDB:
         """A ready connection, or None when the database is absent and
         ``create`` is False (observing a store must not create or import
         it; ``FactStore`` reads an unimported ``memories.json`` directly)."""
-        if not create and not self.path.exists():
+        try:
+            ready = self._prepare_file(create=create)
+        except MigrationError as exc:
+            _failures[str(self.path)] = str(exc)
+            raise
+        if ready:
+            _failures.pop(str(self.path), None)
+        if not ready:
             yield None
             return
-        try:
-            self._prepare_file()
-            self.failure = None
-        except MigrationError as exc:
-            self.failure = str(exc)
-            raise
         entry, cached = self._checkout()
         con = entry.con
         try:
@@ -245,7 +379,7 @@ class FactDB:
             # Usage rows are best effort: in WAL their commit skips the fsync
             # (a power cut may lose the last few, never corrupts), so the
             # write lock is held for microseconds. Fact writes keep FULL.
-            sync = "NORMAL" if usage and _ready.get(str(self.path)) == "wal" else "FULL"
+            sync = "NORMAL" if usage and self._ready_mode() == "wal" else "FULL"
             if entry.sync != sync:
                 con.execute(f"PRAGMA synchronous={sync}")
                 entry.sync = sync
@@ -302,7 +436,13 @@ class FactDB:
         try:
             yield
         except BaseException:
-            con.execute("ROLLBACK")
+            # SQLite may already have rolled back (SQLITE_FULL, an I/O
+            # error); a second ROLLBACK must not mask the original error.
+            if con.in_transaction:
+                try:
+                    con.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             raise
         con.execute("COMMIT")
 
@@ -333,6 +473,15 @@ class FactDB:
         for key in _LISTS:
             if key in doc and not isinstance(doc[key], list):
                 raise MigrationError(f"memories.json field {key!r} is not a list")
+        from fluid.codemode.facts import SCHEMA
+        try:
+            schema = int(doc.get("schema", 1))
+        except (TypeError, ValueError):
+            raise MigrationError("memories.json has an unreadable schema") from None
+        if schema > SCHEMA:
+            raise MigrationError(f"memories.json was written by a newer application (schema {schema})")
+        if self.owner is not None and doc.get("owner", self.owner) != self.owner:
+            raise MigrationError("memories.json belongs to another owner")
         return doc
 
     def _legacy_deliveries(self) -> list[tuple]:
@@ -368,6 +517,7 @@ class FactDB:
                     self._set_meta(con, "sqlite.legacy_forgotten", forgotten)
                 con.executemany("INSERT INTO deliveries(at, fact_id, session, source, record) "
                                 "VALUES (?, ?, ?, ?, ?)", deliveries)
+                self._note_delivered(con, [(at, fact) for at, fact, *_ in deliveries if fact])
                 self._set_meta(con, "sqlite.layout", LAYOUT)
                 self._set_meta(con, "sqlite.created", uuid.uuid4().hex)
                 self._set_meta(con, "sqlite.imported", {
@@ -400,20 +550,21 @@ class FactDB:
         for fact_id, body in con.execute("SELECT fact_id, body FROM revisions ORDER BY fact_id, seq"):
             history.setdefault(fact_id, []).append(json.loads(body))
         doc["entries"], doc["archived"] = [], []
-        for fact_id, state, uses, recalled, body in con.execute(
-                "SELECT id, state, uses, last_recalled_at, body FROM facts ORDER BY pos"):
+        delivered: dict[str, float] = {}
+        for fact_id, state, uses, recalled, last_delivered, body in con.execute(
+                "SELECT id, state, uses, last_recalled_at, last_delivered_at, body FROM facts ORDER BY pos"):
             entry = json.loads(body)
             if uses:
                 entry["uses"] = uses
             if recalled:
                 entry["last_recalled_at"] = recalled
+            if last_delivered:
+                delivered[fact_id] = last_delivered
             entry["history"] = history.get(fact_id, [])
             doc["entries" if state == "live" else "archived"].append(entry)
         doc["tombstones"] = [json.loads(b) for (b,) in con.execute("SELECT body FROM tombstones ORDER BY pos")]
         # Read-only: the store checks the frozen barrier but never grows it.
         doc["forgotten"] = str(cls._meta(con, "sqlite.legacy_forgotten") or "")
-        delivered = dict(con.execute(
-            "SELECT fact_id, MAX(at) FROM deliveries WHERE fact_id IS NOT NULL GROUP BY fact_id"))
         return doc, delivered
 
     def write(self, doc: dict) -> bool:
@@ -562,7 +713,7 @@ class FactDB:
     def status(self) -> dict:
         """Storage facts for health and the CLI. Never creates the database."""
         info: dict[str, Any] = {"path": str(self.path), "exists": self.path.exists(),
-                                "journal_mode": _ready.get(str(self.path))}
+                                "journal_mode": self._ready_mode()}
         if self.failure:
             info.update(state="migration_failed", reason=self.failure)
             return info
@@ -570,6 +721,11 @@ class FactDB:
             with self.connection(create=False) as con:
                 if con is None:
                     # No database yet; the first write imports the document.
+                    # One another process failed to import (it leaves no
+                    # database behind) is checked here, so health in every
+                    # process names it.
+                    if self.legacy.exists():
+                        self._read_legacy()
                     info["state"] = "pending" if self.legacy.exists() else "empty"
                     return info
                 info["imported"] = self._meta(con, "sqlite.imported")
@@ -579,33 +735,57 @@ class FactDB:
         except MigrationError as exc:
             info.update(state="migration_failed", reason=str(exc))
             return info
+        except (sqlite3.Error, OSError) as exc:
+            # An imported store that cannot be opened: no fallback (the JSON
+            # backup is older than its facts); every read fails until fixed.
+            info.update(state="unavailable", reason=f"{type(exc).__name__}: {exc}")
+            return info
         info["bytes"] = sum(p.stat().st_size for p in (self.path, Path(f"{self.path}-wal"))
                             if p.exists())
         info["state"] = "ok"
         return info
 
     # ─── usage (local, never replicated) ────────────────────────────────
+    # Usage writes reach the database only through ``connection``: a store
+    # whose import failed (or is not this owner's, or is newer) raises
+    # MigrationError there and is never written. A Recall never creates a
+    # store (there is nothing to count); a delivery may (it is the log).
     def note_recalled(self, ids, now: float) -> None:
         """One row update per recalled live fact, plus its usage event."""
         ids = [str(i) for i in ids]
-        with self.connection(create=True, usage=True) as con:
+        with self.connection(create=self.exists(), usage=True) as con:
+            if con is None:
+                return
             with self._transaction(con):
                 con.executemany("UPDATE facts SET uses=MIN(1000000, uses + 1), "
                                 "last_recalled_at=MAX(last_recalled_at, ?) WHERE id=? AND state='live'",
                                 [(now, i) for i in ids])
                 con.executemany("INSERT INTO deliveries(at, fact_id, session, source, record) "
-                                "VALUES (?, ?, NULL, 'recall', '{}')", [(now, i) for i in ids])
+                                "SELECT ?, id, NULL, 'recall', '{}' FROM facts WHERE id=? AND state='live'",
+                                [(now, i) for i in ids])
                 self._bump(con)
 
     def record_deliveries(self, rows: list[dict]) -> None:
-        """Append just-in-time delivery rows (``jit_delivery.record``)."""
+        """Append just-in-time delivery rows (``jit_delivery.record``) and
+        raise each delivered fact's ``last_delivered_at``."""
+        values = [(_float(r.get("at")), r.get("fact") if isinstance(r.get("fact"), str) else None,
+                   r.get("session"), _canonical(r)) for r in rows]
         with self.connection(create=True, usage=True) as con:
+            if con is None:
+                return
             with self._transaction(con):
                 con.executemany(
                     "INSERT INTO deliveries(at, fact_id, session, source, record) VALUES (?, ?, ?, 'jit', ?)",
-                    [(_float(r.get("at")), r.get("fact") if isinstance(r.get("fact"), str) else None,
-                      r.get("session"), _canonical(r)) for r in rows])
+                    values)
+                self._note_delivered(con, [(at, fact) for at, fact, *_ in values if fact])
                 self._prune_deliveries(con)
+
+    @staticmethod
+    def _note_delivered(con: sqlite3.Connection, pairs: list[tuple[float, str]]) -> None:
+        """Raise ``last_delivered_at`` (only ever raised, like the usage
+        columns): the delivery renews the fact's life however long its
+        delivery row is kept."""
+        con.executemany("UPDATE facts SET last_delivered_at=MAX(last_delivered_at, ?) WHERE id=?", pairs)
 
     def legacy_delivery_rows(self) -> list[dict]:
         """The pre-SQLite delivery log's rows (read while an import fails)."""
@@ -682,14 +862,64 @@ def main(argv: list[str] | None = None) -> int:
         _write_json(args.output, doc)
         print(f"Wrote {len(doc['entries'])} live and {len(doc['archived'])} archived facts to {args.output}")
         return 0
-    _write_json(db.legacy, doc)
+    return _downgrade(db, doc)
+
+
+MOVE_ATTEMPTS = 6
+
+
+def _move(src: Path, dst: Path) -> bool:
+    """Rename ``src`` to ``dst``; False if ``src`` is gone (SQLite deletes
+    ``-wal``/``-shm`` when its last connection closes). Windows refuses to
+    rename a file another process briefly holds (an antivirus scan, the
+    indexer: WinError 5 or 32), so that is retried a few times."""
+    for attempt in range(MOVE_ATTEMPTS):
+        try:
+            src.replace(dst)
+            return True
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            if attempt == MOVE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+    return False
+
+
+def _downgrade(db: FactDB, doc: dict) -> int:
+    """Move the database aside, then write ``doc`` as ``memories.json``.
+
+    In that order, so a database still in use (the app running) fails the
+    downgrade before anything changes. The existing ``memories.json`` (the
+    pre-SQLite backup) is copied first, and a failed move or write puts the
+    database back: either the store is downgraded or it is as it was."""
+    import shutil
     release_connections()
-    aside = db.path.with_name(f"{DB_NAME}.downgraded-{int(time.time())}")
-    for suffix in ("", "-wal", "-shm"):
-        part = Path(f"{db.path}{suffix}")
-        if part.exists():
-            part.replace(Path(f"{aside}{suffix}"))
-    print(f"Wrote {db.legacy} and moved the database to {aside.name}; "
+    stamp = int(time.time())
+    aside = db.path.with_name(f"{DB_NAME}.downgraded-{stamp}")
+    backup = None
+    if db.legacy.exists():
+        backup = db.legacy.with_name(f"{LEGACY_NAME}.pre-downgrade-{stamp}")
+        shutil.copy2(db.legacy, backup)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            src, dst = Path(f"{db.path}{suffix}"), Path(f"{aside}{suffix}")
+            if _move(src, dst):
+                moved.append((src, dst))
+        if not moved:
+            raise FileNotFoundError(f"{db.path} is gone")
+        _write_json(db.legacy, doc)
+    except OSError as exc:
+        for src, dst in reversed(moved):
+            try:
+                _move(dst, src)
+            except OSError:
+                print(f"Could not move {dst.name} back to {src.name}; move it back by hand.")
+        print(f"Downgrade failed ({exc}); the store is unchanged. Stop the app and try again.")
+        return 1
+    note = f" (the previous one is {backup.name})" if backup else ""
+    print(f"Wrote {db.legacy}{note} and moved the database to {aside.name}; "
           "an older build reads memories.json, and a newer one imports it again.")
     return 0
 

@@ -9,8 +9,9 @@ to every replica like any memory, keyed ``behavior.<family>.<digest>``:
 * ``family`` is ``all`` or the model family whose behaviour the rule fixes
   (:data:`FAMILIES`). A session renders the ``all`` rules plus its own
   family's, in full, as the ``# Learned behaviour`` section.
-* the learner writes rules at the agent tier (``durable``: they fade after
-  ``facts.DURABLE_TTL`` unless re-learned); a rule the owner edits becomes
+* the learner writes rules at the agent tier (they retire to the archive
+  after ``facts.AGENT_TTL`` without a delivery, Recall or re-learning); a
+  rule the owner edits becomes
   user-kept (``protected``), which the learner can read but never change.
 
 A rule is accepted only with a quote copied from something the user wrote in

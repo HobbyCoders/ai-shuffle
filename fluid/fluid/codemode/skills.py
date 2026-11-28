@@ -1917,8 +1917,9 @@ class SkillStore:
         """
         from fluid.codemode.behavior import is_rule_key, render_section
         from fluid.codemode.facts import visible_on
-        # One read for live and archived facts, so the counts agree.
-        doc = self._facts.snapshot()
+        # One read for live and archived facts, so the counts agree. No lock
+        # file: a prompt render never waits for a writer.
+        doc = self._facts.snapshot(read_only=True)
         local = doc["store_id"]
         entries = [self._facts._entry(e) for e in doc["entries"] if visible_on(e, local)]
         archived = [self._facts._entry(e) for e in doc["archived"]

@@ -42,7 +42,8 @@ def test_a_corrupt_memories_file_is_never_imported_as_empty(tmp_path) -> None:
     path = tmp_path / "memories.json"
     path.write_text(good[: len(good) // 2], encoding="utf-8")  # a torn copy
     store = SkillStore(tmp_path)
-    assert store.memories() == []
+    with pytest.raises(ValueError):  # never served as an empty store
+        store.memories()
     with pytest.raises(facts.MemoryStorageError, match="could not be upgraded"):
         store.save_memory("fresh start")
     assert path.read_text(encoding="utf-8") == good[: len(good) // 2]
@@ -69,9 +70,11 @@ def test_a_non_object_memories_file_fails_the_import_safely(tmp_path) -> None:
 
     (tmp_path / "memories.json").write_text("[]", encoding="utf-8")
     store = SkillStore(tmp_path)
-    assert store.memories() == []
+    with pytest.raises(ValueError):
+        store.memories()
     with pytest.raises(facts.MemoryStorageError):
         store.save_memory("x")
+    assert not list(tmp_path.glob("memory.db*"))  # nothing half-made is left
     assert (tmp_path / "memories.json").read_text(encoding="utf-8") == "[]"
 
 

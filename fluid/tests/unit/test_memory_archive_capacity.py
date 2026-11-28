@@ -288,6 +288,7 @@ def test_expiry_deletions_are_counted_through_actual_maintenance(tmp_path, monke
     fill(store, monkeypatch)
     now = time.time() + 1000 * memory_health.DAY
     monkeypatch.setattr(facts.time, "time", lambda: now)
+    store.reap()  # the periodic writer; the health check itself only reads
     s = capacity(memory_health.check(store, now=now))
     assert s["detail"]["archive_dropped_total"] == 0
     # The two old ones, then every fact saved today: idle past its TTL and
