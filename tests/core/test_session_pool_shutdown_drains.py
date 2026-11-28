@@ -140,20 +140,17 @@ async def test_a_deadline_already_in_the_reserve_cuts_reflections_off_at_once():
 
 
 async def test_after_a_shutdown_the_same_loop_closes_wait_for_reflection_again():
-    loop = asyncio.get_running_loop()
     await _shutdown(SessionPool(max_size=10))  # empty pool, same loop
 
     pool = SessionPool(max_size=10)
     engine = Engine()
     pool.put("chat-later", _state(engine))
-    started = loop.time()
     remover = asyncio.create_task(pool.remove("chat-later"))
     await asyncio.sleep(0.3)
     # The close is still waiting for its reflection (until the 5 s grace).
     assert not remover.done() and engine.transport_stopped and not engine.journal.cancelled
     engine.journal.finish.set()
     await asyncio.wait_for(remover, 2)
-    assert loop.time() - started >= 0.3
 
 
 async def test_an_eviction_during_shutdown_still_waits_for_its_reflection(monkeypatch):
@@ -187,7 +184,8 @@ async def test_a_close_outside_shutdown_still_waits_for_its_reflection():
     started = loop.time()
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(engine.aclose(), timeout=0.2)
-    assert loop.time() - started >= 0.2
+    # The loop runs a timer up to one clock tick early (15.6 ms on Windows).
+    assert loop.time() - started >= 0.2 - loop._clock_resolution
     # The deadline ended the wait, never the reflection: it keeps running.
     task = engine.journal._drain_task
     assert not task.done() and not engine.journal.cancelled
