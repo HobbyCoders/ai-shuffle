@@ -71,20 +71,23 @@ def test_update_reach_watched_paths_run_regression_tests(monkeypatch, path):
     assert verdicts == [ctx]
 
 
-@pytest.mark.parametrize("files", [
-    ["docker/container_runtime.py"],
-    ["docker/nested/helper.py"],
-    ["Dockerfile"],
-    ["entrypoint.sh"],
-    ["docker-compose.yml"],
-    ["app/main.py"],
-    ["tests/core/test_container_runtime.py"],
+CONTAINER_CHANGES = [
+    ["docker/container_runtime.py"], ["docker/nested/helper.py"], ["Dockerfile"], ["entrypoint.sh"],
+    ["docker-compose.yml"], ["app/main.py"], ["tests/core/test_container_runtime.py"],
     ["tests/core/test_container_image_contract.py"],
-    None,  # full mode must run the dedicated files despite fast-subset exclusions
+]
+CONTAINER_ENVS = [(pg_source, pressure, pg) for pg_source in ("path", "smoke", None)
+                  for pressure in (False, True) for pg in (False, True)]
+
+
+# Full mode (files=None) decides PG and pressure coverage from all three
+# settings together, so it runs every combination. Each changed file only has
+# to select the suite; it runs once, stepping through the settings (stride 5
+# reaches every PostgreSQL source).
+@pytest.mark.parametrize("files,pg_source,pressure_optin,pg_optin", [
+    *((None, *env) for env in CONTAINER_ENVS),
+    *((files, *CONTAINER_ENVS[i * 5 % len(CONTAINER_ENVS)]) for i, files in enumerate(CONTAINER_CHANGES)),
 ])
-@pytest.mark.parametrize("pg_source", ["path", "smoke", None])
-@pytest.mark.parametrize("pressure_optin", [False, True])
-@pytest.mark.parametrize("pg_optin", [False, True])
 def test_container_tests_run_in_linux_suite(monkeypatch, files, pg_source, pressure_optin, pg_optin):
     ctx = local_ci.Context(mode="full" if files is None else "changed", base="base",
                            files=files, python=sys.executable)

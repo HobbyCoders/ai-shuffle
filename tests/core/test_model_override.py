@@ -1067,9 +1067,14 @@ PLAIN_WORDINGS = [
 ]
 
 
-@pytest.mark.parametrize("family", ["haiku", "sonnet", "opus", "fable"])
-@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
-                         + [(s, True) for s in PLAIN_WORDINGS])
+SENTENCE_CASES = [(s, False) for s in VERSION_WORDINGS] + [(s, True) for s in PLAIN_WORDINGS]
+FAMILIES = ("haiku", "sonnet", "opus", "fable")
+
+
+# The sentence rule does not depend on the family word, so each wording runs
+# once with the families in rotation (every family sees both outcomes).
+@pytest.mark.parametrize("family, wording, consent", [
+    (FAMILIES[i % len(FAMILIES)], wording, consent) for i, (wording, consent) in enumerate(SENTENCE_CASES)])
 def test_native_sentence_consent_is_shared_by_owner_memory_and_receipts(monkeypatch, family, wording, consent):
     text = re.sub("opus", family, wording, flags=re.I)
     assert mo.named_by_user(family, [text]) is consent
@@ -1084,10 +1089,17 @@ def test_historical_sonnet_name_is_not_current_family_consent():
     assert not mo.memory_names("sonnet", "claude-3-5-sonnet")
 
 
-@pytest.mark.parametrize("entry", ["start", "task"])
-@pytest.mark.parametrize("source", ["owner", "memory"])
-@pytest.mark.parametrize("wording, consent", [(s, False) for s in VERSION_WORDINGS]
-                         + [(s, True) for s in PLAIN_WORDINGS])
+NATIVE_ROUTES = [(entry, source) for entry in ("start", "task") for source in ("owner", "memory")]
+
+
+# Each wording runs once, rotating through both entry points and both consent
+# sources; the blank-paragraph wording, whose outcome depends on the source,
+# runs with both.
+@pytest.mark.parametrize("entry, source, wording, consent", list(dict.fromkeys([
+    *(NATIVE_ROUTES[i % len(NATIVE_ROUTES)] + case for i, case in enumerate(SENTENCE_CASES)),
+    ("start", "owner", "Use opus\n\n2 things to check", True),
+    ("task", "memory", "Use opus\n\n2 things to check", True),
+])))
 async def test_sentence_rule_through_real_native_start(chats, entry, source, wording, consent):
     _native_request(chats, entry, source, wording)
     # The memory writer collapses blank paragraphs: the saved number is now

@@ -183,12 +183,18 @@ def test_metadata_only_live_does_not_read_events(mirrored_chat, monkeypatch):
     assert response.json()["messages"] == []
 
 
-@pytest.mark.parametrize("suffix", ["", "/live"])
-@pytest.mark.parametrize("store", ["absent", "empty", "raised"])
-@pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("history", [
-    "absent", "event_only", "retracted", "unavailable", "counter_unavailable",
-    "event_only_unavailable", "retracted_unavailable",
+LEGACY_STORES = ("absent", "empty", "raised")
+LEGACY_HISTORIES = ("absent", "event_only", "retracted", "unavailable", "counter_unavailable",
+                    "event_only_unavailable", "retracted_unavailable")
+LEGACY_CASES = [(store, history) for store in LEGACY_STORES for history in LEGACY_HISTORIES]
+
+
+# Rescue depends on the store and history together only when a legacy row
+# exists, so those run in full; without one, each history runs once. Both
+# routes alternate across the cases, and each history reaches both.
+@pytest.mark.parametrize("suffix,store,legacy,history", [
+    *((("", "/live")[i % 2], store, True, history) for i, (store, history) in enumerate(LEGACY_CASES)),
+    *((("/live", "")[i % 2], LEGACY_STORES[i % 3], False, history) for i, history in enumerate(LEGACY_HISTORIES)),
 ])
 def test_legacy_rescue_requires_no_event_history(
     mirrored_chat, monkeypatch, suffix, store, legacy, history,

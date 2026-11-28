@@ -19,6 +19,7 @@ from app.core.query_options import build_options_from_profile
 from fluid.providers.base import Message
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolRegistry
+from tests._pairwise import pairwise
 
 
 def provider(kind, model, levels=None, default=None):
@@ -82,11 +83,15 @@ for kind in ("openai", "chatgpt", "xai", "openrouter", "custom"):
         pytest.param(kind, "unknown-model", provider(kind, "unknown-model"), None, None, id=f"{kind}-unknown-default"),
         pytest.param(kind, "no-effort", provider(kind, "no-effort", []), "high", None, id=f"{kind}-reject"),
     ])
+# The pick reaches the wire through the session row or a turn override. The two
+# paths are independent of the model, so alternate them across the cases (each
+# provider kind still exercises both) instead of running every case twice.
+CASES = [pytest.param(*case.values, ("session", "override")[i % 2], id=f"{case.id}-{('session', 'override')[i % 2]}")
+         for i, case in enumerate(CASES)]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,model,row,pick,expected", CASES)
-@pytest.mark.parametrize("source", ["session", "override"])
+@pytest.mark.parametrize("kind,model,row,pick,expected,source", CASES)
 async def test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
                               kind, model, row, pick, expected, source,
                               thinking_mode="default", expected_thinking=None, local_extra=None,
@@ -360,18 +365,53 @@ WIRE_CONTRACTS = [
 # Include provider default (None), every recognized token, and an unrecognized
 # spelling. In particular "none" is an explicit wire value, not Python None.
 WIRE_PICKS = (None, "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "bogus")
+def _expected(kind, levels, pick):
+    expected = pick if pick in levels else None
+    if kind in ("anthropic", "delegated") and levels and pick in ("xhigh", "max") and pick not in levels:
+        expected = "high"
+    return expected
+
+
+def _route_row(kind, model, levels):
+    if kind in ("anthropic", "delegated"):
+        return None, kind
+    if kind == "openai":
+        return provider(kind, model), "openai_responses"
+    row = provider(kind, model, list(levels), "medium" if "medium" in levels else None)
+    if model == "catalog-mandatory":
+        row["models_json"][0]["reasoning_capabilities"]["mandatory"] = True
+    return row, "openai_responses" if kind == "chatgpt" else "openrouter"
+
+
+def test_every_contract_model_reports_its_group_levels():
+    for kind, models, levels in WIRE_CONTRACTS:
+        for model in models:
+            row, route = _route_row(kind, model, levels)
+            assert effort_capabilities(model, row, route=route)["effort_levels"] == list(levels), (kind, model)
+
+
+# Every model of a group reports the same levels (above), so the wire path runs
+# every group with every pick, rotating through the group's models, and each
+# pick and group under both effort sources (all pairs, tests/_pairwise.py).
+# Then every model that has not yet reached the wire with an accepted pick runs
+# once more with its group's highest level, so no model is left untested on the
+# wire (a group can have more models than picks).
 MATRIX_CASES = []
-for kind, models, levels in WIRE_CONTRACTS:
-    for model in models:
-        for pick in WIRE_PICKS:
-            expected = pick if pick in levels else None
-            if kind in ("anthropic", "delegated") and levels:
-                if pick == "xhigh" and "xhigh" not in levels:
-                    expected = "high"
-                if pick == "max" and "max" not in levels:
-                    expected = "high"
-            MATRIX_CASES.append(pytest.param(
-                kind, model, levels, pick, expected, id=f"{kind}-{model}-{pick}"))
+_seen = {}
+_on_wire = set()
+for (kind, models, levels), pick, source in pairwise(WIRE_CONTRACTS, WIRE_PICKS, ("session", "override")):
+    _n = _seen[(kind, models)] = _seen.get((kind, models), -1) + 1
+    model = models[_n % len(models)]
+    expected = _expected(kind, levels, pick)
+    if expected is not None or not levels:
+        _on_wire.add((kind, model))
+    MATRIX_CASES.append(pytest.param(kind, model, levels, pick, expected, source,
+                                     id=f"{kind}-{model}-{pick}-{source}"))
+for _i, (kind, model, levels) in enumerate((kind, model, levels) for kind, models, levels in WIRE_CONTRACTS
+                                           for model in models if (kind, model) not in _on_wire):
+    source = ("session", "override")[_i % 2]
+    MATRIX_CASES.append(pytest.param(kind, model, levels, levels[-1], levels[-1], source,
+                                     id=f"{kind}-{model}-{levels[-1]}-{source}"))
 
 
 def test_wire_matrix_covers_native_catalog():
@@ -381,24 +421,17 @@ def test_wire_matrix_covers_native_catalog():
         assert {model for route, models, _ in WIRE_CONTRACTS if route == kind
                 for model in models} == set(table)
     assert set(WIRE_PICKS) >= {None, *EFFORT_LEVELS}
+    # Every contract model reaches the wire with a pick its route accepts.
+    accepted = {(case.values[0], case.values[1]) for case in MATRIX_CASES
+                if case.values[4] is not None or not case.values[2]}
+    assert accepted == {(kind, model) for kind, models, _ in WIRE_CONTRACTS for model in models}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,model,levels,pick,expected", MATRIX_CASES)
-@pytest.mark.parametrize("source", ["session", "override"])
+@pytest.mark.parametrize("kind,model,levels,pick,expected,source", MATRIX_CASES)
 async def test_explicit_route_effort_matrix(mock_db, monkeypatch, tmp_path, record_property,
                                            kind, model, levels, pick, expected, source):
-    if kind in ("anthropic", "delegated"):
-        row = None
-        route = kind
-    elif kind == "openai":
-        row = provider(kind, model)
-        route = "openai_responses"
-    else:
-        row = provider(kind, model, list(levels), "medium" if "medium" in levels else None)
-        route = "openai_responses" if kind == "chatgpt" else "openrouter"
-        if model == "catalog-mandatory":
-            row["models_json"][0]["reasoning_capabilities"]["mandatory"] = True
+    row, route = _route_row(kind, model, levels)
     assert effort_capabilities(model, row, route=route)["effort_levels"] == list(levels)
     await test_picker_to_wire(mock_db, monkeypatch, tmp_path, record_property,
                               kind, model, row, pick, expected, source)

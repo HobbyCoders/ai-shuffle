@@ -7,8 +7,9 @@ shim intentionally differs carry ``differs=<reason>`` and assert the shim's
 own behaviour instead (see the package docstring for the full list).
 Cases tagged ``# regression`` failed on the shim before these fixes.
 
-When jq 1.7.x is installed, ``test_matches_real_jq`` re-checks every
-non-``differs`` case against the binary.
+After editing the table, re-check every non-``differs`` case against an
+installed jq 1.7.x with ``python -m tests.core.test_jq_shim.test_conformance``.
+That checks the table, not the shim, so it is not part of the test run.
 """
 
 import json
@@ -539,23 +540,27 @@ def _real_jq_17() -> Optional[str]:
     return jq if version.startswith("jq-1.7") else None
 
 
-REAL_JQ = _real_jq_17()
-COMPARABLE = [c for c in CASES if not c.differs]
+def _check_table_against_real_jq() -> int:
+    jq = _real_jq_17()
+    if jq is None:
+        print("jq 1.7.x is not installed")
+        return 2
+    wrong = []
+    for case in (c for c in CASES if not c.differs):
+        proc = subprocess.run(
+            [jq, "-c", "--argjson", "x", json.dumps(VARS["x"]), case.program],
+            input=case.input, capture_output=True, text=True, timeout=10,
+        )
+        if case.error is not None:
+            if proc.returncode == 0:
+                wrong.append(f"{case.id}: jq succeeded with {proc.stdout.strip()}")
+        elif proc.returncode != 0:
+            wrong.append(f"{case.id}: jq failed: {proc.stderr.strip()}")
+        elif json.dumps([json.loads(line) for line in proc.stdout.splitlines()]) != json.dumps(case.expected):
+            wrong.append(f"{case.id}: jq printed {proc.stdout.strip()}")
+    print("\n".join(wrong) or "every non-differs case matches jq")
+    return 1 if wrong else 0
 
 
-@pytest.mark.skipif(REAL_JQ is None, reason="jq 1.7.x not installed")
-@pytest.mark.parametrize("case", COMPARABLE, ids=[c.id for c in COMPARABLE])
-def test_matches_real_jq(case: Case):
-    proc = subprocess.run(
-        [REAL_JQ, "-c", "--argjson", "x", json.dumps(VARS["x"]), case.program],
-        input=case.input,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    if case.error is not None:
-        assert proc.returncode != 0, proc.stdout
-    else:
-        assert proc.returncode == 0, proc.stderr
-        outputs = [json.loads(line) for line in proc.stdout.splitlines()]
-        assert json.dumps(outputs) == json.dumps(case.expected)
+if __name__ == "__main__":
+    raise SystemExit(_check_table_against_real_jq())
