@@ -37,7 +37,7 @@ def test_every_fact_mutation_requests_memory_after_commit(writes):
         requests.clear()
         result = action()
         assert requests == [["memory"]]
-        assert store._facts.path.exists()
+        assert store._facts.db_path.exists()
         return result
 
     fact = changed(lambda: store.save_memory("Use amber widgets", when="Choosing widgets"))
@@ -63,11 +63,15 @@ def test_nested_transaction_defers_and_coalesces_notifications(writes):
     assert requests == [["memory"]]
 
 
-def test_failed_atomic_write_does_not_wake(writes, monkeypatch):
+def test_failed_write_does_not_wake(writes, monkeypatch):
+    import sqlite3
+
     store, requests = writes
-    from fluid.codemode import skills
-    monkeypatch.setattr(skills, "atomic_write_text", Mock(side_effect=OSError("disk full")))
-    with pytest.raises(OSError, match="disk full"):
+    store.save_memory("Create the store", when="Testing failure")
+    requests.clear()
+    monkeypatch.setattr(store._facts._db, "write",
+                        Mock(side_effect=sqlite3.OperationalError("database or disk is full")))
+    with pytest.raises(ValueError, match="disk is full"):
         store.save_memory("Unsaved widget", when="Testing failure")
     assert requests == []
 

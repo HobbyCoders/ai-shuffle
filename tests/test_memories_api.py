@@ -390,8 +390,11 @@ def test_delete_explicitly_purges_history_and_journal_and_blocks_re_save(world):
     doc = store._facts.snapshot(read_only=True)
     assert doc["entries"] == doc["archived"] == []
     assert doc["forgotten_before"] > 0
-    assert entry.text not in store.memories_path.read_text()
-    assert revised.text not in store.memories_path.read_text()
+    # Not in any row, nor in freed pages or the write-ahead log.
+    stored = b"".join(path.read_bytes() for path in (store.memories_path,
+                      store.memories_path.with_name(store.memories_path.name + "-wal"))
+                      if path.exists())
+    assert entry.text.encode() not in stored and revised.text.encode() not in stored
     assert entry.text not in store._journal_path.read_text()
     for text in (entry.text, revised.text):
         with pytest.raises(ValueError, match="deletion barrier|forgotten"):
