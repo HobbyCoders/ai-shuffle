@@ -149,14 +149,42 @@ def test_runtime_env_needs_a_connected_browser_and_a_relay_token_is_single_targe
     assert env["AIS_BROWSER_CDP_ENDPOINT"].startswith(prefix)
     token = env["AIS_BROWSER_CDP_ENDPOINT"][len(prefix):]
     assert ext.claim_relay(token) == ("chat-1", browser)
-    # Switching the chat back to the built-in browser voids the relay token.
+    # One use: a second relay cannot connect with the same token.
+    assert ext.claim_relay(token) is None
+    # Switching the chat back to the built-in browser voids an unused token.
+    unused = ext.runtime_env("chat-1", None)["AIS_BROWSER_CDP_ENDPOINT"].rsplit("/", 1)[1]
     ext.set_session_target("chat-1", None)
     assert ext.session_assigned("chat-1") and ext.session_target("chat-1") is None
-    assert ext.claim_relay(token) is None
+    assert ext.claim_relay(unused) is None
     ext.set_session_target("chat-1", browser.id)
     browser.closed = True
     with pytest.raises(RuntimeUnavailable):
         ext.runtime_env("chat-1", None)
+
+
+def test_a_stopped_runtime_drops_its_unused_relay_token():
+    browser = FakeBrowser({})
+    ext._browsers[browser.id] = browser
+    ext.set_session_target("chat-1", browser.id)
+    token = ext.runtime_env("chat-1", None, "runtime-1")["AIS_BROWSER_CDP_ENDPOINT"].rsplit("/", 1)[1]
+    ext.forget_runtime("runtime-2")
+    ext.forget_runtime(None)
+    assert token in ext._relay_tokens
+    ext.forget_runtime("runtime-1")
+    assert ext.claim_relay(token) is None
+
+
+def test_only_browsers_the_caller_may_use_are_listed_or_selectable():
+    mine, theirs = FakeBrowser({}), FakeBrowser({})
+    mine.account_id, theirs.id, theirs.account_id = "acct-me", "browser-0002", "acct-other"
+    ext._browsers.update({mine.id: mine, theirs.id: theirs})
+    may_use = lambda browser: browser.account_id == "acct-me"  # noqa: E731
+    assert [b["id"] for b in ext.browsers(may_use)] == [mine.id]
+    with pytest.raises(ext.ExtensionError):
+        ext.set_session_target("chat-1", theirs.id, may_use)
+    assert not ext.session_assigned("chat-1")
+    ext.set_session_target("chat-1", mine.id, may_use)
+    assert ext.session_target("chat-1") == mine.id
 
 
 class PanelSocket(FakeSocket):

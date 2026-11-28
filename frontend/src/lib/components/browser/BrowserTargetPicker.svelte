@@ -45,7 +45,7 @@
 	}
 </script>
 
-{#if target && (target.browsers.length || target.browser_id)}
+{#if target && !target.remote && (target.browsers.length || target.browser_id)}
 	<label class="target" title={error || (current ? 'The agent works in this browser, in a tab group for this chat' : 'The agent works in the built-in browser')}>
 		<span class="sr-only">Browser for this chat</span>
 		<select value={current} onchange={choose} disabled={saving} aria-label="Browser for this chat" class:error={!!error}>

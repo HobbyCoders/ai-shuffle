@@ -22,7 +22,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -66,9 +65,12 @@ async def extension_socket(websocket: WebSocket):
             raise ValueError("hello expected")
         key = hello.pop("key", None)
         device = await run_sync(_device_for_key, key)
-        # The browser's id is its enrolled device, never what the extension
-        # claims: one extension cannot take over another's browser entry.
+        # The browser's id and account are its enrollment's, never what the
+        # extension claims: one extension cannot take over another's browser
+        # entry or pass as another account's browser.
         hello["browser_id"] = str(device["device_id"])
+        hello["account_id"] = await run_sync(_device_account, device)
+        hello["paired_client_id"] = device.get("paired_client_id")
         browser = ext.ExtensionBrowser(websocket, hello)
     except HTTPException as exc:
         with contextlib.suppress(Exception):
@@ -83,29 +85,58 @@ async def extension_socket(websocket: WebSocket):
     ext.register(browser)
     await browser.send({"event": "welcome", "browser_id": browser.id})
     logger.info("Browser extension connected: %s", browser.name)
-    checked = time.monotonic()
+    watchdog = asyncio.create_task(_watch_device(key, device.get("paired_client_id"), browser, websocket))
     try:
         while True:
             message = json.loads(await websocket.receive_text())
-            if isinstance(message, dict):
+            if isinstance(message, dict) and not browser.closed:
                 await browser.dispatch(message)
-            if time.monotonic() - checked > REVALIDATE_SECONDS:
-                checked = time.monotonic()
-                try:
-                    await run_sync(_device_for_key, key)
-                except HTTPException as exc:
-                    if exc.status_code < 500:
-                        await browser.send({"event": "refused", "status": exc.status_code,
-                                            "detail": str(exc.detail)})
-                        await websocket.close(code=4001)
-                        return
-    except (WebSocketDisconnect, ValueError):
+    except (WebSocketDisconnect, ValueError, RuntimeError):
         pass
     except Exception:
         logger.exception("Browser extension socket failed")
     finally:
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await watchdog
         ext.unregister(browser)
         logger.info("Browser extension disconnected: %s", browser.name)
+
+
+def _device_account(device: dict) -> Optional[str]:
+    from app.db import mobile_hub as hub_store
+    owner = hub_store.ownership(device["device_id"])
+    return owner["account_id"] if owner else None
+
+
+async def _watch_device(key: str, client_id: Optional[str], browser, websocket: WebSocket) -> None:
+    """Re-check the extension's device key on a timer, and at once on unpair.
+
+    Independent of incoming frames: a removed extension stops being
+    selectable and its socket closes without waiting for it to speak.
+    """
+    from app.api.ws_key_watch import paired_client_wake
+
+    with paired_client_wake(client_id) as wake:
+        while True:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(wake.wait(), REVALIDATE_SECONDS)
+            wake.clear()
+            try:
+                await run_sync(_device_for_key, key)
+            except HTTPException as exc:
+                if exc.status_code >= 500:
+                    continue
+                # Unlist it before anything else, so no chat can pick it meanwhile.
+                ext.unregister(browser)
+                with contextlib.suppress(Exception):
+                    await browser.send({"event": "refused", "status": exc.status_code,
+                                        "detail": str(exc.detail)})
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=4001)
+                return
+            except Exception:  # noqa: BLE001 - a DB hiccup must not end a live socket
+                logger.warning("Browser extension re-check failed; retrying", exc_info=True)
 
 
 def _loopback(websocket: WebSocket) -> bool:
@@ -135,20 +166,54 @@ async def page_socket(websocket: WebSocket, token: str):
 
 class TargetBody(BaseModel):
     browser_id: Optional[str] = Field(default=None, max_length=64)
-    # The extension's side panel claims a chat it shows only if nobody picked a
-    # browser for that chat yet; an explicit choice is never overridden.
-    only_if_unassigned: bool = False
+    # The extension's side panel lets a chat it shows use its browser only
+    # while that chat is new (no finished turn, no built-in browser open) and
+    # nobody picked a browser for it: viewing an older chat never moves it.
+    only_if_new: bool = False
 
 
-async def _target_response(session_id: str) -> dict:
+def _browser_access(request: Request) -> ext.MayUse:
+    """Which connected browsers this caller may hand to a chat (blocking).
+
+    A browser carries its owner's site sign-ins, so access to a chat is not
+    enough. An API key or a shared preview never gets one. A paired device
+    gets the browsers signed in with its own Shuffle account, and the
+    extension's side panel its own browser. The worker's own login gets every
+    browser connected to its worker (another account's extension connects only
+    after the worker owner approved that device).
+    """
+    from app.api.auth import get_api_user_from_request
+    from app.core import mobile_tool_identity
+
+    if get_api_user_from_request(request) or mobile_tool_identity.request_is_preview(request):
+        return lambda _browser: False
+    paired = mobile_tool_identity.request_principal(request)
+    if paired:
+        account, client_id = paired.get("account_id"), paired.get("principal_id")
+        return lambda browser: (browser.paired_client_id == client_id
+                                or (bool(account) and browser.account_id == account))
+    return lambda _browser: True
+
+
+def _target_response(session_id: str, may_use: ext.MayUse, session: dict) -> dict:
+    from app.network import control
+
+    # A chat hosted on another worker picks its browser there.
+    remote = bool(control.owner_of(session))
     return {"browser_id": ext.session_target(session_id), "assigned": ext.session_assigned(session_id),
-            "browsers": ext.browsers()}
+            "browsers": [] if remote else ext.browsers(may_use), "remote": remote}
 
 
 @router.get("/api/v1/sessions/{session_id}/browser/target")
 async def get_target(request: Request, session_id: str, _token: str = Depends(require_auth)) -> dict:
-    await require_session(request, session_id)
-    return await _target_response(session_id)
+    session = await require_session(request, session_id)
+    may_use = await run_sync(_browser_access, request)
+    return _target_response(session_id, may_use, session)
+
+
+def _is_new_chat(session: dict) -> bool:
+    from app.core import browser_runtime
+    return int(session.get("turn_count") or 0) == 0 and session["id"] not in browser_runtime._runtimes
 
 
 @router.put("/api/v1/sessions/{session_id}/browser/target")
@@ -159,12 +224,13 @@ async def set_target(request: Request, session_id: str, body: TargetBody,
     session = await require_session(request, session_id)
     if control.owner_of(session):
         raise HTTPException(409, "This chat runs on another worker; open it there to use your browser")
-    if body.only_if_unassigned and ext.session_assigned(session_id):
-        return await _target_response(session_id)
+    may_use = await run_sync(_browser_access, request)
+    if body.only_if_new and (ext.session_assigned(session_id) or not _is_new_chat(session)):
+        return _target_response(session_id, may_use, session)
     if body.browser_id == ext.session_target(session_id) and ext.session_assigned(session_id):
-        return await _target_response(session_id)
+        return _target_response(session_id, may_use, session)
     try:
-        ext.set_session_target(session_id, body.browser_id)
+        ext.set_session_target(session_id, body.browser_id, may_use)
     except ext.ExtensionError as exc:
         raise HTTPException(409, str(exc)) from None
     # Stop only the runtime (not the session's panel registration, whose token
@@ -174,4 +240,4 @@ async def set_target(request: Request, session_id: str, body: TargetBody,
     runtime = browser_runtime._runtimes.get(session_id)
     if runtime:
         await runtime.close()
-    return await _target_response(session_id)
+    return _target_response(session_id, may_use, session)

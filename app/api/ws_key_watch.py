@@ -18,7 +18,7 @@ import asyncio
 import contextlib
 import logging
 import weakref
-from typing import AsyncIterator, Awaitable, Callable, Dict, Optional
+from typing import AsyncIterator, Awaitable, Callable, Dict, Iterator, Optional
 
 from fastapi import WebSocket
 
@@ -127,6 +127,38 @@ def close_paired_client_sockets(client_id: str) -> None:
             signal(client_id)
         except Exception:  # noqa: BLE001
             logger.warning("Could not signal the paired device's open sockets", exc_info=True)
+
+
+class _Wake:
+    """A socket that re-checks its own credential, woken by the unpair signal."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.wake = asyncio.Event()
+
+    signal = _KeyWatch.signal
+
+
+@contextlib.contextmanager
+def paired_client_wake(client_id: Optional[str]) -> Iterator[asyncio.Event]:
+    """An event set when paired device ``client_id`` is unpaired or re-keyed.
+
+    For sockets that authenticate with something other than the request's
+    principal (the browser extension's device key) and re-validate it
+    themselves: they wait on the event as well as their periodic timer.
+    """
+    wake = _Wake()
+    key = PAIRED_WATCH_PREFIX + client_id if client_id else None
+    if key:
+        _watches.setdefault(key, weakref.WeakSet()).add(wake)  # type: ignore[arg-type]
+    try:
+        yield wake.wake
+    finally:
+        watches = _watches.get(key) if key else None
+        if watches is not None:
+            watches.discard(wake)  # type: ignore[arg-type]
+            if not watches:
+                _watches.pop(key, None)
 
 
 @contextlib.asynccontextmanager

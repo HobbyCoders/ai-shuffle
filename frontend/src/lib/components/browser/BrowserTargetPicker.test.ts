@@ -21,6 +21,14 @@ describe('browser target picker', () => {
 		expect(view.queryByRole('combobox')).toBeNull();
 	});
 
+	it('stays hidden for a chat that runs on another worker', async () => {
+		api.getBrowserTarget.mockResolvedValue({ browser_id: null, assigned: false, browsers: [chrome], remote: true });
+		const view = render(BrowserTargetPicker, { sessionId: 'chat-1' });
+		await waitFor(() => expect(api.getBrowserTarget).toHaveBeenCalled());
+		await Promise.resolve();
+		expect(view.queryByRole('combobox')).toBeNull();
+	});
+
 	it('switches the chat to a connected browser and back to the built-in one', async () => {
 		api.getBrowserTarget.mockResolvedValue({ browser_id: null, assigned: false, browsers: [chrome] });
 		api.setBrowserTarget.mockImplementation(async (_sid: string, id: string | null) =>

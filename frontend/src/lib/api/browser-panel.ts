@@ -39,7 +39,10 @@ export interface ExtensionBrowser {
 export interface BrowserTarget {
 	browser_id: string | null;
 	assigned: boolean;
+	/** Browsers this caller may hand to the chat (their own account's). */
 	browsers: ExtensionBrowser[];
+	/** The chat runs on another worker, which picks its browser. */
+	remote?: boolean;
 }
 
 function isBrowserTarget(value: unknown): value is BrowserTarget {

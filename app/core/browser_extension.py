@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import secrets
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,12 @@ class ExtensionBrowser:
         self.name = clean_text(hello.get("name")) or "Browser"
         self.product = clean_text(hello.get("product"), 40) or "Chrome"
         self.version = clean_text(hello.get("version"), 40)
+        # The Shuffle account the extension signed in with (None for a browser
+        # paired straight to this worker). Only that account's controllers, and
+        # the worker's own login, may hand this browser to a chat.
+        self.account_id = hello.get("account_id") or None
+        # The extension's own paired device: its side panel may always use it.
+        self.paired_client_id = hello.get("paired_client_id") or None
         self._ids = itertools.count(1)
         self._pending: Dict[int, asyncio.Future] = {}
         self._send_lock = asyncio.Lock()
@@ -140,11 +146,15 @@ _browsers: Dict[str, ExtensionBrowser] = {}
 # chat session id -> browser id; None once the chat explicitly picked the
 # built-in browser (a chat missing here has not picked any browser yet).
 _targets: Dict[str, Optional[str]] = {}
-_relay_tokens: Dict[str, tuple] = {}  # runtime relay token -> (session id, browser id)
+# Runtime relay token -> (session id, browser id, runtime id). One use: the
+# relay consumes it on connect, and a runtime that stops drops its own.
+_relay_tokens: Dict[str, tuple] = {}
+
+MayUse = Callable[["ExtensionBrowser"], bool]
 
 
-def browsers() -> list:
-    return [b.public() for b in _browsers.values() if not b.closed]
+def browsers(may_use: Optional[MayUse] = None) -> list:
+    return [b.public() for b in _browsers.values() if not b.closed and (may_use is None or may_use(b))]
 
 
 def get_browser(browser_id: str) -> Optional[ExtensionBrowser]:
@@ -176,17 +186,27 @@ def session_assigned(session_id: str) -> bool:
     return session_id in _targets
 
 
-def set_session_target(session_id: str, browser_id: Optional[str]) -> None:
+def set_session_target(session_id: str, browser_id: Optional[str], may_use: Optional[MayUse] = None) -> None:
     if browser_id:
-        if not get_browser(browser_id):
+        browser = get_browser(browser_id)
+        if not browser or (may_use is not None and not may_use(browser)):
             raise ExtensionError("That browser is not connected")
     _targets[session_id] = browser_id or None
-    for token, (sid, _bid) in list(_relay_tokens.items()):
-        if sid == session_id:
+    for token, entry in list(_relay_tokens.items()):
+        if entry[0] == session_id:
             del _relay_tokens[token]
 
 
-def runtime_env(session_id: str, register_url: Optional[str]) -> dict:
+def forget_runtime(runtime_id: Optional[str]) -> None:
+    """A browser runtime stopped: its unused relay token stops working."""
+    if not runtime_id:
+        return
+    for token, entry in list(_relay_tokens.items()):
+        if entry[2] == runtime_id:
+            del _relay_tokens[token]
+
+
+def runtime_env(session_id: str, register_url: Optional[str], runtime_id: Optional[str] = None) -> dict:
     """Env that points one session's browser runtime at its chosen extension browser.
 
     The relay is served on the same loopback listener as the panel register URL.
@@ -199,11 +219,11 @@ def runtime_env(session_id: str, register_url: Optional[str]) -> dict:
         raise RuntimeUnavailable(
             "The browser this chat uses is not connected. Open the AI Shuffle extension in that "
             "browser, or switch the chat back to the built-in browser.")
-    for stale, (sid, _bid) in list(_relay_tokens.items()):
-        if sid == session_id:
+    for stale, entry in list(_relay_tokens.items()):
+        if entry[0] == session_id:
             del _relay_tokens[stale]
     token = secrets.token_urlsafe(32)
-    _relay_tokens[token] = (session_id, browser_id)
+    _relay_tokens[token] = (session_id, browser_id, runtime_id)
     return {
         "AIS_BROWSER_TARGET": "extension",
         "AIS_BROWSER_CDP_ENDPOINT": f"ws://{_loopback_netloc(register_url)}/api/v1/browser-extension/cdp/{token}",
@@ -222,7 +242,7 @@ def _loopback_netloc(register_url: Optional[str]) -> str:
 
 
 def claim_relay(token: str) -> Optional[tuple]:
-    entry = _relay_tokens.get(token)
+    entry = _relay_tokens.pop(token, None)
     if not entry or _targets.get(entry[0]) != entry[1]:
         return None
     browser = get_browser(entry[1])
@@ -452,11 +472,29 @@ async def serve_relay(websocket, token: str) -> None:
         for task in (receiver, gone, *tasks):
             task.cancel()
         browser.relays.pop(relay.key, None)
+        if relay.done.is_set():
+            # The browser went away under a running runtime. Its relay token
+            # was single use, so stop that runtime: the next browser call
+            # starts a fresh one with a new token once the browser is back.
+            _stop_runtime_later(session_id)
         if not browser.closed and not any(r.group == relay.group for r in browser.relays.values()):
             with contextlib.suppress(Exception):
                 await browser.request("group.release", {"group": relay.group}, timeout=5)
         with contextlib.suppress(Exception):
             await websocket.close()
+
+
+def _stop_runtime_later(session_id: str) -> None:
+    from app.core import browser_runtime
+    runtime = browser_runtime._runtimes.get(session_id)
+    if runtime is not None:
+        with contextlib.suppress(RuntimeError):
+            task = asyncio.get_running_loop().create_task(runtime.close())
+            _background.add(task)
+            task.add_done_callback(_background.discard)
+
+
+_background: set = set()
 
 
 # -- Browser panel live view -------------------------------------------------

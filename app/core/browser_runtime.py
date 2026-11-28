@@ -247,7 +247,8 @@ class Runtime:
             self.runtime_id = str(uuid4())
             env = config.setdefault("env", {})
             env["_AIS_BROWSER_RUNTIME_ID"] = self.runtime_id
-            env.update(browser_extension.runtime_env(self.session_id, env.get("AIS_PANEL_REGISTER_URL")))
+            env.update(browser_extension.runtime_env(self.session_id, env.get("AIS_PANEL_REGISTER_URL"),
+                                                     self.runtime_id))
             self.client = RawMcpClient("browser", config)
             await self.client.start()
             await self._require_handshake_tools()
@@ -350,6 +351,8 @@ class Runtime:
                 with suppress(asyncio.CancelledError, Exception):
                     await self.ready
             await self._dispose()
+            from app.core import browser_extension
+            browser_extension.forget_runtime(self.runtime_id)
             if _runtimes.get(self.session_id) is self:
                 _runtimes.pop(self.session_id, None)
         # The actor has stopped, so outstanding HTTP jobs cannot mutate again.

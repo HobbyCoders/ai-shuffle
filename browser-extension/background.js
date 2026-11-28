@@ -130,7 +130,7 @@ function connect(worker) {
     clearInterval(conn.ping);
     if (conn.socket !== socket) return;
     conn.socket = null;
-    await tabs.releaseWorker(worker.id);
+    await tabs.suspendWorker(worker.id);
     const refused = conn.refused;
     conn.refused = null;
     if (paused) {
@@ -212,7 +212,7 @@ async function claimSession(workerId, sessionId) {
   return account.call(origin, `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser/target`, {
     method: "PUT",
     token,
-    body: { browser_id: conn.browserId, only_if_unassigned: true },
+    body: { browser_id: conn.browserId, only_if_new: true },
   });
 }
 
