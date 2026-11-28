@@ -130,7 +130,13 @@ ALWAYS_CHARS = 3000
 # the oldest. ``triggers`` (explicit just-in-time triggers, see
 # validate_triggers) is a third such field; a worker that predates it keeps
 # the keys on the entry untouched and merges them with the text's winner.
-METADATA_FIELDS = ("when", "always", "triggers")
+# ``summary`` (an act-time rule's one-line imperative, see validate_summary)
+# is a fourth, merged and passed on the same way.
+METADATA_FIELDS = ("when", "always", "triggers", "summary")
+# An act-time rule's index line: ``When <when>: <summary>``, one imperative
+# line of at most MAX_SUMMARY_CHARS. A fact saved without one is listed by a
+# line derived from its text at render time (:func:`derived_summary`).
+MAX_SUMMARY_CHARS = 140
 # Explicit triggers: literal command strings (whole words, never a regex),
 # path globs and tool names; each list capped so a fact stays small.
 TRIGGER_KINDS = ("command", "paths", "tools")
@@ -175,6 +181,77 @@ def derived_when(text: object) -> str:
     cut = first[:DERIVED_WHEN_CHARS - 1]
     cut = cut.rsplit(" ", 1)[0] if " " in cut[DERIVED_WHEN_CHARS // 2:] else cut
     return cut.rstrip(" ,;:-") + "…"
+
+
+# A summary's sentence break: a CJK terminator, or . ! ? and a space before
+# a capital (any script), digit, bracket or quote, but not after an
+# abbreviation that is mid-sentence.
+_SUMMARY_BREAK = re.compile(r"[。！？]|[.!?]\s+")
+_ABBREVIATION = re.compile(r"(?<![^\W_])(?:e\.g|i\.e|etc|vs)\.$", re.IGNORECASE)
+
+
+def _first_sentence(text: str) -> str:
+    for match in _SUMMARY_BREAK.finditer(text):
+        if match.group() in "。！？":
+            return text[:match.end()]
+        head, after = text[:match.start() + 1], text[match.end():match.end() + 1]
+        if (after and (after.isupper() or after.isdigit() or after in "(\"'`")
+                and not _ABBREVIATION.search(head)):
+            return head
+    return text
+
+
+def derived_summary(text: object) -> str:
+    """An act-time rule's index line for a fact saved without a summary: its
+    first sentence, cut at a word boundary to MAX_SUMMARY_CHARS (an ellipsis
+    marks a cut). Deterministic, no model call; render-time only, never
+    stored."""
+    text = re.sub(r"^[-*]\s+", "", " ".join(str(text or "").split()))
+    first = _first_sentence(text)
+    if len(first) <= MAX_SUMMARY_CHARS:
+        return first
+    cut = first[:MAX_SUMMARY_CHARS - 1]
+    cut = cut.rsplit(" ", 1)[0] if " " in cut[MAX_SUMMARY_CHARS // 2:] else cut
+    return cut.rstrip(" ,;:-") + "…"
+
+
+def summary_line(entry: "dict | Any") -> str:
+    """The fact's written summary, or one derived from its text."""
+    if isinstance(entry, dict):
+        return entry.get("summary") or derived_summary(entry.get("text"))
+    return getattr(entry, "summary", None) or derived_summary(getattr(entry, "text", None))
+
+
+def act_line(entry: "dict | Any") -> str:
+    """An act-time rule's index line after its label: ``<when-line>:
+    <summary>``. Without a written when-line or summary both would be the
+    first sentence, so it is listed once."""
+    if isinstance(entry, dict):
+        written, summary = written_when(entry), entry.get("summary")
+    else:
+        written, summary = getattr(entry, "when", None), getattr(entry, "summary", None)
+    if not written and not summary:
+        return summary_line(entry)
+    return f"{when_line(entry).rstrip(' .:;')}: {summary_line(entry)}"
+
+
+def validate_summary(summary: object) -> str:
+    """A written summary, whitespace-normalized ("" clears it); screened
+    like the text and when-line. Raises ValueError."""
+    from fluid.context.screening import looks_like_secret, screen_findings
+    if not isinstance(summary, str):
+        raise ValueError("summary must be a string")
+    if "\n" in summary.strip() or "\r" in summary.strip():
+        raise ValueError("summary must be one line")
+    summary = " ".join(summary.split())
+    if len(summary) > MAX_SUMMARY_CHARS:
+        raise ValueError(f"summary must be at most {MAX_SUMMARY_CHARS} characters: one "
+                         "imperative line, such as 'Not while CI is still running; wait for green first.'")
+    if summary and looks_like_secret(summary):
+        raise ValueError("summary contains a credential")
+    if summary and screen_findings(summary):
+        raise ValueError("summary matches an injection pattern")
+    return summary
 
 
 def when_basis(text: str | None) -> str:
@@ -1151,7 +1228,7 @@ class FactStore:
              durable=None, key=None, expected_revision=None, source_session=None, restore=False,
              per_worker=False, correction_project=None, replaces=None, receipt=None,
              when=None, always=None, require_when=False, automatic=False, triggers=None,
-             check=None, _document=None):
+             summary=None, check=None, _document=None):
         """Save one fact in a tier.
 
         ``automatic`` marks background learning (the learner, consolidation).
@@ -1183,6 +1260,8 @@ class FactStore:
         refuses one that would overflow it (:meth:`_check_always_budget`).
         ``triggers`` (None keeps the current ones; ``{}`` clears them) are
         explicit just-in-time triggers (:func:`validate_triggers`).
+        ``summary`` (None keeps the current one; ``""`` clears it) is an
+        act-time rule's index line (:func:`validate_summary`).
         ``check(text, when)`` sees the effective text and when-line of the
         resolved target before anything is written; ValueError refuses.
         """
@@ -1198,6 +1277,8 @@ class FactStore:
             raise ValueError("always must be true or false")
         if triggers is not None:
             triggers = validate_triggers(triggers)
+        if summary is not None:
+            summary = validate_summary(summary)
         if always and not protected:
             raise ValueError("always is only for a memory the user asked to apply in every "
                              "chat (user_requested=true); nothing was saved")
@@ -1308,6 +1389,15 @@ class FactStore:
                 # before any write: a correction keeps its when-line unless it
                 # sends one. ``check`` raises ValueError to refuse.
                 check(text, when if when is not None else (old or {}).get("when"))
+            rule_summary = summary if summary is not None else (old or {}).get("summary")
+            if rule_summary:
+                # The when-line and summary render as one index line; each
+                # may pass the screen alone and still read as one directive.
+                from fluid.context.screening import screen_findings
+                rule = {"text": text, "summary": rule_summary,
+                        "when": when if when is not None else written_when(old or {})}
+                if screen_findings(act_line(rule)):
+                    raise ValueError("summary matches an injection pattern")
             now = time.time()
             # A behaviour rule moved to another model family keeps its text but
             # changes its key: that is a revision, not a repeat of the same save.
@@ -1333,7 +1423,7 @@ class FactStore:
                 targets = []
             if old and old.get("protected") and not protected:
                 if (durable and not old.get("conflicted") and old["text"] == text
-                        and not self._metadata_differs(old, when, always, triggers)):
+                        and not self._metadata_differs(old, when, always, triggers, summary)):
                     if targets:
                         self._supersede(doc, old, targets)
                         self._maintain(doc, keep=old["id"])
@@ -1384,14 +1474,14 @@ class FactStore:
             same_authority = not old or not protected or (
                 not old.get("worker") and (not provenance or old.get("provenance") == provenance))
             if (old and not rekey and not archived_old and not resolves and not old.get("conflicted") and old["text"] == text
-                    and not targets and self._metadata_differs(old, when, always, triggers)
+                    and not targets and self._metadata_differs(old, when, always, triggers, summary)
                     and same_authority and old.get("protected", False) == protected
                     and (protected or bool(old.get("durable")) == is_durable)):
                 # Same live value, new when-line or always flag: a metadata edit.
                 # Archived saves must take the reactivation path below.
                 # Stamped per field (METADATA_FIELDS), not a new revision, so
                 # the revision, clock, updated_at and history stay as they are.
-                self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers,
+                self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers, summary=summary,
                                     expected_revision=expected_revision, exclude=())
                 self._maintain(doc, keep=old["id"])
                 if _document is None:
@@ -1415,10 +1505,10 @@ class FactStore:
                         raise ValueError(f"[{old['id']}] was itself replaced by "
                                          f"[{old['superseded_by']}]; correct that fact instead")
                     return self._entry(old)  # an observation cannot revive a known stale value
-                if self._metadata_differs(old, when, always, triggers):
+                if self._metadata_differs(old, when, always, triggers, summary):
                     # Same text with replaces= and a new when-line or always
                     # flag: the metadata edit applies too (guarded as above).
-                    self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers,
+                    self._edit_metadata(doc, old, when, always, protected=protected, triggers=triggers, summary=summary,
                                         expected_revision=expected_revision,
                                         exclude={e["id"] for e in targets})
                 # Saving the same fact again is a use: renew a durable fact's
@@ -1544,6 +1634,8 @@ class FactStore:
                 _set_metadata(entry, "always", always, local)
             if triggers is not None and triggers != (entry.get("triggers") or {}):
                 _set_metadata(entry, "triggers", triggers, local)
+            if summary is not None and summary != (entry.get("summary") or ""):
+                _set_metadata(entry, "summary", summary, local)
             if not protected or not entry.get("always"):
                 entry.pop("always", None)  # only an owner-saved fact applies always
             elif (not old or not old.get("always") or not old.get("protected")
@@ -1711,15 +1803,16 @@ class FactStore:
         return [t["id"] for t in targets if t.get("superseded_by") == gid]
 
     @staticmethod
-    def _metadata_differs(old, when, always, triggers=None):
+    def _metadata_differs(old, when, always, triggers=None, summary=None):
         # Against the line the fact is listed by: re-sending the line an agent
         # was shown is no change, and a stale backfill line counts as none.
         return ((when is not None and when != written_when(old))
                 or (always is not None and always != bool(old.get("always")))
-                or (triggers is not None and triggers != (old.get("triggers") or {})))
+                or (triggers is not None and triggers != (old.get("triggers") or {}))
+                or (summary is not None and summary != (old.get("summary") or "")))
 
     def _edit_metadata(self, doc, old, when, always, *, protected, expected_revision, exclude,
-                       triggers=None):
+                       triggers=None, summary=None):
         """Apply a Remember save's new when-line/always flag to ``old`` in
         place. An owner fact needs the revision Recall returned; the ALWAYS
         budget is checked before anything changes. Stamps, never bumps."""
@@ -1736,6 +1829,8 @@ class FactStore:
             _set_metadata(old, "always", always, doc["store_id"])
         if triggers is not None and triggers != (old.get("triggers") or {}):
             _set_metadata(old, "triggers", triggers, doc["store_id"])
+        if summary is not None and summary != (old.get("summary") or ""):
+            _set_metadata(old, "summary", summary, doc["store_id"])
 
     @staticmethod
     def _merge_metadata(target, local, incoming, prefer):
@@ -2132,6 +2227,19 @@ class FactStore:
                         entry["triggers"] = {}
                     if not entry["triggers"]:
                         entry.pop("triggers")
+                if entry.get("summary") is not None:
+                    try:
+                        entry["summary"] = validate_summary(entry["summary"])
+                    except ValueError:
+                        # A summary that fails the screen is dropped, never
+                        # stored or passed on; the derived line applies. Its
+                        # stamp goes too, so it cannot win the merge and
+                        # clear a valid local summary. (A deliberate clear
+                        # arrives as "" and still replicates.)
+                        entry["summary"] = ""
+                        entry.pop("summary_at", None)
+                    if not entry["summary"]:
+                        entry.pop("summary")
                 if type(entry.get("always", False)) is not bool:
                     raise ValueError("Invalid memory always flag")
                 if not entry.get("always"):

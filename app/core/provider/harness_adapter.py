@@ -432,6 +432,9 @@ class HarnessAdapter(ProviderAdapter):
         # next message does not repeat it. Process memory only.
         self._memory_put_back: Optional[Tuple[str, int]] = None
         self._memory_put_back_section: Optional[str] = None
+        # That put-back's section and its act-time rules listed with their
+        # summary, noted for just-in-time delivery once it lands whole.
+        self._memory_put_back_index: Optional[Tuple[Optional[str], Tuple[str, ...]]] = None
         # Event seq of the latest compaction start not yet matched to its
         # boundary, and the start seq of the latest compaction that may have
         # folded the snapshot (None when it had no start signal).
@@ -2887,10 +2890,15 @@ class HarnessAdapter(ProviderAdapter):
         out is sent again with the next message."""
         head = self._event_head()
         self._memory_put_back_section = None
+        self._memory_put_back_index = None
         sections = await run_sync(self._compact_note)
         section = self._memory_put_back_section
+        index = self._memory_put_back_index
+
         def credit_memory() -> None:
             self._memory_put_back = (section, head)
+            if index is not None:
+                self._jit_note_index(*index)
 
         def credit_scratch(text: str) -> None:
             self._scratch_put_back = (hashlib.sha256(text.encode("utf-8")).hexdigest(), head)
@@ -2923,7 +2931,9 @@ class HarnessAdapter(ProviderAdapter):
         ctx = getattr(self._engine, "ctx", None)
         source = (getattr(ctx, "extra", None) or {}).get("time_turn_source")
         env = self._checkout_env_note(source)
-        section = self._memory_section()
+        # Noted for just-in-time delivery only once it lands whole
+        # (_compact_context_note): the loop may cut or drop it.
+        section = self._memory_section(note=False)
         self._memory_put_back_section = section
         memory = f"<system-reminder>\n{section}\n</system-reminder>" if section else None
         # A compaction may fold the record away: put the current one back.
@@ -3043,8 +3053,11 @@ class HarnessAdapter(ProviderAdapter):
         section = self._memory_section()
         return f"<system-reminder>\n{section}\n</system-reminder>" if section else None
 
-    def _memory_section(self) -> Optional[str]:
-        """The rendered ``# Memory`` section for this session, or None."""
+    def _memory_section(self, note: bool = True) -> Optional[str]:
+        """The rendered ``# Memory`` section for this session, or None.
+        ``note``: tell just-in-time delivery the session now holds it;
+        otherwise (a put-back that may still be cut) the section and its
+        listed act-time rules wait in ``_memory_put_back_index``."""
         extra = getattr(self._options, "extra", None) or {}
         if self._options is None or extra.get("assistant_proactive") is not None:
             return None
@@ -3056,9 +3069,16 @@ class HarnessAdapter(ProviderAdapter):
             store, project = session_memory(app_session_id, self._options.cwd)
             # The session's model picks which family-specific behaviour
             # rules render (fluid.codemode.behavior).
+            plan: Dict[str, Any] = {}
             section = store.render_memory_section(project, checkout=self._options.cwd,
                                                   task_query=getattr(self, "_memory_initial_task", ""),
-                                                  model=self._options.model or self._current_model or "")
+                                                  model=self._options.model or self._current_model or "",
+                                                  plan_out=plan)
+            index = (section, tuple(plan.get("act_summary_ids") or ()))
+            if note:
+                self._jit_note_index(*index)
+            else:
+                self._memory_put_back_index = index
             return section or None
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] memory snapshot failed", exc_info=True)
@@ -3102,6 +3122,20 @@ class HarnessAdapter(ProviderAdapter):
             self._jit = jit
         return jit
 
+    def _jit_note_index(self, section: Optional[str], summary_ids: Tuple[str, ...] = ()) -> None:
+        """Tell just-in-time delivery which index this session holds (both
+        legs render the section here) and which act-time rules it listed
+        with their summary, so a later delivery of one is logged as its
+        detail, not a late miss."""
+        if not section:
+            return
+        try:
+            jit = self._jit_session()
+            if jit is not None:
+                jit.note_index(section, summary_ids)
+        except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+            logger.debug("[HarnessAdapter] memory index note failed", exc_info=True)
+
     async def _jit_post_tool(self, event: str, payload: Dict[str, Any]) -> Optional[HookDecision]:
         """Facts whose triggers the call's input matches, with its result.
 
@@ -3109,7 +3143,8 @@ class HarnessAdapter(ProviderAdapter):
         bundled tools) sends the call's input with PostToolUse. A model
         reads new context only in its next request, which follows the
         call; reading a fact before the call runs would mean holding the
-        call, so these deliveries are recorded as late. The delivery is an
+        call, so these deliveries are recorded as late (or as detail when
+        the rule's summary was in the session's index). The delivery is an
         attachment: it counts once the gate has put it where the model
         reads it (in code mode, the cell's own result)."""
         try:
@@ -3134,7 +3169,9 @@ class HarnessAdapter(ProviderAdapter):
         try:
             jit = await run_sync(self._jit_session)
             if jit is not None:
-                await run_sync(jit.rearm)
+                # The native loop keeps ``# Memory`` verbatim through its
+                # compaction; the delegated put-back notes it on landing.
+                await run_sync(functools.partial(jit.rearm, keep_index=self._memory_native()))
         except Exception:  # noqa: BLE001 — compaction never waits on memory
             logger.warning("[HarnessAdapter] just-in-time memory re-arm failed", exc_info=True)
 

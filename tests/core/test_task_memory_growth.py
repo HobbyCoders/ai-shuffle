@@ -167,7 +167,7 @@ async def test_fresh_cli_uses_current_turn_plan_not_previous_snapshot(monkeypatc
     held = HeldMemory(frozenset(section_items(base)), 0, "node")
     adapter._memory_plan = plan_memory_note(section, held)
     assert adapter._memory_plan.kind == "changes"
-    monkeypatch.setattr(adapter, "_memory_section", lambda: base)
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: base)
     adapter._is_delegated = True
     scratch = "<system-reminder>\n# Harness scratch\nSynthetic scratch location.\n</system-reminder>"
     monkeypatch.setattr(adapter, "_scratch_note", lambda: scratch)

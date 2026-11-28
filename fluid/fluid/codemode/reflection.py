@@ -430,7 +430,7 @@ class ProposalInbox:
     # writes
     def propose(self, *, kind: str, text: str, scope: str, session: str,
                 quote: str | None = None, when: str | None = None,
-                now: float | None = None) -> dict:
+                summary: str | None = None, now: float | None = None) -> dict:
         """Add a proposal, or this session to the same open one (equal after
         :func:`normalize`). Returns the merged row; one the owner already
         decided comes back with that decision as its status and is not
@@ -449,6 +449,7 @@ class ProposalInbox:
             if mine is None:
                 mine = {"id": pid, "kind": kind, "scope": scope, "text": text, "when": when,
                         "quote": quote, "sessions": [], "created_at": now,
+                        **({"summary": summary} if summary else {}),
                         "expires_at": now + PROPOSAL_TTL_SECONDS, "status": OPEN}
                 rows.append(mine)
             if session in mine["sessions"] and (mine.get("quote") or not quote):
@@ -512,10 +513,16 @@ def promote(store: Any, proposal: dict, *, automatic: bool) -> Any:
         when = facts.validate_when(when)
     except ValueError:
         when = _DEFAULT_WHEN[OWNER_FACT]
+    # An act-time rule's index line, when the reflection gave one; a summary
+    # that no longer passes the screen is dropped and the derived line applies.
+    try:
+        summary = facts.validate_summary(proposal["summary"]) if proposal.get("summary") else None
+    except ValueError:
+        summary = None
     return store.save_memory(
         proposal["text"], scope=proposal.get("scope") or "global", provenance="session",
         durable=True, source_session=(proposal.get("sessions") or [None])[0],
-        when=when, automatic=automatic,
+        when=when, automatic=automatic, **({"summary": summary} if summary else {}),
     )
 
 
@@ -551,7 +558,8 @@ Write at most five items, each one of:
   they did not say it outright), owner_fact (about the owner, their machines
   or accounts) or project (this project's code, layout or conventions:
   scope="project"). quote is optional; when= is one short line saying when
-  the fact matters.
+  the fact matters. For a rule about running a command or editing a file,
+  add summary="the rule as one imperative line" (at most 140 characters).
 - NO_CHANGES when nothing is worth keeping.
 
 Do not capture: anything a listed memory or rule already says; one-task
@@ -658,6 +666,12 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
                 when = facts.validate_when(when)
             except ValueError:
                 when = None
+        summary = attrs.get("summary") or None
+        if summary:
+            try:
+                summary = facts.validate_summary(summary) or None
+            except ValueError:
+                summary = None
         quote = attrs.get("quote") or None
         if quote and not behavior.quote_in_user_text(quote, entries):
             quote = None
@@ -681,7 +695,8 @@ async def apply_output(synth: Any, text: str, entries: list[dict], session: str,
         scope = synth._resolve_scope(scope_attr) or "global"
         try:
             row = await asyncio.to_thread(inbox.propose, kind=kind, text=body, scope=scope,
-                                          session=session, quote=quote, when=when)
+                                          session=session, quote=quote, when=when,
+                                          summary=summary)
         except OSError as exc:
             # Storage, not the proposal (InboxBusy is one): the turns stay
             # unreflected so the chat's next close pays for them again.

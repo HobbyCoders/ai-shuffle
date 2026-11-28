@@ -27,8 +27,12 @@ the session rules around it:
   only once the gate settles it as placed where the model reads it. Until
   then it is pending: not offered again, and released if the gate drops it.
 - **Record.** Each delivery is a row in the store's local ``deliveries``
-  table (fact_db; never replicated): fact id, trigger kind, session, time and whether it arrived
-  on time (before the work it is about) or late (after the matching call).
+  table (fact_db; never replicated): fact id, trigger kind, session, time
+  and whether it arrived on time (before the work it is about), late
+  (after the matching call) or detail: after the matching call, but the
+  rule's one-line summary was already in the session's ``# Memory`` index
+  (an act-time rule, see :meth:`SessionDelivery.note_index`), so the rule
+  itself was on time and this is its full text.
   The session's compaction re-arms are logged too, so a session resumed in
   a new process does not repeat a fact it already has
   (:meth:`SessionDelivery.restore`).
@@ -46,6 +50,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -68,7 +73,8 @@ MAX_RECENT = 200
 MAX_FACT_ROWS = 200
 # Seconds a tool call or turn waits for candidates on a cache miss.
 READ_TIMEOUT = 0.25
-ON_TIME, LATE = "on_time", "late"
+ON_TIME, LATE, DETAIL = "on_time", "late", "detail"
+_INDEX_ID = re.compile(r"^- \[(\S+) r\d+[;\]]")
 HEADING = "# Memory for this step"
 _OVERFLOW = "Also matching (Recall by id): "
 KILL_SWITCH = "FLUID_MEMORY_JIT"
@@ -191,6 +197,9 @@ class Delivery:
     overflow: tuple[str, ...] = ()
     more: int = 0
     timing: str = LATE
+    # Late facts whose summary line was in the session's index: logged as
+    # DETAIL, not LATE (see SessionDelivery.note_index).
+    detail: frozenset[str] = frozenset()
     _session: "SessionDelivery | None" = field(default=None, repr=False, compare=False)
     _settled: bool = field(default=False, repr=False, compare=False)
 
@@ -220,6 +229,9 @@ class SessionDelivery:
     delivered: set[str] = field(default_factory=set)
     named: set[str] = field(default_factory=set)
     pending: set[str] = field(default_factory=set)
+    # Act-time rules listed with their summary in the index this session
+    # was given last (note_index).
+    indexed: set[str] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _restored: bool = field(default=False, repr=False)
 
@@ -238,14 +250,32 @@ class SessionDelivery:
         with self._lock:
             self.delivered.update(given)
 
-    def rearm(self) -> None:
-        """Compaction may have summarised delivered text away: deliver again."""
+    def rearm(self, *, keep_index: bool = False) -> None:
+        """Compaction may have summarised delivered text away: deliver again.
+        ``keep_index``: the compaction keeps the ``# Memory`` index verbatim
+        (the native loop pins it), so its act-time rules are still held."""
         with self._lock:
             self.delivered.clear()
             self.named.clear()
             self.pending.clear()
+            if not keep_index:
+                # The index may be summarised away too; the put-back notes
+                # it again once it lands (note_index).
+                self.indexed.clear()
             self._restored = True
         _append(self.store, [{"at": time.time(), "event": "rearm", "session": self.session_id}])
+
+    def note_index(self, section: str | None, summary_ids: Any = ()) -> None:
+        """Take note of the ``# Memory`` section this session now holds, in
+        place of the last one. ``summary_ids`` are the act-time rules its
+        snapshot plan listed with their summary (``act_summary_ids``); a
+        later tool delivery of one whose line is in ``section`` is its
+        detail, not a late miss: the rule reached the model before the
+        call."""
+        listed = {found.group(1) for line in str(section or "").splitlines()
+                  if (found := _INDEX_ID.match(line))}
+        with self._lock:
+            self.indexed = listed.intersection(str(i) for i in summary_ids or ())
 
     def on_tool(self, name: str, tool_input: Mapping[str, Any] | None, *,
                 timing: str = LATE, what: str = "this call") -> Delivery | None:
@@ -301,8 +331,9 @@ class SessionDelivery:
             if not chosen and not listed and not more:
                 return None
             body = head + lines + ([overflow_line] if overflow_line else [])
+            detail = frozenset(i for i in chosen if timing == LATE and i in self.indexed)
             delivery = Delivery("\n".join(body), tuple((i, kinds[i]) for i in chosen),
-                                tuple(listed), more, timing, _session=self)
+                                tuple(listed), more, timing, detail, _session=self)
             self.pending.update(chosen)
         if commit:
             delivery.commit()
@@ -315,7 +346,9 @@ class SessionDelivery:
             fresh = [(i, k) for i, k in delivery.delivered if i not in self.delivered]
             self.delivered.update(ids)
             self.named.update(delivery.overflow)
-        record(self.store, self.session_id, fresh, delivery.timing)
+        record(self.store, self.session_id, [f for f in fresh if f[0] not in delivery.detail],
+               delivery.timing)
+        record(self.store, self.session_id, [f for f in fresh if f[0] in delivery.detail], DETAIL)
 
     def _release(self, delivery: Delivery) -> None:
         with self._lock:
@@ -439,13 +472,13 @@ def session_delivered(store: Any, session_id: str) -> set[str]:
 
 
 def counts(store: Any) -> dict:
-    """Totals over the retained log: ``totals`` (on_time, late and per
-    kind), ``facts`` (per fact id, the MAX_FACT_ROWS most recently
+    """Totals over the retained log: ``totals`` (on_time, late, detail
+    and per kind), ``facts`` (per fact id, the MAX_FACT_ROWS most recently
     delivered), ``recent`` (the last MAX_RECENT deliveries) and ``since``
     (the oldest retained delivery's time, or None)."""
     try:
         deliveries = [r for r in _rows(store) if isinstance(r.get("fact"), str)
-                      and r.get("timing") in (ON_TIME, LATE)]
+                      and r.get("timing") in (ON_TIME, LATE, DETAIL)]
     except Exception:  # noqa: BLE001
         return {}
     totals: dict[str, int] = {}

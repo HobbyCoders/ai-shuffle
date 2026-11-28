@@ -106,6 +106,7 @@ LABELS = {
     "conflicts": "Possible conflicts",
     "when": "Memory when-lines",
     "delivery": "Just-in-time delivery",
+    "act_rules": "Rules stated before acting",
 }
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
@@ -350,6 +351,7 @@ def check(store, *, now: float | None = None, learning_enabled: bool = True,
     signals.append(_conflicts_signal(live))
     signals.append(_when_signal(store, live + _local(doc, "archived")))
     signals.append(_delivery_signal(store))
+    signals.append(_act_rules_signal(plans))
     attention = [s for s in signals if s["state"] == "attention"]
     return {
         "state": "attention" if attention else "healthy",
@@ -591,16 +593,44 @@ def _when_signal(store, entries: list[dict]) -> dict:
 
 def _delivery_signal(store) -> dict:
     """Just-in-time deliveries counted on this worker (jit_delivery): how
-    many facts reached a session mid-task, and how many only late. A count,
-    never an attention: phases 2-3 of Memory v3 read it for the lifecycle."""
+    many facts reached a session mid-task, how many only late, and how many
+    were the full text of a rule whose summary the session's index already
+    listed (detail, not a miss). A count, never an attention: phases 2-3 of
+    Memory v3 read it for the lifecycle."""
     from fluid.codemode import jit_delivery
     totals = jit_delivery.counts(store).get("totals") or {}
     on_time = int(totals.get(jit_delivery.ON_TIME, 0) or 0)
     late = int(totals.get(jit_delivery.LATE, 0) or 0)
+    detail = int(totals.get(jit_delivery.DETAIL, 0) or 0)
     kinds = {k: int(totals.get(k, 0) or 0) for k in ("command", "path", "tool", "words")}
-    reason = (f"{on_time + late} just-in-time deliveries ({late} late)." if on_time + late
-              else "No just-in-time deliveries yet.")
-    return _signal("delivery", False, reason, on_time=on_time, late=late, **kinds)
+    total = on_time + late + detail
+    reason = (f"{total} just-in-time deliveries ({late} late"
+              + (f"; {detail} were the detail of a rule already in the index" if detail else "")
+              + ")." if total else "No just-in-time deliveries yet.")
+    return _signal("delivery", False, reason, on_time=on_time, late=late, detail=detail, **kinds)
+
+
+def _act_rules_signal(plans) -> dict:
+    """Act-time rules (a command, path or tool trigger) and whether each
+    snapshot lists them with their summary. Past ACT_SUMMARY_CHARS a rule
+    falls back to its plain when-line, so it reaches the agent only with a
+    tool's result; informational, never an attention."""
+    from fluid.codemode.skills import ACT_SUMMARY_CHARS
+    worst = max(plans.values(), key=lambda p: (p.get("act_unfit", 0), p.get("act_time", 0)), default={})
+    total, unfit = int(worst.get("act_time", 0)), int(worst.get("act_unfit", 0))
+    detail = {"act_time": total, "unfit": unfit, "cap": ACT_SUMMARY_CHARS}
+    if not total:
+        return _signal("act_rules", False, "No saved rule names a command, file or tool.", **detail)
+    if unfit:
+        return _signal("act_rules", False,
+                       f"{_plural(unfit, 'act-time rule')} of {total} did not fit the "
+                       f"{ACT_SUMMARY_CHARS:,}-character summary room and "
+                       f"{'is' if unfit == 1 else 'are'} listed by when-line only; shorten "
+                       "summaries or merge rules so each is stated before the action.",
+                       note=True, **detail)
+    return _signal("act_rules", False,
+                   "The act-time rule is listed with its summary." if total == 1 else
+                   f"All {total} act-time rules are listed with their summary.", **detail)
 
 
 def _usage_signal(live, plans, now) -> dict:

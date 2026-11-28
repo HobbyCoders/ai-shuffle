@@ -226,6 +226,46 @@ describe('Settings > Memory page', () => {
 		await waitFor(() => expect(saveButton().disabled).toBe(true));
 	});
 
+	it('shows an act-time rule summary under the when-line and saves an edit to it', async () => {
+		const rule = memory({
+			id: 'm4',
+			text: 'Never deploy while CI is running. Check the run list first.',
+			when: 'When deploying the site',
+			act_time: true,
+			summary: null,
+			derived_summary: 'Never deploy while CI is running.'
+		});
+		http.get.mockResolvedValue({ items: [rule, ...rows], limits: { ...limits, summary_chars: 140 } });
+		http.put.mockImplementation(async (_path: string, body: { summary?: string }) => ({
+			...rule,
+			summary: body.summary ?? null,
+			derived_summary: null
+		}));
+		await show('m4');
+		const box = (await screen.findByRole('textbox', { name: 'Rule before acting' })) as HTMLInputElement;
+		expect(box.value).toBe('');
+		expect(box.placeholder).toBe('Never deploy while CI is running.');
+		const derivedNote = screen.getByText('Taken from the first sentence until you write one.');
+		// No empty problem span beside the note while nothing is wrong.
+		expect(derivedNote.parentElement?.querySelector('.mem-problem')).toBeNull();
+		await fireEvent.input(box, { target: { value: 'Not while CI is still running; wait for green first.' } });
+		await fireEvent.click(saveButton());
+		await waitFor(() => expect(http.put).toHaveBeenCalledTimes(1));
+		expect(http.put).toHaveBeenCalledWith('/memories/m4', {
+			text: rule.text,
+			when: 'When deploying the site',
+			summary: 'Not while CI is still running; wait for green first.',
+			expected_revision: 3,
+			expected_metadata_version: 'meta+1'
+		});
+	});
+
+	it('shows no summary row for a words-only memory', async () => {
+		await show('m1');
+		await screen.findByRole('textbox', { name: 'What to remember' });
+		expect(screen.queryByRole('textbox', { name: 'Rule before acting' })).toBeNull();
+	});
+
 	it('keeps the draft on a stale save and offers the latest version', async () => {
 		http.put.mockRejectedValue({ status: 409, detail: 'This memory changed since you opened it.' });
 		await show('m1');

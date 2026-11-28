@@ -29,6 +29,12 @@ export interface Proposal {
 	kind_label: string;
 	quote: string | null;
 	when: string | null;
+	/** A rule about a command, file or tool: listed before acting once saved. */
+	act_time?: boolean;
+	/** The rule line the reflection wrote; null when it gave none. */
+	summary?: string | null;
+	/** Taken from the text's first sentence for an act-time rule without one. */
+	derived_summary?: string | null;
 	scope: string;
 	scope_label: string;
 	sessions: ProposalSession[];

@@ -43,6 +43,23 @@ def test_adapter_snapshot_is_the_store_render_with_always_and_index(tmp_path, mo
     assert {always.id, deploy.id} <= ids
 
 
+def test_both_legs_carry_the_same_act_time_rule_line(tmp_path, monkeypatch):
+    """An act-time rule (command trigger) is listed as When <when>: <summary>
+    in the one section the native reminder and the delegated note share."""
+    store = SkillStore(tmp_path)
+    rule = store.save_memory("Never deploy while CI is running. Check the run list first.",
+                             protected=True, when="When deploying the site",
+                             triggers={"command": ["make deploy"]},
+                             summary="Not while CI is still running; wait for green first.")
+    adapter = _adapter(monkeypatch, store, None)
+    section = adapter._memory_section()
+    line = (f"- [{rule.id} r1; session] When deploying the site: "
+            "Not while CI is still running; wait for green first.")
+    assert line in section.splitlines()
+    assert section == store.render_memory_section(None, checkout=".")
+    assert section in adapter._memory_snapshot()
+
+
 def test_task_slice_rotates_index_lines_not_full_text(tmp_path, monkeypatch):
     from fluid.codemode import facts
 
