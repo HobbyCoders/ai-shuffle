@@ -7,8 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { GitHubRepo, GitHubRepoPage } from '$lib/api/github';
 
-const githubApi = vi.hoisted(() => ({ listGitHubRepos: vi.fn() }));
+const githubApi = vi.hoisted(() => ({ listGitHubRepos: vi.fn(), listGitLabRepos: vi.fn() }));
 vi.mock('$lib/api/github', () => githubApi);
+const signIns = vi.hoisted(() => ({ github: true, gitlab: false }));
+vi.mock('$lib/stores/auth.svelte', async () => {
+	const { readable } = await import('svelte/store');
+	return {
+		githubAuthenticated: readable(false, (set) => set(signIns.github)),
+		gitlabAuthenticated: readable(false, (set) => set(signIns.gitlab))
+	};
+});
 import GitHubRepoPicker from './GitHubRepoPicker.svelte';
 
 function repo(full_name: string, extra: Partial<GitHubRepo> = {}): GitHubRepo {
@@ -30,6 +38,8 @@ let onConnect: Mock<() => void>;
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	signIns.github = true;
+	signIns.gitlab = false;
 	onSelect = vi.fn();
 	onConnect = vi.fn();
 });
@@ -92,6 +102,43 @@ describe('GitHubRepoPicker', () => {
 		await fireEvent.click(await screen.findByRole('button', { name: /Connect GitHub/ }));
 		expect(onConnect).toHaveBeenCalledOnce();
 		expect(screen.queryByLabelText('Search repositories')).toBeNull();
+	});
+
+	it('offers no GitHub/GitLab switch while GitLab is not connected', async () => {
+		list.mockResolvedValue(pageOf([repo('acme/app')]));
+		mount();
+		await screen.findByRole('button', { name: /^acme\/app,/ });
+		expect(screen.queryByRole('group', { name: 'Repository host' })).toBeNull();
+		expect(githubApi.listGitLabRepos).not.toHaveBeenCalled();
+	});
+
+	it('switches to the GitLab list and back when GitLab is connected', async () => {
+		signIns.gitlab = true;
+		list.mockResolvedValue(pageOf([repo('acme/app')]));
+		(githubApi.listGitLabRepos as Mock).mockResolvedValue(
+			pageOf([repo('group/sub/tool', { clone_url: 'https://gitlab.example.com/group/sub/tool.git' })])
+		);
+		mount();
+		await screen.findByRole('button', { name: /^acme\/app,/ });
+		await fireEvent.click(screen.getByRole('button', { name: 'GitLab' }));
+		await fireEvent.click(await screen.findByRole('button', { name: /^group\/sub\/tool,/ }));
+		expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ clone_url: 'https://gitlab.example.com/group/sub/tool.git' }));
+		expect(screen.getByText(/Your GitLab repositories/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
+		expect(await screen.findByRole('button', { name: /^acme\/app,/ })).toBeTruthy();
+	});
+
+	it('starts on GitLab when it is the only connection and connects the chosen host', async () => {
+		signIns.github = false;
+		signIns.gitlab = true;
+		(githubApi.listGitLabRepos as Mock).mockResolvedValue(pageOf([repo('group/app')]));
+		list.mockResolvedValue({ ...pageOf([]), connected: false });
+		mount();
+		await screen.findByRole('button', { name: /^group\/app,/ });
+		expect(list).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Connect GitHub/ }));
+		expect(onConnect).toHaveBeenCalledWith('github');
 	});
 
 	it('searches on the server after typing stops, ignoring an older answer', async () => {

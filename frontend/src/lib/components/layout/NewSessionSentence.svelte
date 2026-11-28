@@ -26,7 +26,8 @@
 	import { composerReturn } from '$lib/components/chat/composer-editors';
 	import { provideProjectPicker } from '$lib/services/project-picker';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
-	import { githubAuthenticated } from '$lib/stores/auth.svelte';
+	// GitHub or GitLab: either one makes branch controls usable.
+	import { sourceControlAuthenticated as githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git } from '$lib/stores/git.svelte';
 	import { composerIsGitRepo, shouldShowEmptyStateBranchPill } from '$lib/components/chat/contextPills';
 	import ProfileSelector from '$lib/components/chat/ProfileSelector.svelte';

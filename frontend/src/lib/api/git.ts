@@ -1042,6 +1042,8 @@ export interface RawPrState {
     // predate (or rename) the flag.
     lookup_failed?: boolean;
     lookupFailed?: boolean;
+    /** Which forge answered: "github" or "gitlab" (older builds omit it). */
+    provider?: string;
 }
 
 export interface PrState {
@@ -1065,6 +1067,8 @@ export interface PrState {
      * previous value rather than nothing at all.
      */
     served_stale: boolean;
+    /** Which forge the project's remote is on (wording only). */
+    provider?: 'github' | 'gitlab';
 }
 
 export function transformPrState(raw: RawPrState): PrState {
@@ -1074,7 +1078,8 @@ export function transformPrState(raw: RawPrState): PrState {
         open_pr: raw.open_pr ?? null,
         merged_head_sha: raw.merged_head_sha ?? null,
         lookup_failed: Boolean(raw.pr_lookup_failed ?? raw.lookup_failed ?? raw.lookupFailed ?? false),
-        served_stale: Boolean(raw.stale ?? false)
+        served_stale: Boolean(raw.stale ?? false),
+        provider: raw.provider === 'gitlab' ? 'gitlab' : 'github'
     };
 }
 
@@ -1088,7 +1093,8 @@ export function prStateEqual(a: PrState | null, b: PrState | null): boolean {
         a.has_github !== b.has_github ||
         a.merged_head_sha !== b.merged_head_sha ||
         a.lookup_failed !== b.lookup_failed ||
-        a.served_stale !== b.served_stale
+        a.served_stale !== b.served_stale ||
+        (a.provider ?? 'github') !== (b.provider ?? 'github')
     ) {
         return false;
     }

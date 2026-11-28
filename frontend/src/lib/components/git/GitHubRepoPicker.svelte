@@ -1,15 +1,17 @@
 <script lang="ts">
 	/**
-	 * GitHubRepoPicker - searchable list of the connected GitHub account's
-	 * repositories, used by the clone dialog to fill in the clone URL.
+	 * GitHubRepoPicker - searchable list of the connected GitHub (or GitLab)
+	 * account's repositories, used by the clone dialog to fill in the clone URL.
 	 *
-	 * Uses the server's existing GitHub sign-in (GET /github/repos). Search and
+	 * Uses the server's existing sign-in (GET /github/repos or /gitlab/repos).
+	 * When GitLab is connected a GitHub/GitLab switch picks the list. Search and
 	 * paging run on the server's cached list; "Load more" appends the next page.
-	 * When GitHub is not connected it shows where to connect it instead.
+	 * When the chosen service is not connected it shows where to connect it.
 	 */
 	import { onDestroy, onMount } from 'svelte';
-	import { ArrowUpRight, Github, Globe, Lock, RefreshCw, Search } from 'lucide-svelte';
-	import { listGitHubRepos, type GitHubRepo } from '$lib/api/github';
+	import { ArrowUpRight, Github, Gitlab, Globe, Lock, RefreshCw, Search } from 'lucide-svelte';
+	import { listGitHubRepos, listGitLabRepos, type GitHubRepo, type RepoProvider } from '$lib/api/github';
+	import { githubAuthenticated, gitlabAuthenticated } from '$lib/stores/auth.svelte';
 	import { relativeTime } from '$lib/api/network-status';
 
 	interface Props {
@@ -17,8 +19,8 @@
 		selectedUrl?: string;
 		disabled?: boolean;
 		onSelect: (repo: GitHubRepo) => void;
-		/** Open the place where GitHub is connected (Settings > Integrations > GitHub). */
-		onConnect?: () => void;
+		/** Open the place where *provider* is connected (Settings > Integrations). */
+		onConnect?: (provider: RepoProvider) => void;
 		/** A repository that is already a project: marked "Already added" and not selectable. */
 		isAdded?: (repo: GitHubRepo) => boolean;
 	}
@@ -42,6 +44,21 @@
 	let busy = $state(false); // a search or refresh while a list is shown
 	let loadingMore = $state(false);
 
+	// GitLab only appears when it is connected; it is the default when it is
+	// the only connection.
+	let provider = $state<RepoProvider>(!$githubAuthenticated && $gitlabAuthenticated ? 'gitlab' : 'github');
+	const showSwitch = $derived($gitlabAuthenticated);
+	const providerName = $derived(provider === 'gitlab' ? 'GitLab' : 'GitHub');
+	const ProviderIcon = $derived(provider === 'gitlab' ? Gitlab : Github);
+
+	function choose(next: RepoProvider) {
+		if (next === provider) return;
+		provider = next;
+		repos = [];
+		status = 'loading';
+		load();
+	}
+
 	let seq = 0;
 	let controller: AbortController | null = null;
 	let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -52,7 +69,7 @@
 		const err = e as { detail?: unknown; message?: unknown } | null;
 		if (typeof err?.detail === 'string' && err.detail) return err.detail;
 		if (typeof err?.message === 'string' && err.message) return err.message;
-		return 'Could not load your GitHub repositories';
+		return `Could not load your ${providerName} repositories`;
 	}
 
 	async function load({ append = false, refresh = false } = {}) {
@@ -65,7 +82,8 @@
 		else if (status === 'ready') busy = true;
 		else status = 'loading';
 		try {
-			const res = await listGitHubRepos(
+			const list = provider === 'gitlab' ? listGitLabRepos : listGitHubRepos;
+			const res = await list(
 				{ q: query, page: nextPage, perPage: PER_PAGE, refresh },
 				{ signal: controller.signal }
 			);
@@ -122,13 +140,23 @@
 </script>
 
 <div class="picker" data-repo-picker>
+	{#if showSwitch}
+		<div class="provider-switch" role="group" aria-label="Repository host">
+			<button type="button" class="provider" class:active={provider === 'github'} aria-pressed={provider === 'github'} onclick={() => choose('github')} {disabled}>
+				<Github size={13} strokeWidth={1.5} />GitHub
+			</button>
+			<button type="button" class="provider" class:active={provider === 'gitlab'} aria-pressed={provider === 'gitlab'} onclick={() => choose('gitlab')} {disabled}>
+				<Gitlab size={13} strokeWidth={1.5} />GitLab
+			</button>
+		</div>
+	{/if}
 	{#if status === 'disconnected'}
 		<div class="connect-hint">
-			<Github size={16} strokeWidth={1.5} />
-			<span>Connect GitHub to choose from your own and your organizations' repositories.</span>
+			<ProviderIcon size={16} strokeWidth={1.5} />
+			<span>Connect {providerName} to choose from your own and your {provider === 'gitlab' ? "groups'" : "organizations'"} repositories.</span>
 			{#if onConnect}
-				<button type="button" class="link-btn" onclick={onConnect} {disabled}>
-					Connect GitHub
+				<button type="button" class="link-btn" onclick={() => onConnect?.(provider)} {disabled}>
+					Connect {providerName}
 					<ArrowUpRight size={13} strokeWidth={1.5} />
 				</button>
 			{/if}
@@ -136,8 +164,8 @@
 	{:else}
 		<div class="picker-head">
 			<span class="picker-label" id="gh-repo-picker-label">
-				<Github size={14} strokeWidth={1.5} />
-				Your GitHub repositories
+				<ProviderIcon size={14} strokeWidth={1.5} />
+				Your {providerName} repositories
 			</span>
 			<button
 				type="button"
@@ -177,7 +205,7 @@
 			</div>
 		{:else if repos.length === 0}
 			<div class="state" role="status">
-				{query.trim() ? `No repositories match "${query.trim()}"` : 'No repositories on this GitHub account yet'}
+				{query.trim() ? `No repositories match "${query.trim()}"` : `No repositories on this ${providerName} account yet`}
 			</div>
 		{:else}
 			<ul class="repo-list" aria-labelledby="gh-repo-picker-label" aria-busy={busy}>
@@ -491,6 +519,45 @@
 		border: 1px solid var(--border);
 		border-radius: 10px;
 		line-height: 1.4;
+	}
+
+	.provider-switch {
+		display: inline-flex;
+		align-self: flex-start;
+		gap: 2px;
+		padding: 2px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--background);
+	}
+
+	.provider {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		padding: 3px 10px;
+		font-size: 0.75rem;
+		font-weight: 500;
+		border: none;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+
+	.provider:hover:not(:disabled) {
+		color: var(--foreground);
+	}
+
+	.provider.active {
+		background: var(--card);
+		color: var(--foreground);
+		box-shadow: 0 0 0 1px var(--border);
+	}
+
+	.provider:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 
 	.connect-hint span {

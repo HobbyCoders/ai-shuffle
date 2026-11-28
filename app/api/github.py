@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 from app.db.async_database import run_sync
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from app.core.github_service import (
     PullRequest,
     WorkflowRun,
 )
+from app.core.gitlab_service import GitLabApiError, GitLabService, gitlab_service
 from app.core.session_pr_state import persist_pr_state
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth
@@ -84,6 +85,8 @@ class GitHubStatusResponse(BaseModel):
     repo: Optional[str] = None
     repo_info: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    # Which forge answers for this project: "github" or "gitlab".
+    provider: str = "github"
 
 
 # =============================================================================
@@ -150,14 +153,71 @@ async def check_github_auth() -> None:
         )
 
 
+async def gitlab_repo_for_path(
+    working_dir: Optional[str], service: Optional[GitLabService] = None,
+) -> Optional[str]:
+    """The GitLab project path of *working_dir*'s origin, when GitLab is connected.
+
+    Pass the pinned view an operation will act through, so the remote is
+    matched against the same server its requests go to.
+    Cheap when GitLab is not connected (one file read, no git call), so the
+    GitHub path stays exactly as it was for owners who never connect GitLab.
+    """
+    service = service or gitlab_service
+    if not working_dir or not await asyncio.to_thread(service.is_authenticated):
+        return None
+    return await asyncio.to_thread(service.get_repo_from_remote, working_dir)
+
+
+async def gitlab_forge_for_path(working_dir: Optional[str]) -> Tuple[Optional[GitLabService], Optional[str]]:
+    """``(pinned GitLab view, repo)`` when *working_dir*'s origin is on the
+    connected server, else ``(None, None)``."""
+    pinned = gitlab_service.pinned()
+    repo = await gitlab_repo_for_path(working_dir, pinned)
+    return (pinned, repo) if repo else (None, None)
+
+
+def number_for_fan_out(number: int, url: Optional[str]) -> Optional[int]:
+    """The PR number to match other chats by after a merge or close.
+
+    Without the PR's URL (its re-read failed), a bare number also matches
+    another repository's or forge's PR with that number, including MR links
+    saved before GitLab was disconnected. The update then waits for
+    reconciliation instead of marking the wrong chat.
+    """
+    return number if url else None
+
+
+async def resolve_forge_for_project(request: Request, project_id: str) -> Tuple[Any, str]:
+    """``(service, repo)`` for the project's origin: GitLab or GitHub.
+
+    GitLab wins only when its connected server owns the remote; everything
+    else keeps the GitHub checks (sign-in first, then the remote).
+    """
+    if await asyncio.to_thread(gitlab_service.is_authenticated):
+        project_path = await get_project_path_async(request, project_id)
+        service, repo = await gitlab_forge_for_path(project_path)
+        if service and repo:
+            return service, repo
+    await check_github_auth()
+    return github_service, await get_repo_for_project(request, project_id)
+
+
+def forge_label(service: Any) -> str:
+    return "GitLab" if isinstance(service, GitLabService) else "GitHub"
+
+
 def _github_unavailable(action: str, exc: GitHubCliError) -> HTTPException:
-    """Map a gh transport failure to 502 — "unknown", not "no data"."""
-    detail = f"GitHub CLI could not {action}"
+    """Map a gh (or GitLab API) transport failure to 502: "unknown", not "no data"."""
+    source = "GitLab" if isinstance(exc, GitLabApiError) else "GitHub CLI"
+    if isinstance(exc, GitLabApiError):
+        action = action.replace("pull request", "merge request")
+    detail = f"{source} could not {action}"
     if exc.stderr:
         detail = f"{detail}: {exc.stderr}"
     else:
         detail = f"{detail}: {exc}"
-    logger.warning("gh unavailable while trying to %s: %s", action, exc)
+    logger.warning("%s unavailable while trying to %s: %s", source, action, exc)
     return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
 
@@ -231,6 +291,23 @@ async def get_github_status(
     """
     check_project_access(request, project_id)
 
+    if await asyncio.to_thread(gitlab_service.is_authenticated):
+        try:
+            project_path = await get_project_path_async(request, project_id)
+            gl_service, gl_repo = await gitlab_forge_for_path(project_path)
+        except HTTPException:
+            gl_service, gl_repo = None, None
+        if gl_service and gl_repo:
+            response = GitHubStatusResponse(authenticated=True, repo=gl_repo, provider="gitlab")
+            try:
+                response.repo_info = await asyncio.to_thread(gl_service.get_repo_info, gl_repo)
+                if response.repo_info is None:
+                    response.error = "GitLab cannot see this project with the saved token"
+            except GitHubCliError as e:
+                logger.warning("GitLab status: unavailable: %s", e)
+                response.error = f"GitLab is unavailable: {e.stderr or e}"
+            return response
+
     response = GitHubStatusResponse(
         authenticated=await asyncio.to_thread(github_service.is_authenticated)
     )
@@ -283,15 +360,14 @@ async def list_pull_requests(
         limit: Maximum number of PRs to return (default 30, max 100)
     """
     check_project_access(request, project_id)
-    await check_github_auth()
 
     if limit > 100:
         limit = 100
 
-    repo = await get_repo_for_project(request, project_id)
+    service, repo = await resolve_forge_for_project(request, project_id)
     try:
         pulls = await asyncio.to_thread(
-            github_service.list_pulls, repo, state=state, limit=limit
+            service.list_pulls, repo, state=state, limit=limit
         )
     except GitHubCliError as e:
         raise _github_unavailable("list pull requests", e)
@@ -310,11 +386,10 @@ async def get_pull_request(
     Get details of a specific pull request.
     """
     check_project_access(request, project_id)
-    await check_github_auth()
 
-    repo = await get_repo_for_project(request, project_id)
+    service, repo = await resolve_forge_for_project(request, project_id)
     try:
-        pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+        pr = await asyncio.to_thread(service.get_pull, repo, number)
     except GitHubCliError as e:
         raise _github_unavailable(f"read pull request #{number}", e)
 
@@ -342,22 +417,25 @@ async def create_pull_request(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    await check_github_auth()
 
     working_dir = None
     if body.session_id:
         from app.api.git_helpers import get_working_dir_async
         working_dir = await get_working_dir_async(project_id, session_id=body.session_id)
-        repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        gitlab_view, repo = await gitlab_forge_for_path(working_dir)
+        service = gitlab_view or github_service
         if not repo:
-            raise HTTPException(400, "Session checkout has no GitHub remote")
+            await check_github_auth()
+            repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+        if not repo:
+            raise HTTPException(400, "Session checkout has no GitHub or GitLab remote")
     else:
-        repo = await get_repo_for_project(request, project_id)
+        service, repo = await resolve_forge_for_project(request, project_id)
 
     try:
         t_gh_start = time.perf_counter()
         pr, error = await asyncio.to_thread(
-            lambda: github_service.create_pull(
+            lambda: service.create_pull(
                 repo=repo,
                 title=body.title,
                 body=body.body,
@@ -436,17 +514,16 @@ async def merge_pull_request(
     """
     t_start = time.perf_counter()
     check_project_access(request, project_id)
-    await check_github_auth()
 
     method = body.method if body else "merge"
 
-    repo = await get_repo_for_project(request, project_id)
-    await require_idle_pull_branches(project_id, repo, number)
+    service, repo = await resolve_forge_for_project(request, project_id)
+    await require_idle_pull_branches(project_id, repo, number, service=service)
 
     try:
         t_gh_start = time.perf_counter()
         success, error = await asyncio.to_thread(
-            github_service.merge_pull, repo, number, method=method
+            service.merge_pull, repo, number, method=method
         )
         t_gh_ms = (time.perf_counter() - t_gh_start) * 1000
     except Exception as e:
@@ -472,7 +549,7 @@ async def merge_pull_request(
     head = None
     url = None
     try:
-        merged_pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+        merged_pr = await asyncio.to_thread(service.get_pull, repo, number)
         if merged_pr:
             head = merged_pr.head_branch
             url = merged_pr.url
@@ -481,7 +558,7 @@ async def merge_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=number,
+        pr_number=number_for_fan_out(number, url),
         pr_url=url,
         pr_state="merged",
     )
@@ -500,14 +577,13 @@ async def close_pull_request(
     Close a pull request without merging.
     """
     check_project_access(request, project_id)
-    await check_github_auth()
 
-    repo = await get_repo_for_project(request, project_id)
-    await require_idle_pull_branches(project_id, repo, number)
+    service, repo = await resolve_forge_for_project(request, project_id)
+    await require_idle_pull_branches(project_id, repo, number, service=service)
 
     try:
         success, error = await asyncio.to_thread(
-            github_service.close_pull, repo, number
+            service.close_pull, repo, number
         )
     except Exception as e:
         logger.exception(f"Unhandled error closing pull request #{number}")
@@ -525,7 +601,7 @@ async def close_pull_request(
     head = None
     url = None
     try:
-        closed_pr = await asyncio.to_thread(github_service.get_pull, repo, number)
+        closed_pr = await asyncio.to_thread(service.get_pull, repo, number)
         if closed_pr:
             head = closed_pr.head_branch
             url = closed_pr.url
@@ -534,7 +610,7 @@ async def close_pull_request(
     await persist_pr_state(
         project_id=project_id,
         branch=head,
-        pr_number=number,
+        pr_number=number_for_fan_out(number, url),
         pr_url=url,
         pr_state="closed",
     )

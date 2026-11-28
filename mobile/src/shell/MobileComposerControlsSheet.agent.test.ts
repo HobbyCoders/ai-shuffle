@@ -26,7 +26,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	]),
 	appData: { loadSessions: vi.fn() }
 }));
-vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
+vi.mock('$lib/stores/auth.svelte', () => ({ githubAuthenticated: writable(false), sourceControlAuthenticated: writable(false), isAuthenticated: writable(true), isAdmin: writable(true) }));
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable(null),
 	git: writable({ projectId: null, sessionId: 'chat-1', worktreeId: null, hydrated: true, status: null })

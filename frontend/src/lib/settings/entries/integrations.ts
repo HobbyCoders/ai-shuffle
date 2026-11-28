@@ -1,5 +1,5 @@
 /**
- * Integrations: GitHub and API users.
+ * Integrations: GitHub, GitLab and API users.
  *
  * Only rows that render without data are registry entries (the shared
  * coverage test renders each collection with nothing loaded). Rows inside a
@@ -26,6 +26,7 @@ export function setApiUserSearchItems(users: { id: string; name: string }[]): vo
 }
 
 const github = { category: 'integrations' as const, item: 'github' };
+const gitlab = { category: 'integrations' as const, item: 'gitlab' };
 
 export function searchSource(): SearchItem[] {
 	return [
@@ -37,6 +38,14 @@ export function searchSource(): SearchItem[] {
 			target: github
 		},
 		{ title: 'Disconnect GitHub', where: 'Integrations, GitHub', keywords: 'gh sign out logout', target: github },
+		{ title: 'GitLab', where: 'Integrations, Accounts', keywords: 'git merge request self-hosted', target: gitlab },
+		{
+			title: 'Connect GitLab',
+			where: 'Integrations, GitLab',
+			keywords: 'personal access token pat server self-managed',
+			target: gitlab
+		},
+		{ title: 'Disconnect GitLab', where: 'Integrations, GitLab', keywords: 'sign out logout token', target: gitlab },
 		...apiUserItems.flatMap((u) => [
 			{
 				title: u.name,

@@ -50,6 +50,27 @@ async def test_persist_pr_state_writes_and_broadcasts(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_same_number_on_another_forge_leaves_the_other_chat_alone(mock_db):
+    """GitLab !9 and GitHub #9 share a number, not an identity."""
+    github_chat = _mk(project_id='p1', worktree_branch='feat/a')
+    database.update_session_pr_state(github_chat, pr_number=9, pr_url='https://github.com/o/r/pull/9', pr_state='open')
+    gitlab_chat = _mk(project_id='p2', worktree_branch='feat/b')
+    with patch('app.core.sync_engine.sync_engine') as sync:
+        sync.broadcast_session_updated = AsyncMock()
+        sync.broadcast_user_session_updated = AsyncMock()
+        await persist_pr_state(
+            session_id=gitlab_chat,
+            pr_number=9,
+            pr_url='https://gitlab.example.com/o/r/-/merge_requests/9',
+            pr_state='merged',
+        )
+    untouched = database.get_session(github_chat)
+    assert untouched['pr_url'] == 'https://github.com/o/r/pull/9'
+    assert untouched['pr_state'] == 'open'
+    assert database.get_session(gitlab_chat)['pr_state'] == 'merged'
+
+
+@pytest.mark.asyncio
 async def test_persist_merged_does_not_settle(mock_db):
     sid = _mk(project_id='p1', worktree_branch='feat/x')
     database.set_session_active(sid, True)

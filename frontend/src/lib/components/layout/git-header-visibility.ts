@@ -84,6 +84,21 @@ export function shouldShowGitPanelTrigger(input: GitPanelTriggerInput): boolean 
 }
 
 /**
+ * Whether the account for THIS checkout's forge is signed in. pr-state names
+ * the forge (`provider`); a GitLab sign-in must not enable Create PR on a
+ * GitHub branch, nor the reverse. Before pr-state has answered, either
+ * account counts, so the actions do not flicker off on every project switch.
+ */
+export function forgeSignedIn(
+	provider: string | null | undefined,
+	accounts: { github: boolean; gitlab: boolean }
+): boolean {
+	if (provider === 'gitlab') return accounts.gitlab;
+	if (provider === 'github') return accounts.github;
+	return accounts.github || accounts.gitlab;
+}
+
+/**
  * Resolve whether the header's GITHUB-backed actions (Create PR / Finish /
  * Ship It) should render. Requires everything the local gate requires, plus
  * usable GitHub access.

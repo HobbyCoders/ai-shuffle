@@ -847,8 +847,9 @@ async function _bgRefreshTick(): Promise<void> {
 		_lastRepoInfoLoad = Date.now();
 		const authed = await github.ensureRepoInfo(projectId).catch(() => null);
 		// `null` means "could not ask GitHub" (502) — an unknown, not a denial.
-		// Only a definitive verdict feeds the availability hysteresis.
-		if (typeof authed === 'boolean') git.setGithubAuth(authed);
+		// Only a definitive verdict feeds the availability hysteresis, and only
+		// GitHub's: a GitLab project's status answers for the GitLab account.
+		if (typeof authed === 'boolean' && _state.prState?.provider !== 'gitlab') git.setGithubAuth(authed);
 	}
 }
 

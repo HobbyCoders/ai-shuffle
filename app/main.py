@@ -738,6 +738,7 @@ app.include_router(security.router)
 app.include_router(github.router)
 app.include_router(github_inbox.router)
 app.include_router(github_repos.router)
+app.include_router(github_repos.gitlab_router)
 app.include_router(git.router)
 app.include_router(git_operations.router)
 # Before plugins.router: its catch-all /{plugin_id:path} would take /oauth/*.

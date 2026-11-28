@@ -114,4 +114,9 @@ export const anyCredential = createDerived(
 // The server's agent gate: license plus any ready provider (null on older backends).
 export const agentGate = createDerived(() => _state.status?.agent_gate ?? null);
 export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
+export const gitlabAuthenticated = createDerived(() => _state.status?.gitlab_authenticated ?? false);
+/** GitHub or GitLab is connected: gates branch controls and the PR actions. */
+export const sourceControlAuthenticated = createDerived(
+	() => (_state.status?.github_authenticated ?? false) || (_state.status?.gitlab_authenticated ?? false)
+);
 export const username = createDerived(() => _state.status?.username ?? null);

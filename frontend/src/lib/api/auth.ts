@@ -85,6 +85,30 @@ export async function getGithubAuthStatus(): Promise<{
 	return api.get('/auth/github/status');
 }
 
+// GitLab auth (personal access token; gitlab.com or a self-managed server)
+export interface GitlabAuthStatus {
+	authenticated: boolean;
+	user: string | null;
+	host: string | null;
+	/** Saved but not usable right now (token revoked, server unreachable). */
+	error: string | null;
+}
+
+export async function getGitlabAuthStatus(): Promise<GitlabAuthStatus> {
+	return api.get('/auth/gitlab/status');
+}
+
+export async function loginGitlabWithToken(
+	token: string,
+	host: string
+): Promise<{ success: boolean; user?: string; host?: string; error?: string }> {
+	return api.post('/auth/gitlab/login', { token, host });
+}
+
+export async function logoutGitlab(): Promise<{ success: boolean; error?: string }> {
+	return api.post('/auth/gitlab/logout');
+}
+
 // Onboarding
 export async function completeOnboarding(): Promise<{
 	status: string;

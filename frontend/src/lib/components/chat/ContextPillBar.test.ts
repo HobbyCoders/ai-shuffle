@@ -37,7 +37,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 });
 vi.mock('$lib/stores/auth.svelte', () => {
 	auth.store = writable(false);
-	return { githubAuthenticated: auth.store, isAuthenticated: writable(true), isAdmin: writable(true) };
+	return { githubAuthenticated: auth.store, sourceControlAuthenticated: auth.store, isAuthenticated: writable(true), isAdmin: writable(true) };
 });
 vi.mock('$lib/stores/git.svelte', () => ({
 	gitStatus: writable({ current_branch: 'main', is_git_repo: true }),

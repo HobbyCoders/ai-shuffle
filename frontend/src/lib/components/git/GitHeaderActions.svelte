@@ -352,7 +352,10 @@
 	$effect(() => {
 		if (watchRepo && shownPr?.number) void prWatches.load();
 	});
-	const lastKnownSuffix = $derived(prIsLastKnown ? ' (last known state — GitHub unreachable)' : '');
+	// GitLab projects say "GitLab" and "merge request"; everything else is GitHub.
+	const isGitlab = $derived(snapshot.prState?.provider === 'gitlab');
+	const forgeName = $derived(isGitlab ? 'GitLab' : 'GitHub');
+	const lastKnownSuffix = $derived(prIsLastKnown ? ` (last known state — ${forgeName} unreachable)` : '');
 
 	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
 	// optimistic `!== false` used for the header gate): for a reused/cleaned-up
@@ -586,7 +589,7 @@
 		{#if summary.label}<span class="btn-label" class:branch-label={!isGitRepo}>{summary.label}</span>{/if}
 		{#if summary.detail}<span class="btn-detail">{summary.detail}</span>{/if}
 		{#if prIsLastKnown}
-			<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
+			<span class="last-known-dot" aria-label="Last known PR state — {forgeName} unreachable"></span>
 		{/if}
 		<ChevronDown size={12} strokeWidth={1.6} class="trigger-chev" />
 		{/if}
@@ -692,7 +695,7 @@
 						</button>
 					</div>
 				{:else}
-					<span class="ship-off">{githubAvailable ? 'Nothing to ship' : 'Needs GitHub'}</span>
+					<span class="ship-off">{githubAvailable ? 'Nothing to ship' : 'Needs GitHub or GitLab'}</span>
 				{/if}
 			</div>
 
@@ -786,13 +789,14 @@
 					</div>
 				{:else if shownPr}
 					<div class="row-group">
-						<a class="row link" href={shownPr.url} target="_blank" rel="noopener noreferrer" aria-label="Open PR #{shownPr.number} on GitHub" title={shownPr.title}>
+						<a class="row link" href={shownPr.url} target="_blank" rel="noopener noreferrer" aria-label="Open {isGitlab ? 'MR !' : 'PR #'}{shownPr.number} on {forgeName}" title={shownPr.title}>
 							<GitPullRequest size={14} strokeWidth={1.5} />
-							<span class="row-text"><span class="row-title">Open pull request</span><span class="row-sub">#{shownPr.number} on GitHub</span></span>
+							<span class="row-text"><span class="row-title">{isGitlab ? 'Open merge request' : 'Open pull request'}</span><span class="row-sub">{isGitlab ? '!' : '#'}{shownPr.number} on {forgeName}</span></span>
 							<ExternalLink size={12} strokeWidth={1.5} class="row-trail" />
 						</a>
 					</div>
-					{#if sessionId}
+					<!-- Merge when green reads CI through gh: GitHub projects only. -->
+					{#if sessionId && !isGitlab}
 						<div class="row-group">
 							<button class="row" role="switch" aria-checked={mergeWhenGreen}
 								disabled={!!autoMerge.busy[sessionId]}
@@ -824,7 +828,7 @@
 					<div class="row-group off">
 						<button class="row" aria-label="Create PR" disabled>
 							<GitPullRequest size={14} strokeWidth={1.5} />
-							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">{!githubAvailable ? 'needs GitHub' : hasChanges ? 'commit first' : isOnDefaultBranch ? `on ${defaultBranch}` : 'nothing to open'}</span></span>
+							<span class="row-text"><span class="row-title">Create PR</span><span class="row-sub">{!githubAvailable ? 'needs GitHub or GitLab' : hasChanges ? 'commit first' : isOnDefaultBranch ? `on ${defaultBranch}` : 'nothing to open'}</span></span>
 						</button>
 					</div>
 				{/if}

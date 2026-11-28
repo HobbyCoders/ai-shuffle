@@ -166,7 +166,11 @@ class PrStateResponse(BaseModel):
       whatever the client last rendered; do NOT render "no PR exists".
     """
     current_branch: Optional[str] = None
+    # True when a signed-in forge (GitHub, or GitLab on its connected server)
+    # owns this checkout's origin. The name predates GitLab support.
     has_github: bool = False
+    # Which forge answered: "github" or "gitlab".
+    provider: str = "github"
     open_pr: Optional[OpenPrInfo] = None
     # Original head of the latest merged PR, not the squash commit on the base.
     merged_head_sha: Optional[str] = None

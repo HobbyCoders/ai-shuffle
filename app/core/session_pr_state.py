@@ -119,6 +119,7 @@ def _collect_session_ids(
     project_id: Optional[str] = None,
     branch: Optional[str] = None,
     pr_number: Optional[int] = None,
+    pr_url: Optional[str] = None,
 ) -> list[str]:
     from app.db import database
 
@@ -133,6 +134,10 @@ def _collect_session_ids(
     _add(session_id)
     if pr_number is not None:
         for row in database.list_sessions_by_pr_number(pr_number):
+            # Numbers repeat across repositories and forges (GitHub #1, GitLab
+            # !1): two known URLs must agree.
+            if pr_url and row.get("pr_url") and row["pr_url"] != pr_url:
+                continue
             _add(row.get("id"))
     if project_id and branch:
         for row in database.list_sessions_for_branch(project_id, branch):
@@ -233,6 +238,7 @@ async def persist_pr_state(
             project_id=project_id,
             branch=branch,
             pr_number=pr_number,
+            pr_url=pr_url,
         )
         listing_ids: list[str] = []
         if pr_number is not None:
@@ -533,10 +539,11 @@ _MAX_LISTED_REFRESH = 10
 
 
 def _repo_owns_url(repo: str, url: Optional[str]) -> bool:
-    """Whether a PR URL belongs to ``owner/name`` (no URL: assume it does)."""
+    """Whether a PR (or GitLab MR) URL belongs to ``repo`` (no URL: assume it does)."""
     if not url:
         return True
-    return f"/{repo.lower()}/pull/" in url.lower()
+    low = url.lower()
+    return f"/{repo.lower()}/pull/" in low or f"/{repo.lower()}/-/merge_requests/" in low
 
 
 async def _refresh_listed_open_prs(
@@ -650,7 +657,12 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
             return False
 
         try:
-            repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
+            from app.api.github import gitlab_forge_for_path
+
+            gitlab_view, repo = await gitlab_forge_for_path(working_dir)
+            forge: Any = gitlab_view or github_service
+            if not repo:
+                repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
         except Exception:
             logger.debug("PR reconcile: repo lookup failed for %s", session_id, exc_info=True)
             return False
@@ -661,11 +673,11 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
         try:
             if branch:
                 pr = await asyncio.to_thread(
-                    _find_pull_for_branch, github_service, repo, branch
+                    _find_pull_for_branch, forge, repo, branch
                 )
                 if pr is None and checkout_available:
                     pr = await asyncio.to_thread(
-                        find_pull_for_checkout_fallback, github_service, repo, branch, working_dir,
+                        find_pull_for_checkout_fallback, forge, repo, branch, working_dir,
                         session_id=session_id, project_id=checkout_project_id,
                         bypass_negative_cache=force, match_content=True,
                     )
@@ -673,7 +685,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                     and _repo_owns_url(repo, session.get("pr_url"))):
                 # Discovery may miss a renamed branch. A known PR remains
                 # refreshable without consulting the refused checkout's HEAD.
-                pr = await asyncio.to_thread(github_service.get_pull, repo, int(pr_number))
+                pr = await asyncio.to_thread(forge.get_pull, repo, int(pr_number))
         except GitHubCliError:
             logger.debug("PR reconcile: gh lookup failed for %s", session_id, exc_info=True)
             return False
@@ -699,7 +711,7 @@ async def reconcile_session_pr(session_id: str, *, force: bool = False) -> Optio
                 )
         if listed_open:
             ok = await _refresh_listed_open_prs(
-                github_service, repo, session, pr.number if pr is not None else None
+                forge, repo, session, pr.number if pr is not None else None
             ) and ok
         return ok
     except Exception:
