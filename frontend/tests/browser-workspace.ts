@@ -212,6 +212,9 @@ class FixtureSocket {
 const nativeFetch = window.fetch.bind(window);
 if (!live) window.fetch = async (input, init) => {
 	const url = String(input);
+	// A worker with no browser extension connected: the chat uses the built-in browser.
+	if (url.endsWith('/browser/target'))
+		return new Response(JSON.stringify({ browser_id: null, assigned: false, browsers: [], remote: false }), { status: 200 });
 	if (!url.endsWith('/browser/panel/start')) return nativeFetch(input, init);
 	starts.push({ url, method: init?.method, credentials: init?.credentials, body: init?.body });
 	if (holdStart) await new Promise<void>(resolve => { releaseStart = resolve; });
