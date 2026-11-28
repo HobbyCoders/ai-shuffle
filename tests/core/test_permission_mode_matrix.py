@@ -125,6 +125,13 @@ def test_mode_approves_without_prompt(mode, tool, approves):
     ({"file_path": ".env"}, PROJECT, None),
     ({"file_path": ".bashrc"}, PROJECT, None),
     ({"notebook_path": "../x.ipynb"}, PROJECT, None),
+], ids=[
+    # Named here because PROJECT sits in the temp folder, which differs on
+    # every CI runner: a test id built from it gives each backend shard its
+    # own list of tests, and the backend gate refuses the run.
+    "no-input", "empty-input", "no-cwd", "empty-cwd",
+    "outside-absolute", "outside-relative",
+    "git-hook", "claude-settings", "fluid-config", "env-file", "bashrc", "notebook-outside",
 ])
 def test_accept_edits_does_not_approve_an_edit_it_cannot_place_in_the_project(
     tool_input, cwd, extra_roots,
@@ -613,7 +620,7 @@ async def test_unwatched_native_prompts_are_left_to_the_engine_timeout(mode, too
     os.path.join(tempfile.gettempdir(), "elsewhere", "x.py"),
     os.path.join(PROJECT, ".git", "hooks", "pre-commit"),
     os.path.join(PROJECT, ".env"),
-])
+], ids=["outside", "git-hook", "env-file"])  # fixed: the paths hold the temp folder
 async def test_unwatched_native_accept_edits_leaves_an_edit_outside_the_project(path):
     """Nobody is watching, and the mode does not cover this file: the request
     surfaces and fluid denies it after ``permission_timeout``, as for Bash."""
