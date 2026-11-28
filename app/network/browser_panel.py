@@ -175,6 +175,9 @@ async def relay(websocket: WebSocket, upstream, device_id: str | None = None) ->
 async def forward_websocket(
     websocket: WebSocket, device_id: str, session_id: str
 ) -> None:
+    # The owning worker refused this viewer (the chat uses someone's own
+    # browser): pass that on as final, not as an outage to retry.
+    refused = False
     try:
         ctx, link = await peer_link(device_id)
         async with httpx.AsyncClient(follow_redirects=False) as client:
@@ -206,11 +209,16 @@ async def forward_websocket(
                     if exc.status_code == 401 and attempt == 0:
                         link.token = None
                         continue
+                    if exc.status_code == 403:
+                        refused = True
+                        return
                     raise
     except ConnectionClosed as exc:
+        if exc.rcvd is not None and exc.rcvd.code == 4003:
+            refused = True
         # Token renewal and ownership changes deliberately reconnect. They are
         # not outages and must not leave an error banner over a recovered feed.
-        if exc.rcvd is None or exc.rcvd.code not in (1000, 1001, 1013):
+        elif exc.rcvd is None or exc.rcvd.code not in (1000, 1001, 1013):
             with suppress(RuntimeError, WebSocketDisconnect):
                 await websocket.send_json({"type": "error", "message": UNAVAILABLE})
     except (
@@ -228,7 +236,10 @@ async def forward_websocket(
     finally:
         # 1013 permits the normal panel reconnect; never attach a local fallback.
         with suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.close(code=1013, reason="Reconnect to the session's worker")
+            if refused:
+                await websocket.close(code=4003, reason="Only this browser's owner can open it")
+            else:
+                await websocket.close(code=1013, reason="Reconnect to the session's worker")
 
 
 async def require_owned(session_id: str) -> None:
@@ -241,7 +252,7 @@ async def require_owned(session_id: str) -> None:
 
 
 async def serve_peer(websocket: WebSocket, session_id: str) -> None:
-    from app.api.browser_panel import refuser, serve_browser_panel
+    from app.api.browser_panel import serve_watched_panel
     from app.core import browser_extension
 
     # Peer credentials are accepted only here, never on the public browser API.
@@ -261,10 +272,10 @@ async def serve_peer(websocket: WebSocket, session_id: str) -> None:
 
     # The route refuses a chat already on someone's own browser; this worker
     # cannot tell who watches through a peer, so a forwarded panel is closed
-    # too if the chat switches to one while it is open.
+    # too if the chat switches to one while it is open, or while it was still
+    # being admitted above.
     async def serve():
-        with browser_extension.panel_viewer(session_id, browser_extension.no_browser, refuser(websocket)):
-            await serve_browser_panel(websocket, session_id)
+        await serve_watched_panel(websocket, session_id, browser_extension.no_browser)
 
     tasks = [
         asyncio.create_task(serve()),

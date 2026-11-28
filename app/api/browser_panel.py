@@ -340,8 +340,18 @@ async def browser_panel_websocket(
         if owner:
             await remote_panel.forward_websocket(websocket, owner, session_id)
             return
+        await serve_watched_panel(websocket, session_id, may_use)
+
+
+async def serve_watched_panel(websocket: WebSocket, session_id: str, may_use) -> None:
+    """Serve the panel as a registered viewer, refused (4003) before any panel
+    data if the chat already uses a browser this viewer may not watch."""
+    try:
         with browser_extension.panel_viewer(session_id, may_use, refuser(websocket)):
             await serve_browser_panel(websocket, session_id)
+    except browser_extension.ViewerRefused:
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close(code=4003, reason="Only this browser's owner can open it")
 
 
 _closing: set = set()

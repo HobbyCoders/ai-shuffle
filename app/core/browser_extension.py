@@ -224,13 +224,25 @@ def may_use_chat_browser(session_id: str, may_use: MayUse) -> bool:
 _panel_viewers: Dict[str, Dict[int, tuple]] = {}
 
 
+class ViewerRefused(Exception):
+    """The chat uses a browser this panel viewer may not watch."""
+
+
 @contextlib.contextmanager
 def panel_viewer(session_id: str, may_use: MayUse, close: Callable[[], None]) -> Iterator[None]:
     """Hold an open Browser panel viewer; it is closed if the chat moves to a
-    browser this viewer may not use."""
+    browser this viewer may not use.
+
+    Raises :class:`ViewerRefused` before yielding if the chat already uses
+    such a browser. The check runs after registering, so a switch that lands
+    while the viewer was still connecting is caught by one side or the other:
+    the setter writes the target before it closes registered viewers.
+    """
     key = object()
     _panel_viewers.setdefault(session_id, {})[id(key)] = (may_use, close)
     try:
+        if not may_use_chat_browser(session_id, may_use):
+            raise ViewerRefused()
         yield
     finally:
         viewers = _panel_viewers.get(session_id, {})
