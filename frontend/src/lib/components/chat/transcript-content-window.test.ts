@@ -236,6 +236,34 @@ describe('nested transcript mount budget', () => {
   expect(window.visibleRange.start).toBe(0);
   expect(window.windowAround(50)).toEqual({ start: 50, end: 51 });
  });
+ it('jumping to a prompt mounts the reply after it even when that reply alone is over the budget', () => {
+  // Turn 1 of a long chat: a short prompt, then a six-hour reply.
+  const costs = [70, 20000, 70, 300, 70, 300];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.setItemCount(costs.length);
+  expect(window.visibleRange).toEqual({ start: 2, end: 6 });
+  // The prompt is never left on its own above "Show newer messages".
+  const pair = window.windowAround(0);
+  expect(pair).toEqual({ start: 0, end: 2 });
+  // A turn ending or a new row arriving in the running chat keeps the pair.
+  window.onStreamingChange(true);
+  expect(window.setItemCount(costs.length, { followTail: false })).toBe(pair);
+  costs.push(70);
+  expect(window.setItemCount(costs.length, { followTail: false })).toBe(pair);
+  // Paging on from it works as before, and releases it.
+  expect(window.extendNewer()).toEqual({ start: 2, end: 7 });
+  expect(window.setItemCount(costs.length, { followTail: false })).toEqual({ start: 2, end: 7 });
+  expect(window.toTail()).toEqual({ start: 2, end: 7 });
+  // The same holds mid-transcript: older rows do not take the reply's place.
+  const mid = [300, 70, 20000, 70];
+  const later = createTranscriptWindow({ cost: i => mid[i], budget: 12000 });
+  later.setItemCount(mid.length);
+  expect(later.windowAround(1)).toEqual({ start: 1, end: 3 });
+  // A one-row window has no room for it.
+  const single = createTranscriptWindow({ cap: 1, cost: i => costs[i], budget: 12000 });
+  single.setItemCount(costs.length);
+  expect(single.windowAround(0)).toEqual({ start: 0, end: 1 });
+ });
 
  it('pins the selected span in either direction without accumulating mounted history', () => {
   let pinned: TranscriptRange | null = { start: 94, end: 96 };

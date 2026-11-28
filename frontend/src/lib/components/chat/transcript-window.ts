@@ -121,6 +121,10 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	const weighted = !!cost && Number.isFinite(budget);
 	const charge = (index: number) => Math.max(1, cost?.(index) ?? 1);
 	let selectionLimited = false;
+	/** A jump that mounted the reply after its target over the budget (see
+	 * windowAround). Automatic repricing keeps that pair as it is; any other
+	 * navigation releases it. */
+	let jumpPair = false;
 	function commit(start: number, end: number, readingIndex?: number | null): TranscriptRange {
 		selectionLimited = false;
 		const selected = getPinnedRange?.();
@@ -186,14 +190,20 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		return { start, end };
 	}
 	function move(start: number): TranscriptRange {
+		jumpPair = false;
 		const next = startingRange(start);
 		return commit(next.start, next.end);
 	}
 	function endingAt(end: number): TranscriptRange {
+		jumpPair = false;
 		const next = endingRange(end);
 		return commit(next.start, next.end);
 	}
 	function reprice(checkReadingKey = false): TranscriptRange {
+		// The reader asked for this prompt and its reply. Neither fits the usual
+		// forward fill, so repricing would drop the prompt again at the next turn
+		// boundary of a chat that is still running.
+		if (jumpPair && range.end <= count && range.end - range.start === 2 && charge(range.start) <= budget) return range;
 		const next = startingRange(range.start);
 		// Most streaming updates keep the entire mounted slice. Do not
 		// force a DOM/layout read on each token just to rediscover that fact.
@@ -214,6 +224,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 	function toTail(): TranscriptRange { followsTail = true; return endingAt(count); }
 	function extendOlder({ preserveReading = false }: { preserveReading?: boolean } = {}): TranscriptRange {
 		followsTail = false;
+		jumpPair = false;
 		if (!weighted && !preserveReading) return move(range.start - step);
 		if (!range.start) return range;
 		// Scroll-edge paging is speculative, not permission to replace what the
@@ -255,6 +266,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		extendOlder,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
+			jumpPair = false;
 			const previous = range;
 			let next = startingRange(range.start + shift());
 			if (weighted && previous.end < count && (next.end <= previous.end || next.start >= previous.end)) {
@@ -272,6 +284,14 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 			followsTail = false;
 			if (!weighted) return move(index - Math.floor(cap / 2));
 			let start = index, end = index + 1, used = charge(index);
+			// A jump lands on a prompt, and the reader came for what follows it.
+			// When the reply alone is over the budget it would otherwise be left
+			// out, and the view shows a bare prompt above "Show newer messages".
+			// That reply is mounted on its own anyway once asked for, so admit the
+			// one row after a target that fits, whatever it costs, before spending
+			// the rest on neighbours. An oversize target still stands alone.
+			const paired = used <= budget && end < count && cap > 1;
+			if (paired) used += charge(end++);
 			let left = true, right = true;
 			while (end - start < cap && (left || right)) {
 				if (left && start > 0 && used + charge(start - 1) <= budget) { used += charge(--start); }
@@ -280,7 +300,9 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 				if (right && end < count && used + charge(end) <= budget) { used += charge(end++); }
 				else right = false;
 			}
-			return commit(start, end);
+			const committed = commit(start, end);
+			jumpPair = paired && used > budget && committed.start === index && committed.end === index + 2;
+			return committed;
 		},
 		/** Saved scrollTop is relative to this exact bounded range, not cap/2. */
 		restoreRange(saved: TranscriptRange): TranscriptRange { followsTail = false; return move(saved.start); },

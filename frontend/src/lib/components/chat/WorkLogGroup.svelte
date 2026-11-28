@@ -74,6 +74,13 @@
 		pagingEnabled?: boolean;
 		/** Release transcript following before a reader changes a fold; false vetoes stale surfaces. */
 		onBeforeToggle?: (event: MouseEvent) => boolean | void;
+		/** The live turn's status line ("Working for 12s"), drawn in the turn's action slot. */
+		activity?: Snippet;
+		/** `activity` has something to say now. Between tool calls it does; while
+		 *  a call runs, the call's own row stands on the same line instead. */
+		activityShown?: boolean;
+		/** This group ends the transcript: it never gets shorter while it does. */
+		holdHeight?: boolean;
 	}
 
 	let {
@@ -94,6 +101,9 @@
 		revealMessageId = null,
 		pagingEnabled = true,
 		onBeforeToggle,
+		activity,
+		activityShown = false,
+		holdHeight = false,
 		observeTurnAnchor = () => {}
 	}: Props = $props();
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
@@ -252,22 +262,33 @@
 
 	let previousMode = $state<'live' | 'settled' | null>(null);
 
-	// Reserve space below the live group: the active tool row is replaced every
-	// time the next call starts, and a shorter successor would drag the whole
-	// transcript below it up and down for the length of the turn. Hold the
-	// tallest height seen while live as a min-height; the reservation releases
-	// when the turn settles.
+	// Text that is on screen stays where it is. A turn's rows are replaced as it
+	// runs: a finished call joins the fold above it, narration folds when the
+	// next paragraph starts, the Working line gives way to the next call. Each
+	// of those makes the group shorter, and a shorter group at the end of the
+	// transcript pulls everything under it up (or, for a reader at the bottom,
+	// pushes everything above it down). So the group holds the tallest height
+	// it has had as a min-height, and what replaces a row is drawn in the room
+	// that row left.
 	//
 	// Measure an inner wrapper, not the section. The section carries the
-	// min-height, so observing it can never see a shrink — collapse would
-	// leave a hole. Skip the open fold: inspecting history is not a tool
-	// swap, and that taller height must not become the floor. If the same
-	// tail row shrinks (the user collapsed a tool or worker), drop the
-	// floor to the new content height. A shorter successor with a new id
-	// still keeps the peak, which is the swap-jitter case.
+	// min-height, so observing it can never see a shrink. A fold the reader
+	// opened is skipped: inspecting history is not the turn's own work, and
+	// that taller height must not become the floor.
 	//
-	// A live turn rendered as runs keeps every row in place (nothing is
-	// swapped), so it reserves nothing.
+	// A turn drawn as runs (`sequence`) holds its height for as long as it ends
+	// the transcript (`holdHeight`); the next turn releases it. It holds only
+	// HOLD_SLACK_PX: what is held is empty room under the newest text, and that
+	// must stay a band at the foot of the view. A run that folds away more than
+	// that (a long opening line) is given up at once, and the transcript
+	// re-places its reader as it always has (readingFloorReserve in MessageArea:
+	// holding a whole collapsed run left a follower looking at an empty screen).
+	//
+	// The older shape (folded rows and a visible tail) holds only while live.
+	// There, if the same tail row shrinks (the reader collapsed a tool or a
+	// worker), the floor drops to the new height; a shorter successor with a
+	// new id keeps the peak.
+	const HOLD_SLACK_PX = 180;
 	let sectionEl = $state<HTMLElement | null>(null);
 	let contentEl = $state<HTMLElement | null>(null);
 	let reservedPx = $state(0);
@@ -277,11 +298,55 @@
 		return entries.map((entry) => entry.message.id ?? String(entry.index)).join('\0') || '∅';
 	}
 
+	/** Written through to the element as well: the transcript reads this layout
+	 *  in the commit that changed it, ahead of the binding's next update. */
+	function setFloor(px: number) {
+		reservedPx = px;
+		if (sectionEl) sectionEl.style.minHeight = px > 0 ? `${px}px` : '';
+	}
+
+	/** Content height and mode at the last measure, to tell a settle apart. */
+	let measuredPx = 0;
+	let measuredMode: 'live' | 'settled' | null = null;
+
+	/** Runs shape: the turn's own growth raises the floor; a shrink within the
+	 *  slack is held; a larger one is given up. Settling is passed through: the
+	 *  runs merge into one fold above the answer, and the answer is what the
+	 *  reader is looking at, so the room under it stays as it was and the
+	 *  transcript places the shorter turn as it always has. */
+	function holdRuns() {
+		if (!contentEl || !holdHeight) return;
+		const height = contentEl.getBoundingClientRect().height;
+		const held = untrack(() => reservedPx);
+		const settling = measuredMode === 'live' && mode === 'settled';
+		if (height > held) {
+			if (mode === 'live' && !open && openRuns.size === 0) setFloor(height);
+		} else if (settling && height < measuredPx) {
+			setFloor(Math.max(height, held - (measuredPx - height)));
+		} else if (held - height > HOLD_SLACK_PX) {
+			setFloor(height);
+		}
+		measuredPx = height;
+		measuredMode = mode;
+	}
+
+	// Right after this turn's rows change, ahead of the resize observer below:
+	// a large fold must already be given up when the transcript re-places a
+	// follower in that same commit.
+	$effect(() => {
+		void sequence; void activityShown;
+		if (sequence.length > 0) holdRuns();
+	});
+
 	$effect(() => {
 		if (!contentEl || typeof ResizeObserver === 'undefined') return;
 		const el = contentEl;
 		const apply = () => {
-			if (mode !== 'live' || open || sequence.length > 0) return;
+			if (sequence.length > 0) {
+				holdRuns();
+				return;
+			}
+			if (mode !== 'live' || open) return;
 			const height = el.getBoundingClientRect().height;
 			const key = tailIdentity(tail);
 			if (height > reservedPx) {
@@ -298,9 +363,11 @@
 	});
 
 	$effect(() => {
-		if (mode !== 'live' || sequence.length > 0) {
+		if (sequence.length > 0 ? !holdHeight : mode !== 'live') {
 			reservedPx = 0;
 			reservedTailKey = '';
+			measuredPx = 0;
+			measuredMode = null;
 		}
 	});
 
@@ -510,7 +577,7 @@
 	bind:this={sectionEl}
 	class="worklog"
 	class:is-settled={mode === 'settled'}
-	style:min-height={mode === 'live' && reservedPx > 0 ? `${reservedPx}px` : undefined}
+	style:min-height={reservedPx > 0 && (mode === 'live' || sequence.length > 0) ? `${reservedPx}px` : undefined}
 	aria-label="Work log"
 	data-work-log-mode={mode}
 >
@@ -644,6 +711,11 @@
 				Show fewer log entries
 			</button>
 		{/if}
+		{#if activity && activityShown}
+			<!-- The turn's action slot: the running call's row, or this line
+			     between calls, on the same line. -->
+			<div class="action-slot">{@render activity()}</div>
+		{/if}
 	{:else if open}
 		<!-- Legacy shape (folded rows + visible tail, no ordered sequence). -->
 		<button
@@ -733,6 +805,13 @@
 
 	.sequence-row {
 		min-width: 0;
+	}
+
+	/* A running call's row is 31px tall, 12px under the row above it. The
+	   Working line takes exactly that place, so the two swap in one slot. */
+	.action-slot {
+		min-height: 31px;
+		margin-top: 11px;
 	}
 
 	.sequence-row.is-prose {

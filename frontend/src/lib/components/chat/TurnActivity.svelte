@@ -43,9 +43,11 @@
 		queued?: boolean;
 		/** The model's latest live thinking estimate and when it arrived. */
 		thinking?: { tokens: number; at: number } | null;
+		/** Draw the line under it. Off where a rule already follows (the tasks list). */
+		ruled?: boolean;
 	}
 
-	let { startedAt = null, compaction = null, working = true, queued = false, thinking = null }: Props = $props();
+	let { startedAt = null, compaction = null, working = true, queued = false, thinking = null, ruled = true }: Props = $props();
 	let now = $state(Date.now());
 	let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -86,6 +88,7 @@
 {#if shownCompaction || working}
 <div
 	class="turn-activity"
+	class:ruled
 	class:compacting={shownCompaction?.phase === 'running'}
 	class:compaction-failed={shownCompaction?.phase === 'failed'}
 	role="status"
@@ -104,12 +107,17 @@
 		gap: 8px;
 		min-height: 30px;
 		padding: 3px 8px 7px;
-		border-bottom: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
+		/* Always 1px, so the line is the same height with or without its rule. */
+		border-bottom: 1px solid transparent;
 		font-size: 12.5px;
 		line-height: 1.5;
 		font-variant-numeric: tabular-nums;
 		color: var(--muted-foreground);
 		animation: activity-enter 180ms ease-out both;
+	}
+
+	.turn-activity.ruled {
+		border-bottom-color: color-mix(in oklch, var(--border) 72%, transparent);
 	}
 
 	.activity-dot {
