@@ -11,14 +11,16 @@ remote. It talks to GitLab's REST API (v4) directly; no ``glab`` CLI.
 Where the token lives
 ---------------------
 ``<data dir>/gitlab/account.json`` holds the server URL, the token and the
-account name; ``<data dir>/gitlab/git-credential`` holds the same token in
-git's credential format. Both are owner-only files on POSIX, the same posture
-as gh's own ``hosts.yml``. Signing in registers a host-scoped git credential
-helper (``credential.<server>.helper``) in the user's global git config that
-only answers ``get`` from that file, so ``git clone/fetch/push`` over HTTPS
-works for the app and for agents' shells, and a failed push never erases the
-saved token (git's ``store`` helper would). Credential helpers for other
-hosts are left alone.
+account name; ``<data dir>/gitlab/git-credential-<server hash>`` holds the
+same token in git's credential format. Both are owner-only files on POSIX,
+the same posture as gh's own ``hosts.yml``. ``<data dir>/gitlab/gitconfig``
+holds a git credential helper scoped to that server
+(``credential.<server>.helper``) that only answers ``get`` from that file,
+and signing in adds one ``include.path`` line for it to the user's global git
+config. So ``git clone/fetch/push`` over HTTPS works for the app and for
+agents' shells, a failed push never erases the saved token (git's ``store``
+helper would), and disconnecting deletes the app's own files without
+rewriting any entry the owner wrote.
 
 Merge requests are returned as :class:`PullRequest` objects with gh's
 spelling of states (``OPEN``/``MERGED``/``CLOSED``) so every caller that
@@ -27,6 +29,8 @@ already understands pull requests needs no GitLab branch.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -124,6 +128,18 @@ class GitLabService:
         self._repos_lock = threading.Lock()
         self._repos_cache = TTLCache(ttl=USER_REPOS_TTL_SECONDS, max_entries=1, name="gitlab-user-repos")
         self._project_cache = TTLCache(ttl=60.0, max_entries=64, name="gitlab-projects")
+        self._pinned_host: Optional[str] = None
+
+    def pinned(self) -> "GitLabService":
+        """A view bound to the server connected now (same caches and locks).
+
+        A multi-step operation (Ship It: push, describe, create, merge) holds
+        this view, so reconnecting to another server mid-way makes its next
+        request fail instead of acting on a same-named project there.
+        """
+        view = copy.copy(self)
+        view._pinned_host = self.host() or ""
+        return view
 
     # ------------------------------------------------------------------ config
 
@@ -142,8 +158,21 @@ class GitLabService:
         return self.config_dir / "account.json"
 
     @property
-    def credential_file(self) -> Path:
-        return self.config_dir / "git-credential"
+    def git_config_file(self) -> Path:
+        """App-owned git config holding the credential helper; the owner's
+        global config only gains an ``include.path`` line pointing here."""
+        return self.config_dir / "gitconfig"
+
+    def credential_file_for(self, host: str) -> Path:
+        """The token in git's credential format, one file per server, so a
+        helper written for one server can never answer with another's token."""
+        digest = hashlib.sha256(host.encode("utf-8")).hexdigest()[:16]
+        return self.config_dir / f"git-credential-{digest}"
+
+    @property
+    def credential_file(self) -> Optional[Path]:
+        account = self.load_account()
+        return self.credential_file_for(account["host"]) if account else None
 
     def load_account(self) -> Optional[Dict[str, str]]:
         """The saved ``{host, token, user}``, or None when not signed in."""
@@ -187,13 +216,29 @@ class GitLabService:
 
     # ------------------------------------------------------------- git helper
 
-    def _helper_command(self) -> str:
-        path = self.credential_file.as_posix()
+    def _helper_command(self, host: str) -> str:
+        path = self.credential_file_for(host).as_posix()
         if "'" in path:
             raise RuntimeError("The app data folder path contains a quote; git credentials cannot be configured.")
         # Answers only "get": a rejected push makes git call "erase", which
         # must not delete the saved token.
         return f"!f() {{ test \"$1\" = get && cat '{path}'; }}; f"
+
+    def _git_config_text(self, host: str) -> str:
+        """The app-owned config: a helper scoped to *host*, nothing else."""
+        def quoted(value: str) -> str:
+            return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        parts = urlsplit(host)
+        return (
+            "# Written by AI Shuffle for its GitLab connection; removed on disconnect.\n"
+            f"[credential {quoted(f'{parts.scheme}://{parts.netloc}')}]\n"
+            # The empty helper first clears helpers configured before this
+            # file is included (a system credential manager would otherwise
+            # answer first); the owner's own entries are never rewritten.
+            "\thelper =\n"
+            f"\thelper = {quoted(self._helper_command(host))}\n"
+        )
 
     def _git_config(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -201,28 +246,28 @@ class GitLabService:
             capture_output=True, text=True, timeout=10, env=scrub_child_env(),
         )
 
-    def _helper_key(self, host: str) -> str:
-        parts = urlsplit(host)
-        return f"credential.{parts.scheme}://{parts.netloc}.helper"
+    def _include_registered(self) -> bool:
+        current = self._git_config("--get-all", "include.path")
+        return self.git_config_file.as_posix() in (current.stdout or "").splitlines()
 
-    def _configure_git(self, host: str) -> None:
-        key = self._helper_key(host)
-        self._git_config("--unset-all", key)  # exit 5 when unset: fine
-        # An empty helper first clears helpers inherited from lower-priority
-        # config (a system credential manager would otherwise prompt first).
-        for value in ("", self._helper_command()):
-            result = self._git_config("--add", key, value)
-            if result.returncode:
-                raise RuntimeError("git config failed")
+    def _register_include(self) -> None:
+        if self._include_registered():
+            return
+        result = self._git_config("--add", "include.path", self.git_config_file.as_posix())
+        if result.returncode:
+            raise RuntimeError("git config failed")
 
-    def _unconfigure_git(self, host: str) -> None:
-        key = self._helper_key(host)
-        current = self._git_config("--get-all", key)
-        values = [v for v in (current.stdout or "").splitlines()]
-        ours = self.credential_file.as_posix()
-        # Only remove what sign-in added: our helper and its blank reset.
-        if values and all(v == "" or ours in v for v in values):
-            self._git_config("--unset-all", key)
+    def _unregister_include(self) -> None:
+        """Remove only our ``include.path`` line. Best effort: once the
+        included file is gone git ignores a dangling include."""
+        if self._include_registered():
+            self._git_config("--fixed-value", "--unset-all", "include.path", self.git_config_file.as_posix())
+
+    def _credential_files(self) -> List[Path]:
+        try:
+            return sorted(self.config_dir.glob("git-credential-*"))
+        except OSError:
+            return []
 
     # -------------------------------------------------------------- sign in/out
 
@@ -267,35 +312,67 @@ class GitLabService:
         except GitLabApiError as exc:
             return {"success": False, "error": f"Could not validate the token: {exc}"}
         username = str(user["username"])
+        credential_file = self.credential_file_for(host)
         with self._lock:
-            previous = self.load_account()
+            # What a failure must put back. The account file is written last,
+            # so the app never reports Connected for an unfinished sign-in.
+            files = (credential_file, self.git_config_file, self.account_file)
+            backups = {path: self._read_or_none(path) for path in files}
+            was_registered = self._include_registered()
             try:
+                self._write_private(credential_file, f"username={username}\npassword={token}\n")
+                self._write_private(self.git_config_file, self._git_config_text(host))
+                self._register_include()
                 self._write_private(
                     self.account_file,
                     json.dumps({"host": host, "token": token, "user": username}),
                 )
-                self._write_private(self.credential_file, f"username={username}\npassword={token}\n")
-                if previous and previous["host"] != host:
-                    self._unconfigure_git(previous["host"])
-                self._configure_git(host)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GitLab sign-in could not be saved (%s)", type(exc).__name__)
-                return {"success": False, "error": "GitLab signed in, but the token or git credentials could not be saved. Retry connecting."}
+                self._restore(backups)
+                if not was_registered:
+                    self._unregister_include()
+                return {"success": False, "error": "GitLab accepted the token, but it or the git credentials could not be saved. Retry connecting."}
+            # The included config now names only this server; drop the
+            # previous server's token.
+            for stale in self._credential_files():
+                if stale != credential_file:
+                    stale.unlink(missing_ok=True)
         self.invalidate_repos_cache()
         self._project_cache.invalidate()
         return {"success": True, "user": username, "host": host}
 
+    @staticmethod
+    def _read_or_none(path: Path) -> Optional[bytes]:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def _restore(self, backups: Dict[Path, Optional[bytes]]) -> None:
+        for path, data in backups.items():
+            try:
+                if data is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    self._write_private(path, data.decode("utf-8"))
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not restore %s after a failed GitLab sign-in", path.name)
+
     def logout(self) -> Dict[str, Any]:
         with self._lock:
-            account = self.load_account()
             try:
-                if account:
-                    self._unconfigure_git(account["host"])
-                self.credential_file.unlink(missing_ok=True)
+                # The account goes first: from here on the app is signed out
+                # even if a later step fails, and git's helper goes with its
+                # config file (a dangling include.path is ignored by git).
                 self.account_file.unlink(missing_ok=True)
+                self.git_config_file.unlink(missing_ok=True)
+                for path in self._credential_files():
+                    path.unlink(missing_ok=True)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GitLab sign-out failed (%s)", type(exc).__name__)
                 return {"success": False, "error": "Could not remove the saved GitLab token."}
+            self._unregister_include()
         self.invalidate_repos_cache()
         self._project_cache.invalidate()
         return {"success": True}
@@ -325,6 +402,8 @@ class GitLabService:
         account = self.load_account()
         if not account:
             raise GitLabApiError("GitLab is not connected on this worker")
+        if self._pinned_host is not None and account["host"] != self._pinned_host:
+            raise GitLabApiError("The GitLab connection changed during this operation; nothing was sent to the new server")
         try:
             return httpx.request(
                 method, f"{self._api_base(account['host'])}{path}",
@@ -432,7 +511,11 @@ class GitLabService:
         head: Optional[str] = None, timeout: Optional[int] = None,
     ) -> List[PullRequest]:
         gl_state = {"open": "opened", "closed": "closed", "merged": "merged", "all": "all"}.get(state, "opened")
-        params: Dict[str, Any] = {"per_page": max(1, min(int(limit), 100)), "order_by": "updated_at"}
+        limit = max(1, min(int(limit), 100))
+        # A head lookup asks for this checkout's branch. GitLab's source_branch
+        # filter also matches forks' MRs from a same-named branch, so fetch a
+        # full page, keep this project's own MRs and apply the limit after.
+        params: Dict[str, Any] = {"per_page": 100 if head else limit, "order_by": "updated_at"}
         if gl_state != "all":
             params["state"] = gl_state
         if head:
@@ -441,7 +524,10 @@ class GitLabService:
         if resp.status_code != 200:
             raise GitLabApiError(f"GitLab could not list merge requests for {repo}", stderr=self._error_text(resp))
         data = self._json(resp, "merge requests")
-        return [self._to_pull(mr, repo) for mr in data if isinstance(mr, dict)] if isinstance(data, list) else []
+        pulls = [self._to_pull(mr, repo) for mr in data if isinstance(mr, dict)] if isinstance(data, list) else []
+        if head:
+            pulls = [pr for pr in pulls if pr.head_repo == repo]
+        return pulls[:limit]
 
     def list_commit_pulls(self, repo: str, sha: str, timeout: Optional[int] = None) -> List[PullRequest]:
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha or ""):
@@ -619,6 +705,10 @@ class GitLabService:
         }
 
 
+def _effective_port(scheme: str, port: Optional[int]) -> int:
+    return port if port else (80 if scheme == "http" else 443)
+
+
 def repo_path_for_remote(remote_url: str, host: str) -> Optional[str]:
     """The project path of *remote_url* when it is on GitLab server *host*.
 
@@ -642,6 +732,16 @@ def repo_path_for_remote(remote_url: str, host: str) -> Optional[str]:
         if (parts.hostname or "").lower() != base_host:
             return None
         path = parts.path.strip("/")
+        if parts.scheme in ("http", "https"):
+            # Two servers can share a host name on different ports; only the
+            # connected one's port is this account's server. (SSH runs on its
+            # own port, so SSH remotes match by host name.)
+            try:
+                remote_port = _effective_port(parts.scheme, parts.port)
+            except ValueError:
+                return None
+            if remote_port != _effective_port(base.scheme, base.port):
+                return None
         if parts.scheme in ("http", "https") and prefix:
             if not (path == prefix or path.startswith(prefix + "/")):
                 return None

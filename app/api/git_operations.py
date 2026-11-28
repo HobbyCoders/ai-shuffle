@@ -1029,9 +1029,10 @@ async def _prepare_operation(
         # get_repo_from_remote shells out to git — keep it off the event loop.
         from app.api.github import gitlab_repo_for_path
         from app.core.gitlab_service import gitlab_service
+        pinned = gitlab_service.pinned()
         repo = await gitlab_repo_for_path(working_dir)
         if repo:
-            op.forge = gitlab_service
+            op.forge = pinned
         else:
             repo = await asyncio.to_thread(github_service.get_repo_from_remote, working_dir)
         if not repo:

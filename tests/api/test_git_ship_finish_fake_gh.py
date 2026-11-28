@@ -367,9 +367,9 @@ def test_unreachable_guard_bites_when_disabled(env, monkeypatch):
     """Degrade "could not ask" to "no PR" and Ship opens a duplicate PR."""
     real = git_operations._find_open_pr_for_branch
 
-    def swallow(repo, branch):
+    def swallow(repo, branch, *args, **kwargs):
         try:
-            return real(repo, branch)
+            return real(repo, branch, *args, **kwargs)
         except git_operations.GitHubCliError:
             return None
 
@@ -621,6 +621,7 @@ def test_pr_state_live_then_cached(env):
         "merged_head_sha": None,
         "pr_lookup_failed": False,
         "stale": False,
+        "provider": "github",
     }
     calls = len(env.gh.calls("pr", "list"))
     # Second poll within the TTL is served from cache: no gh call.
@@ -675,6 +676,7 @@ def test_pr_state_non_repo_and_no_remote(env, tmp_path):
     assert env.client.get("/api/v1/projects/p-plain/git/pr-state").json() == {
         "current_branch": None, "has_github": False, "open_pr": None,
         "merged_head_sha": None, "pr_lookup_failed": False, "stale": False,
+        "provider": "github",
     }
 
     git(env.repo, "remote", "remove", "origin")

@@ -27,8 +27,7 @@
 		whenTranscriptSettled,
 		type GitLoadOptions
 	} from '$lib/stores/git.svelte';
-	// GitHub or GitLab: either one makes the PR / merge request actions usable.
-	import { sourceControlAuthenticated as githubAuthenticated } from '$lib/stores/auth.svelte';
+	import { githubAuthenticated as githubSignedIn, gitlabAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitControlsStreaming } from '$lib/stores/derived/active-streaming.svelte';
 	import { createPullRequest } from '$lib/api/github';
@@ -68,7 +67,7 @@
 	import NoProjectPill from './NoProjectPill.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
 	import { draftSetupPending, workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
-	import { shouldShowHeaderGitActions } from './git-header-visibility';
+	import { forgeSignedIn, shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle, NEW_CHAT_LABEL } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -448,8 +447,12 @@
 	// fails under load, and a single blip used to blank the whole git surface
 	// for up to two minutes (G10c). The store only believes a `false` after two
 	// consecutive failures ≥60s apart.
+	// The PR / merge request actions need the account for THIS checkout's forge.
+	const forgeAuthenticated = $derived(
+		forgeSignedIn($gitPrState?.provider, { github: $githubSignedIn, gitlab: $gitlabAuthenticated })
+	);
 	$effect(() => {
-		git.setGithubAuth($githubAuthenticated);
+		git.setGithubAuth(forgeAuthenticated);
 	});
 
 	// A parked turn is not streaming, but its Monitor/Task can still own the
@@ -563,7 +566,7 @@
 	const headerGitInput = $derived({
 		viewType: $activeView?.type,
 		hasProject: !!activeProject,
-		githubAuthenticated: $githubAuthenticated,
+		githubAuthenticated: forgeAuthenticated,
 		githubAvailable: activeGithubAvailable,
 		worktreeDeleted: activeWorktreeDeleted,
 		isRemote: activeIsRemote,

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+	forgeSignedIn,
 	shouldShowHeaderGitActions,
 	shouldShowGithubGitActions,
 	shouldShowGitPanelTrigger,
@@ -19,6 +20,22 @@ function base(overrides: Partial<HeaderGitActionsInput> = {}): HeaderGitActionsI
 		...overrides
 	};
 }
+
+describe('forgeSignedIn', () => {
+	it("needs the checkout's own forge account", () => {
+		const gitlabOnly = { github: false, gitlab: true };
+		expect(forgeSignedIn('github', gitlabOnly)).toBe(false);
+		expect(forgeSignedIn('gitlab', gitlabOnly)).toBe(true);
+		const githubOnly = { github: true, gitlab: false };
+		expect(forgeSignedIn('gitlab', githubOnly)).toBe(false);
+		expect(forgeSignedIn('github', githubOnly)).toBe(true);
+	});
+
+	it('accepts either account before pr-state names the forge', () => {
+		expect(forgeSignedIn(undefined, { github: false, gitlab: true })).toBe(true);
+		expect(forgeSignedIn(null, { github: false, gitlab: false })).toBe(false);
+	});
+});
 
 describe('shouldShowHeaderGitActions', () => {
 	it('shows local git actions for a local session', () => {

@@ -16,6 +16,9 @@ TOKEN = "glpat-test-token-0001"
 class FakeGitLab:
     def __init__(self, monkeypatch, host: str = HOST):
         self.host = host
+        # Other servers this fake also answers for (a reconnect to a second
+        # server); one shared route table, which is enough for these tests.
+        self.extra_hosts: set[str] = set()
         self.calls: list[tuple[str, str, dict, dict | None]] = []
         self.routes: dict[tuple[str, str], tuple[int, object]] = {}
         self.valid_tokens = {TOKEN}
@@ -32,8 +35,10 @@ class FakeGitLab:
     def _answer(self, method, url, headers, params=None, json=None):
         if self.unreachable:
             raise httpx.ConnectError("offline")
-        api = f"{self.host}/api/v4"
-        assert url.startswith(api), url
+        api = next(
+            (f"{h}/api/v4" for h in (self.host, *self.extra_hosts) if url.startswith(f"{h}/api/v4")), None
+        )
+        assert api, url
         path = url[len(api):]
         self.calls.append((method, path, dict(params or {}), json))
         if headers.get("PRIVATE-TOKEN") not in self.valid_tokens:

@@ -119,6 +119,7 @@ def _collect_session_ids(
     project_id: Optional[str] = None,
     branch: Optional[str] = None,
     pr_number: Optional[int] = None,
+    pr_url: Optional[str] = None,
 ) -> list[str]:
     from app.db import database
 
@@ -133,6 +134,10 @@ def _collect_session_ids(
     _add(session_id)
     if pr_number is not None:
         for row in database.list_sessions_by_pr_number(pr_number):
+            # Numbers repeat across repositories and forges (GitHub #1, GitLab
+            # !1): two known URLs must agree.
+            if pr_url and row.get("pr_url") and row["pr_url"] != pr_url:
+                continue
             _add(row.get("id"))
     if project_id and branch:
         for row in database.list_sessions_for_branch(project_id, branch):
@@ -233,6 +238,7 @@ async def persist_pr_state(
             project_id=project_id,
             branch=branch,
             pr_number=pr_number,
+            pr_url=pr_url,
         )
         listing_ids: list[str] = []
         if pr_number is not None:

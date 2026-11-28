@@ -20,7 +20,7 @@ from app.core.github_service import (
     PullRequest,
     WorkflowRun,
 )
-from app.core.gitlab_service import GitLabApiError, gitlab_service
+from app.core.gitlab_service import GitLabApiError, GitLabService, gitlab_service
 from app.core.session_pr_state import persist_pr_state
 from app.api.git_owner import session_git_action
 from app.api.auth import require_auth
@@ -172,15 +172,16 @@ async def resolve_forge_for_project(request: Request, project_id: str) -> Tuple[
     """
     if await asyncio.to_thread(gitlab_service.is_authenticated):
         project_path = await get_project_path_async(request, project_id)
+        service = gitlab_service.pinned()
         repo = await gitlab_repo_for_path(project_path)
         if repo:
-            return gitlab_service, repo
+            return service, repo
     await check_github_auth()
     return github_service, await get_repo_for_project(request, project_id)
 
 
 def forge_label(service: Any) -> str:
-    return "GitLab" if service is gitlab_service else "GitHub"
+    return "GitLab" if isinstance(service, GitLabService) else "GitHub"
 
 
 def _github_unavailable(action: str, exc: GitHubCliError) -> HTTPException:

@@ -6,6 +6,7 @@ helper sign-in writes is checked by asking git for a credential.
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -59,6 +60,13 @@ def test_normalize_host_rejects_unsafe_addresses(typed):
     ("https://gitlab.example.com/acme/app/-/tree/main", HOST, None),
     ("https://git.example.com/other/acme/app.git", "https://git.example.com/gitlab", None),
     ("", HOST, None),
+    # Same host name, another port: another server.
+    ("https://git.example.com:8443/acme/app.git", "https://git.example.com:8443", "acme/app"),
+    ("https://git.example.com:9443/acme/app.git", "https://git.example.com:8443", None),
+    ("https://gitlab.example.com:443/acme/app.git", HOST, "acme/app"),
+    ("https://gitlab.example.com:8443/acme/app.git", HOST, None),
+    ("http://gitlab.example.com/acme/app.git", HOST, None),
+    ("git@git.example.com:acme/app.git", "https://git.example.com:8443", "acme/app"),
 ])
 def test_repo_path_for_remote(remote, host, expected):
     assert repo_path_for_remote(remote, host) == expected
@@ -86,10 +94,27 @@ def test_login_saves_the_account_and_git_answers_with_the_token(env):
     assert f"password={TOKEN}" in answer.stdout
 
 
+def _fill(host: str, protocol: str = "https") -> subprocess.CompletedProcess:
+    # An unanswered lookup fails instead of prompting.
+    return subprocess.run(
+        ["git", "-c", "credential.interactive=never", "credential", "fill"],
+        input=f"protocol={protocol}\nhost={host}\n\n",
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"},
+    )
+
+
+def _global_entries() -> str:
+    return git(".", "config", "--global", "--list", check=False)
+
+
 def test_helper_is_scoped_to_the_gitlab_host_and_survives_a_rejected_push(env):
     service, _api, _tmp = env
     service.login(TOKEN, HOST)
-    helpers = git(".", "config", "--global", "--get-regexp", r"credential\..*\.helper")
+    # The owner's global config gains one include line and nothing else.
+    entries = _global_entries()
+    assert entries.splitlines() == [f"include.path={service.git_config_file.as_posix()}"]
+    helpers = git(".", "config", "--global", "--includes", "--get-regexp", r"credential\..*\.helper")
     assert helpers.count("credential.https://gitlab.example.com.helper") == 2  # reset + ours
     assert "github" not in helpers
     # git calls "erase" after a rejected password; the saved token must stay.
@@ -123,23 +148,97 @@ def test_login_reports_an_unreachable_server(env):
     assert result["success"] is False and "Could not validate" in result["error"]
 
 
-def test_logout_removes_the_token_and_only_our_git_helper(env):
+def test_logout_removes_the_token_and_only_our_git_config(env):
     service, _api, _tmp = env
     git(".", "config", "--global", "credential.https://github.com.helper", "!gh auth git-credential")
     service.login(TOKEN, HOST)
+    credential = service.credential_file
     assert service.logout() == {"success": True}
-    assert not service.account_file.exists() and not service.credential_file.exists()
-    helpers = git(".", "config", "--global", "--get-regexp", r"credential\..*\.helper")
-    assert "gitlab.example.com" not in helpers
-    assert "gh auth git-credential" in helpers
+    assert not service.account_file.exists() and not credential.exists()
+    assert not service.git_config_file.exists()
+    entries = _global_entries()
+    assert "include.path" not in entries and "gitlab.example.com" not in entries
+    assert "credential.https://github.com.helper=!gh auth git-credential" in entries
 
 
-def test_logout_keeps_a_helper_the_owner_set_for_the_same_host(env):
+def test_connect_and_disconnect_leave_the_owners_helper_for_the_same_host(env):
+    """Connecting never rewrites an entry the owner wrote; disconnecting
+    leaves it exactly as it was, wherever it sits relative to ours."""
     service, _api, _tmp = env
+    key = "credential.https://gitlab.example.com.helper"
+    git(".", "config", "--global", "--add", key, "manager")
     service.login(TOKEN, HOST)
-    git(".", "config", "--global", "--add", "credential.https://gitlab.example.com.helper", "manager")
+    git(".", "config", "--global", "--add", key, "store")  # added while connected
     service.logout()
-    assert "manager" in git(".", "config", "--global", "--get-all", "credential.https://gitlab.example.com.helper")
+    assert git(".", "config", "--global", "--get-all", key).splitlines() == ["manager", "store"]
+    assert "include.path" not in _global_entries()
+
+
+def test_a_helper_left_behind_cannot_answer_for_another_server(env):
+    """Each server's token lives in its own file. Even with the include line
+    still registered (the owner copied it, say), switching servers leaves no
+    helper on the old server that would hand it the new server's token."""
+    service, api, _tmp = env
+    other = "https://code.example.org"
+    api.extra_hosts.add(other)
+    api.valid_tokens.add("glpat-other-0002")
+    service.login(TOKEN, HOST)
+    service.login("glpat-other-0002", other)
+    assert service.load_account()["host"] == other
+    # The old server gets nothing: no helper names it and its token file is gone.
+    old = _fill("gitlab.example.com")
+    assert "glpat-other-0002" not in old.stdout and TOKEN not in old.stdout
+    new = _fill("code.example.org")
+    assert "password=glpat-other-0002" in new.stdout
+    assert len(list(service.config_dir.glob("git-credential-*"))) == 1
+
+
+def test_failed_git_setup_keeps_the_previous_connection(env, monkeypatch):
+    service, api, _tmp = env
+    service.login(TOKEN, HOST)
+    before = service.account_file.read_text()
+    api.extra_hosts.add("https://code.example.org")
+    api.valid_tokens.add("glpat-other-0002")
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("git config failed")
+
+    monkeypatch.setattr(service, "_register_include", broken)
+    result = service.login("glpat-other-0002", "https://code.example.org")
+    assert result["success"] is False
+    # Settings still shows the old server and git still answers for it.
+    assert service.account_file.read_text() == before
+    assert f"password={TOKEN}" in _fill("gitlab.example.com").stdout
+    assert len(list(service.config_dir.glob("git-credential-*"))) == 1
+
+
+def test_failed_first_git_setup_saves_nothing(env, monkeypatch):
+    service, _api, _tmp = env
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("git config failed")
+
+    monkeypatch.setattr(service, "_register_include", broken)
+    assert service.login(TOKEN, HOST)["success"] is False
+    assert not service.is_authenticated()
+    assert not service.git_config_file.exists()
+    assert list(service.config_dir.glob("git-credential-*")) == []
+
+
+def test_a_pinned_view_refuses_a_server_changed_mid_operation(env):
+    service, api, _tmp = env
+    api.route("GET", "/projects/acme%2Fapp/merge_requests/4", 200, _mr(4))
+    service.login(TOKEN, HOST)
+    pinned = service.pinned()
+    assert pinned.get_pull("acme/app", 4).number == 4
+    api.extra_hosts.add("https://code.example.org")
+    api.valid_tokens.add("glpat-other-0002")
+    service.login("glpat-other-0002", "https://code.example.org")
+    calls = len(api.calls)
+    with pytest.raises(GitLabApiError, match="changed during this operation"):
+        pinned.get_pull("acme/app", 4)
+    assert len(api.calls) == calls  # nothing reached the new server
+    assert service.get_pull("acme/app", 4).number == 4  # the shared service follows the switch
 
 
 def test_auth_info_flags_a_revoked_token(env):
@@ -191,6 +290,19 @@ def test_fork_merge_requests_are_not_this_repos_branch(signed_in):
     service, api, _tmp = signed_in
     api.route("GET", "/projects/acme%2Fapp/merge_requests/9", 200, _mr(9, source_project_id=55))
     assert service.get_pull("acme/app", 9).head_repo == "fork:55"
+
+
+def test_a_branch_lookup_skips_a_forks_same_named_branch(signed_in):
+    """A fork's MR from feat/x must not stand in for this repo's feat/x, even
+    when GitLab lists it first and the caller asks for one result."""
+    service, api, _tmp = signed_in
+    api.route("GET", "/projects/acme%2Fapp/merge_requests", 200,
+              [_mr(9, source_project_id=55), _mr(3)])
+    pulls = service.list_pulls("acme/app", state="open", head="feat/x", limit=1)
+    assert [(p.number, p.head_repo) for p in pulls] == [(3, "acme/app")]
+    assert api.calls[-1][2]["per_page"] == 100  # the limit applies after filtering
+    api.route("GET", "/projects/acme%2Fapp/merge_requests", 200, [_mr(9, source_project_id=55)])
+    assert service.list_pulls("acme/app", state="open", head="feat/x", limit=1) == []
 
 
 def test_read_failures_raise_instead_of_answering_empty(signed_in):

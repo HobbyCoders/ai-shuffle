@@ -90,7 +90,7 @@ def test_status_reports_auth_repo_and_gh_failures(env):
     env.gh.signed_in(False)
     assert _call(env.client, "get", "/status").json() == {
         "authenticated": False, "repo": None, "repo_info": None,
-        "error": "GitHub CLI is not authenticated",
+        "error": "GitHub CLI is not authenticated", "provider": "github",
     }
 
     reset_git_state()
