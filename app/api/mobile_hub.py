@@ -332,7 +332,10 @@ def enroll(body: EnrollRequest):
     key = 'aim_' + secrets.token_urlsafe(32)
     from app.core.device_keys import KEY_LIFETIME_DAYS
     expires = datetime.now(timezone.utc) + timedelta(days=KEY_LIFETIME_DAYS)
-    scopes = list(pairing.DEFAULT_MOBILE_SCOPES)
+    # The browser extension shares its browser and shows the phone UI in its
+    # side panel (controller + web session); it gets no phone notifications.
+    scopes = (list(pairing.EXTENSION_SCOPES) if body.device_info.platform == 'extension'
+              else list(pairing.DEFAULT_MOBILE_SCOPES))
     proof = body.install_proof.get_secret_value() if body.install_proof else None
     try:
         device_id = store.enroll(identity, body.device_info, hashlib.sha256(key.encode()).hexdigest(), expires, scopes,

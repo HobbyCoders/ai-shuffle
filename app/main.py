@@ -73,6 +73,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "font-src 'self'; "
             "frame-ancestors 'self';"
         )
+        # The phone UI also shows in the AI Shuffle browser extension's side
+        # panel, which frames it from the extension's own origin. Only those
+        # extension IDs may frame it, and only that page.
+        path = request.url.path
+        if path == "/mobile" or path.startswith("/mobile/"):
+            from app.core.browser_extension import extension_frame_ancestors
+            response.headers["Content-Security-Policy"] = response.headers["Content-Security-Policy"].replace(
+                "frame-ancestors 'self';", f"frame-ancestors 'self' {extension_frame_ancestors()};")
+            del response.headers["X-Frame-Options"]
 
         # HTML selects the revision's hashed JS/CSS. A cached entry page can keep
         # showing the previous UI after the worker has been updated. Immutable
@@ -749,6 +758,8 @@ app.include_router(learner.router)
 app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)
+from app.api import browser_extension as browser_extension_api
+app.include_router(browser_extension_api.router)
 app.include_router(terminals_api.router)
 app.include_router(terminals_api.ws_router)
 app.include_router(mobile.router)

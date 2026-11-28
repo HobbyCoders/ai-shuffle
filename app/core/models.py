@@ -1273,7 +1273,9 @@ class DeviceInfo(BaseModel):
     """Device registration info"""
     device_id: str = Field(..., min_length=1, max_length=255)
     device_name: str = Field(..., min_length=1, max_length=100)
-    platform: str = Field(..., pattern=r'^(ios|android)$')
+    # ``extension``: the AI Shuffle browser extension (Chrome or Edge), which
+    # enrolls through the account like a phone but only drives a browser.
+    platform: str = Field(..., pattern=r'^(ios|android|extension)$')
     capabilities: DeviceCapabilities
 
 

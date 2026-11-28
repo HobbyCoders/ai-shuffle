@@ -16,6 +16,7 @@ import { registerComposerShell } from '$lib/components/chat/composer-shell';
 import MobileComposerControlsSheet from '$lib/components/chat/phone/MobileComposerControlsSheet.svelte';
 import MobilePromptDock from './MobilePromptDock.svelte';
 import { reconcileMobileComposerExpanded } from './mobile-composer-collapse';
+import { installExtensionPanelBridge } from './extension-panel';
 
 let installed = false;
 
@@ -23,6 +24,7 @@ export function installMobileShell(): void {
 	if (installed) return;
 	installed = true;
 	setPlatformForMobileApp();
+	installExtensionPanelBridge();
 	registerComposerShell({
 		reconcileExpanded: reconcileMobileComposerExpanded,
 		ControlsSheet: MobileComposerControlsSheet,

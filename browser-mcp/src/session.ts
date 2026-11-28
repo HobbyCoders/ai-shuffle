@@ -13,7 +13,7 @@
  */
 
 import type { Page, Locator, ConsoleMessage, Response, CDPSession, Dialog, Download } from "playwright-core";
-import { BrowserManager, BrowserRestartingError } from "./browser.js";
+import { BrowserManager, BrowserRestartingError, extensionTarget } from "./browser.js";
 import { RefRegistry, STALE_REF_REMEDY, isRefToken } from "./refs.js";
 import {
   maskSecretValues,
@@ -302,6 +302,13 @@ export class Session {
       pending = raceWithTimeout(page.context().newCDPSession(page), 5000, "CDP session timed out");
       this.cdpSessions.set(page, pending);
       pending.catch(() => this.cdpSessions.delete(page));
+      // A tab in the person's own browser is as big as their window, and they
+      // can resize it at any time: tell the Browser panel its new size.
+      if (extensionTarget()) {
+        pending.then((cdp) => cdp.on("Page.frameResized", () => {
+          if (page === this.currentEntry()?.page) this.onWorkspaceChange?.();
+        })).catch(() => {});
+      }
     }
     return pending;
   }
@@ -322,10 +329,17 @@ export class Session {
     // An open dialog blocks page script; the editor scan would only stall.
     const editors = page && !this.pendingDialog ? await readEditors(page).catch(() => []) : [];
     if (page) this.checkCaptchaInBackground();
+    // Without emulation a tab in the person's own browser has no fixed
+    // viewport: report the size it really has, which is what its frames show.
+    let size = page?.viewportSize() ?? null;
+    if (!size && page && extensionTarget() && !this.pendingDialog) {
+      const real = await this.appliedViewport().catch(() => null);
+      if (real && real.width > 0 && real.height > 0) size = { width: real.width, height: real.height };
+    }
     return { active_tab_id: id ?? null, target_id: target, editors,
       ...(this.captchaNotice ? { notice: this.captchaNotice } : {}),
       tabs: tabs.slice(0, 128).map(t => ({ ...t, url: t.url.slice(0, 1024), title: t.title.slice(0, 256) })),
-      viewport: { mode: this.viewportMode, ...(page?.viewportSize() ?? this.desiredViewport) } };
+      viewport: { mode: this.viewportMode, ...(size ?? this.desiredViewport) } };
   }
 
   invalidateScreenshot(): void {
@@ -562,10 +576,15 @@ export class Session {
   private async trackPage(page: Page, adopted = false): Promise<PageEntry> {
     // Persistent CDP contexts have no default viewport override. Apply ours
     // before exposing the tab/target, including on first use and reconnect.
-    const viewport = this.currentEntry()?.page.viewportSize() ?? this.desiredViewport;
+    // A tab in the person's own browser (extension) keeps its window's size
+    // unless the agent or the panel asks for one: emulating ours there would
+    // squeeze every page they watch.
+    const viewport = extensionTarget()
+      ? this.pinnedViewport ?? null
+      : this.currentEntry()?.page.viewportSize() ?? this.desiredViewport;
     if (!this.nativeScreen) await this.readNativeScreen(page);
     try {
-      await this.pinViewport(page, viewport, "initial viewport timed out");
+      if (viewport) await this.pinViewport(page, viewport, "initial viewport timed out");
     } catch (error) {
       // A popup the page opened is the site's, not ours to close.
       if (!adopted) {
@@ -573,7 +592,7 @@ export class Session {
         throw error;
       }
     }
-    this.desiredViewport = { ...viewport };
+    if (viewport) this.desiredViewport = { ...viewport };
     this.tabSeq += 1;
     const id = `tab${this.tabSeq}`;
     const entry: PageEntry = {
@@ -670,6 +689,10 @@ export class Session {
   async ensurePage(): Promise<Page> {
     const entry = this.currentEntry();
     if (entry) return entry.page;
+    // The chat's tab group in the person's own browser outlives a runtime:
+    // pick its tabs back up rather than opening a blank one beside them.
+    const kept = await this.adoptChatPages();
+    if (kept) return kept;
     const page = await this.manager.newPage();
     const fresh = await this.trackPage(page);
     this.currentId = fresh.id;
@@ -679,6 +702,35 @@ export class Session {
     // against it. Drop them.
     this.notifyNavigation();
     return fresh.page;
+  }
+
+  /**
+   * Register the tabs the person's own browser already shows this chat, make
+   * the visible one (else the first) current, and return it. Undefined when
+   * there are none (or this is the built-in browser).
+   */
+  private async adoptChatPages(): Promise<Page | undefined> {
+    if (!extensionTarget()) return undefined;
+    const tracked = new Set([...this.pages.values()].map((entry) => entry.page));
+    const found = (await this.manager.chatPages()).filter((page) => !tracked.has(page));
+    let current: PageEntry | undefined;
+    for (const page of found.slice(0, Math.max(0, 128 - this.pages.size))) {
+      let entry: PageEntry;
+      try {
+        entry = await this.trackPage(page, true);
+      } catch {
+        continue; // a tab that went away meanwhile
+      }
+      if (!current) current = entry;
+      else if (await raceWithTimeout(page.evaluate(() => document.visibilityState === "visible"), 1000, "visibility timeout")
+        .catch(() => false)) current = entry;
+    }
+    if (!current) return undefined;
+    this.currentId = current.id;
+    reportCurrentTarget(current.page, current.id);
+    this.notifyNavigation();
+    this.onWorkspaceChange?.();
+    return current.page;
   }
 
   private requireEntry(): PageEntry {
@@ -837,6 +889,10 @@ export class Session {
   async bringToFront(): Promise<boolean> {
     const entry = this.currentEntry();
     if (!entry) return false;
+    // In the user's own browser (the extension) the tab is already showing in
+    // its chat's tab group; raising it on every call would pull the person's
+    // window to the front, and the Browser domain is not available there.
+    if (extensionTarget()) return true;
     try {
       await raceWithTimeout(entry.page.bringToFront(), BRING_TO_FRONT_TIMEOUT_MS, "bringToFront timed out");
       // Chromium 149 can keep the emulated DOM viewport but reset screencast

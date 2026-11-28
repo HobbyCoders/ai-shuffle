@@ -67,6 +67,11 @@
     "reason": "Image application root for isolated egress-policy subprocess",
     "base_settings": false
   },
+  "AIS_BROWSER_CDP_ENDPOINT": {
+    "kind": "internal",
+    "reason": "App-set loopback CDP relay URL that points browser-mcp at a chat's browser extension",
+    "base_settings": false
+  },
   "AIS_BROWSER_MODE": {
     "kind": "internal",
     "reason": "Choose app-managed browser runtime/proxy transport",
@@ -75,6 +80,11 @@
   "AIS_BROWSER_PANEL_UPLOAD_DIR": {
     "kind": "internal",
     "reason": "File-upload root for human browser-panel editing",
+    "base_settings": false
+  },
+  "AIS_BROWSER_TARGET": {
+    "kind": "internal",
+    "reason": "App-set marker telling browser-mcp a chat drives the user's browser extension instead of the built-in browser",
     "base_settings": false
   },
   "AIS_PANEL_REGISTER_URL": {
@@ -90,6 +100,11 @@
   "AIS_SESSION_ID": {
     "kind": "internal",
     "reason": "Identify owning session to browser proxy or workflow guard",
+    "base_settings": false
+  },
+  "AI_SHUFFLE_BROWSER_EXTENSION_IDS": {
+    "kind": "infra",
+    "reason": "Extra browser extension IDs (comma-separated) allowed to sign in and embed the side panel, for builds not yet built in",
     "base_settings": false
   },
   "AI_SHUFFLE_APP": {

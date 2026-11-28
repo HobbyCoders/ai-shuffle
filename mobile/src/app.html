@@ -18,6 +18,32 @@
 		<link rel="icon" href="data:," />
 		<meta name="mobile-web-app-capable" content="yes" />
 		<title>AI Shuffle</title>
+		<!-- The AI Shuffle browser extension's side panel frames this page (the
+		     worker lets only the extension's IDs frame /mobile/) and hands it the
+		     panel's session in the URL fragment, which never reaches the server.
+		     Read it before the app starts, then drop it from the address. -->
+		<script>
+			(function () {
+				var prefix = '#shuffle-extension=';
+				if (window.top === window || location.hash.indexOf(prefix) !== 0) return;
+				try {
+					var data = JSON.parse(decodeURIComponent(location.hash.slice(prefix.length)));
+					var parent = (location.ancestorOrigins && location.ancestorOrigins[0]) || '';
+					history.replaceState(history.state, '', location.pathname + location.search);
+					if (!data || typeof data.token !== 'string' || !data.token) return;
+					if (!/^chrome-extension:\/\/[a-p]{32}$/.test(parent)) return;
+					window.__SHUFFLE_MOBILE__ = {
+						apiOrigin: location.origin,
+						token: data.token,
+						version: String(data.version || ''),
+						deviceName: String(data.deviceName || ''),
+						sendCookies: false,
+						native: { platform: 'extension', bridge: 1, capabilities: [] },
+						extension: { origin: parent }
+					};
+				} catch (e) {}
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

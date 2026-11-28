@@ -1,0 +1,127 @@
+/* Matches the phone UI it frames: AI Shuffle's dark and light themes. */
+:root {
+  color-scheme: dark light;
+  --background: oklch(0.214 0.006 265);
+  --foreground: oklch(0.928 0.003 265);
+  --card: oklch(0.247 0.006 265);
+  --muted-foreground: oklch(0.715 0.008 265);
+  --primary: oklch(0.72 0.11 175);
+  --primary-foreground: oklch(0.18 0.02 175);
+  --destructive: oklch(0.7 0.175 20);
+  --warning: oklch(0.8 0.13 80);
+  --border: oklch(1 0 0 / 0.085);
+  --radius: 8px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: oklch(0.98 0.003 90);
+    --foreground: oklch(0.21 0.005 250);
+    --card: oklch(1 0 0);
+    --muted-foreground: oklch(0.488 0.008 90);
+    --primary: oklch(0.53 0.09 178);
+    --primary-foreground: oklch(0.99 0 0);
+    --destructive: oklch(0.55 0.19 22);
+    --warning: oklch(0.62 0.13 70);
+    --border: oklch(0.21 0.01 250 / 0.09);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--foreground);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+[hidden] { display: none !important; }
+
+header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.picker select {
+  min-width: 0;
+  max-width: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  padding: 4px 18px 4px 2px;
+  border-radius: 6px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 9px) 52%, calc(100% - 5px) 52%;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+.picker select:focus-visible, button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.picker option { background: var(--card); color: var(--foreground); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-foreground); flex: none; }
+.dot.connected { background: var(--primary); }
+.dot.refused, .dot.error { background: var(--destructive); }
+.dot.connecting { background: var(--warning); }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+button.icon {
+  width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent;
+  font-size: 18px; line-height: 1;
+}
+button.icon:hover { background: var(--card); }
+
+#menu {
+  position: absolute;
+  right: 6px;
+  top: 36px;
+  z-index: 10;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px oklch(0 0 0 / 0.3);
+}
+#menu button {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  padding: 7px 10px; border-radius: 6px;
+}
+#menu button:hover { background: var(--background); }
+.menu-note { padding: 6px 10px 8px; color: var(--muted-foreground); font-size: 12px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+
+main.center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+main h1 { font-size: 16px; margin: 6px 0 0; }
+main p { margin: 0; max-width: 300px; color: var(--muted-foreground); }
+button.primary {
+  margin-top: 6px; min-width: 160px; padding: 8px 16px; border: 0; border-radius: var(--radius);
+  background: var(--primary); color: var(--primary-foreground); font-weight: 600;
+}
+button.primary:disabled { opacity: 0.6; cursor: default; }
+button.link { border: 0; background: none; color: var(--primary); padding: 4px; }
+.error { color: var(--destructive); min-height: 1em; }
+
+iframe { flex: 1; width: 100%; border: 0; background: var(--background); }

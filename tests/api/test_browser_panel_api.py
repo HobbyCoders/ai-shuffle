@@ -195,6 +195,70 @@ class TestBrowserPanelWebSocket:
                 ws.receive_json()
         assert exc.value.code == 4003
 
+    @pytest.fixture
+    def own_browser(self, monkeypatch):
+        """The chat's browser is someone's own Chrome, which this caller may not use."""
+        from types import SimpleNamespace
+
+        from app.core import browser_extension as ext
+        monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)  # the owner's chats
+        browser = SimpleNamespace(id="browser-0001", closed=False, paired_client_id="pc-owner",
+                                  account_id="acct-owner")
+        ext._browsers[browser.id] = browser
+        yield browser
+        ext._browsers.clear()
+        ext._targets.clear()
+        ext._target_owners.clear()
+        ext._panel_viewers.clear()
+
+    def test_someone_elses_own_browser_is_refused(self, client, monkeypatch, own_browser):
+        from app.core import browser_extension as ext
+        ext.set_session_target("s1", own_browser.id)
+        monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_json()
+        assert exc.value.code == 4003
+
+    def test_an_open_viewer_is_closed_when_the_chat_moves_to_a_browser_it_may_not_use(
+            self, client, monkeypatch, own_browser):
+        from app.core import browser_extension as ext
+        monkeypatch.setattr(bp, "authenticate_websocket", AsyncMock(return_value=(True, None)))
+        monkeypatch.setattr(bp.database, "get_session", lambda sid: {"id": sid})
+        monkeypatch.setattr(bp, "_browser_running", AsyncMock(return_value=False))
+        self._patch_hub(monkeypatch)
+        with client.websocket_connect("/api/v1/ws/browser/s1?token=x") as ws:
+            assert ws.receive_json()["protocol"] == 2
+            ext.set_session_target("s1", own_browser.id)  # the owner picks their Chrome
+            with pytest.raises(WebSocketDisconnect) as exc:
+                while True:
+                    ws.receive_json()
+        assert exc.value.code == 4003
+
+    def test_http_panel_routes_refuse_someone_elses_own_browser(self, authenticated_client, monkeypatch, own_browser):
+        from app.core import browser_extension as ext
+        from app.db import database
+        database.create_session(session_id="sess-own", profile_id="default")
+        ext.set_session_target("sess-own", own_browser.id)
+        # A request with no paired owner and no worker login (an API key here).
+        monkeypatch.setattr("app.api.auth.get_api_user_from_request", lambda request: {"id": "api-user-1"})
+        monkeypatch.setattr(bp, "require_session", AsyncMock(return_value={"id": "sess-own"}))
+        base = "/api/v1/sessions/sess-own/browser/panel"
+        for method, path in (("get", base), ("post", base + "/start"),
+                             ("post", base + "/upload?viewer_id=v&runtime_id=r&tab_id=t&field=f")):
+            response = getattr(authenticated_client, method)(path)
+            assert response.status_code == 403, (path, response.text)
+
+    def test_peer_routes_refuse_a_chat_on_someones_own_browser(self, own_browser):
+        from app.core import browser_extension as ext
+        ext.set_session_target("s1", own_browser.id)
+        with pytest.raises(HTTPException) as exc:
+            bp._refuse_peer_for_own_browser("s1")
+        assert exc.value.status_code == 403
+        ext.set_session_target("s1", None)
+        bp._refuse_peer_for_own_browser("s1")
+
     def test_handshake_then_protocol_violation_closes_4400(self, client, monkeypatch):
         monkeypatch.setattr(
             bp, "authenticate_websocket", AsyncMock(return_value=(True, None))

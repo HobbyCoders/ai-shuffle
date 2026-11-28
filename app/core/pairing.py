@@ -31,6 +31,9 @@ DEFAULT_MOBILE_SCOPES = [
     "mobile:actions",
     "web:session",
 ]
+# The AI Shuffle browser extension: the phone UI in its side panel plus the
+# socket that shares the browser itself (app/api/browser_extension.py).
+EXTENSION_SCOPES = ["controller", "web:session", "browser:extension"]
 
 
 def generate_pairing_code() -> str:

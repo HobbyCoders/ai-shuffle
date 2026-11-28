@@ -21,7 +21,10 @@ vi.mock('$lib/stores/browser-panel.svelte', () => ({ browserPanel: {
  setStatus: vi.fn(), setPage: vi.fn(), resetPageTracking: vi.fn(), setInspectMode: vi.fn(), setExpanded: vi.fn(),
 } }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: { sendMessage: mocks.sendMessage, subscribe: (callback: (value: null) => void) => { callback(null); return () => {}; } } }));
-vi.mock('$lib/api/browser-panel', () => ({ startPanelBrowser: vi.fn(), uploadPanelFiles: vi.fn() }));
+vi.mock('$lib/api/browser-panel', () => ({
+	startPanelBrowser: vi.fn(), uploadPanelFiles: vi.fn(),
+	getBrowserTarget: vi.fn(async () => ({ browser_id: null, assigned: false, browsers: [] })), setBrowserTarget: vi.fn(),
+}));
 
 const state = (owner: 'agent' | 'human', pending = false): BrowserWorkspaceState => ({
  runtime_id: 'runtime', revision: 1, available: true, target_id: 'target', active_tab_id: 'tab',

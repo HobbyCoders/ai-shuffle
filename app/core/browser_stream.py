@@ -34,7 +34,7 @@ from fastapi import WebSocket
 from pydantic import BaseModel, Field, StrictInt
 
 from app.api.ws_utils import WSPayloadEncodeError, safe_ws_send
-from app.core import browser_control, native_chrome
+from app.core import browser_control, browser_extension, native_chrome
 from app.core import browser_panel_registry as registry
 
 logger = logging.getLogger(__name__)
@@ -1280,7 +1280,12 @@ class BrowserStreamHub:
         return time.monotonic() - self._attach_opened_at
 
     async def _attach_and_pump(self, target: registry.PanelTarget) -> None:
-        uri = (
+        # A chat in the owner's own browser (the AI Shuffle extension) streams
+        # through the worker's relay onto that tab; everything else is the
+        # built-in Chrome's own page socket.
+        uri = browser_extension.page_endpoint(
+            self.session_id, target.target_id
+        ) or (
             f"ws://127.0.0.1:{native_chrome._cdp_port()}"
             f"/devtools/page/{target.target_id}"
         )

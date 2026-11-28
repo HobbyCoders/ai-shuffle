@@ -26,3 +26,37 @@ export async function startPanelBrowser(sessionId: string, signal: AbortSignal):
 	if (!isBrowserWorkspaceState(state)) throw new Error('Browser did not return a workspace. Try again.');
 	return state;
 }
+
+/** A Chrome or Edge connected through the AI Shuffle browser extension. */
+export interface ExtensionBrowser {
+	id: string;
+	name: string;
+	product?: string;
+	version?: string;
+}
+
+/** Which browser a chat uses: `browser_id` null is the built-in browser. */
+export interface BrowserTarget {
+	browser_id: string | null;
+	assigned: boolean;
+	/** Browsers this caller may hand to the chat (their own account's). */
+	browsers: ExtensionBrowser[];
+	/** The chat runs on another worker, which picks its browser. */
+	remote?: boolean;
+}
+
+function isBrowserTarget(value: unknown): value is BrowserTarget {
+	const v = value as BrowserTarget | null;
+	return !!v && typeof v === 'object' && (v.browser_id === null || typeof v.browser_id === 'string') &&
+		Array.isArray(v.browsers) && v.browsers.every((b) => !!b && typeof b.id === 'string' && typeof b.name === 'string');
+}
+
+export async function getBrowserTarget(sessionId: string, signal?: AbortSignal): Promise<BrowserTarget | null> {
+	const result = await api.get<unknown>(`/sessions/${encodeURIComponent(sessionId)}/browser/target`, { signal });
+	return isBrowserTarget(result) ? result : null;
+}
+
+export async function setBrowserTarget(sessionId: string, browserId: string | null): Promise<BrowserTarget | null> {
+	const result = await api.put<unknown>(`/sessions/${encodeURIComponent(sessionId)}/browser/target`, { browser_id: browserId });
+	return isBrowserTarget(result) ? result : null;
+}

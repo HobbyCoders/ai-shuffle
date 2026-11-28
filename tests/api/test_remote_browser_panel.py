@@ -296,6 +296,115 @@ async def test_peer_stream_stops_on_revocation_and_cleans_viewer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_open_peer_stream_closes_when_the_chat_moves_to_someones_own_browser(monkeypatch):
+    from app.core import browser_extension as ext
+
+    closed = asyncio.Event()
+    serving = asyncio.Event()
+
+    async def serve(ws, session_id):
+        serving.set()
+        await closed.wait()  # a real panel ends when its socket closes
+
+    monkeypatch.setattr(tokens, "require_worker_device", lambda ws: "peer")
+    monkeypatch.setattr(remote, "require_owned", AsyncMock())
+    monkeypatch.setattr(api, "serve_browser_panel", serve)
+    monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)
+    browser = SimpleNamespace(id="browser-0001", closed=False, account_id="acct-owner", paired_client_id="pc-owner")
+    ws = SimpleNamespace(accept=AsyncMock(), close=AsyncMock(side_effect=lambda **_: closed.set()))
+    peer = asyncio.create_task(remote.serve_peer(ws, "session"))
+    try:
+        await asyncio.wait_for(serving.wait(), 1)
+        ext._browsers[browser.id] = browser
+        ext.set_session_target("session", browser.id)  # the owner on this worker picks their Chrome
+        await asyncio.wait_for(peer, 1)
+        assert ws.close.await_args_list[0].kwargs["code"] == 4003
+        assert ext._panel_viewers == {}
+    finally:
+        peer.cancel()
+        ext._browsers.clear()
+        ext._targets.clear()
+        ext._target_owners.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_stream_admitted_during_a_switch_to_someones_own_browser_is_refused(monkeypatch):
+    from app.core import browser_extension as ext
+
+    admitting = asyncio.Event()
+    release = asyncio.Event()
+
+    async def require_owned(_session_id):
+        admitting.set()
+        await release.wait()  # the peer is still being admitted
+
+    serve = AsyncMock()
+    monkeypatch.setattr(tokens, "require_worker_device", lambda ws: "peer")
+    monkeypatch.setattr(remote, "require_owned", require_owned)
+    monkeypatch.setattr(api, "serve_browser_panel", serve)
+    monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)
+    browser = SimpleNamespace(id="browser-0001", closed=False, account_id="acct-owner", paired_client_id="pc-owner")
+    ws = SimpleNamespace(accept=AsyncMock(), close=AsyncMock())
+    peer = asyncio.create_task(remote.serve_peer(ws, "session"))
+    try:
+        await asyncio.wait_for(admitting.wait(), 1)
+        ext._browsers[browser.id] = browser
+        ext.set_session_target("session", browser.id)  # no viewer registered yet to close
+        release.set()
+        await asyncio.wait_for(peer, 1)
+        serve.assert_not_awaited()  # no panel data before the refusal
+        assert ws.close.await_args_list[0].kwargs["code"] == 4003
+        assert ext._panel_viewers == {}
+    finally:
+        peer.cancel()
+        ext._browsers.clear()
+        ext._targets.clear()
+        ext._target_owners.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_peers_refusal_reaches_the_viewer_as_final(monkeypatch):
+    from websockets.datastructures import Headers
+    from websockets.exceptions import ConnectionClosedError, InvalidStatusCode
+    from websockets.frames import Close
+
+    link = SimpleNamespace(token="device", base_url="http://peer", authenticate=AsyncMock())
+    monkeypatch.setattr(remote, "peer_link", AsyncMock(return_value=(object(), link)))
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    # An open stream the owning worker closes because the chat moved to Chrome.
+    monkeypatch.setattr(remote, "PeerConnect", lambda *args, **kwargs: Socket())
+    monkeypatch.setattr(
+        remote, "relay",
+        AsyncMock(side_effect=ConnectionClosedError(Close(4003, "owner"), Close(4003, "owner"), True)),
+    )
+    ws = SimpleNamespace(send_json=AsyncMock(), close=AsyncMock())
+    await remote.forward_websocket(ws, "remote", "session")
+    ws.send_json.assert_not_awaited()
+    assert ws.close.await_args.kwargs["code"] == 4003
+
+    # The next open, refused at the handshake.
+    class Refused:
+        async def __aenter__(self):
+            raise InvalidStatusCode(403, Headers())
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(remote, "PeerConnect", lambda *args, **kwargs: Refused())
+    ws = SimpleNamespace(send_json=AsyncMock(), close=AsyncMock())
+    await remote.forward_websocket(ws, "remote", "session")
+    ws.send_json.assert_not_awaited()
+    assert ws.close.await_args.kwargs["code"] == 4003
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [

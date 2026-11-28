@@ -68,6 +68,7 @@
 	import BrowserDesignRail from './BrowserDesignRail.svelte';
 	import BrowserWorkspaceToolbar from './BrowserWorkspaceToolbar.svelte';
 	import BrowserWorkspaceNotice from './BrowserWorkspaceNotice.svelte';
+	import BrowserTargetPicker from './BrowserTargetPicker.svelte';
 	import {
 		ownsControl,
 		type BrowserEditor,
@@ -1159,6 +1160,7 @@
 
 		<div class="tab-row">
 			<BrowserWorkspaceToolbar mode="tabs" starting={submitting} {workspace} {viewerId} connected={streamOpen} onCommand={workspaceCommand} />
+			<BrowserTargetPicker {sessionId} />
 			{#if !embedded}<div class="window-actions">
 				<button class="tool-btn" aria-label={panel.expanded ? 'Restore browser panel' : 'Expand browser panel'} onclick={() => browserPanel.setExpanded(sessionId, !panel.expanded)}>
 					{#if panel.expanded}<Minimize2 size={15} />{:else}<Maximize2 size={15} />{/if}
