@@ -11,6 +11,7 @@ import json
 import time
 
 import pytest
+from fluid.codemode.fact_db import FactDB
 from fluid.codemode.facts import FactStore
 from fluid.codemode.skills import SkillStore
 
@@ -247,24 +248,24 @@ async def test_dropped_fact_retracts_only_the_record_and_does_not_delete_the_rep
     await receive(b, a, touched)
     assert {"Fact X, edited later.", "Fact Y, dropped on A only.", "Fact Z."} <= texts(b)
 
-    # A drops Y from its own file without a Forget (expiry, a cap, a local
+    # A drops Y from its own store without a Forget (expiry, a cap, a local
     # cleanup): A's record is retracted, B's copy stays.
-    root = a.data_dir / "fluid" / "skills" / "memories.json"
+    root = a.data_dir / "fluid" / "skills"
     with a.active():
-        doc = json.loads(root.read_text(encoding="utf-8"))
+        doc = FactDB(root).read(create=False)[0]
         doc["entries"] = [e for e in doc["entries"] if e["id"] != y.id]
-        root.write_text(json.dumps(doc), encoding="utf-8")
+        FactDB(root).write(doc)
     assert publish(a) == 1
     (retracted,) = [r for r in own(a, memory_records.FACT_PREFIX).values() if r["deleted"]]
     await receive(b, a, touched)
     assert "Fact Y, dropped on A only." in texts(b)
 
     # B drops Y locally too. An unrelated change to X on A re-sends only X.
-    root_b = b.data_dir / "fluid" / "skills" / "memories.json"
+    root_b = b.data_dir / "fluid" / "skills"
     with b.active():
-        doc = json.loads(root_b.read_text(encoding="utf-8"))
+        doc = FactDB(root_b).read(create=False)[0]
         doc["entries"] = [e for e in doc["entries"] if "Fact Y" not in e["text"]]
-        root_b.write_text(json.dumps(doc), encoding="utf-8")
+        FactDB(root_b).write(doc)
     with a.active():
         facts(a).save_memory("Fact X, now edited.", x.id, protected=True, expected_revision=x.revision)
     assert publish(a) == 1
@@ -371,11 +372,11 @@ async def test_startup_reconcile_writes_records_committed_without_a_notice(pg_wo
 
     # A worker's own records never flow back into its own store: a fact it
     # dropped before its next publish pass stays dropped.
-    root = a.data_dir / "fluid" / "skills" / "memories.json"
+    root = a.data_dir / "fluid" / "skills"
     with a.active():
-        doc = json.loads(root.read_text(encoding="utf-8"))
+        doc = FactDB(root).read(create=False)[0]
         doc["entries"] = [e for e in doc["entries"] if e["id"] != dropped.id]
-        root.write_text(json.dumps(doc), encoding="utf-8")
+        FactDB(root).write(doc)
         assert any(not r["deleted"] for r in own(a, memory_records.FACT_PREFIX).values()
                    if "Dropped on A" in r["content"])
         await startup.reconcile_memory()

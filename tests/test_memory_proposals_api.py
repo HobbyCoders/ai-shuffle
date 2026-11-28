@@ -107,8 +107,7 @@ def test_accept_after_a_dismissal_on_another_worker_is_refused(world):
     inbox = reflection.ProposalInbox(root)
     inbox.apply_remote("dev-other", [], {row["id"]: {"status": "dismissed", "at": 1.0}})
     assert client.post(f"{BASE}/{row['id']}/accept").status_code == 409
-    memories_file = root / "memories.json"
-    assert not memories_file.exists() or "make release" not in memories_file.read_text()
+    assert not any("make release" in m.text for m in SkillStore(root).memories())
 
 
 def test_dismiss_saves_nothing(world):
@@ -117,8 +116,7 @@ def test_dismiss_saves_nothing(world):
     response = client.post(f"{BASE}/{row['id']}/dismiss")
     assert response.status_code == 200 and response.json()["status"] == "dismissed"
     assert client.get(BASE).json()["items"] == []
-    memories_file = root / "memories.json"
-    assert not memories_file.exists() or "make release" not in memories_file.read_text()
+    assert not any("make release" in m.text for m in SkillStore(root).memories())
     stored = json.loads((root / reflection.PROPOSAL_FILE).read_text())
     assert stored["proposals"] == [] and stored["decisions"][row["id"]]["status"] == "dismissed"
     # A later chat proposing it again does not bring it back.
