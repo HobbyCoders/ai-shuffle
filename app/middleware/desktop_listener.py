@@ -39,8 +39,12 @@ _OPEN_PATHS = frozenset({
     # The agent proxy has only a session panel token, never the desktop token.
     # This exact route checks that token and session before allocating a runtime.
     "/api/v1/browser/panel/rpc",
+    # The browser extension's socket authenticates with its device key in its
+    # first frame; the CDP relay with a per-runtime token (loopback only).
+    "/api/v1/browser-extension/connect",
 })
-_OPEN_PREFIXES = ("/health/", "/api/v1/browser/panel/control/")
+_OPEN_PREFIXES = ("/health/", "/api/v1/browser/panel/control/", "/api/v1/browser-extension/cdp/",
+                  "/api/v1/browser-extension/page/")
 
 
 def _open_path(path: str) -> bool:

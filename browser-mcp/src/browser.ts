@@ -274,7 +274,17 @@ export class BrowserRestartingError extends Error {
   }
 }
 
+/**
+ * True when this runtime drives the user's own Chrome or Edge through the AI
+ * Shuffle browser extension (the worker relays CDP to it) instead of the
+ * supervised browser on the worker.
+ */
+export function extensionTarget(): boolean {
+  return process.env.AIS_BROWSER_TARGET === "extension" && Boolean(process.env.AIS_BROWSER_CDP_ENDPOINT);
+}
+
 function cdpEndpoint(): string {
+  if (extensionTarget()) return process.env.AIS_BROWSER_CDP_ENDPOINT as string;
   const port = process.env.CHROME_CDP_PORT ?? "9221";
   return `http://127.0.0.1:${port}`;
 }
@@ -351,7 +361,10 @@ export class BrowserManager {
           // Install the SSRF egress guard before any page exists. It is
           // idempotent per connection; after a reconnect the Browser is a fresh
           // object, so interception is re-installed.
-          await this.guard.install(browser, this.context);
+          // The worker-network egress guard protects the worker's network from
+          // its own browser. The user's browser already reaches what the user
+          // can, so it is not filtered (local dev servers keep working).
+          if (!extensionTarget()) await this.guard.install(browser, this.context);
           return browser;
         } catch (err) {
           attempt += 1;
@@ -385,7 +398,9 @@ export class BrowserManager {
     this.closed = true;
     const pages = [...this.ownedPages];
     this.ownedPages.clear();
-    await Promise.allSettled(pages.map((p) => p.close()));
+    // Tabs in the user's own browser stay open for them: disconnecting only
+    // detaches the extension's debugger from them.
+    if (!extensionTarget()) await Promise.allSettled(pages.map((p) => p.close()));
     // Close a context we created ourselves (leave a reused persistent one).
     if (this.ownsContext && this.context) {
       try {

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Shuffle</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header id="bar" hidden>
+      <img src="icons/icon32.png" alt="" width="18" height="18" />
+      <label class="picker">
+        <span class="dot" id="dot"></span>
+        <select id="worker" aria-label="Worker"></select>
+      </label>
+      <button id="menu-button" class="icon" aria-haspopup="menu" aria-expanded="false" aria-label="More">⋯</button>
+      <div id="menu" role="menu" hidden>
+        <div class="menu-note" id="share-note"></div>
+        <button role="menuitem" id="pause"></button>
+        <button role="menuitem" id="reload">Reload workers</button>
+        <button role="menuitem" id="sign-out">Sign out</button>
+      </div>
+    </header>
+
+    <main id="signed-out" class="center" hidden>
+      <img src="icons/icon128.png" alt="" width="56" height="56" />
+      <h1>AI Shuffle in your browser</h1>
+      <p>Chat with your agents here. They can also work in this browser, inside a tab group for each chat.</p>
+      <button id="sign-in" class="primary">Sign in</button>
+      <button id="sign-up" class="link">Create an account</button>
+      <p class="error" id="sign-in-error" role="alert"></p>
+    </main>
+
+    <main id="message" class="center" hidden>
+      <h1 id="message-title"></h1>
+      <p id="message-text"></p>
+      <button id="message-action" class="primary" hidden></button>
+    </main>
+
+    <iframe id="app" title="AI Shuffle" hidden allow="clipboard-read; clipboard-write; microphone"></iframe>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

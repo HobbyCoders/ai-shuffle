@@ -233,15 +233,21 @@ class Runtime:
         try:
             # Start the native browser first: the server env built below flags
             # BROWSER_EGRESS_PROXY only while its supervisor is running.
+            from app.core import browser_extension
             from app.core.native_chrome import ensure_started
-            await ensure_started()
+            # A chat that uses the owner's own Chrome or Edge (the extension)
+            # needs no browser on this worker.
+            if not browser_extension.session_target(self.session_id):
+                await ensure_started()
             config = await run_sync(resolve_config, self.session_id)
             if self.closed:
                 raise RuntimeUnavailable("Browser runtime closed")
             # Correlate this child before its bridge can register, even if MCP
             # initialization never returns. Never adopt an identity from status.
             self.runtime_id = str(uuid4())
-            config.setdefault("env", {})["_AIS_BROWSER_RUNTIME_ID"] = self.runtime_id
+            env = config.setdefault("env", {})
+            env["_AIS_BROWSER_RUNTIME_ID"] = self.runtime_id
+            env.update(browser_extension.runtime_env(self.session_id, env.get("AIS_PANEL_REGISTER_URL")))
             self.client = RawMcpClient("browser", config)
             await self.client.start()
             await self._require_handshake_tools()
@@ -251,6 +257,9 @@ class Runtime:
             # list ensures one initial page, unlike create (which adds a second).
             result = await self.client.call_tool("browser_tabs", {"op": "list"})
             if result.get("isError"):
+                logger.warning("Browser initial tab failed for session %s: %.500s", self.session_id,
+                               " ".join(str(item.get("text", "")) for item in result.get("content") or []
+                                        if isinstance(item, dict)))
                 raise RuntimeUnavailable("Browser could not open its initial tab")
             async with asyncio.timeout(READY_SECONDS):
                 while not (

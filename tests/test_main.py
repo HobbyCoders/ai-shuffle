@@ -176,7 +176,25 @@ class TestSecurityHeadersMiddleware:
         assert "img-src 'self' data: blob: https: http:" in csp
         assert "connect-src 'self' ws: wss: https://*.cloudflareaccess.com" in csp
         assert "font-src 'self'" in csp
-        assert "frame-ancestors 'self'" in csp
+        assert "frame-ancestors 'self';" in csp
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path,framable", [("/mobile/", True), ("/mobile/_app/x.js", True),
+                                               ("/chat", False), ("/mobilefoo", False)])
+    async def test_only_the_phone_ui_may_be_framed_by_the_browser_extension(self, middleware, path, framable):
+        request = MagicMock()
+        request.url.path = path
+        mock_response = MagicMock()
+        mock_response.headers = {}
+
+        async def mock_call_next(request):
+            return mock_response
+
+        response = await middleware.dispatch(request, mock_call_next)
+        csp = response.headers["Content-Security-Policy"]
+        extension = "chrome-extension://fnjpjlkegjhjepkdnnignfokaffgdmak"
+        assert (extension in csp) is framable
+        assert ("X-Frame-Options" not in response.headers) is framable
 
 
 class TestLimitRequestBodyMiddleware:

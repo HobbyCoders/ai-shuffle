@@ -306,6 +306,18 @@ def test_enroll_fresh_key_hash_and_duplicate_no_overwrite(setup, monkeypatch, te
     assert database.get_mobile_device(store.local_device_id(SERVER, DEVICE))['api_key_hash'] == row['api_key_hash']
 
 
+def test_browser_extension_enrolls_with_side_panel_and_browser_scopes_only(setup, monkeypatch, test_db):
+    bind()
+    monkeypatch.setattr(account_hub, 'call', lambda b, m, p, body=None: identity() if p == 'exchange' else active())
+    extension = DeviceInfo(device_id=DEVICE, device_name='Chrome on Windows', platform='extension', capabilities={})
+    response = setup.post('/api/v1/mobile/hub/enroll', json={'ticket': 'single-use-ticket',
+                                                             'device_info': extension.model_dump()})
+    assert response.status_code == 200, response.text
+    assert response.json()['scopes'] == ['controller', 'web:session', 'browser:extension']
+    row = database.get_mobile_device(store.local_device_id(SERVER, DEVICE))
+    assert 'mobile:notifications' not in row['scopes'] and 'browser:extension' in row['scopes']
+
+
 def test_enroll_identity_mismatch_consumed_but_not_saved(setup, monkeypatch):
     bind()
     call = Mock(return_value=identity())
