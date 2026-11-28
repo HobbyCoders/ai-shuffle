@@ -385,7 +385,7 @@ def test_default_release_graph_contract():
     # stable source publication, without changing any release activation guards.
     assert jobs["ui-stable"]["permissions"] == {"contents": "read"}
     assert "ui-stable" in jobs["source-stable"]["needs"]
-    assert p.sha256(p.canonical(wf)) == "5f5acb3a27674be60a5f3b6c36498ae971fef141b363d075c22734f0622fa93a"
+    assert p.sha256(p.canonical(wf)) == "62852fcbcc035a37d7995c1122c71b5975cdc0f7566cf96b05b79c1931641f5d"
 
 
 def test_real_stage_producer_round_trip_uses_immutable_uploads(candidate, tmp_path, monkeypatch):
@@ -570,16 +570,18 @@ def test_release_inline_shell_is_valid():
 
 @pytest.fixture
 def owner_gate_evidence(candidate, monkeypatch):
-    """Keep real gates()/owner_status(); fake only GitHub and unrelated gates."""
+    """Keep real gates()/suite_status(); fake only GitHub and unrelated gates."""
     from scripts.ci import edge_publication_gate as edge
     revision = candidate.record["revision"]
     success = {"context": edge.CONTEXT, "creator": {"id": edge.OWNER_ID}, "state": "success"}
     evidence = SimpleNamespace(rows=[success], calls=[], error=None)
     def api(route):
         evidence.calls.append(route)
-        assert route == f"commits/{revision}/statuses?per_page=100&page=1"
         if evidence.error:
             raise evidence.error
+        if route == f"actions/workflows/ci.yml/runs?branch=main&head_sha={revision}&per_page=100":
+            return {"workflow_runs": []}  # no main CI run on the revision
+        assert route == f"commits/{revision}/statuses?per_page=100&page=1"
         return evidence.rows
     monkeypatch.setattr(gh, "api", api)
     monkeypatch.setattr(gh, "owner_gate", lambda _: candidate.record["repository"])
@@ -595,7 +597,7 @@ def owner_gate_evidence(candidate, monkeypatch):
 
 @pytest.mark.parametrize("case", ["missing", "failure", "foreign", "pending", "api-error", "superseded"])
 @pytest.mark.parametrize("phase", ["stage", "promote"])
-def test_latest_owner_full_suite_is_required(candidate, owner_gate_evidence, case, phase):
+def test_a_suite_pass_on_the_exact_revision_is_required(candidate, owner_gate_evidence, case, phase):
     evidence = owner_gate_evidence
     success = copy.deepcopy(evidence.rows[0])
     if case == "missing":
@@ -613,14 +615,27 @@ def test_latest_owner_full_suite_is_required(candidate, owner_gate_evidence, cas
     def current(record):
         return {**original_current(record), **gh.gates(record["tag"])}
     fake.current = current
-    with pytest.raises(ValueError, match="attestation|API unavailable"):
+    with pytest.raises(ValueError, match="Main CI has not passed|API unavailable"):
         if phase == "stage":
             # stage() must refuse before even looking for candidate artifacts.
             gh.stage(SimpleNamespace(tag="v1.2.3"), fake)
         else:
             p.activate(envelope(candidate), fake)
-    assert len(evidence.calls) == 1
+    # An owner veto or an API error stops at the statuses; otherwise main CI is asked too.
+    assert evidence.calls[0] == f"commits/{'a' * 40}/statuses?per_page=100&page=1"
+    assert len(evidence.calls) == (1 if case in ("failure", "superseded", "api-error") else 2)
     assert not fake.writes
+
+
+def test_a_green_main_ci_run_satisfies_the_suite_gate(owner_gate_evidence, monkeypatch):
+    from scripts.ci import edge_publication_gate as edge
+    owner_gate_evidence.rows = []
+    asked = []
+    monkeypatch.setattr(edge, "hosted_status", lambda api, revision, **kwargs: asked.append(revision) or {
+        "state": "success", "context": edge.MAIN_SUITE_NAME, "description": "Hosted CI run 1, attempt 1",
+        "target_url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1/attempts/1"})
+    assert gh.gates("v1.2.3")["owner"] is True
+    assert asked == ["a" * 40]
 
 
 def test_owner_gate_ignores_foreign_status_and_checks_exact_revision(owner_gate_evidence):
@@ -632,7 +647,7 @@ def test_owner_gate_ignores_foreign_status_and_checks_exact_revision(owner_gate_
 
 
 @pytest.mark.parametrize("revoke_after", ["verification", "source"])
-def test_owner_attestation_is_rechecked_immediately_before_activation(candidate, owner_gate_evidence, revoke_after):
+def test_suite_evidence_is_rechecked_immediately_before_activation(candidate, owner_gate_evidence, revoke_after):
     evidence = owner_gate_evidence
     success = copy.deepcopy(evidence.rows[0])
     fake = Fake(candidate)
@@ -650,11 +665,11 @@ def test_owner_attestation_is_rechecked_immediately_before_activation(candidate,
         if sink == revoke_after:
             revoke()
     fake.current, fake.verify_provenance, fake.write = current, provenance, write
-    with pytest.raises(ValueError, match="attestation"):
+    with pytest.raises(ValueError, match="Main CI has not passed"):
         p.activate(envelope(candidate), fake)
     assert fake.writes == ([] if revoke_after == "verification" else ["source"])
     # Retrying the signed candidate cannot reuse its formerly successful status.
-    with pytest.raises(ValueError, match="attestation"):
+    with pytest.raises(ValueError, match="Main CI has not passed"):
         p.activate(envelope(candidate), fake)
     assert fake.writes == ([] if revoke_after == "verification" else ["source"])
     assert len(evidence.calls) >= 3
@@ -681,6 +696,7 @@ def test_release_publication_credentials_are_step_scoped():
     for name in ("stage-begin", "stage-record", "promotion", "promotion-play"):
         job = wf["jobs"][name]
         assert job["permissions"]["statuses"] == "read"
+        assert job["permissions"]["actions"] == "read"  # verify_suite reads main CI runs
         for step in job["steps"]:
             if "release_staging_github.py" in step.get("run", ""):
                 assert step["env"]["GH_TOKEN"] == "${{ github.token }}"

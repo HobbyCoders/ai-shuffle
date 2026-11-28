@@ -1,7 +1,8 @@
 """Read-only release checks. No tags, artifacts, secrets or deployments are created.
 
 Without --tag, check the candidate source tree. --tag also requires a matching
-checkout on main; --github checks the protected branch and merged PR.
+checkout on main; --github checks the protected branch, the merged PR and a
+green main CI run on the release commit.
 --remote-catalog reads the pinned sources from GitHub using the existing gh login.
 """
 from __future__ import annotations
@@ -11,9 +12,12 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 REPOSITORY = "HobbyCoders/ai-shuffle"
 FINAL = r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 TAG = FINAL + r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
@@ -118,6 +122,23 @@ def verify_merged_pr(revision: str) -> None:
         raise ValueError("Release commit must be a merged pull request on main; the initial public root is not a stable release candidate")
 
 
+def verify_suite(revision: str, api=None) -> str:
+    """Require the full suite to have passed on the release commit itself.
+
+    The evidence is the main CI run on that exact commit (``hosted_status``
+    verifies the workflow, run, attempt and aggregate job). An owner
+    ``local/full-suite`` success also counts, and an owner failure vetoes the
+    commit. A green run on another commit never stands in for this one.
+    """
+    from scripts.ci import edge_publication_gate as edge
+    status = edge.suite_status(api or edge.GitHub(), revision)
+    if status is None:
+        raise ValueError(
+            f"Main CI has not passed on {revision[:9]} (missing, running, cancelled or failed). Tag a main "
+            "commit whose CI run passed: `python scripts/ci/ship_release_status.py` names the newest one.")
+    return edge.suite_description(status, revision)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag")
@@ -131,6 +152,7 @@ def main() -> None:
     verify_catalog(ROOT, args.remote_catalog)
     if args.github:
         verify_merged_pr(revision)
+        print(verify_suite(revision))
     print(f"Release source checks passed for {version}")
     if args.tag:
         print(f"promote_latest={str(newest_final(ROOT, args.tag)).lower()}")

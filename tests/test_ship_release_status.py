@@ -86,6 +86,7 @@ def test_collect_reads_public_main_in_a_checkout_whose_origin_is_the_archive(tmp
     monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
     monkeypatch.setattr(srs, "_gh_json", lambda *a: [])
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
+    monkeypatch.setattr(srs, "main_ci", lambda head: {"state": "success", "url": "u"})
     report = srs.collect(["ServerWorker"], "away", str(tmp_path / "smoke"))
     assert report["main_ref"] == "public/main"
     assert report["remote"] == {"name": "public", "url": str(public)}
@@ -135,19 +136,7 @@ def test_android_changes_need_play_build():
     assert builds["android"] == {"needed": True, "example_paths": ["android/app/build.gradle.kts"]}
 
 
-def _status(context, state="success", creator=srs.OWNER_ID):
-    return {"context": context, "state": state, "creator": {"id": int(creator)}}
-
-
-def test_local_state_uses_the_newest_owner_status_per_suite():
-    statuses = [
-        _status("local/full-suite", creator="7"),  # a stranger's newer success never counts
-        _status("local/full-suite", "failure"),
-        _status("local/full-suite"),
-        _status("local/windows-suite", "pending"),
-    ]
-    assert srs.local_state(statuses) == {"local/full-suite": "failure", "local/windows-suite": "pending"}
-    assert srs.local_state([]) == {"local/full-suite": "missing", "local/windows-suite": "missing"}
+GREEN = {"state": "success", "url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1/attempts/1"}
 
 
 def test_edge_state_uses_the_newest_run_on_sha():
@@ -244,7 +233,7 @@ def test_smoke_gate_without_a_candidate_blocks(tmp_path):
     assert _gate(tmp_path, revision="", skip="offline")["verdict"] == "skipped"
 
 
-def _fake_collect(monkeypatch, statuses):
+def _fake_collect(monkeypatch, ci=GREEN, runs=()):
     def fake_try(*args):
         if args[:2] == ("git", "rev-parse"):
             return "abc" if args[-1].startswith("abc") else CANDIDATE
@@ -254,9 +243,10 @@ def _fake_collect(monkeypatch, statuses):
             return "abc change"
         return ""
     runs = [{"workflowName": srs.EDGE_WORKFLOW, "status": "completed", "conclusion": "success",
-             "headSha": CANDIDATE}]
+             "headSha": CANDIDATE}, *runs]
     monkeypatch.setattr(srs, "_try", fake_try)
-    monkeypatch.setattr(srs, "_gh_json", lambda *a: statuses if a[0] == "api" else runs)
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: [] if a[0] == "api" else runs)
+    monkeypatch.setattr(srs, "main_ci", lambda head: ci)
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
     monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
     # The real catalog has journey rows; their CI evidence is stubbed green here.
@@ -268,7 +258,7 @@ def _fake_collect(monkeypatch, statuses):
     ("away", True, ["Live smoke skipped (--skip-smoke): away"]),
 ])
 def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip, ready, notes):
-    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
+    _fake_collect(monkeypatch)
     report = srs.collect(["ServerWorker"], skip, str(tmp_path))
     assert report["edge_published"] is True
     assert report["ready"] is ready
@@ -282,49 +272,84 @@ def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip,
         assert "release notes must say: Live smoke skipped (--skip-smoke): away" in text
 
 
-def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/full-suite")])
+@pytest.mark.parametrize("state, url, tail", [
+    ("pending", "https://ci/run/4", " (https://ci/run/4). Wait for it to finish, or tag a main commit"),
+    ("cancelled", "https://ci/run/5", " (https://ci/run/5). Tag a main commit"),
+    ("missing", None, ". Tag a main commit"),
+])
+def test_collect_waits_for_main_ci_on_the_candidate(tmp_path, monkeypatch, state, url, tail):
+    _fake_collect(monkeypatch, ci={"state": state, "url": url})
     report = srs.collect(["ServerWorker"], "away", str(tmp_path))
     assert not report["ready"]
-    assert len(report["blockers"]) == 1
-    assert "local/windows-suite" in report["blockers"][0] and "DesktopWorker" in report["blockers"][0]
-    assert "local/windows-suite=missing" in srs.render(report)
+    assert report["blockers"] == [f"Main CI on 123456789 is {state}{tail} whose CI run passed."]
+    assert f"Main CI on candidate: {state}" in srs.render(report)
 
 
-def test_missing_windows_suite_names_the_staged_command(tmp_path, monkeypatch):
-    # A Windows full run (~75 min) outlasts one 45-minute Monitor job, so the blocker must
-    # name the checkpointed command documented in docs/ci/pr-checks.md, not `full --attest`.
-    _fake_collect(monkeypatch, [_status("local/full-suite")])
+def _ci_run(sha, conclusion="success", event="push", run_id=1):
+    return {"workflowName": "CI", "status": "completed", "conclusion": conclusion, "headSha": sha,
+            "event": event, "databaseId": run_id}
+
+
+def test_a_red_candidate_names_the_newest_green_unreleased_main_commit(tmp_path, monkeypatch):
+    older, released = "0" * 40, "e" * 40
+    _fake_collect(monkeypatch, ci={"state": "cancelled", "url": None}, runs=[
+        _ci_run(CANDIDATE, "cancelled"), _ci_run("f" * 40, event="pull_request"), _ci_run(older)])
+    real_try = srs._try
+    walked = []
+
+    def fake_try(*a):
+        if a[:3] == ("git", "rev-list", "--first-parent"):
+            walked.append(a[-1])
+            return "\n".join([CANDIDATE, "f" * 40, older])
+        return real_try(*a)
+    monkeypatch.setattr(srs, "_try", fake_try)
     blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
-    assert blocker == (
-        "local/windows-suite on 123456789 is missing: run "
-        "`python scripts/local_ci.py full --step --attest` (one Monitor job per run; "
-        "repeat the same command until it prints COMPLETE) on DesktopWorker (Windows) "
-        "on a clean checkout of main, or dispatch windows-suite.yml on main "
-        "(`gh workflow run windows-suite.yml --ref main`).")
-    docs = (Path(__file__).resolve().parents[1] / "docs" / "ci" / "pr-checks.md").read_text(encoding="utf-8")
-    assert "python scripts/local_ci.py full --step --attest" in docs and "COMPLETE" in docs
+    assert blocker.endswith("The newest main commit with a green CI run is 000000000: rerun with --candidate 000000000.")
+    assert walked == [f"abc..{CANDIDATE}"]  # only commits after the last release tag
+    assert srs.newest_green_main([_ci_run(released)], CANDIDATE, None) is None
 
 
-def test_missing_linux_suite_keeps_the_one_shot_command(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/windows-suite")])
-    blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
-    assert blocker == ("local/full-suite on 123456789 is missing: run "
-                       "`python scripts/local_ci.py full --attest` on a Linux worker on a clean checkout of main.")
+def test_a_newer_red_run_on_a_commit_outweighs_its_older_green_one(monkeypatch):
+    monkeypatch.setattr(srs, "_try", lambda *a: "\n".join([CANDIDATE, "0" * 40]))
+    runs = [_ci_run(CANDIDATE, run_id=1), _ci_run(CANDIDATE, "failure", "workflow_dispatch", run_id=2),
+            _ci_run("0" * 40, run_id=3)]
+    assert srs.newest_green_main(runs, CANDIDATE, "abc") == "0" * 40
 
 
-def test_skip_windows_releases_with_a_note(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/full-suite")])
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="DesktopWorker off")
-    assert report["ready"]
-    assert "Windows full suite not run on this release (--skip-windows): DesktopWorker off" in report["release_notes_lines"]
+def test_green_main_ci_is_the_only_suite_gate(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch)
+    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
+    assert report["ready"], report["blockers"]
+    assert report["main_ci"] == GREEN
+    assert f"Main CI on candidate: success ({GREEN['url']})" in srs.render(report)
 
 
-def test_linux_suite_cannot_be_skipped(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/windows-suite")])
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x")
-    assert not report["ready"]
-    assert report["blockers"][0].startswith("local/full-suite")
+def _run(run_id, status="completed", conclusion="success", event="push"):
+    return {"id": run_id, "status": status, "conclusion": conclusion, "event": event,
+            "html_url": f"https://ci/run/{run_id}"}
+
+
+@pytest.mark.parametrize("runs, expected", [
+    ([], {"state": "missing", "url": None}),
+    ([_run(3, "in_progress", None)], {"state": "pending", "url": "https://ci/run/3"}),
+    ([_run(3), _run(4, conclusion="cancelled")], {"state": "cancelled", "url": "https://ci/run/4"}),
+    ([_run(3, event="pull_request")], {"state": "missing", "url": None}),
+    ([_run(3)], {"state": "not verified", "url": "https://ci/run/3"}),
+])
+def test_main_ci_explains_a_missing_pass_from_the_newest_main_run(monkeypatch, runs, expected):
+    from scripts.ci import edge_publication_gate as edge
+    monkeypatch.setattr(edge, "suite_status", lambda api, revision: None)
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: {"workflow_runs": runs})
+    assert srs.main_ci(CANDIDATE) == expected
+
+
+def test_main_ci_reports_the_verified_pass(monkeypatch):
+    from scripts.ci import edge_publication_gate as edge
+    asked = []
+    monkeypatch.setattr(edge, "suite_status", lambda api, revision: asked.append(revision) or {
+        "state": "success", "target_url": GREEN["url"]})
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: pytest.fail("not consulted"))
+    assert srs.main_ci(CANDIDATE) == GREEN and asked == [CANDIDATE]
 
 
 def test_skip_smoke_rows_excuses_not_run_rows_into_the_release_notes(tmp_path, monkeypatch):
@@ -381,7 +406,7 @@ def test_journey_ci_reads_main_suite_through_gh(monkeypatch):
 
 
 def test_collect_blocks_and_renders_when_the_journeys_are_not_green(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
+    _fake_collect(monkeypatch)
     monkeypatch.setattr(srs, "journey_ci", lambda revision: {"state": "pending", "url": "https://ci/run/3"})
     report = srs.collect(["ServerWorker"], None, str(tmp_path))
     assert any(b.startswith("Live smoke: UI journeys at 123456789 are pending") for b in report["blockers"])
@@ -407,7 +432,7 @@ def test_main_passes_skip_smoke_rows_through(monkeypatch, capsys):
 TIP = "fedcba9876543210fedcba9876543210fedcba98"
 
 
-def _fake_pinned(monkeypatch, statuses_by_sha, history, seen=None):
+def _fake_pinned(monkeypatch, green, history, seen=None):
     seen = {} if seen is None else seen
 
     def fake_try(*args):
@@ -428,21 +453,17 @@ def _fake_pinned(monkeypatch, statuses_by_sha, history, seen=None):
             return "desktop/src/main.rs" if args[-1].endswith(TIP) else "frontend/src/app.ts"
         return ""
 
-    def fake_gh(*args):
-        if args[0] == "api" and "/statuses" in args[1]:
-            return statuses_by_sha.get(args[1].split("/commits/")[1].split("/")[0], [])
-        return []
     monkeypatch.setattr(srs, "_try", fake_try)
-    monkeypatch.setattr(srs, "_gh_json", fake_gh)
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: [])
+    monkeypatch.setattr(srs, "main_ci", lambda head: GREEN if head in green else {"state": "missing", "url": None})
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
     monkeypatch.setattr(srs, "public_main_ref", lambda: "public/main")
 
 
 def test_a_pinned_candidate_reads_its_own_gates_after_main_moved(tmp_path, monkeypatch):
-    # The suites and smoke passed on CANDIDATE; another session then merged TIP. Pinning keeps them.
-    passed = [_status(c) for c in srs.REQUIRED_LOCAL]
+    # Main CI and smoke passed on CANDIDATE; another session then merged TIP. Pinning keeps them.
     seen = {}
-    _fake_pinned(monkeypatch, {CANDIDATE: passed}, [TIP, CANDIDATE, "abc"], seen)
+    _fake_pinned(monkeypatch, {CANDIDATE}, [TIP, CANDIDATE, "abc"], seen)
     smoked = []
     real_gate = srs.smoke_gate
     monkeypatch.setattr(srs, "smoke_gate", lambda revision, *a, **k: smoked.append(revision) or real_gate(
@@ -462,80 +483,23 @@ def test_a_pinned_candidate_reads_its_own_gates_after_main_moved(tmp_path, monke
     assert "does not block a pinned release" in text
 
 
-def test_a_hosted_windows_run_on_the_pinned_candidate_counts(tmp_path, monkeypatch):
-    _fake_pinned(monkeypatch, {CANDIDATE: [_status("local/full-suite")]}, [TIP, CANDIDATE, "abc"])
-    asked = []
-    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: asked.append(head) or (
-        [_hosted()] if head == CANDIDATE else []))
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
-    assert asked == [CANDIDATE]
-    assert report["ready"], report["blockers"]
-    assert report["windows_suite"]["source"] == "hosted"
-
-
-def test_a_pinned_candidate_missing_a_suite_says_it_cannot_be_made_now(tmp_path, monkeypatch):
-    _fake_pinned(monkeypatch, {CANDIDATE: [_status("local/full-suite")]}, [TIP, CANDIDATE, "abc"])
-    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [])
+def test_a_pinned_candidate_without_green_ci_blocks(tmp_path, monkeypatch):
+    _fake_pinned(monkeypatch, {TIP}, [TIP, CANDIDATE, "abc"])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
     assert report["blockers"] == [
-        f"local/windows-suite on pinned {CANDIDATE[:9]} is missing, and main has moved to {TIP[:9]}: "
-        f"a suite run now would test {TIP[:9]}, not the pinned revision. Pin a revision that already "
-        'passed, or drop --candidate and test main\'s tip or --skip-windows "<reason>".']
-    skipped = srs.collect(["ServerWorker"], "away", str(tmp_path), skip_windows="x", candidate=CANDIDATE)
-    assert skipped["ready"]
+        f"Main CI on pinned {CANDIDATE[:9]} is missing. Tag a main commit whose CI run passed."]
 
 
 def test_a_pinned_candidate_off_main_history_blocks(tmp_path, monkeypatch):
     # CANDIDATE stands for a PR-branch commit: reachable through a merge's second parent,
     # but not on main's first-parent history.
-    _fake_pinned(monkeypatch, {CANDIDATE: [_status(c) for c in srs.REQUIRED_LOCAL]}, [TIP, "abc"])
+    _fake_pinned(monkeypatch, {CANDIDATE}, [TIP, "abc"])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate=CANDIDATE)
     assert not report["ready"]
     assert report["blockers"][0].startswith(f"Pinned candidate {CANDIDATE[:9]} is not on public main")
 
 
 def test_an_unknown_pinned_candidate_blocks(tmp_path, monkeypatch):
-    _fake_pinned(monkeypatch, {}, [TIP])
+    _fake_pinned(monkeypatch, set(), [TIP])
     report = srs.collect(["ServerWorker"], "away", str(tmp_path), candidate="nope")
     assert report["blockers"][0].startswith("Pinned candidate nope is not a commit")
-
-
-def _hosted(conclusion="success", status="completed", head=CANDIDATE, actor=srs.OWNER_ID,
-            event="workflow_dispatch", branch="main"):
-    return {"head_sha": head, "status": status, "conclusion": conclusion, "event": event,
-            "head_branch": branch, "triggering_actor": {"id": int(actor)},
-            "html_url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1"}
-
-
-def test_hosted_windows_state_counts_only_the_owners_manual_run_on_main():
-    assert srs.hosted_windows_state([_hosted()], CANDIDATE)[0] == "success"
-    assert srs.hosted_windows_state([_hosted(status="in_progress", conclusion=None)], CANDIDATE)[0] == "pending"
-    assert srs.hosted_windows_state([_hosted("failure"), _hosted()], CANDIDATE)[0] == "failure"
-    for stranger in (_hosted(actor="7"), _hosted(event="push"), _hosted(branch="fix/x"), _hosted(head="other")):
-        assert srs.hosted_windows_state([stranger], CANDIDATE) == ("missing", None)
-
-
-def test_a_hosted_windows_run_satisfies_the_windows_suite(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/full-suite")])
-    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [_hosted()])
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
-    assert report["ready"]
-    assert report["local_suites_on_main_head"]["local/windows-suite"] == "success"
-    assert report["windows_suite"] == {"source": "hosted",
-                                       "url": "https://github.com/HobbyCoders/ai-shuffle/actions/runs/1"}
-    assert any("GitHub-hosted Windows runner" in line for line in report["release_notes_lines"])
-
-
-def test_a_failed_hosted_windows_run_still_blocks_and_says_so(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status("local/full-suite")])
-    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: [_hosted("failure")])
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
-    assert not report["ready"]
-    assert report["blockers"][0].endswith("(the hosted run on it is failure).")
-
-
-def test_an_owner_windows_status_needs_no_hosted_run(tmp_path, monkeypatch):
-    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
-    monkeypatch.setattr(srs, "hosted_windows_runs", lambda head: pytest.fail("not consulted"))
-    report = srs.collect(["ServerWorker"], "away", str(tmp_path))
-    assert report["ready"] and report["windows_suite"]["source"] == "local"

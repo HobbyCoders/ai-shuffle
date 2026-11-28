@@ -1,11 +1,11 @@
 """One-shot, read-only release readiness summary for the ship-release skill.
 
 Gathers every gate the owner otherwise has to be walked through one question at
-a time: what changed since the last final tag, whether the local full suites
-passed on the release candidate on Linux and on Windows (the ``local/full-suite``
-and ``local/windows-suite`` statuses ``scripts/local_ci.py full --attest``
-posts; a successful owner-dispatched ``windows-suite.yml`` run on main at the
-candidate also satisfies the Windows one), whether edge publication caught up, the Play gates, and
+a time: what changed since the last final tag, whether main CI (the full suite
+on GitHub) passed on the release candidate, the same check ``release.yml``
+enforces through ``release_preflight.verify_suite`` (an owner
+``local/full-suite`` success also counts; an owner failure vetoes), whether
+edge publication caught up, the Play gates, and
 which platforms actually need a new build, and the live smoke gate: a passing
 smoke result file for the candidate revision on every covered worker, and the
 UI journeys green in CI at the candidate for the rows they cover (see
@@ -20,7 +20,7 @@ Usage::
     python scripts/ci/ship_release_status.py --smoke-worker ServerWorker --smoke-worker DesktopWorker
     python scripts/ci/ship_release_status.py --skip-smoke "DesktopWorker away this week"
     python scripts/ci/ship_release_status.py --skip-smoke-rows two_worker "DesktopWorker away; preview run only"
-    python scripts/ci/ship_release_status.py --skip-windows "DesktopWorker away; no Windows changes"
+    python scripts/ci/ship_release_status.py --candidate <sha>   # tag an older main commit whose CI passed
 """
 from __future__ import annotations
 
@@ -44,19 +44,9 @@ from scripts.live_smoke import scenarios as smoke_scenarios
 
 REPOSITORY = "HobbyCoders/ai-shuffle"
 FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-OWNER_ID = "76577322"
-# Local full-suite passes the owner must have posted on the candidate before
-# tagging. PR CI is separate; scripts/local_ci.py full --attest posts these.
-REQUIRED_LOCAL = ("local/full-suite", "local/windows-suite")
-WINDOWS_CONTEXT = "local/windows-suite"
 EDGE_WORKFLOW = "Publish desktop source update"
-# The same Windows full suite on a GitHub-hosted runner (free in public
-# repositories). A successful run the owner dispatched on main at the exact
-# candidate counts as local/windows-suite, so a release need not wait for a
-# Windows PC.
-HOSTED_WINDOWS_WORKFLOW = "windows-suite.yml"
-HOSTED_WINDOWS_HINT = (f"or dispatch {HOSTED_WINDOWS_WORKFLOW} on main "
-                       f"(`gh workflow run {HOSTED_WINDOWS_WORKFLOW} --ref main`)")
+# The main suite workflow; its push run on the candidate is the release's test evidence.
+MAIN_CI_WORKFLOW = "CI"
 
 # Path prefixes -> platform that needs a fresh artifact when they change.
 # The phone UI is served by the worker (android/ only ships native shell and
@@ -155,17 +145,6 @@ def platforms_needing_builds(changed: Iterable[str]) -> dict:
     return {name: {"needed": bool(paths), "example_paths": paths} for name, paths in result.items()}
 
 
-def local_state(statuses: list) -> dict:
-    """Newest owner-posted status per required local suite -> success/pending/failure/missing."""
-    state = {}
-    for context in REQUIRED_LOCAL:
-        mine = [s for s in statuses if s.get("context") == context
-                and str((s.get("creator") or {}).get("id")) == OWNER_ID]
-        # GitHub lists statuses newest first.
-        state[context] = mine[0].get("state") or "missing" if mine else "missing"
-    return state
-
-
 def edge_state(runs: list, sha: str) -> str:
     """Latest edge publication run on ``sha`` -> success/pending/failed/missing."""
     mine = [r for r in runs if r.get("workflowName") == EDGE_WORKFLOW and r.get("headSha") == sha]
@@ -177,35 +156,55 @@ def edge_state(runs: list, sha: str) -> str:
     return "success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failed")
 
 
-def hosted_windows_runs(head: str) -> list:
-    """Owner-dispatchable hosted Windows suite runs on ``head``, newest first."""
-    if not head:
-        return []
-    data = _gh_json("api", f"repos/{REPOSITORY}/actions/workflows/{HOSTED_WINDOWS_WORKFLOW}/runs"
-                           f"?head_sha={head}&event=workflow_dispatch&per_page=20")
-    runs = data.get("workflow_runs") if isinstance(data, dict) else None
-    return runs if isinstance(runs, list) else []
+def main_ci(head: str) -> dict:
+    """Main CI on ``head`` -> {"state", "url"}.
 
-
-def hosted_windows_state(runs: list, head: str) -> tuple:
-    """Newest owner-dispatched hosted Windows run on main at ``head`` -> (state, url).
-
-    Only a manual run the owner started on main counts, the same authority as
-    the owner-posted local/windows-suite status; anyone else's run is ignored.
+    ``success`` only when ``edge_publication_gate.suite_status`` verifies it,
+    the same evidence ``release_preflight.verify_suite`` requires in
+    ``release.yml``. Otherwise the newest main run's state explains why.
     """
-    def owner(run: dict) -> bool:
-        actor = run.get("triggering_actor") or run.get("actor") or {}
-        return str(actor.get("id")) == OWNER_ID
-
-    mine = [r for r in runs if r.get("head_sha") == head and r.get("event") == "workflow_dispatch"
-            and r.get("head_branch") == "main" and owner(r)]
-    if not mine:
-        return "missing", None
-    run = mine[0]  # the API lists newest first
+    from scripts.ci import edge_publication_gate as edge
+    try:
+        status = edge.suite_status(edge.GitHub(), head)
+    except (subprocess.SubprocessError, OSError, ValueError) as error:
+        return {"state": f"unreadable ({str(error).splitlines()[0] if str(error) else type(error).__name__})",
+                "url": None}
+    if status:
+        return {"state": "success", "url": status.get("target_url")}
+    data = _gh_json("api", f"repos/{REPOSITORY}/actions/workflows/ci.yml/runs"
+                           f"?branch=main&head_sha={head}&per_page=20")
+    runs = data.get("workflow_runs") if isinstance(data, dict) else None
+    runs = [r for r in runs or [] if r.get("event") in ("push", "workflow_dispatch")]
+    if not runs:
+        return {"state": "missing", "url": None}
+    run = max(runs, key=lambda r: r.get("id") or 0)
     if run.get("status") != "completed":
-        return "pending", run.get("html_url")
-    return ("success" if run.get("conclusion") == "success" else (run.get("conclusion") or "failure"),
-            run.get("html_url"))
+        state = "pending"
+    elif run.get("conclusion") == "success":
+        # Green run, but its aggregate job did not pass or an owner local failure vetoes it.
+        state = "not verified"
+    else:
+        state = run.get("conclusion") or "failure"
+    return {"state": state, "url": run.get("html_url")}
+
+
+def newest_green_main(runs: list, tip: str, since: Optional[str], exclude: str = "") -> Optional[str]:
+    """Newest unreleased first-parent main commit (after ``since``, other than
+    ``exclude``) whose newest main CI run succeeded, as ``verify_suite`` judges it."""
+    newest = {}
+    for run in runs:
+        if run.get("workflowName") == MAIN_CI_WORKFLOW and run.get("event") in ("push", "workflow_dispatch"):
+            sha = run.get("headSha")
+            if sha not in newest or (run.get("databaseId") or 0) > (newest[sha].get("databaseId") or 0):
+                newest[sha] = run
+    green = {sha for sha, run in newest.items()
+             if run.get("status") == "completed" and run.get("conclusion") == "success"}
+    if not tip or not since or not green:
+        return None
+    for sha in (_try("git", "rev-list", "--first-parent", "--max-count=200", f"{since}..{tip}") or "").split():
+        if sha in green and sha != exclude:
+            return sha
+    return None
 
 
 def _gh_json(*args: str):
@@ -260,14 +259,14 @@ def pinned_candidate(candidate: str, tip: str, blockers: list) -> str:
 
 
 def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
-            smoke_dir: Optional[str] = None, skip_windows: Optional[str] = None,
-            skip_smoke_rows: Optional[list] = None, candidate: Optional[str] = None) -> dict:
+            smoke_dir: Optional[str] = None, skip_smoke_rows: Optional[list] = None,
+            candidate: Optional[str] = None) -> dict:
     """Release gates for public main's tip, or for ``candidate`` when one is pinned.
 
     A pinned candidate must be on public main's first-parent history. Pinning
     lets other sessions keep merging while the tested revision is tagged:
-    every gate (local suites, hosted Windows run, live smoke) is read for the
-    pinned commit, so a later merge no longer resets them.
+    every gate (main CI, live smoke) is read for the pinned commit, so a later
+    merge no longer resets them.
     """
     blockers = []
     try:
@@ -297,16 +296,8 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         commits = [line for line in log.splitlines() if line]
         changed = (_try("git", "diff", "--name-only", f"{tag_sha}..{head}") or "").splitlines()
     runs = _gh_json("run", "list", "--repo", REPOSITORY, "--branch", "main", "--limit", "60",
-                    "--json", "workflowName,status,conclusion,headSha") or []
-    statuses = (_gh_json("api", f"repos/{REPOSITORY}/commits/{head}/statuses?per_page=100") or []) if head else []
-    local = local_state(statuses)
-    windows_source = {"source": "local" if local[WINDOWS_CONTEXT] == "success" else None, "url": None}
-    hosted_state = None
-    if local[WINDOWS_CONTEXT] != "success" and head:
-        hosted_state, hosted_url = hosted_windows_state(hosted_windows_runs(head), head)
-        if hosted_state == "success":
-            local[WINDOWS_CONTEXT] = "success"
-            windows_source = {"source": "hosted", "url": hosted_url}
+                    "--json", "workflowName,status,conclusion,headSha,event,databaseId") or []
+    ci = main_ci(head) if head else {"state": "missing", "url": None}
     edge = edge_state(runs, head)
     gates = {
         "ANDROID_WORKERS_READY": _variable("ANDROID_WORKERS_READY"),
@@ -314,31 +305,15 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
     }
     if ref and not commits:
         blockers.append("Nothing new on main since the last release tag.")
-    notes = []
-    if windows_source["source"] == "hosted":
-        notes.append(f"Windows full suite: passed on a GitHub-hosted Windows runner ({windows_source['url']}).")
-    for context in REQUIRED_LOCAL:
-        if local[context] == "success":
-            continue
-        if context == WINDOWS_CONTEXT and skip_windows:
-            notes.append(f"Windows full suite not run on this release (--skip-windows): {skip_windows}")
-            continue
-        if head and tip and head != tip:
-            # Suites start only on main's tip, so a missing pass cannot be made for this revision now.
-            skip = " or --skip-windows \"<reason>\"" if context == WINDOWS_CONTEXT else ""
-            blockers.append(
-                f"{context} on pinned {head[:9]} is {local[context]}, and main has moved to {tip[:9]}: "
-                f"a suite run now would test {tip[:9]}, not the pinned revision. Pin a revision that "
-                f"already passed, or drop --candidate and test main's tip{skip}.")
-            continue
-        if context == WINDOWS_CONTEXT:
-            hosted = f" (the hosted run on it is {hosted_state})" if hosted_state not in (None, "missing") else ""
-            blockers.append(
-                f"{context} on {head[:9]} is {local[context]}: run {local_ci.WINDOWS_FULL_HINT} "
-                f"on DesktopWorker (Windows) on a clean checkout of main, {HOSTED_WINDOWS_HINT}{hosted}.")
-            continue
-        run = "`python scripts/local_ci.py full --attest` on a Linux worker"
-        blockers.append(f"{context} on {head[:9]} is {local[context]}: run {run} on a clean checkout of main.")
+    if head and ci["state"] != "success":
+        where = f" ({ci['url']})" if ci.get("url") else ""
+        pinned = "pinned " if head != tip else ""
+        wait = " Wait for it to finish, or tag" if ci["state"] == "pending" else " Tag"
+        green = newest_green_main(runs, tip, tag_sha, exclude=head)
+        newest = (f" The newest main commit with a green CI run is {green[:9]}: "
+                  f"rerun with --candidate {green[:9]}.") if green else ""
+        blockers.append(f"Main CI on {pinned}{head[:9]} is {ci['state']}{where}.{wait} a main commit "
+                        f"whose CI run passed.{newest}")
     smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir, skip_rows=skip_smoke_rows)
     blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {
@@ -352,13 +327,12 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         "suggested_tag": next_patch(tag),
         "commits_since_release": len(commits),
         "commit_subjects": commits[:30],
-        "local_suites_on_main_head": local,
-        "windows_suite": windows_source,
+        "main_ci": ci,
         "edge_published": edge == "success",
         "platform_builds": platforms_needing_builds(changed),
         "play_gates": gates,
         "smoke": smoke,
-        "release_notes_lines": smoke["release_notes_lines"] + notes,
+        "release_notes_lines": smoke["release_notes_lines"],
         "blockers": blockers,
         "ready": not blockers,
     }
@@ -374,7 +348,8 @@ def render(report: dict) -> str:
         f"Candidate: {source} {report['main_head'][:9]}{pinned}  "
         f"(last release {report['last_release']['tag']}, {report['commits_since_release']} commits since)",
         f"Suggested tag: {report['suggested_tag']}",
-        "Local suites on candidate: " + ", ".join(f"{k}={v}" for k, v in report["local_suites_on_main_head"].items())
+        f"Main CI on candidate: {report['main_ci']['state']}"
+        + (f" ({report['main_ci']['url']})" if report["main_ci"].get("url") else "")
         + f"; edge published: {'yes' if report['edge_published'] else 'no'}",
         "Play gates: " + ", ".join(f"{k}={v}" for k, v in report["play_gates"].items()),
     ]
@@ -411,15 +386,13 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--skip-smoke-rows", nargs=2, action="append", metavar=("ROWS", "REASON"),
                         help="smoke rows that may stay not run (two_worker, or comma-separated row ids); "
                              "failed rows still block and the reason goes into the release notes")
-    parser.add_argument("--skip-windows", metavar="REASON", default=None,
-                        help="tag without a Windows full-suite pass; the reason goes into the release notes")
     parser.add_argument("--candidate", metavar="SHA", default=None,
                         help="check and tag this already-merged main revision instead of main's tip, so "
-                             "merges after the suites ran do not reset the gates")
+                             "merges after its CI run passed do not reset the gates")
     parser.add_argument("--smoke-dir", default=None,
                         help="smoke results folder (default $AI_SHUFFLE_SMOKE_DIR or <data dir>/smoke)")
     args = parser.parse_args(argv)
-    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_windows, args.skip_smoke_rows,
+    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir, args.skip_smoke_rows,
                      candidate=args.candidate)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 0
