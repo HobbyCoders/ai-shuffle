@@ -859,6 +859,110 @@ describe('WorkLogGroup', () => {
 			expect(folds.current).toEqual({});
 		});
 
+		describe('the turn that ends the transcript', () => {
+			const status = createRawSnippet(() => ({ render: () => '<span data-testid="status">Working</span>' }));
+			/** jsdom lays nothing out: give the turn's content a height, then tell its observers. */
+			function layout() {
+				const observers = new Set<() => void>();
+				class FakeRO {
+					private readonly fire: () => void;
+					constructor(callback: ResizeObserverCallback) { this.fire = () => callback([], this as unknown as ResizeObserver); }
+					observe = () => { observers.add(this.fire); };
+					unobserve = () => {};
+					disconnect = () => { observers.delete(this.fire); };
+				}
+				const g = globalThis as unknown as { ResizeObserver?: unknown };
+				const previous = g.ResizeObserver;
+				g.ResizeObserver = FakeRO;
+				return {
+					/** The height the content will have at its next measure. */
+					stub(height: number) {
+						const content = document.querySelector('.worklog-measure') as HTMLElement;
+						Object.defineProperty(content, 'getBoundingClientRect', { value: () => ({ height }), configurable: true });
+					},
+					async set(height: number) {
+						this.stub(height);
+						for (const fire of [...observers]) fire();
+						await tick();
+					},
+					restore() {
+						if (previous) g.ResizeObserver = previous;
+						else delete g.ResizeObserver;
+					}
+				};
+			}
+			const floor = () => (document.querySelector('section.worklog') as HTMLElement).style.minHeight;
+
+			it('draws the status line in its action slot, under the last row, only while it has something to say', async () => {
+				const view = render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()), activity: status, activityShown: true });
+				const slot = document.querySelector('.action-slot') as HTMLElement;
+				expect(slot.contains(screen.getByTestId('status'))).toBe(true);
+				const rows = [...document.querySelectorAll('.sequence-row')];
+				expect(rows.at(-1)!.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+				await view.rerender({ ...logOf(true), activity: status, activityShown: false });
+				expect(document.querySelector('.action-slot')).toBeNull();
+			});
+
+			it('keeps its height when a row folds, and gives up a fold taller than the slack', async () => {
+				const ro = layout();
+				try {
+					render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()), holdHeight: true });
+					await ro.set(400);
+					expect(floor()).toBe('400px');
+					// A call finished and joined the fold above it: 70px less content.
+					await ro.set(330);
+					expect(floor()).toBe('400px');
+					// The turn went on and grew past what it held.
+					await ro.set(520);
+					expect(floor()).toBe('520px');
+					// A long line folded away: holding it would leave an empty screen.
+					await ro.set(120);
+					expect(floor()).toBe('120px');
+				} finally { ro.restore(); }
+			});
+
+			it('passes the settle through, keeping only the room it already held under the answer', async () => {
+				const ro = layout();
+				try {
+					const view = render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()), holdHeight: true });
+					await ro.set(400);
+					await ro.set(360);
+					expect(floor()).toBe('400px');
+					// Settling merges the runs into one fold: 90px less, above the answer.
+					ro.stub(270);
+					await view.rerender({ ...logOf(false), holdHeight: true });
+					expect(floor()).toBe('310px');
+				} finally { ro.restore(); }
+			});
+
+			it('holds nothing for a turn that does not end the transcript, and lets go when a newer turn does', async () => {
+				const ro = layout();
+				try {
+					const view = render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
+					await ro.set(400);
+					expect(floor()).toBe('');
+
+					await view.rerender({ ...logOf(true), holdHeight: true });
+					await ro.set(400);
+					expect(floor()).toBe('400px');
+					await view.rerender({ ...logOf(true), holdHeight: false });
+					expect(floor()).toBe('');
+				} finally { ro.restore(); }
+			});
+
+			it('does not take the height of a run the reader opened', async () => {
+				const ro = layout();
+				try {
+					render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()), holdHeight: true });
+					await ro.set(200);
+					await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+					await ro.set(600);
+					expect(floor()).toBe('200px');
+				} finally { ro.restore(); }
+			});
+		});
+
 		it('carries an open run into the settled fold without a fold key too', async () => {
 			const view = render(WorkLogGroup, { ...logOf(true), foldKey: null });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));

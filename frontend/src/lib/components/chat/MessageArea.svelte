@@ -104,6 +104,7 @@
 		createTranscriptWindow,
 		selectedRowRange,
 		dominantReadingIndex,
+		jumpTargetMounted,
 		transcriptItemCost,
 		TRANSCRIPT_CONTENT_BUDGET,
 		classifyTurnEntry,
@@ -465,7 +466,7 @@
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
 
 	// A request waiting on the owner stands in for the dots while it waits.
-	/** The inline tasks list is on screen: the Working line is drawn inside it. */
+	/** The inline tasks list is on screen: its rule is the line under the turn. */
 	let tasksListShown = $state(false);
 	const showGapIndicator = $derived(
 		!assistantQuestion
@@ -737,6 +738,10 @@
 	// the session's own queues and prose question.
 	const openSessionId = $derived($activeSession.sessionId);
 	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
+	/** The turn's status line has something to say: working, queued or compacting. */
+	const turnStatusShown = $derived(
+		!!$activeSession.liveCompaction || showGapIndicator || !!openRow?.start_queued
+	);
 	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
 	// later records patch the episode, so only the anchor rows re-read this.
 	// The source worker never sees `moved`: the session row CHANGING to the
@@ -854,6 +859,15 @@
 	const mountedStart = $derived(mountedRange.start);
 	const mountedEnd = $derived(mountedRange.end);
 	const visibleItems = $derived(displayItems.slice(mountedStart, mountedEnd));
+	/** The turn that ends the transcript, when it is on screen and drawn as
+	 *  runs. It keeps its height while it is last, and the turn's status line
+	 *  ("Working for 12s") is drawn in its action slot, where the running call's
+	 *  row stands while a call runs. */
+	const tailWorkLogKey = $derived.by(() => {
+		if (mountedEnd < displayItems.length) return null;
+		const last = displayItems[displayItems.length - 1];
+		return last?.kind === 'work_log' && last.sequence.length > 0 ? displayItemKey(last) : null;
+	});
 	let windowSessionKey: string | undefined;
 	let windowShiftVersion = 0;
 	let windowShifting = false;
@@ -1055,7 +1069,7 @@
 	}
 
 	async function ensureItemMounted(itemIndex: number): Promise<void> {
-		if (itemIndex < 0 || (itemIndex >= mountedStart && itemIndex < mountedEnd)) return;
+		if (itemIndex < 0 || jumpTargetMounted({ start: mountedStart, end: mountedEnd }, itemIndex, displayItems.length)) return;
 		applyMountedRange(transcriptWindow.windowAround(itemIndex), false);
 		await tick();
 	}
@@ -3017,6 +3031,9 @@
 						speaker={turnSpeaker}
 						revealMessageId={revealedTurnId}
 						pagingEnabled={!shouldAutoScroll}
+						holdHeight={displayItemKey(item) === tailWorkLogKey}
+						activity={turnStatus}
+						activityShown={displayItemKey(item) === tailWorkLogKey && turnStatusShown}
 						{observeTurnAnchor}
 					/>
 				{:else if item.kind === 'system_group'}
@@ -3035,13 +3052,46 @@
 				</div>
 			{/if}
 
+			<!-- The turn's status line. It has one place at a time, and none of them
+			     comes and goes as a row of its own:
+			     - in the last turn's action slot, where the running call's row
+			       stands while a call runs;
+			     - with no such turn on screen, above the tasks list's rule, in room
+			       the list keeps whether or not the line shows;
+			     - with neither, in the trailing breathing room, out of flow. -->
+			{#snippet workingLine()}
+				{#if showGapIndicator || openRow?.start_queued}
+					<!-- Above the tasks list its rule is the one line; alone, the line
+					     carries its own. -->
+					<TurnActivity
+						startedAt={liveTurnStartedAt}
+						queued={!!openRow?.start_queued}
+						thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null}
+						ruled={!tasksListShown}
+					/>
+				{/if}
+			{/snippet}
+			{#snippet turnStatus()}
+				{#if $activeSession.liveCompaction}
+					<TurnActivity
+						startedAt={liveTurnStartedAt}
+						compaction={$activeSession.liveCompaction ?? null}
+						working={showGapIndicator}
+						ruled={!tasksListShown}
+					/>
+				{:else}
+					{@render workingLine()}
+				{/if}
+			{/snippet}
+
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
 			     running-tool spinner, visible thinking state, or active subagent row. -->
-			{#if $activeSession.liveCompaction}
+			{#if $activeSession.liveCompaction && !tailWorkLogKey}
 				<TurnActivity
 					startedAt={liveTurnStartedAt}
 					compaction={$activeSession.liveCompaction ?? null}
 					working={showGapIndicator}
+					ruled={!tasksListShown}
 				/>
 			{/if}
 
@@ -3050,19 +3100,11 @@
 			     for agents, its transcript. The phone shows the same collapsible row.
 			     Renders nothing when nothing runs. Chats this one started
 			     (StartSession) are rows in the Agents group with a chat icon. -->
-			<!-- While tasks are listed, the live turn's Working line sits above their
-			     "Background tasks" rule, closing the live work, instead of trailing
-			     the tasks from the spacer below where it read as one of them. -->
-			{#snippet workingLead()}
-				{#if showGapIndicator || openRow?.start_queued}
-					<TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} />
-				{/if}
-			{/snippet}
 			<RunningTasksList
 				sessionId={$activeSession.sessionId}
 				presentation={$activeSession}
 				variant="inline"
-				lead={($activeSession.isStreaming || openRow?.start_queued) && !$activeSession.liveCompaction ? workingLead : undefined}
+				lead={!tailWorkLogKey && !$activeSession.liveCompaction ? workingLine : undefined}
 				bind:listed={tasksListShown}
 			/>
 
@@ -3071,10 +3113,10 @@
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
 			>
-				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction && !tasksListShown}
+				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction && !tasksListShown && !tailWorkLogKey}
 					<!-- Working occupies existing trailing breathing room, not a
 					     new 30px row + 18px gap that disappears at completion. -->
-					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} /></div>
+					<div class="tail-activity">{@render workingLine()}</div>
 				{/if}
 				<div class="tail-controls" bind:this={tailControlsRef} style:min-height={`${tailQueueSlotPx}px`}>
 					{#if pendingMessages.length > 0}

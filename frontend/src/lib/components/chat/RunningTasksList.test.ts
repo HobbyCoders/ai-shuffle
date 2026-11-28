@@ -267,7 +267,7 @@ describe('RunningTasksList grouping and counts', () => {
 		expect(screen.queryByTestId('tasks-toggle')).toBeNull();
 	});
 
-	it('inline opens with a "Background tasks" rule, the live turn\'s Working line above it', () => {
+	it('inline opens with one plain rule, the turn\'s status line above it', () => {
 		setTasks([task('b', { kind: 'shell', subject: 'npm test' })]);
 		const lead = createRawSnippet(() => ({ render: () => '<span>Working</span>' }));
 		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline', lead });
@@ -277,10 +277,19 @@ describe('RunningTasksList grouping and counts', () => {
 		expect(first.textContent).toBe('Working');
 		expect(second.classList.contains('inline-divider')).toBe(true);
 		expect(second.getAttribute('aria-hidden')).toBe('true');
-		expect(second.textContent).toBe('Background tasks');
+		// The rule says nothing: no label, and no second line above it.
+		expect(second.textContent).toBe('');
+		expect(second.childElementCount).toBe(0);
 	});
 
-	it('draws the rule without a Working slot once the turn has ended', () => {
+	it('keeps the status slot while it is passed, even with nothing to say', () => {
+		setTasks([task('b', { kind: 'shell', subject: 'npm test' })]);
+		const lead = createRawSnippet(() => ({ render: () => '<!---->' }));
+		render(RunningTasksList, { sessionId: 's1', variant: 'inline', lead });
+		expect(screen.getByTestId('tasks-lead').textContent).toBe('');
+	});
+
+	it('draws the rule without a status slot when the turn above carries the line', () => {
 		setTasks([task('b', { kind: 'shell', subject: 'npm test' })]);
 		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
 		expect(screen.queryByTestId('tasks-lead')).toBeNull();

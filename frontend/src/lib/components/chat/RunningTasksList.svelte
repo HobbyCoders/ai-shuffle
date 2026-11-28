@@ -10,8 +10,9 @@
 	 *
 	 * variant="inline" sits under the last reply: a collapsible grouped list
 	 * (capped height past a handful of rows, with "Show all" for search and
-	 * filters) under a "Background tasks" rule, so it never reads as a row of the
-	 * live work above it. A live turn's Working line (`lead`) sits above the rule.
+	 * filters) under one plain rule, so it never reads as a row of the live work
+	 * above it. With no turn on screen to carry it, the turn's status line
+	 * (`lead`) sits above the rule, in room the list keeps for it.
 	 * The phone shows the same row, with larger tap targets; its full list is
 	 * also Chat controls > Running tasks.
 	 *
@@ -132,10 +133,10 @@
 		 */
 		onClose?: () => void;
 		/**
-		 * Inline only: the live turn's Working line, drawn above the "Background
-		 * tasks" rule so it closes the live work instead of trailing the tasks.
-		 * Its slot keeps its height while passed, so the line coming and going
-		 * between tool calls never moves the list.
+		 * Inline only: the turn's status line ("Working for 12s"), drawn above
+		 * the rule so it closes the live work instead of trailing the tasks.
+		 * Its slot keeps its height while passed, whether or not the line shows,
+		 * so the line coming and going never moves the list.
 		 */
 		lead?: Snippet;
 		/** Inline only: whether the list draws anything (the host's Working line goes here then). */
@@ -1369,7 +1370,7 @@
 		{#if lead}
 			<div class="inline-lead" data-testid="tasks-lead">{@render lead()}</div>
 		{/if}
-		<div class="inline-divider" aria-hidden="true"><span>Background tasks</span></div>
+		<div class="inline-divider" aria-hidden="true"></div>
 		<div class="inline-head">
 			<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
 				data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>
@@ -1590,28 +1591,15 @@
 
 	/* ── Compact (desktop inline) ───────────────────────────────────────────── */
 	.inline { flex-shrink: 0; font-size: 0.75rem; color: var(--muted-foreground); }
-	/* The Working line's slot: TurnActivity's own row height, held while the
-	   turn is live so the line appearing between tool calls moves nothing. */
-	.inline-lead { min-height: 30px; margin-bottom: 4px; }
-	/* A labelled rule: the tasks are their own area, not the live work's last row. */
+	/* The status line's slot: TurnActivity's own row height, held whether or
+	   not the line shows, so it coming and going moves nothing. */
+	.inline-lead { min-height: 30px; margin-bottom: 6px; }
+	/* One plain rule: the tasks are their own area, not the live work's last row. */
 	.inline-divider {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin: 6px 0 4px;
-		font-size: 0.65625rem;
-		font-weight: 600;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		color: var(--muted-foreground);
-	}
-	.inline-divider::before, .inline-divider::after {
-		content: '';
-		flex: 1;
 		height: 1px;
+		margin-bottom: 10px;
 		background: color-mix(in oklch, var(--border) 85%, transparent);
 	}
-	.inline-divider span { flex: none; opacity: 0.85; }
 	.inline-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 	.inline-toggle {
 		display: inline-flex;
