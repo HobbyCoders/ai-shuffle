@@ -109,9 +109,12 @@ export function workerStatus(worker: ProjectWorker, kind: ProjectKind | null | u
  * as it is.
  */
 export function repositorySlug(remote: string): string {
-	const trimmed = remote.trim().replace(/[?#].*$/, '').replace(/\/+$/, '').replace(/\.git$/i, '');
-	// scp-style "git@host:owner/name" has no scheme; its path starts after the colon.
-	const path = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i, '') : trimmed.replace(/^[^/:]+:/, '');
+	const trimmed = remote.trim().replace(/[?#].*$/, '').replace(/[/\\]+$/, '').replace(/\.git$/i, '');
+	// Without a scheme the address starts "host:port/" (how the server shows a
+	// remote that names a port) or scp-style "git@host:"; the path follows either.
+	const path = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+		? trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i, '')
+		: trimmed.replace(/^(?:\[[^\]]*\]|[^/\\:]+):\d+(?=[/\\]|$)/, '').replace(/^[^/\\:]+:/, '');
 	const parts = path.split(/[/\\]/).filter(Boolean);
 	return parts.length >= 2 ? parts.slice(-2).join('/') : remote.trim();
 }

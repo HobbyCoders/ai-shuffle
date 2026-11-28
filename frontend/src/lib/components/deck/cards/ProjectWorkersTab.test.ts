@@ -212,7 +212,8 @@ describe('Worker rows', () => {
 		await fireEvent.click(within(row).getByRole('button', { name: 'Set up' }));
 		// The default folder, as suggested; the worker opens so its progress shows.
 		expect(startProjectSetup).toHaveBeenCalledWith(ref, { install_id: 'spare', folder: 'demo', mode: 'auto' });
-		expect(details('Spare')).toBeTruthy();
+		// The button is gone once the setup starts, so the details take the keyboard.
+		await waitFor(() => expect(document.activeElement).toBe(details('Spare')));
 	});
 
 	it('starts a chat on a worker from its details', async () => {

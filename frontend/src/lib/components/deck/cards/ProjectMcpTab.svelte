@@ -143,7 +143,7 @@
 	}
 
 	// Add new local/project server
-	export function openAddForm() {
+	function openAddForm() {
 		editingMcpServer = null;
 		mcpSelectedScope = 'local';
 		showMcpServerForm = true;

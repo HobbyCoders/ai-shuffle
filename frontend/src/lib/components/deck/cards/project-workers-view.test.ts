@@ -265,6 +265,11 @@ describe('worker table status cell', () => {
 		['https://example.com/team/tools/demo.git?ref=main', 'tools/demo'],
 		['example.com/acme/demo', 'acme/demo'],
 		['/srv/git/demo.git', 'git/demo'],
+		['C:\\repos\\demo.git\\', 'repos/demo'],
+		// A port is not an owner: with one path part the address stays whole.
+		['git.example.com:2222/demo', 'git.example.com:2222/demo'],
+		['git.example.com:2222/acme/demo', 'acme/demo'],
+		['[::1]:8080/demo', '[::1]:8080/demo'],
 		['demo', 'demo']
 	])('names a repository %s by its last two path parts', (remote, slug) => {
 		expect(repositorySlug(remote)).toBe(slug);

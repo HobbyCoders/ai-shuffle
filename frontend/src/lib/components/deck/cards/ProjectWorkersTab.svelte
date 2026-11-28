@@ -450,6 +450,8 @@
 		e.stopPropagation();
 		select(w.install_id);
 		void setUp(w);
+		// The button leaves the row once the setup starts: the details take the keyboard.
+		void tick().then(() => document.getElementById(`pw-card-${w.install_id}`)?.focus({ preventScroll: true }));
 	}
 
 	function branchLine(w: ProjectWorkerDetail): string | null {

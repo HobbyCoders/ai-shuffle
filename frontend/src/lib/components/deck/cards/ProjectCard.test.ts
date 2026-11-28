@@ -182,6 +182,21 @@ describe('Projects master/detail', () => {
   // The one folder editor is the worker table's: Settings sends folder changes there.
   expect(within(await openSettings()).queryByRole('button', { name: 'Change folder' })).toBeNull();
  });
+ it('closes an open worker row when the owner changes tab, so coming back does not pull the keyboard into it', async () => {
+  supported.set(true);
+  overview.set([]);
+  const workersTab = vi.mocked(ProjectWorkersTab as unknown as (...args: unknown[]) => unknown);
+  workersTab.mockClear();
+  render(ProjectCard);
+  await screen.findByRole('heading', { level: 2, name: 'One' });
+  // The Workers tab opens a row through its bound selection.
+  const first = workersTab.mock.calls.at(-1)![1] as { selectedInstallId: string | null };
+  first.selectedInstallId = 'peer';
+  expect(first.selectedInstallId).toBe('peer');
+  await fireEvent.click(screen.getByRole('tab', { name: 'Resources' }));
+  await fireEvent.click(screen.getByRole('tab', { name: /^Workers/ }));
+  expect((workersTab.mock.calls.at(-1)![1] as { selectedInstallId: string | null }).selectedInstallId).toBeNull();
+ });
  it('changes the folder in the Settings tab when this worker has no worker list for a local project', async () => {
   supported.set(true);
   overview.set([]);

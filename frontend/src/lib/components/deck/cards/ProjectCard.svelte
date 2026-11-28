@@ -346,7 +346,7 @@
 			{@const row = selectedRow}
 			{@const ref = overviewOn && row.projectV2Id ? { project_v2_id: row.projectV2Id } : null}
 			<DetailPane width="reading" name={row.name} onBack={back} backLabel="Projects"
-				tabs={detailTabs} tab={shownTab} onTabChange={(tab) => { activeTab = tab as DetailTab; }} phonePrimary="inline">
+				tabs={detailTabs} tab={shownTab} onTabChange={(tab) => { activeTab = tab as DetailTab; selectedInstallId = null; }} phonePrimary="inline">
 				{#snippet subtitle()}<span class="project-subtitle" data-ui-project-subtitle>{detailSubtitle}</span>{/snippet}
 				{#snippet primary()}
 					<ProjectNewChat workers={ref ? row.workers : null} kind={row.kind} localProjectId={row.localId} projectV2Id={row.projectV2Id} />

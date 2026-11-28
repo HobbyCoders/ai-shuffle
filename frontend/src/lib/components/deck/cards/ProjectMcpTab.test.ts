@@ -108,8 +108,8 @@ describe('ProjectMcpTab', () => {
 	});
 
 	it('adds a project-scoped server through the form', async () => {
-		const view = await mount();
-		(view.component as unknown as { openAddForm: () => void }).openAddForm();
+		await mount();
+		await fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
 		const form = await screen.findByRole('dialog');
 		await fireEvent.input(within(form).getByPlaceholderText('my-mcp-server'), { target: { value: 'notes' } });
 		await fireEvent.input(within(form).getByPlaceholderText('node, python, npx, etc.'), { target: { value: 'node' } });
