@@ -431,6 +431,50 @@ def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
     return out
 
 
+def _owner_rule(entry: Mapping[str, Any]) -> bool:
+    """A live rule the owner kept, of the kinds a session reads as guidance."""
+    key = str(entry.get("key") or "")
+    return bool(entry.get("protected")) and not (
+        is_superseded(entry) or entry.get("conflicted") or entry.get("retired_at")
+        or key in IDENTITY_KEYS or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX))
+
+
+def _shared_trigger(a: Triggers, b: Triggers) -> bool:
+    """The two fire in the same situation: a command, path or named tool in
+    common, a two-word phrase in common, or two strong words in common."""
+    if (set(a.command) & set(b.command)
+            or set(a.paths + a.explicit_paths) & set(b.paths + b.explicit_paths)
+            or set(a.explicit_tools) & set(b.explicit_tools)):
+        return True
+    phrases = {w for w in a.words if " " in w} & {w for w in b.words if " " in w}
+    singles = {w for w in _singles(a) if _strong(w)} & set(_singles(b))
+    return bool(phrases) or len(singles) >= 2
+
+
+def possible_conflicts(entries: Iterable[Mapping[str, Any]],
+                       about: str | None = None) -> list[tuple[str, str]]:
+    """Pairs of owner rules (ids) that may contradict each other: in
+    overlapping scopes, sharing a trigger, and exactly one of the two texts
+    says "not", "never", "avoid" or the like. Deterministic and cheap; a hint
+    for the owner, never a verdict. With ``about``, only pairs with that id."""
+    rules = []
+    for entry in entries:
+        if _owner_rule(entry):
+            triggers = with_explicit(derive_triggers(entry.get("when"), entry.get("text"), entry.get("key")),
+                                     entry.get("triggers"))
+            rules.append((str(entry.get("id")), str(entry.get("scope") or "global"),
+                          bool(_NEGATION.search(str(entry.get("text") or ""))), triggers))
+    out = []
+    for i, (a_id, a_scope, a_neg, a_trig) in enumerate(rules):
+        for b_id, b_scope, b_neg, b_trig in rules[i + 1:]:
+            if about is not None and about not in (a_id, b_id):
+                continue
+            if (a_neg != b_neg and (a_scope == b_scope or "global" in (a_scope, b_scope))
+                    and _shared_trigger(a_trig, b_trig)):
+                out.append((a_id, b_id))
+    return out
+
+
 _CLAUSE = re.compile(r"[.;:!?\n]+(?:\s|$)")
 # Word triggers fire only when their evidence sits close together: WINDOW
 # content words, about one sentence. A long brief mentions everything once.

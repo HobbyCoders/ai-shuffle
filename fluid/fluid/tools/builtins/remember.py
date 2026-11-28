@@ -141,6 +141,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if noted:
         text += (f"\nKept because the user asked, but {_progress_reason(noted[0])}: task progress "
                  "belongs in the working record (WorkingRecord) or session notes (Note).")
+    if saved.protected:
+        try:
+            text += await asyncio.to_thread(_conflict_note, store, saved)
+        except Exception:  # noqa: BLE001 — a hint never fails a committed save
+            pass
     return ToolOutcome(text=text + _receipt_notes(receipt))
 
 
@@ -165,6 +170,22 @@ def _words_only(saved: Any) -> bool:
             jit.derive_triggers(saved.when, saved.text, saved.key), saved.triggers))
     except Exception:  # noqa: BLE001 — a hint never fails a committed save
         return False
+
+
+def _conflict_note(store: Any, saved: Any) -> str:
+    """Owner rules that share a trigger with the saved one and disagree on a
+    negation (triggers.possible_conflicts). A hint only, never a verdict."""
+    from fluid.codemode import triggers as jit
+    live = {m.id: m for m in store.memories()}
+    pairs = jit.possible_conflicts([vars(m) for m in live.values()], about=saved.id)
+    others = [live[b if a == saved.id else a] for a, b in pairs][:3]
+    if not others:
+        return ""
+    rows = "; ".join(f"[{m.id} r{m.revision}] {_clip(m.when or m.text)}" for m in others)
+    verb = "fires" if len(others) == 1 else "fire"
+    return (f"\nPossible conflict: {rows} {verb} in the same situation as this rule, and only "
+            "one side says not or never. If they contradict, ask the user which stands and "
+            "correct the other (memory_id, expected_revision).")
 
 
 def _status(store: Any, saved: Any) -> tuple[str, str | None, Any]:

@@ -32,7 +32,7 @@ import logging
 import re
 import time
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from fluid.codemode import reflection
@@ -535,9 +535,8 @@ class LearnerRoute(NamedTuple):
     session_model: str | None = None
     #: How the route's provider bills a call (BILLING_SUBSCRIPTION, metered).
     billing: str | None = None
-    #: Where the text goes (provider kind and row). Retained workflow evidence
-    #: from another chat is shown only to a call on the same row and model;
-    #: a failure backs off this row's model, not every row serving that id.
+    #: Where the text goes (provider kind and row): a failure backs off this
+    #: row's model, not every row serving that id.
     destination: str | None = None
 
 
@@ -685,19 +684,11 @@ class Synthesizer:
         session_id: str | None = None,
         enabled: bool | Callable[[], Any] = True,
         context_window: int | None = None,
-        workflow_cwd: str | None = None,
-        workflow_sources: Sequence[str] | None = None,
         daily_calls: int | Callable[[], Any] | None = None,
         billing: str | Callable[[], str | None] | None = None,
         own_session: str | None = None,
         route: Callable[[str], LearnerRoute | None] | None = None,
     ) -> None:
-        self._workflow_cwd = workflow_cwd
-        # The session's setting sources (None: no restriction): the skills a
-        # workflow proposal is compared with are the ones the session loads.
-        self._workflow_sources = (
-            tuple(workflow_sources) if workflow_sources is not None else None
-        )
         # The journal is shared by every chat of the store, so a pass can read
         # other chats' entries. With ``route``, an entry stamped with another
         # chat's session (not ``own_session``) is learned on that chat's own
@@ -709,9 +700,6 @@ class Synthesizer:
         self._route = route
         # The foreign route of the group being called, or None (this chat).
         self._active_route: LearnerRoute | None = None
-        # Each chat's route target (provider row, model) seen this pass, for
-        # filtering retained workflow evidence (see _evidence_allowed).
-        self._destinations: dict[str, tuple[str | None, str] | None] = {}
         # (model, billing, prompt limit) of a call made since the last
         # pass-log row (see _complete): the row records a call that ran.
         self._last_call: tuple[str, Any, int] | None = None
@@ -799,9 +787,6 @@ class Synthesizer:
         # day, the whole budget).
         self.last_pass_failed = False
         self.last_pass_skipped = False
-        # True while the when-line backfill runs after a pass, so a close
-        # that times out then is charged to the backfill, not to synthesis.
-        self._in_backfill = False
         # When this synthesizer first found the synthesis lock held, and when
         # it last wrote that down (see run()).
         self._lock_busy_since: float | None = None
@@ -1144,28 +1129,15 @@ class Synthesizer:
         try:
             await asyncio.wait_for(self._drain_inner(), timeout=self._close_timeout)
         except TimeoutError:
-            if self._in_backfill:
-                # Synthesis finished; the conflict review or when-line backfill
-                # after it ran out of the close budget synthesis shares with
-                # them. That says nothing about the provider: no backoff, no
-                # failure count, no failed synthesis pass. Rules left unreviewed
-                # are reviewed by a later pass. When-lines stay missing; the
-                # facts the backfill had picked count as tried today (the daily
-                # bound on a stuck provider) and are retried after the UTC day
-                # rolls over.
-                self._in_backfill = False
-                _log.info("conflict review or when-line backfill on close was cut off "
-                          "after %.0fs; a later pass retries", self._close_timeout)
-            else:
-                kind = "reflection" if reflection.reflection_mode() else "synthesis"
-                self.last_error = (
-                    f"{kind} on close exceeded {self._close_timeout:.0f}s and was abandoned"
-                )
-                # An abandoned pass leaves no cursor movement (the slice
-                # retries next session) — but it must leave a trace, or a
-                # slow pass is indistinguishable from one that never ran.
-                self._log_pass(kind, [], error=self.last_error,
-                               extra={"outcome": "error"} if kind == "reflection" else None)
+            kind = "reflection" if reflection.reflection_mode() else "synthesis"
+            self.last_error = (
+                f"{kind} on close exceeded {self._close_timeout:.0f}s and was abandoned"
+            )
+            # An abandoned pass leaves no cursor movement (the slice
+            # retries next session) — but it must leave a trace, or a
+            # slow pass is indistinguishable from one that never ran.
+            self._log_pass(kind, [], error=self.last_error,
+                           extra={"outcome": "error"} if kind == "reflection" else None)
             if self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -1184,11 +1156,9 @@ class Synthesizer:
             await self._run_safe()
 
     async def _reflect_safe(self) -> list[str]:
-        """Reflect on this chat once (fluid.codemode.reflection), then the
-        owner-rule conflict review as before. No helper-skill synthesis, no
-        consolidation, no when-line backfill, no workflow proposals: those
-        belong to the continuous learner."""
-        self._in_backfill = False
+        """Reflect on this chat once (fluid.codemode.reflection). No
+        helper-skill synthesis and no consolidation: those belong to the
+        continuous learner."""
         try:
             changed = await asyncio.wait_for(reflection.reflect(self), timeout=self._pass_timeout)
         except TimeoutError:
@@ -1203,18 +1173,10 @@ class Synthesizer:
             self._log_pass("reflection", [], error=self.last_error, retry_after_s=retry,
                            counts_toward_yield=False, extra={"outcome": "error"})
             return []
-        if not self.last_pass_failed and self.enabled():
-            from fluid.codemode.conflict_review import run as review_conflicts
-
-            self._in_backfill = True
-            reviewed = await review_conflicts(self)
-            self._in_backfill = False
-            changed += ["memory-conflict:" + mid for mid in reviewed.changed]
         await self._notify(changed)
         return changed
 
     async def _run_safe(self) -> list[str]:
-        self._in_backfill = False
         try:
             changed = await asyncio.wait_for(self.run(), timeout=self._pass_timeout)
         except TimeoutError:
@@ -1249,22 +1211,6 @@ class Synthesizer:
                 self._log_budget_spent("consolidation")
             except Exception as exc:  # consolidation is opportunistic, never fatal
                 self._consolidation_failed(f"{type(exc).__name__}: {exc}")
-        if not (self.last_pass_failed or self.last_pass_skipped):
-            # Best-effort and self-contained: its failures (including its own
-            # timeout) go to the backfill's backoff, never last_pass_failed.
-            from fluid.codemode.conflict_review import run as review_conflicts
-            from fluid.codemode.memory_backfill import run as backfill_when
-            # Left set if a close cancels it, so drain() can tell (a finally
-            # would clear it before drain sees the timeout).
-            self._in_backfill = True
-            # Owner rules that are new or reworded since their last review:
-            # do two of them contradict each other? Before the backfill, so a
-            # rule the owner just saved is reviewed in the pass that follows it.
-            reviewed = await review_conflicts(self)
-            changed += ["memory-conflict:" + mid for mid in reviewed.changed]
-            backfilled = await backfill_when(self)
-            self._in_backfill = False
-            changed += ["memory-when:" + mid for mid in backfilled.lines]
         await self._notify(changed)
         return changed
 
@@ -1467,24 +1413,16 @@ class Synthesizer:
         that chat (gone, no model, a provider that refuses background calls,
         or its model is backing off after failures)."""
         routes: dict[str, LearnerRoute | None] = {}
-        self._destinations = {}
         for _, entry in shown:
             key = self._route_key(entry)
             if key is None or key in routes:
                 continue
             route = await self._lookup_route(key)
-            self._destinations[key] = self._route_target(route)
             if route is not None and self._backing_off(self._backoff_key(route.model, route.destination)):
                 await self._close_routes({key: route})
                 route = None
             routes[key] = route
         return routes
-
-    @staticmethod
-    def _route_target(route: LearnerRoute | None) -> tuple[str | None, str] | None:
-        """Where a chat's own text goes (provider row, model), or None when
-        it has no learner or its row is unknown."""
-        return (route.destination, route.model) if route and route.destination else None
 
     async def _lookup_route(self, session: str) -> LearnerRoute | None:
         try:
@@ -1492,54 +1430,6 @@ class Synthesizer:
         except Exception:  # noqa: BLE001 — no route: never another provider
             _log.debug("learner route lookup failed", exc_info=True)
             return None
-
-    async def _learn_destinations(self, sessions: list[str]) -> None:
-        """Record where each of ``sessions`` sends its text (clients are
-        built lazily, so nothing is opened; they are closed regardless)."""
-        for session in sessions:
-            if session in self._destinations:
-                continue
-            route = await self._lookup_route(session)
-            self._destinations[session] = self._route_target(route)
-            await self._close_routes({session: route})
-
-    async def _learn_evidence_destinations(self, fitted: list[tuple[int, dict]]) -> None:
-        """Before a slice that accepts a workflow, learn the destination of
-        every chat whose retained entries in those projects could be shown as
-        workflow evidence, so _synthesis_input can keep to the call's own."""
-        if self._route is None:
-            return
-        projects = {e.get("project") for _, e in fitted
-                    if e.get("kind") == "user"
-                    and e.get("text", "").strip().lower().startswith("workflow accepted: ")}
-        if not projects:
-            return
-        try:
-            retained = self._store.journal_entries()
-        except (ValueError, OSError):
-            return
-        sessions = sorted({str(e["session"]) for e in retained
-                           if e.get("session") and e.get("project") in projects})
-        await self._learn_destinations(sessions)
-
-    def _evidence_allowed(self, entry: dict, group_session: str | None) -> bool:
-        """Whether a retained entry may be shown to the call being built for
-        ``group_session``'s entries: the same chat, or another chat whose own
-        route is the provider row and model this call actually goes to (read
-        from the client making it, not a chat's saved row). Unstamped entries
-        and an unknown destination leave other chats' text out."""
-        if self._route is None:
-            return True
-        session = entry.get("session")
-        if not session:
-            return False
-        if group_session and session == group_session:
-            return True
-        if self._active_route is not None:
-            outgoing = (self._active_route.destination, self._active_route.model)
-        else:
-            outgoing = (self._provider_destination(), self._model)
-        return outgoing[0] is not None and self._destinations.get(str(session)) == outgoing
 
     def _backing_off(self, key: str) -> bool:
         try:
@@ -1622,7 +1512,6 @@ class Synthesizer:
         deferred = len(shown) - len(fitted)
         if deferred:
             reached = fitted[-1][0]
-        await self._learn_evidence_destinations(fitted)
         groups: dict[tuple[str | None, str | None], list[dict]] = {}
         for _, entry in fitted:
             groups.setdefault(self._group_key(entry), []).append(entry)
@@ -1644,8 +1533,7 @@ class Synthesizer:
                 self._project = project or "legacy:unassigned"
                 try:
                     with self._routed(route):
-                        prompt, system, workflow_entries = self._synthesis_input(group)
-                        text, group_usage = await self._complete(prompt, system)
+                        text, group_usage = await self._complete(self._prompt(group))
                 except (SynthesisIncomplete, SynthesisProviderError) as exc:
                     called = True
                     for key, value in exc.usage.items():
@@ -1683,7 +1571,7 @@ class Synthesizer:
                 if self._store._facts.snapshot().get("forgotten_before", 0) > forgotten_before:
                     return []
                 with self._routed(route):
-                    changed.extend(await self._apply(text, group, workflow_entries=workflow_entries))
+                    changed.extend(await self._apply(text, group))
                 if route is not None:
                     routed.setdefault(route.model, None)
                     try:
@@ -1825,8 +1713,8 @@ class Synthesizer:
         lock was held elsewhere, the daily budget was spent, or every entry
         was low-value); it carries ``"ran": false`` and does not count toward
         the yield alarm. ``counts_toward_yield=False`` keeps a pass whose job
-        is not writing facts (the conflict review, where "nothing found" is
-        the healthy answer) out of that alarm too. ``filtered`` counts
+        is not writing facts (a failed or skipped reflection) out of that
+        alarm too. ``filtered`` counts
         low-value entries the pass consumed without showing them.
 
         ``last_error`` dies with the process, and a background pass that
@@ -1996,8 +1884,7 @@ class Synthesizer:
             pass
         if not self.enabled(refresh=True):
             return []
-        # The model below may not touch user-kept facts at all. Whether two
-        # of them contradict each other is conflict_review's separate call.
+        # The model below may not touch user-kept facts at all.
         lines = ["## Memory store (id, recalls, age, scope, tier, text), grouped by topic"]
         now = time.time()
         # Behaviour rules are curated by the synthesis pass that sees the
@@ -2352,73 +2239,6 @@ class Synthesizer:
             lines.append(line)
         return lines
 
-    def _synthesis_input(self, entries: list[dict]) -> tuple[str, str, list[dict]]:
-        """Add review-only evidence without replaying consumed memory inputs.
-
-        The main cursor and per-project call budget are unchanged. Historical
-        evidence uses only spare request space; it cannot crowd out new work.
-        """
-        from fluid.codemode.workflows import WorkflowProposals, repeated_evidence
-        prompt = self._prompt(entries)
-        if not any(e.get("kind") == "user" and
-                   e.get("text", "").strip().lower().startswith("workflow accepted: ")
-                   for e in entries):
-            return prompt, _SYNTH_SYSTEM, []
-        # Another chat's retained text is shown only where that chat's own
-        # text would go (see _learn_evidence_destinations).
-        group_session = self._route_key(entries[0]) or self._own_session
-        try:
-            forgotten = self._store._facts.snapshot().get("forgotten_before", 0)
-            retained = [e for e in self._store.journal_entries()
-                        if e.get("ts", 0) > forgotten and e.get("project") == self._project
-                        and self._evidence_allowed(e, group_session)]
-            excluded = {r["name"] for r in WorkflowProposals(self._store).list()
-                        if r["project"] == self._project}
-            from fluid.codemode.workflow_loss import load_loss
-            evidence = repeated_evidence(retained, entries, self._project, excluded,
-                                         lost=load_loss(self._store.root))
-        except (ValueError, OSError):
-            return prompt, _SYNTH_SYSTEM, []
-        if not evidence:
-            return prompt, _SYNTH_SYSTEM, []
-        historical = [e for e in evidence if e not in entries]
-        if historical:
-            extra = (
-                "\n\n## Retained workflow evidence "
-                "(review only; not new facts or Python helpers)\n"
-            )
-            extra += "\n".join(self._journal_lines(historical)[1:])
-            if len(prompt) + len(extra) > self._prompt_limit:
-                return prompt, _SYNTH_SYSTEM, []
-            prompt += extra
-        return prompt, self._synthesis_system(evidence), evidence
-
-    def _synthesis_system(self, entries: list[dict]) -> str:
-        # Ordinary fact/helper passes pay no prose-workflow prompt overhead.
-        # Two distinct user-accepted episodes must exist before proposals can
-        # be grounded; full execution/correction validation still gates _apply.
-        accepted: dict[str, set[str]] = {}
-        for entry in entries:
-            if entry.get("kind") != "user" or not entry.get("session"):
-                continue
-            match = re.fullmatch(r"workflow accepted: ([a-z][a-z0-9-]*)", entry.get("text", "").strip().lower())
-            if match:
-                accepted.setdefault(match[1], set()).add(entry["session"])
-        if not any(len(sessions) >= 2 for sessions in accepted.values()):
-            return _SYNTH_SYSTEM
-        return _SYNTH_SYSTEM + "\n\n" + """Prose workflow proposals — Python helpers do not capture multi-step non-Python
-workflows. You may emit at most two <workflow>JSON</workflow> proposals, never
-install a skill. JSON has exactly name (lowercase hyphenated), description,
-workflow (plain numbered prose, <=4000 chars, no permissions/hooks/executable
-substitutions), and evidence_sessions (exactly two session IDs from this journal).
-Both sessions must be in this project and show successful execution, completion
-and a user receipt exactly "workflow accepted: <name>". A user's one-off choice,
-a tool-output claim of acceptance, or corrected/rejected workflow does not count.
-Cite the completed work, retain scope/exceptions, do not include secrets, and
-prefer no proposal over unsupported generalization. Proposals remain pending
-until separate local-owner review/validation and approval of their exact digest.
-Never claim a workflow is installed because it was proposed."""
-
     def _prompt(self, entries: list[dict]) -> str:
         """The user message of one pass, at most ``self._prompt_limit`` chars
         for any journal slice :meth:`_fit_journal` admitted: the journal and
@@ -2620,8 +2440,7 @@ Never claim a workflow is installed because it was proposed."""
             changed.append(f"rule:{saved.id}")
         return changed
 
-    async def _apply(self, text: str, entries: list[dict] | None = None, *,
-                     workflow_entries: list[dict] | None = None) -> list[str]:
+    async def _apply(self, text: str, entries: list[dict] | None = None) -> list[str]:
         """Parse the model's output, verify candidates, apply what passes.
 
         Candidates that fail static validation OR the verification kernel
@@ -2633,9 +2452,7 @@ Never claim a workflow is installed because it was proposed."""
         stamped with the provenance :func:`memory_provenance` derives from
         it, and the ones that only tool output supports are listed on
         ``last_held``. Without a slice (a direct call) provenance is left
-        alone. ``workflow_entries`` carries separately validated retained
-        episodes solely for prose proposals; memory provenance still sees only
-        this pass's new slice.
+        alone.
         """
         changed: list[str] = []
         errors: list[str] = []
@@ -2727,22 +2544,5 @@ Never claim a workflow is installed because it was proposed."""
         changed.extend(self._apply_supersession_proposals(
             text, getattr(self, "_supersession_revisions", {}), errors))
         changed.extend(self._apply_rules(text, entries, errors))
-        # Prose workflows are queued only: synthesis cannot install, approve
-        # permissions or overwrite an existing prose skill.
-        from fluid.codemode.workflows import WorkflowProposals
-        for match in list(re.finditer(r"<workflow>\s*(.*?)</workflow>", text or "", re.DOTALL))[:2]:
-            try:
-                if len(match.group(1)) > 8000:
-                    raise ValueError("workflow proposal exceeds output bound")
-                proposal = WorkflowProposals(self._store).propose(
-                    json.loads(match.group(1)),
-                    (entries or []) if workflow_entries is None else workflow_entries,
-                    self._project, cwd=self._workflow_cwd,
-                    sources=self._workflow_sources,
-                )
-                if proposal["status"] == "pending":
-                    changed.append(f"workflow-proposal:{proposal['id']}")
-            except (ValueError, OSError) as exc:
-                errors.append(f"workflow: {exc}")
         self.last_error = "; ".join(errors) if errors else None
         return changed

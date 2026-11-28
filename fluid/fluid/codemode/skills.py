@@ -37,9 +37,6 @@ Alongside the skills the store keeps:
   line range it read and how far a reap has moved it since (positions only),
   so the reap leaves that slice alone and the pass advances the cursor to
   the right line. Removed when the pass ends; ignored after 30 minutes.
-- ``.workflow-loss.json`` — a fixed-size, monotone hash filter of sessions
-  whose journal evidence was trimmed; prevents learning from partial tails
-  that happen to start at a later user request. No session content or IDs.
 
 Every one of those files is BOUNDED and the harness owns the cleanup. The
 model has no reaping control at all. Reaping is deterministic, best-effort (a
@@ -493,8 +490,7 @@ def journal_drop_tier(entry: object) -> int:
     1. other successful cells and tool calls;
     2. everything else: failed cells and calls, friction, user and assistant
        prose (where corrections and preferences are), unknown kinds and
-       unparseable lines (a dropped malformed line saturates the workflow
-       completeness filter, see workflow_loss).
+       unparseable lines.
     """
     if not isinstance(entry, dict):
         return 2
@@ -956,15 +952,6 @@ class SkillStore:
         self._journal_tag: dict[str, str] = {}
         self._journal_cwd: str | None = None
         self._journal_backoff_key = os.path.normcase(os.path.realpath(self._journal_path))
-        # Existing tails cannot prove that an earlier correction survived an
-        # old reap. Quarantine those sessions once; future trims record loss
-        # before removal. Metadata failure disables only workflow learning.
-        from fluid.codemode.workflow_loss import initialize_loss
-        try:
-            if initialize:
-                initialize_loss(self.root, self._journal_path)
-        except OSError:
-            _log.warning("Workflow completeness metadata unavailable; prose learning disabled")
 
     def journal_context(
         self, *, session_id: str | None = None, agent: str | None = None,
@@ -1374,10 +1361,8 @@ class SkillStore:
         value first (:func:`journal_drop_tier`, oldest first within a tier),
         never explicit kinds and never the slice a running pass is reading
         (its read lease, see :meth:`begin_synth_read`), with a warning naming
-        the count. Every dropped line is recorded in ``.workflow-loss.json``
-        first, so its session's episode stays marked incomplete. Dropping
-        evidence is lossy; refusing all new evidence forever, which is what
-        happened before, is worse.
+        the count. Dropping evidence is lossy; refusing all new evidence
+        forever, which is what happened before, is worse.
 
         Positions: ``meta.synth_cursor`` is a line position in the retained
         journal, the first line no pass has read. Drops at or past it (the
@@ -1435,15 +1420,6 @@ class SkillStore:
                     drop, size, target, protect,
                 )
             removed = set(range(drop)) | set(backlog)
-            if removed:
-                from fluid.codemode.workflow_loss import record_loss
-                try:
-                    with self._journal_path.open(encoding="utf-8") as stream:
-                        record_loss(
-                            self.root, (line for i, line in enumerate(stream) if i in removed),
-                        )
-                except OSError:
-                    return 0  # never discard evidence without durable loss tracking
             if backlog:
                 ok = _rewrite_dropping_lines(
                     self._journal_path, removed, expect_size=size
@@ -1895,7 +1871,6 @@ class SkillStore:
                 lines = self._journal_path.read_text(encoding="utf-8").splitlines()
                 cursor = max(0, self.synth_cursor())
                 kept = []
-                removed = []
                 behind = 0  # dropped lines the cursor had already passed
                 for index, line in enumerate(lines):
                     try:
@@ -1904,11 +1879,8 @@ class SkillStore:
                             continue
                     except (ValueError, AttributeError):
                         pass
-                    removed.append(line)
                     behind += index < cursor
                 if len(kept) != len(lines):
-                    from fluid.codemode.workflow_loss import record_loss
-                    record_loss(self.root, removed)
                     atomic_write_text(self._journal_path, "".join(line + "\n" for line in kept))
                 # Rebase like reap_journal does, then clamp: entries kept
                 # past the cursor stay unsynthesized.
@@ -1945,9 +1917,6 @@ class SkillStore:
         injection screen (text and when-line); a finding replaces that entry
         with a note naming the file. Tool-harvested facts carry a short
         "unconfirmed" hint; conflicted entries stay out (Recall names them).
-        An owner-kept rule the learner's model found to contradict another
-        (fluid.codemode.conflict_review) says so on its own line; Recall of
-        either rule prints the two clashing passages.
         """
         from fluid.codemode.behavior import is_rule_key, render_section
         from fluid.codemode.facts import visible_on
@@ -2094,23 +2063,15 @@ class SkillStore:
         identity: list[tuple[MemoryEntry, str]] = []
         index: list[tuple[MemoryEntry, str]] = []
         from fluid.codemode.facts import is_superseded
-        # Rules the learner's model found to contradict each other keep their
-        # ordinary line and budget; the line names the other rule, and Recall
-        # of either prints both passages. Best-effort: a broken verdict file
-        # never costs the snapshot.
-        try:
-            from fluid.codemode.conflict_review import conflict_notes, session_conflicts
-            conflict_note = conflict_notes(session_conflicts(self, project))
-        except Exception:  # noqa: BLE001
-            conflict_note = {}
         for entry in entries:
             if project is not None and entry.scope not in ("global", project):
                 out_of_scope += 1
                 continue
             if is_superseded(vars(entry)):
                 continue
-            # Pair answers are historical evidence, never general prompt rules.
-            # Recall labels their exact-pair validity explicitly.
+            # "Both stand" answers to the retired model conflict review
+            # (memory v3 phase 3a) are history, never prompt rules; Recall
+            # and Settings still list them.
             if str(entry.key or "").startswith("memory.coexist."):
                 recall_only += 1
                 continue
@@ -2137,11 +2098,10 @@ class SkillStore:
                 other_checkout += 1
                 continue
             label = f"[{entry.id} r{entry.revision}; {entry.provenance}]"
-            note = conflict_note.get(entry.id, "")
             if always_applies(entry):
-                always.append((entry, f"- {label} {entry.text}{note}"))
+                always.append((entry, f"- {label} {entry.text}"))
                 continue
-            hint = note or (UNCONFIRMED_TAG if entry.provenance == "tool" else "")
+            hint = UNCONFIRMED_TAG if entry.provenance == "tool" else ""
             if entry.key in identity_keys:
                 # Bound only the rendered identity, never the stored fact or
                 # Recall result. An ellipsis makes the omitted tail explicit.
@@ -2171,7 +2131,7 @@ class SkillStore:
                         text = text[:IDENTITY_TEXT_CHARS - 1].rstrip() + "…"
                     identity.append((entry, f"- {label} {text}"))
                     continue
-                overflow.append((entry, f"- {label} {when_line(entry)}{conflict_note.get(entry.id, '')}"))
+                overflow.append((entry, f"- {label} {when_line(entry)}"))
         identity.sort(key=lambda item: item[0].key != "profile.name")
         index = overflow + index
         remaining = MAX_PROMPT_CHARS - sum(len(line) + 1 for _, line in pinned + identity)
@@ -2439,31 +2399,6 @@ class SkillStore:
         meta = self._load_meta()
         meta["consolidation_retry_at"] = float(ts)
         self._save_meta(meta)
-
-    # The when-line backfill's own retry state (``meta.json["memory_backfill"]``:
-    # ``failures`` in a row, ``until`` and the last ``error`` type). Separate
-    # from the learner's per-model backoff and consolidation's retry, so a
-    # failing backfill never delays synthesis or curation.
-    def backfill_backoff(self) -> dict:
-        entry = self._load_meta().get("memory_backfill")
-        return dict(entry) if isinstance(entry, dict) else {}
-
-    def note_backfill_failure(self, error: str, *, now: float, base: float, cap: float) -> dict:
-        """One more failed backfill call: the wait doubles from ``base`` up to
-        ``cap``. Returns the stored entry."""
-        meta = self._load_meta()
-        prior = meta.get("memory_backfill") if isinstance(meta.get("memory_backfill"), dict) else {}
-        failures = int(prior.get("failures", 0)) + 1
-        entry = {"failures": failures, "until": now + min(cap, base * (2 ** min(failures - 1, 20))),
-                 "error": str(error)[:120]}
-        meta["memory_backfill"] = entry
-        self._save_meta(meta)
-        return entry
-
-    def clear_backfill_failures(self) -> None:
-        meta = self._load_meta()
-        if meta.pop("memory_backfill", None) is not None:
-            self._save_meta(meta)
 
     # ─── learner yield (see Synthesizer._track_yield) ─────────────────────
     #

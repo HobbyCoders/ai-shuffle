@@ -28,7 +28,6 @@ from fluid.codemode.skills import (
     journal_drop_tier,
     read_journal_loss,
 )
-from fluid.codemode.workflow_loss import load_loss, session_lost
 
 from .test_learner_coverage import (
     DAY,
@@ -156,7 +155,7 @@ def test_dropped_failed_cells_are_not_counted_as_low_value(tmp_path, monkeypatch
     assert record["dropped_low_value"] == dropped - failed_lost == 2
 
 
-def test_a_dropped_user_receipt_still_marks_its_episode_incomplete(tmp_path, monkeypatch):
+def test_prose_goes_only_after_the_cells_and_no_workflow_loss_file_is_written(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     store.journal_context(session_id="receipt", project="proj")
     store.journal_append(_mark({"kind": "user", "text": "workflow accepted: deploy-preview"}, "r"))
@@ -173,10 +172,8 @@ def test_a_dropped_user_receipt_still_marks_its_episode_incomplete(tmp_path, mon
     kept = marks(store)
     assert "r" not in kept and not any(m.startswith("c") for m in kept)
     assert kept == ["l0", "l1", "l2"]
-    lost = load_loss(store.root)
-    assert session_lost(lost, "proj", "receipt"), "a dropped receipt makes its episode lossy"
-    assert session_lost(lost, "proj", "cells")
-    assert not session_lost(lost, "proj", "later")
+    # Workflow proposals are gone (memory v3 phase 3a): nothing tracks loss for them.
+    assert not (store.root / ".workflow-loss.json").exists()
 
 
 # ─── the cursor ─────────────────────────────────────────────────────────────

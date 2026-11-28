@@ -3510,7 +3510,6 @@ class HarnessAdapter(ProviderAdapter):
             model,
             skills,
             project=memory_project,
-            workflow_cwd=options.cwd,
             session_id=fluid_session_id or self._resolve_app_session_id(),
             on_change=_announce,
             session_model=session_model,
