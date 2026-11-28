@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import secrets
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,10 @@ _targets: Dict[str, Optional[str]] = {}
 # relay consumes it on connect, and a runtime that stops drops its own.
 _relay_tokens: Dict[str, tuple] = {}
 
-MayUse = Callable[["ExtensionBrowser"], bool]
+# Whether a caller may use a connected browser. Called with None for a browser
+# that is not connected right now: only a caller who may use every browser
+# (the worker's own login) answers True then.
+MayUse = Callable[[Optional["ExtensionBrowser"]], bool]
 
 
 def browsers(may_use: Optional[MayUse] = None) -> list:
@@ -186,12 +189,52 @@ def session_assigned(session_id: str) -> bool:
     return session_id in _targets
 
 
+def may_use_chat_browser(session_id: str, may_use: MayUse) -> bool:
+    """Whether a caller may watch, drive or switch away from this chat's browser.
+
+    Always for the built-in browser. For the person's own browser, only a caller
+    that may use that browser: access to the chat alone is not enough.
+    """
+    browser_id = _targets.get(session_id)
+    if not browser_id:
+        return True
+    return may_use(_browsers.get(browser_id))
+
+
+# chat session id -> open Browser panel viewers: (may_use, close callback).
+_panel_viewers: Dict[str, Dict[int, tuple]] = {}
+
+
+@contextlib.contextmanager
+def panel_viewer(session_id: str, may_use: MayUse, close: Callable[[], None]) -> Iterator[None]:
+    """Hold an open Browser panel viewer; it is closed if the chat moves to a
+    browser this viewer may not use."""
+    key = object()
+    _panel_viewers.setdefault(session_id, {})[id(key)] = (may_use, close)
+    try:
+        yield
+    finally:
+        viewers = _panel_viewers.get(session_id, {})
+        viewers.pop(id(key), None)
+        if not viewers:
+            _panel_viewers.pop(session_id, None)
+
+
+def _close_refused_viewers(session_id: str) -> None:
+    for may_use, close in list(_panel_viewers.get(session_id, {}).values()):
+        if not may_use_chat_browser(session_id, may_use):
+            close()
+
+
 def set_session_target(session_id: str, browser_id: Optional[str], may_use: Optional[MayUse] = None) -> None:
+    if may_use is not None and not may_use_chat_browser(session_id, may_use):
+        raise ExtensionError("Only this browser's owner can change the browser this chat uses")
     if browser_id:
         browser = get_browser(browser_id)
         if not browser or (may_use is not None and not may_use(browser)):
             raise ExtensionError("That browser is not connected")
     _targets[session_id] = browser_id or None
+    _close_refused_viewers(session_id)
     for token, entry in list(_relay_tokens.items()):
         if entry[0] == session_id:
             del _relay_tokens[token]

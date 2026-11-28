@@ -46,6 +46,7 @@ def clean_state():
     ext._targets.clear()
     ext._relay_tokens.clear()
     ext._page_tokens.clear()
+    ext._panel_viewers.clear()
 
 
 def relay_with(answers):
@@ -185,6 +186,30 @@ def test_only_browsers_the_caller_may_use_are_listed_or_selectable():
     assert not ext.session_assigned("chat-1")
     ext.set_session_target("chat-1", mine.id, may_use)
     assert ext.session_target("chat-1") == mine.id
+
+
+def test_only_the_browsers_owner_can_watch_or_move_a_chat_off_it():
+    mine = FakeBrowser({})
+    mine.account_id = "acct-me"
+    ext._browsers[mine.id] = mine
+    owner = lambda browser: browser is not None and browser.account_id == "acct-me"  # noqa: E731
+    outsider = lambda browser: False  # noqa: E731
+    closed = []
+    # Both watch the chat on the built-in browser, which anyone with the chat may see.
+    with ext.panel_viewer("chat-1", owner, lambda: closed.append("owner")), \
+            ext.panel_viewer("chat-1", outsider, lambda: closed.append("outsider")):
+        assert ext.may_use_chat_browser("chat-1", outsider)
+        ext.set_session_target("chat-1", mine.id, owner)
+        # Moving the chat onto the owner's browser shuts the outsider's view at once.
+        assert closed == ["outsider"]
+        assert not ext.may_use_chat_browser("chat-1", outsider)
+        # Nor can the outsider move it back to the built-in browser (or anywhere).
+        with pytest.raises(ext.ExtensionError):
+            ext.set_session_target("chat-1", None, outsider)
+        assert ext.session_target("chat-1") == mine.id
+        ext.set_session_target("chat-1", None, owner)
+        assert ext.session_target("chat-1") is None
+    assert ext._panel_viewers == {}
 
 
 class PanelSocket(FakeSocket):

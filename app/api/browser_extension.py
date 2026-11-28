@@ -186,13 +186,44 @@ def _browser_access(request: Request) -> ext.MayUse:
     from app.core import mobile_tool_identity
 
     if get_api_user_from_request(request) or mobile_tool_identity.request_is_preview(request):
-        return lambda _browser: False
-    paired = mobile_tool_identity.request_principal(request)
-    if paired:
-        account, client_id = paired.get("account_id"), paired.get("principal_id")
-        return lambda browser: (browser.paired_client_id == client_id
-                                or (bool(account) and browser.account_id == account))
-    return lambda _browser: True
+        return _NO_BROWSER
+    return _access(mobile_tool_identity.request_principal(request))
+
+
+def _NO_BROWSER(_browser) -> bool:
+    return False
+
+
+def _access(paired: Optional[dict]) -> ext.MayUse:
+    """A paired controller's browsers, or every browser for the worker login."""
+    if not paired:
+        return lambda _browser: True
+    account, client_id = paired.get("account_id"), paired.get("principal_id")
+    return lambda browser: browser is not None and (
+        browser.paired_client_id == client_id or (bool(account) and browser.account_id == account))
+
+
+def socket_browser_access(websocket) -> ext.MayUse:
+    """:func:`_browser_access` for a socket :func:`authenticate_websocket` admitted."""
+    from app.core import mobile_tool_identity as identity
+
+    value = getattr(websocket.state, "mobile_tool_principal", None)
+    if (not isinstance(value, dict) or value.get("kind") == "api_user"
+            or value.get(identity.PREVIEW_LIMITED_KEY)
+            or (value.get("kind") == "admin" and value.get("principal_id") == identity.PREVIEW_PRINCIPAL_ID)):
+        return _NO_BROWSER
+    if value.get("kind") == "paired":
+        return _access(value)
+    return _access(None) if value.get("kind") == "admin" else _NO_BROWSER
+
+
+CHAT_BROWSER_REFUSED = "This chat uses someone's own browser; only that browser's owner can open it"
+
+
+def require_chat_browser(request: Request, session_id: str) -> None:
+    """403 unless this caller may use the browser the chat drives (blocking)."""
+    if not ext.may_use_chat_browser(session_id, _browser_access(request)):
+        raise HTTPException(403, CHAT_BROWSER_REFUSED)
 
 
 def _target_response(session_id: str, may_use: ext.MayUse, session: dict) -> dict:
@@ -229,6 +260,8 @@ async def set_target(request: Request, session_id: str, body: TargetBody,
         return _target_response(session_id, may_use, session)
     if body.browser_id == ext.session_target(session_id) and ext.session_assigned(session_id):
         return _target_response(session_id, may_use, session)
+    if not ext.may_use_chat_browser(session_id, may_use):
+        raise HTTPException(403, CHAT_BROWSER_REFUSED)
     try:
         ext.set_session_target(session_id, body.browser_id, may_use)
     except ext.ExtensionError as exc:

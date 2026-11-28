@@ -389,6 +389,18 @@ export class BrowserManager {
     return page;
   }
 
+  /**
+   * The tabs the person's own browser already shows this chat (its tab group,
+   * kept across runtime restarts). Empty for the built-in browser, whose
+   * persistent profile's pages belong to no chat in particular.
+   */
+  async chatPages(): Promise<Page[]> {
+    if (this.closed || !extensionTarget()) return [];
+    await this.ensureBrowser();
+    if (!this.context) throw new BrowserRestartingError();
+    return this.context.pages().filter((page) => !page.isClosed());
+  }
+
   isReconnecting(): boolean {
     return this.reconnecting;
   }

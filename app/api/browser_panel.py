@@ -42,10 +42,11 @@ from app.api.sessions_helpers import (
     check_session_access_for_api_user,
     require_session,
 )
+from app.api import browser_extension as browser_extension_api
 from app.api.ws_auth import authenticate_websocket
 from app.api.ws_key_watch import watch_api_key
 from app.api.ws_utils import safe_ws_send
-from app.core import browser_control, browser_stream
+from app.core import browser_control, browser_extension, browser_stream
 from app.core import browser_panel_registry as registry
 from app.db import database
 from app.db.async_database import run_sync
@@ -158,6 +159,7 @@ async def start_panel(
 ) -> dict:
     """Ready the shared workspace without taking control or navigating it."""
     session = await require_session(request, session_id)
+    await run_sync(browser_extension_api.require_chat_browser, request, session_id)
     owner = control.owner_of(session)
     if owner:
         return await remote_panel.forward_http(request, owner, session_id, "start")
@@ -179,6 +181,7 @@ async def upload_panel_files(
     tab_id: str, field: str, token: str = Depends(require_auth),
 ) -> dict:
     session = await require_session(request, session_id)
+    await run_sync(browser_extension_api.require_chat_browser, request, session_id)
     owner = control.owner_of(session)
     if owner:
         return await remote_panel.forward_http(request, owner, session_id, "upload")
@@ -230,6 +233,7 @@ async def get_panel_status(
     """Report whether a live panel target exists for this session."""
     async with api_error_handler("get browser panel status"):
         session = await require_session(request, session_id)  # 404 / 403 access check
+        await run_sync(browser_extension_api.require_chat_browser, request, session_id)
         owner = control.owner_of(session)
         if owner:
             return await remote_panel.forward_http(request, owner, session_id, "")
@@ -244,6 +248,7 @@ async def get_panel_status(
 @router.get("/api/v1/network/peer/browser/{session_id}")
 async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
+    _refuse_peer_for_own_browser(session_id)
     target = registry.get_target(session_id)
     return {"has_target": bool(target is not None and target.target_id),
             "url": target.url if target is not None else None,
@@ -253,6 +258,7 @@ async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.req
 @router.post("/api/v1/network/peer/browser/{session_id}/start")
 async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
+    _refuse_peer_for_own_browser(session_id)
     from app.core import browser_runtime
     try:
         return await browser_runtime.start(session_id)
@@ -264,13 +270,24 @@ async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.requ
 async def peer_panel_upload(request: Request, session_id: str, viewer_id: str, runtime_id: str,
                             tab_id: str, field: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
+    _refuse_peer_for_own_browser(session_id)
     from app.core import browser_uploads
     return await browser_uploads.upload(request, session_id, viewer_id, runtime_id, tab_id, field)
 
 
 @router.websocket("/api/v1/network/peer/browser/{session_id}")
 async def peer_panel_websocket(websocket: WebSocket, session_id: str) -> None:
+    if browser_extension.session_target(session_id):
+        await websocket.close(code=4003, reason="Open this chat on its own worker")
+        return
     await remote_panel.serve_peer(websocket, session_id)
+
+
+def _refuse_peer_for_own_browser(session_id: str) -> None:
+    """Another worker cannot vouch for who is asking, and this chat drives
+    someone's own browser: it opens only on the worker that browser joined."""
+    if browser_extension.session_target(session_id):
+        raise HTTPException(403, "This chat uses someone's own browser; open it on its own worker")
 
 
 # ---------------------------------------------------------------------------
@@ -311,13 +328,32 @@ async def browser_panel_websocket(
         await websocket.close(code=4003, reason="Access denied")
         return
 
+    # Someone's own browser needs more than access to the chat.
+    may_use = browser_extension_api.socket_browser_access(websocket)
+    if not browser_extension.may_use_chat_browser(session_id, may_use):
+        await websocket.close(code=4003, reason="Only this browser's owner can open it")
+        return
+
+    loop = asyncio.get_running_loop()
+
+    def refuse() -> None:
+        def close() -> None:
+            task = loop.create_task(websocket.close(code=4003, reason="Only this browser's owner can open it"))
+            _closing.add(task)
+            task.add_done_callback(_closing.discard)
+        loop.call_soon_threadsafe(close)
+
     # A revoked API key loses the panel (app.api.ws_key_watch).
     async with watch_api_key(websocket):
         owner = control.owner_of(session)
         if owner:
             await remote_panel.forward_websocket(websocket, owner, session_id)
             return
-        await serve_browser_panel(websocket, session_id)
+        with browser_extension.panel_viewer(session_id, may_use, refuse):
+            await serve_browser_panel(websocket, session_id)
+
+
+_closing: set = set()
 
 
 async def serve_browser_panel(

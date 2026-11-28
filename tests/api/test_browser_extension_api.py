@@ -142,6 +142,31 @@ def test_only_the_browsers_owner_account_or_the_worker_login_can_use_it(client):
         assert client.put(url, json={"browser_id": DEVICE}, headers=owner).json()["browser_id"] == DEVICE
         # The worker's own login sees it too.
         assert [b["id"] for b in client.get(url).json()["browsers"]] == [DEVICE]
+        # Once the chat is on the owner's browser, an outsider cannot move it
+        # back to the built-in browser either.
+        for outsider in ("api", "paired:acct-intruder"):
+            moved = client.put(url, json={"browser_id": None}, headers={"x-test-as": outsider})
+            assert moved.status_code == 403 and ext.session_target("chat-1") == DEVICE
+
+
+def test_panel_sockets_get_the_same_browser_access_as_requests():
+    from types import SimpleNamespace
+
+    from app.core import mobile_tool_identity as identity
+    owner_browser = SimpleNamespace(paired_client_id="pc-extension", account_id=OWNER_ACCOUNT)
+
+    def access(principal):
+        return api.socket_browser_access(SimpleNamespace(state=SimpleNamespace(mobile_tool_principal=principal)))
+
+    admin = {"kind": "admin", "principal_id": "install"}
+    assert access(admin)(owner_browser) and access(admin)(None)
+    for refused in (None, {"kind": "api_user", "principal_id": "api-user-1"},
+                    {"kind": "admin", "principal_id": identity.PREVIEW_PRINCIPAL_ID},
+                    {**admin, identity.PREVIEW_LIMITED_KEY: True},
+                    {"kind": "paired", "principal_id": "controller-of-acct-intruder", "account_id": "acct-intruder"}):
+        assert not access(refused)(owner_browser)
+    owner = {"kind": "paired", "principal_id": "controller-of-owner", "account_id": OWNER_ACCOUNT}
+    assert access(owner)(owner_browser) and not access(owner)(None)
 
 
 def test_the_extensions_side_panel_may_use_its_own_browser_even_without_an_account(client, monkeypatch):

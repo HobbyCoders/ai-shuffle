@@ -689,6 +689,10 @@ export class Session {
   async ensurePage(): Promise<Page> {
     const entry = this.currentEntry();
     if (entry) return entry.page;
+    // The chat's tab group in the person's own browser outlives a runtime:
+    // pick its tabs back up rather than opening a blank one beside them.
+    const kept = await this.adoptChatPages();
+    if (kept) return kept;
     const page = await this.manager.newPage();
     const fresh = await this.trackPage(page);
     this.currentId = fresh.id;
@@ -698,6 +702,35 @@ export class Session {
     // against it. Drop them.
     this.notifyNavigation();
     return fresh.page;
+  }
+
+  /**
+   * Register the tabs the person's own browser already shows this chat, make
+   * the visible one (else the first) current, and return it. Undefined when
+   * there are none (or this is the built-in browser).
+   */
+  private async adoptChatPages(): Promise<Page | undefined> {
+    if (!extensionTarget()) return undefined;
+    const tracked = new Set([...this.pages.values()].map((entry) => entry.page));
+    const found = (await this.manager.chatPages()).filter((page) => !tracked.has(page));
+    let current: PageEntry | undefined;
+    for (const page of found.slice(0, Math.max(0, 128 - this.pages.size))) {
+      let entry: PageEntry;
+      try {
+        entry = await this.trackPage(page, true);
+      } catch {
+        continue; // a tab that went away meanwhile
+      }
+      if (!current) current = entry;
+      else if (await raceWithTimeout(page.evaluate(() => document.visibilityState === "visible"), 1000, "visibility timeout")
+        .catch(() => false)) current = entry;
+    }
+    if (!current) return undefined;
+    this.currentId = current.id;
+    reportCurrentTarget(current.page, current.id);
+    this.notifyNavigation();
+    this.onWorkspaceChange?.();
+    return current.page;
   }
 
   private requireEntry(): PageEntry {
