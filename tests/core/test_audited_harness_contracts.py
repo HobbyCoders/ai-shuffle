@@ -242,5 +242,8 @@ def test_adapter_snapshot_uses_real_store_and_current_checkout(tmp_path, monkeyp
     adapter._resolve_app_session_id = lambda: "owner-scoped-session"
     snapshot = adapter._memory_snapshot()
     assert old.text not in snapshot and current.text in snapshot
-    assert routed == [("owner-scoped-session", adapter._options.cwd)]
+    # The snapshot and just-in-time delivery (told which index the session
+    # now holds) both resolve the store; each lookup is owner-scoped and
+    # uses the current checkout.
+    assert routed and set(routed) == {("owner-scoped-session", adapter._options.cwd)}
     assert len(store.memories()) == 2

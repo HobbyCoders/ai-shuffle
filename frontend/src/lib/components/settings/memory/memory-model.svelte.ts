@@ -33,6 +33,12 @@ export interface MemoryItem {
 	scope: string;
 	scope_label: string;
 	always: boolean;
+	/** A rule about a command, file or tool: the # Memory index lists it with its summary. */
+	act_time?: boolean;
+	/** The summary the owner or an agent wrote; null when none. */
+	summary?: string | null;
+	/** The line listed when no summary was written (its first sentence). */
+	derived_summary?: string | null;
 	needs_review: boolean;
 	this_worker_only: boolean;
 	created_at: number | null;
@@ -45,6 +51,7 @@ export interface MemoryItem {
 export interface MemoryLimits {
 	text_chars: number;
 	when_chars: number;
+	summary_chars?: number;
 }
 
 interface MemoryList {
@@ -55,13 +62,15 @@ interface MemoryList {
 export interface MemoryForm {
 	text: string;
 	when: string;
+	summary: string;
 	/** What the form was opened from; a later list refresh does not move it. */
-	base: { text: string; when: string; revision: number; metadataVersion: string };
+	base: { text: string; when: string; summary: string; revision: number; metadataVersion: string };
 }
 
 export interface MemoryProblems {
 	text?: string;
 	when?: string;
+	summary?: string;
 }
 
 export interface MemoryError {
@@ -127,7 +136,7 @@ const searchable = new WeakMap<MemoryItem, string>();
 function haystack(m: MemoryItem): string {
 	let text = searchable.get(m);
 	if (text === undefined) {
-		text = `${m.text}\n${m.when ?? ''}`.toLowerCase();
+		text = `${m.text}\n${m.when ?? ''}\n${m.summary ?? ''}`.toLowerCase();
 		searchable.set(m, text);
 	}
 	return text;
@@ -148,7 +157,13 @@ export function filterMemories(
 
 export function formFromMemory(m: MemoryItem): MemoryForm {
 	const when = m.when ?? '';
-	return { text: m.text, when, base: { text: m.text, when, revision: m.revision, metadataVersion: m.metadata_version } };
+	const summary = m.summary ?? '';
+	return {
+		text: m.text,
+		when,
+		summary,
+		base: { text: m.text, when, summary, revision: m.revision, metadataVersion: m.metadata_version }
+	};
 }
 
 export function validateMemoryForm(f: MemoryForm, limits: MemoryLimits): MemoryProblems {
@@ -160,6 +175,8 @@ export function validateMemoryForm(f: MemoryForm, limits: MemoryLimits): MemoryP
 	if (when.length > limits.when_chars) problems.when = `Keep this under ${limits.when_chars.toLocaleString()} characters.`;
 	// The worker keeps an existing line when none is sent, so blank cannot remove one.
 	else if (!when && compact(f.base.when)) problems.when = 'You can reword this line, but it can’t be left empty.';
+	const summaryChars = limits.summary_chars ?? 140;
+	if (compact(f.summary).length > summaryChars) problems.summary = `Keep this under ${summaryChars.toLocaleString()} characters.`;
 	return problems;
 }
 
@@ -185,7 +202,7 @@ const UNREACHABLE = {
 export class MemoryModel {
 	/** Replaced, never mutated: rows are read many times and edited rarely. */
 	items = $state.raw<MemoryItem[]>([]);
-	limits = $state<MemoryLimits>({ text_chars: 2000, when_chars: 140 });
+	limits = $state<MemoryLimits>({ text_chars: 2000, when_chars: 140, summary_chars: 140 });
 	loading = $state(false);
 	loaded = $state(false);
 	forbidden = $state(false);
@@ -296,7 +313,12 @@ export class MemoryModel {
 
 	dirty(id: string): boolean {
 		const f = this.forms[id];
-		return !!f && (compact(f.text) !== compact(f.base.text) || compact(f.when) !== compact(f.base.when));
+		return (
+			!!f &&
+			(compact(f.text) !== compact(f.base.text) ||
+				compact(f.when) !== compact(f.base.when) ||
+				compact(f.summary) !== compact(f.base.summary))
+		);
 	}
 
 	problems(id: string): MemoryProblems {
@@ -306,7 +328,9 @@ export class MemoryModel {
 
 	canSave(id: string): boolean {
 		const problems = this.problems(id);
-		return this.dirty(id) && !problems.text && !problems.when && !this.saving && this.remote[id] !== 'deleted';
+		return (
+			this.dirty(id) && !problems.text && !problems.when && !problems.summary && !this.saving && this.remote[id] !== 'deleted'
+		);
 	}
 
 	discard(id: string): void {
@@ -329,13 +353,16 @@ export class MemoryModel {
 	async save(id: string): Promise<boolean> {
 		const f = this.forms[id];
 		if (!f || !this.canSave(id)) return false;
-		const sent = { text: f.text, when: f.when };
+		const sent = { text: f.text, when: f.when, summary: f.summary };
+		// Sent only when edited: omitted keeps the saved one, '' clears it (the derived line applies).
+		const summary = compact(sent.summary) !== compact(f.base.summary) ? { summary: compact(sent.summary) } : {};
 		delete this.errors[id];
 		this.saving = id;
 		try {
 			const saved = await api.put<MemoryItem>(path(id), {
 				text: compact(sent.text),
 				when: compact(sent.when) || null,
+				...summary,
 				expected_revision: f.base.revision,
 				expected_metadata_version: f.base.metadataVersion
 			});
@@ -345,9 +372,10 @@ export class MemoryModel {
 			const next = formFromMemory(saved);
 			// Typing that happened while the save ran is still the owner's draft.
 			const current = this.forms[id];
-			if (current && (current.text !== sent.text || current.when !== sent.when)) {
+			if (current && (current.text !== sent.text || current.when !== sent.when || current.summary !== sent.summary)) {
 				next.text = current.text;
 				next.when = current.when;
+				next.summary = current.summary;
 			}
 			this.forms[id] = next;
 			delete this.remote[id];
@@ -408,7 +436,8 @@ export class MemoryModel {
 				this.remote[id] = 'deleted';
 			} else {
 				const base = this.forms[id].base;
-				if (m.revision !== base.revision || m.metadata_version !== base.metadataVersion || m.text !== base.text || (m.when ?? '') !== base.when) this.remote[id] = 'changed';
+				if (m.revision !== base.revision || m.metadata_version !== base.metadataVersion || m.text !== base.text || (m.when ?? '') !== base.when || (m.summary ?? '') !== base.summary)
+					this.remote[id] = 'changed';
 				else delete this.remote[id];
 			}
 		}

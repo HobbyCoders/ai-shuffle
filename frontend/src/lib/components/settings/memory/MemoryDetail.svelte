@@ -1,6 +1,7 @@
 <script lang="ts">
 	/**
-	 * One saved memory. Text and when-line stay in the form until Save. A save
+	 * One saved memory. Text, when-line and (for a rule about a command, file
+	 * or tool) its one-line summary stay in the form until Save. A save
 	 * or delete is checked against the version the form was opened from, so a
 	 * newer version is never overwritten and the draft is never lost to one.
 	 */
@@ -35,6 +36,10 @@
 	const remote = $derived(model.remote[id]);
 	const textLength = $derived(compact(form?.text ?? '').length);
 	const whenLength = $derived(compact(form?.when ?? '').length);
+	const summaryLength = $derived(compact(form?.summary ?? '').length);
+	const summaryChars = $derived(model.limits.summary_chars ?? 140);
+	// A rule about a command, file or tool, or one that already has a summary.
+	const showSummary = $derived(!!item?.act_time || !!form?.base.summary);
 
 	const status = $derived.by(() => {
 		if (dirty) return { tone: 'warn', text: 'Unsaved changes' } as const;
@@ -179,6 +184,28 @@
 							</div>
 						{/snippet}
 					</SettingRow>
+					{#if showSummary}
+						<SettingRow label="Rule before acting" hint="One line agents read before running the command or editing the file">
+							{#snippet expanded()}
+								<TextField
+									bind:value={form.summary}
+									label="Rule before acting"
+									placeholder={item?.derived_summary || 'For example: not while CI is still running; wait for green first'}
+									width="full"
+									invalid={!!problems.summary}
+									errorId="{uid}-summary"
+								/>
+								<div class="mem-foot" id="{uid}-summary">
+									{#if dirty && problems.summary}
+										<span class="mem-problem" role="alert">{problems.summary}</span>
+									{:else if !dirty && !form.summary && item?.derived_summary}
+										<span class="mem-derived">Taken from the first sentence until you write one.</span>
+									{/if}
+									<span class="mem-count" class:over={summaryLength > summaryChars}>{summaryLength.toLocaleString()} / {summaryChars.toLocaleString()}</span>
+								</div>
+							{/snippet}
+						</SettingRow>
+					{/if}
 				</RowGroup>
 				{#if dirty && settingsNav.stacked}
 					<!-- In the phone header this button would wrap the title and move the box being typed in. -->
@@ -220,6 +247,9 @@
 	}
 	.mem-problem {
 		color: var(--st-destructive);
+		min-width: 0;
+	}
+	.mem-derived {
 		min-width: 0;
 	}
 	.mem-count {
