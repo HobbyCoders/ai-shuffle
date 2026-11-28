@@ -22,6 +22,7 @@ from fluid.codemode.memory_health import check as health_check
 from fluid.codemode.skills import SkillStore
 from fluid.tools.builtins.remember import handler as remember
 from fluid.tools.registry import ToolCtx
+from tests.fixtures.memory_doc import read_doc, stored_text
 
 DEPLOY = ("Deploys wait until CI is green on the release branch. A deploy started "
           "mid-run ships a build nobody tested.")
@@ -98,7 +99,7 @@ def test_summary_saves_edits_as_metadata_and_clears(tmp_path):
     fact = store.save_memory(DEPLOY, protected=True, when=DEPLOY_WHEN,
                              triggers={"command": ["make deploy"]}, summary=DEPLOY_SUMMARY)
     assert fact.summary == DEPLOY_SUMMARY
-    raw = json.loads((tmp_path / "memories.json").read_text())["entries"][0]
+    raw = read_doc(tmp_path)["entries"][0]
     assert raw["summary"] == DEPLOY_SUMMARY and raw["summary_at"]
     # A summary-only change is metadata: the revision stays.
     edited = store.save_memory(DEPLOY, protected=True, memory_id=fact.id, expected_revision=1,
@@ -176,7 +177,7 @@ def test_a_replicated_summary_that_fails_the_screen_is_dropped(tmp_path):
     b._facts.merge(export)
     [copy] = b.memories()
     assert not copy.summary  # the derived line applies instead
-    assert "ghp_" not in (tmp_path / "b" / "memories.json").read_text()
+    assert "ghp_" not in stored_text(tmp_path / "b")
 
 
 def test_a_rejected_replica_summary_never_clears_a_valid_local_one(tmp_path):

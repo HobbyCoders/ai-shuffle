@@ -323,7 +323,7 @@ def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
     kinds = [s.kind for s in compiled.sections]
     assert kinds[0] == "base"
     assert kinds[-1] == "environment"
-    # The learner-memory snapshot (path = memories.json) sits after the
+    # The learner-memory snapshot (path = the store's memory.db) sits after the
     # instruction stack and right before the environment block.
     indexes = {
         "instructions": next(
@@ -332,7 +332,7 @@ def test_compiled_prompt_section_order(tmp_path, monkeypatch) -> None:
         ),
         "memory_store": next(
             i for i, s in enumerate(compiled.sections)
-            if s.kind == "memory" and (s.path or "").endswith("memories.json")
+            if s.kind == "memory" and (s.path or "").endswith("memory.db")
         ),
         "environment": kinds.index("environment"),
     }

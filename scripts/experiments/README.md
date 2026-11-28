@@ -224,7 +224,8 @@ report makes no model calls and costs nothing.
 
 The report reads the same data the app uses:
 
-- **Fact stores.** The local `memories.json` under the app's fluid skills root
+- **Fact stores.** The local store (`memory.db`, or `memories.json` before the
+  SQLite import) under the app's fluid skills root
   (`app.core.fluid_memory.skills_root()`, normally `DATA_DIR/fluid/skills`). It
   also reads every worker's replicated snapshot from Postgres (rows
   `network_memory_records` with id `memory-v2:<device>:<owner>`). Postgres is

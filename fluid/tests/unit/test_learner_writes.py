@@ -3,7 +3,7 @@
 Both deployed workers ran the learner for eleven days without one non-empty
 ``changed`` row in ``.synthesis-log.jsonl``. These tests drive the real path —
 journal appends through ToolJournal, the kick, the synthesis pass, the reap and
-``memories.json`` — with a fake inference client that answers the way real
+the fact store — with a fake inference client that answers the way real
 providers did:
 
 * the Codex backend rejected every learner request with HTTP 400; fluid
@@ -33,6 +33,7 @@ from fluid.codemode import continual as continual_mod
 from fluid.codemode import skills as skills_mod
 from fluid.codemode.journal import ToolJournal
 from fluid.providers.base import StreamChunk
+from tests.fixtures.memory_doc import read_doc
 
 PROJECT = "project:p1"
 # The learner's request cap (continual.PROMPT_CHAR_LIMIT; 32,000 before this fix too).
@@ -108,7 +109,7 @@ def log_rows(store: SkillStore) -> list[dict]:
 
 
 def memories_doc(store: SkillStore) -> dict:
-    return json.loads(store.memories_path.read_text(encoding="utf-8"))
+    return read_doc(store.root)
 
 
 def desktop_shaped_memories(store: SkillStore, n: int = 95) -> None:
@@ -152,7 +153,7 @@ async def settle(synth: Synthesizer) -> None:
 # ─── the proven root causes, end to end ──────────────────────────────────────
 
 
-async def test_desktop_store_pass_sees_the_journal_and_writes_memories_json(tmp_path) -> None:
+async def test_desktop_store_pass_sees_the_journal_and_writes_the_fact_store(tmp_path) -> None:
     """95 facts used to fill the whole 32,000-char prompt, so the journal
     never reached the model and every pass answered NO_CHANGES."""
     store = SkillStore(tmp_path)

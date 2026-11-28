@@ -9,6 +9,7 @@ from fluid.codemode.facts import global_id
 from fluid.codemode.continual import Synthesizer
 from fluid.tools.builtins.recall import handler as recall
 from fluid.tools.registry import ToolCtx
+from tests.fixtures.memory_doc import read_doc
 
 OLD = "Backend/general subagent work runs on GPT Astra (gpt-6-astra); Opus handles frontend work."
 NEW = "Code work by subagents runs on GPT 6.1 Sol, replacing gpt-6-astra. Code review and frontend work use Opus."
@@ -41,7 +42,7 @@ async def test_different_keys_scopes_keep_only_current_value_and_recall_pair(tmp
     result = await recall({"query": "subagent", "limit": 10}, ToolCtx(extra={"recall_store": reopened, "memory_project": "project:fixture"}))
     assert OLD in result.text and "superseded by" in result.text.lower()
     assert "Unresolved conflict" not in result.text
-    assert not json.loads(reopened.memories_path.read_text())["tombstones"]
+    assert not read_doc(reopened.root)["tombstones"]
 
 
 async def test_learner_save_detects_replacement_and_curation_repairs_legacy_pair(tmp_path, monkeypatch):

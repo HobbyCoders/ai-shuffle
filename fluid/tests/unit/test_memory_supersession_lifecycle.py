@@ -1,11 +1,12 @@
 """Supersession lifecycle and replication use real save/curate/merge paths."""
 import json
 import pytest
-from fluid.codemode.skills import SkillStore, MAX_ARCHIVED_MEMORIES
+from fluid.codemode.skills import SkillStore
 from fluid.codemode.facts import global_id
 from fluid.codemode.continual import Synthesizer, _SYNTH_SYSTEM, _CONSOLIDATE_SYSTEM
 from fluid.tools.builtins.recall import handler as recall
 from fluid.tools.registry import ToolCtx
+from tests.fixtures.memory_doc import stored_text, write_doc
 
 OLD = "Backend subagent code tasks use model Orion."
 NEW = "Backend subagent code tasks use model Lyra, replacing Orion."
@@ -164,12 +165,14 @@ def test_proposal_revision_fence_is_preserved(tmp_path):
     assert not find(store, global_id(vars(old))).superseded_by
 
 
-def test_inferred_lineage_obeys_archive_cap(tmp_path):
+def test_inferred_lineage_keeps_every_replaced_fact_in_the_archive(tmp_path):
     store = SkillStore(tmp_path)
-    for i in range(MAX_ARCHIVED_MEMORIES + 2):
+    for i in range(6):
         store.save_memory(f"Backend subagent code tasks use model Orion{i}.")
         store.save_memory(f"Backend subagent code tasks use model Lyra{i}, replacing Orion{i}.")
-    assert len(store.archived_memories()) <= MAX_ARCHIVED_MEMORIES
+    archived = {m.text for m in store.archived_memories()}
+    # The archive has no size limit: no replaced fact is dropped for room.
+    assert {f"Backend subagent code tasks use model Orion{i}." for i in range(6)} <= archived
 
 
 @pytest.mark.parametrize("protected", [True, False])
@@ -251,7 +254,7 @@ def test_archived_successor_does_not_revive_predecessor(tmp_path, monkeypatch, a
     old = store.save_memory(OLD)
     successor = store.save_memory(NEW)
     if archive_reason == "overflow":
-        monkeypatch.setattr("fluid.codemode.skills.MAX_MEMORIES", 1)
+        monkeypatch.setattr("fluid.codemode.facts.MAX_AGENT_LIVE", 1)
         store.save_memory("Unrelated fixture fact, kept for overflow.")
     else:
         # Advance the real lifecycle producer past only the successor's TTL.
@@ -262,7 +265,7 @@ def test_archived_successor_does_not_revive_predecessor(tmp_path, monkeypatch, a
             from fluid.codemode.facts import ARCHIVE_RETENTION
             successor_row["expires_at"] -= ARCHIVE_RETENTION
         # Isolate the fixture clock; maintenance itself performs the archive.
-        store.memories_path.write_text(json.dumps(packet))
+        write_doc(store._facts.root, packet)
     assert successor.id not in {e.id for e in store.memories()}
     for _ in range(2):
         assert OLD not in store.render_memory_section()
@@ -291,7 +294,7 @@ def test_expired_middle_is_not_a_withdrawal_of_its_replacement(tmp_path, proposa
                                                  old_revision=middle.revision, new_revision=final.revision)
     packet = store._facts.snapshot()
     next(e for e in packet["entries"] + packet["archived"] if e["id"] == middle.id)["expires_at"] = time.time() - 1
-    store.memories_path.write_text(json.dumps(packet))
+    write_doc(store._facts.root, packet)
     peer = SkillStore(tmp_path / "peer")
     peer._facts.merge(store._facts.export())
     assert store.delete_memory(final.id, explicit=True)
@@ -379,12 +382,12 @@ def test_two_worker_forgets_break_deletion_bridge_cycle_without_read_churn(tmp_p
         assert section.count(texts[0]) == 1
         assert all(text not in store.render_memory_section() for text in texts[1:])
         assert not find(store, gids[0]).superseded_by
-        stable = store._facts.path.read_bytes()
+        stable = stored_text(store._facts.root)
         for _ in range(3):
             store.render_memory_section()
             store.memories()
             store._facts.export()
-            assert store._facts.path.read_bytes() == stable
+            assert stored_text(store._facts.root) == stable
     for _ in range(3):
         a._facts.merge(b._facts.export())
         b._facts.merge(a._facts.export())
@@ -393,7 +396,7 @@ def test_two_worker_forgets_break_deletion_bridge_cycle_without_read_churn(tmp_p
 
 @pytest.mark.parametrize("cycle", ["self", "pair"])
 def test_peer_deletion_bridge_cycle_restores_once(tmp_path, cycle):
-    from fluid.codemode.facts import barrier_add
+    from fluid.codemode.facts import _wire_barrier
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
     old = a.save_memory(OLD)
     middle = a.save_memory(NEW)
@@ -407,17 +410,18 @@ def test_peer_deletion_bridge_cycle_restores_once(tmp_path, cycle):
     tomb["revision"] += 5
     if cycle == "pair":
         packet["tombstones"].append(dict(tomb, id=final.id, superseded_by=mgid))
-        packet["forgotten"] = barrier_add(packet["forgotten"], "id:" + fgid)
+        # An older peer's packet: its Bloom barrier also names the final fact.
+        packet["forgotten"] = _wire_barrier(packet["forgotten"], packet["tombstones"])
     b._facts.merge(packet)
     # A surviving final fact may re-supersede the restored predecessor.
     expected = FINAL if cycle == "self" else OLD
     assert expected in b.render_memory_section()
-    stable = b._facts.path.read_bytes()
+    stable = stored_text(b._facts.root)
     for _ in range(3):
         b.render_memory_section()
         b.memories()
         b._facts.merge(packet)
-        assert b._facts.path.read_bytes() == stable
+        assert stored_text(b._facts.root) == stable
 
 
 def test_trimmed_deletion_bridge_does_not_revive_old_value(tmp_path):
@@ -428,34 +432,17 @@ def test_trimmed_deletion_bridge_does_not_revive_old_value(tmp_path):
     b._facts.merge(a._facts.export())
     assert a.delete_memory(middle.id, explicit=True)
     packet = a._facts.export()
-    packet["tombstones"] = []  # compacted bodies; monotonic barrier remains
+    packet["tombstones"] = []  # an older peer dropped the bodies; its barrier remains
     # This replica still has the pre-Forget predecessor link; no newer copy
     # of that entry is available to replace it in the incoming packet.
     packet["entries"] = [fact for fact in packet["entries"] if global_id(fact) != global_id(vars(old))]
     b._facts.merge(packet)
     assert OLD not in b.render_memory_section()
     assert old.text in [fact.text for fact in b.archived_memories()]
-    stable = b._facts.path.read_bytes()
+    stable = stored_text(b._facts.root)
     for _ in range(3):
         b.render_memory_section()
-        assert b._facts.path.read_bytes() == stable
-
-
-def test_direct_chain_checks_deletion_barrier_once_per_pointer(tmp_path, monkeypatch):
-    import fluid.codemode.facts as facts
-    store = SkillStore(tmp_path)
-    old = store.save_memory(OLD)
-    middle = store.save_memory(NEW)
-    final = store.save_memory(FINAL)
-    doc = store._facts.snapshot()
-    original, checked = facts.barrier_contains, []
-    def counted(barrier, value):
-        checked.append(value)
-        return original(barrier, value)
-    monkeypatch.setattr(facts, "barrier_contains", counted)
-    store._facts._repair_supersession_links(doc)
-    assert len(checked) == len(set(checked)) == 2
-    assert find(store, global_id(vars(old))).superseded_by == global_id(vars(middle))
+        assert stored_text(b._facts.root) == stable
 
 
 def test_learner_supersession_instruction_is_one_bounded_line():

@@ -1,6 +1,9 @@
 """Measure what one project's ``# Memory`` snapshot makes visible.
 
 python scripts/measure_memory_index.py --memory-file <copy of memories.json> [--project KEY]
+
+A store already in SQLite: export it first with
+``PYTHONPATH=fluid python -m fluid.codemode.fact_db export <store dir> <out.json>``.
 python scripts/measure_memory_index.py            # synthetic fixture store
 
 The memory file is copied into a temporary directory first, so the source is
@@ -41,12 +44,13 @@ def _synthetic(root: Path) -> None:
 def measure(memory_file: Path | None, project: str | None) -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        owner = "local"
         if memory_file is None:
             _synthetic(root)
-        else:
+        else:  # a copy; opening the store imports it into memory.db
             shutil.copyfile(memory_file, root / "memories.json")
-        doc = json.loads((root / "memories.json").read_text(encoding="utf-8"))
-        store = SkillStore(root, owner=doc.get("owner") or "local")
+            owner = json.loads((root / "memories.json").read_text(encoding="utf-8")).get("owner") or owner
+        store = SkillStore(root, owner=owner)
         live = store.memories()
         if project is None:
             scopes = collections.Counter(e.scope for e in live if e.scope != "global")

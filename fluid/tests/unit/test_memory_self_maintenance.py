@@ -213,12 +213,18 @@ def test_failed_saves_are_counted_by_kind(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     with pytest.raises(ValueError):
         store.save_memory("x" * 2100)
-    monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
-    with pytest.raises(ValueError):
+    import sqlite3
+
+    def busy(doc):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store._facts._db, "write", busy)
+    with pytest.raises(facts.MemoryStorageError):
         store.save_memory("A fact that no longer fits")
     record = store.memory_save_failures()
     assert record["rejected"] == 1 and record["storage"] == 1
     assert len(record["storage_times"]) == 1
+    assert record["last_storage_error"] == "MemoryStorageError"
     assert "fits" not in json.dumps(record)
 
 
@@ -263,7 +269,7 @@ def test_saving_an_expired_fact_again_brings_it_back(tmp_path, monkeypatch):
     assert not store.memories()
     # The same observation again: live with a fresh lifetime, same ID.
     again = store.save_memory("Node dependencies are missing in frontend.", provenance="tool", key="env.node")
-    assert again.id == harvest.id and again.expires_at == clock[0] + facts.INFERRED_TTL
+    assert again.id == harvest.id and again.expires_at == clock[0] + facts.AGENT_TTL
     # A changed observation under the same key is new, not already expired.
     changed = store.save_memory("The release notes live in docs/CHANGELOG.md.", memory_id=learned.id)
     assert changed.expires_at > clock[0]
@@ -533,6 +539,16 @@ async def test_learner_insert_without_an_id_never_overwrites_a_keyed_value(tmp_p
     assert [m.text for m in store.memories()] == ["The user's preferred name is Avery."]
 
 
+def outlive(store, keep, monkeypatch, real):
+    """One pool, one lifetime: Recall ``keep`` shortly before it ends, then
+    move past it. The others expire into the archive; ``keep`` stays live."""
+    from fluid.codemode import facts
+
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.AGENT_TTL - 10 * 86400)
+    store.note_memories_recalled([m.id for m in store.memories() if m.id in keep or m.text in keep])
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.AGENT_TTL + 5 * 86400)
+
+
 @pytest.mark.asyncio
 async def test_an_expired_slot_contender_does_not_block_the_survivor(tmp_path, monkeypatch):
     import time as time_mod
@@ -544,9 +560,8 @@ async def test_an_expired_slot_contender_does_not_block_the_survivor(tmp_path, m
                           durable=True)
     a._facts.merge(b._facts.export())
     assert all(m.conflicted for m in a.memories() if m.key == "profile.name")
-    real = time_mod.time
-    # Past the inferred lifetime, inside the durable one: Blair expires into the archive.
-    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    # Avery was recalled lately, Blair not: Blair expires into the archive.
+    outlive(a, {avery.id}, monkeypatch, time_mod.time)
     [survivor] = [m for m in a.memories() if m.key == "profile.name"]
     assert survivor.id == avery.id
     synth = Synthesizer(provider=None, model="m", store=a)
@@ -584,9 +599,8 @@ def test_a_settled_contention_still_shields_older_facts_from_curation(tmp_path, 
     b.save_memory("Use bun for frontend installs.", provenance="session", key="frontend.installer")
     a._facts.merge(b._facts.export())  # the contention flags the survivor
     a._facts.merge(c._facts.export())  # an older matching fact arrives meanwhile
-    real = time_mod.time
     # The contender expires; the survivor and the older fact live on.
-    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    outlive(a, {pnpm.id, yarn.text}, monkeypatch, time_mod.time)
     survivor = next(m for m in a.memories() if m.id == pnpm.id)
     assert not survivor.conflicted  # back in prompts
     a._facts.reconcile_supersessions()
@@ -604,9 +618,8 @@ async def test_consolidation_never_retires_a_fact_whose_contention_settled(tmp_p
                           durable=True)
     b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
     a._facts.merge(b._facts.export())
-    real = time_mod.time
     # Blair expires; Avery keeps the merge's flag until the owner answers.
-    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.INFERRED_TTL + 5 * 86400)
+    outlive(a, {avery.id}, monkeypatch, time_mod.time)
     synth = Synthesizer(Scripted(f'<delete-memory id="{avery.id}"/>'), "m", a)
     assert await synth.consolidate() == []
     assert avery.id in {m.id for m in a.memories()}

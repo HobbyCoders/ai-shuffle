@@ -145,10 +145,10 @@ def test_journal_slice_counts_the_lines_it_consumed(tmp_path: Path) -> None:
 
 
 def test_memory_eviction_keeps_the_survivors_in_order(tmp_path: Path, monkeypatch) -> None:
-    from fluid.codemode import skills as skills_mod
+    from fluid.codemode import facts
     from fluid.codemode.skills import SkillStore
 
-    monkeypatch.setattr(skills_mod, "MAX_MEMORIES", 3)
+    monkeypatch.setattr(facts, "MAX_AGENT_LIVE", 3)
     store = SkillStore(tmp_path)
     ids = [store.save_memory(f"fact {i}").id for i in range(3)]
     # The first entry is the one retrieval keeps asking for.

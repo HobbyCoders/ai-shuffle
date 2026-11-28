@@ -232,13 +232,13 @@ def test_user_facts_well_below_their_cap_are_healthy(tmp_path, monkeypatch):
     assert signal(memory_health.check(store), "capacity")["state"] == "healthy"
 
 
-def test_a_nearly_full_memory_file_needs_attention(tmp_path, monkeypatch):
+def test_store_size_is_reported_and_never_a_cap(tmp_path):
+    # SQLite has no whole-document byte cap to fill (Memory v3 phase 3b).
     store = SkillStore(tmp_path)
     store.save_memory("Some fact")
-    size = (tmp_path / "memories.json").stat().st_size
-    monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", int(size * 1.1))
     s = signal(memory_health.check(store), "capacity")
-    assert s["state"] == "attention" and "% full" in s["reason"]
+    assert s["state"] == "healthy" and "% full" not in s["reason"]
+    assert s["detail"]["bytes"] > 0
 
 
 def test_snapshot_that_leaves_out_most_facts_is_informational(tmp_path, monkeypatch):
@@ -309,9 +309,9 @@ def test_failed_saves_this_week_need_attention(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         store.save_memory("x" * 2100)  # a rejection, not a failure
     assert signal(memory_health.check(store), "saves")["state"] == "healthy"
-    monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
+    _busy_store(store, monkeypatch)
     with pytest.raises(ValueError):
-        store.save_memory("A fact that no longer fits")
+        store.save_memory("A fact the busy store cannot take")
     s = signal(memory_health.check(store), "saves")
     assert s["state"] == "attention" and "1 save failed" in s["reason"]
 
@@ -351,6 +351,16 @@ def test_an_index_line_is_not_a_use_but_a_full_text_line_is(tmp_path):
 
 
 # ─── the scheduled run ─────────────────────────────────────────────────────
+
+def _busy_store(store, monkeypatch):
+    """Every write fails the way a store locked past its timeout does."""
+    import sqlite3
+
+    def busy(doc):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store._facts._db, "write", busy)
+
 
 def _nearly_full(tmp_path, monkeypatch):
     """A store whose user-saved facts are near their cap: an alert."""
@@ -441,9 +451,9 @@ def test_loss_and_refusal_signals_are_alerts(tmp_path, monkeypatch):
     edit(store, lambda doc: doc.update(losses={"explicit_dropped": 1,
                                                "last_explicit_dropped_at": time.time()}))
     assert signal(memory_health.check(store), "protected")["alert"]
-    monkeypatch.setattr(facts, "MAX_DOCUMENT_BYTES", 10)
+    _busy_store(store, monkeypatch)
     with pytest.raises(ValueError):
-        store.save_memory("A fact that no longer fits")
+        store.save_memory("A fact the busy store cannot take")
     result = memory_health.check(store)
     assert signal(result, "saves")["alert"] and signal(result, "capacity")["alert"]
     assert not any(s["alert"] for s in memory_health.check(SkillStore(tmp_path / "empty"))["signals"])

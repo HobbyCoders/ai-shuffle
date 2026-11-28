@@ -27,8 +27,15 @@ def p75(samples):
 
 def measure(root: Path, source: Path | None = None):
     if source:
-        # Copy only the fact document. Opening SkillStore can migrate/reap it.
-        shutil.copyfile(source / "memories.json", root / "memories.json")
+        # Copy only the facts, as the document an older build reads (the
+        # store is SQLite; a pre-3b store is still a memories.json). Opening
+        # SkillStore imports the copy and may reap it; the source is never
+        # opened for writing.
+        if (source / "memory.db").exists():
+            from fluid.codemode.fact_db import export_document
+            (root / "memories.json").write_text(json.dumps(export_document(source)), encoding="utf-8")
+        else:
+            shutil.copyfile(source / "memories.json", root / "memories.json")
     store = SkillStore(root)
     if not source:
         facts = [

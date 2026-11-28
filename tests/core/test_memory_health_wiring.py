@@ -19,7 +19,8 @@ def _owner_store_needing_attention():
 def test_owner_health_without_a_store_is_healthy_and_creates_nothing():
     view = fluid_memory.owner_health()
     assert view == {"state": "healthy", "checked_at": None, "signals": [], "repairs": []}
-    assert not (fluid_memory.skills_root() / "memories.json").exists()
+    from fluid.codemode.facts import store_exists
+    assert not store_exists(fluid_memory.skills_root())
 
 
 def test_sweep_does_not_announce_attention_without_a_loss(monkeypatch):

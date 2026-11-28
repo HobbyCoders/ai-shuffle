@@ -58,7 +58,8 @@ def test_public_alias_with_tunnel_repairs_binding_and_is_signed_into_presence(se
         assert alias in engine.presence_of(server.device_id)["endpoints"]
         assert engine.presence_of(server.device_id)["capabilities"] == {
             **capabilities, "nested-secret-rekey": 1, native_providers.CAPABILITY: 1,
-            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1, antigravity.CAPABILITY: 1,
+            gemini_provider.CAPABILITY: 1, memory_records.CAPABILITY: 1,
+            memory_records.STORE_CAPABILITY: 1, antigravity.CAPABILITY: 1,
         }
         assert advertisements.owner_urls() == []  # another worker's local config is not imported
     with server.active():

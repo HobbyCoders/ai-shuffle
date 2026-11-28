@@ -1,9 +1,10 @@
-"""Bounded fact storage. One locked atomic document is the commit boundary.
+"""Fact storage rules. The rows live in SQLite (:mod:`fluid.codemode.fact_db`).
 
-Live facts, archive, revisions, deletion metadata and the replication snapshot
-are committed together. Skills and inference journals are separate resources.
-No model is needed to enforce these rules. The app supplies authenticated owner
-and project identities; standalone Fluid uses an installation-local owner.
+Live facts, archive, revisions and tombstones are committed together, in one
+transaction under the store's lock file. Skills and inference journals are
+separate resources. No model is needed to enforce these rules. The app
+supplies authenticated owner and project identities; standalone Fluid uses an
+installation-local owner.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -23,34 +25,37 @@ from fluid.codemode.transactions import file_transaction
 
 _log = logging.getLogger(__name__)
 
-# Three tiers:
+# Two kinds of fact (Memory v3, section 5.4):
 #
-# * explicit (``protected``): the user asked for it or corrected a fact. No
-#   TTL, its value (text, tier, always flag) never touched by the learner,
-#   never removed or archived by any automatic path. The one automatic
-#   write is metadata only: the when-line backfill may add a missing
-#   when-line (:meth:`FactStore.annotate`), which leaves the text, the
-#   revision and the clock as they are. At MAX_EXPLICIT user-saved facts (live and archived
+# * owner-kept (``protected``): the user asked for it or corrected a fact. No
+#   TTL, its value (text, always flag) never touched by the learner, never
+#   removed or archived by any automatic path. The one automatic write is
+#   metadata only: the when-line backfill may add a missing when-line
+#   (:meth:`FactStore.annotate`), which leaves the text, the revision and the
+#   clock as they are. At MAX_EXPLICIT user-saved facts (live and archived
 #   together) a new one is refused with a reason the agent can relay;
 #   nothing already saved is dropped to make room.
-# * durable (``durable``): an agent decided a fact was worth keeping
-#   (Remember without ``user_requested``). Longer TTL than inferred, renewed
-#   when recalled or re-saved, curated by consolidation, and archived past
-#   MAX_DURABLE. The store filled its 256-slot explicit quota in three weeks
-#   when every agent save was explicit, then refused every new save.
-# * inferred: learner output and tool harvests, as before.
+# * agent-saved (Remember without ``user_requested``, accepted proposals,
+#   learner output and tool harvests): one pool. A fact earns its place by
+#   use: a delivery, a Recall or a save renews it for AGENT_TTL, and one
+#   unused that long retires to the archive, where Recall still finds it.
+#   Past MAX_AGENT_LIVE live facts the least used one (deliveries plus
+#   Recalls in the last VALUE_WINDOW) is archived too. Never a refusal.
 #
-# Durable and inferred facts never refuse a save for lack of room.
+# ``durable`` stays on the record because older workers still tier by it.
 MAX_EXPLICIT = 512
-MAX_DURABLE = 120
+MAX_AGENT_LIVE = 160
 EXPLICIT_FULL_MESSAGE = (
     "Memory is full: {cap} facts are saved at the user's request. Forget or merge "
     "one first; nothing was saved.")
-DURABLE_TTL = 120 * 86400
-# An unprotected fact moves to the archive when it expires and is removed
-# for good this long after its expiry date, so an expiry can be undone by
-# saving the fact again for a year. Recall finds it until then.
+AGENT_TTL = 90 * 86400
+VALUE_WINDOW = 60 * 86400
+# Archived facts are kept this long past their expiry (or retirement), so
+# an expiry can be undone by saving the fact again for a year, and Recall
+# finds them until then. The archive has no size cap.
 ARCHIVE_RETENTION = 365 * 86400
+# A Forget's tombstone is kept (and replicated) this long.
+TOMBSTONE_RETENTION = 365 * 86400
 # Recalls count as this much recent activity each (capped), so a fact that
 # keeps being looked up outranks one that was merely written recently.
 USE_CREDIT = 7 * 86400
@@ -67,9 +72,34 @@ _BRANCH_REF = re.compile(
     r"|\b(?:worktree|checkout)\s+[a-z0-9]+(?:-[a-z0-9]+)+\b"
     r"|\b[a-z0-9]+(?:-[a-z0-9]+)+\s+(?:(?:Linux|Windows)\s+)?(?:worktree|checkout)\b"
     r"|\.fluid/worktrees/[\w.-]+")
-MAX_TOMBSTONES = 256
+# Older workers kept a Bloom barrier of forgotten facts. One imported from
+# memories.json, and one an older peer still sends, is read (never grown) so
+# a fact forgotten before the tombstone rows existed stays forgotten.
 BLOOM_BYTES = 16 * 1024
-MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
+# A Bloom match is probabilistic: it never deletes a fact this store holds
+# and never becomes a tombstone (which would replicate a false positive to
+# every worker). It only keeps an arriving copy out, and the store remembers
+# that locally (``fenced``, never exported) for this long, at most this many.
+FENCE_RETENTION = 365 * 86400
+MAX_FENCES = 4096
+# The filter built for older peers stops taking values at this share of set
+# bits: four hashes then match a never-forgotten fact about once in 10,000.
+MAX_BARRIER_FILL = 0.10
+# An incoming replica larger than this is refused.
+MAX_REPLICA_BYTES = 16 * 1024 * 1024
+# Older workers refuse a store replica above 2 MiB (their document cap) and
+# keep their newest 256 tombstones. While one is in the network, an export
+# lists archived facts only within this much and only that many tombstones
+# (see FactStore.export); otherwise it lists everything.
+EXPORT_BUDGET_BYTES = 1536 * 1024
+MAX_LEGACY_TOMBSTONES = 256
+
+
+def _stamp(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 # The # Memory snapshot (see SkillStore.memory_snapshot_plan) is one style of
 # memory: every fact has a WHEN line (the situation that should make a future
 # agent load it) and its full text. The snapshot lists the when-lines of the
@@ -113,7 +143,6 @@ TRIGGER_KINDS = ("command", "paths", "tools")
 MAX_TRIGGERS_PER_KIND = 8
 MAX_TRIGGER_CHARS = 120
 _NO_STAMP = (0.0, "")
-INFERRED_TTL = 90 * 86400
 MAX_INFERENCE_CALLS_PER_DAY = 48
 HISTORY_TTL = 30 * 86400
 MAX_HISTORY = 2
@@ -488,9 +517,8 @@ def usefulness(entry):
 
 
 def tier(entry):
-    if entry.get("protected"):
-        return "explicit"
-    return "durable" if entry.get("durable") else "inferred"
+    """``explicit`` (owner-kept) or ``agent`` (the single agent-saved pool)."""
+    return "explicit" if entry.get("protected") else "agent"
 
 
 def volatile(text):
@@ -499,10 +527,8 @@ def volatile(text):
 
 
 def lifetime(entry):
-    """Seconds a non-explicit fact lives past its last save or recall."""
-    if volatile(entry.get("text")):
-        return VOLATILE_TTL
-    return DURABLE_TTL if entry.get("durable") else INFERRED_TTL
+    """Seconds a non-explicit fact lives past its last save, delivery or recall."""
+    return VOLATILE_TTL if volatile(entry.get("text")) else AGENT_TTL
 
 
 # Legacy classification. Before tiers existed every Remember call was
@@ -538,6 +564,7 @@ def validate_text(text):
 
 
 def barrier_contains(barrier, value):
+    """Whether a legacy Bloom barrier (see BLOOM_BYTES) may hold ``value``."""
     bits = bytes.fromhex(barrier) if barrier else bytes(BLOOM_BYTES)
     if len(bits) != BLOOM_BYTES:
         raise ValueError("Invalid deletion barrier")
@@ -545,13 +572,101 @@ def barrier_contains(barrier, value):
     return all(bits[(bit := int.from_bytes(digest[i:i + 4], "big") % (BLOOM_BYTES * 8)) // 8] & (1 << (bit % 8)) for i in range(0, 16, 4))
 
 
-def barrier_add(barrier, value):
-    bits = bytearray.fromhex(barrier) if barrier else bytearray(BLOOM_BYTES)
-    digest = hashlib.sha256(value.encode()).digest()
-    for i in range(0, 16, 4):
-        bit = int.from_bytes(digest[i:i + 4], "big") % (BLOOM_BYTES * 8)
-        bits[bit // 8] |= 1 << (bit % 8)
+class MemoryStorageError(ValueError):
+    """The store cannot be written: its SQLite import failed (see fact_db).
+
+    A ValueError, so every caller that reports a refused save reports this
+    too; the save-failure counter files it under storage, not rules."""
+
+
+def _wire_barrier(legacy, tombstones, *, max_fill=None):
+    """The Bloom barrier older peers expect: ``legacy`` plus ``tombstones``.
+
+    Built per export, never stored. With ``max_fill`` it stops adding
+    tombstones (in the order given) once that share of the bits is set, so a
+    long deletion history cannot saturate it into matching everything.
+    """
+    if not legacy and not tombstones:
+        return ""
+    bits = bytearray.fromhex(legacy) if legacy else bytearray(BLOOM_BYTES)
+    if len(bits) != BLOOM_BYTES:
+        raise ValueError("Invalid deletion barrier")
+    limit = None if max_fill is None else int(max_fill * BLOOM_BYTES * 8)
+    filled = int.from_bytes(bits, "big").bit_count() if limit is not None else 0
+    for t in tombstones:
+        if limit is not None and filled >= limit:
+            break
+        values = ["id:" + global_id(t)]
+        values += ["text:" + fp for fp in t.get("fingerprints") or [] if isinstance(fp, str)]
+        if t.get("key"):
+            values.append("key:" + str(t.get("scope") or "global") + ":" + str(t["key"]))
+        for value in values:
+            digest = hashlib.sha256(value.encode()).digest()
+            for i in range(0, 16, 4):
+                bit = int.from_bytes(digest[i:i + 4], "big") % (BLOOM_BYTES * 8)
+                if not bits[bit // 8] & (1 << (bit % 8)):
+                    bits[bit // 8] |= 1 << (bit % 8)
+                    filled += 1
     return bits.hex()
+
+
+def newest_tombstones(tombstones):
+    """Tombstones, the most recently deleted first."""
+    return sorted(tombstones, key=lambda t: -_stamp(t.get("deleted_at")))
+
+
+def legacy_barrier(frozen, tombstones):
+    """The filter for a build that predates the tombstone rows (an older peer,
+    a downgraded store). It keeps only its newest MAX_LEGACY_TOMBSTONES
+    tombstones as rows, so the filter covers the older ones, newest first,
+    up to MAX_BARRIER_FILL, on top of the frozen imported barrier."""
+    older = newest_tombstones(tombstones)[MAX_LEGACY_TOMBSTONES:]
+    return _wire_barrier(frozen, older, max_fill=MAX_BARRIER_FILL)
+
+
+def _live_fences(raw, now):
+    """The store's local Bloom fences (global ID -> when) still in force."""
+    if not isinstance(raw, dict):
+        return {}
+    return {gid: float(at) for gid, at in raw.items()
+            if isinstance(gid, str) and isinstance(at, (int, float)) and now - at < FENCE_RETENTION}
+
+
+def store_exists(root) -> bool:
+    """Whether a memory store exists at ``root`` (without creating it)."""
+    from fluid.codemode.fact_db import FactDB
+    return FactDB(root).exists()
+
+
+def stored_owner(root) -> str | None:
+    """The owner recorded in the store at ``root``, or None. Read-only."""
+    from fluid.codemode.fact_db import FactDB
+    db = FactDB(root)
+    owner = None
+    if db.path.exists():
+        try:
+            owner = db.meta_field("owner")
+        except Exception:  # noqa: BLE001 — an unreadable store has no owner to report
+            owner = None
+    if owner is None:
+        try:
+            owner = json.loads(db.legacy.read_text(encoding="utf-8")).get("owner")
+        except (OSError, ValueError, AttributeError):
+            owner = None
+    return owner if isinstance(owner, str) and owner else None
+
+
+def owner_store_dirs(root):
+    """``(directory, owner)`` of each per-owner store under ``root/.users``
+    that exists (SQLite or not yet imported JSON). Never creates one."""
+    users = Path(root) / ".users"
+    try:
+        dirs = sorted(p for p in users.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for path in dirs:
+        if store_exists(path) and (owner := stored_owner(path)):
+            yield path, owner
 
 
 def global_id(entry):
@@ -573,22 +688,98 @@ def visible_on(entry, store_id):
 
 class FactStore:
     def __init__(self, root: Path, owner="local"):
+        from fluid.codemode.fact_db import FactDB
         self.root, self.owner = Path(root), owner
+        self._db = FactDB(self.root, owner=owner)
+        # The legacy document: the migration's source and backup, and the
+        # name change notifications carry (replication keys stores by it).
         self.path = self.root / "memories.json"
+        self.db_path = self._db.path
         self.lock = self.root / ".memory.lock"
+        # True after a load fell back to memories.json (the import failed).
+        self.fallback = False
+
+    def _storage_error(self):
+        return MemoryStorageError(f"Memory storage could not be upgraded ({self._db.failure}); "
+                                  "memories.json is unchanged and no changes were saved")
+
+    def storage_status(self) -> dict:
+        """The SQLite layer's state (``fact_db.FactDB.status``), for health."""
+        return self._db.status()
+
+    def stamp(self) -> tuple:
+        """Changes whenever the facts change (a write or a Recall), not on a
+        delivery; caches key on it. Never creates the store."""
+        from fluid.codemode.fact_db import MigrationError
+        try:
+            stamp = self._db.stamp()  # ("", 0): no imported database
+            if stamp != ("", 0) or not self.path.exists():
+                return stamp
+        except MigrationError:
+            pass
+        # A failed import, or one not run yet: the backup's own state.
+        try:
+            st = self.path.stat()
+            return ("legacy", st.st_mtime_ns, st.st_size)
+        except OSError:
+            return ("legacy", 0, 0)
+
+    def record_deliveries(self, rows) -> None:
+        """Store just-in-time delivery rows (local usage, never replicated).
+        Raises on a busy or failed store; ``jit_delivery`` drops the rows."""
+        self._db.record_deliveries(list(rows))
+
+    def deliveries(self, *, session=None) -> list:
+        """Just-in-time delivery and re-arm rows, oldest first. Before the
+        import (or after it failed) these are the old log's rows."""
+        from fluid.codemode.fact_db import MigrationError
+        try:
+            if self.db_path.exists():
+                return self._db.deliveries(session=session)
+            rows = self._db.legacy_delivery_rows()
+            return [r for r in rows if session is None or r.get("session") == session]
+        except MigrationError:
+            rows = self._db.legacy_delivery_rows()
+            return [r for r in rows if session is None or r.get("session") == session]
 
     def _load(self, *, read_only=False):
-        from fluid.codemode.skills import load_json_document
-        if read_only:
-            # Observation must not quarantine corrupt files or hide I/O failures.
+        from fluid.codemode.fact_db import MigrationError
+        delivered = {}
+        self.fallback = False
+        try:
+            # Only a write creates an empty store (as the file used to be
+            # created by the first save); one with a memories.json imports it.
+            got = self._db.read(create=not read_only and self._db.exists())
+        except MigrationError:
+            # Fail safe: keep serving what the backup holds (reads, Recall,
+            # the snapshot); every write refuses until the import succeeds.
+            # A backup that does not parse is never served as an empty
+            # store: the read fails (the API answers 503) and the file is
+            # left as it is for the owner.
+            self.fallback = True
             try:
-                doc = json.loads(self.path.read_text(encoding="utf-8"))
+                got = (json.loads(self.path.read_text(encoding="utf-8")), {})
             except FileNotFoundError:
-                doc = {"next_id": 1, "entries": []}
-            if not isinstance(doc, dict):
+                got = None
+            except ValueError as exc:
+                raise self._storage_error() from exc
+            if got is not None and not isinstance(got[0], dict):
+                raise self._storage_error()
+        if got is None and read_only:
+            # Observing a store not yet imported reads the document as it
+            # is: no import, and a corrupt file raises (never served empty).
+            try:
+                got = (json.loads(self.path.read_text(encoding="utf-8")), {})
+            except FileNotFoundError:
+                got = None
+            if got is not None and not isinstance(got[0], dict):
                 raise ValueError("Invalid memory document")
+        if got is None:
+            doc = {"next_id": 1, "entries": []}
         else:
-            doc = load_json_document(self.path, {"next_id": 1, "entries": []})
+            doc, delivered = got
+        if not isinstance(doc, dict):
+            raise ValueError("Invalid memory document")
         if doc.get("schema", 1) > SCHEMA:
             raise ValueError("Memory was written by a newer application; refusing to overwrite it")
         if doc.get("owner", self.owner) != self.owner:
@@ -598,20 +789,32 @@ class FactStore:
         for key in ("entries", "archived", "tombstones"):
             if not isinstance(doc.get(key), list):
                 doc[key] = []
+        # A Recall or a delivery renews an agent fact without rewriting it:
+        # its stored expiry is a floor, extended by its latest local use.
+        for e in doc["entries"] + doc["archived"]:
+            if isinstance(e, dict) and not e.get("protected") and e.get("expires_at"):
+                used = max(float(e.get("last_recalled_at") or 0), float(delivered.get(e.get("id")) or 0))
+                if used:
+                    e["expires_at"] = max(float(e["expires_at"]), used + lifetime(e))
         return doc
 
     def _write(self, doc, *, notify=True):
-        from fluid.codemode.skills import atomic_write_text
+        from fluid.codemode.fact_db import MigrationError
         doc.update(schema=SCHEMA, owner=self.owner)
-        payload = json.dumps(doc, ensure_ascii=False, indent=2)
-        if len(payload.encode()) > MAX_DOCUMENT_BYTES:
-            raise ValueError("Memory capacity reached; no changes saved")
-        atomic_write_text(self.path, payload)
-        if notify:
+        try:
+            changed = self._db.write(doc)
+        except MigrationError:
+            raise self._storage_error() from None
+        except sqlite3.Error as exc:
+            # Busy past the timeout, disk full, read-only file: the save was
+            # lost, so it counts as a storage failure, not a rule refusal.
+            raise MemoryStorageError(f"Memory could not be saved ({type(exc).__name__}: {exc})") from exc
+        if notify and changed:
+            # Nothing differed (a replayed replica, say): nothing to publish.
             from fluid.codemode.transactions import committed_change
             committed_change(self.path)
 
-    def _prepare(self, *, read_only=False):
+    def _prepare(self, *, read_only=False, derive=True):
         doc = self._load(read_only=read_only)
         changed = False
         legacy = self.root / ".archive" / "memories-archive.jsonl"
@@ -631,15 +834,33 @@ class FactStore:
                     e.setdefault("revision", 1)
                     e.setdefault("protected", False)
                     e.setdefault("provenance", "session")
-                    e.setdefault("expires_at", time.time() + INFERRED_TTL)
+                    e.setdefault("expires_at", time.time() + AGENT_TTL)
                     e.setdefault("origin", e["id"].rsplit(":", 1)[0] if ":" in e["id"] else doc["store_id"])
                     e.setdefault("clock", {e["origin"]: e["revision"]})
             changed = bool(doc["entries"] or doc["archived"])
-        if read_only:
+        if read_only or self.fallback:
             # Normalize legacy tiers in this copy, without curation, revision
-            # bumps, archive pruning, migrations or filesystem changes.
+            # bumps, archive pruning, migrations or filesystem changes. A
+            # store serving its backup after a failed import is read-only.
+            now = time.time()
             for entry in doc["entries"] + doc["archived"]:
-                self._classify(entry, time.time())
+                self._classify(entry, now)
+            # Show expiry as the next write will store it (Recall, the index
+            # and replication read without the lock; see _maintain).
+            expired = [e for e in doc["entries"] if isinstance(e, dict) and not e.get("protected")
+                       and e.get("expires_at", now + 1) <= now]
+            if expired:
+                gone = {id(e) for e in expired}
+                doc["entries"] = [e for e in doc["entries"] if id(e) not in gone]
+                doc["archived"] += expired
+            doc["archived"] = [e for e in doc["archived"] if not isinstance(e, dict) or e.get("protected")
+                               or e.get("expires_at", now + 1) + ARCHIVE_RETENTION > now]
+            if derive:
+                # What the next maintenance pass derives (repaired links,
+                # settled contention), shown now. Never for a replica: a repair
+                # can bump a revision this store has not stored yet.
+                self._repair_supersession_links(doc)
+                self._settle_slot_conflicts(doc)
             return doc
         changed = self._maintain(doc) or changed
         if changed:
@@ -683,33 +904,25 @@ class FactStore:
         their predecessors keep links and age out on their own. Read paths
         repair legacy links too. Text and lifetime are never renewed here.
         """
-        from fluid.codemode.skills import MAX_MEMORIES
         from fluid.codemode.supersession import replacement_evidence
         from fluid.context.screening import screen_findings
         records = doc["entries"] + doc["archived"]
         by_id = {global_id(e): e for e in records}
         forgotten_links = {global_id(e): e.get("superseded_by") for e in doc["tombstones"]}
-        forgotten_cache = {}  # one 16-KiB barrier decode per distinct pointer
 
         def is_forgotten(pointer):
-            if pointer not in forgotten_cache:
-                forgotten_cache[pointer] = barrier_contains(doc.get("forgotten", ""), "id:" + pointer)
-            return forgotten_cache[pointer]
+            return pointer in forgotten_links
 
         def deletion_successor(pointer, origin):
             # Deletion bodies form their own graph, including concurrent
             # cross-worker cycles. Resolve it before planning a metadata bump.
-            initial, seen = pointer, {origin}
+            seen = {origin}
             while pointer:
                 if pointer in seen:
                     return None
                 seen.add(pointer)
                 if not is_forgotten(pointer):
                     return pointer
-                if pointer not in forgotten_links:
-                    # The barrier outlives compacted bodies. Missing lineage
-                    # is not evidence that the newer value was withdrawn.
-                    return initial
                 pointer = forgotten_links[pointer]
             return None
 
@@ -792,9 +1005,8 @@ class FactStore:
                     if len(set(old.get("alternatives", []) + [old["text"]])) == 1:
                         old.pop("conflicted", None)
                         old.pop("alternatives", None)
-                    category = tier(old)
-                    limit = MAX_DURABLE if category == "durable" else MAX_MEMORIES
-                    room = old.get("protected") or sum(tier(e) == category for e in doc["entries"]) < limit
+                    room = old.get("protected") or sum(
+                        not e.get("protected") for e in doc["entries"]) < MAX_AGENT_LIVE
                     if (old.get("retired_reason") == "superseded" and room
                             and (old.get("protected") or old.get("expires_at", now + 1) > now)):
                         doc["archived"] = [e for e in doc["archived"] if e is not old]
@@ -815,7 +1027,6 @@ class FactStore:
         archived to make room for itself. ``arrived`` names IDs a merge just
         added; dropping one of those is not a local loss (see _note_loss).
         """
-        from fluid.codemode.skills import MAX_MEMORIES, MAX_ARCHIVED_MEMORIES
         before = json.dumps(doc, sort_keys=True)
         now = time.time()
         for bucket in ("entries", "archived"):
@@ -845,31 +1056,23 @@ class FactStore:
             self._note_loss(doc, "expired_archived", [e for e in ended if e["id"] not in arrived], now)
         self._repair_supersession_links(doc)
         self._settle_slot_conflicts(doc)
+        # Past MAX_AGENT_LIVE agent facts the least used ones (deliveries
+        # plus Recalls in the last VALUE_WINDOW, then recency) move to the
+        # archive. Nothing is dropped for room; user-saved facts are never
+        # moved (a full owner tier refuses the next save instead).
         live = doc["entries"]
-        inferred = [e for e in live if tier(e) == "inferred" and not retained(e)]
-        ranked = sorted(inferred, key=lambda e: (e.get("id") == keep, e.get("uses", 0), e.get("updated_at", 0)))
-        overflow = ranked[:max(0, len(inferred) - MAX_MEMORIES)]
-        durable = [e for e in live if tier(e) == "durable" and not retained(e)]
-        ranked = sorted(durable, key=lambda e: (e.get("id") == keep, usefulness(e), str(e.get("id"))))
-        overflow += ranked[:max(0, len(durable) - MAX_DURABLE)]
-        gone = {id(e) for e in overflow}
-        doc["entries"] = [e for e in live if id(e) not in gone]
-        archived = doc["archived"] + overflow
-        # User-saved facts are never trimmed: a full explicit tier refuses
-        # the next save instead (see save). Archived explicit facts (from
-        # older versions, which archived past 256) stay until a Forget. The
-        # shared archive gives up inferred facts before durable ones, least
-        # useful first.
-        explicit = [e for e in archived if retained(e)]
-        rest = sorted((e for e in archived if not retained(e)),
-                      key=lambda e: (tier(e) == "durable", usefulness(e) if e.get("durable") else e.get("updated_at", 0), str(e.get("id"))))
-        cut = max(0, len(rest) - MAX_ARCHIVED_MEMORIES)
-        doc["archived"] = rest[cut:] + explicit
-        if cut:
-            self._note_loss(doc, "archive_dropped", [e for e in rest[:cut] if e["id"] not in arrived], now)
-        self._repair_supersession_links(doc)
-        # Compact deletion bodies; the monotonic barrier survives compaction.
-        doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
+        pool = [e for e in live if not retained(e)]
+        if len(pool) > MAX_AGENT_LIVE:
+            value = self._db.recent_uses(now - VALUE_WINDOW)
+            ranked = sorted(pool, key=lambda e: (e.get("id") == keep, value.get(e.get("id"), 0),
+                                                 usefulness(e), str(e.get("id"))))
+            gone = {id(e) for e in ranked[:len(pool) - MAX_AGENT_LIVE]}
+            doc["entries"] = [e for e in live if id(e) not in gone]
+            doc["archived"] += [e for e in live if id(e) in gone]
+            self._repair_supersession_links(doc)
+        # Tombstones are rows kept for a year, then removed.
+        doc["tombstones"] = [t for t in doc["tombstones"] if isinstance(t, dict)
+                             and float(t.get("deleted_at") or now) > now - TOMBSTONE_RETENTION]
         return before != json.dumps(doc, sort_keys=True)
 
     @staticmethod
@@ -998,12 +1201,12 @@ class FactStore:
     def inference_budget(self):
         """``{"day", "calls", "last_at"}`` of the day's claims so far, read
         without the lock (the document is replaced atomically); {} when none."""
-        budget = self._load().get("inference_budget")
+        budget = self._load(read_only=True).get("inference_budget")
         return dict(budget) if isinstance(budget, dict) else {}
 
     def inference_budget_spent_days(self):
         """UTC days (``time // 86400``) on which the call budget ran out."""
-        days = self._load().get("inference_budget_spent_days")
+        days = self._load(read_only=True).get("inference_budget_spent_days")
         return [d for d in days if isinstance(d, int)] if isinstance(days, list) else []
 
     def snapshot(self, *, read_only=False):
@@ -1015,8 +1218,9 @@ class FactStore:
             return self._prepare()
 
     def entries(self, archived=False):
-        """Facts that apply on this worker (see :func:`visible_on`)."""
-        doc = self.snapshot()
+        """Facts that apply on this worker (see :func:`visible_on`). A read:
+        no lock file, no maintenance write (expiry is projected)."""
+        doc = self.snapshot(read_only=True)
         return [self._entry(e) for e in doc["archived" if archived else "entries"]
                 if visible_on(e, doc["store_id"])]
 
@@ -1131,12 +1335,12 @@ class FactStore:
                     memory_id = old["id"]
             if old is not None and scope is None:
                 scope = old.get("scope", "global")
-            # Scope-sensitive canonical keys and deletion barriers must use the
+            # Scope-sensitive canonical keys and tombstones must use the
             # resolved correction scope, not the new-fact global default.
             key = key or (canonical_key(text) if scope in (None, "global") else None)
             # Pair answers are separate decisions even when their prose is
-            # identical. Legacy Bloom/tombstone text fences must not poison a
-            # different pair; id/key fences still prevent restoring this one.
+            # identical. Tombstone text fences must not poison a different
+            # pair; id/key fences still prevent restoring this one.
             old_answer = bool(old and str(old.get("key") or "").startswith("memory.coexist."))
             if old is not None and str(key or "").startswith("memory.coexist.") and not old_answer:
                 raise ValueError("An ordinary fact cannot be moved into the answer namespace; "
@@ -1145,6 +1349,8 @@ class FactStore:
             # text fence. Rekeying it to an ordinary rule restores that fence.
             pair_answer = str(key or (old or {}).get("key") or "").startswith("memory.coexist.")
             fence = _fence_fingerprint(text, key)
+            # The frozen pre-SQLite barrier still fences what was forgotten
+            # before tombstone rows were kept for a year.
             suppressed = not pair_answer and barrier_contains(doc.get("forgotten", ""), "text:" + fence)
             # A behaviour rule keeps the key its first wording gave it through
             # every edit and family move, so a deleted rule's key names text
@@ -1376,7 +1582,13 @@ class FactStore:
                 for alias in aliases:
                     for actor, counter in (alias.get("clock") or {alias["origin"]: alias.get("revision", 1)}).items():
                         clock[actor] = max(clock.get(actor, 0), counter)
-                    doc["forgotten"] = barrier_add(doc.get("forgotten", ""), "id:" + global_id(alias))
+                    # An id-only tombstone: a replica cannot bring the losing
+                    # copy back, and its text and slot are not fenced.
+                    doc["tombstones"].append({
+                        "id": alias["id"], "origin": alias.get("origin", doc["store_id"]),
+                        "revision": alias.get("revision", 1) + 1, "key": None,
+                        "scope": alias.get("scope", "global"), "deleted_at": now, "fingerprints": [],
+                        "source_session": None})
                 alias_ids = {e["id"] for e in aliases}
                 doc["entries"] = [e for e in doc["entries"] if e["id"] not in alias_ids]
                 doc["archived"] = [e for e in doc["archived"] if e["id"] not in alias_ids]
@@ -1390,13 +1602,9 @@ class FactStore:
                          protected=protected, conflicted=False, key=key or entry.get("key"),
                          history=history[-MAX_HISTORY:], source_session=source_session or entry.get("source_session"),
                          **_rule_fences(entry, key or entry.get("key"), text, history, reserve),
-                         expires_at=0 if protected else (now + DURABLE_TTL if is_durable
-                                                         else entry.get("expires_at", now + INFERRED_TTL)))
+                         # A save is a use: the value lives a full lifetime again.
+                         expires_at=0 if protected else now + AGENT_TTL)
             entry.pop("contested", None)  # the conflict is resolved; its wordings are fenced
-            # A rewrite of a fact that already expired into the archive is a
-            # new observation, not a continuation of the old lifetime.
-            if not protected and entry["expires_at"] and entry["expires_at"] <= now:
-                entry["expires_at"] = now + INFERRED_TTL
             # A rewrite is a new value: it lives again even if curation had
             # retired the old one.
             entry.pop("retired_at", None)
@@ -1408,8 +1616,6 @@ class FactStore:
                 entry["worker"] = local
             elif protected:
                 entry.pop("worker", None)  # what the user states is shared
-            if not protected and not entry["expires_at"]:
-                entry["expires_at"] = now + INFERRED_TTL
             if is_durable:
                 entry.update(durable=True, saved_by="agent")
             if not protected:
@@ -1828,14 +2034,9 @@ class FactStore:
             if old.get("superseded_by"):
                 # ID-only bridge: no forgotten text is retained here.
                 tombstone["superseded_by"] = old["superseded_by"]
-            doc["tombstones"].append(tombstone)
-            barrier = barrier_add(doc.get("forgotten", ""), "id:" + global_id(tombstone))
-            for fp in tombstone["fingerprints"]:
-                barrier = barrier_add(barrier, "text:" + fp)
-            if tombstone.get("key"):
-                barrier = barrier_add(barrier, "key:" + tombstone["scope"] + ":" + tombstone["key"])
-            doc["forgotten"] = barrier
-            doc["tombstones"] = doc["tombstones"][-MAX_TOMBSTONES:]
+            # The tombstone row is the deletion record: kept and replicated
+            # for TOMBSTONE_RETENTION, with no count cap.
+            doc["tombstones"] = [t for t in doc["tombstones"] if t.get("id") != tombstone["id"]] + [tombstone]
             for bucket in ("entries", "archived"):
                 doc[bucket] = [e for e in doc[bucket] if e["id"] != memory_id]
             if explicit and purge:
@@ -1892,32 +2093,64 @@ class FactStore:
         self._repair_supersession_links(doc)
 
     def note_recalled(self, ids):
+        """Count a Recall of live facts: one row update each, no lock file.
+
+        A fact that is still being looked up is not stale: its expiry is
+        extended from ``last_recalled_at`` when the store is read (see
+        :meth:`_load`). Local bookkeeping, so nothing is published.
+        """
         if not ids:
             return
-        with file_transaction(self.lock):
-            doc = self._prepare()
-            now = time.time()
-            for e in doc["entries"]:
-                if e["id"] in ids:
-                    e["uses"] = min(1_000_000, e.get("uses", 0) + 1)
-                    e["last_recalled_at"] = now
-                    # A fact that is still being looked up is not stale.
-                    if not e.get("protected"):
-                        e["expires_at"] = max(e.get("expires_at", 0), now + lifetime(e))
-            # Recall/budget bookkeeping must not turn a read into an urgent
-            # whole-store publish. Periodic reconciliation still sees it.
-            self._write(doc, notify=False)
+        from fluid.codemode.fact_db import MigrationError
+        try:
+            self._db.note_recalled(ids, time.time())
+        except MigrationError:
+            # Read-only while the import is failing: the Recall still answers.
+            _log.debug("Recall not counted: %s", self._db.failure)
+        except sqlite3.Error:
+            # Busy past USAGE_TIMEOUT_MS: a count is not worth failing a Recall.
+            _log.debug("Recall not counted", exc_info=True)
 
-    def export(self):
-        doc = self.snapshot()
+    def export(self, *, legacy=False):
+        """The replica other workers merge, in the shape older builds read.
+
+        Everything is exported (live, archive, tombstones), unless ``legacy``:
+        an older build still reads it, and it refuses a merge above 2 MiB and
+        keeps only its newest MAX_LEGACY_TOMBSTONES tombstones. Then the
+        newest tombstones are listed and archived facts fill
+        EXPORT_BUDGET_BYTES, owner-kept ones first, then the most recently
+        changed or retired; one left out is only "not exported here", never
+        a deletion.
+
+        ``forgotten`` is the Bloom barrier older builds expect. Only a legacy
+        export builds one, over the tombstones left off the list (see
+        ``legacy_barrier``); a store whose readers all hold every tombstone
+        as a row sends only the frozen barrier it imported, if any.
+        """
+        doc = self._prepare(read_only=True, derive=False)  # the stored state, lock-free
+        tombstones, archived = doc["tombstones"], doc["archived"]
+        forgotten = doc.get("forgotten", "")
+        if legacy:
+            forgotten = legacy_barrier(forgotten, tombstones)
+            tombstones = newest_tombstones(tombstones)[:MAX_LEGACY_TOMBSTONES]
+            ranked = sorted(archived, key=lambda e: (not e.get("protected"), -max(
+                _stamp(e.get("updated_at")), _stamp(e.get("retired_at")))))
+            room = EXPORT_BUDGET_BYTES - len(json.dumps(
+                {"entries": doc["entries"], "tombstones": tombstones}).encode()) - 2 * BLOOM_BYTES
+            archived = []
+            for e in ranked:
+                room -= len(json.dumps(e).encode()) + 2
+                if room < 0:
+                    break
+                archived.append(e)
         return {"schema": SCHEMA, "owner": self.owner, "store_id": doc["store_id"],
-                "entries": doc["entries"] + doc["archived"], "tombstones": doc["tombstones"],
-                "forgotten": doc.get("forgotten", "")}
+                "entries": doc["entries"] + archived, "tombstones": tombstones,
+                "forgotten": forgotten}
 
     def merge(self, snapshot):
         if snapshot.get("schema") != SCHEMA or snapshot.get("owner") != self.owner:
             raise ValueError("Invalid memory replica owner or schema")
-        if len(json.dumps(snapshot).encode()) > MAX_DOCUMENT_BYTES:
+        if len(json.dumps(snapshot).encode()) > MAX_REPLICA_BYTES:
             raise ValueError("Memory replica exceeds its byte budget")
         with file_transaction(self.lock):
             doc = self._prepare()
@@ -1933,10 +2166,11 @@ class FactStore:
                     raise ValueError("Invalid memory ID")
                 local = raw_id.split(":")[-1]
                 return local if origin == doc["store_id"] else f"{origin}:{local}"
+            # An older peer's barrier fences this merge only; it is not kept.
             barrier_contains(snapshot.get("forgotten", ""), "validate")
             a = bytes.fromhex(doc.get("forgotten", "")) or bytes(BLOOM_BYTES)
             b = bytes.fromhex(snapshot.get("forgotten", "")) or bytes(BLOOM_BYTES)
-            doc["forgotten"] = bytes(x | y for x, y in zip(a, b)).hex()
+            barrier = bytes(x | y for x, y in zip(a, b)).hex() if any(b) else doc.get("forgotten", "")
             tombstones = {t["id"]: t for t in doc["tombstones"]}
             for raw in snapshot.get("tombstones", []):
                 t = dict(raw, id=ident(raw))
@@ -2086,9 +2320,29 @@ class FactStore:
                 # Delete wins over every replay. Restoring creates a new ID;
                 # a stale worker cannot resurrect the forgotten record.
                 entries.pop(key, None)
+            kept = []
+            now = time.time()
+            fenced = _live_fences(doc.get("fenced"), now)
+            for e in entries.values():
+                if e["id"] not in held:
+                    gid = global_id(e)
+                    if gid in fenced or (barrier and barrier_contains(barrier, "id:" + gid)):
+                        # An arriving copy an older peer's barrier (or the
+                        # frozen imported one) may name: kept out of this
+                        # store, and remembered here so a later copy from
+                        # another peer stays out too. A Bloom match can be a
+                        # false positive, so it never deletes a fact held
+                        # here and never becomes a tombstone that would
+                        # delete the fact on every worker.
+                        fenced.setdefault(gid, now)
+                        continue
+                kept.append(e)
+            if fenced:
+                newest = sorted(fenced.items(), key=lambda kv: -kv[1])[:MAX_FENCES]
+                doc["fenced"] = dict(sorted(newest))
+            else:
+                doc.pop("fenced", None)
             doc["tombstones"] = list(tombstones.values())
-            kept = [e for e in entries.values()
-                    if not barrier_contains(doc.get("forgotten", ""), "id:" + global_id(e))]
             # A retired fact stays archived on every replica; other archived
             # facts compete for live room again and _maintain re-bounds them.
             doc["entries"] = [e for e in kept if not e.get("retired_at")]

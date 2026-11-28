@@ -27,8 +27,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "fluid"))
 
 from fluid.codemode.continual import Synthesizer  # noqa: E402
+from fluid.codemode.facts import MAX_AGENT_LIVE as MAX_MEMORIES  # noqa: E402
 from fluid.codemode.skills import (  # noqa: E402
-    MAX_MEMORIES, SkillStore, atomic_write_text, project_key_for,
+    SkillStore, atomic_write_text, project_key_for,
 )
 from fluid.providers.base import StreamChunk  # noqa: E402
 from fluid.tools.builtins import recall, remember  # noqa: E402
@@ -41,6 +42,10 @@ class ScriptedProvider:
 
     async def stream(self, request):
         yield StreamChunk(kind="text_delta", payload={"text": self.output})
+
+
+# Remember requires the situation a fact applies in.
+WHEN = "When addressing the user"
 
 
 def journal_context(store):
@@ -60,7 +65,7 @@ def synth(store, output):
 async def acknowledged_save(root):
     store = SkillStore(root)
     outcome = await remember.handler(
-        {"text": "The user's name is AuditExample."}, journal_context(store)
+        {"text": "The user's name is AuditExample.", "when": WHEN}, journal_context(store)
     )
     fresh = SkillStore(root)
     return bool(fresh.memories()), {
@@ -73,7 +78,7 @@ async def acknowledged_save(root):
 async def explicit_noop(root):
     store = SkillStore(root)
     await remember.handler(
-        {"text": "The user's name is AuditExample."}, journal_context(store)
+        {"text": "The user's name is AuditExample.", "when": WHEN}, journal_context(store)
     )
     await synth(store, "NO_CHANGES").run()
     pending = store.journal_count() - store.synth_cursor()
@@ -86,7 +91,7 @@ async def explicit_noop(root):
 async def explicit_eviction(root):
     store = SkillStore(root)
     fact = "The user's name is AuditExample."
-    await remember.handler({"text": fact}, journal_context(store))
+    await remember.handler({"text": fact, "when": WHEN}, journal_context(store))
     await synth(store, f"<memory>{fact}</memory>").run()
     for _ in range(10):
         store.render_memory_section()
@@ -174,7 +179,7 @@ async def concurrent_saves(root):
 async def model_deletion(root):
     store = SkillStore(root)
     fact = "The user's name is AuditExample."
-    await remember.handler({"text": fact}, journal_context(store))
+    await remember.handler({"text": fact, "when": WHEN}, journal_context(store))
     await synth(store, f"<memory>{fact}</memory>").run()
     entry = store.memories()[0]
     await synth(store, f'<delete-memory id="{entry.id}"/>').consolidate()
@@ -208,12 +213,11 @@ async def project_identity(root):
 def network_functions(root, records):
     # Compile selected, unmodified production function bodies. Do NOT import
     # app.network: importing the application can load the real DB settings.
+    # The module body runs without its imports; their names are stubbed below.
     path = ROOT / "app/network/memory_records.py"
-    names = {"_store", "_stores", "apply_to_files", "refresh_from_files", "_hash"}
     module = ast.parse(path.read_text(encoding="utf-8"))
-    functions = [n for n in module.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert len(functions) == len(names)
-    program = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *functions], type_ignores=[])
+    body = [n for n in module.body if not isinstance(n, (ast.Import, ast.ImportFrom, ast.Expr))]
+    program = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *body], type_ignores=[])
     ast.fix_missing_locations(program)
     class FakeDB:
         def __init__(self):
@@ -236,13 +240,43 @@ def network_functions(root, records):
             return records
     db = FakeDB()
     ctx = SimpleNamespace(device_id="audit-local")
+    import logging, re, sqlite3  # noqa: E401
+    from contextlib import nullcontext
+    from time import monotonic
+    prose = SimpleNamespace(LOCK=threading.Lock(), load_manifest=dict, save_manifest=lambda m: None,
+                            stage_publish=lambda cur, known, manifest: False,
+                            suppress_changes=nullcontext, KIND="prose_skill", PREFIX="prose-skill:",
+                            apply_record=lambda record, manifest: False)
+    # Function bodies import app.network modules locally (authored plugin
+    # drafts, the transport). Those resolve to stubs; any other app import
+    # fails loudly instead of loading the application.
+    import builtins
+    stubs = {
+        "authored_plugins": SimpleNamespace(is_record=lambda rid: False, apply_records=lambda rows: 0,
+                                            refresh_from_files=lambda cur: None),
+        "transport": SimpleNamespace(request_scan=lambda collections: None),
+    }
+
+    def scoped_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "app.network" and fromlist and set(fromlist) <= set(stubs):
+            return SimpleNamespace(**stubs)
+        if name == "app" or name.startswith("app."):
+            raise ImportError(f"the probe does not load the application ({name})")
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
     namespace = {
-        "_root": lambda: root, "engine": SimpleNamespace(context=lambda: ctx),
-        "get_db": lambda: db, "json": json, "hashlib": hashlib,
-        "_atomic_write": atomic_write_text, "_SKILL_NAME": __import__("re").compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$"),
-        "MAX_SKILL_BYTES": 65536, "log": __import__("logging").getLogger("audit"),
+        "__builtins__": {**vars(builtins), "__import__": scoped_import},
+        "engine": SimpleNamespace(context=lambda: ctx, all_presence=dict), "get_db": lambda: db,
+        "prose_skills": prose, "json": json, "hashlib": hashlib, "re": re, "sqlite3": sqlite3,
+        "threading": threading, "logging": logging, "Path": Path, "monotonic": monotonic,
     }
     exec(compile(program, str(path), "exec"), namespace)
+    namespace.update({
+        "_root": lambda: root, "_atomic_write": atomic_write_text,
+        # Assume an older worker is present: the format every peer reads.
+        "_legacy_readers": lambda ctx: True, "_snapshot_readers": lambda ctx: True,
+        "log": logging.getLogger("audit"),
+    })
     return namespace, db
 
 
@@ -318,22 +352,23 @@ async def control_durable_store(root):
 
 
 async def control_retention(root):
-    from fluid.codemode.skills import MAX_ARCHIVED_MEMORIES
+    # Live agent facts are capped; the archive keeps one row per fact with no
+    # count limit (Memory v3 phase 3b), so nothing saved is lost to a cap.
     store = SkillStore(root)
-    for i in range(MAX_MEMORIES + MAX_ARCHIVED_MEMORIES + 2):
+    total = MAX_MEMORIES * 2 + 2
+    for i in range(total):
         store.save_memory(f"Synthetic retention control {i}")
     store.reap()
     live, archive = len(store.memories()), len(store.archived_memories())
-    return live <= MAX_MEMORIES and archive <= MAX_ARCHIVED_MEMORIES, {
-        "live_count": live, "archive_count": archive,
-        "live_cap": MAX_MEMORIES, "archive_cap": MAX_ARCHIVED_MEMORIES,
+    return live <= MAX_MEMORIES and live + archive == total, {
+        "live_count": live, "archive_count": archive, "saved": total, "live_cap": MAX_MEMORIES,
     }
 
 
 async def control_secret_rejection(root):
     store = SkillStore(root)
     outcome = await remember.handler(
-        {"text": "The API key is sk-ant-api03-abcdefghijklmnop"}, journal_context(store)
+        {"text": "The API key is sk-ant-api03-abcdefghijklmnop", "when": WHEN}, journal_context(store)
     )
     return outcome.is_error and store.journal_count() == 0, {
         "tool_rejected_synthetic_credential": outcome.is_error,

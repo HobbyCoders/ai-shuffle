@@ -519,13 +519,13 @@ def test_resolving_a_cross_family_conflict_fences_each_wording_for_its_own_famil
 
 
 def test_keyed_facts_that_disagree_are_flagged_even_when_one_is_trimmed_for_room(tmp_path, monkeypatch):
-    from fluid.codemode import skills
+    from fluid.codemode import facts
 
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
     b.save_memory("The owner's name is Blair.", provenance="session", key="profile.name")
     a.save_memory("The owner's name is Avery.", provenance="session", key="profile.name")
     a.save_memory("The owner works on AI Shuffle.", provenance="session")
-    monkeypatch.setattr(skills, "MAX_MEMORIES", 2)
+    monkeypatch.setattr(facts, "MAX_AGENT_LIVE", 2)
     a._facts.merge(b._facts.export())
     doc = a._facts._load(read_only=True)
     copies = [e for e in doc["entries"] + doc["archived"] if e.get("key") == "profile.name"]
@@ -624,7 +624,7 @@ def test_an_expired_copy_does_not_hide_a_rule_moved_into_its_slot(tmp_path, monk
     gpt_key = behavior.rule_key("gpt", old_text)
     store.save_memory(old_text, provenance="user", durable=True, key=gpt_key, when=OWNER_WHEN)
     real = time_mod.time
-    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.DURABLE_TTL + 86400)
+    monkeypatch.setattr(facts.time, "time", lambda: real() + facts.AGENT_TTL + 86400)
     assert not [m for m in store.memories() if m.key == gpt_key]  # expired into the archive
     moving = store.save_memory("When reporting: lead with the blocker.", provenance="user",
                                protected=True, key=behavior.rule_key("all", "x"), when=OWNER_WHEN)

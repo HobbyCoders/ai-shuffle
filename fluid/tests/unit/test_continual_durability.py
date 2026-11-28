@@ -2,7 +2,7 @@
 
 Three failure modes that used to lose data silently:
 
-1. ``meta.json`` / ``memories.json`` were rewritten with
+1. ``meta.json`` / ``memories.json`` (now ``memory.db``) were rewritten with
    a plain open-truncate-write, and a load that failed to parse returned an
    empty document — so a truncated file emptied the store and the next save
    overwrote the evidence with colliding ids.
@@ -30,28 +30,30 @@ def _journal(store: SkillStore, n: int) -> None:
 # ─── atomic document writes and corrupt-file quarantine ──────────────────────
 
 
-def test_truncated_memories_file_is_set_aside_not_overwritten(tmp_path, caplog) -> None:
-    store = SkillStore(tmp_path)
-    store.save_memory("prefers tabs")
-    store.save_memory("tests live under tests/unit")
+def test_a_corrupt_memories_file_is_never_imported_as_empty(tmp_path) -> None:
+    # The store moved to SQLite (memory.db); memories.json is imported once.
+    # A file that does not parse fails the import safely: nothing is served
+    # as if memory were empty and overwritten, writes refuse, the file stays
+    # exactly as it was, and the import runs once the file is repaired.
+    from fluid.codemode import fact_db, facts
+
+    good = json.dumps({"next_id": 3, "entries": [
+        {"id": "m1", "text": "prefers tabs"}, {"id": "m2", "text": "tests live under tests/unit"}]})
     path = tmp_path / "memories.json"
-    good = path.read_text(encoding="utf-8")
-    # Truncate mid-object, the shape a crash mid-write used to leave behind.
-    path.write_text(good[: len(good) // 2], encoding="utf-8")
+    path.write_text(good[: len(good) // 2], encoding="utf-8")  # a torn copy
+    store = SkillStore(tmp_path)
+    with pytest.raises(ValueError):  # never served as an empty store
+        store.memories()
+    with pytest.raises(facts.MemoryStorageError, match="could not be upgraded"):
+        store.save_memory("fresh start")
+    assert path.read_text(encoding="utf-8") == good[: len(good) // 2]
+    assert fact_db.FactDB(tmp_path).status()["state"] == "migration_failed"
 
-    with caplog.at_level(logging.WARNING, logger="fluid.codemode.skills"):
-        assert store.memories() == []
-    assert any("memories.json" in r.getMessage() for r in caplog.records)
-    assert not path.exists()
-    aside = list(tmp_path.glob("memories.json.corrupt-*"))
-    assert len(aside) == 1
-    assert aside[0].read_text(encoding="utf-8") == good[: len(good) // 2]
-
-    # The next save starts a fresh document beside the quarantined one.
-    entry = store.save_memory("fresh start")
-    assert entry.id == "m1"
-    assert [m.text for m in store.memories()] == ["fresh start"]
-    assert aside[0].exists()
+    path.write_text(good, encoding="utf-8")  # the owner restores the file
+    assert store.save_memory("fresh start").id == "m3"
+    assert [m.text for m in store.memories()] == ["prefers tabs", "tests live under tests/unit",
+                                                  "fresh start"]
+    assert path.read_text(encoding="utf-8") == good  # kept as the backup
 
 
 def test_meta_document_gets_the_same_quarantine(tmp_path, caplog) -> None:
@@ -63,34 +65,38 @@ def test_meta_document_gets_the_same_quarantine(tmp_path, caplog) -> None:
     assert list(tmp_path.glob("meta.json.corrupt-*"))
 
 
-def test_non_object_document_is_quarantined_too(tmp_path) -> None:
-    store = SkillStore(tmp_path)
+def test_a_non_object_memories_file_fails_the_import_safely(tmp_path) -> None:
+    from fluid.codemode import facts
+
     (tmp_path / "memories.json").write_text("[]", encoding="utf-8")
-    assert store.memories() == []
-    assert list(tmp_path.glob("memories.json.corrupt-*"))
-    assert not (tmp_path / "memories.json").exists()
+    store = SkillStore(tmp_path)
+    with pytest.raises(ValueError):
+        store.memories()
+    with pytest.raises(facts.MemoryStorageError):
+        store.save_memory("x")
+    assert not list(tmp_path.glob("memory.db*"))  # nothing half-made is left
+    assert (tmp_path / "memories.json").read_text(encoding="utf-8") == "[]"
 
 
-def test_interrupted_save_leaves_the_previous_document_intact(tmp_path, monkeypatch) -> None:
+def test_interrupted_save_leaves_the_previous_facts_intact(tmp_path, monkeypatch) -> None:
+    import sqlite3
+
+    from fluid.codemode import fact_db, facts
+
     store = SkillStore(tmp_path)
     store.save_memory("first")
-    path = tmp_path / "memories.json"
-    before = path.read_text(encoding="utf-8")
 
-    def boom(src, dst):
-        raise OSError("simulated crash before the rename")
+    def boom(cls, con):
+        raise sqlite3.OperationalError("disk I/O error")  # dies mid-transaction
 
-    monkeypatch.setattr(skills_mod.os, "replace", boom)
-    with pytest.raises(OSError):
+    monkeypatch.setattr(fact_db.FactDB, "_bump", classmethod(boom))
+    with pytest.raises(facts.MemoryStorageError):
         store.save_memory("second")
     monkeypatch.undo()
-
-    assert path.read_text(encoding="utf-8") == before
-    assert [m.text for m in store.memories()] == ["first"]
-    assert not list(tmp_path.glob("memories.json.tmp-*"))
+    assert [m.text for m in SkillStore(tmp_path).memories()] == ["first"]
 
 
-def test_document_saves_go_through_a_temp_file_and_rename(tmp_path, monkeypatch) -> None:
+def test_meta_saves_go_through_a_temp_file_and_rename(tmp_path, monkeypatch) -> None:
     seen: list[tuple[str, str]] = []
     real_replace = os.replace
 
@@ -103,8 +109,12 @@ def test_document_saves_go_through_a_temp_file_and_rename(tmp_path, monkeypatch)
     store.save_memory("x")
     store.set_synth_cursor(1)
     targets = {dst for _, dst in seen}
-    assert {"memories.json", "meta.json"} <= targets
-    assert all(src.startswith(dst + ".tmp-") for src, dst in seen)
+    assert "meta.json" in targets
+    # Facts commit in SQLite transactions; no memories.json is written.
+    assert "memories.json" not in targets and not (tmp_path / "memories.json").exists()
+    # The database itself is put in place once, from its import file.
+    assert [src.startswith(".memory.db.importing-") for src, dst in seen if dst == "memory.db"] == [True]
+    assert all(src.startswith(dst + ".tmp-") for src, dst in seen if dst != "memory.db")
 
 
 # ─── journal reaping cannot lose an append ───────────────────────────────────

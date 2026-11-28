@@ -16,7 +16,9 @@ The whole-store record (``memory-v2:<device>:<owner hash>``) is still written
 while another active worker does not advertise :data:`CAPABILITY` in its
 signed presence, and marked deleted once every one does. Receivers merge every
 live whole-store record, whoever published it, so old and new workers keep
-exchanging memory.
+exchanging memory. While another active worker does not advertise
+:data:`STORE_CAPABILITY` (it predates the SQLite store and refuses a store's
+records above 2 MiB), exports are trimmed for it (``FactStore.export``).
 
 Incoming records are committed first and written to the files by a one-shot
 post-commit notification. :func:`reconcile_files` re-applies every peer's live
@@ -41,6 +43,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import threading
 from pathlib import Path
 from time import monotonic
@@ -50,6 +53,9 @@ from app.network import engine, prose_skills
 
 log = logging.getLogger(__name__)
 CAPABILITY = "memory_fact_records"
+# Advertised by workers whose store is SQLite (memory v3 phase 3b): they merge
+# records of any size, so exports to them are not trimmed.
+STORE_CAPABILITY = "memory_sqlite_store"
 FACT_PREFIX = "memory-fact:"
 BARRIER_PREFIX = "memory-barrier:"
 SNAPSHOT_PREFIX = "memory-v2:"
@@ -98,15 +104,15 @@ def _store(owner="local"):
 
 
 def _stores():
-    if (_root() / "memories.json").exists():
+    from fluid.codemode.facts import owner_store_dirs, store_exists
+    if store_exists(_root()):
         yield _store()
-    for path in (_root() / ".users").glob("*/memories.json"):
+    for path, owner in owner_store_dirs(_root()):
         try:
-            owner = json.loads(path.read_text(encoding="utf-8"))["owner"]
             store = _store(owner)
-            if store.root == path.parent:
+            if store.root == path:
                 yield store
-        except (ValueError, KeyError, OSError):
+        except ValueError:
             log.warning("Skipped invalid owner memory store")
 
 
@@ -121,6 +127,9 @@ def install_write_hook() -> None:
             path = path.resolve()
             # Only installation/API-owner fact stores and installation Python
             # skills are shared. Project/standalone stores must stay local.
+            # A fact store's commit names memories.json (FactStore.path) even
+            # though its rows live in memory.db; Recalls and deliveries are
+            # local and send no hint.
             shared = ("memories.json", "proposals.json")
             if (path.parent == root and (path.name in shared or path.suffix == ".py")) or (
                 path.name in shared and path.parent.parent == root / ".users"
@@ -161,12 +170,12 @@ def reconcile_files(*, ctx=None) -> int:
     return apply_to_files([], ctx=ctx, reconcile=True)
 
 
-def _supports(presence_row) -> bool:
-    return ((presence_row or {}).get("capabilities") or {}).get(CAPABILITY) == 1
+def _supports(presence_row, capability=CAPABILITY) -> bool:
+    return ((presence_row or {}).get("capabilities") or {}).get(capability) == 1
 
 
-def _snapshot_readers(ctx) -> bool:
-    """Whether another active worker may still need the whole-store record.
+def _peers_lacking(ctx, capability) -> bool:
+    """Whether another active worker does not advertise ``capability``.
 
     Membership defines the set, signed presence the support (the rule in
     ``app.core.provider_capability``): an unknown or missing presence counts
@@ -179,12 +188,25 @@ def _snapshot_readers(ctx) -> bool:
         presence = engine.all_presence()
         members = store.list_members(include_revoked=False)
     except Exception:  # noqa: BLE001 - unknown means keep the old format too
-        log.warning("Could not read member capabilities; keeping whole-store memory records", exc_info=True)
+        log.warning("Could not read member capabilities; keeping the older memory record format",
+                    exc_info=True)
         return True
     return any(member["device_id"] != ctx.device_id
                and (member.get("kind") or membership.KIND_WORKER) == membership.KIND_WORKER
-               and not _supports(presence.get(member["device_id"]))
+               and not _supports(presence.get(member["device_id"]), capability)
                for member in members)
+
+
+def _snapshot_readers(ctx) -> bool:
+    """Whether another active worker may still need the whole-store record."""
+    return _peers_lacking(ctx, CAPABILITY)
+
+
+def _legacy_readers(ctx) -> bool:
+    """Whether another active worker predates the SQLite store: it refuses
+    a store's records above 2 MiB in one merge, so exports stay trimmed for
+    it (``FactStore.export(legacy=True)``)."""
+    return _peers_lacking(ctx, STORE_CAPABILITY)
 
 
 def _fact_records(ctx, payload, owner_hash):
@@ -257,9 +279,11 @@ def _refresh(ctx, manifest) -> bool:
     root = _root()
     incoming = {}
     exported = set()  # owner hashes whose store was read this pass
-    snapshot_readers = None
+    snapshot_readers = legacy_readers = None
     for store in (_stores() if root.is_dir() else ()):
-        payload = store._facts.export()
+        if legacy_readers is None:
+            legacy_readers = _legacy_readers(ctx)
+        payload = store._facts.export(legacy=legacy_readers)
         # Usage counters affect local ranking, not fact truth or sync revisions.
         for entry in payload["entries"]:
             entry.pop("uses", None)
@@ -375,10 +399,18 @@ def apply_to_files(ids: list[str], *, ctx=None, reconcile=False) -> int:
     return applied
 
 
+def _retryable(exc) -> bool:
+    """Whether a refused record failed on storage (busy, disk full, a failed
+    import), not on its content. MemoryStorageError is a ValueError, so it is
+    checked before any content verdict."""
+    from fluid.codemode.facts import MemoryStorageError
+    return isinstance(exc, (OSError, sqlite3.Error, MemoryStorageError))
+
+
 def _rejected(rid, exc) -> None:
-    """A bad record is refused for good; an I/O failure is retried (#1167)."""
+    """A bad record is refused for good; a storage failure is retried (#1167)."""
     global _reconcile_owed
-    if isinstance(exc, OSError):
+    if _retryable(exc):
         _reconcile_owed = True
     log.error("Memory replica rejected: %s", rid, exc_info=exc)
 
@@ -399,6 +431,9 @@ def _apply(ids, ctx, manifest) -> int:
     records = [r for r in records if not authored_plugins.is_record(r["id"])]
     from fluid.codemode.skills import atomic_write_text
     fact_groups = {}
+    snapshots = []  # merged after every barrier of the batch is collected
+    barriers = {}  # owner -> OR of every older peer's barrier in this batch
+    older = _older_store(ctx)
     for record in records:
         rid = record["id"]
         try:
@@ -432,14 +467,19 @@ def _apply(ids, ctx, manifest) -> int:
                     payload = json.loads(record.get("content") or "{}")
                     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
                         raise ValueError("Invalid memory fact record")
+                    _keep_older_barrier(payload, older(_device_of(rid)))
                     key = (payload.get("schema"), payload.get("owner"), payload.get("store_id"))
                     fact_groups.setdefault(key, []).append((rid, payload))
+                    _note_barrier(barriers, payload)
                 continue
             if rid.startswith(SNAPSHOT_PREFIX):
                 if not record.get("deleted"):
                     payload = json.loads(record.get("content") or "{}")
-                    _store(payload.get("owner"))._facts.merge(payload)
-                    applied += 1
+                    if not isinstance(payload, dict):
+                        raise ValueError("Invalid memory replica")
+                    _keep_older_barrier(payload, older(_device_of(rid)))
+                    snapshots.append((rid, payload))
+                    _note_barrier(barriers, payload)
                 continue
             # Legacy records are read during upgrade but are never republished.
             # Legacy deletion was ambiguous (it could mean archive); it is not
@@ -459,14 +499,115 @@ def _apply(ids, ctx, manifest) -> int:
             store._facts.merge({"schema": 2, "owner": "local", "store_id": origin,
                                 "entries": [item], "tombstones": []})
             applied += 1
-        except (ValueError, KeyError, TypeError, OSError) as exc:
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+            _rejected(rid, exc)
+    if snapshots or fact_groups:
+        # A copy can arrive in a later batch than the barrier that forgot it.
+        for payload in _standing_barriers(older, {r["id"] for r in records}):
+            _note_barrier(barriers, payload)
+    # Whole-store records merge after the loop, like fact groups, so each one
+    # merges behind every older peer's barrier for its owner, whatever order
+    # the records arrived in.
+    for rid, payload in snapshots:
+        try:
+            _with_barrier(payload, barriers.get(payload.get("owner")))
+            _store(payload.get("owner"))._facts.merge(payload)
+            applied += 1
+        except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
             _rejected(rid, exc)
     for (_schema, owner, _store_id), group in fact_groups.items():
-        applied += _merge_fact_group(owner, group)
+        applied += _merge_fact_group(owner, group, barriers.get(owner))
     return applied
 
 
-def _merge_fact_group(owner, group) -> int:
+def _device_of(rid: str) -> str:
+    """The publishing device of a ``memory-fact:``/``memory-barrier:``/
+    ``memory-v2:`` record."""
+    return rid.split(":", 2)[1] if rid.count(":") >= 2 else ""
+
+
+def _older_store(ctx):
+    """A test: does this device predate the SQLite store? Its Bloom barrier
+    is then its record of what it forgot. A worker that advertises
+    :data:`STORE_CAPABILITY` sends every tombstone as a row, so its filter
+    (at most the one its store imported) is not applied. Unknown presence
+    counts as older, as everywhere here."""
+    try:
+        presence = engine.all_presence()
+    except Exception:  # noqa: BLE001 - unknown means treat every peer as older
+        log.warning("Could not read peer capabilities; applying every memory barrier", exc_info=True)
+        return lambda device: True
+    return lambda device: device != ctx.device_id and not _supports(presence.get(device), STORE_CAPABILITY)
+
+
+def _standing_barriers(older, skip):
+    """The live barrier of every older peer outside this batch (``skip``):
+    its ``memory-barrier:`` record, or its whole-store record when it
+    publishes none (it predates per-fact records)."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM network_memory_records WHERE deleted = FALSE AND "
+                    "(id LIKE %s OR id LIKE %s)", (BARRIER_PREFIX + "%", SNAPSHOT_PREFIX + "%"))
+        found = [r["id"] for r in cur.fetchall()]
+        with_barrier = {rid[len(BARRIER_PREFIX):] for rid in found if rid.startswith(BARRIER_PREFIX)}
+        wanted = [rid for rid in found if rid not in skip and older(_device_of(rid))
+                  and (rid.startswith(BARRIER_PREFIX) or rid[len(SNAPSHOT_PREFIX):] not in with_barrier)]
+        if not wanted:
+            return []
+        cur.execute("SELECT id, content FROM network_memory_records WHERE id IN (%s)"
+                    % ",".join(["%s"] * len(wanted)), tuple(wanted))
+        rows = list(cur.fetchall())
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row.get("content") or "{}")
+        except ValueError:
+            continue  # refused when that record itself is applied
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def _keep_older_barrier(payload, older: bool) -> None:
+    """Drop the Bloom barrier of a record from a worker on the SQLite store."""
+    if not older and isinstance(payload, dict):
+        payload.pop("forgotten", None)
+
+
+def _with_barrier(payload, bits) -> None:
+    """OR the owner's collected barrier into a whole-store record's."""
+    if bits is None:
+        return
+    own = payload.get("forgotten")
+    if own:
+        mine = bytes.fromhex(own)  # merge() refuses a malformed one
+        if len(mine) == len(bits):
+            bits = bytes(x | y for x, y in zip(mine, bits))
+    payload["forgotten"] = bits.hex()
+
+
+def _note_barrier(barriers, payload) -> None:
+    """OR an older peer's deletion barrier into its owner's: every peer
+    group and whole-store record of that owner merges behind all of them, so
+    one peer's copy cannot bring back what another forgot. A Bloom match is
+    probabilistic, so the merge keeps such a copy out with a local fence,
+    never a replicated tombstone (``FactStore.merge``)."""
+    hexed = payload.get("forgotten") if isinstance(payload, dict) else None
+    if not hexed or not isinstance(hexed, str):
+        return
+    from fluid.codemode.facts import BLOOM_BYTES
+    try:
+        bits = bytes.fromhex(hexed)
+    except ValueError:
+        return  # the record's own merge refuses it
+    if len(bits) != BLOOM_BYTES:
+        return  # likewise: never let one bad record fence the others
+    owner = payload.get("owner")
+    held = barriers.get(owner)
+    barriers[owner] = bits if held is None else bytes(x | y for x, y in zip(held, bits))
+
+
+def _merge_fact_group(owner, group, barrier=None) -> int:
     """Merge one store's fact and barrier records in one store write.
 
     A first sync or a reconcile can bring a whole store's records; one combined
@@ -478,7 +619,7 @@ def _merge_fact_group(owner, group) -> int:
     first = group[0][1]
     combined = {"schema": first.get("schema"), "owner": owner, "store_id": first.get("store_id"),
                 "entries": [], "tombstones": []}
-    bloom = None
+    bloom = barrier
     try:
         for _rid, payload in group:
             combined["entries"] += payload["entries"]
@@ -489,7 +630,7 @@ def _merge_fact_group(owner, group) -> int:
         if bloom is not None:
             combined["forgotten"] = bloom.hex()
         _store(owner)._facts.merge(combined)
-    except (ValueError, KeyError, TypeError, OSError) as exc:
+    except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
         _rejected(f"{len(group)} record(s) starting at {group[0][0]}", exc)
         return 0
     return len(group)

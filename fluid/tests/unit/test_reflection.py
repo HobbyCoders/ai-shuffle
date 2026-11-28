@@ -17,6 +17,7 @@ import pytest
 
 from fluid.codemode import SkillStore, Synthesizer, reflection
 from fluid.providers.base import StreamChunk
+from tests.fixtures.memory_doc import stored_text
 
 pytestmark = pytest.mark.memory_reflection
 DAY = 86400.0
@@ -127,7 +128,7 @@ async def test_correction_reflects_once_saves_the_quoted_rule_and_queues_a_propo
     assert [r.text for r in rules] == ["When a change needs a service restart: ask the owner before restarting it."]
     # The proposal waits in the inbox: not a fact, so not in the index, JIT or Recall.
     assert not any("8080" in m.text for m in store.memories())
-    assert "8080" not in (tmp_path / "memories.json").read_text()
+    assert "8080" not in stored_text(tmp_path)
     [proposal] = reflection.ProposalInbox(store.root).open()
     assert proposal["kind"] == "owner_fact" and proposal["sessions"] == ["ses_a"]
     assert proposal["expires_at"] - proposal["created_at"] == pytest.approx(14 * DAY)
@@ -384,7 +385,7 @@ def test_a_dismissal_on_another_worker_is_permanent_here_too(tmp_path):
     assert merged["sessions"] == ["s_remote"]
     row = here.propose(kind="owner_fact", text=text, scope="global", session="s_local")
     assert set(row["sessions"]) == {"s_remote", "s_local"} and row["status"] == reflection.OPEN
-    assert not (tmp_path / "here" / "memories.json").exists()
+    assert not (tmp_path / "here" / "memory.db").exists()
 
     there.dismiss(remote_row["id"])
     sync(here, there)
