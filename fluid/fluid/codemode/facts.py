@@ -76,6 +76,15 @@ _BRANCH_REF = re.compile(
 # memories.json, and one an older peer still sends, is read (never grown) so
 # a fact forgotten before the tombstone rows existed stays forgotten.
 BLOOM_BYTES = 16 * 1024
+# A Bloom match is probabilistic: it never deletes a fact this store holds
+# and never becomes a tombstone (which would replicate a false positive to
+# every worker). It only keeps an arriving copy out, and the store remembers
+# that locally (``fenced``, never exported) for this long, at most this many.
+FENCE_RETENTION = 365 * 86400
+MAX_FENCES = 4096
+# The filter built for older peers stops taking values at this share of set
+# bits: four hashes then match a never-forgotten fact about once in 10,000.
+MAX_BARRIER_FILL = 0.10
 # An incoming replica larger than this is refused.
 MAX_REPLICA_BYTES = 16 * 1024 * 1024
 # Older workers refuse a store replica above 2 MiB (their document cap) and
@@ -493,29 +502,57 @@ class MemoryStorageError(ValueError):
     too; the save-failure counter files it under storage, not rules."""
 
 
-def _wire_barrier(legacy, tombstones):
-    """The Bloom barrier older peers expect: ``legacy`` plus every tombstone.
+def _wire_barrier(legacy, tombstones, *, max_fill=None):
+    """The Bloom barrier older peers expect: ``legacy`` plus ``tombstones``.
 
-    Built per export, never stored. An older worker keeps only its newest
-    256 tombstones and relies on this filter for the rest.
+    Built per export, never stored. With ``max_fill`` it stops adding
+    tombstones (in the order given) once that share of the bits is set, so a
+    long deletion history cannot saturate it into matching everything.
     """
     if not legacy and not tombstones:
         return ""
     bits = bytearray.fromhex(legacy) if legacy else bytearray(BLOOM_BYTES)
     if len(bits) != BLOOM_BYTES:
         raise ValueError("Invalid deletion barrier")
-    values = []
+    limit = None if max_fill is None else int(max_fill * BLOOM_BYTES * 8)
+    filled = int.from_bytes(bits, "big").bit_count() if limit is not None else 0
     for t in tombstones:
-        values.append("id:" + global_id(t))
+        if limit is not None and filled >= limit:
+            break
+        values = ["id:" + global_id(t)]
         values += ["text:" + fp for fp in t.get("fingerprints") or [] if isinstance(fp, str)]
         if t.get("key"):
             values.append("key:" + str(t.get("scope") or "global") + ":" + str(t["key"]))
-    for value in values:
-        digest = hashlib.sha256(value.encode()).digest()
-        for i in range(0, 16, 4):
-            bit = int.from_bytes(digest[i:i + 4], "big") % (BLOOM_BYTES * 8)
-            bits[bit // 8] |= 1 << (bit % 8)
+        for value in values:
+            digest = hashlib.sha256(value.encode()).digest()
+            for i in range(0, 16, 4):
+                bit = int.from_bytes(digest[i:i + 4], "big") % (BLOOM_BYTES * 8)
+                if not bits[bit // 8] & (1 << (bit % 8)):
+                    bits[bit // 8] |= 1 << (bit % 8)
+                    filled += 1
     return bits.hex()
+
+
+def newest_tombstones(tombstones):
+    """Tombstones, the most recently deleted first."""
+    return sorted(tombstones, key=lambda t: -_stamp(t.get("deleted_at")))
+
+
+def legacy_barrier(frozen, tombstones):
+    """The filter for a build that predates the tombstone rows (an older peer,
+    a downgraded store). It keeps only its newest MAX_LEGACY_TOMBSTONES
+    tombstones as rows, so the filter covers the older ones, newest first,
+    up to MAX_BARRIER_FILL, on top of the frozen imported barrier."""
+    older = newest_tombstones(tombstones)[MAX_LEGACY_TOMBSTONES:]
+    return _wire_barrier(frozen, older, max_fill=MAX_BARRIER_FILL)
+
+
+def _live_fences(raw, now):
+    """The store's local Bloom fences (global ID -> when) still in force."""
+    if not isinstance(raw, dict):
+        return {}
+    return {gid: float(at) for gid, at in raw.items()
+            if isinstance(gid, str) and isinstance(at, (int, float)) and now - at < FENCE_RETENTION}
 
 
 def store_exists(root) -> bool:
@@ -598,8 +635,9 @@ class FactStore:
         delivery; caches key on it. Never creates the store."""
         from fluid.codemode.fact_db import MigrationError
         try:
-            if self.db_path.exists() or not self.path.exists():
-                return self._db.stamp()
+            stamp = self._db.stamp()  # ("", 0): no imported database
+            if stamp != ("", 0) or not self.path.exists():
+                return stamp
         except MigrationError:
             pass
         # A failed import, or one not run yet: the backup's own state.
@@ -650,7 +688,7 @@ class FactStore:
                 raise self._storage_error() from exc
             if got is not None and not isinstance(got[0], dict):
                 raise self._storage_error()
-        if got is None and read_only and not self.db_path.exists():
+        if got is None and read_only:
             # Observing a store not yet imported reads the document as it
             # is: no import, and a corrupt file raises (never served empty).
             try:
@@ -1086,12 +1124,12 @@ class FactStore:
     def inference_budget(self):
         """``{"day", "calls", "last_at"}`` of the day's claims so far, read
         without the lock (the document is replaced atomically); {} when none."""
-        budget = self._load().get("inference_budget")
+        budget = self._load(read_only=True).get("inference_budget")
         return dict(budget) if isinstance(budget, dict) else {}
 
     def inference_budget_spent_days(self):
         """UTC days (``time // 86400``) on which the call budget ran out."""
-        days = self._load().get("inference_budget_spent_days")
+        days = self._load(read_only=True).get("inference_budget_spent_days")
         return [d for d in days if isinstance(d, int)] if isinstance(days, list) else []
 
     def snapshot(self, *, read_only=False):
@@ -1987,14 +2025,19 @@ class FactStore:
         newest tombstones are listed and archived facts fill
         EXPORT_BUDGET_BYTES, owner-kept ones first, then the most recently
         changed or retired; one left out is only "not exported here", never
-        a deletion. ``forgotten`` is the Bloom barrier older builds expect,
-        built from every tombstone row (and the frozen imported barrier);
-        this build does not keep one.
+        a deletion.
+
+        ``forgotten`` is the Bloom barrier older builds expect. Only a legacy
+        export builds one, over the tombstones left off the list (see
+        ``legacy_barrier``); a store whose readers all hold every tombstone
+        as a row sends only the frozen barrier it imported, if any.
         """
         doc = self._prepare(read_only=True, derive=False)  # the stored state, lock-free
         tombstones, archived = doc["tombstones"], doc["archived"]
+        forgotten = doc.get("forgotten", "")
         if legacy:
-            tombstones = sorted(tombstones, key=lambda t: -_stamp(t.get("deleted_at")))[:MAX_LEGACY_TOMBSTONES]
+            forgotten = legacy_barrier(forgotten, tombstones)
+            tombstones = newest_tombstones(tombstones)[:MAX_LEGACY_TOMBSTONES]
             ranked = sorted(archived, key=lambda e: (not e.get("protected"), -max(
                 _stamp(e.get("updated_at")), _stamp(e.get("retired_at")))))
             room = EXPORT_BUDGET_BYTES - len(json.dumps(
@@ -2007,7 +2050,7 @@ class FactStore:
                 archived.append(e)
         return {"schema": SCHEMA, "owner": self.owner, "store_id": doc["store_id"],
                 "entries": doc["entries"] + archived, "tombstones": tombstones,
-                "forgotten": _wire_barrier(doc.get("forgotten", ""), doc["tombstones"])}
+                "forgotten": forgotten}
 
     def merge(self, snapshot):
         if snapshot.get("schema") != SCHEMA or snapshot.get("owner") != self.owner:
@@ -2171,22 +2214,26 @@ class FactStore:
                 entries.pop(key, None)
             kept = []
             now = time.time()
+            fenced = _live_fences(doc.get("fenced"), now)
             for e in entries.values():
-                if barrier and barrier_contains(barrier, "id:" + global_id(e)):
-                    # Forgotten by an older peer (its barrier). This build
-                    # keeps no barrier, so the drop is kept as an ID-only
-                    # tombstone: another peer's copy, merged later, cannot
-                    # bring the fact back, and the tombstone replicates. Like
-                    # a Forget's, it keeps the ID-only bridge to a successor,
-                    # so a predecessor stays replaced (no text is kept).
-                    stone = {"id": e["id"], "origin": e.get("origin"), "revision": e.get("revision", 1),
-                             "key": None, "scope": e.get("scope") or "global", "deleted_at": now,
-                             "fingerprints": [], "source_session": None}
-                    if e.get("superseded_by"):
-                        stone["superseded_by"] = e["superseded_by"]
-                    tombstones.setdefault(e["id"], stone)
-                    continue
+                if e["id"] not in held:
+                    gid = global_id(e)
+                    if gid in fenced or (barrier and barrier_contains(barrier, "id:" + gid)):
+                        # An arriving copy an older peer's barrier (or the
+                        # frozen imported one) may name: kept out of this
+                        # store, and remembered here so a later copy from
+                        # another peer stays out too. A Bloom match can be a
+                        # false positive, so it never deletes a fact held
+                        # here and never becomes a tombstone that would
+                        # delete the fact on every worker.
+                        fenced.setdefault(gid, now)
+                        continue
                 kept.append(e)
+            if fenced:
+                newest = sorted(fenced.items(), key=lambda kv: -kv[1])[:MAX_FENCES]
+                doc["fenced"] = dict(sorted(newest))
+            else:
+                doc.pop("fenced", None)
             doc["tombstones"] = list(tombstones.values())
             # A retired fact stays archived on every replica; other archived
             # facts compete for live room again and _maintain re-bounds them.

@@ -4,8 +4,13 @@ per-thread connection cache."""
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -181,9 +186,9 @@ def _legacy_store(root):
 
 def _fail_setup(monkeypatch):
     """The database cannot be set up (a full disk, say): DDL raises."""
-    def broken(self, con):
+    def broken(con):
         raise sqlite3.OperationalError("database or disk is full")
-    monkeypatch.setattr(FactDB, "_schema", broken)
+    monkeypatch.setattr(FactDB, "_create_tables", staticmethod(broken))
 
 
 def test_a_failed_import_serves_the_json_read_only_and_raises_the_health_alert(tmp_path, monkeypatch):
@@ -228,6 +233,61 @@ def test_a_crash_mid_import_leaves_nothing_half_imported(tmp_path, monkeypatch):
     store._facts.snapshot()  # imports in full on the next open
     assert _summary(store) == expected
     assert FactDB(root).status()["state"] == "ok"
+
+
+_FAILING_FIRST_OPEN = """
+import pathlib, sqlite3, sys, time
+from fluid.codemode.fact_db import FactDB, MigrationError
+root = pathlib.Path(sys.argv[1])
+def stall_then_fail(con):
+    (root / "b-ready").write_text("1")
+    deadline = time.monotonic() + 30
+    while not (root / "b-go").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.2)  # the other process is now waiting for the store
+    raise sqlite3.OperationalError("database or disk is full")
+FactDB._create_tables = staticmethod(stall_then_fail)
+try:
+    with FactDB(root).connection(create=True):
+        print("imported")
+except MigrationError as exc:
+    print("failed:", exc)
+"""
+
+
+def test_two_processes_opening_first_and_one_failing_lose_nothing(tmp_path):
+    root = _legacy_store(tmp_path / "b")
+    expected = _summary(SkillStore(root))
+    fact_db.release_connections()
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(Path(fact_db.__file__).parents[2]), os.environ.get("PYTHONPATH", "")]))
+    other = subprocess.Popen([sys.executable, "-c", _FAILING_FIRST_OPEN, str(root)], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 30
+    while not (root / "b-ready").exists():
+        assert other.poll() is None and time.monotonic() < deadline, other.communicate()
+        time.sleep(0.02)
+    done = {}
+
+    def open_first():  # this process's first open, while the other one imports
+        try:
+            with FactDB(root).connection(create=True) as con:
+                done["marker"] = FactDB._meta(con, "sqlite.imported")
+        except Exception as exc:  # noqa: BLE001 - reported below
+            done["error"] = exc
+
+    waiter = threading.Thread(target=open_first)
+    waiter.start()
+    (root / "b-go").write_text("1")
+    out, err = other.communicate(timeout=60)
+    waiter.join(60)
+    assert out.startswith("failed:"), (out, err)
+    assert "error" not in done and done["marker"]
+    # The failure removed only its own temporary file: the database this
+    # process imported (and its journal files) stayed in place.
+    assert not list(root.glob(".memory.db.importing-*"))
+    assert FactDB(root).status()["state"] == "ok"
+    assert _summary(SkillStore(root)) == expected
 
 
 def test_a_database_without_the_import_marker_is_imported_again(tmp_path):
@@ -401,24 +461,66 @@ def _peer(root, texts):
     return store, [store.save_memory(t, scope="global", durable=True) for t in texts]
 
 
-def test_an_older_peers_barrier_cannot_be_undone_by_another_peers_copy(tmp_path):
+def _barrier_naming(export):
+    """A Bloom filter that matches every fact of ``export``: what an older
+    peer's filter is for a fact it forgot, or, by false positive, for one it
+    never saw."""
     from fluid.codemode.facts import _wire_barrier
+    return _wire_barrier("", [{"id": e["id"], "origin": e["origin"]} for e in export["entries"]])
+
+
+def test_an_older_peers_barrier_cannot_be_undone_by_another_peers_copy(tmp_path):
     b, (fact,) = _peer(tmp_path / "b", ["A fact peer A forgot long ago."])
     copy_from_b = b._facts.export()
     # Peer A (pre-3b) forgot it more than 256 tombstones ago: only its Bloom
-    # barrier remembers, and its record carries no tombstone for it.
-    tombstone = {"id": fact.id, "origin": copy_from_b["entries"][0]["origin"]}
-    from_a = dict(copy_from_b, store_id="peer-a", entries=[], tombstones=[],
-                  forgotten=_wire_barrier("", [tombstone]))
+    # barrier remembers, and its record carries no tombstone for it. The
+    # replication layer merges every peer group behind that barrier.
     c = SkillStore(tmp_path / "c")
-    c._facts.merge(copy_from_b)
-    assert [e.text for e in c.memories()] == [fact.text]
-    c._facts.merge(from_a)  # drops it, and keeps the drop as a tombstone
-    assert not c.memories()
-    c._facts.merge(copy_from_b)  # another peer group, merged later
+    c._facts.merge(dict(copy_from_b, forgotten=_barrier_naming(copy_from_b)))
     assert not c.memories() and not c.archived_memories()
-    # The tombstone replicates to builds that keep no barrier.
-    assert fact.id in {t["id"].split(":")[-1] for t in c._facts.export()["tombstones"]}
+    c._facts.merge(copy_from_b)  # the same copy again, in a later batch
+    assert not c.memories() and not c.archived_memories()
+    # Kept out by a local fence: never a tombstone, never exported.
+    exported = c._facts.export(legacy=True)
+    assert not exported["tombstones"] and not exported["forgotten"]
+    assert "fenced" not in exported and "fenced" not in c._facts.export()
+
+
+def test_a_fact_a_bloom_filter_matches_by_chance_is_never_deleted_anywhere(tmp_path):
+    b, (fact,) = _peer(tmp_path / "b", ["A fact nobody ever forgot."])
+    c = SkillStore(tmp_path / "c")
+    c._facts.merge(b._facts.export())
+    # An older peer's filter matches it by false positive.
+    c._facts.merge(dict(b._facts.export(), store_id="peer-a", entries=[], tombstones=[],
+                        forgotten=_barrier_naming(b._facts.export())))
+    assert [e.text for e in c.memories()] == [fact.text]  # held here: kept
+    b._facts.merge(c._facts.export())
+    d = SkillStore(tmp_path / "d")
+    d._facts.merge(c._facts.export())
+    for store in (b, c, d):
+        assert [e.text for e in store.memories()] == [fact.text]
+        assert not store._facts.export()["tombstones"]
+        assert not store._facts.export(legacy=True)["tombstones"]
+
+
+def test_an_export_to_sqlite_peers_carries_no_filter_and_a_legacy_one_stays_sparse(tmp_path):
+    from fluid.codemode import facts as facts_mod
+    store = SkillStore(tmp_path)
+    store.save_memory("A fact that stays.", scope="global", durable=True)
+    doc = store._facts._load()
+    now = time.time()
+    for i in range(5000):  # far more than a 16 KiB filter holds safely
+        doc["tombstones"].append({"id": f"m{1000 + i}", "origin": doc["store_id"], "revision": 1,
+                                  "scope": "global", "deleted_at": now - 5000 + i, "fingerprints": [],
+                                  "key": f"key-{i}"})
+    store._facts._write(doc)
+    assert store._facts.export()["forgotten"] == ""  # every tombstone travels as a row
+    legacy = store._facts.export(legacy=True)
+    bits = int(legacy["forgotten"], 16).bit_count()
+    assert bits <= facts_mod.MAX_BARRIER_FILL * facts_mod.BLOOM_BYTES * 8 + 16
+    # The fact that was never forgotten does not match.
+    gid = facts_mod.global_id(store._facts.export()["entries"][0])
+    assert not facts_mod.barrier_contains(legacy["forgotten"], "id:" + gid)
 
 
 def test_only_a_legacy_export_is_trimmed_and_it_keeps_what_matters(tmp_path, monkeypatch):
@@ -459,7 +561,9 @@ def test_only_a_legacy_export_is_trimmed_and_it_keeps_what_matters(tmp_path, mon
     assert "m129" in ids  # the newest retirement
     assert "m100" not in ids  # the oldest filler is left out, not deleted
     assert [t["id"] for t in legacy["tombstones"]] == [t["id"] for t in newest]
-    # The barrier still covers the tombstones left off the list.
-    assert facts_mod.barrier_contains(legacy["forgotten"], "id:" + facts_mod.global_id(full["tombstones"][0]))
+    # The barrier covers the tombstones left off the list, not the listed ones.
+    oldest = min(full["tombstones"], key=lambda t: t["deleted_at"])
+    assert facts_mod.barrier_contains(legacy["forgotten"], "id:" + facts_mod.global_id(oldest))
+    assert full["forgotten"] == ""
     # A full export is never trimmed, whatever the budget.
     assert len(store._facts.export()["entries"]) == len(full["entries"])

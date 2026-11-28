@@ -23,16 +23,19 @@ write that read a row before a Recall cannot lower its count. Readers take
 no lock file: one read transaction gives them a consistent view. WAL is
 used where the filesystem supports it, else the rollback journal.
 
-Migration. The first open imports ``memories.json`` (and an existing
-``jit_deliveries.jsonl``) in one transaction and records ``sqlite.imported``,
-so it runs once, a crash leaves nothing half imported, and two processes
-opening together import once. A database without that marker is never
-served. ``memories.json`` is never written or removed here: it stays as the
-backup. If the import fails (a document of a newer schema or another owner,
-an unreadable file, a full disk) the database file the attempt created is
-removed again, the store reads from the JSON file and refuses every write
-(``FactDB.failure``, shown by memory health); a JSON file that does not parse
-fails the read instead of serving an empty store.
+Migration. The first writing open imports ``memories.json`` (and an existing
+``jit_deliveries.jsonl``) into a private temporary file beside the store,
+records ``sqlite.imported`` in the same transaction and only then renames
+the file to ``memory.db``, holding the store's lock file throughout. So it
+runs once, a crash leaves nothing half imported, two processes opening
+together import once, and a failure removes only its own temporary file,
+never a database another process put in place. A database without the
+marker is never served. ``memories.json`` is never written or removed here:
+it stays as the backup. If the import fails (a document of a newer schema or
+another owner, an unreadable file, a full disk) the store reads from the JSON
+file and refuses every write (``FactDB.failure``, shown by memory health); a
+JSON file that does not parse fails the read instead of serving an empty
+store.
 
 Downgrade: ``python -m fluid.codemode.fact_db export <store> <file>`` writes a
 ``memories.json`` document an older build reads; ``downgrade <store>`` moves
@@ -49,7 +52,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -144,6 +147,22 @@ def _file_ident(path: Path) -> tuple[int, int] | None:
     return st.st_dev, st.st_ino
 
 
+def _fsync_dir(path: Path) -> None:
+    """Make a rename in ``path`` durable (POSIX; Windows has no such call)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _thread_pool() -> dict[str, _Pooled]:
     # A forked child must not use its parent's connections (SQLite forbids
     # it); it abandons them rather than closing them, and keeps them
@@ -229,8 +248,8 @@ class FactDB:
         """Whether this store holds anything (database or unmigrated JSON)."""
         return self.path.exists() or self.legacy.exists()
 
-    def _connect(self, timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-        con = sqlite3.connect(str(self.path), timeout=timeout_ms / 1000, isolation_level=None)
+    def _connect(self, timeout_ms: int = BUSY_TIMEOUT_MS, *, path: Path | None = None) -> sqlite3.Connection:
+        con = sqlite3.connect(str(path or self.path), timeout=timeout_ms / 1000, isolation_level=None)
         con.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
         # A Forget must not leave the forgotten text in freed pages.
         con.execute("PRAGMA secure_delete=ON")
@@ -255,13 +274,17 @@ class FactDB:
         except sqlite3.Error:
             return None
 
+    @staticmethod
+    def _create_tables(con: sqlite3.Connection) -> None:
+        con.executescript(_DDL_ONCE)
+
     def _schema(self, con: sqlite3.Connection) -> str:
         """Pick the journal mode and create the tables; returns the mode."""
         try:
             mode = str(con.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
             if mode != "wal":
                 raise sqlite3.OperationalError(f"journal mode stayed {mode}")
-            con.executescript(_DDL_ONCE)
+            self._create_tables(con)
         except sqlite3.OperationalError as exc:
             if _busy(exc):
                 raise  # another process holds the lock: not a WAL problem
@@ -273,7 +296,7 @@ class FactDB:
             _log.warning("Memory store %s cannot use WAL (%s); using the rollback journal",
                          self.path, exc)
             mode = str(con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
-            con.executescript(_DDL_ONCE)
+            self._create_tables(con)
         self._upgrade(con)
         return mode
 
@@ -287,22 +310,69 @@ class FactDB:
                 con.execute("UPDATE facts SET last_delivered_at=COALESCE((SELECT MAX(at) FROM deliveries "
                             "WHERE deliveries.fact_id=facts.id AND source='jit'), 0)")
 
-    def _remove_files(self, ident: tuple[int, int] | None) -> None:
-        """Remove a database this process created for an import that failed,
-        so no empty store is left to pass for an imported one. Only the file
-        it created (same identity): another process may have made a new one.
-        On Windows an open file cannot be removed; it stays without the
-        import marker and the next open imports again."""
-        if ident is None or _file_ident(self.path) != ident:
-            return
-        for suffix in ("", "-wal", "-shm", "-journal"):
+    def _open_existing(self) -> str | None:
+        """Prepare an imported ``memory.db`` (journal mode, tables added
+        since); returns its journal mode, or None when the file holds no
+        import marker. Its errors are storage errors, never an import
+        failure: a store that may hold imported facts never falls back to
+        the (older) ``memories.json``."""
+        con = self._connect()
+        try:
+            imported = self._imported(con)
+            if imported is None:
+                raise sqlite3.DatabaseError("memory.db cannot be read")
+            if not imported:
+                return None
+            return self._schema(con)
+        finally:
+            con.close()
+
+    def _import_new(self) -> None:
+        """Import ``memories.json`` into a private file beside the store and
+        put it in place as ``memory.db``. The caller holds the store's lock
+        file, and ``memory.db`` is absent or holds no import marker.
+
+        Nothing another process may use is touched on failure: the import
+        happens in this call's own temporary file, which is all that is
+        removed, and ``memory.db`` appears (by rename) only once its import
+        has committed."""
+        tmp = self.root / f".{DB_NAME}.importing-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+        try:
             try:
-                Path(f"{self.path}{suffix}").unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                _log.warning("Could not remove %s%s after a failed import", self.path, suffix)
-                return
+                self.root.mkdir(parents=True, exist_ok=True)
+                con = self._connect(path=tmp)
+                try:
+                    # The rollback journal: a closed file is the whole
+                    # database, safe to rename (no WAL beside it).
+                    con.execute("PRAGMA journal_mode=DELETE")
+                    self._create_tables(con)
+                    self._migrate(con)
+                finally:
+                    con.close()
+                if self.path.exists():
+                    # A database without the marker (an older build's or a
+                    # crashed attempt's) holds nothing served: set aside.
+                    aside = self.path.with_name(f"{DB_NAME}.unimported-{int(time.time())}")
+                    for suffix in ("", "-wal", "-shm", "-journal"):
+                        _move(Path(f"{self.path}{suffix}"), Path(f"{aside}{suffix}"))
+                    _log.warning("Memory store %s held a database without its import marker; "
+                                 "moved it to %s", self.root, aside.name)
+                else:
+                    # Journal files without their database belong to none
+                    # (every creator holds the lock); SQLite would replay
+                    # them into the new file.
+                    for suffix in ("-wal", "-shm", "-journal"):
+                        Path(f"{self.path}{suffix}").unlink(missing_ok=True)
+                os.replace(tmp, self.path)
+                _fsync_dir(self.root)
+            except (sqlite3.Error, OSError) as exc:
+                raise MigrationError(f"memory.db could not be set up ({exc})") from exc
+        finally:
+            for suffix in ("", "-journal"):
+                try:
+                    Path(f"{tmp}{suffix}").unlink(missing_ok=True)
+                except OSError:
+                    _log.warning("Could not remove %s%s", tmp, suffix)
 
     def _prepare_file(self, *, create: bool) -> bool:
         """Create the tables, pick a journal mode and import the legacy
@@ -311,50 +381,44 @@ class FactDB:
 
         A store whose import has not committed is never served from the
         database: any failure on the way (the document, a full disk, a
-        read-only folder) raises MigrationError, and a database file this
-        call created is removed again."""
+        read-only folder) raises MigrationError and leaves no database
+        behind (see ``_import_new``)."""
         if self._ready_mode() is not None:
             return True
-        with _ready_guard:
-            if self._ready_mode() is not None:
-                return True
-            existed = self.path.exists()
-            if not existed and not create:
-                return False
-            # An existing file is "unknown" until its marker is read: a store
-            # that may hold imported facts never falls back to the (older)
-            # memories.json; its errors are storage errors.
-            imported: bool | None = None if existed else False
-            ident = None
-            con = None
+        if self.path.exists():
+            with _ready_guard:
+                if self._ready_mode() is not None:
+                    return True
+                mode = self._open_existing()
+                if mode is not None:
+                    _ready[str(self.path)] = (_file_ident(self.path), mode)
+                    return True
+        if not create:
+            return False  # absent, or not imported: observing never imports
+        # An import: one process at a time, under the store's lock file, taken
+        # before the thread guard (a writer already holds the lock file when
+        # it reaches here; the lock is reentrant within a thread).
+        from fluid.codemode.transactions import file_transaction
+        with ExitStack() as held:
             try:
-                try:
-                    self.root.mkdir(parents=True, exist_ok=True)
-                    con = self._connect()
-                    ident = None if existed else _file_ident(self.path)
-                    if existed:
-                        imported = self._imported(con)
-                        if imported is None:
-                            raise sqlite3.DatabaseError("memory.db cannot be read")
-                    mode = self._schema(con)
-                    if not imported:
-                        self._migrate(con)
-                finally:
-                    if con is not None:
-                        con.close()
-            except MigrationError:
-                self._remove_files(ident)
-                raise
-            except (sqlite3.Error, OSError) as exc:
-                if imported is not False or _busy(exc):
-                    # Imported or unreadable: an ordinary storage error. Busy:
-                    # another process holds the file (it may be importing
-                    # it), so it is neither removed nor called failed.
-                    raise
-                self._remove_files(ident)
+                self.root.mkdir(parents=True, exist_ok=True)
+                held.enter_context(file_transaction(self.root / ".memory.lock"))
+            except TimeoutError:
+                raise  # another process holds the store: busy, not failed
+            except OSError as exc:  # a read-only folder, say
                 raise MigrationError(f"memory.db could not be set up ({exc})") from exc
-            _ready[str(self.path)] = (_file_ident(self.path), mode)
-            return True
+            with _ready_guard:
+                if self._ready_mode() is not None:
+                    return True
+                # Another process may have imported while this one waited.
+                mode = self._open_existing() if self.path.exists() else None
+                if mode is None:
+                    self._import_new()
+                    mode = self._open_existing()
+                    if mode is None:
+                        raise sqlite3.DatabaseError("memory.db lost its import marker")
+                _ready[str(self.path)] = (_file_ident(self.path), mode)
+                return True
 
     @contextmanager
     def connection(self, *, create: bool,
@@ -711,27 +775,39 @@ class FactDB:
             return "" if con is None else str(self._meta(con, "sqlite.legacy_forgotten") or "")
 
     def status(self) -> dict:
-        """Storage facts for health and the CLI. Never creates the database."""
+        """Storage facts for health and the CLI. Only reads: never creates,
+        prepares or imports the database."""
         info: dict[str, Any] = {"path": str(self.path), "exists": self.path.exists(),
                                 "journal_mode": self._ready_mode()}
         if self.failure:
             info.update(state="migration_failed", reason=self.failure)
             return info
         try:
-            with self.connection(create=False) as con:
-                if con is None:
-                    # No database yet; the first write imports the document.
-                    # One another process failed to import (it leaves no
-                    # database behind) is checked here, so health in every
-                    # process names it.
-                    if self.legacy.exists():
-                        self._read_legacy()
-                    info["state"] = "pending" if self.legacy.exists() else "empty"
+            if not self.path.exists():
+                # No database yet; the first write imports the document. One
+                # another process failed to import (it leaves no database
+                # behind) is checked here, so health in every process names it.
+                if self.legacy.exists():
+                    self._read_legacy()
+                info["state"] = "pending" if self.legacy.exists() else "empty"
+                return info
+            con = self._connect()
+            try:
+                imported = self._imported(con)
+                if imported is None:
+                    raise sqlite3.DatabaseError("memory.db cannot be read")
+                if not imported:
+                    # Not imported (a crashed attempt of an older build): the
+                    # next write imports again, unless the document fails.
+                    self._read_legacy()
+                    info.update(state="pending", reason="memory.db holds no import marker")
                     return info
                 info["imported"] = self._meta(con, "sqlite.imported")
                 info["journal_mode"] = str(con.execute("PRAGMA journal_mode").fetchone()[0]).lower()
                 for table in ("facts", "revisions", "tombstones", "deliveries"):
                     info[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            finally:
+                con.close()
         except MigrationError as exc:
             info.update(state="migration_failed", reason=str(exc))
             return info
@@ -821,14 +897,17 @@ def export_document(root: Path) -> dict:
 
     Everything is kept (live, archive, revisions, tombstones). An older build
     keeps only its newest 256 tombstones, so ``forgotten`` is the Bloom
-    barrier it expects, built from every tombstone row and the imported one.
+    barrier it expects over the older ones (``facts.legacy_barrier``).
     """
-    from fluid.codemode.facts import SCHEMA, FactStore, _wire_barrier
+    from fluid.codemode.facts import SCHEMA, FactStore, legacy_barrier
     db = FactDB(root)
     owner = db.meta_field("owner") or "local"
     doc = FactStore(root, owner=owner)._load(read_only=True)
+    # Local Bloom fences are this worker's own; the peers whose filters set
+    # them keep sending those filters to an older build.
+    doc.pop("fenced", None)
     doc.update(schema=SCHEMA, owner=owner,
-               forgotten=_wire_barrier(db.legacy_forgotten(), doc["tombstones"]))
+               forgotten=legacy_barrier(db.legacy_forgotten(), doc["tombstones"]))
     return doc
 
 
@@ -891,24 +970,25 @@ def _downgrade(db: FactDB, doc: dict) -> int:
 
     In that order, so a database still in use (the app running) fails the
     downgrade before anything changes. The existing ``memories.json`` (the
-    pre-SQLite backup) is copied first, and a failed move or write puts the
-    database back: either the store is downgraded or it is as it was."""
+    pre-SQLite backup) is copied once the database is aside, just before it
+    is overwritten; a failed move, copy or write puts the database back (and
+    drops the copy): either the store is downgraded or it is as it was."""
     import shutil
     release_connections()
     stamp = int(time.time())
     aside = db.path.with_name(f"{DB_NAME}.downgraded-{stamp}")
     backup = None
-    if db.legacy.exists():
-        backup = db.legacy.with_name(f"{LEGACY_NAME}.pre-downgrade-{stamp}")
-        shutil.copy2(db.legacy, backup)
     moved: list[tuple[Path, Path]] = []
     try:
-        for suffix in ("", "-wal", "-shm"):
+        for suffix in ("", "-wal", "-shm", "-journal"):
             src, dst = Path(f"{db.path}{suffix}"), Path(f"{aside}{suffix}")
             if _move(src, dst):
                 moved.append((src, dst))
-        if not moved:
+        if not moved or moved[0][0] != db.path:
             raise FileNotFoundError(f"{db.path} is gone")
+        if db.legacy.exists():
+            backup = db.legacy.with_name(f"{LEGACY_NAME}.pre-downgrade-{stamp}")
+            shutil.copy2(db.legacy, backup)
         _write_json(db.legacy, doc)
     except OSError as exc:
         for src, dst in reversed(moved):
@@ -916,6 +996,8 @@ def _downgrade(db: FactDB, doc: dict) -> int:
                 _move(dst, src)
             except OSError:
                 print(f"Could not move {dst.name} back to {src.name}; move it back by hand.")
+        if backup is not None:
+            backup.unlink(missing_ok=True)
         print(f"Downgrade failed ({exc}); the store is unchanged. Stop the app and try again.")
         return 1
     note = f" (the previous one is {backup.name})" if backup else ""

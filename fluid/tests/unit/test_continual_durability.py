@@ -112,7 +112,9 @@ def test_meta_saves_go_through_a_temp_file_and_rename(tmp_path, monkeypatch) -> 
     assert "meta.json" in targets
     # Facts commit in SQLite transactions; no memories.json is written.
     assert "memories.json" not in targets and not (tmp_path / "memories.json").exists()
-    assert all(src.startswith(dst + ".tmp-") for src, dst in seen)
+    # The database itself is put in place once, from its import file.
+    assert [src.startswith(".memory.db.importing-") for src, dst in seen if dst == "memory.db"] == [True]
+    assert all(src.startswith(dst + ".tmp-") for src, dst in seen if dst != "memory.db")
 
 
 # ─── journal reaping cannot lose an append ───────────────────────────────────
