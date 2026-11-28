@@ -58,7 +58,7 @@ vi.mock('$lib/stores/auth.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	stores.github = writable(true);
 	// The shared view kit pulls in Settings access, which reads isAdmin.
-	return { githubAuthenticated: stores.github, isAdmin: writable(true) };
+	return { githubAuthenticated: stores.github, sourceControlAuthenticated: stores.github, isAdmin: writable(true) };
 });
 vi.mock('$lib/stores/git.svelte', async () => {
 	const { writable } = await import('svelte/store');

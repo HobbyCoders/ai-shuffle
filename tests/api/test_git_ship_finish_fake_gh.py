@@ -342,7 +342,7 @@ def test_ship_guards(env):
     git(env.repo, "remote", "set-url", "origin", str(bare_of(env.repo)))
     response = client.post(f"{BASE}/ship", json={})
     assert response.status_code == 400
-    assert response.json()["detail"].startswith("Could not determine GitHub repository")
+    assert response.json()["detail"].startswith("Could not determine the GitHub or GitLab repository")
 
     # Invalid merge method is rejected by validation before any git work.
     assert client.post(f"{BASE}/ship", json={"merge_method": "admin"}).status_code == 422
