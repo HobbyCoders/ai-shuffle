@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,6 +101,21 @@ class PermissionEngine:
         # kept by identity so a mode switch lifts exactly these and no
         # configured rule that happens to look the same.
         self._mode_rules: list[Rule] = []
+        # Folders outside the working folder the session may edit under
+        # Accept Edits: a list, or a callable returning one. The loop that
+        # owns the session sets it to the session's scratch folder; a host
+        # may set its own first.
+        self.edit_roots: Any = None
+
+    def extra_edit_roots(self) -> list[str]:
+        """:attr:`edit_roots` as a list, read when an edit is judged (the
+        session's id, and so its scratch folder, can arrive after the
+        engine is built). Empty when it cannot be worked out."""
+        roots = self.edit_roots
+        try:
+            return [os.fspath(root) for root in (roots() if callable(roots) else roots or ())]
+        except Exception:  # noqa: BLE001 - no extra folder, so the edit asks
+            return []
 
     def set_mode_rules(self, rules: list[Rule]) -> None:
         """Replace the rules a permission mode contributes.
@@ -116,21 +132,39 @@ class PermissionEngine:
         self._mode_rules = list(rules)
         self.rules = [*self._mode_rules, *kept]
 
-    def evaluate(self, spec: ToolSpec, input: dict[str, Any]) -> str:
-        """Return ``allow`` | ``deny`` | ``ask`` for one tool call."""
-        return self.decide(spec, input).decision
+    def evaluate(
+        self, spec: ToolSpec, input: dict[str, Any], *, cwd: str | None = None
+    ) -> str:
+        """Return ``allow`` | ``deny`` | ``ask`` for one tool call.
+
+        ``cwd`` is the session's working folder; a rule about paths (and the
+        Accept Edits allows) reads the call against it.
+        """
+        return self.decide(spec, input, cwd=cwd).decision
 
     def decide(
-        self, spec: ToolSpec, input: dict[str, Any], *, cwd: str | None = None
+        self,
+        spec: ToolSpec,
+        input: dict[str, Any],
+        *,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Verdict:
         """Like :meth:`evaluate`, but says where the decision came from.
 
         The policy axis keys off the call's *effective* risk — the tool's
         ``classify_risk`` hook when it has one (Bash reports read-only
         commands as safe), its static ``risk`` otherwise. ``cwd`` lets path
-        rules see the resolved spelling of a relative path.
+        rules see the resolved spelling of a relative path, and a risk hook
+        the folder a shell command starts in. ``env`` is the
+        session's settings ``env`` (``ctx.extra["settings_env"]``), which its
+        shells start with: a risk hook that depends on what a command finds
+        there (which git is first on PATH) is asked about that environment.
         """
-        risk = spec.effective_risk(input)
+        from fluid.tools.child_env import launch_context
+
+        with launch_context(env, cwd):
+            risk = spec.effective_risk(input)
         rule = match_rule(self.rules, spec.name, input, cwd=cwd)
         if rule is not None:
             return Verdict(rule.decision, "rule", risk, rule)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from fluid.engine.native import NativeLoop
 from fluid.events import SetPermissionMode
+from fluid.permissions.edit_guard import edit_stays_in_project
 from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.modes import (
     ACCEPT_EDITS_TOOLS,
@@ -28,10 +29,14 @@ def _spec(name: str, risk: str = "write") -> ToolSpec:
     return ToolSpec(name=name, description="", input_schema={}, risk=risk)
 
 
-def _verdicts(engine: PermissionEngine) -> dict[str, str]:
-    inp = {"file_path": "a.py", "command": "rm x", "code": "1", "url": "https://x"}
+def _verdicts(engine: PermissionEngine, cwd) -> dict[str, str]:
+    """Each tool asked about a file of the project in ``cwd``."""
+    inp = {
+        "file_path": "a.py", "notebook_path": "a.ipynb",
+        "command": "rm x", "code": "1", "url": "https://x",
+    }
     return {
-        name: engine.evaluate(_spec(name), inp)
+        name: engine.evaluate(_spec(name), inp, cwd=str(cwd))
         for name in (*sorted(ACCEPT_EDITS_TOOLS), "Bash", "run_python", "WebFetch", "Remember")
     }
 
@@ -43,21 +48,24 @@ def test_the_table() -> None:
     assert MODE_POLICY["bypassPermissions"] == "never_ask"
     assert {r.tool for r in accept_edits_rules()} == ACCEPT_EDITS_TOOLS
     assert all(r.decision == "allow" and not r.input_globs for r in accept_edits_rules())
+    # Each allow is limited to the project's own files (test_edit_guard.py).
+    assert all(r.guard is edit_stays_in_project for r in accept_edits_rules())
     assert mode_rules("default") == mode_rules("bypassPermissions") == mode_rules("on_write") == []
     assert [r.tool for r in mode_rules("acceptEdits")] == sorted(ACCEPT_EDITS_TOOLS)
 
 
-def test_set_mode_rules_allows_edits_and_keeps_asking_for_the_rest() -> None:
+def test_set_mode_rules_allows_edits_and_keeps_asking_for_the_rest(tmp_path) -> None:
     engine = PermissionEngine("on_write")
     engine.set_mode_rules(mode_rules("acceptEdits"))
-    verdicts = _verdicts(engine)
+    verdicts = _verdicts(engine, tmp_path)
     assert {n for n, v in verdicts.items() if v == "allow"} == ACCEPT_EDITS_TOOLS
     assert {n for n, v in verdicts.items() if v == "ask"} == set(verdicts) - ACCEPT_EDITS_TOOLS
     # Safe calls stay allowed by the policy, as under default.
     assert engine.evaluate(_spec("Read", "safe"), {"file_path": "a.py"}) == "allow"
 
 
-def test_set_mode_rules_lifts_only_the_rules_it_installed() -> None:
+def test_set_mode_rules_lifts_only_the_rules_it_installed(tmp_path) -> None:
+    cwd = str(tmp_path)
     configured_allow = Rule(tool="Write", decision="allow")  # looks like a mode rule
     configured_deny = Rule(tool="Edit", decision="deny", input_globs={"file_path": "*.lock"})
     engine = PermissionEngine("on_write", rules=[configured_allow, configured_deny])
@@ -65,13 +73,13 @@ def test_set_mode_rules_lifts_only_the_rules_it_installed() -> None:
     engine.set_mode_rules(mode_rules("acceptEdits"))
     # Mode rules go in front: the configured deny still wins for its files.
     assert engine.rules[: len(ACCEPT_EDITS_TOOLS)] == mode_rules("acceptEdits")
-    assert engine.evaluate(_spec("Edit"), {"file_path": "x.lock"}) == "deny"
-    assert engine.evaluate(_spec("Edit"), {"file_path": "a.py"}) == "allow"
+    assert engine.evaluate(_spec("Edit"), {"file_path": "x.lock"}, cwd=cwd) == "deny"
+    assert engine.evaluate(_spec("Edit"), {"file_path": "a.py"}, cwd=cwd) == "allow"
 
     engine.set_mode_rules(mode_rules("default"))
     assert engine.rules == [configured_allow, configured_deny]
-    assert engine.evaluate(_spec("Edit"), {"file_path": "a.py"}) == "ask"
-    assert engine.evaluate(_spec("Write"), {"file_path": "a.py"}) == "allow"  # the configured one
+    assert engine.evaluate(_spec("Edit"), {"file_path": "a.py"}, cwd=cwd) == "ask"
+    assert engine.evaluate(_spec("Write"), {"file_path": "a.py"}, cwd=cwd) == "allow"  # the configured one
 
     # Installing twice never doubles the rules.
     engine.set_mode_rules(mode_rules("acceptEdits"))
@@ -79,23 +87,23 @@ def test_set_mode_rules_lifts_only_the_rules_it_installed() -> None:
     assert len(engine.rules) == len(ACCEPT_EDITS_TOOLS) + 2
 
 
-async def test_set_permission_mode_op_swaps_policy_and_rules() -> None:
+async def test_set_permission_mode_op_swaps_policy_and_rules(tmp_path) -> None:
     perms = PermissionEngine("on_write")
     loop = NativeLoop(provider=None, store=MemoryStore(), model="m", permissions=perms)
 
     await loop.submit(SetPermissionMode(mode="acceptEdits"))
     assert perms.approval_policy == "on_write"
-    verdicts = _verdicts(perms)
+    verdicts = _verdicts(perms, tmp_path)
     assert {n for n, v in verdicts.items() if v == "allow"} == ACCEPT_EDITS_TOOLS
     assert verdicts["Bash"] == verdicts["run_python"] == verdicts["WebFetch"] == "ask"
 
     await loop.submit(SetPermissionMode(mode="default"))
     assert perms.approval_policy == "on_write"
-    assert set(_verdicts(perms).values()) == {"ask"}
+    assert set(_verdicts(perms, tmp_path).values()) == {"ask"}
 
     await loop.submit(SetPermissionMode(mode="bypassPermissions"))
     assert perms.approval_policy == "never_ask"
-    assert set(_verdicts(perms).values()) == {"allow"}
+    assert set(_verdicts(perms, tmp_path).values()) == {"allow"}
     assert perms.rules == []
 
     # A raw policy name clears the mode's rules too.
@@ -103,3 +111,46 @@ async def test_set_permission_mode_op_swaps_policy_and_rules() -> None:
     await loop.submit(SetPermissionMode(mode="always_ask"))
     assert perms.approval_policy == "always_ask"
     assert perms.rules == []
+
+
+async def test_accept_edits_covers_the_sessions_own_scratch_folder_only(tmp_path, monkeypatch) -> None:
+    """The loop that owns the session names its scratch folder for the edit
+    allow. Another session's folder beside it still asks, and so does this
+    one's before the session has an id."""
+    from fluid.state import scratch_dir
+    from fluid.tools.registry import ToolCtx
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    project = tmp_path / "project"
+    project.mkdir()
+    perms = PermissionEngine("on_write")
+    ctx = ToolCtx(cwd=str(project))
+    loop = NativeLoop(provider=None, store=MemoryStore(), model="m", permissions=perms, ctx=ctx)
+    await loop.submit(SetPermissionMode(mode="acceptEdits"))
+
+    def verdict(path) -> str:
+        return perms.evaluate(_spec("Write"), {"file_path": str(path)}, cwd=str(project))
+
+    ctx.session_id = "ses_1"
+    mine = scratch_dir(ctx)
+    assert verdict(mine / "brief.md") == "allow"
+    assert verdict(mine.parent / "ses_2" / "brief.md") == "ask"
+    assert verdict(mine.parent.parent / "memory" / "facts.md") == "ask"
+
+    ctx.session_id = ""
+    assert perms.extra_edit_roots() == []
+    assert verdict(mine / "brief.md") == "ask"
+
+
+def test_a_host_that_names_its_own_edit_folders_keeps_them(tmp_path) -> None:
+    perms = PermissionEngine("on_write")
+    perms.edit_roots = [str(tmp_path / "uploads")]
+    NativeLoop(provider=None, store=MemoryStore(), model="m", permissions=perms)
+    assert perms.extra_edit_roots() == [str(tmp_path / "uploads")]
+
+    def broken():
+        raise RuntimeError("no folder")
+
+    perms.edit_roots = broken
+    assert perms.extra_edit_roots() == []  # the edit asks

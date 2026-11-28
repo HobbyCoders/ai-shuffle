@@ -19,9 +19,10 @@ key by key, scalars and lists replace, with one exception noted below.
    Windows, if present.
 4. User: `~/.fluid/mcp.json`, then `~/.fluid/hooks.json`, then
    `~/.fluid/config.toml`.
-5. Project: for each project directory, outer first: `<dir>/.fluid/mcp.json`,
-   then `<dir>/.fluid/hooks.json`, then `<dir>/.fluid/config.toml` or, if that
-   is absent, `<dir>/fluid.toml`.
+5. Project, only for a [trusted project](#project-trust): for each project
+   directory, outer first: `<dir>/.fluid/mcp.json`, then
+   `<dir>/.fluid/hooks.json`, then `<dir>/.fluid/config.toml` or, if that is
+   absent, `<dir>/fluid.toml`.
 6. Environment: the `FLUID_*` variables below.
 7. Command-line flags (`--provider`, `--model`, `--code-mode`, `--continual`,
    `--skills-dir`, `--approval-policy`, `--cwd`).
@@ -42,6 +43,57 @@ the same project config, MCP servers, and hooks as one started at the root,
 and a nearer directory's values win. Outside a git checkout only the start
 directory counts. The home directory is never a project directory, even when
 the start directory sits under it.
+
+### Project trust
+
+The project layer loads only for a project you have trusted. Until then the
+`fluid` CLI treats everything the project itself supplies as absent:
+
+- its config files (`.fluid/config.toml`, `fluid.toml`), so it cannot set the
+  approval policy, turn off `protect_sensitive_files`, add permission rules,
+  hooks or MCP servers, or choose a provider or model;
+- its `.fluid/mcp.json`, `.fluid/hooks.json`, `.fluid/settings.json` and
+  `.fluid/settings.local.json`;
+- its instruction files, skills, agents, slash commands, and the plugins its
+  settings enable;
+- its `.git`: git runs the programs `.git/config` names (filters, diff
+  drivers) even for `git status`, so fluid runs no git of its own there, the
+  prompt has no git lines, and each git command the agent runs asks first.
+
+In terms of the keys below, `setting_sources` is reduced to what is left
+without `project` and `local`, whichever layer named them: a user config,
+`FLUID_SETTING_SOURCES` or a flag chooses which scopes load, but none of them
+is the trust answer. System, user, environment and flag layers load as usual.
+
+The project is the git repository root, or the start directory outside a
+checkout, and a checkout nested inside a trusted folder is its own project:
+in a trusted project a git command aimed at such a checkout (or any other
+one, by the Bash call's `cwd` or `git -C`) still asks first, and reading a
+file in it adds none of its instruction files.
+Outside a checkout the `fluid` CLI searches the start directory alone for
+instruction files, commands, skills and agents, not the folders above it.
+The Claude provider is held to the same bound with Claude Code's own
+settings, which needs Claude Code 2.1.239 or newer; an older one is not
+started ([security.md](security.md) has the limits).
+Trust is recorded by real path in `~/.fluid/trusted_projects.json`, never
+inside the project, by one of:
+
+- answering yes when `fluid chat` or `fluid run` asks. They ask once per
+  project, and only when stdin and stdout are both a terminal;
+- `fluid trust` (see [cli.md](cli.md)), which also works in scripts;
+- `--trust-project`, which loads the project for that one run and records
+  nothing.
+
+Without a terminal nothing is asked: the project's files are left out and two
+lines on stderr say so. Trust is for the folder, not for its contents at the
+time, so files that arrive later (a `git pull`, a branch switch) load without
+a new question. The rule is the same on Linux, macOS and Windows. A recorded
+path is compared as text: a folder that is moved or renamed is asked about
+again, and where the file system keeps the spelling you typed (macOS) a path
+spelled with different case is too.
+
+This is the standalone CLI's rule. A harness embedder that builds its config
+with `load_config` gets the same default and can pass `project_trusted`.
 
 ## Top-level keys
 
@@ -133,6 +185,10 @@ The global `~/.fluid/AGENTS.md` and `~/.fluid/{skills,agents,commands}` roots
 are excluded from project/nested discovery by resolved path: they load only
 in the user scope. Other home-level files (including `.fluid/AGENTS.local.md`,
 which is not global) and ancestors above home still participate in the walk.
+The `fluid` CLI is narrower outside a git checkout: there the walk is the
+start directory alone, the folder the [trust answer](#project-trust) is for,
+so an `AGENTS.md` in a folder above it does not load. Put the project in a
+git repository to get a walk from its root.
 `AGENTS.local.md` is the gitignored personal file that layers after the shared
 one, the role `CLAUDE.local.md` has in Claude Code; the settings import maps
 `CLAUDE.local.md` to it. `AGENTS.override.md` is the Codex convention and does
@@ -185,7 +241,7 @@ non-destructively. Consumed keys:
 | Key | Effect |
 |---|---|
 | `permissions.allow` / `ask` / `deny` | `Tool(pattern)` entries become permission rules, evaluated before the `[[permission.rules]]` from `config.toml`, so under last-match-wins a TOML rule outranks a settings rule of the same shape and `deny` outranks `ask` outranks `allow` within the settings. A pattern narrows only `Bash` (command), `Read`, `Write` and `Edit` (file path); for any other tool a patterned `ask`/`deny` covers the whole tool and a patterned `allow` is skipped with a warning. |
-| `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` (a settings `deny` still wins), `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
+| `permissions.defaultMode` | Sets `permission.approval_policy` unless a config file, `FLUID_APPROVAL_POLICY`, or `--approval-policy` does: `default` → `on_write`, `acceptEdits` → `on_write` plus allow rules for `Edit`, `Write`, `MultiEdit`, `NotebookEdit` that cover the project's own files only (see [security.md](security.md); a settings `deny` still wins), `bypassPermissions` → `never_ask`. Any other value is ignored with a warning. |
 | `env` | Layered over the process environment for the `Bash` builtin's child processes and for each MCP stdio server's spawn (under the server's own `env`). `os.environ` itself is never changed. The same map feeds `${VAR}` expansion in `mcp.json`. |
 | `enabledPlugins` | Which plugins under `~/.fluid/plugins` load (below). |
 | `enabledMcpjsonServers` | When non-empty, only the named servers load from a project `.fluid/mcp.json`; user `mcp.json` and TOML servers are unaffected. |

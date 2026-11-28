@@ -32,7 +32,7 @@ import logging
 import re
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 from fluid.codemode import reflection
@@ -686,12 +686,18 @@ class Synthesizer:
         enabled: bool | Callable[[], Any] = True,
         context_window: int | None = None,
         workflow_cwd: str | None = None,
+        workflow_sources: Sequence[str] | None = None,
         daily_calls: int | Callable[[], Any] | None = None,
         billing: str | Callable[[], str | None] | None = None,
         own_session: str | None = None,
         route: Callable[[str], LearnerRoute | None] | None = None,
     ) -> None:
         self._workflow_cwd = workflow_cwd
+        # The session's setting sources (None: no restriction): the skills a
+        # workflow proposal is compared with are the ones the session loads.
+        self._workflow_sources = (
+            tuple(workflow_sources) if workflow_sources is not None else None
+        )
         # The journal is shared by every chat of the store, so a pass can read
         # other chats' entries. With ``route``, an entry stamped with another
         # chat's session (not ``own_session``) is learned on that chat's own
@@ -2732,6 +2738,7 @@ Never claim a workflow is installed because it was proposed."""
                     json.loads(match.group(1)),
                     (entries or []) if workflow_entries is None else workflow_entries,
                     self._project, cwd=self._workflow_cwd,
+                    sources=self._workflow_sources,
                 )
                 if proposal["status"] == "pending":
                     changed.append(f"workflow-proposal:{proposal['id']}")

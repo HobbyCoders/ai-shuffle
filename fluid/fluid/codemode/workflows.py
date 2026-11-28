@@ -181,12 +181,12 @@ class WorkflowProposals:
         with file_transaction(self.lock):
             return self._read()
 
-    def propose(self, body, entries, project, *, cwd=None):
+    def propose(self, body, entries, project, *, cwd=None, sources=None):
         if not isinstance(project, str) or not project or project == "global":
             raise ValueError("Workflow proposals require explicit project scope")
         content = _content(body)
         if cwd is not None:
-            self._deduplicate(cwd, body["name"], body["description"])
+            self._deduplicate(cwd, body["name"], body["description"], sources)
         evidence = _evidence(entries, body["evidence_sessions"], body["name"], project,
                              lost=load_loss(self.store.root))
         identity = {"owner": self.owner, "project": project, "content": content}
@@ -215,10 +215,24 @@ class WorkflowProposals:
             self._write(rows)
 
     @staticmethod
-    def _deduplicate(cwd, name, description):
+    def _deduplicate(cwd, name, description, sources=None):
+        """Refuse a workflow an installed skill already covers.
+
+        ``sources`` are the session's setting sources (None: every scope).
+        A proposal is compared with the skills that session loads, so a
+        project whose files are left out (untrusted) has no say here.
+        """
         from fluid.codemode.relevance import query_terms
+        from fluid.context.plugins import discover_plugins
         terms = set(query_terms(description))
-        for skill in discover_skills(cwd, include_plugins=True):
+        installed = discover_skills(
+            cwd,
+            include_global=sources is None or "user" in sources,
+            include_project=sources is None or "project" in sources,
+            include_plugins=True,
+            plugins=None if sources is None else discover_plugins(cwd, sources=tuple(sources)),
+        )
+        for skill in installed:
             other = set(query_terms(skill.description))
             overlap = len(terms & other) / max(1, len(terms | other))
             if skill.name.rsplit(":", 1)[-1].lower() == name or (terms and overlap >= 0.8):

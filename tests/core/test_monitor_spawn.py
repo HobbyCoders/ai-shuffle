@@ -1210,6 +1210,26 @@ def test_an_executable_script_is_left_alone(tmp_path):
     assert sh_fallback_command(str(script), None) == str(script)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no exec bit")
+def test_a_bare_name_is_not_turned_into_a_script_from_the_working_folder(tmp_path):
+    """``ls`` is the program on PATH, and the permission check rated it as
+    that. A readable file called ``ls`` in the working folder must not make
+    Monitor run ``sh ls`` after the check has passed."""
+    from app.mcp.builtin_tools import sh_fallback_command
+
+    planted = tmp_path / "ls"
+    planted.write_text("touch ran\n", encoding="utf-8")
+    planted.chmod(0o644)
+    assert sh_fallback_command("ls", str(tmp_path)) == "ls"
+
+    # A script named by path still gets the fallback: that command asks.
+    script = tmp_path / "launch.sh"
+    script.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    script.chmod(0o644)
+    assert sh_fallback_command("./launch.sh", str(tmp_path)) == "sh ./launch.sh"
+    assert sh_fallback_command("launch.sh", str(tmp_path)) == "launch.sh"
+
+
 def test_a_real_command_is_never_rewritten(tmp_path):
     from app.mcp.builtin_tools import sh_fallback_command
 

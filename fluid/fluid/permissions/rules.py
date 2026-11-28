@@ -29,6 +29,7 @@ Three things make the field match more than a bare ``fnmatch``:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -209,12 +210,24 @@ def _path_matches(value: str, pattern: str, decision: str, cwd: str | None) -> b
     return opened is not None and any(fnmatchcase(c, p) for c in opened for p in patterns)
 
 
+# Tools whose ``command`` field is a line for the shell. A host can register
+# its own under a server prefix (``mcp__builtins__Monitor``).
+SHELL_COMMAND_TOOLS = frozenset({"Bash", "Monitor"})
+
+
+def runs_shell_command(tool_name: str) -> bool:
+    return tool_name.rsplit("__", 1)[-1] in SHELL_COMMAND_TOOLS
+
+
 def _command_matches(value: str, pattern: str, decision: str) -> bool:
     from fluid.tools.builtins.bash_risk import simple_commands
 
-    parts = simple_commands(value)
     if decision == "allow":
+        # Stricter reading: the program each part names must be the one the
+        # shell runs, in a shell this module can read (not cmd.exe).
+        parts = simple_commands(value, for_allow=True)
         return bool(parts) and all(pattern_matches(part, pattern) for part in parts)
+    parts = simple_commands(value)
     if pattern_matches(value, pattern):
         return True
     return any(pattern_matches(part, pattern) for part in parts or ())
@@ -225,15 +238,24 @@ class Rule:
     tool: str  # glob on tool name, e.g. "Bash", "mcp__*", "*"
     decision: str  # "allow" | "deny" | "ask"
     input_globs: dict[str, str] = field(default_factory=dict)  # field → glob on str(value)
+    # A further condition code decides, for what a glob cannot say:
+    # ``(input, cwd) -> bool``. The rule matches only when it returns True.
+    # The Accept Edits allows carry one (``permissions.edit_guard``), so the
+    # mode approves an edit inside the project and nothing else.
+    guard: Callable[[dict[str, Any], str | None], bool] | None = field(
+        default=None, repr=False
+    )
 
     def matches(self, name: str, input: dict[str, Any], *, cwd: str | None = None) -> bool:
         if not fnmatchcase(name, self.tool):
+            return False
+        if self.guard is not None and not self.guard(input, cwd):
             return False
         for key, pat in self.input_globs.items():
             value = str(input.get(key, ""))
             if key in PATH_FIELDS:
                 ok = _path_matches(value, pat, self.decision, cwd)
-            elif name == "Bash" and key == "command":
+            elif key == "command" and runs_shell_command(name):
                 ok = _command_matches(value, pat, self.decision)
             else:
                 ok = pattern_matches(value, pat)

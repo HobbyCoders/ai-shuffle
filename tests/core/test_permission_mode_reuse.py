@@ -13,6 +13,8 @@ so Accept Edits and Auto deny the computer-use access request as Ask does.
 """
 
 import asyncio
+import os
+import tempfile
 import dataclasses
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -272,10 +274,16 @@ async def test_legacy_auto_is_recorded_as_asked_for():
 # ─── Fix 2: the delegated leg with nobody to answer ──────────────────────
 
 
+# The delegated session's working folder and a file in it (neither has to
+# exist: Accept Edits places a path, it does not open it).
+_PROJECT = os.path.join(tempfile.gettempdir(), "mode-reuse-project")
+_PROJECT_FILE = os.path.join(_PROJECT, "src", "a.py")
+
+
 def _delegated(mode, alias=None):
     adapter = HarnessAdapter()
     adapter._is_delegated = True
-    adapter._options = SessionOptions(model="fable", permission_mode=mode)
+    adapter._options = SessionOptions(model="fable", permission_mode=mode, cwd=_PROJECT)
     registry = {alias: COMPUTER_USE_REQUEST_ACCESS} if alias else {}
     adapter._engine = SimpleNamespace(
         _registry_spec=lambda name: (
@@ -286,9 +294,12 @@ def _delegated(mode, alias=None):
     return adapter
 
 
-async def _decision(adapter, name):
+async def _decision(adapter, name, tool_input=None):
     await adapter._answer_without_approver(
-        PermissionRequestEvent(tool_use_id="t", input={}, name=name)
+        PermissionRequestEvent(
+            tool_use_id="t", name=name,
+            input={"file_path": _PROJECT_FILE} if tool_input is None else tool_input,
+        )
     )
     adapter.respond_to_permission.assert_awaited_once()
     return adapter.respond_to_permission.await_args.args[1]
@@ -309,6 +320,20 @@ async def _decision(adapter, name):
 ])
 async def test_unattended_delegated_decision_follows_the_watched_rule(mode, tool, allow):
     assert await _decision(_delegated(mode), tool) is allow
+
+
+@pytest.mark.parametrize("tool_input", [
+    {},
+    {"file_path": os.path.join(tempfile.gettempdir(), "elsewhere", "a.py")},
+    {"file_path": os.path.join(_PROJECT, ".git", "hooks", "pre-commit")},
+    {"file_path": os.path.join(_PROJECT, ".claude", "settings.json")},
+])
+async def test_unattended_delegated_accept_edits_denies_an_edit_outside_the_project(tool_input):
+    """The CLI asked about this edit because it is not one of the project's
+    own files. Nobody can be asked, and Accept Edits does not cover it."""
+    adapter = _delegated("acceptEdits")
+    assert await _decision(adapter, "Write", tool_input) is False
+    assert adapter.respond_to_permission.await_args.kwargs["message"]
 
 
 @pytest.mark.parametrize("mode", ["acceptEdits", "auto"])

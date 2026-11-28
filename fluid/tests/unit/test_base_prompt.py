@@ -101,5 +101,7 @@ def test_base_prompt_config_key_and_env(tmp_path) -> None:
     )
     assert config.base_prompt is False
     (tmp_path / "fluid.toml").write_text("base_prompt = false\n", encoding="utf-8")
-    config = load_config(cwd=tmp_path, include_system=False, include_user=False, env={})
+    config = load_config(
+        cwd=tmp_path, include_system=False, include_user=False, env={}, project_trusted=True
+    )
     assert config.base_prompt is False

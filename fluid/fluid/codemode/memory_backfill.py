@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import shutil
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -211,9 +212,17 @@ async def run(synth: Any, *, limit: int = BATCH_SIZE) -> Result:
 def _synthesizer(store: SkillStore) -> Any:
     from fluid.codemode.continual import Synthesizer
     from fluid.config.loader import _build_provider_client, load_config
+    from fluid.config.trust import is_project_trusted, project_root
 
     config = load_config()
     name = config.default_provider
+    if not is_project_trusted():
+        # The folder's own config may name another provider or model. It is
+        # left out until the owner trusts the folder; say so before any
+        # inference is paid for on the provider used instead.
+        print(f"fluid: {project_root()} is not a trusted project, so its own config "
+              f"was not used: inference goes to the provider your user config names "
+              f"({name}). Run `fluid trust` here to use the project's.", file=sys.stderr)
     return Synthesizer(_build_provider_client(config, name),
                        config.continual_model or config.model_for(name), store,
                        daily_calls=config.learner_daily_calls)

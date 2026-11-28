@@ -15,6 +15,8 @@ tests/core/test_jq_shim checks the copies match.
 import sys
 import json
 import argparse
+import contextlib
+import contextvars
 import io
 import math
 import os
@@ -22,7 +24,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
@@ -151,6 +153,341 @@ def _names(raw: str | None) -> list[str]:
     return [p.strip() for p in (raw or "").split(",") if p.strip()]
 
 
+# Git settings every shell that runs model-chosen commands gets, as
+# command-scope config (``GIT_CONFIG_COUNT``, git 2.31+), which outranks a
+# repository's own config file. They work the same on Linux, macOS and
+# Windows. An older git ignores what it does not know, which is why the Bash
+# classifier asks :func:`git_hardening_supported` before it rates a git
+# command read-only.
+#
+# ``git status`` is rated read-only and runs unprompted, but git runs the
+# program a repository's config names, and a folder of plain files (``HEAD``,
+# ``config``, ``objects/``, ``refs/``) is a repository to git: a clone can
+# ship one, and ``git -C that/folder status`` then ran its ``core.fsmonitor``
+# command.
+#
+# * ``safe.bareRepository=explicit`` (git 2.38+): git refuses a bare-shaped
+#   folder it merely found; one named with ``--git-dir`` still works, and so
+#   do normal checkouts and linked worktrees.
+# * ``core.fsmonitor=false``: no config file can name a program for the
+#   status reads (the app's own git calls already set this, see #436).
+AGENT_GIT_CONFIG: tuple[tuple[str, str], ...] = (
+    ("safe.bareRepository", "explicit"),
+    ("core.fsmonitor", "false"),
+)
+
+
+def harden_git_env(env: dict[str, str]) -> dict[str, str]:
+    """Append :data:`AGENT_GIT_CONFIG` to ``env``'s git config and return it.
+
+    Entries already present are kept and ours go after them, so ours win.
+    Calling it twice adds nothing. A malformed ``GIT_CONFIG_COUNT`` is left
+    alone: git rejects it, so every git command fails closed.
+    """
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        return env
+    if count < 0:
+        return env
+    # The value git would use for each key now: the last entry wins.
+    current = {
+        env.get(f"GIT_CONFIG_KEY_{i}", "").lower(): env.get(f"GIT_CONFIG_VALUE_{i}")
+        for i in range(count)
+    }
+    for key, value in AGENT_GIT_CONFIG:
+        if current.get(key.lower()) == value:
+            continue
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+    return env
+
+
+# Whether git may run unprompted in the project this process works in.
+#
+# The settings above stop git using a repository-shaped folder it merely
+# found, which is what a clone can carry. They do not make a checkout's own
+# ``.git`` safe: git runs the filters, diff drivers, signature programs and
+# hooks that ``.git`` names, on ``git status`` and ``git diff`` too, and no
+# option turns all of that off. So a folder's ``.git`` counts as the project's
+# own configuration. The ``fluid`` CLI names the checkouts its owner has
+# trusted (``fluid.config.trust``): in any other checkout the harness runs no
+# git of its own and the Bash classifier rates no git command read-only. The
+# question is asked of the checkout git would open, not of the folder the
+# session started in: a trusted session can be pointed at another checkout.
+# A host that never calls the setter (the app, whose projects the owner
+# registered himself) has no such list and git runs as before.
+_TRUSTED_GIT_ROOTS: tuple[str, ...] | None = None
+
+
+def set_trusted_git_roots(roots: Iterable[str | os.PathLike[str]] | None) -> None:
+    """Name the checkouts git may run in unprompted; None lifts the limit."""
+    global _TRUSTED_GIT_ROOTS
+    _TRUSTED_GIT_ROOTS = (
+        None if roots is None else tuple(os.path.realpath(os.fspath(r)) for r in roots)
+    )
+
+
+def git_trust_limited() -> bool:
+    """True when a host named the checkouts git may run in unprompted."""
+    return _TRUSTED_GIT_ROOTS is not None
+
+
+def checkout_of(folder: str | os.PathLike[str]) -> str | None:
+    """The repository git opens when started in ``folder`` (a real path): the
+    nearest folder at or above it that holds a ``.git`` entry or is itself
+    shaped like a repository, or None when there is none.
+
+    This is the rule ``fluid.config.trust`` uses for a project's root. git
+    itself skips a ``.git`` that is not a repository and looks further up;
+    that only matters for a broken ``.git`` inside a trusted folder, whose
+    files the owner has already let configure the run.
+    """
+    current = os.fspath(folder)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")) or (
+            os.path.isfile(os.path.join(current, "HEAD"))
+            and os.path.isdir(os.path.join(current, "objects"))
+            and os.path.isdir(os.path.join(current, "refs"))
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def git_trusted_in(folder: str | os.PathLike[str] | None) -> bool:
+    """Whether git may run unprompted when started in ``folder``.
+
+    Always True for a host that named no checkouts. Otherwise the repository
+    git would open from there must be one of the named ones; a folder in no
+    repository at all gives git nothing to read. An unknown folder is not
+    trusted.
+    """
+    roots = _TRUSTED_GIT_ROOTS
+    if roots is None:
+        return True
+    if not folder:
+        return False
+    try:
+        checkout = checkout_of(os.path.realpath(os.fspath(folder)))
+    except (OSError, TypeError, ValueError):
+        return False
+    return checkout is None or checkout in roots
+
+
+# ``GIT_CONFIG_COUNT`` came with git 2.31 and ``safe.bareRepository`` with
+# 2.38. An older git reads neither and says nothing, so the settings above
+# protect nothing there.
+GIT_HARDENING_MIN_VERSION = (2, 38)
+_GIT_VERSION_RE = re.compile(r"\bgit version (\d+)\.(\d+)")
+
+
+def git_version_supports_hardening(version_output: str) -> bool:
+    """True when ``git --version`` output names a git that honours
+    :data:`AGENT_GIT_CONFIG` (``git version 2.47.0.windows.1``,
+    ``git version 2.39.5 (Apple Git-154)``)."""
+    match = _GIT_VERSION_RE.search(version_output or "")
+    if match is None:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= GIT_HARDENING_MIN_VERSION
+
+
+# The settings ``env`` of the session whose tool call is being rated. Rating a
+# call never runs anything with it: it is only looked at, by
+# :func:`launch_changes_program_lookup`. Set by ``PermissionEngine.decide``
+# around the risk hook.
+_LAUNCH_OVERLAY: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
+    "fluid_launch_env_overlay", default=None
+)
+
+
+# The folder that session's shells start in when the call names none.
+_LAUNCH_CWD: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "fluid_launch_cwd", default=None
+)
+
+
+@contextlib.contextmanager
+def launch_context(overlay: Mapping[str, str] | None, cwd: str | None = None) -> Iterator[None]:
+    """Rate tool calls for shells that get ``overlay`` on top of the host
+    environment (a session's settings ``env``, or None) and start in ``cwd``
+    (the session's working folder) unless the call names another. Both are
+    only read while a call is rated; rating starts no process."""
+    env_token = _LAUNCH_OVERLAY.set(overlay or None)
+    cwd_token = _LAUNCH_CWD.set(cwd or None)
+    try:
+        yield
+    finally:
+        _LAUNCH_CWD.reset(cwd_token)
+        _LAUNCH_OVERLAY.reset(env_token)
+
+
+def launch_cwd() -> str | None:
+    """The working folder of the session whose tool call is being rated."""
+    return _LAUNCH_CWD.get()
+
+
+def shell_env(overlay: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a Bash or Monitor shell starts with: the host's,
+    scrubbed, the session's settings ``env`` on top, then the git settings."""
+    from fluid.context.settings_stack import layered_env
+
+    return harden_git_env(layered_env(dict(overlay) if overlay else None, base=scrub_child_env()))
+
+
+# Settings ``env`` names that decide which program a command name runs, or
+# that make the shell, the dynamic loader or git run or read something else
+# first. Compared in upper case: Windows names are case-insensitive (``Path``).
+_LOOKUP_ENV_NAMES = frozenset({
+    "PATH", "PATHEXT", "COMSPEC",                       # where a name is found
+    "ENV", "BASH_ENV", "ZDOTDIR", "SHELLOPTS", "BASHOPTS",  # shell startup
+    "HOME", "USERPROFILE", "XDG_CONFIG_HOME",           # ~, and git's own config
+})
+_LOOKUP_ENV_PREFIXES = ("GIT_", "BASH_FUNC_", "LD_", "DYLD_", "MSYS", "CYGWIN")
+
+
+def changes_program_lookup(overlay: Mapping[str, str] | None) -> bool:
+    """True when a settings ``env`` can change which program a command runs.
+
+    The Bash classifier knows what the worker's own ``cat``, ``ls`` and
+    ``git`` do. A session whose settings put another folder on ``PATH``, name
+    a shell startup file, preload a library or reconfigure git runs something
+    this module has not looked at, so no command of that session is rated
+    read-only: each one asks. Nothing is executed to find out.
+    """
+    for name in overlay or ():
+        upper = str(name).upper()
+        if upper in _LOOKUP_ENV_NAMES or upper.startswith(_LOOKUP_ENV_PREFIXES):
+            return True
+    return False
+
+
+def launch_changes_program_lookup() -> bool:
+    """:func:`changes_program_lookup` for the session whose call is being rated."""
+    return changes_program_lookup(_LAUNCH_OVERLAY.get())
+
+
+# What git said, per shell, environment and git file found on PATH.
+_GIT_ANSWERS: dict[tuple[object, ...], bool] = {}
+
+
+def _git_on_path(env: Mapping[str, str]) -> tuple[str, int, int] | None:
+    """The git file a PATH search finds now, with its size and change time.
+
+    Part of the key an answer is kept under: a git installed later, earlier on
+    PATH or over the old one, is a different git and is asked again.
+    """
+    import shutil
+
+    found = shutil.which("git", path=env.get("PATH", os.defpath))
+    if found is None:
+        return None
+    try:
+        info = os.stat(found)
+    except OSError:
+        return None
+    return os.path.realpath(found), info.st_size, info.st_mtime_ns
+
+
+def _git_probe() -> tuple[list[str], str | None, dict[str, str], tuple[object, ...]] | None:
+    """How the worker's git is asked its version, and the key the answer is
+    kept under: through the shell a Bash command gets, started the way agent
+    commands are (the spawn runner under Docker agent isolation), with the
+    host's scrubbed environment and none of a session's settings. Git Bash on
+    Windows puts its own git ahead of PATH, and that is the one asked.
+
+    None, so nothing is asked and no git command is rated read-only, under
+    ``cmd.exe``: the classifier rates nothing read-only there, and ``cmd``
+    looks for a program in the working folder before PATH, so the question
+    would start a ``git.cmd`` the project ships. The question is never asked
+    from the session's folder either: it runs in the shell's own folder, so a
+    PATH with ``.`` or an empty entry cannot make it start the project's
+    ``./git``."""
+    from fluid.tools import agent_runner
+    from fluid.tools.shell import resolve_shell
+
+    shell = resolve_shell()
+    if not shell.posix:
+        return None
+    try:
+        argv, cwd, env = agent_runner.wrap(
+            [*shell.argv_prefix, "git --version"], None, shell_env()
+        )
+    except OSError:
+        return None
+    if cwd is None:
+        cwd = os.path.dirname(os.path.realpath(shell.path))
+        if not cwd or not os.path.isdir(cwd):
+            return None
+    key = (tuple(argv), cwd, tuple(sorted(env.items())), _git_on_path(env))
+    return list(argv), cwd, dict(env), key
+
+
+def git_hardening_supported() -> bool:
+    """True when the worker's own git is known to honour
+    :data:`AGENT_GIT_CONFIG`.
+
+    A lookup, nothing more: rating a tool call happens before a rule, a hook
+    or a person has had a say on it, so it must not start a program. The
+    answer is the one :func:`learn_git_version` recorded for the git a PATH
+    search finds now. False when none was recorded (no session started yet,
+    or a git that appeared on PATH since), and when that git is missing, too
+    old or did not answer: the Bash classifier then rates no git command
+    read-only, so each one asks instead of running unprotected. A session
+    whose settings ``env`` could select another git is not looked up at all;
+    the classifier rates none of its commands read-only
+    (:func:`changes_program_lookup`).
+    """
+    probe = _git_probe()
+    return probe is not None and _GIT_ANSWERS.get(probe[3]) is True
+
+
+def learn_git_version() -> None:
+    """Ask the worker's git its version once and keep the answer.
+
+    For the moment a session starts, where no tool call is waiting on a rule,
+    a hook or a person: the host already runs this same git from this same
+    PATH for its own work. Never call it while a call is being rated. The
+    answer is kept per git file found on PATH, so a git installed later is
+    unknown, and its commands ask, until the next session starts.
+    """
+    probe = _git_probe()
+    if probe is None:
+        return
+    argv, cwd, env, key = probe
+    if key in _GIT_ANSWERS:
+        return
+    if len(_GIT_ANSWERS) >= 16:
+        _GIT_ANSWERS.clear()
+    _GIT_ANSWERS[key] = _ask_git_version(argv, cwd, env)
+
+
+def _ask_git_version(argv: list[str], cwd: str | None, env: Mapping[str, str]) -> bool:
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv, no model or session input
+            list(argv),
+            cwd=cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            check=False,
+            **kwargs,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and git_version_supports_hardening(done.stdout)
+
+
 def child_env_with_overlay(overlay: Mapping[str, str] | None,
                            environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The inherited environment (scrubbed), minus the names the overlay's
@@ -175,7 +512,8 @@ def claude_cli_env_with_overlay(overlay: Mapping[str, str] | None,
     if any(is_claude_auth(k) for k in (overlay or {})) and (overlay or {}).get("ANTHROPIC_API_KEY"):
         env["ANTHROPIC_API_KEY"] = overlay["ANTHROPIC_API_KEY"]
     _restore_host_oauth_token(env, overlay, environ)
-    return env
+    # The CLI's own Bash tool inherits this environment.
+    return harden_git_env(env)
 
 
 def _restore_host_oauth_token(env: dict[str, str], overlay: Mapping[str, str] | None,

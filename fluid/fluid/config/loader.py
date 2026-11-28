@@ -458,14 +458,27 @@ def load_config(
     env: dict[str, str] | None = None,
     include_system: bool = True,
     include_user: bool = True,
+    project_trusted: bool | None = None,
 ) -> HarnessConfig:
     """Merge every layer and materialize a :class:`HarnessConfig`.
 
     ``overrides`` is the highest-precedence layer — the CLI passes parsed flags
     here. ``cwd`` seeds project discovery and becomes the config's ``cwd`` unless
     a layer overrides it.
+
+    ``project_trusted`` says whether the project's own files may configure
+    the harness. None reads the owner's record (``fluid.config.trust``), so a
+    caller that never asks gets the safe answer for a folder nobody has
+    trusted. For an untrusted project its TOML layers are left out and the
+    ``project`` and ``local`` setting sources are switched off whatever layer
+    set them, so its settings.json, mcp.json, hooks.json, plugins, commands
+    and instruction files are not loaded either.
     """
+    from fluid.config.trust import PROJECT_SOURCES, is_project_trusted
+
     cwd_path = Path(cwd) if cwd is not None else Path.cwd()
+    if project_trusted is None:
+        project_trusted = is_project_trusted(cwd_path)
     merged: dict[str, Any] = deep_merge(BUILTIN_DEFAULTS, {"cwd": str(cwd_path)})
 
     # Parse the TOML layers up front: they are always applied (harness config
@@ -482,7 +495,12 @@ def load_config(
 
     # The project walk (git root → cwd inside a checkout, the cwd alone
     # outside one, home excluded), outer first, with each directory's TOML.
-    project_layers = [(d, _project_toml(d)) for d in project_dirs(cwd_path)]
+    # An untrusted project contributes none of it: its TOML could set the
+    # approval policy, add hooks and MCP servers, or point a provider at
+    # another host.
+    project_layers = (
+        [(d, _project_toml(d)) for d in project_dirs(cwd_path)] if project_trusted else []
+    )
     project_tomls = [toml for _d, toml in project_layers]
     env_layer = env_overrides(env)
 
@@ -495,6 +513,8 @@ def load_config(
     sources = set(_setting_sources_from(raw_sources))
     if not include_user:
         sources.discard("user")
+    if not project_trusted:
+        sources -= PROJECT_SOURCES
 
     # The settings.json stack feeds three things here: the defaultMode policy
     # layer (lowest, so every file/env/flag layer above still wins), the
@@ -549,6 +569,14 @@ def load_config(
     merged = deep_merge(merged, env_layer)
     if overrides:
         merged = deep_merge(merged, overrides)
+    if not project_trusted:
+        # The session's own gate, read by everything that discovers context
+        # later (instruction files, skills, agents, commands, plugins), must
+        # say the same thing whichever layer or flag named the sources.
+        merged["setting_sources"] = [
+            source for source in _setting_sources_from(merged.get("setting_sources"))
+            if source not in PROJECT_SOURCES
+        ]
 
     return HarnessConfig.from_dict(merged)
 
@@ -556,20 +584,38 @@ def load_config(
 # ─── engine factory ──────────────────────────────────────────────────────────
 
 
-def _sensitive_file_rules():
+def sensitive_file_rules(active=None):
     """Default ask-rules for credential files, per file-taking builtin.
+
+    ``active`` is an optional callable read each time a call is judged: while
+    it returns False the asks stand aside. A host passes one that is False
+    under ``never_ask`` (Bypass), where nothing asks, so the rules follow a
+    mode changed on a live engine.
 
     Prepended BEFORE user rules — last match wins, so one user rule allows a
     path through. Bash gets the same protection through its risk classifier
     (a read-only command targeting a credential file classifies as write).
+
+    Template files (``.env.example`` and friends) hold no values and are meant
+    to be read. They match ``.env.*``, so each ask carries a guard that steps
+    aside for them. Stepping aside is not an allow: the call is then decided
+    as any other is, so editing a template still asks under the default
+    policy. (These used to be allow rules after the asks, which also let an
+    Edit or Write of a template run unprompted.)
+
+    Public because a host that builds its own engine installs the same rules
+    (the app's native leg does).
     """
-    from fluid.permissions.rules import Rule
+    import dataclasses
+
+    from fluid.permissions.rules import Rule, path_candidates
     from fluid.tools.hardening import (
         PROTECTED_WRITE_PREFIXES,
         SENSITIVE_BASENAME_GLOBS,
         SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
         SENSITIVE_PATH_SUFFIXES,
+        is_sensitive_path,
     )
 
     # "*" prefixes make basename globs match directory-qualified inputs too
@@ -584,26 +630,63 @@ def _sensitive_file_rules():
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
     }
+
+    def not_a_template(field: str):
+        def guard(input, cwd) -> bool:
+            value = input.get(field) if isinstance(input, dict) else None
+            if not isinstance(value, str) or not value:
+                return True
+            # Every spelling, the link's target included: ``.env.example``
+            # linked to ``.env`` is the credential file.
+            raw, normalized = path_candidates(value, cwd)
+            names = {
+                spelling.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+                for spelling in raw | normalized
+            }
+            return not names <= SENSITIVE_EXCEPTIONS
+
+        return guard
+
+    def names_a_credential_file(field: str):
+        def guard(input, cwd) -> bool:
+            value = input.get(field) if isinstance(input, dict) else None
+            if not isinstance(value, str) or not value:
+                return False
+            raw, normalized = path_candidates(value, cwd)
+            return any(is_sensitive_path(spelling) for spelling in raw | normalized)
+
+        return guard
+
+    guards = {field: not_a_template(field) for field in set(field_by_tool.values())}
     asks = [
-        Rule(tool=tool, decision="ask", input_globs={field: glob})
+        Rule(tool=tool, decision="ask", input_globs={field: glob}, guard=guards[field])
         for tool, field in field_by_tool.items()
         for glob in globs
     ]
+    # Rule globs are case-sensitive, and ``.ENV`` opens ``.env`` on Windows and
+    # on a default macOS volume. One rule per tool asks for any letter case, so
+    # the protection is the same on every platform.
+    asks.extend(
+        Rule(tool=tool, decision="ask", guard=names_a_credential_file(field))
+        for tool, field in field_by_tool.items()
+    )
     asks.extend(
         Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
         for tool in ("Edit", "Write")
         for prefix in PROTECTED_WRITE_PREFIXES
     )
-    # Template files (.env.example and friends) hold no values and are meant
-    # to be read. They match ``.env.*`` above, so an allow rule after the
-    # asks lets them through; last match wins, and a user rule still comes
-    # after both.
-    allows = [
-        Rule(tool=tool, decision="allow", input_globs={field: f"*{name}"})
-        for tool, field in field_by_tool.items()
-        for name in sorted(SENSITIVE_EXCEPTIONS)
-    ]
-    return [*asks, *allows]
+    if active is not None:
+        def while_active(inner):
+            def guard(input, cwd) -> bool:
+                return bool(active()) and (inner is None or inner(input, cwd))
+
+            return guard
+
+        asks = [dataclasses.replace(rule, guard=while_active(rule.guard)) for rule in asks]
+    return asks
+
+
+_sensitive_file_rules = sensitive_file_rules
 
 
 def _session_settings(config: HarnessConfig) -> dict[str, Any]:
@@ -628,20 +711,23 @@ def _build_permissions(config: HarnessConfig, settings: dict[str, Any] | None = 
 
     if settings is None:
         settings = _session_settings(config)
+    engine = PermissionEngine(config.permission.approval_policy)
     rules = []
-    if (
-        config.permission.protect_sensitive_files
-        and config.permission.approval_policy != "never_ask"
-    ):
-        rules.extend(_sensitive_file_rules())
-    _policy, mode_rules = default_mode_policy(settings)
+    if config.permission.protect_sensitive_files:
+        # Asked under every policy but ``never_ask``, read when a call is
+        # judged: the policy can change on a live engine.
+        rules.extend(sensitive_file_rules(
+            active=lambda: engine.approval_policy != "never_ask"
+        ))
+    _policy, mode_rules = default_mode_policy(settings, engine.extra_edit_roots)
     rules.extend(mode_rules)
     rules.extend(permission_rules(settings))
     rules.extend(
         Rule(tool=r.tool, decision=r.decision, input_globs=dict(r.input_globs))
         for r in config.permission.rules
     )
-    return PermissionEngine(config.permission.approval_policy, rules=rules)
+    engine.rules = rules
+    return engine
 
 
 def _build_provider_client(config: HarnessConfig, provider_name: str):
@@ -795,6 +881,7 @@ def _wire_continual(
             client, config.continual_model or model, skills,
             project=project_key_for(config.cwd),
             workflow_cwd=config.cwd,
+            workflow_sources=config.setting_sources,
             session_id=session_id,
             on_change=on_change,
             session_model=model,
@@ -937,6 +1024,7 @@ def build_engine(
         ctx.extra.setdefault("session_view", store.session_slice)
 
     if pc.kind == "delegated_claude":
+        from fluid.context.instructions import project_walk_bound
         from fluid.engine.delegated import DelegatedLoop
 
         # The delegated leg gates fluid's builtins at the bundled bridge, so
@@ -997,6 +1085,12 @@ def build_engine(
             hooks=hooks,
             journal=journal,
             mcp_servers=_mcp_server_map(config, disabled_mcp, child_env) or None,
+            # The Claude child reads settings and instruction files itself:
+            # it gets the same sources, so an untrusted project's are left out,
+            # and the same upper bound as fluid's own walk, so the folders
+            # above the project add nothing (None outside the CLI).
+            setting_sources=config.setting_sources,
+            project_bound=project_walk_bound(),
         )
 
     # Native providers.

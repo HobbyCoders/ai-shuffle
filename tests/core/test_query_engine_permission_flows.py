@@ -55,6 +55,12 @@ def _clean_rules():
     permission_handler.clear_session_rules(SID)
 
 
+def _session_file(tmp_path, name="x.py") -> str:
+    """A file inside the working folder ``_callback`` gives its session.
+    Accept Edits approves an edit there and asks about one anywhere else."""
+    return str(tmp_path / "missing-cwd-stops-before-connect" / name)
+
+
 async def _callback(tmp_path, *, overrides=None, session_row=None, profile_config=None,
                     user_id=USER, stack=None):
     """Run a turn up to the spawn refusal and return (callback, broadcast, bounds)."""
@@ -232,7 +238,10 @@ async def test_context_enrichment_reaches_the_prompt(tmp_path):
 # of tool it approves; any other tool would prompt under it exactly as under
 # Ask and could not tell the two apart) and WebFetch elsewhere (on every lane's
 # surface, including chat).
-_EDIT = ("Write", {"file_path": "/tmp/x.txt", "content": "x"})
+# The edit names a file of the session's own working folder (a relative path is
+# read against it); Accept Edits asks about one anywhere else.
+_EDIT = ("Write", {"file_path": "x.txt", "content": "x"})
+_OUTSIDE_EDIT = ("Write", {"file_path": "/tmp/x.txt", "content": "x"})
 _FETCH = ("WebFetch", {"url": "https://example.com"})
 
 
@@ -242,6 +251,8 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
     ({"permission_mode": "default"}, {"permission_mode": "bypassPermissions"},
      {"permission_mode": "acceptEdits"}, _EDIT, True),
     ({"permission_mode": "acceptEdits"}, {"permission_mode": "acceptEdits"}, {}, _EDIT, False),
+    # Accept Edits approves an edit of the session's own files only.
+    ({"permission_mode": "acceptEdits"}, {"permission_mode": "acceptEdits"}, {}, _OUTSIDE_EDIT, True),
     # Queued in Accept Edits, then the owner tightened the chat to Ask: the
     # later tightening wins over the pick the waiting message carries.
     ({"permission_mode": "acceptEdits"}, {"permission_mode": "default"}, {}, _EDIT, True),
@@ -257,7 +268,8 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
     # A no-project session keeps the Bypass its owner chose (#371 step 4).
     (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, _FETCH, False),
 ], ids=[
-    "override-default", "override-acceptEdits", "override-capped-by-later-tightening",
+    "override-default", "override-acceptEdits", "override-acceptEdits-outside-the-project",
+    "override-capped-by-later-tightening",
     "binding-bypass", "binding-default", "null-binding-uses-agent-acceptEdits", "nothing", "plan", "chat-keeps-bypass",
 ])
 async def test_permission_mode_chain_decides_whether_a_tool_prompts(

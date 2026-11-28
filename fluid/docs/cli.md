@@ -13,6 +13,7 @@ fluid chat [common options] [--tui]
 fluid run  [common options] "<prompt>"
 fluid sessions [--store DIR] [--limit N]
 fluid config [common options]
+fluid trust [--cwd DIR] [--remove | --list]
 fluid anchors {list,add,rm,run,harvest} [common options] ...
 fluid evolve  {propose,run,pending,parked,log} [common options] ...
 fluid import-settings [--source claude|codex] [--source-home DIR]
@@ -62,7 +63,8 @@ Permission prompts in `run` depend on where it is running:
   prompt as the REPL.
 - either is piped or redirected: the call is denied, and the model receives a
   message saying the run is non-interactive and that it can be unblocked with
-  `--approval-policy never_ask` or a permission rule in `.fluid/config.toml`.
+  `--approval-policy never_ask` or a permission rule in `.fluid/config.toml`
+  (a project's own config file counts only once the project is trusted).
 
 ### `fluid sessions`
 
@@ -76,7 +78,29 @@ rows. `--store DIR` points at a different store directory.
 Prints the fully resolved configuration as JSON after every layer (defaults,
 system, user, project, environment, flags) has been applied. Useful for
 checking which provider block and model a run will actually use. See
-[configuration.md](configuration.md).
+[configuration.md](configuration.md). For a project you have not trusted it
+prints the config without the project layer and says so on stderr; it never
+asks.
+
+### `fluid trust`
+
+Records that you trust the project in the current directory (or `--cwd DIR`),
+so fluid loads the project's own config, hooks, MCP servers, settings,
+instruction files, skills, agents and commands. Until a project is trusted
+none of those load: see
+[Project trust](configuration.md#project-trust).
+
+| Form | Effect |
+|---|---|
+| `fluid trust` | Trusts the project: the git repository root, or the directory itself outside a checkout. Prints the folder it recorded. |
+| `fluid trust --remove` | Takes the trust back. The next session there leaves the project's files out again. |
+| `fluid trust --list` | Prints every trusted folder, one per line. |
+
+The record is `~/.fluid/trusted_projects.json`. `fluid chat` and `fluid run`
+ask the same question the first time they start in a project, when stdin and
+stdout are both a terminal; piped or redirected, they do not ask, leave the
+project's files out and say so on stderr. Run in the home directory the
+command exits 1: the home directory is never a project.
 
 ### `fluid anchors`
 
@@ -141,6 +165,7 @@ and every config file.
 | `--approval-policy never_ask\|on_write\|always_ask` | `permission.approval_policy` | When the harness asks before running a tool. See Permissions below. |
 | `--resume SESSION_ID` | — | Continue an existing session from the store. The engine rehydrates the deferred tool catalog, compaction state, and any recorded background tasks on the first turn. |
 | `--continue` | — | Same as `--resume` with the most recently active session in the store. |
+| `--trust-project` | — | Load this project's own files for this run without recording trust. For scripts and CI that run in a checkout they control. See [Project trust](configuration.md#project-trust). |
 
 `--resume` with an unknown id, or `--continue` on an empty store, prints
 `fluid: no such session: ...` on stderr and exits 2.

@@ -179,6 +179,30 @@ def _hide_dirs_above_basetemp(basetemp, monkeypatch) -> None:
         monkeypatch.setattr(module, "_walk_up_dirs", inside_basetemp)
 
 
+@pytest.fixture(autouse=True)
+def _project_switches_reset():
+    """The ``fluid`` CLI sets two process-wide switches from the trust answer
+    (one process serves one project). A test that runs the CLI must not leave
+    them set for the next test."""
+    yield
+    from fluid.context.instructions import set_project_walk_bound
+    from fluid.tools.child_env import set_trusted_git_roots
+
+    set_trusted_git_roots(None)
+    set_project_walk_bound(None)
+
+
+@pytest.fixture
+def trusted_projects(monkeypatch):
+    """Every project folder counts as trusted (``fluid.config.trust``).
+
+    For tests of what a project's own config, settings and hooks do once they
+    load. Without it ``load_config`` leaves an untrusted project's files out,
+    which is what tests/unit/test_project_trust.py covers.
+    """
+    monkeypatch.setattr("fluid.config.trust.is_project_trusted", lambda cwd=None: True)
+
+
 @pytest.fixture
 def requires_symlinks(tmp_path):
     """Skip only link-dependent tests when this host cannot create symlinks."""

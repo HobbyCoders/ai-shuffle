@@ -48,6 +48,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
 
+from fluid.permissions.edit_guard import edit_stays_in_project
 from fluid.permissions.modes import ACCEPT_EDITS_TOOLS as _FLUID_ACCEPT_EDITS_TOOLS
 
 from app.core.tool_access import DENY_ALL, ToolAccess, intersect_tool_surfaces, resolve_tool_access
@@ -589,26 +590,72 @@ def turn_permission_mode(overrides: Optional[Mapping[str, Any]], session: Option
     return permission_mode_for_session_mode(mode, session.get("mode"))
 
 
-def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
-    """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
+def session_edit_roots(session_id: Any, cwd: Any, add_dirs: Any = None):
+    """The folders outside its working folder a session may edit under Accept
+    Edits, as a callable for ``mode_approves_without_prompt``'s
+    ``extra_roots``: the folders the session was given (``add_dirs``) and its
+    own scratch folder. The scratch folder is the one the host resolves for
+    this session id, never one read off the path being edited, so another
+    session's scratch is not this session's to edit. Worked out only when an
+    edit lands outside the working folder; a lookup that fails adds nothing,
+    and the edit asks."""
+    def roots() -> list:
+        folders = list(add_dirs or ())
+        try:
+            from app.core.harness_state import session_scratch_dir
+
+            scratch = session_scratch_dir(session_id, cwd)
+        except Exception:  # noqa: BLE001 - no scratch folder known: ask
+            scratch = None
+        if scratch:
+            folders.append(scratch)
+        return folders
+
+    return roots
+
+
+def mode_approves_without_prompt(
+    permission_mode: Any,
+    tool_name: str,
+    tool_input: Any = None,
+    *,
+    cwd: Optional[str] = None,
+    extra_roots: Any = None,
+) -> bool:
+    """Whether a session in ``permission_mode`` approves this call on its own.
 
     The rule for a call the runtime asked about: Ask (``default``, the retired
     ``plan``, or no mode) puts it to a person; Bypass approves everything;
-    Accept Edits approves the edit-class tools (:data:`ACCEPT_EDITS_TOOLS`) and
-    puts everything else — a shell command, a Python cell, a web fetch, screen
-    control — to a person exactly as Ask does; the delegated CLI's classifier
-    mode ``auto`` approves everything except the computer-use access request.
-    The interactive approver and both no-approver paths
-    (``HarnessAdapter.receive_events`` / ``_answer_without_approver``) decide
-    through this, so a run with nobody watching allows exactly what a watched
-    one would.
+    Accept Edits approves the edit-class tools (:data:`ACCEPT_EDITS_TOOLS`)
+    for the project's own files and puts everything else — a shell command, a
+    Python cell, a web fetch, screen control — to a person exactly as Ask
+    does; the delegated CLI's classifier mode ``auto`` approves everything
+    except the computer-use access request.
+
+    "The project's own files" is fluid's answer
+    (:func:`fluid.permissions.edit_guard.edit_stays_in_project`), from the
+    call's ``tool_input``, the session's working folder ``cwd`` and the
+    ``extra_roots`` the session may also write (:func:`session_edit_roots`:
+    its ``add_dirs`` and its own scratch folder). An edit
+    outside them, or to a file that configures a tool, starts programs or
+    holds credentials, is not approved by the mode: ``~/.bashrc``,
+    ``.git/hooks/pre-commit``, ``.claude/settings.json``. A caller that does
+    not pass the input or the folder gets no approval for an edit, so a new
+    call site cannot bring the name-only rule back.
+
+    The interactive approver, the release of pending prompts on a mode change
+    and both no-approver paths (``HarnessAdapter.receive_events`` /
+    ``_answer_without_approver``) decide through this, so a run with nobody
+    watching allows exactly what a watched one would.
     """
     if permission_mode == "bypassPermissions":
         return True
     if permission_mode in (None, "", "default", "plan"):
         return False
     if permission_mode == "acceptEdits":
-        return tool_name in ACCEPT_EDITS_TOOLS
+        return tool_name in ACCEPT_EDITS_TOOLS and edit_stays_in_project(
+            tool_input, cwd, extra_roots
+        )
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 

@@ -1309,9 +1309,16 @@ def sh_fallback_command(command: str, cwd: Optional[str]) -> str:
     running it through the shell instead is safe and loses nothing.
 
     Deliberately narrow: the command must be exactly one token, that token must
-    resolve to an existing regular file that is readable but not executable,
-    and the platform must have an exec bit at all (never on Windows, where
+    name a file by path (``./launch.sh``, ``scripts/run.sh``, ``/abs/run.sh``)
+    that exists, is a regular file, and is readable but not executable, and
+    the platform must have an exec bit at all (never on Windows, where
     ``os.access(X_OK)`` answers about file extensions).
+
+    A bare name (``ls``) is never rewritten. The shell looks a bare name up on
+    PATH, and the permission check rated the command on that reading; turning
+    it into ``sh ls`` would run a file of that name from the working folder
+    after the check had cleared a different command. A command named by path
+    is never rated read-only, so the rewrite stays behind the same prompt.
     """
     import os
     import shlex
@@ -1326,6 +1333,8 @@ def sh_fallback_command(command: str, cwd: Optional[str]) -> str:
     if len(parts) != 1:
         return command
     path = parts[0]
+    if "/" not in path:
+        return command
     candidate = path if os.path.isabs(path) else os.path.join(cwd or "", path)
     try:
         if not os.path.isfile(candidate):

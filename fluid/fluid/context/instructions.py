@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import harden_git_env, scrub_child_env
 
 log = logging.getLogger(__name__)
 
@@ -503,11 +503,69 @@ def _git_root(cwd: Path) -> Path | None:
     return None
 
 
+# Outside a git checkout the walk climbs to the filesystem root. A host that
+# asks the owner to trust one folder (the ``fluid`` CLI, ``fluid.config.
+# trust``) sets that folder here, and the walk then stops at it: a folder
+# above the trusted one (a shared temp directory, a download folder) is not
+# searched for instruction files, commands, skills or agents. Inside a
+# checkout the git root is the boundary either way.
+_WALK_BOUND: Path | None = None
+
+
+def set_project_walk_bound(root: str | os.PathLike[str] | None) -> None:
+    """Keep the project walk at or below ``root`` outside a git checkout.
+    None restores the walk to the filesystem root."""
+    global _WALK_BOUND
+    _WALK_BOUND = None if root is None else Path(root).resolve()
+
+
+def project_walk_bound() -> Path | None:
+    """The folder a host bound the project walk to, or None."""
+    return _WALK_BOUND
+
+
+def _inside_bound_project(directory: Path) -> bool:
+    """Whether ``directory`` belongs to the project a host bound the walk to.
+
+    True for a host that set no bound. Otherwise the folder, with links
+    followed, must be the bound or lie under it with no ``.git`` of its own
+    on the way up: a separate checkout placed inside a trusted project (a
+    vendored copy, an unpacked archive) is another project, and reading a
+    file in it is not a trust decision.
+    """
+    bound = _WALK_BOUND
+    if bound is None:
+        return True
+    try:
+        d = directory.resolve()
+    except (OSError, RuntimeError):
+        return False
+    while True:
+        if d == bound:
+            return True
+        if os.path.lexists(d / ".git") or d.parent == d:
+            return False
+        d = d.parent
+
+
+def _walk_boundary(cwd: Path) -> Path:
+    """The outermost directory the walk from ``cwd`` (resolved) reaches."""
+    root = _git_root(cwd)
+    if root is not None:
+        return root
+    bound = _WALK_BOUND
+    if bound is None:
+        return Path(cwd.anchor or "/")
+    # Below the bound: stop at it. Anywhere else: the folder alone.
+    return bound if cwd == bound or bound in cwd.parents else cwd
+
+
 def _walk_up_dirs(cwd: Path) -> list[Path]:
-    """Directories from the outermost boundary (git root, else fs root) down to
-    ``cwd`` — so blocks end up ordered least-specific → most-specific."""
+    """Directories from the outermost boundary (git root, else fs root or the
+    host's bound) down to ``cwd`` — so blocks end up ordered least-specific →
+    most-specific."""
     cwd = cwd.resolve()
-    root = _git_root(cwd) or Path(cwd.anchor or "/")
+    root = _walk_boundary(cwd)
     chain: list[Path] = []
     d = cwd
     while True:
@@ -572,9 +630,13 @@ def nested_instructions(path: str | os.PathLike[str]) -> list[InstructionFile]:
     When the agent touches ``<subdir>/foo.py``, ``<subdir>``'s own native
     AGENTS files apply on top of the project stack. This returns those files;
     ``NativeLoop._dispatch_tool`` appends them to that call's tool result.
+    Nothing is returned for a folder outside the project a host bound the
+    walk to (:func:`set_project_walk_bound`).
     """
     p = Path(path)
     directory = p if p.is_dir() else p.parent
+    if not _inside_bound_project(directory):
+        return []
     return [
         InstructionFile(path=f.path, scope="nested", kind=f.kind, content=f.content)
         for f in _files_in_dir(directory, "nested")
@@ -951,7 +1013,7 @@ def _run_inline_bash(command: str, cwd: str, timeout: float) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
-            env=scrub_child_env(),
+            env=harden_git_env(scrub_child_env()),
         )
         return proc.stdout.decode(errors="replace").strip()
     except subprocess.TimeoutExpired:

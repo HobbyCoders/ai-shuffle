@@ -9,6 +9,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from fluid.context.settings_stack import (
     default_permission_mode,
     enabled_plugins,
@@ -20,6 +22,9 @@ from fluid.context.settings_stack import (
     settings_env,
 )
 from fluid.permissions.rules import evaluate_rules
+
+# These tests are about what a project's own files do once they load.
+pytestmark = pytest.mark.usefixtures("trusted_projects")
 
 
 def _set_home(monkeypatch, home) -> None:
@@ -390,9 +395,19 @@ def test_accept_edits_allows_the_file_editing_builtins(tmp_path, monkeypatch) ->
     )
     engine = _engine(proj)
     assert engine.permissions.approval_policy == "on_write"
-    assert engine.permissions.evaluate(_spec("Edit"), {"file_path": "a.py"}) == "allow"
+    cwd = str(proj)
+    assert engine.permissions.evaluate(_spec("Edit"), {"file_path": "a.py"}, cwd=cwd) == "allow"
     # A settings deny still outranks the mode's allow.
-    assert engine.permissions.evaluate(_spec("Write"), {"file_path": "x.lock"}) == "deny"
+    assert engine.permissions.evaluate(_spec("Write"), {"file_path": "x.lock"}, cwd=cwd) == "deny"
+    # The mode's allow comes after the credential-file asks in this list, and
+    # still leaves them asking: it only covers the project's ordinary files.
+    assert engine.permissions.evaluate(_spec("Write"), {"file_path": ".env"}, cwd=cwd) == "ask"
+    assert engine.permissions.evaluate(
+        _spec("Edit"), {"file_path": ".git/hooks/pre-commit"}, cwd=cwd
+    ) == "ask"
+    assert engine.permissions.evaluate(
+        _spec("Edit"), {"file_path": str(proj.parent / "home" / ".bashrc")}, cwd=cwd
+    ) == "ask"
     assert engine.permissions.evaluate(_spec("Bash"), {"command": "rm x"}) == "ask"
 
 

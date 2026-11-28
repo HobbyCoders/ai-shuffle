@@ -306,9 +306,9 @@ curl http://localhost:8000/api/v1/streaming/active \
 
 ### Tool Permissions
 - `POST /api/v1/query`, `/query/stream`, `/conversation/stream` and `/conversation/start` have nobody to answer a permission prompt, so the permission mode decides alone
-- `acceptEdits` approves only file edits (Edit, Write, MultiEdit, NotebookEdit); every other tool call is treated as under `default`
+- `acceptEdits` approves only file edits (Edit, Write, MultiEdit, NotebookEdit) of files in the session's own folder; every other tool call is treated as under `default`, and so is an edit outside that folder or of a file that starts programs, configures a tool or holds credentials (`.git`, `.claude`, `.fluid`, shell startup files, `.env`)
 - On the built-in Claude models (the Claude Code CLI), `default` and `acceptEdits` deny a tool call the CLI asks about at once and the agent is told why (under `acceptEdits` the CLI runs file edits itself); `bypassPermissions` allows it; `auto` allows it except the screen-control (computer use) access request, which it denies
-- On other providers, `bypassPermissions` runs the tool and `acceptEdits` runs a file edit; a call that would prompt (every write-class call under `default`, everything but a file edit under `acceptEdits`, and the screen-control access request short of `bypassPermissions`) waits and is denied after 15 minutes. A session that still has `auto` runs as `default` there
+- On other providers, `bypassPermissions` runs the tool and `acceptEdits` runs a file edit; a call that would prompt (every write-class call under `default`, everything but a file edit in the session's folder under `acceptEdits`, reading a credential file such as `.env` short of `bypassPermissions`, and the screen-control access request short of `bypassPermissions`) waits and is denied after 15 minutes. A session that still has `auto` runs as `default` there
 - `POST /api/v1/conversation` runs like a session in the app: its prompts appear in the app and are denied if nobody answers within 5 minutes
 
 ### Cost Tracking

@@ -3,6 +3,8 @@
 import json
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.config.loader import (
     BUILTIN_DEFAULTS,
     build_engine,
@@ -15,6 +17,9 @@ from fluid.engine.delegated import DelegatedLoop
 from fluid.engine.native import NativeLoop
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
+
+# These tests are about what a project's own files do once they load.
+pytestmark = pytest.mark.usefixtures("trusted_projects")
 
 
 class FakeProvider:

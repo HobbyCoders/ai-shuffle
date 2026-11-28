@@ -21,6 +21,8 @@ Mode x leg x watched/unwatched, for a call the runtime asked about:
 
 import asyncio
 import dataclasses
+import os
+import tempfile
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -32,13 +34,14 @@ from fluid.tools.registry import ToolSpec
 
 import app.core.query_engine as qe
 from app.core.permission_handler import permission_handler
-from app.core.provider.harness_adapter import HarnessAdapter
+from app.core.provider.harness_adapter import _PERMISSION_POLICY, HarnessAdapter
 from app.core.provider.types import PermissionRequestEvent, SessionOptions
 from app.core.session_modes import (
     ACCEPT_EDITS_TOOLS,
     COMPUTER_USE_REQUEST_ACCESS,
     effective_permission_mode,
     mode_approves_without_prompt,
+    session_edit_roots,
 )
 from tests.core.test_query_engine_permission_flows import (
     SID,
@@ -47,9 +50,14 @@ from tests.core.test_query_engine_permission_flows import (
     _ctx,
     _next_prompt,
     _prompt_count,
+    _session_file,
 )
 
 FSID = "ses_matrix"
+# The working folder of the unwatched native sessions below, and a file in it.
+# Neither has to exist: Accept Edits places a path, it does not open it.
+PROJECT = os.path.join(tempfile.gettempdir(), "permission-matrix-project")
+PROJECT_FILE = os.path.join(PROJECT, "src", "x.py")
 
 
 @pytest.fixture(autouse=True)
@@ -95,7 +103,95 @@ def test_effective_permission_mode(mode, delegated, expected):
     ("bypassPermissions", COMPUTER_USE_REQUEST_ACCESS, True),
 ])
 def test_mode_approves_without_prompt(mode, tool, approves):
-    assert mode_approves_without_prompt(mode, tool) is approves
+    """For a call that names a file of the session's own working folder."""
+    assert mode_approves_without_prompt(
+        mode, tool, {"file_path": PROJECT_FILE}, cwd=PROJECT) is approves
+
+
+@pytest.mark.parametrize("tool_input, cwd, extra_roots", [
+    # No input or no working folder: the file cannot be placed.
+    (None, PROJECT, None),
+    ({}, PROJECT, None),
+    ({"file_path": PROJECT_FILE}, None, None),
+    ({"file_path": PROJECT_FILE}, "", None),
+    # Outside the project.
+    ({"file_path": os.path.join(tempfile.gettempdir(), "elsewhere", "x.py")}, PROJECT, None),
+    ({"file_path": "../x.py"}, PROJECT, None),
+    # Inside it, but a file that configures a tool, starts programs or holds
+    # credentials.
+    ({"file_path": ".git/hooks/pre-commit"}, PROJECT, None),
+    ({"file_path": ".claude/settings.json"}, PROJECT, None),
+    ({"file_path": ".fluid/config.toml"}, PROJECT, None),
+    ({"file_path": ".env"}, PROJECT, None),
+    ({"file_path": ".bashrc"}, PROJECT, None),
+    ({"notebook_path": "../x.ipynb"}, PROJECT, None),
+], ids=[
+    # Named here because PROJECT sits in the temp folder, which differs on
+    # every CI runner: a test id built from it gives each backend shard its
+    # own list of tests, and the backend gate refuses the run.
+    "no-input", "empty-input", "no-cwd", "empty-cwd",
+    "outside-absolute", "outside-relative",
+    "git-hook", "claude-settings", "fluid-config", "env-file", "bashrc", "notebook-outside",
+])
+def test_accept_edits_does_not_approve_an_edit_it_cannot_place_in_the_project(
+    tool_input, cwd, extra_roots,
+):
+    """The mode used to approve an edit-class tool on its name alone."""
+    for tool in sorted(ACCEPT_EDITS_TOOLS):
+        assert not mode_approves_without_prompt(
+            "acceptEdits", tool, tool_input, cwd=cwd, extra_roots=extra_roots)
+        # Bypass is the mode that approves everything; it is not narrowed.
+        assert mode_approves_without_prompt(
+            "bypassPermissions", tool, tool_input, cwd=cwd, extra_roots=extra_roots)
+
+
+def test_accept_edits_approves_an_edit_in_a_folder_the_session_was_given():
+    uploads = os.path.join(tempfile.gettempdir(), "permission-matrix-uploads")
+    target = {"file_path": os.path.join(uploads, "notes.md")}
+    assert not mode_approves_without_prompt("acceptEdits", "Write", target, cwd=PROJECT)
+    assert mode_approves_without_prompt(
+        "acceptEdits", "Write", target, cwd=PROJECT, extra_roots=[uploads])
+
+
+def test_accept_edits_covers_the_sessions_own_scratch_folder_only(tmp_path, monkeypatch):
+    """The scratch folder is the one the host resolves for this session id
+    (the folder the session's scratch reminder names). It was read off the
+    path being edited, which made every session's scratch editable by every
+    other session and missed a state folder kept somewhere else."""
+    import app.core.harness_state as harness_state
+    from fluid.state import scratch_dir
+    from fluid.tools.registry import ToolCtx
+
+    state = tmp_path / "state-kept-elsewhere" / "proj"
+    monkeypatch.setattr(harness_state, "session_state_root", lambda session_id, cwd=None: state)
+
+    # The same folder the engine's reminder gives the session.
+    ctx = harness_state.bind_state_context(ToolCtx(cwd=PROJECT, session_id="ses-1"), lambda: "ses-1")
+    mine = scratch_dir(ctx)
+    assert harness_state.session_scratch_dir("ses-1", PROJECT) == str(mine)
+    assert harness_state.session_scratch_dir(None, PROJECT) is None
+
+    def approves(path, session_id="ses-1"):
+        return mode_approves_without_prompt(
+            "acceptEdits", "Write", {"file_path": str(path)}, cwd=PROJECT,
+            extra_roots=session_edit_roots(session_id, PROJECT, None))
+
+    assert approves(mine / "brief.md")
+    assert not approves(mine.parent / "ses-2" / "brief.md")
+    assert not approves(mine / "brief.md", session_id="ses-2")
+    assert not approves(mine / "brief.md", session_id=None)
+    assert not approves(state / "memory" / "facts.md")
+
+
+def test_session_edit_roots_keep_the_given_folders_when_the_lookup_fails(monkeypatch):
+    import app.core.harness_state as harness_state
+
+    def broken(session_id, cwd=None):
+        raise RuntimeError("database is away")
+
+    monkeypatch.setattr(harness_state, "session_state_root", broken)
+    assert session_edit_roots("ses-1", PROJECT, ["/uploads"])() == ["/uploads"]
+    assert session_edit_roots("ses-1", PROJECT, None)() == []
 
 
 def test_the_edit_class_set_is_fluids_and_names_only_file_editors():
@@ -133,6 +229,80 @@ def test_native_engine_asks_for_every_write_short_of_bypass(mode, expected):
     assert set(_engine_verdicts(mode).values()) == {expected}
 
 
+def _read_spec(name):
+    return ToolSpec(name=name, description="", input_schema={}, risk="read")
+
+
+_CREDENTIAL_READS = [
+    ("Read", {"file_path": ".env"}),
+    ("Read", {"file_path": os.path.join(PROJECT, "deploy", ".env.production")}),
+    ("Read", {"file_path": os.path.join(PROJECT, ".ENV")}),
+    ("Read", {"file_path": "~/.ssh/id_ed25519"}),
+    ("Read", {"file_path": "~/.aws/credentials"}),
+    ("Grep", {"pattern": "TOKEN", "path": ".env"}),
+    ("Glob", {"pattern": "*", "path": ".credential-keys/"}),
+]
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", None])
+@pytest.mark.parametrize("tool, tool_input", _CREDENTIAL_READS)
+def test_native_engine_asks_before_reading_a_credential_file(mode, tool, tool_input):
+    """A Read is a read-class call, which the policy runs with no prompt. The
+    app's engine used to carry none of fluid's credential-file rules, so a
+    native session read ``.env`` and private keys unasked."""
+    engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=mode))
+    assert engine.evaluate(_read_spec(tool), tool_input, cwd=PROJECT) == "ask"
+
+
+@pytest.mark.parametrize("tool, tool_input", _CREDENTIAL_READS)
+def test_native_engine_under_bypass_decides_a_credential_read_as_before(tool, tool_input):
+    """Bypass asks about nothing. The credential asks stand aside there, so the
+    call is the policy's own allow: an "ask" that the app then approved would
+    skip the loop's repeat guard, which counts allowed calls only."""
+    engine = HarnessAdapter()._build_permissions(
+        SessionOptions(model="gpt-5", permission_mode="bypassPermissions"))
+    verdict = engine.decide(_read_spec(tool), tool_input, cwd=PROJECT)
+    assert (verdict.decision, verdict.source) == ("allow", "policy")
+
+
+@pytest.mark.parametrize("start, policy, expected", [
+    ("bypassPermissions", "on_write", "ask"),
+    ("default", "never_ask", "allow"),
+    ("acceptEdits", "never_ask", "allow"),
+])
+def test_native_engine_credential_asks_follow_a_live_mode_change(start, policy, expected):
+    """The mode changes on a live engine (the hot swap sets the policy). The
+    asks read the policy when a call is judged, not when the engine was built."""
+    engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=start))
+    engine.approval_policy = policy
+    assert engine.evaluate(_read_spec("Read"), {"file_path": ".env"}, cwd=PROJECT) == expected
+    engine.approval_policy = _PERMISSION_POLICY[start]
+    assert engine.evaluate(_read_spec("Read"), {"file_path": ".env"}, cwd=PROJECT) != expected
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits", "bypassPermissions"])
+@pytest.mark.parametrize("tool, tool_input", [
+    ("Read", {"file_path": os.path.join(PROJECT, "src", "x.py")}),
+    ("Read", {"file_path": ".env.example"}),
+    ("Read", {"file_path": os.path.join(PROJECT, ".env.template")}),
+    ("Grep", {"pattern": "TOKEN", "path": "src"}),
+    ("Glob", {"pattern": "*.py"}),
+])
+def test_native_engine_still_reads_ordinary_files_unasked(mode, tool, tool_input):
+    """Templates hold no values and are meant to be read."""
+    engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=mode))
+    assert engine.evaluate(_read_spec(tool), tool_input, cwd=PROJECT) == "allow"
+
+
+@pytest.mark.parametrize("mode", ["default", "acceptEdits"])
+def test_native_engine_asks_before_editing_a_template_too(mode):
+    """The template exception is for reading: it steps the credential rule
+    aside, it does not allow the call."""
+    engine = HarnessAdapter()._build_permissions(SessionOptions(model="gpt-5", permission_mode=mode))
+    for tool in ("Edit", "Write"):
+        assert engine.evaluate(_write_spec(tool), {"file_path": ".env.example"}, cwd=PROJECT) == "ask"
+
+
 async def test_native_hot_swap_sends_the_policy_and_installs_no_edit_allows():
     """The real NativeLoop: a switch to Accept Edits leaves the engine asking
     for Edit (fluid's own mode rules stay out), Bypass stops it asking."""
@@ -152,7 +322,8 @@ async def test_native_hot_swap_sends_the_policy_and_installs_no_edit_allows():
     await adapter.set_permission_mode("acceptEdits")
     assert adapter.permission_mode == "acceptEdits"
     assert perms.approval_policy == "on_write"
-    assert perms.rules == []
+    # The credential-file asks are the only rules; nothing allows.
+    assert {rule.decision for rule in perms.rules} == {"ask"}
     assert perms.evaluate(_write_spec("Edit"), {"file_path": "/x"}) == "ask"
 
     await adapter.set_permission_mode("bypassPermissions")
@@ -193,11 +364,16 @@ async def test_accept_edits_approves_edits_and_asks_for_everything_else(tmp_path
     cb, broadcast, bounds = await _callback(
         tmp_path, session_row={"permission_mode": "acceptEdits"},
     )
-    assert _allowed(await cb("Write", {"file_path": "/x"}, _ctx(delegated=False)))
-    assert _allowed(await cb("Edit", {"file_path": "/x"}, _ctx(delegated=False)))
+    inside = _session_file(tmp_path)
+    assert _allowed(await cb("Write", {"file_path": inside}, _ctx(delegated=False)))
+    assert _allowed(await cb("Edit", {"file_path": inside}, _ctx(delegated=False)))
     assert _prompt_count(broadcast) == 0
     with patch.object(qe, "sync_engine", new=bounds.sync_engine):
         asked = [
+            # An edit outside the session's folder, or of a file that starts
+            # programs, is a question for a person like any other write.
+            ("Write", {"file_path": str(tmp_path / "elsewhere.py")}),
+            ("Edit", {"file_path": _session_file(tmp_path, ".git/hooks/pre-commit")}),
             ("Bash", {"command": "ls"}),
             ("run_python", {"code": "print(1)"}),
             ("WebFetch", {"url": "https://example.com"}),
@@ -216,20 +392,24 @@ async def test_a_saved_deny_beats_accept_edits(tmp_path):
     """Remembered Deny on Write: Write is denied, Edit is still auto-allowed;
     a patterned rule denies only the files it names."""
     cb, broadcast, _ = await _callback(tmp_path, session_row={"permission_mode": "acceptEdits"})
+    inside = _session_file(tmp_path)
     with patch("app.db.database.get_permission_rules", return_value=_saved_deny("Write")):
-        assert not _allowed(await cb("Write", {"file_path": "/x"}, _ctx(delegated=False)))
-        assert _allowed(await cb("Edit", {"file_path": "/x"}, _ctx(delegated=False)))
+        assert not _allowed(await cb("Write", {"file_path": inside}, _ctx(delegated=False)))
+        assert _allowed(await cb("Edit", {"file_path": inside}, _ctx(delegated=False)))
     with patch("app.db.database.get_permission_rules", return_value=_saved_deny("Write", "*.lock")):
-        assert not _allowed(await cb("Write", {"file_path": "/x/a.lock"}, _ctx(delegated=False)))
-        assert _allowed(await cb("Write", {"file_path": "/x/a.py"}, _ctx(delegated=False)))
+        assert not _allowed(await cb(
+            "Write", {"file_path": _session_file(tmp_path, "a.lock")}, _ctx(delegated=False)))
+        assert _allowed(await cb(
+            "Write", {"file_path": _session_file(tmp_path, "a.py")}, _ctx(delegated=False)))
     assert _prompt_count(broadcast) == 0
 
 
 async def test_a_session_deny_beats_accept_edits(tmp_path):
     cb, broadcast, _ = await _callback(tmp_path, session_row={"permission_mode": "acceptEdits"})
     permission_handler._add_session_rule_idempotent(SID, "Edit", None, "deny")
-    assert not _allowed(await cb("Edit", {"file_path": "/x"}, _ctx(delegated=False)))
-    assert _allowed(await cb("Write", {"file_path": "/x"}, _ctx(delegated=False)))
+    inside = _session_file(tmp_path)
+    assert not _allowed(await cb("Edit", {"file_path": inside}, _ctx(delegated=False)))
+    assert _allowed(await cb("Write", {"file_path": inside}, _ctx(delegated=False)))
     assert _prompt_count(broadcast) == 0
 
 
@@ -311,11 +491,11 @@ class _Engine:
                 yield e
 
 
-def _request(name="Write", risk="write"):
+def _request(name="Write", risk="write", path=PROJECT_FILE):
     return [
         lm.PermissionRequest(
             session_id=FSID, request_id="perm_1", tool_use_id="tu1",
-            name=name, input={"file_path": "/x"}, risk=risk,
+            name=name, input={"file_path": path}, risk=risk,
         ),
         lm.TurnComplete(session_id=FSID, stop_reason="end_turn", num_model_calls=1),
     ]
@@ -326,7 +506,7 @@ def _native(engine, mode):
     adapter._engine = engine
     adapter._connected = True
     adapter._is_delegated = False
-    adapter._options = SessionOptions(model="gpt-5", permission_mode=mode)
+    adapter._options = SessionOptions(model="gpt-5", permission_mode=mode, cwd=PROJECT)
     return adapter
 
 
@@ -434,6 +614,21 @@ async def test_unwatched_native_prompts_are_left_to_the_engine_timeout(mode, too
     got = await _drain(_native(engine, mode))
     assert any(isinstance(e, PermissionRequestEvent) for e in got)
     assert engine.ops == []
+
+
+@pytest.mark.parametrize("path", [
+    os.path.join(tempfile.gettempdir(), "elsewhere", "x.py"),
+    os.path.join(PROJECT, ".git", "hooks", "pre-commit"),
+    os.path.join(PROJECT, ".env"),
+], ids=["outside", "git-hook", "env-file"])  # fixed: the paths hold the temp folder
+async def test_unwatched_native_accept_edits_leaves_an_edit_outside_the_project(path):
+    """Nobody is watching, and the mode does not cover this file: the request
+    surfaces and fluid denies it after ``permission_timeout``, as for Bash."""
+    for tool in ("Write", "Edit"):
+        engine = _Engine(_request(name=tool, path=path))
+        got = await _drain(_native(engine, "acceptEdits"))
+        assert any(isinstance(e, PermissionRequestEvent) for e in got)
+        assert engine.ops == []
 
 
 async def test_unwatched_native_accept_edits_honours_a_saved_deny():

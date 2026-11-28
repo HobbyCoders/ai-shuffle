@@ -9,12 +9,15 @@ import re
 import sys
 from typing import Any
 
-from fluid.context.settings_stack import layered_env
+# ``shell_env`` reads the settings layers when a command starts. Load that
+# module with the tool, as before, so a host that gives up its access to the
+# code after importing it (a privilege drop) still finds it.
+import fluid.context.settings_stack  # noqa: F401
 from fluid.tools import agent_runner
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import shell_env
 from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
 from fluid.tools.hardening import fence_shell_output
 from fluid.tools.priority import (
@@ -341,7 +344,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # os.environ itself is never changed. The inherited part is scrubbed of
     # host secrets first (see fluid.tools.child_env); settings env is a
     # deliberate hand-over and is layered on unchanged.
-    env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+    # Git settings a repository's own config cannot override go on last.
+    env = shell_env(ctx.extra.get("settings_env"))
     # Ask the child not to colourise; anything that ignores the hint gets
     # its escapes stripped from the captured output below.
     env.update(NO_COLOR="1", FORCE_COLOR="0")

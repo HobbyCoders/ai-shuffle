@@ -1,5 +1,6 @@
 """Worker interpreter settings belong to the worker, not project subprocesses."""
 import json
+import os
 import subprocess
 import sys
 
@@ -45,3 +46,23 @@ def test_child_env_monitor_explicit_project_overlay_survives(monkeypatch):
     for name in names:
         monkeypatch.setenv(name, "worker-runtime")
     assert names.items() <= child_env(names).items()
+
+
+def test_child_env_monitor_shells_get_the_agent_git_settings(monkeypatch):
+    """A shell the app starts for an agent (Monitor, a background command)
+    runs model-chosen commands like the Bash tool does, so it gets the same
+    git settings: a planted bare-shaped folder is not a repository and no
+    config file can name a program for a status read."""
+    from fluid.tools.child_env import AGENT_GIT_CONFIG
+
+    for name in [n for n in os.environ if n.startswith("GIT_CONFIG_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "all")
+
+    env = child_env()
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(count)]
+    # Ours go after the inherited entry, and git uses the last one for a key.
+    assert entries == [("safe.bareRepository", "all"), *AGENT_GIT_CONFIG]

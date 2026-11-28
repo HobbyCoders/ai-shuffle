@@ -11,11 +11,15 @@ agree on what each mode means.
 ``on_write`` policy (asks for every write-class call) and adds allow rules for
 the edit-class tools, so a file edit runs without a prompt while a shell
 command, a Python cell, a web fetch or any other write-class tool still asks
-exactly as ``default`` does.
+exactly as ``default`` does. The allows cover edits to the project's own
+files only (:func:`fluid.permissions.edit_guard.edit_stays_in_project`): an
+edit outside the working folder, or to a file that configures a tool, starts
+programs or holds credentials, asks as it does in ``default``.
 """
 
 from __future__ import annotations
 
+from fluid.permissions.edit_guard import edit_stays_in_project
 from fluid.permissions.rules import Rule
 
 # The edit-class tools ``acceptEdits`` approves on its own. This is the whole
@@ -42,19 +46,36 @@ MODE_POLICY: dict[str, str] = {
 PERMISSION_MODES: tuple[str, ...] = tuple(MODE_POLICY)
 
 
-def accept_edits_rules() -> list[Rule]:
-    """Fresh tool-wide allow rules for :data:`ACCEPT_EDITS_TOOLS`.
+def accept_edits_rules(extra_roots=None) -> list[Rule]:
+    """Fresh allow rules for :data:`ACCEPT_EDITS_TOOLS`, each limited to edits
+    of the project's own files by :func:`edit_stays_in_project`.
+
+    ``extra_roots`` names further folders the session may edit (a list, or a
+    callable returning one): its own scratch folder, which only the engine
+    that owns the session can name.
+
+    Because the limit travels with the rule, it holds wherever the rule sits
+    in the list: ahead of the credential-file asks or after them.
 
     A new list of new ``Rule`` objects each call, so an engine can track the
     rules it installed for a mode by identity and lift exactly those again.
     """
-    return [Rule(tool=tool, decision="allow") for tool in sorted(ACCEPT_EDITS_TOOLS)]
+    if extra_roots is None:
+        in_project = edit_stays_in_project
+    else:
+        def in_project(tool_input, cwd) -> bool:
+            return edit_stays_in_project(tool_input, cwd, extra_roots)
+
+    return [
+        Rule(tool=tool, decision="allow", guard=in_project)
+        for tool in sorted(ACCEPT_EDITS_TOOLS)
+    ]
 
 
-def mode_rules(mode: str) -> list[Rule]:
+def mode_rules(mode: str, extra_roots=None) -> list[Rule]:
     """The rules ``mode`` implies on top of its policy: the edit allows for
     ``acceptEdits``, nothing for every other mode or policy name."""
-    return accept_edits_rules() if mode == "acceptEdits" else []
+    return accept_edits_rules(extra_roots) if mode == "acceptEdits" else []
 
 
 __all__ = [

@@ -102,6 +102,12 @@ def test_memory_rejects_credentials(tmp_path) -> None:
 
 def test_is_sensitive_path() -> None:
     assert is_sensitive_path(".env")
+    # One answer on every platform: ``.ENV`` opens ``.env`` on Windows and macOS.
+    assert is_sensitive_path(".ENV")
+    assert is_sensitive_path("src/.Env.Local")
+    assert is_sensitive_path("C:\\Users\\sam\\.SSH\\ID_RSA")
+    assert is_sensitive_path("Server.PEM")
+    assert not is_sensitive_path(".ENV.EXAMPLE")
     assert is_sensitive_path("src/.env.local")
     assert is_sensitive_path("/home/u/.ssh/id_rsa")
     assert is_sensitive_path("C:\\Users\\u\\.aws\\credentials")
@@ -234,9 +240,51 @@ def test_default_sensitive_rules_see_alternate_path_spellings(spelling: str) -> 
     assert engine.decide(read_spec, {"file_path": spelling}).decision == "ask"
 
 
+@pytest.mark.parametrize("tool, tool_input", [
+    ("Read", {"file_path": ".ENV"}),
+    ("Read", {"file_path": "deploy/.Env.Production"}),
+    ("Read", {"file_path": "C:\\Users\\sam\\.SSH\\ID_RSA"}),
+    ("Read", {"file_path": "certs/Server.PEM"}),
+    ("Edit", {"file_path": ".ENV"}),
+    ("Write", {"file_path": ".Npmrc"}),
+    ("Grep", {"pattern": "KEY", "path": ".ENV"}),
+    ("Glob", {"pattern": "*", "path": ".Credential-Keys"}),
+])
+def test_default_sensitive_rules_ignore_letter_case(tool: str, tool_input: dict) -> None:
+    """Rule globs are case-sensitive, and ``.ENV`` opens ``.env`` on Windows
+    and on a default macOS volume: the same answer on every platform."""
+    engine = _build_permissions(_config())
+    spec = ToolSpec(name=tool, description="", input_schema={}, risk="safe")
+    assert engine.decide(spec, tool_input).decision == "ask"
+    template = {**tool_input, next(iter(k for k in tool_input if k != "pattern")): ".ENV.EXAMPLE"}
+    assert engine.decide(spec, template).decision == "allow"
+
+
 def test_default_sensitive_rules_see_absolute_paths_via_cwd(tmp_path) -> None:
     engine = _build_permissions(_config())
     read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
     target = str(tmp_path / "cfg" / ".." / ".env")
     assert engine.decide(read_spec, {"file_path": target}, cwd=str(tmp_path)).decision == "ask"
     assert engine.decide(read_spec, {"file_path": "README.md"}, cwd=str(tmp_path)).decision == "allow"
+
+
+def test_default_sensitive_rules_follow_a_policy_changed_on_a_live_engine(tmp_path) -> None:
+    """Nothing asks under ``never_ask``. The asks read the policy when a call
+    is judged, so a session that leaves ``never_ask`` gets them back and one
+    that enters it is decided (and counted by the repeat guard) as before."""
+    cwd = str(tmp_path)
+    read = ToolSpec(name="Read", description="", input_schema={}, risk="read")
+    call = {"file_path": ".env"}
+
+    engine = _build_permissions(_config(permission={"approval_policy": "never_ask"}))
+    assert engine.evaluate(read, call, cwd=cwd) == "allow"
+    engine.approval_policy = "on_write"
+    assert engine.evaluate(read, call, cwd=cwd) == "ask"
+    engine.approval_policy = "never_ask"
+    assert engine.evaluate(read, call, cwd=cwd) == "allow"
+
+    # With the asks standing aside no rule decides the call: it is the
+    # policy's own allow, the kind the loop's repeat guard counts (an "ask"
+    # the host then approves is not counted).
+    verdict = engine.decide(read, call, cwd=cwd)
+    assert (verdict.decision, verdict.source) == ("allow", "policy")

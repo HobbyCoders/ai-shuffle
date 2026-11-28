@@ -118,6 +118,7 @@ from app.core.session_modes import (
     effective_permission_mode,
     mode_approves_without_prompt,
     safety_check_denial,
+    session_edit_roots,
 )
 # Registers the app-owned SafetyWarning shape with fluid's event codec. The
 # translation branch below matches on the class NAME, so it needs no symbol
@@ -3418,10 +3419,7 @@ class HarnessAdapter(ProviderAdapter):
                 if (
                     isinstance(translated, PermissionRequestEvent)
                     and getattr(translated, "risk", None) != "question"
-                    and mode_approves_without_prompt(
-                        self.permission_mode,
-                        self._permission_tool_name(translated.name),
-                    )
+                    and self._mode_approves(translated)
                 ):
                     # Native leg, no approver: the modes that approve on their
                     # own allow here too, as they do in a watched session.
@@ -4297,9 +4295,7 @@ class HarnessAdapter(ProviderAdapter):
                 elif saved == "allow":
                     allow = True
         if allow is None:
-            allow = mode_approves_without_prompt(
-                self.permission_mode, self._permission_tool_name(ev.name),
-            )
+            allow = self._mode_approves(ev)
             if not allow:
                 message = _NO_APPROVER_DENIAL
         if not allow:
@@ -4329,6 +4325,22 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] failed to submit the safety-check decision for %s",
                 ev.tool_use_id, exc_info=True,
             )
+
+    def _mode_approves(self, ev: PermissionRequestEvent) -> bool:
+        """Whether the session's mode approves ``ev`` with nobody to ask, read
+        with the call's input and the folders this session works in: Accept
+        Edits approves an edit of a project file and nothing outside it."""
+        options = self._options
+        cwd = getattr(options, "cwd", None)
+        return mode_approves_without_prompt(
+            self.permission_mode,
+            self._permission_tool_name(ev.name),
+            ev.input,
+            cwd=cwd,
+            extra_roots=session_edit_roots(
+                self._resolve_app_session_id(), cwd, getattr(options, "add_dirs", None),
+            ),
+        )
 
     async def _allow_without_approver(self, ev: PermissionRequestEvent) -> None:
         """Approve a native prompt the session's mode approves on its own —
@@ -6474,22 +6486,40 @@ class HarnessAdapter(ProviderAdapter):
     def _build_permissions(self, options: SessionOptions):
         """The native leg's PermissionEngine for ``options.permission_mode``.
 
-        Policy plus the chat-lane rules, and no mode rules: under Accept Edits
-        the engine still asks for a file edit and the app's approver allows it
-        unless a saved Deny rule names it (see ``_PERMISSION_POLICY``).
+        Policy, fluid's credential-file asks, then the chat-lane rules, and no
+        mode rules: under Accept Edits the engine still asks for a file edit
+        and the app's approver allows it unless a saved Deny rule names it
+        (see ``_PERMISSION_POLICY``).
+
+        The credential-file asks (``.env``, private keys, ``.netrc``, ...) are
+        the ones the ``fluid`` CLI installs. Without them a ``Read`` of such a
+        file is a read-class call and runs with no prompt. They are installed
+        for every mode, because the mode can change on a live engine, and each
+        reads the engine's policy when a call is judged: under Bypass
+        (``never_ask``) they stand aside, so a call there is decided, and
+        counted by the repeat guard, exactly as it was before. They come
+        first, so a chat-lane rule that follows still has the last word.
         """
+        from fluid.config.loader import sensitive_file_rules
+
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
         scope = _assistant_scope(options)
         if scope is not None:
-            return _AssistantPermissionEngine(
-                scope, approval_policy=policy, rules=_chat_mode_rules(options),
+            engine: PermissionEngine = _AssistantPermissionEngine(
+                scope, approval_policy=policy,
                 doom_loop_threshold_for=_screen_tool_repeat_threshold,
             )
-        return PermissionEngine(
-            approval_policy=policy, rules=_chat_mode_rules(options),
-            doom_loop_threshold_for=_screen_tool_repeat_threshold,
-        )
+        else:
+            engine = PermissionEngine(
+                approval_policy=policy,
+                doom_loop_threshold_for=_screen_tool_repeat_threshold,
+            )
+        engine.rules = [
+            *sensitive_file_rules(active=lambda: engine.approval_policy != "never_ask"),
+            *(_chat_mode_rules(options) or ()),
+        ]
+        return engine
 
 
 # ─── Module-level helpers ─────────────────────────────────────────────────────
@@ -7492,11 +7522,13 @@ class _AssistantPermissionEngine(PermissionEngine):
         super().__init__(**kwargs)
         self.assistant_scope = scope
 
-    def decide(self, spec, input, *, cwd=None):
+    def decide(self, spec, input, *, cwd=None, env=None):
         from app.core.background_permissions import needs_owner
         from fluid.permissions.engine import Verdict
 
-        verdict = super().decide(spec, input, cwd=cwd)
+        # ``env`` is the session's settings environment, which fluid's gates
+        # pass with every call; the base engine rates a shell command with it.
+        verdict = super().decide(spec, input, cwd=cwd, env=env)
         if verdict.decision == "deny":
             return verdict
         # The native leg runs ``auto`` as Ask, so the policy tells Bypass apart.

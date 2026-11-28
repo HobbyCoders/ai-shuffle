@@ -74,9 +74,8 @@ from fluid.events.ops import (
     UserTurn,
 )
 from fluid.store.base import new_id
-from fluid.context.settings_stack import layered_env
 from fluid.tools.builtins._util import strip_ansi
-from fluid.tools.child_env import scrub_child_env
+from fluid.tools.child_env import shell_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.process_tree import kill_tree, release_tree, spawn_tree
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
@@ -465,7 +464,7 @@ class CliHost:
             # dev server that colourises its output makes the summary
             # unsearchable. Anything that ignores the hint gets its escapes
             # stripped as the stream is read (see _supervise).
-            env=dict(layered_env(ctx.extra.get("settings_env"), base=scrub_child_env()),
+            env=dict(shell_env(ctx.extra.get("settings_env")),
                      NO_COLOR="1", FORCE_COLOR="0"),
             **spawn_kwargs,
         )
@@ -829,9 +828,18 @@ class CliHost:
         if isinstance(registry, dict) and name in registry:
             return registry[name]
         from fluid.context.agents import discover_agents
+        from fluid.context.plugins import discover_plugins
 
+        cwd = ctx.cwd or self.config.cwd or "."
+        sources = self.config.setting_sources
         for definition in discover_agents(
-            ctx.cwd or self.config.cwd or ".", include_plugins=True
+            cwd,
+            # A session that leaves the project's files out (an untrusted
+            # folder) does not take a worker's prompt and tools from them, and
+            # its settings do not choose which plugins supply one.
+            include_project="project" in sources,
+            include_plugins=True,
+            plugins=discover_plugins(cwd, sources=sources),
         ):
             if definition.name == name:
                 return definition

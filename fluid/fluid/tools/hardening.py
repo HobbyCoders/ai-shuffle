@@ -174,14 +174,19 @@ SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"
 
 
 def is_sensitive_path(path: str) -> bool:
-    """True when ``path`` names a file that exists to hold credentials."""
-    from fnmatch import fnmatch
+    """True when ``path`` names a file that exists to hold credentials.
+
+    Letter case is ignored on every platform: ``.ENV`` opens ``.env`` on
+    Windows and on a default macOS volume, and one answer everywhere beats a
+    check that only holds on Linux.
+    """
+    from fnmatch import fnmatchcase
 
     normalized = str(path).replace("\\", "/").rstrip("/")
-    basename = normalized.rsplit("/", 1)[-1]
-    if basename.lower() in SENSITIVE_EXCEPTIONS:
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    if basename in SENSITIVE_EXCEPTIONS:
         return False
-    if any(fnmatch(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
+    if any(fnmatchcase(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
         return True
     lowered = normalized.lower()
     if any(
