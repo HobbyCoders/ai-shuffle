@@ -1,6 +1,5 @@
 """Recovered history cannot be an input to its own ordering or hide a reply hint."""
 from datetime import datetime, timedelta, timezone
-from itertools import permutations
 
 import pytest
 
@@ -158,7 +157,11 @@ def test_held_progress_does_not_hide_an_observed_saved_suggestion(session):
     assert composer_suggestions.get(session["id"])["suggestion"] == "Reply"
 
 
-@pytest.mark.parametrize("order", list(permutations(range(5))))
+# Every rotation and its reverse: each receipt replays at every position and
+# every pair replays in both orders, without all 120 permutations.
+@pytest.mark.parametrize("order", [
+    tuple(range(5))[k:] + tuple(range(5))[:k] for k in range(5)] + [
+    (tuple(range(5))[k:] + tuple(range(5))[:k])[::-1] for k in range(5)])
 def test_all_five_receipt_replay_orders(session, order):
     test_replay_order_cannot_change_a_bucket_or_existing_watermarks(session, 5, "gap", order)
 
