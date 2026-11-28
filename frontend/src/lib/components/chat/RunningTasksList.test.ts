@@ -6,7 +6,7 @@
  * copy.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { tick } from 'svelte';
+import { createRawSnippet, tick } from 'svelte';
 import { render, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/svelte';
 import type { Task } from '$lib/stores/types';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
@@ -265,6 +265,26 @@ describe('RunningTasksList grouping and counts', () => {
 	it('renders nothing inline when nothing runs', () => {
 		render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
 		expect(screen.queryByTestId('tasks-toggle')).toBeNull();
+	});
+
+	it('inline opens with a "Background tasks" rule, the live turn\'s Working line above it', () => {
+		setTasks([task('b', { kind: 'shell', subject: 'npm test' })]);
+		const lead = createRawSnippet(() => ({ render: () => '<span>Working</span>' }));
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline', lead });
+		const row = container.querySelector('[data-transcript-task-row]') as HTMLElement;
+		const [first, second] = Array.from(row.children);
+		expect(first.getAttribute('data-testid')).toBe('tasks-lead');
+		expect(first.textContent).toBe('Working');
+		expect(second.classList.contains('inline-divider')).toBe(true);
+		expect(second.getAttribute('aria-hidden')).toBe('true');
+		expect(second.textContent).toBe('Background tasks');
+	});
+
+	it('draws the rule without a Working slot once the turn has ended', () => {
+		setTasks([task('b', { kind: 'shell', subject: 'npm test' })]);
+		const { container } = render(RunningTasksList, { sessionId: 's1', variant: 'inline' });
+		expect(screen.queryByTestId('tasks-lead')).toBeNull();
+		expect(container.querySelector('[data-transcript-task-row] > .inline-divider')).not.toBeNull();
 	});
 
 	it('groups Agents and Shell with singular counts', () => {

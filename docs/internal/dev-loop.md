@@ -390,6 +390,7 @@ A step has `text` (with `{summary}`, `{round}`, `{scenarios}` and `{answer}`,
 the latest question-tray answer, filled in),
 optional `tool_calls`, or `error` (`{"status": 429, "message": "...",
 "retry_after": "1"}`); `cut_after_chars` drops the stream mid-reply.
+A step's own `tps` paces just that step, over the tag's and the scenario's.
 `served_model` names the model the reply reports; `refusal`
 (`{"category", "explanation", "recommended_model", "refuse_models"}`) declines
 a request for one of `refuse_models` (default `["fake-ai"]`, `"*"` for all)

@@ -925,7 +925,7 @@ class DevClaude(script.Fake):
                         f"--disallowed-tools removes from this session.")
                 calls = []
             if text:
-                if self.say(text, tps, step.get("cut_after_chars")):
+                if self.say(text, fake_ai._number(step.get("tps"), tps), step.get("cut_after_chars")):
                     if self.interrupted:
                         break
                     self.result_frame("API Error: Connection error.", error=True)

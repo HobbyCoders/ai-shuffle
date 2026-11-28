@@ -465,6 +465,8 @@
 	const activeApprovalId = $derived(assistantQuestion?.request.request_id ?? null);
 
 	// A request waiting on the owner stands in for the dots while it waits.
+	/** The inline tasks list is on screen: the Working line is drawn inside it. */
+	let tasksListShown = $state(false);
 	const showGapIndicator = $derived(
 		!assistantQuestion
 		&& shouldShowGapIndicator(
@@ -564,7 +566,7 @@
 	// made streaming get progressively choppier as a session grew. A plain
 	// object (not $state) avoids Svelte 5 compiling these into reactive signals
 	// inside the derived.
-	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; model: TranscriptModel } =
+	const _displayCache: { messages: ChatMessage[] | null; sessionId?: string | null; swarms?: Record<string, SwarmSnapshot>; isStreaming: boolean; latestTurnUnsettled: boolean; runningToolKey: string; heldTurnKeys: ReadonlySet<string> | null; groupingEnabled: boolean; thinkingShown: boolean; model: TranscriptModel } =
 		{
 			messages: null,
 			isStreaming: false,
@@ -572,6 +574,7 @@
 			runningToolKey: '',
 			heldTurnKeys: null,
 			groupingEnabled: true,
+			thinkingShown: true,
 			model: {
 				items: [],
 				promptOccurrence: [],
@@ -613,6 +616,7 @@
 		// When grouping is off, groupable tools fall through to the plain
 		// single-message path (system grouping is unaffected by this toggle).
 		const groupingEnabled = chatPrefs?.groupToolCalls !== false;
+		const thinkingShown = chatPrefs?.showThinkingBlocks !== false;
 		if (
 			messages === _displayCache.messages
 			&& sessionId === _displayCache.sessionId
@@ -622,6 +626,7 @@
 			&& runningToolKey === _displayCache.runningToolKey
 			&& heldKeys === _displayCache.heldTurnKeys
 			&& groupingEnabled === _displayCache.groupingEnabled
+			&& thinkingShown === _displayCache.thinkingShown
 		) {
 			// Same message identities (e.g. a WS-delta-only update) — reuse the
 			// cached model so downstream {#each} skips re-diffing.
@@ -641,7 +646,8 @@
 			heldTurnKeys: heldKeys,
 			sessionId,
 			swarms: Object.values(sessionSwarms ?? {}),
-			groupingEnabled
+			groupingEnabled,
+			thinkingShown
 		});
 
 		_displayCache.messages = messages;
@@ -652,6 +658,7 @@
 		_displayCache.runningToolKey = runningToolKey;
 		_displayCache.heldTurnKeys = heldKeys;
 		_displayCache.groupingEnabled = groupingEnabled;
+		_displayCache.thinkingShown = thinkingShown;
 		_displayCache.model = model;
 		return model;
 	});
@@ -3043,14 +3050,28 @@
 			     for agents, its transcript. The phone shows the same collapsible row.
 			     Renders nothing when nothing runs. Chats this one started
 			     (StartSession) are rows in the Agents group with a chat icon. -->
-			<RunningTasksList sessionId={$activeSession.sessionId} presentation={$activeSession} variant="inline" />
+			<!-- While tasks are listed, the live turn's Working line sits above their
+			     "Background tasks" rule, closing the live work, instead of trailing
+			     the tasks from the spacer below where it read as one of them. -->
+			{#snippet workingLead()}
+				{#if showGapIndicator || openRow?.start_queued}
+					<TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} />
+				{/if}
+			{/snippet}
+			<RunningTasksList
+				sessionId={$activeSession.sessionId}
+				presentation={$activeSession}
+				variant="inline"
+				lead={($activeSession.isStreaming || openRow?.start_queued) && !$activeSession.liveCompaction ? workingLead : undefined}
+				bind:listed={tasksListShown}
+			/>
 
 			<!-- Responsive room belongs only to the live edge, never historical turns. -->
 			<div
 				bind:this={tailSpacerRef}
 				class="transcript-tail-spacer"
 			>
-				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction}
+				{#if (showGapIndicator || openRow?.start_queued) && !$activeSession.liveCompaction && !tasksListShown}
 					<!-- Working occupies existing trailing breathing room, not a
 					     new 30px row + 18px gap that disappears at completion. -->
 					<div class="tail-activity"><TurnActivity startedAt={liveTurnStartedAt} queued={!!openRow?.start_queued} thinking={$activeSession.liveThinking?.sessionId === $activeSession.sessionId ? $activeSession.liveThinking : null} /></div>

@@ -909,7 +909,7 @@ async function openFoldChat(ctx, path = prefix(ctx.variant)) {
 async function watchFold(page) {
 	await page.evaluate(() => {
 		const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null,
-			track: null, tracked: 0, trace: [] };
+			earlyFold: false, track: null, tracked: 0, trace: [] };
 		const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
 		const sample = () => {
 			if (!watch.running) return;
@@ -920,6 +920,9 @@ async function watchFold(page) {
 				const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
 				const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')];
 				watch.streaming++;
+				// Finished commands fold as each completes, before the new prose starts.
+				if (!watch.earlyFold && log.querySelector('.chat-column [data-run-fold]')
+					&& ![...log.querySelectorAll('.chat-column .prose')].some(e => e.textContent.includes('All sixteen checks ran'))) watch.earlyFold = true;
 				// The prose end in scroll coordinates: proves the fold really shrank it.
 				const proseEnd = log.scrollTop + spacer.getBoundingClientRect().top - box.top;
 				if (watch.lastProseEnd !== null) watch.proseDrop = Math.max(watch.proseDrop, watch.lastProseEnd - proseEnd);
@@ -976,6 +979,8 @@ async function checkFold(page, log, watch, label) {
 	log(`${label} ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length,
 		longest: watch.longest, blank: watch.blank, tracked: watch.tracked, clamp: foldClamp(watch.trace) })}`);
 	expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
+	expect(watch.earlyFold, 'the finished commands folded one by one, before the new prose started');
+	// The long opening line folds with the commands once newer prose takes over.
 	expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
 	expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
 	const settled = await page.locator(LOG).evaluate(el => {
@@ -1185,7 +1190,9 @@ function sampleCover({ LOG, token, bubble: words }) {
 			blank: rows.length > 0 && !rows.some(seen) && !controls.some(seen),
 			promptTop: prompt ? Math.round(prompt.getBoundingClientRect().top - box.top) : null,
 			promptBottom: prompt ? Math.round(prompt.getBoundingClientRect().bottom - box.top) : null,
-			folded: !!log.querySelector('.chat-column [data-run-fold]'),
+			// The collapse under test: tool-run-fold's long opener folded away (see runFolded).
+			folded: (p => p.some(e => e.textContent.includes('All sixteen checks ran')) && !p.some(e => e.textContent.includes('Checking the project step by step')))(
+				[...log.querySelectorAll('.chat-column .prose')]),
 			...(words ? { bubble: drawn(queuedBubble, log, box) } : {}),
 			users: log.querySelectorAll('[data-user-turn-id]').length, queued: log.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length,
 			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming });
@@ -1225,8 +1232,14 @@ const pausedUntil = (page, fn, arg) => page.waitForFunction(fn, arg, { polling: 
 // as typed). A hidden page paints no fold: the feed defers streamed text and the
 // transcript window mounts no new rows until visible. So the server finishes the
 // tools while the device is closed, and the collapse paints in the catch-up at
-// resume, on the cover screen, with the bubble still docked.
-const runFolded = () => !!document.querySelector('.chat-column [data-run-fold]');
+// resume, on the cover screen, with the bubble still docked. The commands fold
+// one by one as they finish, a row at a time; the collapse is the long opening
+// line, which folds with them only once the final prose takes over from it.
+const runFolded = () => {
+	const prose = [...document.querySelectorAll('.chat-column .prose')];
+	return prose.some(e => e.textContent.includes('All sixteen checks ran'))
+		&& !prose.some(e => e.textContent.includes('Checking the project step by step'));
+};
 cases.push({
 	name: 'fold-close-across-a-tool-fold-keeps-reply-and-queue-on-screen', viewports: ['fold-inner'], throttles: ['slow'],
 	async setup(ctx) {
@@ -1242,7 +1255,7 @@ cases.push({
 		await mark('queue a wrapping prompt the running turn cannot take: it names a note');
 		await typeAndSend(page, `${queued} runs as its own turn, it names @Notes/note-0f0f0f0f\nThis second line wraps on the cover display ${'word '.repeat(14)}[script:default tps=300]`);
 		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
-		expect(!(await page.evaluate(runFolded)), 'the bubble was confirmed before the tool run folded');
+		expect(!(await page.evaluate(runFolded)), 'the bubble was confirmed before the opening line folded');
 		await page.evaluate(sampleCover, { LOG, token: queued, bubble: [queued, '@Notes/note-0f0f0f0f'] });
 		await mark('close the device: hidden and paused, then sized to the cover screen');
 		await pauseClose(page);
@@ -1258,8 +1271,8 @@ cases.push({
 		}
 		expect(ran >= 16, `the server finished all sixteen commands while the device was closed (${ran})`);
 		await page.waitForTimeout(1200);
-		const paused = await page.evaluate(() => ({ folded: !!document.querySelector('.chat-column [data-run-fold]'), queued: document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length }));
-		expect(!paused.folded && paused.queued === 1, `while closed, nothing folded on the page and the bubble is docked (${JSON.stringify(paused)})`);
+		const paused = { folded: await page.evaluate(runFolded), queued: await page.locator('.pending-messages [data-queue-confirmed="true"]').count() };
+		expect(!paused.folded && paused.queued === 1, `while closed, the opening line had not folded on the page and the bubble is docked (${JSON.stringify(paused)})`);
 		await mark('resume the same chat on the cover screen: the run folds in the catch-up');
 		const from = await page.evaluate(() => { window.__render.resume(); return window.__cover.frames.length; });
 		await page.waitForFunction(runFolded, null, { polling: 'raf', timeout: 15_000 }).catch(() => {});

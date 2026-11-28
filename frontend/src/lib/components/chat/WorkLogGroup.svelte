@@ -6,7 +6,8 @@
 	 *  - live: the turn so far, cut into runs at its protected rows. Each earlier
 	 *    run hides behind its own live label ("Read 3 files and ran 2 commands");
 	 *    the protected row that ended it stays visible below, and the current run
-	 *    shows every row (transcript-organization spec §2).
+	 *    folds each row as it completes, so only what is still running shows
+	 *    under its label (transcript-organization spec §2).
 	 *  - settled: the whole run — tool rows plus the turn's non-final commentary
 	 *    — hides behind one "Worked for {duration}" row.
 	 *

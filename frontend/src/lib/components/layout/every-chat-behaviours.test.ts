@@ -76,7 +76,7 @@ describe('background work in the running-tasks list, in every chat', () => {
 	it('lists started chats with the agents, not in a strip beside the composer', () => {
 		expect(chatView).not.toContain('BackgroundWorkStrip');
 		expect(lib('components/chat/RunningTasksList.svelte')).toContain('startedChats(');
-		expect(messageArea).toMatch(/<RunningTasksList sessionId=\{\$activeSession\.sessionId\} presentation=\{\$activeSession\} variant="inline" \/>/);
+		expect(messageArea).toMatch(/<RunningTasksList\s+sessionId=\{\$activeSession\.sessionId\}\s+presentation=\{\$activeSession\}\s+variant="inline"[\s\S]*?\/>/);
 		expect(messageArea).not.toMatch(/\{#if [^}]*\}\s*<RunningTasksList/);
 	});
 });
