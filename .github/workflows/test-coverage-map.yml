@@ -5,7 +5,8 @@ run-name: "Test coverage map (per-test coverage of the Python suites)"
 # (coverage.py with one context per test). The data shows which tests cover
 # nothing another test does not, so the suite can be cut by evidence rather
 # than by guess. It gates nothing: no pull request, push or schedule starts it,
-# and a failing test does not fail it (the coverage it collected still uploads).
+# and a failing test does not fail it (the coverage it collected still uploads);
+# a collection or internal pytest error does.
 #
 # PostgreSQL-only tests skip here (ALLOW_REAL_PG=0, as in the hermetic shards),
 # and the frontend and phone suites are not measured.
@@ -67,6 +68,7 @@ jobs:
           COVERAGE_FILE: coverage-map/backend-${{ matrix.shard }}.db
         run: |
           mkdir -p coverage-map
+          rc=0
           python -m pytest tests/api tests/core tests/db tests/middleware tests/contract tests/performance tests/mcp tests/services tests/unit tests/test_*.py \
             --ignore=tests/scripts --ignore=tests/core/test_docs_content.py \
             --deselect=tests/test_buyer_docs.py --deselect=tests/test_scan_blocking_db.py \
@@ -74,9 +76,12 @@ jobs:
             --ignore=tests/core/test_container_image_contract.py \
             -o addopts="" -q -p no:cacheprovider --timeout=600 -n 4 \
             -p scripts.ci.backend_shards --backend-shard "${{ matrix.shard }}" --backend-shard-count 8 \
-            --cov=app --cov=fluid --cov=scripts --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
+            --cov=app --cov=fluid --cov=scripts --cov=docker --cov=run_local --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
             --junitxml=coverage-map/backend-${{ matrix.shard }}.xml \
-            || echo "::warning::Some tests failed or errored; their coverage is still recorded."
+            || rc=$?
+          # 1 means some tests failed: keep their coverage. Any other code is a
+          # collection, usage or internal error and fails the job.
+          if [ "$rc" -eq 1 ]; then echo "::warning::Some tests failed; their coverage is still recorded."; else exit "$rc"; fi
 
       - name: Upload coverage-map-backend-${{ matrix.shard }}
         if: always()
@@ -84,7 +89,7 @@ jobs:
         with:
           name: coverage-map-backend-${{ matrix.shard }}
           path: coverage-map/
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: error
 
   scripts:
@@ -127,11 +132,15 @@ jobs:
           COVERAGE_FILE: coverage-map/scripts.db
         run: |
           mkdir -p coverage-map
-          python -m pytest tests/scripts \
+          rc=0
+          python -m pytest tests/scripts tests/test_buyer_docs.py tests/core/test_docs_content.py tests/test_scan_blocking_db.py \
             -o addopts="" -q -p no:cacheprovider --timeout=600 -n 4 --dist loadfile \
-            --cov=app --cov=fluid --cov=scripts --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
+            --cov=app --cov=fluid --cov=scripts --cov=docker --cov=run_local --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
             --junitxml=coverage-map/scripts.xml \
-            || echo "::warning::Some tests failed or errored; their coverage is still recorded."
+            || rc=$?
+          # 1 means some tests failed: keep their coverage. Any other code is a
+          # collection, usage or internal error and fails the job.
+          if [ "$rc" -eq 1 ]; then echo "::warning::Some tests failed; their coverage is still recorded."; else exit "$rc"; fi
 
       - name: Upload coverage-map-scripts
         if: always()
@@ -139,7 +148,7 @@ jobs:
         with:
           name: coverage-map-scripts
           path: coverage-map/
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: error
 
   fluid:
@@ -178,10 +187,14 @@ jobs:
           COVERAGE_FILE: coverage-map/fluid.db
         run: |
           mkdir -p coverage-map
+          rc=0
           python -m pytest fluid/tests/unit -q -p no:cacheprovider -n 4 --dist loadfile \
-            --cov=fluid/fluid --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
+            --cov=fluid --cov=scripts --cov-config="$RUNNER_TEMP/covrc" --cov-context=test --cov-report= \
             --junitxml=coverage-map/fluid.xml \
-            || echo "::warning::Some tests failed or errored; their coverage is still recorded."
+            || rc=$?
+          # 1 means some tests failed: keep their coverage. Any other code is a
+          # collection, usage or internal error and fails the job.
+          if [ "$rc" -eq 1 ]; then echo "::warning::Some tests failed; their coverage is still recorded."; else exit "$rc"; fi
 
       - name: Upload coverage-map-fluid
         if: always()
@@ -189,5 +202,5 @@ jobs:
         with:
           name: coverage-map-fluid
           path: coverage-map/
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: error
