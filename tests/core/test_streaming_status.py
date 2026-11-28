@@ -418,6 +418,7 @@ def test_get_user_streaming_sessions_join(mock_db):
     assert streaming_status.get_user_streaming_sessions("admin") == [
         {
             "session_id": "s-admin",
+            "compacting": False,
             "project_id": "p1",
             "worktree_id": None,
             "worktree_branch": None,
@@ -428,6 +429,7 @@ def test_get_user_streaming_sessions_join(mock_db):
     assert streaming_status.get_user_streaming_sessions("u1") == [
         {
             "session_id": "s-user",
+            "compacting": False,
             "project_id": None,
             "worktree_id": None,
             "worktree_branch": None,
@@ -503,8 +505,107 @@ def test_get_user_streaming_sessions_reports_v2_branch(mock_db):
     assert streaming_status.get_user_streaming_sessions("admin") == [
         {
             "session_id": "s-v2",
+            "compacting": False,
             "project_id": "p1",
             "worktree_id": None,
             "worktree_branch": "feat/login",
         }
     ]
+
+
+# =============================================================================
+# Compaction: a chat in the background says Compacting, not just Working
+# =============================================================================
+
+def _append(session_id, *events):
+    from app.db import session_events as session_events_db
+
+    session_events_db.append_events(session_id, [
+        {"type": event[0], "payload": event[1], "turn_id": event[2] if len(event) > 2 else None}
+        for event in events
+    ])
+
+
+@pytest.mark.parametrize("closing", [
+    ("system.compaction_status", {"state": "ended"}),
+    ("system.compaction_status", {"state": "failed", "error": "too big"}),
+    ("system.compaction_boundary", {"subtype": "compact_boundary", "data": {}}),
+    ("system.note", {"subtype": "compact_failed"}),
+    ("turn.started", {}),
+])
+def test_snapshot_marks_a_chat_compacting_until_its_compaction_ends(mock_db, closing):
+    database.create_session(session_id="s1", profile_id="default")
+    runs.claim_run("s1", "runnerA", 60)
+    _append("s1", ("turn.started", {}), ("system.compaction_status", {"state": "started"}))
+
+    [row] = streaming_status.get_user_streaming_sessions("admin")
+    assert row["compacting"] is True
+    # Unrelated output during the compaction does not end it.
+    _append("s1", ("system.note", {"subtype": "other"}))
+    # Nor does a voice exchange or brief written as its own turn meanwhile.
+    _append("s1", ("turn.started", {}, "voice-1"), ("turn.completed", {}, "voice-1"),
+            ("turn.completed", {}, "brief-1"))
+    assert streaming_status.compacting_session_ids(["s1"]) == {"s1"}
+
+    _append("s1", closing)
+    [row] = streaming_status.get_user_streaming_sessions("admin")
+    assert row["compacting"] is False
+
+
+def test_compacting_session_ids_fails_open(monkeypatch):
+    def broken():
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(streaming_status, "get_db", broken)
+    assert streaming_status.compacting_session_ids(["s1"]) == set()
+
+
+async def test_compaction_frames_reach_the_owner_in_order(mock_db, monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    sent = []
+
+    async def _capture(user_id, message, source_device_id=None):
+        await asyncio.sleep(0.05 if message["compacting"] else 0)  # a slow first send
+        sent.append((user_id, message))
+
+    monkeypatch.setattr(sync_engine, "_broadcast_user_message", _capture)
+    database.create_session(session_id="s1", profile_id="default")
+
+    # A stop for a chat never said to be compacting (every ordinary turn end)
+    # sends nothing.
+    streaming_status.notify_compaction("s1", False)
+    await asyncio.sleep(0.1)
+    assert sent == []
+
+    streaming_status.notify_compaction("s1", True)
+    streaming_status.notify_compaction("s1", False)
+    assert await _wait_until(lambda: len(sent) == 2)
+    assert sent == [
+        ("admin", {"type": "user_compaction_changed", "session_id": "s1", "compacting": True}),
+        ("admin", {"type": "user_compaction_changed", "session_id": "s1", "compacting": False}),
+    ]
+
+
+async def test_recorded_compaction_events_announce_start_and_end(monkeypatch):
+    from app.core import turn_recorder
+
+    seen = []
+    monkeypatch.setattr(streaming_status, "notify_compaction",
+                        lambda sid, compacting: seen.append((sid, compacting)))
+
+    turn_recorder._announce_compaction("s1", [{"type": "assistant.delta", "payload": {}}])
+    turn_recorder._announce_compaction(
+        "s1", [{"type": "system.compaction_status", "payload": {"state": "started"}}])
+    # The last compaction event in a batch decides.
+    turn_recorder._announce_compaction("s1", [
+        {"type": "system.compaction_status", "payload": {"state": "started"}},
+        {"type": "system.compaction_boundary", "payload": {"subtype": "compact_boundary"}},
+    ])
+    # A voice exchange or brief written as its own turn decides nothing.
+    turn_recorder._announce_compaction("s1", [
+        {"type": "turn.started", "payload": {}, "turn_id": "voice-1"},
+        {"type": "turn.completed", "payload": {}, "turn_id": "brief-1"},
+    ])
+    turn_recorder._announce_compaction("s1", [{"type": "turn.completed", "payload": {}}])
+    assert seen == [("s1", True), ("s1", False), ("s1", False)]

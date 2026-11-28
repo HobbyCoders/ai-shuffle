@@ -33,8 +33,9 @@ const mocks = vi.hoisted(() => {
 		projects: store<unknown[]>([]),
 		clusterProjects: store<unknown[]>([]),
 		projectCatalogReady: store(true),
-		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[] }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
+		activeSession: store<{ sessionId: string | null; isStreaming: boolean; optimisticStreaming?: boolean; activeTasks: { status: string }[]; liveCompaction?: { phase: string } | null }>({ sessionId: null, isStreaming: false, activeTasks: [] }),
 		streamingSessions: store(new Set<string>()),
+		compactingSessions: store<ReadonlySet<string>>(new Set<string>()),
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
 		activeView: store<unknown>(null),
 		getPullRequests: vi.fn(),
@@ -81,6 +82,7 @@ vi.mock('$lib/stores/active-session', () => ({
 		setTitle: vi.fn(),
 	}),
 	streamingSessions: mocks.streamingSessions,
+	compactingSessions: mocks.compactingSessions,
 	backgroundPermissions: mocks.backgroundPermissions,
 }));
 
@@ -524,6 +526,7 @@ beforeEach(() => {
 	mocks.loadMoreSessions.mockReset().mockResolvedValue(undefined);
 	mocks.activeSession.set({ sessionId: null, isStreaming: false, activeTasks: [] });
 	mocks.streamingSessions.set(new Set());
+	mocks.compactingSessions.set(new Set());
 	mocks.backgroundPermissions.set(new Map());
 	// Reset the CALL COUNT too: without this the counter accumulates across
 	// tests and any "fetched exactly once" assertion reads a stale total.
@@ -1656,6 +1659,42 @@ describe('Sidebar streaming folds (R2)', () => {
 		mocks.streamingSessions.set(new Set(['settled']));
 		await tick();
 		expect(vi.mocked(sessionTimestamp).mock.calls.length).toBeGreaterThan(before);
+	});
+
+	it('shows Compacting on a working chat that is not the open one', async () => {
+		// The open chat is another one: this row only knows from the server's frames.
+		mocks.activeSession.set({ sessionId: 'settled', isStreaming: false, activeTasks: [] });
+		mocks.streamingSessions.set(new Set(['active']));
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+
+		mocks.compactingSessions.set(new Set(['active']));
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Compacting');
+		expect(cardFrame('Active chat').querySelector('.pip.compacting')).not.toBeNull();
+
+		mocks.compactingSessions.set(new Set());
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+		expect(cardFrame('Active chat').textContent).not.toContain('Compacting');
+	});
+
+	it('the open chat follows its own feed, not the server frames', async () => {
+		// A frame said compacting, then the open chat's feed saw it end.
+		mocks.activeSession.set({ sessionId: 'active', isStreaming: true, activeTasks: [], liveCompaction: null });
+		mocks.streamingSessions.set(new Set(['active']));
+		mocks.compactingSessions.set(new Set(['active']));
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		expect(cardFrame('Active chat').textContent).not.toContain('Compacting');
+
+		mocks.activeSession.set({
+			sessionId: 'active', isStreaming: true, activeTasks: [], liveCompaction: { phase: 'running' },
+		});
+		mocks.compactingSessions.set(new Set());
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Compacting');
 	});
 
 	it('still shows Working from the cross-device map alone', async () => {

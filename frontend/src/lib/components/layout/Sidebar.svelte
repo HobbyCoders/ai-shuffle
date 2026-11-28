@@ -58,7 +58,7 @@
 		settledTotal
 	} from '$lib/stores/app-data.svelte';
 	import { groups as userGroups, organizeByGroups } from '$lib/stores/groups.svelte';
-	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
+	import { activeSession, streamingSessions, compactingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { vaultPending } from '$lib/stores/vault';
 	import { isTranscriptProseDismissed, proseQuestionDismissals, proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -254,9 +254,16 @@
 	// reads its own transcript instead.
 	const rememberedProse = $derived(withoutSession($proseQuestionSessions, activeId));
 	const streamingMap = $derived($streamingSessions);
+	// The open chat reads its compaction from its own feed; every other chat
+	// from the server's compaction frames.
+	const activeCompacting = $derived($activeSession.liveCompaction?.phase === 'running');
 
 	function isStreaming(id: string): boolean {
 		return streamingMap.has(id) || activeStreamingId === id;
+	}
+
+	function isCompacting(id: string): boolean {
+		return id === activeId ? activeCompacting : $compactingSessions.has(id);
 	}
 
 	function projectLabel(s: Session): string {
@@ -1047,7 +1054,7 @@
 		openPr={row.openPr}
 		projectLabel={projectLabel(row.session)}
 		active={row.session.id === activeId}
-		compacting={row.session.id === activeId && $activeSession.liveCompaction?.phase === 'running'}
+		compacting={isCompacting(row.session.id)}
 		{now}
 		timestamp={row.ts}
 		{compact}
