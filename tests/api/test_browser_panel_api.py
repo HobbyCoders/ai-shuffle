@@ -196,17 +196,19 @@ class TestBrowserPanelWebSocket:
         assert exc.value.code == 4003
 
     @pytest.fixture
-    def own_browser(self):
+    def own_browser(self, monkeypatch):
         """The chat's browser is someone's own Chrome, which this caller may not use."""
         from types import SimpleNamespace
 
         from app.core import browser_extension as ext
+        monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)  # the owner's chats
         browser = SimpleNamespace(id="browser-0001", closed=False, paired_client_id="pc-owner",
                                   account_id="acct-owner")
         ext._browsers[browser.id] = browser
         yield browser
         ext._browsers.clear()
         ext._targets.clear()
+        ext._target_owners.clear()
         ext._panel_viewers.clear()
 
     def test_someone_elses_own_browser_is_refused(self, client, monkeypatch, own_browser):

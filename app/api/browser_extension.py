@@ -186,12 +186,8 @@ def _browser_access(request: Request) -> ext.MayUse:
     from app.core import mobile_tool_identity
 
     if get_api_user_from_request(request) or mobile_tool_identity.request_is_preview(request):
-        return _NO_BROWSER
+        return ext.no_browser
     return _access(mobile_tool_identity.request_principal(request))
-
-
-def _NO_BROWSER(_browser) -> bool:
-    return False
 
 
 def _access(paired: Optional[dict]) -> ext.MayUse:
@@ -211,10 +207,10 @@ def socket_browser_access(websocket) -> ext.MayUse:
     if (not isinstance(value, dict) or value.get("kind") == "api_user"
             or value.get(identity.PREVIEW_LIMITED_KEY)
             or (value.get("kind") == "admin" and value.get("principal_id") == identity.PREVIEW_PRINCIPAL_ID)):
-        return _NO_BROWSER
+        return ext.no_browser
     if value.get("kind") == "paired":
         return _access(value)
-    return _access(None) if value.get("kind") == "admin" else _NO_BROWSER
+    return _access(None) if value.get("kind") == "admin" else ext.no_browser
 
 
 CHAT_BROWSER_REFUSED = "This chat uses someone's own browser; only that browser's owner can open it"
@@ -263,7 +259,8 @@ async def set_target(request: Request, session_id: str, body: TargetBody,
     if not ext.may_use_chat_browser(session_id, may_use):
         raise HTTPException(403, CHAT_BROWSER_REFUSED)
     try:
-        ext.set_session_target(session_id, body.browser_id, may_use)
+        # Blocking: it reads who owns the chat.
+        await run_sync(ext.set_session_target, session_id, body.browser_id, may_use)
     except ext.ExtensionError as exc:
         raise HTTPException(409, str(exc)) from None
     # Stop only the runtime (not the session's panel registration, whose token

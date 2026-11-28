@@ -36,6 +36,7 @@ import json
 import logging
 import re
 import secrets
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -150,10 +151,28 @@ _targets: Dict[str, Optional[str]] = {}
 # relay consumes it on connect, and a runtime that stops drops its own.
 _relay_tokens: Dict[str, tuple] = {}
 
-# Whether a caller may use a connected browser. Called with None for a browser
-# that is not connected right now: only a caller who may use every browser
-# (the worker's own login) answers True then.
+# Whether a caller may use a browser: a connected one, or the BrowserOwner a
+# chat kept for its chosen browser while that is offline. Called with None
+# when neither is known: only a caller who may use every browser (the
+# worker's own login) answers True then.
 MayUse = Callable[[Optional["ExtensionBrowser"]], bool]
+
+
+def no_browser(_browser) -> bool:
+    """The :data:`MayUse` of a caller that may use nobody's own browser."""
+    return False
+
+
+@dataclass(frozen=True)
+class BrowserOwner:
+    """Who a chat's chosen browser belongs to, kept while it is offline so its
+    owner can still move the chat off it (the fields :data:`MayUse` reads)."""
+    account_id: Optional[str]
+    paired_client_id: Optional[str]
+
+
+# chat session id -> owner of its chosen browser, recorded when it was chosen.
+_target_owners: Dict[str, BrowserOwner] = {}
 
 
 def browsers(may_use: Optional[MayUse] = None) -> list:
@@ -198,7 +217,7 @@ def may_use_chat_browser(session_id: str, may_use: MayUse) -> bool:
     browser_id = _targets.get(session_id)
     if not browser_id:
         return True
-    return may_use(_browsers.get(browser_id))
+    return may_use(get_browser(browser_id) or _target_owners.get(session_id))
 
 
 # chat session id -> open Browser panel viewers: (may_use, close callback).
@@ -226,6 +245,27 @@ def _close_refused_viewers(session_id: str) -> None:
             close()
 
 
+def _api_key_chat(session_id: str) -> bool:
+    """Whether an API key owns this chat (blocking): directly, or as the chat
+    that spawned this worker chat (the rule of ``api_user_owns_session``).
+
+    Such a key may continue the chat, and its turns would drive whatever
+    browser the chat uses, so it never gets someone's own browser.
+    """
+    from app.db import database
+
+    row = database.get_session(session_id)
+    for _ in range(8):
+        if not row:
+            return True  # unknown: fail closed
+        if row.get("api_user_id"):
+            return True
+        if not row.get("is_worker") or not row.get("parent_session_id"):
+            return False
+        row = database.get_session(row["parent_session_id"])
+    return True
+
+
 def set_session_target(session_id: str, browser_id: Optional[str], may_use: Optional[MayUse] = None) -> None:
     if may_use is not None and not may_use_chat_browser(session_id, may_use):
         raise ExtensionError("Only this browser's owner can change the browser this chat uses")
@@ -233,6 +273,11 @@ def set_session_target(session_id: str, browser_id: Optional[str], may_use: Opti
         browser = get_browser(browser_id)
         if not browser or (may_use is not None and not may_use(browser)):
             raise ExtensionError("That browser is not connected")
+        if _api_key_chat(session_id):
+            raise ExtensionError("A chat started with an API key cannot use someone's own browser")
+        _target_owners[session_id] = BrowserOwner(browser.account_id, browser.paired_client_id)
+    else:
+        _target_owners.pop(session_id, None)
     _targets[session_id] = browser_id or None
     _close_refused_viewers(session_id)
     for token, entry in list(_relay_tokens.items()):

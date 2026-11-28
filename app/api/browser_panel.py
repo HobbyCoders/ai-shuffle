@@ -334,6 +334,22 @@ async def browser_panel_websocket(
         await websocket.close(code=4003, reason="Only this browser's owner can open it")
         return
 
+    # A revoked API key loses the panel (app.api.ws_key_watch).
+    async with watch_api_key(websocket):
+        owner = control.owner_of(session)
+        if owner:
+            await remote_panel.forward_websocket(websocket, owner, session_id)
+            return
+        with browser_extension.panel_viewer(session_id, may_use, refuser(websocket)):
+            await serve_browser_panel(websocket, session_id)
+
+
+_closing: set = set()
+
+
+def refuser(websocket: WebSocket) -> Callable[[], None]:
+    """A callback, safe from any thread, that closes this panel socket because
+    the chat moved to a browser its viewer may not use."""
     loop = asyncio.get_running_loop()
 
     def refuse() -> None:
@@ -343,17 +359,7 @@ async def browser_panel_websocket(
             task.add_done_callback(_closing.discard)
         loop.call_soon_threadsafe(close)
 
-    # A revoked API key loses the panel (app.api.ws_key_watch).
-    async with watch_api_key(websocket):
-        owner = control.owner_of(session)
-        if owner:
-            await remote_panel.forward_websocket(websocket, owner, session_id)
-            return
-        with browser_extension.panel_viewer(session_id, may_use, refuse):
-            await serve_browser_panel(websocket, session_id)
-
-
-_closing: set = set()
+    return refuse
 
 
 async def serve_browser_panel(

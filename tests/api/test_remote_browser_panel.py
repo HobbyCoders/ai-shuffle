@@ -296,6 +296,38 @@ async def test_peer_stream_stops_on_revocation_and_cleans_viewer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_open_peer_stream_closes_when_the_chat_moves_to_someones_own_browser(monkeypatch):
+    from app.core import browser_extension as ext
+
+    closed = asyncio.Event()
+    serving = asyncio.Event()
+
+    async def serve(ws, session_id):
+        serving.set()
+        await closed.wait()  # a real panel ends when its socket closes
+
+    monkeypatch.setattr(tokens, "require_worker_device", lambda ws: "peer")
+    monkeypatch.setattr(remote, "require_owned", AsyncMock())
+    monkeypatch.setattr(api, "serve_browser_panel", serve)
+    monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)
+    browser = SimpleNamespace(id="browser-0001", closed=False, account_id="acct-owner", paired_client_id="pc-owner")
+    ws = SimpleNamespace(accept=AsyncMock(), close=AsyncMock(side_effect=lambda **_: closed.set()))
+    peer = asyncio.create_task(remote.serve_peer(ws, "session"))
+    try:
+        await asyncio.wait_for(serving.wait(), 1)
+        ext._browsers[browser.id] = browser
+        ext.set_session_target("session", browser.id)  # the owner on this worker picks their Chrome
+        await asyncio.wait_for(peer, 1)
+        assert ws.close.await_args_list[0].kwargs["code"] == 4003
+        assert ext._panel_viewers == {}
+    finally:
+        peer.cancel()
+        ext._browsers.clear()
+        ext._targets.clear()
+        ext._target_owners.clear()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [

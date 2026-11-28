@@ -241,7 +241,8 @@ async def require_owned(session_id: str) -> None:
 
 
 async def serve_peer(websocket: WebSocket, session_id: str) -> None:
-    from app.api.browser_panel import serve_browser_panel
+    from app.api.browser_panel import refuser, serve_browser_panel
+    from app.core import browser_extension
 
     # Peer credentials are accepted only here, never on the public browser API.
     try:
@@ -258,8 +259,15 @@ async def serve_peer(websocket: WebSocket, session_id: str) -> None:
             await run_sync(tokens.require_worker_device, websocket)
             await require_owned(session_id)
 
+    # The route refuses a chat already on someone's own browser; this worker
+    # cannot tell who watches through a peer, so a forwarded panel is closed
+    # too if the chat switches to one while it is open.
+    async def serve():
+        with browser_extension.panel_viewer(session_id, browser_extension.no_browser, refuser(websocket)):
+            await serve_browser_panel(websocket, session_id)
+
     tasks = [
-        asyncio.create_task(serve_browser_panel(websocket, session_id)),
+        asyncio.create_task(serve()),
         asyncio.create_task(watch_authority()),
     ]
     try:

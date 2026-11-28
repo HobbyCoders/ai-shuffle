@@ -17,12 +17,13 @@ const groups = new Map();
 /** tabId -> chatGroupKey */
 const tabOwner = new Map();
 /**
- * Tabs the person pressed Cancel on Chrome's debugging bar for. They stay in
- * their group but are never attached again, across runtime and socket
- * restarts, until the person takes them out of the group (or closes them):
- * putting one back in is how they hand it to the agent again.
+ * Tabs the person pressed Cancel on Chrome's debugging bar for: tabId -> the
+ * Chrome group id it was in. They stay in that group but are never attached
+ * again, across runtime and socket restarts, until the person takes them out
+ * of that group (or closes them): putting one back in is how they hand it to
+ * the agent again.
  */
-const declined = new Set();
+const declined = new Map();
 let eventSink = () => {};
 
 export function onEvent(sink) {
@@ -50,14 +51,17 @@ async function persist() {
   for (const [key, g] of groups) {
     saved[key] = { groupId: g.groupId, title: g.title, worker: g.worker, tabs: [...g.tabs], active: g.active };
   }
-  await chrome.storage.session.set({ groups: saved, declined: [...declined] });
+  await chrome.storage.session.set({ groups: saved, declined: Object.fromEntries(declined) });
 }
 
 /** Re-learn groups after the service worker restarts (tabs survive it). */
 export async function restore() {
-  const { groups: saved = {}, declined: refused = [] } = await chrome.storage.session.get(["groups", "declined"]);
-  const open = new Set((await chrome.tabs.query({})).map((t) => t.id));
-  for (const id of refused) if (open.has(id)) declined.add(id);
+  const { groups: saved = {}, declined: refused = {} } = await chrome.storage.session.get(["groups", "declined"]);
+  const open = new Map((await chrome.tabs.query({})).map((t) => [t.id, t.groupId]));
+  // Still in the group it was cancelled in (it may have moved while we slept).
+  for (const [id, groupId] of Object.entries(refused)) {
+    if (open.get(Number(id)) === groupId) declined.set(Number(id), groupId);
+  }
   for (const [key, g] of Object.entries(saved)) {
     const tabs = new Set(g.tabs.filter((id) => open.has(id)));
     groups.set(key, { groupId: g.groupId, title: g.title, worker: g.worker, tabs, active: !!g.active });
@@ -247,7 +251,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   const key = tabOwner.get(source.tabId);
   if (!key || !groups.get(key)?.active) return;
   // "canceled_by_user": the person pressed Cancel on Chrome's debugging bar.
-  if (reason === "canceled_by_user") declined.add(source.tabId);
+  if (reason === "canceled_by_user") declined.set(source.tabId, groups.get(key).groupId);
   forgetTab(key, source.tabId);
   persist();
   eventSink(key, { event: "detached", tabId: source.tabId, reason });
@@ -266,9 +270,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // A tab the person drags out of a chat's group is let go at once.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!("groupId" in changeInfo)) return;
-  // Taking a declined tab out of its group ends the refusal: moving it back
-  // in later is the person handing it to the agent again.
-  if (declined.has(tabId) && ![...groups.values()].some((g) => g.groupId === changeInfo.groupId)) {
+  // Taking a declined tab out of the group it was cancelled in ends the
+  // refusal, wherever it goes: moving it back in later is the person handing
+  // it to the agent again.
+  if (declined.has(tabId) && declined.get(tabId) !== changeInfo.groupId) {
     declined.delete(tabId);
     persist();
   }

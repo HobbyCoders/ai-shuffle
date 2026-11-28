@@ -58,11 +58,13 @@ def client(monkeypatch):
                             if paired_client_id and paired_client_id.startswith("controller-of-") else None))
     from app.network import control
     monkeypatch.setattr(control, "owner_of", lambda session: None)
+    monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)  # the owner's chats
     yield TestClient(app)
     REVOKED.clear()
     TURNS.clear()
     ext._browsers.clear()
     ext._targets.clear()
+    ext._target_owners.clear()
     ext._relay_tokens.clear()
 
 

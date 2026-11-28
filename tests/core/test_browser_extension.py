@@ -37,13 +37,17 @@ class FakeBrowser(ext.ExtensionBrowser):
 
 
 PAGE = {"targetId": "T1", "type": "page", "title": "Example", "url": "https://example.com/"}
+REAL_API_KEY_CHAT = ext._api_key_chat
 
 
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(monkeypatch):
+    # These chats are not in a database; the owner started them.
+    monkeypatch.setattr(ext, "_api_key_chat", lambda _session_id: False)
     yield
     ext._browsers.clear()
     ext._targets.clear()
+    ext._target_owners.clear()
     ext._relay_tokens.clear()
     ext._page_tokens.clear()
     ext._panel_viewers.clear()
@@ -210,6 +214,45 @@ def test_only_the_browsers_owner_can_watch_or_move_a_chat_off_it():
         ext.set_session_target("chat-1", None, owner)
         assert ext.session_target("chat-1") is None
     assert ext._panel_viewers == {}
+
+
+def test_the_owner_can_move_a_chat_off_their_browser_while_it_is_offline():
+    mine = FakeBrowser({})
+    mine.account_id = "acct-me"
+    ext._browsers[mine.id] = mine
+    owner = lambda browser: browser is not None and browser.account_id == "acct-me"  # noqa: E731
+    outsider = lambda browser: False  # noqa: E731
+    ext.set_session_target("chat-1", mine.id, owner)
+    ext.unregister(mine)  # the owner closed Chrome
+    assert not ext.may_use_chat_browser("chat-1", outsider)
+    with pytest.raises(ext.ExtensionError):
+        ext.set_session_target("chat-1", None, outsider)
+    ext.set_session_target("chat-1", None, owner)
+    assert ext.session_target("chat-1") is None and ext._target_owners == {}
+
+
+def test_a_chat_an_api_key_owns_never_gets_someones_own_browser(monkeypatch):
+    from app.db import database
+
+    rows = {
+        "key-chat": {"id": "key-chat", "api_user_id": "key-1"},
+        "key-worker": {"id": "key-worker", "is_worker": True, "parent_session_id": "key-chat"},
+        "owner-chat": {"id": "owner-chat"},
+        "owner-worker": {"id": "owner-worker", "is_worker": True, "parent_session_id": "owner-chat"},
+    }
+    monkeypatch.setattr(database, "get_session", rows.get)
+    monkeypatch.setattr(ext, "_api_key_chat", REAL_API_KEY_CHAT)
+    assert [ext._api_key_chat(s) for s in ("key-chat", "key-worker", "owner-chat", "owner-worker", "gone")] \
+        == [True, True, False, False, True]
+    browser = FakeBrowser({})
+    ext._browsers[browser.id] = browser
+    # Even the worker login cannot hand it to a chat whose key continues it.
+    for chat in ("key-chat", "key-worker"):
+        with pytest.raises(ext.ExtensionError):
+            ext.set_session_target(chat, browser.id, lambda _browser: True)
+        assert not ext.session_assigned(chat)
+    ext.set_session_target("owner-worker", browser.id, lambda _browser: True)
+    assert ext.session_target("owner-worker") == browser.id
 
 
 class PanelSocket(FakeSocket):
