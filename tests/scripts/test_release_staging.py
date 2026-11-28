@@ -696,6 +696,7 @@ def test_release_publication_credentials_are_step_scoped():
     for name in ("stage-begin", "stage-record", "promotion", "promotion-play"):
         job = wf["jobs"][name]
         assert job["permissions"]["statuses"] == "read"
+        assert job["permissions"]["actions"] == "read"  # verify_suite reads main CI runs
         for step in job["steps"]:
             if "release_staging_github.py" in step.get("run", ""):
                 assert step["env"]["GH_TOKEN"] == "${{ github.token }}"

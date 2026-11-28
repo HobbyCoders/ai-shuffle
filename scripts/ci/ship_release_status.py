@@ -188,14 +188,20 @@ def main_ci(head: str) -> dict:
     return {"state": state, "url": run.get("html_url")}
 
 
-def newest_green_main(runs: list, tip: str, exclude: str = "") -> Optional[str]:
-    """Newest first-parent main commit (other than ``exclude``) whose main CI run succeeded."""
-    green = {r.get("headSha") for r in runs if r.get("workflowName") == MAIN_CI_WORKFLOW
-             and r.get("event") in ("push", "workflow_dispatch", None)
-             and r.get("status") == "completed" and r.get("conclusion") == "success"}
-    if not tip or not green:
+def newest_green_main(runs: list, tip: str, since: Optional[str], exclude: str = "") -> Optional[str]:
+    """Newest unreleased first-parent main commit (after ``since``, other than
+    ``exclude``) whose newest main CI run succeeded, as ``verify_suite`` judges it."""
+    newest = {}
+    for run in runs:
+        if run.get("workflowName") == MAIN_CI_WORKFLOW and run.get("event") in ("push", "workflow_dispatch"):
+            sha = run.get("headSha")
+            if sha not in newest or (run.get("databaseId") or 0) > (newest[sha].get("databaseId") or 0):
+                newest[sha] = run
+    green = {sha for sha, run in newest.items()
+             if run.get("status") == "completed" and run.get("conclusion") == "success"}
+    if not tip or not since or not green:
         return None
-    for sha in (_try("git", "rev-list", "--first-parent", "--max-count=200", tip) or "").split():
+    for sha in (_try("git", "rev-list", "--first-parent", "--max-count=200", f"{since}..{tip}") or "").split():
         if sha in green and sha != exclude:
             return sha
     return None
@@ -290,7 +296,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         commits = [line for line in log.splitlines() if line]
         changed = (_try("git", "diff", "--name-only", f"{tag_sha}..{head}") or "").splitlines()
     runs = _gh_json("run", "list", "--repo", REPOSITORY, "--branch", "main", "--limit", "60",
-                    "--json", "workflowName,status,conclusion,headSha,event") or []
+                    "--json", "workflowName,status,conclusion,headSha,event,databaseId") or []
     ci = main_ci(head) if head else {"state": "missing", "url": None}
     edge = edge_state(runs, head)
     gates = {
@@ -303,7 +309,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
         where = f" ({ci['url']})" if ci.get("url") else ""
         pinned = "pinned " if head != tip else ""
         wait = " Wait for it to finish, or tag" if ci["state"] == "pending" else " Tag"
-        green = newest_green_main(runs, tip, exclude=head)
+        green = newest_green_main(runs, tip, tag_sha, exclude=head)
         newest = (f" The newest main commit with a green CI run is {green[:9]}: "
                   f"rerun with --candidate {green[:9]}.") if green else ""
         blockers.append(f"Main CI on {pinned}{head[:9]} is {ci['state']}{where}.{wait} a main commit "

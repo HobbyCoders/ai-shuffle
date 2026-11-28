@@ -285,17 +285,35 @@ def test_collect_waits_for_main_ci_on_the_candidate(tmp_path, monkeypatch, state
     assert f"Main CI on candidate: {state}" in srs.render(report)
 
 
-def test_a_red_candidate_names_the_newest_green_main_commit(tmp_path, monkeypatch):
-    older = "0" * 40
+def _ci_run(sha, conclusion="success", event="push", run_id=1):
+    return {"workflowName": "CI", "status": "completed", "conclusion": conclusion, "headSha": sha,
+            "event": event, "databaseId": run_id}
+
+
+def test_a_red_candidate_names_the_newest_green_unreleased_main_commit(tmp_path, monkeypatch):
+    older, released = "0" * 40, "e" * 40
     _fake_collect(monkeypatch, ci={"state": "cancelled", "url": None}, runs=[
-        {"workflowName": "CI", "status": "completed", "conclusion": "cancelled", "headSha": CANDIDATE, "event": "push"},
-        {"workflowName": "CI", "status": "completed", "conclusion": "success", "headSha": "f" * 40, "event": "pull_request"},
-        {"workflowName": "CI", "status": "completed", "conclusion": "success", "headSha": older, "event": "push"}])
+        _ci_run(CANDIDATE, "cancelled"), _ci_run("f" * 40, event="pull_request"), _ci_run(older)])
     real_try = srs._try
-    monkeypatch.setattr(srs, "_try", lambda *a: "\n".join([CANDIDATE, "f" * 40, older])
-                        if a[:3] == ("git", "rev-list", "--first-parent") else real_try(*a))
+    walked = []
+
+    def fake_try(*a):
+        if a[:3] == ("git", "rev-list", "--first-parent"):
+            walked.append(a[-1])
+            return "\n".join([CANDIDATE, "f" * 40, older])
+        return real_try(*a)
+    monkeypatch.setattr(srs, "_try", fake_try)
     blocker = srs.collect(["ServerWorker"], "away", str(tmp_path))["blockers"][0]
     assert blocker.endswith("The newest main commit with a green CI run is 000000000: rerun with --candidate 000000000.")
+    assert walked == [f"abc..{CANDIDATE}"]  # only commits after the last release tag
+    assert srs.newest_green_main([_ci_run(released)], CANDIDATE, None) is None
+
+
+def test_a_newer_red_run_on_a_commit_outweighs_its_older_green_one(monkeypatch):
+    monkeypatch.setattr(srs, "_try", lambda *a: "\n".join([CANDIDATE, "0" * 40]))
+    runs = [_ci_run(CANDIDATE, run_id=1), _ci_run(CANDIDATE, "failure", "workflow_dispatch", run_id=2),
+            _ci_run("0" * 40, run_id=3)]
+    assert srs.newest_green_main(runs, CANDIDATE, "abc") == "0" * 40
 
 
 def test_green_main_ci_is_the_only_suite_gate(tmp_path, monkeypatch):
