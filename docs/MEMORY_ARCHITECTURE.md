@@ -35,19 +35,26 @@ store is reported as busy, never taken for a filesystem without WAL.
 from `memories.json` directly. The first write (a save, a merge, maintenance,
 a delivery or a Recall usage write on an existing store) of a store whose
 database has no import marker imports `memories.json` (and a pre-3b
-`jit_deliveries.jsonl`) in one `BEGIN IMMEDIATE` transaction that also writes
-the marker (`sqlite.imported` in `meta`, with the counts). The document's
-`schema` and `owner` are checked first: a document written by a newer build or
-for another owner is never imported. A crash mid-import rolls the whole
-transaction back, so the next write starts again; a second process waits on
-the write lock and then finds the marker and imports nothing. A database
-without the marker is never treated as imported, and one whose marker cannot
-be read (a corrupt file) keeps failing; it is never read as an empty store.
-A store with neither file gets its database at its first write.
+`jit_deliveries.jsonl`) under `.memory.lock` into a private temporary file
+beside it, in one transaction that also writes the marker (`sqlite.imported`
+in `meta`, with the counts), and only then renames that file to `memory.db`.
+Every process that creates the database holds that lock, so none can find a
+`memory.db` appear under it mid-import. The
+document's `schema` and `owner` are checked first: a document written by a
+newer build or for another owner is never imported. A crash or failure
+mid-import leaves at most the temporary file, which is the only file a failed
+import removes; another process's `memory.db` and its `-wal`/`-shm` are never
+touched. A second process waits on the lock and then opens the database the
+first one imported. A database without the marker (a crashed attempt's) is
+moved aside to `memory.db.unimported-<time>` and the import runs again; one
+whose marker cannot be read
+(a corrupt file) keeps failing; it is never read as an empty store. A store
+with neither file gets its database at its first write. Health and `status`
+only read: they report `pending` or `migration_failed` and never import.
 `memories.json` and the delivery log are never modified or deleted: they stay
 as a backup for at least one release. If the import or the database setup
 fails (the file does not parse, a newer schema, another owner, a full disk),
-the files it created (`memory.db`, `-wal`, `-shm`) are removed, the store
+its temporary file is removed, the store
 serves the facts read-only from `memories.json` when it parses (and fails
 every read with a storage error when it does not), refuses every write,
 Recall usage and delivery row with "Memory storage could not be upgraded (…);
@@ -57,14 +64,15 @@ succeeds.
 
 **Downgrade.** `python -m fluid.codemode.fact_db export <store dir> <file>`
 writes a `memories.json` document an older build reads (live, archive,
-revisions, tombstones, plus the deletion filter older builds expect).
-`python -m fluid.codemode.fact_db downgrade <store dir>` (app stopped) first
-copies the existing `memories.json` (the pre-3b backup) to
-`memories.json.pre-downgrade-<time>`, then moves `memory.db` and its `-wal`
-and `-shm` files to `memory.db.downgraded-<time>` (retrying a few times while
-Windows reports the file in use), and only then writes the document in place,
-so an older build reads it and a newer one imports it again. If a move or the
-write fails, the files already moved are put back and the command reports
+revisions, tombstones, plus the deletion filter older builds expect over the
+tombstones beyond the newest 256). `python -m fluid.codemode.fact_db downgrade
+<store dir>` (app stopped) first moves `memory.db` and its `-wal`, `-shm` and
+`-journal` files to `memory.db.downgraded-<time>` (retrying a few times while
+Windows reports the file in use), then copies the existing `memories.json`
+(the pre-3b backup) to `memories.json.pre-downgrade-<time>`, and only then
+writes the document in place, so an older build reads it and a newer one
+imports it again. If a move, the copy or the write fails, the files already
+moved are put back, the copy is removed, and the command exits 1 reporting
 that the store is unchanged. `status <store dir>` prints the storage state. Changes an
 older build makes to `memories.json` while `memory.db` exists are not seen by
 a newer build; downgrade first.
@@ -491,9 +499,10 @@ worker does not (or its presence is unknown), its exports (the per-fact
 records and the whole-store record alike) are trimmed to 1.5 MiB: live facts
 and the newest 256 tombstones always, then archived facts, owner-kept ones
 first and then by the later of their last change and retirement, so a fact
-retired just now still travels. The deletion filter still covers every
-tombstone, so the shorter list resurrects nothing. Once every worker
-advertises the capability, exports carry everything. The trade-off: while an
+retired just now still travels. The deletion filter covers the tombstones
+left off that list, so the shorter list resurrects nothing. Once every worker
+advertises the capability, exports carry everything and no filter is built
+(only one imported from an older store is passed on, unchanged). The trade-off: while an
 older worker is on the network, the oldest archived facts of a very large store
 reach no other worker until it updates (main did the same by dropping them
 for good); nothing is deleted, and an older worker never refuses a whole
@@ -551,13 +560,24 @@ kept and replicated for 365 days with no count limit (phase 3b replaced the
 fixed-size Bloom filter). A store imported from an older version keeps its
 filter read-only, so what it fenced stays fenced; it is never grown. On the
 wire nothing changed: the barrier record still carries tombstones and a
-`forgotten` filter, built at publish time from the tombstone rows and the
-imported filter, so an older worker (which keeps only its newest 256
-tombstones) still never resurrects a forgotten fact. A filter received from an
-older worker is not stored: it fences every record for that owner in the same
-apply batch, whichever peer sent it and in any order, and a fact it drops gets
-an ID-only tombstone row, so a later copy from another peer cannot bring it
-back. Storage errors while applying (a busy store, a full disk, a store that
+`forgotten` filter. While an older worker (which keeps only its newest 256
+tombstones) is on the network, that filter is built at publish time from the
+imported filter and the tombstones beyond the 256 it lists, and stops taking
+values at 10% of its bits set (then four hashes match a never-forgotten fact
+about once in 10,000), so the older worker still never resurrects a forgotten
+fact. A Bloom match is probabilistic, so it never deletes anything and never
+becomes a tombstone: a tombstone replicates, and a false positive would then
+delete a real fact, owner-kept ones included, on every worker. A receiver
+applies only the filters of workers that do not advertise
+`memory_sqlite_store` (a 3b worker's deletions all travel as rows). Such a
+filter fences every arriving record for that owner, in this batch and in
+later ones, whichever older or newer peer sent the record: whole-store
+records are merged after every filter of the batch is collected, together
+with each older peer's standing barrier. A fenced copy is kept out of that
+merge, and the store notes its ID locally (`fenced`, never exported, kept for
+365 days, at most 4,096) so a later copy without a filter in view stays out
+too. A fact the receiver already holds is never removed by a filter match.
+Storage errors while applying (a busy store, a full disk, a store that
 failed to import) are retried on the next publish pass; only a malformed
 record is refused for good. A restore gets a new ID.
 Transport operation-log retention is owned by the network subsystem.
@@ -598,8 +618,8 @@ rename an open file).
 | Maintenance (expiry, retirement, every five minutes) | App server | Structural write under `.memory.lock`; nothing is written when nothing changed |
 | Memory health | App server | Lock-free reads; `memory_health.json` has its own atomic write |
 | Code-mode kernel | Kernel subprocess | Does not open the store; memory tools run in the agent's process |
-| `python -m fluid.codemode.fact_db` | Its own process | `status`/`export` read; `downgrade` needs the app stopped |
-| First open (import) | Whichever process opens first | One `BEGIN IMMEDIATE` transaction with the marker (see Migration) |
+| `python -m fluid.codemode.fact_db` | Its own process | `status`/`export` only read (never import); `downgrade` needs the app stopped |
+| First writing open (import) | Whichever process writes first | `.memory.lock`, the import in a private temporary file, then a rename to `memory.db` (see Migration); a failure removes only that temporary file |
 
 ## Forgetting and migration
 
