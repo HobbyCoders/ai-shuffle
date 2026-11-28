@@ -20,8 +20,10 @@ imports do not leak into the vendored library.
 Since Memory v3 phase 3b each store is `<store root>/memory.db` (stdlib
 `sqlite3`). Tables: `facts` (one row per live or archived fact: id, state,
 list position, scope, protected and always flags, `updated_at`, `uses`,
-`last_recalled_at`, `last_delivered_at`, and the fact's JSON body; the usage
-columns are only ever raised, with `MAX()`), `revisions` (retained earlier
+`last_recalled_at`, `last_delivered_at`, and the fact's JSON body, which
+holds every other field, including metadata such as `when`, `triggers`,
+`summary` and their per-field stamps; the usage columns are only ever
+raised, with `MAX()`), `revisions` (retained earlier
 values, one row each), `tombstones` (one row per forgotten fact), `deliveries`
 (just-in-time deliveries, re-arms and Recalls: local usage, never replicated)
 and `meta` (owner, store id, budgets, loss counters, the schema version, the

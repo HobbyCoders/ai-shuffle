@@ -567,3 +567,57 @@ def test_only_a_legacy_export_is_trimmed_and_it_keeps_what_matters(tmp_path, mon
     assert full["forgotten"] == ""
     # A full export is never trimmed, whatever the budget.
     assert len(store._facts.export()["entries"]) == len(full["entries"])
+
+
+# ─── act-time summaries on SQLite ────────────────────────────────────────
+
+RULE = "Deploys wait until CI is green. A deploy started mid-run ships an untested build."
+RULE_WHEN = "When deploying the web app"
+RULE_SUMMARY = "Not while CI is still running; wait for green first."
+
+
+def _save_rule(store, **extra):
+    return store.save_memory(RULE, scope="global", when=RULE_WHEN,
+                             triggers={"command": ["make deploy"]}, summary=RULE_SUMMARY, **extra)
+
+
+def _stored(root, fact_id, part="entries"):
+    from tests.fixtures.memory_doc import read_doc
+    return next(e for e in read_doc(root)[part] if e["id"] == fact_id)
+
+
+def test_a_summary_survives_reopening_retiring_and_coming_back(tmp_path):
+    fact = _save_rule(SkillStore(tmp_path), durable=True)
+    stamp = _stored(tmp_path, fact.id)["summary_at"]
+    fact_db.release_connections()
+    [reopened] = SkillStore(tmp_path).memories()
+    assert reopened.summary == RULE_SUMMARY and stamp
+    store = SkillStore(tmp_path)
+    assert store.retire_memory(fact.id, reason="unused", expected_revision=1)
+    archived = _stored(tmp_path, fact.id, "archived")
+    assert archived["summary"] == RULE_SUMMARY and archived["summary_at"] == stamp
+    back = store.save_memory(RULE, scope="global", memory_id=fact.id,
+                             expected_revision=archived["revision"], durable=True)
+    assert back.summary == RULE_SUMMARY and _stored(tmp_path, fact.id)["summary_at"] == stamp
+
+
+def test_an_imported_store_keeps_its_summaries(tmp_path):
+    src = tmp_path / "src"
+    fact = _save_rule(SkillStore(src), protected=True)
+    want = _stored(src, fact.id)
+    root = tmp_path / "b"
+    root.mkdir()
+    (root / "memories.json").write_text(json.dumps(export_document(src)), encoding="utf-8")
+    fact_db.release_connections()
+    SkillStore(root)._facts.snapshot()  # the first locked read imports
+    got = _stored(root, fact.id)
+    assert (got["summary"], got["summary_at"]) == (want["summary"], want["summary_at"])
+    assert [m.summary for m in SkillStore(root).memories()] == [RULE_SUMMARY]
+
+
+def test_downgrade_writes_the_summaries_back(tmp_path):
+    fact = _save_rule(SkillStore(tmp_path), protected=True)
+    stamp = _stored(tmp_path, fact.id)["summary_at"]
+    assert fact_db.main(["downgrade", str(tmp_path)]) == 0
+    [entry] = json.loads((tmp_path / "memories.json").read_text(encoding="utf-8"))["entries"]
+    assert (entry["summary"], entry["summary_at"]) == (RULE_SUMMARY, stamp)

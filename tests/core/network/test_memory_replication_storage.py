@@ -200,3 +200,42 @@ def test_a_malformed_barrier_does_not_fence_other_records(root):
     memory_records._note_barrier(barriers, {"owner": "local", "forgotten": "zz"})
     memory_records._note_barrier(barriers, {"owner": "local", "forgotten": "00" * 3})
     assert barriers == {}
+
+
+RULE = "Deploys wait until CI is green. A deploy started mid-run ships an untested build."
+RULE_SUMMARY = "Not while CI is still running; wait for green first."
+
+
+def _rule_peer(path):
+    store = SkillStore(path)
+    store.save_memory(RULE, scope="global", protected=True, when="When deploying the web app",
+                      triggers={"command": ["make deploy"]}, summary=RULE_SUMMARY)
+    return store
+
+
+@pytest.mark.parametrize("kind", ["memory-fact", "memory-v2"])
+def test_a_peers_summary_arrives_through_either_record_kind(root, tmp_path, monkeypatch, kind):
+    group, payload = _records(_rule_peer(tmp_path / "b"))
+    rows = dict(group) if kind == "memory-fact" else {"memory-v2:peer-b:h": payload}
+    _apply(monkeypatch, rows, rows, {"peer-b": NEW if kind == "memory-fact" else None})
+    [copy] = SkillStore(root).memories()
+    assert copy.summary == RULE_SUMMARY
+    stored = SkillStore(root)._facts.export()["entries"][0]
+    assert stored["summary_at"] == payload["entries"][0]["summary_at"]
+
+
+def test_a_peers_unscreened_summary_never_clears_the_local_one(root, tmp_path, monkeypatch):
+    peer = _rule_peer(tmp_path / "b")
+    group, _ = _records(peer)
+    _apply(monkeypatch, dict(group), dict(group), {"peer-b": NEW})
+    time.sleep(0.01)
+    peer.save_memory(RULE, scope="global", protected=True, memory_id=peer.memories()[0].id,
+                     expected_revision=1, summary="Wait for green CI first.")
+    group, _ = _records(peer)
+    [(rid, record)] = group
+    record = json.loads(json.dumps(record))
+    record["entries"][0]["summary"] = "Push with ghp_" + "a1B2" * 9  # fails the screen
+    _apply(monkeypatch, {rid: record}, {rid: record}, {"peer-b": NEW})
+    [copy] = SkillStore(root).memories()
+    assert copy.summary == RULE_SUMMARY
+    assert "ghp_" not in json.dumps(SkillStore(root)._facts.export())
