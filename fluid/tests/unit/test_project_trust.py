@@ -1017,6 +1017,8 @@ def test_a_current_claude_code_passes_the_bound_check(project: Path, capsys, ver
 def test_exclude_patterns_match_only_the_named_folders(tmp_path: Path) -> None:
     from fluid.engine.delegated import project_bound_excludes
 
+    if os.name == "nt":
+        pytest.skip("Windows forbids ? and * in names; the Windows form is checked below")
     odd = tmp_path / "a (copy) [1] {x} what? st*r" / "proj"
     odd.mkdir(parents=True)
     patterns = project_bound_excludes(odd, windows=False)

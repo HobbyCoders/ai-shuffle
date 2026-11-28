@@ -25,6 +25,14 @@ def _soon(minutes=30):
     return datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
 
+def _next_wall_tick():
+    """Wait until time.time() moves on. On Windows it steps every 15.6 ms, so a
+    pass and a resume noticed right after it can otherwise share one timestamp."""
+    start = time.time()
+    while time.time() == start:
+        time.sleep(0.001)
+
+
 def _pair(workers):
     a, b = workers("owner"), workers("mirror")
     with a.active():
@@ -269,6 +277,7 @@ async def test_offline_peer_does_not_stop_wakes(workers, dial, sleep):
                 # The machine sleeps after that dial: it no longer counts on resume.
                 # A long sleep shows as a gap between sweeps; a short one as wall
                 # time running ahead of monotonic time (which a suspend stops).
+                _next_wall_tick()
                 if sleep == "long":
                     transport._gate_checked_at = (time.time() - transport.RESUME_GAP_SECONDS - 1,
                                                   transport._awake_seconds())
@@ -333,7 +342,7 @@ async def test_pass_spanning_a_sleep_does_not_count(workers):
             # notices on resume, before this pass records its outcome.
             slept.append(True)
             with b.active():
-                time.sleep(0.01)
+                _next_wall_tick()
                 transport._gate_checked_at = (time.time() - 20, transport._awake_seconds() - 1)
                 assert not transport.caught_up_since_start()
         return response
@@ -345,7 +354,7 @@ async def test_pass_spanning_a_sleep_does_not_count(workers):
             await link.sync_once(client, engine.context())
             assert slept and link.last_pass[1] == transport.PASS_CURRENT
             assert not transport.caught_up_since_start()
-            time.sleep(0.01)
+            _next_wall_tick()
             await link.sync_once(client, engine.context())
             assert transport.caught_up_since_start()
 

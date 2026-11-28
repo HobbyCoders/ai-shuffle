@@ -212,9 +212,12 @@ async def test_watch_is_not_admitted_at_the_limit(
     from app.core import watch_manager, watches
     from app.db import watches as watches_db
 
+    # Name this worker: a Windows or desktop test host is not always-on, so
+    # automatic placement would refuse the watch before the limit is checked.
     row = watches.prepare(
         assistant_fixture["id"],
-        {"description": "At cap", "source": {"kind": "schedule", "interval_seconds": 60}},
+        {"description": "At cap", "source": {"kind": "schedule", "interval_seconds": 60},
+         "worker_id": service.assistant_id()},
     )
     wid = watches_db.create(**row)
     set_limits(daily_spend_limit_usd=1)

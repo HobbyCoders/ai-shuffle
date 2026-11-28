@@ -113,7 +113,7 @@ def install(root):
             # Before Fluid is installed, this is the standalone build/installer
             # environment, not an agent tool's environment with injected secrets.
             env = dict(os.environ)
-        deadline = time.monotonic() + 180
+        started = time.monotonic()
         result = subprocess.run([
             sys.executable, "-m", "pip", "install", "--only-binary=:all:",
             "--require-hashes", "--no-deps", "--timeout", "30", "--retries", "0",
@@ -121,7 +121,9 @@ def install(root):
         ], cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, env=env)
         # Verify in the target interpreter, not this process's import cache.
         # The pip install and native-import check share one 180-second budget.
-        remaining = deadline - time.monotonic()
+        # Subtract elapsed time from the budget: (start + 180) - now can round
+        # to slightly over 180 when the monotonic clock reads a large value.
+        remaining = 180 - (time.monotonic() - started)
         installed = False
         if result.returncode == 0 and remaining > 0:
             probe = subprocess.run(
