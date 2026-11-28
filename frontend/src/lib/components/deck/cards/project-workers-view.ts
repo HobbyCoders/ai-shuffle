@@ -114,7 +114,7 @@ export function repositorySlug(remote: string): string {
 	// remote that names a port) or scp-style "git@host:"; the path follows either.
 	const path = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
 		? trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*\/?/i, '')
-		: trimmed.replace(/^(?:\[[^\]]*\]|[^/\\:]+):\d+(?=[/\\]|$)/, '').replace(/^[^/\\:]+:/, '');
+		: trimmed.replace(/^(?:\[[^\]]*\]|[^/\\:]+):\d+(?=[/\\]|$)/, '').replace(/^[^/\\:[]+:/, '');
 	const parts = path.split(/[/\\]/).filter(Boolean);
 	return parts.length >= 2 ? parts.slice(-2).join('/') : remote.trim();
 }

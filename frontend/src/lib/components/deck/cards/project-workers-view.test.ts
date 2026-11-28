@@ -270,6 +270,8 @@ describe('worker table status cell', () => {
 		['git.example.com:2222/demo', 'git.example.com:2222/demo'],
 		['git.example.com:2222/acme/demo', 'acme/demo'],
 		['[::1]:8080/demo', '[::1]:8080/demo'],
+		['[::1]/demo', '[::1]/demo'],
+		['[2001:db8::1]/acme/demo', 'acme/demo'],
 		['demo', 'demo']
 	])('names a repository %s by its last two path parts', (remote, slug) => {
 		expect(repositorySlug(remote)).toBe(slug);
