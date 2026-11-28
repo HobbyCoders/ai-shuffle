@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from fluid.codemode.skills import SkillStore
 from fluid.codemode.facts import MAX_PROMPT_CHARS
-from fluid.codemode.skills import MAX_MEMORIES
+from fluid.codemode.facts import MAX_AGENT_LIVE as MAX_MEMORIES
 
 
 def seeded(tmp_path):

@@ -1,8 +1,14 @@
-"""Capacity distinguishes actionable refusals, recent cleanup and quiet history."""
+"""Capacity distinguishes actionable refusals, recent cleanup and quiet history.
+
+The archive has no size limit: the only automatic permanent deletion is an
+archived agent fact removed ARCHIVE_RETENTION after it expired. These tests
+drive that real path (facts saved in the past, then a save today runs the
+maintenance that removes them) and read the loss record it writes.
+"""
 import time
 
 import pytest
-from fluid.codemode import facts, memory_health, skills
+from fluid.codemode import facts, memory_health
 from fluid.codemode.skills import SkillStore
 
 
@@ -10,22 +16,35 @@ def capacity(result):
     return next(s for s in result["signals"] if s["id"] == "capacity")
 
 
+def lose(store, monkeypatch, count, topic="receipt"):
+    """Make ``count`` real automatic deletions: save agent facts long enough
+    ago that they expired and outlived the archive's retention, then save one
+    fact today so maintenance removes them."""
+    real = time.time
+    then = real() - facts.AGENT_TTL - facts.ARCHIVE_RETENTION - 2 * memory_health.DAY
+    monkeypatch.setattr(facts.time, "time", lambda: then)
+    for i in range(count):
+        store.save_memory(f"Old backend {topic} number {i}", durable=True)
+    monkeypatch.setattr(facts.time, "time", real)
+    store.save_memory(f"Current backend {topic} after {count} old ones", durable=True)
+
+
 def fill(store, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_DURABLE", 2)
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 2)
-    for i in range(6):
+    lose(store, monkeypatch, 2)
+    for i in range(3):
         store.save_memory(f"Durable backend receipt number {i}", durable=True)
 
 
-def test_real_overflow_cannot_report_room_to_spare(tmp_path, monkeypatch):
+def test_recent_cleanup_cannot_report_room_to_spare(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
     s = capacity(memory_health.check(store))
     assert s["state"] == "attention" and s["alert"]
-    assert s["detail"]["archive_dropped_total"] == 2
-    assert s["detail"]["archive_cap"] == 2
+    assert s["detail"]["archive_expired_total"] == 2
+    assert s["detail"]["archive_dropped_total"] == 0
     assert "recorded 2 permanent deletions" in s["reason"]
-    assert "2 at the archive limit; 0 on expiry" in s["reason"]
+    assert "(a year after they expired)" in s["reason"]
+    assert "archive limit" not in s["reason"]
     assert "not the number of distinct facts lost" in s["reason"]
     assert "Recall cannot recover a deleted copy" in s["reason"]
     assert "Deletions were recorded within the past 3 days" in s["reason"]
@@ -33,65 +52,35 @@ def test_real_overflow_cannot_report_room_to_spare(tmp_path, monkeypatch):
     assert not s["detail"]["archive_loss_counter_reset"]
 
 
+def test_an_older_builds_overflow_count_is_still_reported(tmp_path):
+    _, detail = memory_health._archive_loss_samples(
+        {"losses": {"archive_dropped": 5, "expired_archived": 2}}, time.time(), {})
+    s = memory_health._capacity_signal(SkillStore(tmp_path), [], [], detail)
+    assert "recorded 7 permanent deletions" in s["reason"]
+    assert "5 at an older version's archive limit; 2 a year after they expired" in s["reason"]
+
+
+def test_the_archive_has_no_size_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(facts, "MAX_AGENT_LIVE", 2)
+    store = SkillStore(tmp_path)
+    for i in range(12):
+        store.save_memory(f"Durable backend receipt number {i}", durable=True)
+    assert len(store.memories()) == 2
+    assert len(store.archived_memories()) == 10
+    assert "losses" not in store._facts.snapshot()
+
+
 def test_loss_counters_are_local_not_imported_from_replicas(tmp_path, monkeypatch):
     source = SkillStore(tmp_path / "source")
     fill(source, monkeypatch)
     packet = source._facts.export()
     assert "losses" not in packet
-    assert source._facts.snapshot()["losses"]["archive_dropped"] == 2
+    assert source._facts.snapshot()["losses"]["expired_archived"] == 2
 
     replica = SkillStore(tmp_path / "replica")
     replica._facts.merge(packet)
     # The source's two deletion events are local accounting, not replicated.
-    assert replica._facts.snapshot().get("losses", {}).get("archive_dropped", 0) == 0
-
-
-def test_stale_replica_replay_does_not_add_archive_loss_events(tmp_path, monkeypatch):
-    source = SkillStore(tmp_path / "source")
-    fill(source, monkeypatch)
-    packet = source._facts.export()
-    replica = SkillStore(tmp_path / "replica")
-    replica._facts.merge(packet)
-    replica.save_memory("A newer durable receipt on the replica", durable=True)
-    retained_ids = {e.id for e in replica.memories() + replica.archived_memories()}
-    first = memory_health.check(replica)
-    assert capacity(first)["detail"]["archive_dropped_total"] == 1
-
-    # Replaying a packet must not report new loss when the retained facts
-    # do not change: the same deleted copy is not counted twice (#956).
-    for _ in range(10):
-        replica._facts.merge(packet)
-        assert {e.id for e in replica.memories() + replica.archived_memories()} == retained_ids
-    result = memory_health.check(
-        replica, now=first["checked_at"] + memory_health.LOSS_SAMPLE_EVERY, previous=first)
-    signal = capacity(result)
-    assert signal["state"] == "attention" and signal["alert"]
-    assert signal["detail"]["archive_dropped_total"] == 1
-    assert signal["detail"]["archive_dropped_in_window"] == 0
-    assert "not the number of distinct facts lost" in signal["reason"]
-    assert "Recall cannot recover a deleted copy" in signal["reason"]
-
-
-def test_replay_neither_counts_nor_refreshes_time_but_a_new_distinct_loss_does(tmp_path, monkeypatch):
-    source = SkillStore(tmp_path / "source")
-    fill(source, monkeypatch)
-    packet = source._facts.export()
-    replica = SkillStore(tmp_path / "replica")
-    replica._facts.merge(packet)
-    replica.save_memory("A newer durable receipt on the replica", durable=True)
-    losses = replica._facts.snapshot()["losses"]
-    assert losses["archive_dropped"] == 1
-    stamp = losses["last_archive_dropped_at"]
-    for _ in range(10):
-        replica._facts.merge(packet)
-    losses = replica._facts.snapshot()["losses"]
-    # Replays of an already-deleted copy leave both the count and the time,
-    # so a quiet store does not look as if it were still losing facts.
-    assert losses["archive_dropped"] == 1 and losses["last_archive_dropped_at"] == stamp
-    # A genuinely new deletion is still counted and stamped.
-    replica.save_memory("A second newer durable receipt on the replica", durable=True)
-    losses = replica._facts.snapshot()["losses"]
-    assert losses["archive_dropped"] == 2 and losses["last_archive_dropped_at"] >= stamp
+    assert replica._facts.snapshot().get("losses", {}).get("expired_archived", 0) == 0
 
 
 class Clock:
@@ -125,7 +114,7 @@ def test_expired_copy_replayed_by_a_replica_is_counted_once(tmp_path, monkeypatc
     packet = source._facts.export()
     replica = SkillStore(tmp_path / "replica")
     replica._facts.merge(packet)
-    clock.now += facts.INFERRED_TTL
+    clock.now += facts.AGENT_TTL
     clock.past_retention()
     for _ in range(5):
         replica._facts.merge(packet)
@@ -149,7 +138,6 @@ FLOOD = 2100
 
 
 def test_expired_copies_replayed_after_many_later_deletions_stay_counted_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
     clock = Clock(monkeypatch)
     replica = SkillStore(tmp_path)
     first = _packet(replica, "peer-a", [_copy("peer-a", n, clock.now, clock.now + memory_health.DAY, "first")
@@ -172,45 +160,9 @@ def test_expired_copies_replayed_after_many_later_deletions_stay_counted_once(tm
     assert _held(replica) == set()
 
 
-def test_overflow_copies_replayed_after_many_later_deletions_stay_counted_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 20)
-    clock = Clock(monkeypatch)
-    replica = SkillStore(tmp_path)
-    later = clock.now + 365 * memory_health.DAY
-    # The first packet's older copies are held, then newer copies push them
-    # out at the archive limit.
-    first = _packet(replica, "peer-a", [_copy("peer-a", n, clock.now - 9 * memory_health.DAY, later, "stale")
-                                        for n in range(40)])
-    replica._facts.merge(first)
-    assert len(_held(replica)) == 40
-    replica._facts.merge(_packet(replica, "peer-k", [_copy("peer-k", n, clock.now, later, "kept")
-                                                     for n in range(60)]))
-    assert replica._facts.snapshot()["losses"]["archive_dropped"] == 40
-    retained = _held(replica)
-    assert len(retained) == 60
-    # Many more held copies are dropped at the limit later on.
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
-    replica._facts.merge(_packet(replica, "peer-b", [
-        _copy("peer-b", n, clock.now - 8 * memory_health.DAY, later, "flood") for n in range(FLOOD)]))
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 20)
-    clock.now += 1
-    losses = replica._facts.snapshot()["losses"]
-    total, stamp = losses["archive_dropped"], losses["last_archive_dropped_at"]
-    assert total == 40 + FLOOD
-    assert _held(replica) == retained
-    for _ in range(3):
-        clock.now += 1
-        replica._facts.merge(first)
-        losses = replica._facts.snapshot()["losses"]
-        assert losses["archive_dropped"] == total
-        assert losses["last_archive_dropped_at"] == stamp
-        assert _held(replica) == retained
-
-
 def test_new_losses_still_count_after_two_hundred_thousand_deletions(tmp_path, monkeypatch):
     # A lifetime replay record of fixed size (the round-1 filter) saturates
     # well before this and then takes new losses for replays.
-    monkeypatch.setattr(skills, "MAX_ARCHIVED_MEMORIES", 3000)
     clock = Clock(monkeypatch)
     replica = SkillStore(tmp_path)
     batch, rounds = 2500, 81
@@ -232,15 +184,14 @@ def test_new_losses_still_count_after_two_hundred_thousand_deletions(tmp_path, m
 
 
 def test_loss_record_keeps_no_replay_memory_and_survives_a_restart(tmp_path, monkeypatch):
-    clock = Clock(monkeypatch)
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
-    for i in range(4):
-        store.save_memory(f"Extra durable backend receipt {i}", durable=True)
+    lose(store, monkeypatch, 4, topic="extra receipt")
+    clock = Clock(monkeypatch)
     packet = store._facts.export()
     losses = store._facts.snapshot()["losses"]
-    assert set(losses) == {"archive_dropped", "last_archive_dropped_at"}
-    assert losses["archive_dropped"] == 6
+    assert set(losses) == {"expired_archived", "last_expired_archived_at"}
+    assert losses["expired_archived"] == 6
     reopened = SkillStore(tmp_path)
     clock.now += 1
     for _ in range(3):
@@ -271,10 +222,10 @@ def test_held_fact_replaced_and_dropped_counts_but_its_replays_do_not(tmp_path, 
     assert replica._facts.snapshot()["losses"]["expired_archived"] == 3
 
 
-def test_repeated_local_save_deduplicates_before_archive_eviction(tmp_path, monkeypatch):
+def test_repeated_local_save_deduplicates_and_records_no_loss(tmp_path, monkeypatch):
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
-    existing = store.archived_memories()[0]
+    existing = store.memories()[0]
     before = store._facts.snapshot()
     ids = {e["id"] for e in before["entries"] + before["archived"]}
     for _ in range(10):
@@ -290,14 +241,14 @@ def test_loss_growth_is_sampled_and_quiet_full_tiers_do_not_alert_forever(tmp_pa
     fill(store, monkeypatch)
     now = time.time()
     first = memory_health.check(store, now=now)
-    store.save_memory("One more backend receipt", durable=True)
+    lose(store, monkeypatch, 1, topic="later receipt")
     second = memory_health.check(store, now=now + memory_health.LOSS_SAMPLE_EVERY, previous=first)
     assert capacity(second)["state"] == "attention"
     assert capacity(second)["detail"]["archive_dropped_in_window"] == 1
     assert len(second["archive_loss_samples"]) == 2
     quiet = capacity(memory_health.check(store, now=now + 30 * memory_health.DAY, previous=second))
     assert quiet["state"] == "healthy" and not quiet["alert"]
-    assert quiet["detail"]["archive_dropped_total"] == 3
+    assert quiet["detail"]["archive_expired_total"] == 3
     assert "recorded 3 permanent deletions" in quiet["reason"]
     assert "No further archive deletions were recorded in the past 3 days" in quiet["reason"]
 
@@ -306,7 +257,7 @@ def test_counter_reset_is_unknown_growth_not_a_negative_loss(tmp_path, monkeypat
     store = SkillStore(tmp_path)
     fill(store, monkeypatch)
     previous = memory_health.check(store)
-    previous["archive_loss_samples"] = [[time.time() - 100, 999]]
+    previous["archive_loss_samples"] = [[time.time() - 100, 0, 999]]
     s = capacity(memory_health.check(store, previous=previous))
     assert s["detail"]["archive_loss_counter_reset"]
     assert s["detail"]["archive_dropped_in_window"] is None
@@ -338,10 +289,12 @@ def test_expiry_deletions_are_counted_through_actual_maintenance(tmp_path, monke
     now = time.time() + 1000 * memory_health.DAY
     monkeypatch.setattr(facts.time, "time", lambda: now)
     s = capacity(memory_health.check(store, now=now))
-    assert s["detail"]["archive_dropped_total"] == 2
-    assert s["detail"]["archive_expired_total"] == 4  # two live + two already archived
+    assert s["detail"]["archive_dropped_total"] == 0
+    # The two old ones, then every fact saved today: idle past its TTL and
+    # then a year in the archive.
+    assert s["detail"]["archive_expired_total"] == 6
     assert s["detail"]["archive_deleted_total"] == 6
-    assert "2 at the archive limit; 4 on expiry" in s["reason"]
+    assert "(a year after they expired)" in s["reason"]
     assert s["alert"]
 
 
@@ -404,7 +357,7 @@ def test_archive_cleanup_excludes_live_and_archived_owner_kept_facts(tmp_path, m
     live = store.save_memory("The owner's independent explicit rule", protected=True)
     fill(store, monkeypatch)
     snapshot = store._facts.snapshot()
-    assert snapshot["losses"]["archive_dropped"] > 0
+    assert snapshot["losses"]["expired_archived"] > 0
     assert old.text in {e["text"] for e in snapshot["archived"]}
     assert {new.text, live.text} <= {e["text"] for e in snapshot["entries"]}
     future = time.time() + 1000 * memory_health.DAY

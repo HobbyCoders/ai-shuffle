@@ -90,18 +90,16 @@ def session_memory(session_id: str | None, cwd: str | None = None):
 
 def stores():
     """Existing stores only; no user-controlled path is accepted."""
-    import json
-
+    from fluid.codemode.facts import owner_store_dirs, store_exists
     from fluid.codemode.skills import SkillStore
     root = skills_root()
-    if (root / "memories.json").exists():
+    if store_exists(root):
         yield store_for_owner("local")
-    for path in (root / ".users").glob("*/memories.json"):
+    for path, owner in owner_store_dirs(root):
         try:
-            owner = json.loads(path.read_text(encoding="utf-8"))["owner"]
-            if owner_root(owner) == path.parent:
-                yield SkillStore(path.parent, owner=owner)
-        except (OSError, ValueError, KeyError):
+            if owner_root(owner) == path:
+                yield SkillStore(path, owner=owner)
+        except ValueError:
             continue
 
 
@@ -327,8 +325,9 @@ def owner_health() -> dict:
     import time
 
     from fluid.codemode import memory_health
+    from fluid.codemode.facts import store_exists
     root = skills_root()
-    if not (root / "memories.json").exists():
+    if not store_exists(root):
         return {"state": "healthy", "checked_at": None, "signals": [], "repairs": []}
     store = store_for_owner("local")
     state = memory_health.load_state(store)

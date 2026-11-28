@@ -10,7 +10,9 @@ import pytest
 
 from fluid.codemode.continual import Synthesizer
 from fluid.codemode.journal import ToolJournal
-from fluid.codemode.skills import MAX_MEMORIES, SkillStore
+from fluid.codemode.facts import MAX_AGENT_LIVE as MAX_MEMORIES
+from fluid.codemode.skills import SkillStore
+from tests.fixtures.memory_doc import read_doc
 from fluid.context.compiler import PromptInputs, compile_prompt
 from fluid.messages import Message
 from fluid.messages.content import Text, ToolResultBlock, ToolUseBlock
@@ -63,7 +65,7 @@ def test_memories_cap_archives_oldest(tmp_path) -> None:
     assert "durable fact number 0" not in texts  # oldest archived, not kept
     archive = tmp_path / ".archive" / "memories-archive.jsonl"
     assert not archive.exists()
-    archived = json.loads(store.memories_path.read_text())["archived"]
+    archived = read_doc(tmp_path)["archived"]
     assert any(e["text"] == "durable fact number 0" for e in archived)
 
 
@@ -90,7 +92,7 @@ def test_compiler_includes_learner_memory_section(tmp_path) -> None:
     ))
     memory_sections = [
         s for s in compiled.of_kind("memory") if s.path is not None
-        and s.path.endswith("memories.json")
+        and s.path.endswith("memory.db")
     ]
     assert len(memory_sections) == 1
     assert "A durable fact" in memory_sections[0].text
@@ -103,7 +105,7 @@ def test_compiler_includes_learner_memory_section(tmp_path) -> None:
     ))
     assert not [
         s for s in compiled.of_kind("memory") if s.path is not None
-        and s.path.endswith("memories.json")
+        and s.path.endswith("memory.db")
     ]
 
 
@@ -619,21 +621,18 @@ def test_curation_leaves_unstamped_skills_alone(tmp_path) -> None:
 # ─── bounded storage (harness-owned reaping) ─────────────────────────────────
 
 
-def test_memory_archive_is_capped(tmp_path, monkeypatch) -> None:
-    from fluid.codemode import skills as skills_mod
-
-    monkeypatch.setattr(skills_mod, "MAX_ARCHIVED_MEMORIES", 5)
+def test_memory_archive_has_no_size_limit(tmp_path) -> None:
     store = SkillStore(tmp_path)
     for i in range(MAX_MEMORIES + 12):
         store.save_memory(f"durable fact number {i}")
     before = [m.text for m in store.archived_memories()]
-    assert len(before) == 5  # ingress enforces the cap
+    assert len(before) == 12  # every displaced fact is kept, none dropped
 
     dropped = store.reap()
     assert dropped.get("memory_archive", 0) == 0
     after = [m.text for m in store.archived_memories()]
-    assert after == before[-5:]  # newest archived entries survive
-    # Recall still searches what is left.
+    assert after == before
+    # Recall still searches the archive.
     (hit, archived), = store.search_memories(after[-1], limit=1)
     assert archived and hit.text == after[-1]
 

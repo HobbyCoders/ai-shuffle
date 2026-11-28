@@ -16,16 +16,16 @@ Alongside the skills the store keeps:
   ``skills.<name>``) and the synthesis cursor (how far into the journal the
   synthesizer has already looked). Usage counts exist so curation can favor
   skills that earn their keep and prune ones that never get imported.
-- ``memories.json`` — the learner's declarative half: short remembered facts
-  (stated preferences, environment conventions, corrections) rendered into
-  every session's prompt as a frozen snapshot (``render_memory_section``).
-  Written through :class:`fluid.codemode.facts.FactStore` by the synthesizer,
-  by the ``Remember`` builtin (``save_memory`` directly: explicit when the
-  user asked, durable when the agent chose to) and by runtime-fact
-  provisioning. Each tier has a live cap; the least useful entries move into
-  the file's ``archived`` list instead of growing without bound or refusing
-  a save. The ``Recall`` builtin searches live and archived entries and
-  feeds the usage counters that drive that eviction.
+- ``memory.db`` — the declarative half: short remembered facts (stated
+  preferences, environment conventions, corrections) rendered into every
+  session's prompt as a frozen snapshot (``render_memory_section``). A
+  SQLite file (:mod:`fluid.codemode.fact_db`) written through
+  :class:`fluid.codemode.facts.FactStore` by the synthesizer, by the
+  ``Remember`` builtin (``save_memory`` directly: owner-kept when the user
+  asked, agent-saved otherwise) and by runtime-fact provisioning. An agent
+  fact nobody uses retires to the archive, which Recall still searches and
+  which keeps rows for a year. ``memories.json`` is the pre-SQLite document:
+  imported once and kept untouched as a backup.
 - ``journal_loss.json`` — fixed-shape counts and times of journal entries
   that were not recorded or were dropped unsynthesized (quota, busy lock,
   backlog overflow), so coverage loss outlives the process that saw it.
@@ -47,7 +47,8 @@ failure never breaks journaling or synthesis) and rides machinery that
 already exists: :meth:`SkillStore.reap`, called from the interval-gated
 lifecycle pass (:meth:`SkillStore.curate`) and from the synthesizer's
 consolidation pass. The caps live in module constants next to
-``MAX_MEMORIES`` so every bound is visible in one place.
+``MAX_LIVE_SKILLS`` so every bound is visible in one place (the fact store's
+own bounds are in :mod:`fluid.codemode.facts`).
 
 Everything is stdlib-only and synchronous; callers are the code-mode session
 (host side) and the synthesizer.
@@ -56,8 +57,7 @@ Concurrency posture. Within one process journaling and reaping are
 synchronous and the synthesizer's background pass runs on the same event
 loop, so they cannot interleave. Across processes sharing a skills root:
 
-- Every JSON document rewrite (``meta.json``, ``memories.json``)
-  and every log trim goes through a temp file in the same
+- Every JSON document rewrite (``meta.json``) and every log trim goes through a temp file in the same
   directory plus ``os.replace`` (:func:`atomic_write_text`), so a crash or a
   lost race leaves the previous complete file, never a truncated one. A
   document that fails to parse on load is renamed aside as
@@ -399,11 +399,9 @@ def _source_digest(source: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-# Live skills past this many are archived, least useful first (the memory cap
-# has the same posture): a library the synthesizer must re-read every pass
-# cannot grow without bound.
+# Live skills past this many are archived, least useful first: a library the
+# synthesizer must re-read every pass cannot grow without bound.
 MAX_LIVE_SKILLS = 40
-MAX_MEMORIES = 40
 MAX_MEMORY_CHARS = 2000  # one memory: a fact or one rule with its exceptions, not an essay
 # An identity fact (profile.name and the like) is listed in every # Memory
 # snapshot by its text, cut to this many characters (the stored fact and its
@@ -471,9 +469,6 @@ SYNTH_LEASE_TTL = 30 * 60.0
 # append that cannot land one of these raises instead of logging, so the
 # caller can surface the loss instead of reporting "recorded".
 JOURNAL_EXPLICIT_KINDS = frozenset({"remember"})
-# The ``archived`` list inside memories.json: overflow past MAX_MEMORIES lands
-# there and Recall searches it, so it is real storage — but it is capped.
-MAX_ARCHIVED_MEMORIES = 200
 # .archive/*.py: skills curation archives rather than deletes; the oldest
 # archived modules are dropped for good past this count.
 MAX_ARCHIVED_SKILLS = 100
@@ -1745,7 +1740,8 @@ class SkillStore:
 
     @property
     def memories_path(self) -> Path:
-        return self.root / "memories.json"
+        """The fact store's file (SQLite; see :mod:`fluid.codemode.fact_db`)."""
+        return self._facts.db_path
 
     def _load_memories(self) -> dict:
         return self._facts.snapshot()
@@ -1771,14 +1767,15 @@ class SkillStore:
             self._note_save_failure(exc)
             raise
 
-    # Storage failures (disk, lock timeout, document byte cap) mean a fact
+    # Storage failures (disk, lock or database busy timeout) mean a fact
     # was lost; rejections (secret, length, stale revision, a protected fact
     # the learner may not rewrite) are the rules working. Both are counted
     # in meta.json for the memory health check, never with any fact text.
     MAX_SAVE_FAILURE_TIMES = 20
 
     def _note_save_failure(self, exc: BaseException) -> None:
-        storage = isinstance(exc, (OSError, TimeoutError)) or "capacity" in str(exc).lower()
+        from fluid.codemode.facts import MemoryStorageError
+        storage = isinstance(exc, (OSError, TimeoutError, MemoryStorageError)) or "capacity" in str(exc).lower()
         try:
             meta = self._load_meta()
             record = meta.get("memory_save_failures")
@@ -2503,14 +2500,16 @@ class SkillStore:
             self._save_meta(meta)
 
     def store_id(self) -> str | None:
-        """This replica's id from ``memories.json`` (the ``origin`` of the
-        facts it writes), or None before the file first exists. Read-only:
-        naming a store in a log line must not create or migrate it."""
+        """This replica's id (the ``origin`` of the facts it writes), or None
+        before the store first exists. Read-only: naming a store in a log
+        line must not create it."""
+        from fluid.codemode.facts import store_exists
+        if not store_exists(self.root):
+            return None
         try:
-            doc = json.loads(self.memories_path.read_text(encoding="utf-8"))
+            value = self._facts.snapshot(read_only=True).get("store_id")
         except (OSError, ValueError):
             return None
-        value = doc.get("store_id") if isinstance(doc, dict) else None
         return value if isinstance(value, str) and value else None
 
 

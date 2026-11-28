@@ -30,7 +30,6 @@ from fluid.codemode.skills import (
     JOURNAL_HIGH_VALUE_KINDS,
     JOURNAL_LOSS_FILE,
     JOURNAL_LOSS_KINDS,
-    MAX_MEMORIES,
     SkillStore,
     atomic_write_text,
     read_journal_loss,
@@ -81,7 +80,6 @@ NEAR_DUPLICATE_MIN_WORDS = 4
 NEAR_DUPLICATE_GROUPS = 5
 # Capacity.
 FULL_SHARE = 0.9
-DOCUMENT_FULL_SHARE = 0.8
 # Snapshot: bounded by design, Recall finds the rest. Leaving facts out is
 # reported, not counted as needing attention (#1814); a snapshot that shows
 # nothing although facts are in scope is.
@@ -722,8 +720,12 @@ def _archive_loss_reason(detail):
     if reset:
         parts.append("The deletion record restarted, so earlier losses are unknown.")
     if total:
+        # The archive has no size limit any more; an older build's overflow
+        # count stays in the record and is still reported.
+        how = (f"{overflow} at an older version's archive limit; {expired} a year after they expired"
+               if overflow else "a year after they expired")
         parts.append(f"Automatic cleanup has recorded {_plural(total, 'permanent deletion')} of older facts "
-                     f"({overflow} at the archive limit; {expired} on expiry). "
+                     f"({how}). "
                      "Some facts may be counted more than once; this is not the number of distinct facts lost. "
                      "Recall cannot recover a deleted copy.")
         if detail.get("archive_loss_time_unknown"):
@@ -740,21 +742,16 @@ def _archive_loss_reason(detail):
 
 
 def _capacity_signal(store, live, archived, archive_loss=None, *, now=None) -> dict:
-    from fluid.codemode import skills
-
     now = time.time() if now is None else now
-    tiers = {name: sum(1 for e in live if facts.tier(e) == name) for name in ("explicit", "durable", "inferred")}
+    tiers = {name: sum(1 for e in live if facts.tier(e) == name) for name in ("explicit", "agent")}
     archived_explicit = sum(1 for e in archived if e.get("protected"))
-    try:
-        size = (Path(store.root) / "memories.json").stat().st_size
-    except OSError:
-        size = 0
+    storage = store._facts.storage_status()
     user_saved = tiers["explicit"] + archived_explicit
-    detail = {**tiers, "explicit_cap": facts.MAX_EXPLICIT, "durable_cap": facts.MAX_DURABLE,
-              "inferred_cap": MAX_MEMORIES, "archived": len(archived),
-              "archived_explicit": archived_explicit, "user_saved": user_saved,
-              "bytes": size, "bytes_cap": facts.MAX_DOCUMENT_BYTES,
-              "archive_cap": skills.MAX_ARCHIVED_MEMORIES, **(archive_loss or {})}
+    detail = {**tiers, "explicit_cap": facts.MAX_EXPLICIT, "agent_cap": facts.MAX_AGENT_LIVE,
+              "archived": len(archived), "archived_explicit": archived_explicit,
+              "user_saved": user_saved, "bytes": int(storage.get("bytes") or 0),
+              "storage": storage.get("state"), "journal_mode": storage.get("journal_mode"),
+              **(archive_loss or {})}
     loss_reason = (_archive_loss_reason(detail)
                    if detail.get("archive_deleted_total") or detail.get("archive_dropped_total")
                    or detail.get("archive_expired_total") or detail.get("archive_loss_counter_reset") else "")
@@ -765,9 +762,14 @@ def _capacity_signal(store, live, archived, archive_loss=None, *, now=None) -> d
     if failed:
         primary = "Recent memory saves failed; check available storage and the saved-fact limits."
         detail["refusal_event"] = f"storage:{record.get('storage', 0)}:{max(failed)}"
-    if size >= DOCUMENT_FULL_SHARE * facts.MAX_DOCUMENT_BYTES:
-        share = round(100 * size / facts.MAX_DOCUMENT_BYTES)
-        primary = (primary + " " if primary else "") + f"The memory file is {share}% full; saves fail at the limit."
+    if storage.get("state") == "migration_failed":
+        # The import into SQLite failed: memories.json still serves every
+        # read, untouched, and every write is refused until it succeeds.
+        primary = (primary + " " if primary else "") + (
+            "Memory could not be moved to its new storage, so it is read-only: "
+            "saved facts are still used, but new ones are not saved. "
+            f"({storage.get('reason')})")
+        detail["refusal_event"] = "storage-migration"
     if user_saved >= facts.MAX_EXPLICIT:
         primary += (" " if primary else "") + (
             f"Memory is full: {user_saved} user-saved facts; new ones are refused until one is forgotten or merged.")
@@ -831,8 +833,9 @@ def _protected_signal(doc, previous, now) -> tuple[dict, list[str], list[dict]]:
     vanished = []
     if isinstance(before, list):
         forgotten = doc.get("forgotten", "")
-        vanished = [gid for gid in set(before) - set(current)
-                    if not facts.barrier_contains(forgotten, "id:" + gid)]
+        tombstoned = {facts.global_id(t) for t in doc["tombstones"] if t.get("origin") and t.get("id")}
+        vanished = [gid for gid in set(before) - set(current) if gid not in tombstoned
+                    and not facts.barrier_contains(forgotten, "id:" + gid)]
     lost = [e for e in previous.get("lost_protected", []) if isinstance(e, dict)
             and now - float(e.get("at") or 0) < PROTECTED_WINDOW]
     if vanished:

@@ -19,6 +19,7 @@ When a chat reaches the situation a memory describes, its full text is added to 
 Agents don't save where a piece of work stands, such as "continuing the fix in PR #123", as a memory: that goes in the chat's working notes. If you ask for it anyway, it's saved. When an agent saves a memory that looks like one it already has, it's shown the existing one so it can update it instead of keeping two. Facts about a worker's setup, such as which Python has pytest, are checked fresh at the start of each chat rather than saved as memories; ones saved before expire on their own.
 
 - Saving a memory an agent wrote makes it yours, and it's kept until you change it.
+- A memory an agent saved that no chat has used for 90 days (it wasn't added to a chat or looked up) moves to **Archived**. Agents can still find it by searching, and archived ones are deleted a year later. Memories you saved never expire.
 - Saving an archived memory makes it active again.
 - A memory marked **Needs review** conflicts with another one, or a newer one replaced it. Saving your version settles it.
 

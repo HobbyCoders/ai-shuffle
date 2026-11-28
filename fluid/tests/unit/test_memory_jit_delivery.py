@@ -8,6 +8,7 @@ the local delivery record and the native leg carrying the context.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,7 @@ from fluid.codemode.memory_health import check as health_check
 from fluid.codemode.skills import SkillStore
 from fluid.tools.builtins.remember import handler as remember
 from fluid.tools.registry import ToolCtx
+from tests.fixtures.memory_doc import read_doc
 
 PUSH = "Pushes go through the merge queue; never push to main directly."
 PUSH_WHEN = "When publishing commits to the shared repository"
@@ -72,7 +74,7 @@ async def test_remember_triggers_round_trip_and_a_correction_keeps_them(tmp_path
     assert "loads mid-task only on words" not in out.text
     [entry] = SkillStore(tmp_path).memories()
     assert entry.triggers == {"command": ["git push"], "paths": ["deploy/*.yml"]}
-    raw = json.loads((tmp_path / "memories.json").read_text())["entries"][0]
+    raw = read_doc(tmp_path)["entries"][0]
     assert raw["triggers_at"]  # stamped like the other per-fact fields
     # A text correction without trigger inputs keeps them.
     fixed = store.save_memory(PUSH + " Tags too.", durable=True, memory_id=entry.id,
@@ -455,6 +457,7 @@ def test_setup_receipts_for_another_checkout_are_left_out(tmp_path):
 def test_the_log_takes_concurrent_writers_from_two_processes(tmp_path):
     import multiprocessing as mp
 
+    SkillStore(tmp_path).save_memory("Create the store before the writers race")
     ctx_ = mp.get_context("spawn")
     procs = [ctx_.Process(target=_log_writer, args=(str(tmp_path), f"w{n}", 150)) for n in range(2)]
     for proc in procs:
@@ -462,75 +465,76 @@ def test_the_log_takes_concurrent_writers_from_two_processes(tmp_path):
     for proc in procs:
         proc.join(60)
         assert proc.exitcode == 0
-    store = SimpleNamespace(root=tmp_path)
+    store = SkillStore(tmp_path)
     assert jit_delivery.counts(store)["totals"] == {LATE: 300, "command": 300}
     assert len(jit_delivery.session_delivered(store, "w0")) == 150
 
 
 def _log_writer(root, session, n):
-    store = SimpleNamespace(root=root)
+    from fluid.codemode import fact_db
+
+    # Production drops a usage row after a 1s wait rather than slow a tool
+    # call; a slow CI disk must not turn that into a lost count here.
+    fact_db.USAGE_TIMEOUT_MS = fact_db.BUSY_TIMEOUT_MS
+    store = SkillStore(Path(root))
     for i in range(n):
         jit_delivery.record(store, session, [(f"{session}-m{i}", "command")], LATE)
 
 
-def test_two_writers_past_the_cap_rotate_once_and_keep_the_old_segment(tmp_path, monkeypatch):
-    import threading
+def test_an_old_delivery_log_is_imported_once_with_its_torn_line(tmp_path):
+    from fluid.codemode import fact_db
 
-    monkeypatch.setattr(jit_delivery, "MAX_LOG_BYTES", 2048)
-    store = SimpleNamespace(root=tmp_path)
-    log = tmp_path / jit_delivery.DELIVERY_LOG
-    n = 0
-    while not log.exists() or log.stat().st_size < 1900:
-        jit_delivery.record(store, "old", [(f"old{n}", "command")], LATE)
-        n += 1
-    old_ids = {f"old{i}" for i in range(n)}
-    # Both writers pass the unlocked size check before either rotates.
-    gate = threading.Barrier(2, timeout=10)
-    seen = threading.local()
-    real = jit_delivery._size_of
+    import time
 
-    def size_of(path):
-        size = real(path)
-        if not getattr(seen, "once", False):
-            seen.once = True
-            gate.wait()
-        return size
+    now = time.time()  # rows past the 90-day retention are pruned on import
 
-    monkeypatch.setattr(jit_delivery, "_size_of", size_of)
-    writers = [threading.Thread(target=jit_delivery.record,
-                                args=(store, w, [(f"{w}-new", "command")], LATE)) for w in ("a", "b")]
-    for t in writers:
-        t.start()
-    for t in writers:
-        t.join(10)
-    rows = jit_delivery._rows(store)
-    facts = {r["fact"] for r in rows}
-    assert old_ids <= facts  # the retained segment survived
-    assert {"a-new", "b-new"} <= facts
+    def line(**row):
+        return json.dumps(row, sort_keys=True)
 
-
-def test_a_torn_line_keeps_the_good_record_appended_onto_it(tmp_path):
-    store = SimpleNamespace(root=tmp_path)
-    jit_delivery.record(store, "s", [("m1", "command")], LATE)
-    with open(tmp_path / jit_delivery.DELIVERY_LOG, "ab") as stream:
-        stream.write(b'{"at":1.0,"fact":"m2","ki')  # a writer died mid-record
-    jit_delivery.record(store, "s", [("m3", "path")], LATE)
-    jit_delivery.record(store, "s", [("m4", "tool")], LATE)
+    (tmp_path / "jit_deliveries.1.jsonl").write_text(
+        line(at=now - 3, fact="m1", kind="command", session="s", timing=LATE) + "\n")
+    (tmp_path / jit_delivery.DELIVERY_LOG).write_text(
+        '{"at":1.0,"fact":"m2","ki'  # a writer died mid-record
+        + line(at=now - 1, fact="m3", kind="path", session="s", timing=LATE) + "\n")
+    store = SkillStore(tmp_path)
+    # Read before the import: the old log as it is.
+    assert [r["fact"] for r in jit_delivery._rows(store)] == ["m1", "m3"]
+    jit_delivery.record(store, "s", [("m4", "tool")], LATE)  # imports, then appends
     assert [r["fact"] for r in jit_delivery._rows(store)] == ["m1", "m3", "m4"]
-    assert jit_delivery.session_delivered(store, "s") >= {"m1", "m3", "m4"}
+    assert jit_delivery.session_delivered(store, "s") == {"m1", "m3", "m4"}
+    # The old files are kept as they were and never read again.
+    (tmp_path / jit_delivery.DELIVERY_LOG).write_text(line(at=now, fact="m9", kind="command",
+                                                           session="s", timing=LATE) + "\n")
+    assert "m9" not in {r["fact"] for r in jit_delivery._rows(SkillStore(tmp_path))}
+    assert fact_db.FactDB(tmp_path).status()["state"] == "ok"
 
 
-def test_the_log_is_capped_and_per_fact_rows_are_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr(jit_delivery, "MAX_LOG_BYTES", 4096)
-    store = SimpleNamespace(root=tmp_path)
+def test_the_deliveries_table_is_bounded_and_per_fact_rows_are_bounded(tmp_path, monkeypatch):
+    from fluid.codemode import fact_db
+
+    monkeypatch.setattr(fact_db, "MAX_DELIVERY_ROWS", 100)
+    store = SkillStore(tmp_path)
     for i in range(500):
         jit_delivery.record(store, "s", [(f"m{i}", "command")], LATE)
-    sizes = [p.stat().st_size for p in tmp_path.glob("jit_deliveries*.jsonl")]
-    assert len(sizes) == 2 and max(sizes) <= 4096
+    rows = jit_delivery._rows(store)
+    assert len(rows) <= 101 and rows[-1]["fact"] == "m499"
     record = jit_delivery.counts(store)
     assert len(record["facts"]) <= jit_delivery.MAX_FACT_ROWS
     assert len(record["recent"]) <= jit_delivery.MAX_RECENT
     assert "m499" in record["facts"]
+
+
+def test_old_deliveries_age_out(tmp_path, monkeypatch):
+    from fluid.codemode import fact_db
+
+    store = SkillStore(tmp_path)
+    clock = [1_000_000.0]
+    monkeypatch.setattr(jit_delivery.time, "time", lambda: clock[0])
+    monkeypatch.setattr(fact_db.time, "time", lambda: clock[0])
+    jit_delivery.record(store, "s", [("old", "command")], LATE)
+    clock[0] += fact_db.DELIVERY_RETENTION + 1
+    jit_delivery.record(store, "s", [("new", "command")], LATE)
+    assert [r["fact"] for r in jit_delivery._rows(store)] == ["new"]
 
 
 def test_a_failing_log_or_a_slow_store_never_fails_or_holds_a_call(tmp_path, monkeypatch):
@@ -540,7 +544,12 @@ def test_a_failing_log_or_a_slow_store_never_fails_or_holds_a_call(tmp_path, mon
     store = SkillStore(tmp_path)
     _push_facts(store, 1)
     # The log cannot be written: the delivery still goes out.
-    monkeypatch.setattr(jit_delivery.os, "open", lambda *a, **k: (_ for _ in ()).throw(OSError("full")))
+    import sqlite3
+
+    def busy(rows):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store._facts, "record_deliveries", busy)
     assert give(SessionDelivery(store, None, "s"), *bash("git push"))
     monkeypatch.undo()
     # A store read that hangs: the call gets nothing, quickly.

@@ -6,10 +6,13 @@ from pathlib import Path
 import pytest
 
 from fluid.codemode import facts
-from fluid.codemode.skills import SkillStore, MAX_MEMORIES
+from fluid.codemode.skills import SkillStore
 from fluid.codemode.continual import Synthesizer
 from fluid.tools.builtins import remember, recall, forget
 from fluid.tools.registry import ToolCtx
+from tests.fixtures.memory_doc import read_doc, stored_text, write_doc
+
+MAX_MEMORIES = facts.MAX_AGENT_LIVE
 
 
 def ctx(store, project="project:one", session="source-one"):
@@ -50,7 +53,7 @@ async def test_correct_forget_and_restore_through_tools(tmp_path):
     out = await forget.handler({"memory_id": current.id, "expected_revision": current.revision, "confirm": True}, c)
     assert not out.is_error and "Forgotten" in out.text
     assert not store.search_memories("After")
-    raw = (tmp_path / "memories.json").read_text()
+    raw = stored_text(tmp_path)
     assert "Before" not in raw and "After" not in raw
     denied = await remember.handler({"when": "When testing memory", "text": "The user's name is After."}, c)
     assert denied.is_error
@@ -223,13 +226,15 @@ def test_full_explicit_tier_refuses_instead_of_archiving(tmp_path, monkeypatch):
 
 
 def test_agent_and_learned_saves_never_refuse_for_room(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_DURABLE", 3)
+    monkeypatch.setattr(facts, "MAX_AGENT_LIVE", 3)
     store = SkillStore(tmp_path)
     for i in range(10):
         store.save_memory(f"Agent fact {i}", durable=True)
         store.save_memory(f"Learned fact {i}")
     live = store.memories()
-    assert sum(e.durable for e in live) == 3
+    # Agent-saved and learned facts share one pool.
+    assert len(live) == 3
+    assert len(store.archived_memories()) == 17
     # The fact saved last is never the one archived to make room for itself.
     assert {"Agent fact 9", "Learned fact 9"} <= {e.text for e in live}
 
@@ -240,14 +245,14 @@ def test_durable_tier_lifetime_renews_on_recall_and_resave(tmp_path, monkeypatch
     store = SkillStore(tmp_path)
     saved = store.save_memory("Pytest lives at /usr/local/bin/pytest", durable=True)
     assert saved.durable and not saved.protected
-    assert saved.expires_at == clock[0] + facts.DURABLE_TTL
-    clock[0] += facts.DURABLE_TTL - 86400
+    assert saved.expires_at == clock[0] + facts.AGENT_TTL
+    clock[0] += facts.AGENT_TTL - 86400
     store.search_memories("pytest")  # a recall renews it
-    clock[0] += facts.DURABLE_TTL - 86400
+    clock[0] += facts.AGENT_TTL - 86400
     again = store.save_memory("Pytest lives at /usr/local/bin/pytest", durable=True)
     assert again.revision == saved.revision  # renewal is not an edit
-    assert again.expires_at == clock[0] + facts.DURABLE_TTL
-    clock[0] += facts.DURABLE_TTL + 1  # nothing touched it for a whole TTL
+    assert again.expires_at == clock[0] + facts.AGENT_TTL
+    clock[0] += facts.AGENT_TTL + 1  # nothing touched it for a whole TTL
     assert store.memories() == [] and [e.id for e in store.archived_memories()] == [saved.id]
     clock[0] += facts.ARCHIVE_RETENTION
     assert store.archived_memories() == []
@@ -263,7 +268,7 @@ def test_branch_specific_facts_get_a_short_lifetime(tmp_path, monkeypatch):
                                 durable=True)
     path = store.save_memory("Docs live in docs/content and tests/test_docs.py checks them.", durable=True)
     assert receipt.expires_at == named.expires_at == clock[0] + facts.VOLATILE_TTL
-    assert general.expires_at == path.expires_at == clock[0] + facts.DURABLE_TTL
+    assert general.expires_at == path.expires_at == clock[0] + facts.AGENT_TTL
     # An explicit fact never expires, whatever it mentions.
     assert store.save_memory("User wants fix/x merged first.", protected=True).expires_at == 0
 
@@ -287,8 +292,7 @@ def test_agent_save_cannot_downgrade_or_rewrite_a_user_requested_fact(tmp_path):
 def test_legacy_explicit_facts_split_into_user_and_agent_tiers(tmp_path):
     store = SkillStore(tmp_path)
     store.save_memory("placeholder", protected=True)
-    path = tmp_path / "memories.json"
-    doc = json.loads(path.read_text())
+    doc = read_doc(tmp_path)
     base = doc["entries"][0]
     legacy = [
         ("m1", "The user prefers tabs over spaces.", None),
@@ -302,11 +306,11 @@ def test_legacy_explicit_facts_split_into_user_and_agent_tiers(tmp_path):
         entry = {k: v for k, v in base.items() if k not in ("saved_by", "durable")}
         entry.update(id=mid, text=text, key=key, clock={base["origin"]: 1}, revision=1)
         doc["entries"].append(entry)
-    path.write_text(json.dumps(doc))
+    write_doc(tmp_path, doc)
     tiers = {e.id: (e.protected, e.durable) for e in SkillStore(tmp_path).memories()}
     assert tiers == {"m1": (True, False), "m2": (True, False), "m3": (True, False),
                      "m4": (False, True), "m5": (False, True)}
-    migrated = json.loads(path.read_text())["entries"]
+    migrated = read_doc(tmp_path)["entries"]
     # Classification is local and deterministic; it never bumps the clock,
     # so it cannot replicate as an edit that overrides another worker.
     assert all(e["clock"] == {base["origin"]: 1} and e["revision"] == 1 for e in migrated)
@@ -351,11 +355,11 @@ def test_archive_forget_preserves_provenance_and_removes_retained_text(tmp_path)
     hits = store.search_memories("low-trust")
     assert hits and hits[0][0].provenance == "tool" and hits[0][1] is True
     assert store.delete_memory(first.id)
-    assert "low-trust" not in (tmp_path / "memories.json").read_text()
+    assert "low-trust" not in stored_text(tmp_path)
 
 
 def test_expiry_is_not_refreshed_by_reads_or_replay(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "INFERRED_TTL", 10)
+    monkeypatch.setattr(facts, "AGENT_TTL", 10)
     now = 1000.0
     monkeypatch.setattr(facts.time, "time", lambda: now)
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
@@ -384,19 +388,33 @@ def test_sync_retains_archive_and_applies_ingress_limits(tmp_path):
     assert not consumer._facts.export()["tombstones"]
 
 
-def test_old_replica_cannot_resurrect_after_tombstone_compaction(tmp_path, monkeypatch):
-    monkeypatch.setattr(facts, "MAX_TOMBSTONES", 1)
+def test_old_replica_cannot_resurrect_a_forgotten_fact(tmp_path):
     a, b = SkillStore(tmp_path / "a"), SkillStore(tmp_path / "b")
     first = a.save_memory("Synthetic forgotten original", protected=True)
     stale = a._facts.export()
     assert a.delete_memory(first.id, explicit=True)
     second = a.save_memory("Another fact to delete", protected=True)
     assert a.delete_memory(second.id, explicit=True)
-    assert len(a._facts.snapshot()["tombstones"]) == 1
+    # Tombstones are rows kept for TOMBSTONE_RETENTION, with no count cap.
+    assert len(a._facts.snapshot()["tombstones"]) == 2
     b._facts.merge(a._facts.export())
     b._facts.merge(stale)
     assert not b.memories()
     assert not b.search_memories("original")
+
+
+def test_tombstones_expire_after_their_retention(tmp_path, monkeypatch):
+    clock = [1_000_000.0]
+    monkeypatch.setattr(facts.time, "time", lambda: clock[0])
+    store = SkillStore(tmp_path)
+    gone = store.save_memory("Synthetic fact to forget", protected=True)
+    assert store.delete_memory(gone.id, explicit=True)
+    clock[0] += facts.TOMBSTONE_RETENTION - 86400
+    store.save_memory("A later fact", protected=True)
+    assert len(store._facts.snapshot()["tombstones"]) == 1
+    clock[0] += 2 * 86400
+    store.save_memory("A much later fact", protected=True)
+    assert store._facts.snapshot()["tombstones"] == []
 
 
 def test_same_revision_disagreement_is_withheld_not_guessed(tmp_path):
@@ -437,12 +455,12 @@ def test_legacy_archive_migration_is_atomic_and_idempotent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_failed_commit_never_returns_saved_receipt(tmp_path, monkeypatch):
-    from fluid.codemode import skills
+    import sqlite3
     store = SkillStore(tmp_path)
     store.save_memory("Existing durable value", protected=True)
     def fail(*args):
-        raise OSError("simulated disk failure")
-    monkeypatch.setattr(skills, "atomic_write_text", fail)
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(store._facts._db, "write", fail)
     out = await remember.handler({"when": "When testing memory", "text": "New value"}, ctx(store))
     assert out.is_error and "Not saved" in out.text
     assert len(store.memories()) == 1
@@ -512,7 +530,7 @@ async def test_forget_invalidates_inflight_inference_and_purges_raw_evidence(tmp
     await Synthesizer(Provider(), "test", store).run()
     assert not store.memories()
     assert not store.journal_entries()
-    assert "Sensitive synthetic phrase" not in (tmp_path / "memories.json").read_text()
+    assert "Sensitive synthetic phrase" not in stored_text(tmp_path)
     log = tmp_path / ".synthesis-log.jsonl"
     assert not log.exists() or "Sensitive synthetic phrase" not in log.read_text()
 
@@ -531,33 +549,19 @@ async def test_inference_resolves_each_source_project_not_current_project(tmp_pa
     assert {e.scope for e in store.memories()} == {"project:one", "project:two"}
 
 
-@pytest.mark.parametrize("permanent", [False, True])
-def test_windows_replace_retry_is_bounded_and_preserves_old_document(tmp_path, monkeypatch, permanent):
-    from fluid.codemode import skills
+def test_a_failed_write_rolls_back_and_keeps_the_committed_facts(tmp_path, monkeypatch):
+    import sqlite3
+    from fluid.codemode import fact_db
     store = SkillStore(tmp_path)
     store.save_memory("Original committed fact", protected=True)
-    real_replace = skills.os.replace
-    calls = []
-    def replace(src, dst):
-        if Path(dst).name != "memories.json":
-            # The failed save is counted in meta.json; only the memory
-            # document's retries are under test.
-            return real_replace(src, dst)
-        calls.append(1)
-        if permanent or len(calls) < 3:
-            error = PermissionError("simulated Windows sharing violation")
-            error.winerror = 5
-            raise error
-        return real_replace(src, dst)
-    monkeypatch.setattr(skills.os, "replace", replace)
-    monkeypatch.setattr(skills.time, "sleep", lambda _: None)
-    if permanent:
-        with pytest.raises(PermissionError):
-            store.save_memory("Uncommitted fact", protected=True)
-        assert len(calls) == 6
-        assert [e.text for e in store.memories()] == ["Original committed fact"]
-    else:
-        store.save_memory("Second committed fact", protected=True)
-        assert len(calls) == 3
-        assert len(store.memories()) == 2
-    assert not list(tmp_path.glob("*.tmp-*"))
+
+    def busy(cls, con):
+        # Fails after the fact rows were written, inside the transaction.
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fact_db.FactDB, "_bump", classmethod(busy))
+    with pytest.raises(facts.MemoryStorageError):
+        store.save_memory("Uncommitted fact", protected=True)
+    monkeypatch.undo()
+    assert [e.text for e in SkillStore(tmp_path).memories()] == ["Original committed fact"]
+    assert "Uncommitted fact" not in stored_text(tmp_path)

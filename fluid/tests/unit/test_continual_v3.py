@@ -15,7 +15,8 @@ import time
 import pytest
 
 from fluid.codemode.continual import Synthesizer
-from fluid.codemode.skills import MAX_MEMORIES, SkillStore, project_key_for
+from fluid.codemode.facts import MAX_AGENT_LIVE as MAX_MEMORIES
+from fluid.codemode.skills import SkillStore, project_key_for
 from fluid.tools.builtins import recall as recall_mod
 from fluid.tools.builtins import remember as remember_mod
 from fluid.tools.registry import ToolCtx

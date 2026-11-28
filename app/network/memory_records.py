@@ -98,15 +98,15 @@ def _store(owner="local"):
 
 
 def _stores():
-    if (_root() / "memories.json").exists():
+    from fluid.codemode.facts import owner_store_dirs, store_exists
+    if store_exists(_root()):
         yield _store()
-    for path in (_root() / ".users").glob("*/memories.json"):
+    for path, owner in owner_store_dirs(_root()):
         try:
-            owner = json.loads(path.read_text(encoding="utf-8"))["owner"]
             store = _store(owner)
-            if store.root == path.parent:
+            if store.root == path:
                 yield store
-        except (ValueError, KeyError, OSError):
+        except ValueError:
             log.warning("Skipped invalid owner memory store")
 
 
@@ -121,6 +121,9 @@ def install_write_hook() -> None:
             path = path.resolve()
             # Only installation/API-owner fact stores and installation Python
             # skills are shared. Project/standalone stores must stay local.
+            # A fact store's commit names memories.json (FactStore.path) even
+            # though its rows live in memory.db; Recalls and deliveries are
+            # local and send no hint.
             shared = ("memories.json", "proposals.json")
             if (path.parent == root and (path.name in shared or path.suffix == ".py")) or (
                 path.name in shared and path.parent.parent == root / ".users"

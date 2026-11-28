@@ -26,8 +26,8 @@ the session rules around it:
   an attachment (fluid.hooks.bus.Attachment); the fact counts as delivered
   only once the gate settles it as placed where the model reads it. Until
   then it is pending: not offered again, and released if the gate drops it.
-- **Record.** Each delivery is appended to a local log (DELIVERY_LOG, never
-  replicated): fact id, trigger kind, session, time and whether it arrived
+- **Record.** Each delivery is a row in the store's local ``deliveries``
+  table (fact_db; never replicated): fact id, trigger kind, session, time and whether it arrived
   on time (before the work it is about) or late (after the matching call).
   The session's compaction re-arms are logged too, so a session resumed in
   a new process does not repeat a fact it already has
@@ -37,8 +37,9 @@ Nothing here may slow or fail a tool call. Candidates come from the store's
 read-only snapshot (no writer lock), prepared once per store file revision
 and checkout, and a read that does not finish within READ_TIMEOUT delivers
 nothing this time (the read finishes in the background and fills the
-cache). A log append is one ``write`` on an ``O_APPEND`` descriptor, never
-an fsync.
+cache). Recording a delivery is one short insert that waits at most
+fact_db.USAGE_TIMEOUT_MS for a busy store and is dropped (not retried) past
+that.
 """
 from __future__ import annotations
 
@@ -51,7 +52,6 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from fluid.codemode import triggers as trig
@@ -60,12 +60,10 @@ _log = logging.getLogger(__name__)
 
 MAX_FACTS = 3
 MAX_CHARS = 1500
+# The pre-SQLite log, imported once into the store's deliveries table (see
+# fact_db); only parse_line still reads its format.
 DELIVERY_LOG = "jit_deliveries.jsonl"
-ROTATED_LOG = "jit_deliveries.1.jsonl"
-ROTATE_LOCK = ".jit_deliveries.lock"
 _RECORD_START = '{"at":'
-# The log is rotated past this size; two files bound what a read parses.
-MAX_LOG_BYTES = 256 * 1024
 MAX_RECENT = 200
 MAX_FACT_ROWS = 200
 # Seconds a tool call or turn waits for candidates on a cache miss.
@@ -97,11 +95,11 @@ _cache_lock = threading.Lock()
 
 
 def _stamp(store: Any) -> tuple:
+    """Changes whenever the store's facts do (not on deliveries)."""
     try:
-        st = Path(store.memories_path).stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return (0, 0)
+        return store._facts.stamp()
+    except Exception:  # noqa: BLE001 — an unreadable store just misses the cache
+        return ("", 0)
 
 
 def _build(store: Any, project: str | None, checkout: str | None, stamp: tuple) -> _Prepared:
@@ -384,50 +382,24 @@ def _line(entry: Mapping[str, Any]) -> str:
 
 # ─── local record ────────────────────────────────────────────────────────
 
-def _paths(store: Any) -> tuple[Path, Path]:
-    root = Path(store.root)
-    return root / DELIVERY_LOG, root / ROTATED_LOG
-
-
 def _append(store: Any, rows: list[dict]) -> None:
-    """Append ``rows`` to the local log as JSON lines: one ``write`` on an
-    ``O_APPEND`` descriptor, so concurrent processes interleave whole
-    records, and no fsync. Rotation alone (size check and rename) runs
-    under a short cross-process lock, so two writers past the cap rotate
-    once and never replace the retained segment with a fresh one.
-    Best-effort: a failure is logged, never raised."""
+    """Add ``rows`` to the store's ``deliveries`` table (local, never
+    replicated): one short transaction that waits at most
+    fact_db.USAGE_TIMEOUT_MS for a writer. Best-effort: a failure or a busy
+    store is logged, never raised, and the rows are not kept."""
     if not rows:
         return
     try:
-        current, rotated = _paths(store)
-        data = "".join(json.dumps(r, separators=(",", ":"), sort_keys=True) + "\n"
-                       for r in rows).encode("utf-8")
-        if _size_of(current) + len(data) > MAX_LOG_BYTES:
-            from fluid.codemode.transactions import file_transaction
-            with file_transaction(Path(store.root) / ROTATE_LOCK):
-                size = _size_of(current)  # another writer may have rotated
-                if size and size + len(data) > MAX_LOG_BYTES:
-                    os.replace(current, rotated)
-        fd = os.open(current, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        store._facts.record_deliveries(rows)
     except Exception:  # noqa: BLE001 — counting never fails a tool call
         _log.debug("could not record a just-in-time delivery", exc_info=True)
 
 
-def _size_of(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return 0
-
-
-def _parse(line: str) -> list[dict]:
-    """The records on one log line. A torn record (a writer died mid-write)
-    has the next good record appended onto it: resync at that record's
-    start (each record begins with its sorted first key) and keep it."""
+def parse_line(line: str) -> list[dict]:
+    """The records on one line of the pre-SQLite log (``DELIVERY_LOG``). A
+    torn record (a writer died mid-write) has the next good record appended
+    onto it: resync at that record's start (each record begins with its
+    sorted first key) and keep it. Used to import that log once."""
     try:
         return [json.loads(line)]
     except ValueError:
@@ -448,27 +420,17 @@ def record(store: Any, session_id: str, delivered, timing: str) -> None:
                      "timing": timing} for fact_id, kind in delivered or ()])
 
 
-def _rows(store: Any) -> list[dict]:
-    rows: list[dict] = []
-    for path in reversed(_paths(store)):  # the rotated file is the older one
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
-            continue
-        for line in raw.decode("utf-8", "replace").splitlines():
-            for row in _parse(line):
-                if isinstance(row, dict) and isinstance(row.get("session"), str):
-                    rows.append(row)
-    return rows
+def _rows(store: Any, session: str | None = None) -> list[dict]:
+    """The delivery and re-arm rows, oldest first (one session's, or all)."""
+    return [r for r in store._facts.deliveries(session=session)
+            if isinstance(r, dict) and isinstance(r.get("session"), str)]
 
 
 def session_delivered(store: Any, session_id: str) -> set[str]:
     """Fact ids the log shows delivered to ``session_id`` since its last
     re-arm (compaction)."""
     given: set[str] = set()
-    for row in _rows(store):
-        if row.get("session") != session_id:
-            continue
+    for row in _rows(store, session_id):
         if row.get("event") == "rearm":
             given.clear()
         elif isinstance(row.get("fact"), str):

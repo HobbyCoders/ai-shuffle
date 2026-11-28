@@ -8,11 +8,48 @@ current contracts with synthetic data.
 ## Durable facts
 
 `FactStore` in `fluid/fluid/codemode/facts.py` is the mutation boundary behind
-`SkillStore`, Remember, Recall, Forget, synthesis and worker imports. A process
-lock plus a cross-thread lock protects each read-modify-write transaction.
-Live entries, archive, bounded revisions and deletion barriers are one atomic,
-fsynced JSON replacement. The existing file store remains usable by standalone
-Fluid; application imports do not leak into the vendored library.
+`SkillStore`, Remember, Recall, Forget, synthesis and worker imports. Its rows
+live in one SQLite database per store (`fluid/fluid/codemode/fact_db.py`, see
+"Storage" below); live facts, archive, revisions and tombstones change together
+in one transaction. Nothing outside the store API reads the files. The store
+uses only the standard library, so standalone Fluid keeps working; application
+imports do not leak into the vendored library.
+
+### Storage
+
+Since Memory v3 phase 3b each store is `<store root>/memory.db` (stdlib
+`sqlite3`). Tables: `facts` (one row per live or archived fact: id, state,
+list position, scope, protected and always flags, `updated_at`, `uses`,
+`last_recalled_at`, and the fact's JSON body), `revisions` (retained earlier
+values, one row each), `tombstones` (one row per forgotten fact), `deliveries`
+(just-in-time deliveries, re-arms and Recalls: local usage, never replicated)
+and `meta` (owner, store id, budgets, loss counters, the schema version, the
+import marker). The journal is WAL; where WAL cannot be set up (some network
+and FUSE filesystems) the store uses `journal_mode=DELETE`. Connections wait up
+to 10 seconds for a busy store (`busy_timeout`); transactions are short.
+
+**Migration.** The first open of a store whose database has no import marker
+imports `memories.json` (and a pre-3b `jit_deliveries.jsonl`) in one
+`BEGIN IMMEDIATE` transaction that also writes the marker (`sqlite.imported`
+in `meta`, with the counts). A crash mid-import rolls the whole transaction
+back, so the next open starts again; a second process waits on the write lock
+and then finds the marker and imports nothing.
+`memories.json` and the delivery log are never modified or deleted: they stay
+as a backup for at least one release. If the import fails (the file does not
+parse, a newer schema, another owner, a full disk), the store serves the facts
+read-only from `memories.json` when it parses, refuses every write with "Memory
+storage could not be upgraded (…); nothing was saved", and memory health
+raises a `capacity` alert naming the reason. Nothing is dropped; the import is
+retried on every open until it succeeds.
+
+**Downgrade.** `python -m fluid.codemode.fact_db export <store dir> <file>`
+writes a `memories.json` document an older build reads (live, archive,
+revisions, tombstones, plus the deletion filter older builds expect).
+`python -m fluid.codemode.fact_db downgrade <store dir>` (app stopped) writes it
+in place and moves `memory.db` aside, so an older build reads it and a newer
+one imports it again. `status <store dir>` prints the storage state. Changes an
+older build makes to `memories.json` while `memory.db` exists are not seen by
+a newer build; downgrade first.
 
 Remember commits before returning a saved receipt. It does not journal a promise
 for a second model to fulfill. Explicit facts are protected from inference
@@ -144,17 +181,17 @@ revision and checkout; a read that takes longer than a quarter second
 delivers nothing for that event. Proactive assistant and one-shot runs do
 not deliver.
 
-Each delivery is recorded only on this worker, in the append-only log
-`<store root>/jit_deliveries.jsonl`, which is never replicated. A record is
-one JSON line written in a single append, so concurrent processes do not lose
-each other's records, and no write waits on an fsync. It holds the fact ID,
-the trigger kind (command, path, tool or words), the session, the time, and
-whether it was on time or late; compaction re-arms are logged too. Past
-256 KB the log rotates to `jit_deliveries.1.jsonl`, so at most two files are
-kept; the size check and rename run under a short cross-process lock while
-appends stay lock-free, and a reader keeps a good record appended onto a torn
-one. Totals, per-fact counts (the 200 most recently delivered facts) and
-the last 200 deliveries are computed on read. Memory health reads the totals as its
+Each delivery is recorded only on this worker, as a row in the store's
+`deliveries` table (see "Storage"), which is never replicated. A row holds
+the fact ID, the trigger kind (command, path, tool or words), the session,
+the time, and whether it was on time or late; compaction re-arms are rows
+too. The insert waits at most one second for a busy store and is otherwise
+dropped, so recording never slows or fails a tool call. Rows older than 365
+days are pruned. A pre-3b `jit_deliveries.jsonl` (and its rotated
+`jit_deliveries.1.jsonl`) is imported once with the store and then left as it
+is. A delivery counts toward its fact's value (see "Automatic lifecycle").
+Totals, per-fact counts (the 200 most recently delivered facts) and the last
+200 deliveries are computed on read. Memory health reads the totals as its
 `delivery` signal, which is a count and never an attention. Set
 `FLUID_MEMORY_JIT=false` to turn delivery off; the index is unaffected.
 
@@ -375,22 +412,19 @@ Current per-owner defaults:
 | Resource | Limit/policy |
 |---|---|
 | User-saved (explicit) facts | 512, live and archived together. At 512 a new user-saved fact, or an agent fact promoted to one, is refused with "Memory is full: … Forget or merge one first; nothing was saved." Corrections of a saved fact still work. Nothing already saved is archived or dropped to make room, and a merge never trims them; a merged store above 512 refuses new ones until enough are forgotten |
-| Agent-saved (durable) active facts | 120; overflow enters the archive; valid 120 days from the last save or recall |
-| Inferred active facts | 40; overflow enters the archive |
-| Archived facts | 200 agent-saved and learned facts; when full the least useful learned facts go first, then agent-saved ones, counted in the store's loss counters. User-saved facts in the archive (from older versions) do not count and are never dropped |
-| Inferred validity | 90 days; retrieval does not renew validity. Facts naming one branch or worktree: 14 days |
-| Expiry | An expired agent-saved or learned fact moves to the archive, where Recall still finds it; saving it again brings it back with a fresh lifetime. It is removed for good 365 days after its expiry date, counted as `expired_archived`. User-saved facts never expire |
+| Agent facts (agent-saved, accepted proposals and learned facts: one pool, Memory v3 phase 3b) | Valid 90 days from the last save, just-in-time delivery or Recall; facts naming one branch or worktree: 14 days. A fact's value is its deliveries plus Recalls in the last 60 days. Past 160 live agent facts the lowest-value ones (then the least recently used) move to the archive |
+| Archived facts | No count limit: one row each. Recall still finds them; saving one again brings it back with a fresh lifetime. An archived agent fact is removed for good 365 days after its expiry date, counted as `expired_archived`. User-saved facts in the archive (from older versions) are never removed |
+| Expiry | An expired agent fact moves to the archive (above). User-saved facts never expire |
 | Retained fact revisions | At most 2, for at most 30 days |
 | Fact text | 2,000 characters (one fact, or one rule with its exceptions); oversize saves fail rather than truncate meaning |
 | When-line (`when`) | 1–140 characters, one line, screened for credentials and injection patterns: the situation in which a future agent should load the fact ("When choosing a model for a subagent"), not a summary. Required by Remember for a new fact; a correction keeps the old one unless a new one is given. A fact without one (older stores, the learner, harvests) is listed by a line derived from its text at render time (first sentence or clause, at most 100 characters), never stored. A bounded learner backfill (40 facts per call, 3 calls per UTC day, at most half the daily budget) writes missing ones as metadata only, with its own retry backoff (1 hour doubling to 24 hours); memory health asks for attention after 3 failed attempts in a row |
 | ALWAYS flag (`always`) | Only on a user-saved fact, at the owner's request: rendered in full in every session. The ALWAYS memories visible in one project (global plus that project's) share 3,000 characters of text; a save past that is refused with the list of current ones |
 | Metadata merge | `when` and `always` are metadata with their own stamps (`when_at`/`always_at`: hybrid timestamp and store id). Replicas settle each field on its newest stamp, independently of the fact's text revision clock, so a metadata edit never bumps the revision, never turns a concurrent text edit into a conflict, and never loses another worker's edit of the other field. A missing stamp (older stores and replicas) is the oldest |
 | Recall by id | `Recall(ids=[...])`, at most 10 ids, local or global: full text, when-line and labels, live or archived. Scoped like keyword Recall: global facts and the session's project; another project's id is reported as not found in this project |
-| Fact document | 2 MiB; commit rejected if exceeded |
 | Prompt fact lines | The stable, task-independent base is an index: ALWAYS memories in full within their own 3,000 characters, then identity facts (`profile.name`, `profile.preferred_name`, `profile.pronouns`, `profile.language`, `profile.github_username`) always listed by their text cut to 120 characters, then one `- [id rN; source] <when-line>` line per other fact in scope, in 10,000 characters shared by the identity lines, the index and conflict/withheld notes. Index order: facts the task names, then the session's project, then the most useful. The model Recalls a fact by id for its text; an index-only line is not a use for memory health's usage signal or its unconfirmed-harvest repair. An additional task slice delivers at most 1,000 new fact-line characters per owner turn and at most 2,000 held total, requiring two distinct whole-word matches. It never displaces base facts. When full, oldest-admitted task-only facts that no longer match the current query can yield space to a new two-term match; matching facts and all base facts are preserved. Admission age is recovered from the provenance-marked chain, not a query log. Topic-driven changes have an 8,000-character cumulative allowance since the trusted full snapshot (including change-list wrappers and retired IDs), then explicit Recall is the fallback until a genuine restore/base update. This bounds 100-turn topic-switch history to the initial snapshot plus 8,000 characters, rather than buying another base snapshot on every switch. Actual source corrections, deletion, safety and scope removals reconcile even after the novelty allowance is spent. Task-only changes never cause a full base re-send. All selection follows owner, scope, checkout, conflict and injection screening; archived facts still require explicit Recall. No query log, model call or embeddings. Additions use the existing provenance-marked user-tail memory/change-list chain and its compaction preservation, never the cached system prefix. A closing note counts what is left out that Recall finds in that session: live facts omitted for space and archived facts in scope ("(144 saved facts omitted for space and 12 archived; Recall finds them by keyword.)"). Other projects' facts and setup receipts for other checkouts have their own notes; another worker's environment facts are neither shown nor counted |
 | Raw inference journal | 1 MiB; consumed lines are reaped first; past 90% with nothing consumed left to reap, unsynthesized lines (never explicit ones, never the slice a running pass is reading) are dropped down to half the cap with a warning, lowest value first and oldest first within each tier: successful read-only cells and calls, then other successful cells and calls, and last failed cells and calls, friction, and user and assistant prose. Every dropped line marks its session's workflow episode incomplete first. `journal_loss.json` counts the drops in `dropped_unsynthesized` and per kind in `dropped_by_kind` (`cell`, `tool`, `user`, `assistant`, `friction`, `other`; records from older builds have the total only); events may still be skipped under lock contention |
 | Model-assisted inference | A daily call budget per store that follows how the pass is billed: 200 attempted calls per UTC day when the learner's provider row is a flat-rate subscription (ChatGPT/Codex, SuperGrok: the rows `credential_gate.subscription_provider_model` treats as subscriptions), 48 for an API-key, metered or unknown provider. The decision is per learner, from the provider its passes use, so one store served by both kinds claims each pass against that pass's own limit. The owner policy setting `learner_daily_calls` (`PUT /api/v1/settings/owner-policy`; 0 = automatic, the default; fluid's own config key is `learner_daily_calls`) overrides either, clamped to 4–1,000, and is read at pass time, so a change applies from the next pass without a restart. Calls kept for consolidation scale with the budget (2 of 48, 8 of 200, at most 10). Each synthesis-log row records the budget that applied (`budget`: `daily`, `reserved`, `source` = `setting`, `subscription_default` or `metered_default`). The calls are spread over the day: by a given time a store may have used 2 calls plus its share of the day so far, a pass starts at least 15 minutes after the previous call (with a bigger budget, proportionally less, never under a minute), and it runs ahead of that pace only while the journal is past 60% of its cap; a pending Remember entry is not paced until a pass has read it. A pass makes one call per project in its slice and stops the slice before a project the day's remaining calls cannot pay for; when a later project's call fails or is refused, the entries the answered projects cover are still consumed. Input capped at 32,000 characters plus the fixed system prompt (6,000 for saved facts, the journal slice of up to 400 lines, then the skill library) when the learner model's context window is unknown or small, as for most local models; a known window raises it, up to 96,000. Successful read-only calls and cells (Read, Glob, Grep, LS, TaskList, ToolSearch) are consumed without being shown, unless they contain a top-level function/class definition or a lambda assigned to a name, import a saved skill, cannot be parsed safely, or name a path outside the session's working directory and the temp directory (home config, notes, another checkout); other working cells are shown with code and output clipped to their head and tail, failed ones whole. Output bounded by the configured synthesis token limit; a failed call backs off per model, 5 minutes doubling to 6 hours, shared by every session on the store |
-| Recent deletion records | 256, plus a fixed 16 KiB monotonic deletion filter (32 KiB as hexadecimal JSON) |
+| Deletion records (tombstones) | One row per forgotten fact, kept and replicated for 365 days, no count limit. A store imported from an older version keeps its 16 KiB deletion filter read-only, so what it fenced stays fenced |
 
 These defaults are conservative initial policy, not benchmark-derived optimal
 values. Inference is allowed to be lossy; acknowledged explicit saves are not:
@@ -401,7 +435,7 @@ but cannot update unknown IDs, overwrite a protected fact, or retire one. A
 learner or consolidation retirement moves the fact to the archive with no
 deletion barrier: Recall still finds it, a later agent save brings it back, and
 the retirement replicates instead of being undone by the next merge. Facts that
-leave without a Forget (the end of archive retention, a full archive) are counted in the document's
+leave without a Forget (the end of archive retention) are counted in the store's
 `losses`; failed saves are counted in `meta.json` without their text. Consolidation runs only after a
 successful synthesis pass, under the same lock; a failed consolidation is retried
 after six hours instead of waiting a full interval. Inference batches retain
@@ -564,20 +598,46 @@ shared: a user-requested save of a harvested fact drops its worker binding,
 and harvests never rewrite it; an agent confirming a harvest keeps it on its
 worker.
 
-A deletion is monotonic for the deleted ID. Compaction keeps a fixed-size filter
-instead of an unbounded tombstone log. This is deliberately conservative: filter
-false positives may withhold a fact or require an explicit restore, but cannot
-resurrect an erased ID. A restore gets a new ID. At extreme lifetime churn the
-filter can saturate; this tradeoff must remain visible, not be described as exact
-unlimited-history deletion. A future acknowledged replica-epoch reset could
-replace this conservative policy. Transport operation-log retention is owned by
-the network subsystem, not this fact-document limit.
+A deletion is monotonic for the deleted ID. Each Forget writes a tombstone row,
+kept and replicated for 365 days with no count limit (phase 3b replaced the
+fixed-size Bloom filter). A store imported from an older version keeps its
+filter read-only, so what it fenced stays fenced; it is never grown. On the
+wire nothing changed: the barrier record still carries tombstones and a
+`forgotten` filter, built at publish time from the tombstone rows and the
+imported filter, so an older worker (which keeps only its newest 256
+tombstones) still never resurrects a forgotten fact. A filter received from an
+older worker fences that merge and is not stored. A restore gets a new ID.
+Transport operation-log retention is owned by the network subsystem.
+
+### Concurrency map
+
+Several processes on one worker open the same store: the app server, a
+standalone `fluid` run, the `fact_db` command line, and during an update two
+app versions for a moment. SQLite's file locks order them; `.memory.lock` (a
+cross-process file lock plus a thread lock, `codemode/transactions.py`)
+serializes the read-modify-write transactions.
+
+| Reader or writer | Process | Rule |
+|---|---|---|
+| Native Fluid agent: Remember, Forget, harvests, corrections | App server (or a standalone `fluid` process) | `.memory.lock`, then one `BEGIN IMMEDIATE` transaction that writes only the changed rows |
+| Delegated Claude Code: memory tools through the bundled MCP bridge (`app/mcp/builtin_tools.py` → `app/core/fluid_memory.py`) | App server: the bridge is an in-process tool server | Same as the native agent |
+| Recall (both legs) | App server or standalone `fluid` | Lock-free snapshot read, then a usage write: one short transaction (one row update per fact plus a usage row), waiting at most 1 second and dropped if the store stays busy. A concurrent structural write keeps the higher count (`MAX`) |
+| Prompt index render, just-in-time candidates | App server or standalone `fluid` | Lock-free read (WAL snapshot); cached on the store stamp |
+| Just-in-time delivery log | Wherever the agent loop runs | One insert transaction, 1-second wait, dropped if busy; never fails a tool call |
+| Settings > Memory API (`app/api/memories.py`) | App server | Reads lock-free; edits, deletes and scoping go through `FactStore` under `.memory.lock` |
+| Replication export and import (`app/network/memory_records.py`) | App server (network task) | Export is a lock-free read; a received batch merges under `.memory.lock` in one transaction |
+| Learner, reflection and proposal acceptance (`continual.py`, `reflection.py`) | App server background tasks | Reads lock-free; a write (accepted proposal, consolidation) is a structural write under `.memory.lock`. `proposals.json` keeps its own lock file |
+| Maintenance (expiry, retirement, every five minutes) | App server | Structural write under `.memory.lock`; nothing is written when nothing changed |
+| Memory health | App server | Lock-free reads; `memory_health.json` has its own atomic write |
+| Code-mode kernel | Kernel subprocess | Does not open the store; memory tools run in the agent's process |
+| `python -m fluid.codemode.fact_db` | Its own process | `status`/`export` read; `downgrade` needs the app stopped |
+| First open (import) | Whichever process opens first | One `BEGIN IMMEDIATE` transaction with the marker (see Migration) |
 
 ## Forgetting and migration
 
 Forgetting a fact requires an explicit request and current revision. It removes live,
 archived and retained historical values, purges old inference evidence and legacy
-synthesis previews, and publishes a deletion barrier. Normal learning cannot
+synthesis previews, and writes and publishes a tombstone. Normal learning cannot
 reintroduce a matching forgotten key/value without an explicit restore. It does
 not erase source conversations, provider logs, backups or requests already sent
 to a provider. Offline replicas apply the deletion when they synchronize. Full
@@ -592,8 +652,8 @@ provenance, and removes the legacy archive only after a successful commit.
 Legacy inferred facts are not silently promoted into user-authorized protected
 facts. Legacy network fact records are accepted on upgrade, but their ambiguous
 absence/deletion does not override new-format explicit saves or forget barriers.
-Backward application downgrades are not supported after this migration: old
-writers do not understand the new lifecycle fields.
+Since phase 3b a store can be taken back to an older build with the downgrade
+command above; an older build reads the exported document like its own.
 
 ## Other systems
 

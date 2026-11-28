@@ -1859,7 +1859,7 @@ class Synthesizer:
             # for how the pass's provider bills it).
             record["budget"] = self._resolved_budget.record()
         store = self._store_label()
-        # Replicas merge memories.json but each keeps its own log; the id
+        # Replicas merge one fact store but each keeps its own log; the id
         # says which learner wrote a row once logs are compared.
         record["store_id"] = store
         if consumed is not None:
@@ -1927,7 +1927,7 @@ class Synthesizer:
             pass
 
     def _store_label(self) -> str:
-        """This replica's store id for log lines ("new" until memories.json
+        """This replica's store id for log lines ("new" until the fact store
         exists; the id is fixed once it does, so it is read once)."""
         if self._store_id is None:
             try:

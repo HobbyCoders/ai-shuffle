@@ -778,7 +778,8 @@ def owner_memories(session_id: str, cwd: Optional[str] = None) -> List[Any]:
             return []
         principal = session_api_user_id(row)
         owner = f"api:{principal}" if principal else "local"
-        if not (owner_root(owner) / "memories.json").exists():
+        from fluid.codemode.facts import store_exists
+        if not store_exists(owner_root(owner)):
             return []
         store = store_for_owner(owner)
         scopes = {"global", _memory_scope(row, cwd)} - {None}
