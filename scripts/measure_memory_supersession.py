@@ -92,18 +92,21 @@ def bridge_cycle(root, fact_type=None):
     for _ in range(3):
         a._facts.merge(b._facts.export())
         b._facts.merge(a._facts.export())
+    def stored():
+        return a._facts._load(read_only=True)
+
     def revision():
-        doc = json.loads(a._facts.path.read_text())
+        doc = stored()
         return next(fact["revision"] for fact in doc["entries"] + doc["archived"]
                     if global_id(fact) == gids[0])
     initial_revision = revision()
     writes, durations = 0, []
     for _ in range(5):
-        before = a._facts.path.read_bytes()
+        before = stored()
         start = time.perf_counter()
         section = a.render_memory_section() or ""
         durations.append((time.perf_counter() - start) * 1000)
-        writes += before != a._facts.path.read_bytes()
+        writes += before != stored()
     return {"nearest_retained_value_injected": texts[0] in section,
             "revision_growth_over_five_reads": revision() - initial_revision,
             "writes_over_five_reads": writes,

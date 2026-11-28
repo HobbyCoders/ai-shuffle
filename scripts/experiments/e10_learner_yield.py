@@ -2,7 +2,7 @@
 
 Reads, for a date range:
 
-* the fact stores of every replica: the local ``memories.json`` under the
+* the fact stores of every replica: the local store (``memory.db``) under the
   app's fluid skills root, plus each worker's replicated snapshot in Postgres
   (``network_memory_records`` rows ``memory-v2:<device>:<owner>``). Each
   snapshot also carries the peers' facts, so facts are de-duplicated by global
@@ -394,8 +394,26 @@ def format_report(report: dict[str, Any]) -> str:
 
 
 def load_store_file(path: Path, label: str | None = None) -> Snapshot | None:
+    """A store document from a memories.json (or export) file, a memory.db
+    or a store directory. A store in SQLite is read without changing it; its
+    memories.json is only the pre-SQLite backup and is not read then."""
+    path = Path(path)
+    root = path if path.is_dir() else path.parent
+    if path.is_dir() or path.name == "memory.db" or (
+            path.name == "memories.json" and (root / "memory.db").exists()):
+        if not (root / "memory.db").exists():
+            path = root / "memories.json"  # not imported yet: the document is current
+        else:
+            ensure_import_paths()
+            from fluid.codemode.fact_db import MigrationError, export_document
+            try:
+                doc = export_document(root)
+            except (MigrationError, OSError, ValueError):
+                return None
+            store_id = str(doc.get("store_id") or label or root)
+            return Snapshot(label=label or store_id, store_id=store_id, doc=doc)
     try:
-        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(doc, dict):
@@ -489,7 +507,7 @@ def gather(*, since: float, until: float, store_files: list[tuple[str | None, Pa
     the same store (same ``store_id``) keeps the local file's label."""
     sources = Sources(logs=list(logs))
     if local_root is not None:
-        snap = load_store_file(local_root / "memories.json", "local")
+        snap = load_store_file(local_root, "local")
         if snap:
             sources.snapshots.append(snap)
         log = local_root / ".synthesis-log.jsonl"
@@ -526,7 +544,8 @@ def main(argv: list[str] | None = None, *, emit: Callable[[str], None] = print,
     parser.add_argument("--since", help="start date, local (default: 7 days ago)")
     parser.add_argument("--until", help="end date, exclusive, local (default: tomorrow)")
     parser.add_argument("--store", action="append", default=[],
-                        help="extra memories.json, as PATH or LABEL=PATH (repeatable)")
+                        help="extra store (memories.json, an export, memory.db or its folder), "
+                             "as PATH or LABEL=PATH (repeatable)")
     parser.add_argument("--log", action="append", default=[],
                         help=".synthesis-log.jsonl, as LABEL=PATH (repeatable)")
     parser.add_argument("--skills-root", help="local fluid skills root (default: the app's)")
