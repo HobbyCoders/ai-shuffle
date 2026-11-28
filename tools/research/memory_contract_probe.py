@@ -247,7 +247,25 @@ def network_functions(root, records):
                             stage_publish=lambda cur, known, manifest: False,
                             suppress_changes=nullcontext, KIND="prose_skill", PREFIX="prose-skill:",
                             apply_record=lambda record, manifest: False)
+    # Function bodies import app.network modules locally (authored plugin
+    # drafts, the transport). Those resolve to stubs; any other app import
+    # fails loudly instead of loading the application.
+    import builtins
+    stubs = {
+        "authored_plugins": SimpleNamespace(is_record=lambda rid: False, apply_records=lambda rows: 0,
+                                            refresh_from_files=lambda cur: None),
+        "transport": SimpleNamespace(request_scan=lambda collections: None),
+    }
+
+    def scoped_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "app.network" and fromlist and set(fromlist) <= set(stubs):
+            return SimpleNamespace(**stubs)
+        if name == "app" or name.startswith("app."):
+            raise ImportError(f"the probe does not load the application ({name})")
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
     namespace = {
+        "__builtins__": {**vars(builtins), "__import__": scoped_import},
         "engine": SimpleNamespace(context=lambda: ctx, all_presence=dict), "get_db": lambda: db,
         "prose_skills": prose, "json": json, "hashlib": hashlib, "re": re, "sqlite3": sqlite3,
         "threading": threading, "logging": logging, "Path": Path, "monotonic": monotonic,
