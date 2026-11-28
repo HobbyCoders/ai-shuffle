@@ -33,7 +33,8 @@ imports `memories.json` (and a pre-3b `jit_deliveries.jsonl`) in one
 `BEGIN IMMEDIATE` transaction that also writes the marker (`sqlite.imported`
 in `meta`, with the counts). A crash mid-import rolls the whole transaction
 back, so the next open starts again; a second process waits on the write lock
-and then finds the marker and imports nothing.
+and then finds the marker and imports nothing. A store with neither file gets
+its database at its first write; reading it creates nothing.
 `memories.json` and the delivery log are never modified or deleted: they stay
 as a backup for at least one release. If the import fails (the file does not
 parse, a newer schema, another owner, a full disk), the store serves the facts
@@ -527,6 +528,17 @@ standalone `fluid` run, the `fact_db` command line, and during an update two
 app versions for a moment. SQLite's file locks order them; `.memory.lock` (a
 cross-process file lock plus a thread lock, `codemode/transactions.py`)
 serializes the read-modify-write transactions.
+
+Each thread keeps one open connection per store (at most eight stores) and
+reuses it: opening a connection and closing the last one (which checkpoints
+the WAL) cost more per Recall than the whole old document rewrite. A cached
+connection is never shared between threads or with a forked child, is
+dropped after any SQLite error and when the database file is replaced
+(compared by device and inode), and a nested use on the same thread opens a
+private one. Autocommit mode means an idle connection holds no snapshot, so
+every read sees the latest commit from any process. The `downgrade` command
+closes its connections before it moves the database aside (Windows cannot
+rename an open file).
 
 | Reader or writer | Process | Rule |
 |---|---|---|

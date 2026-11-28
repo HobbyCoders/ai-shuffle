@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -92,8 +93,52 @@ CREATE INDEX IF NOT EXISTS deliveries_session ON deliveries(session, seq);
 CREATE INDEX IF NOT EXISTS deliveries_at ON deliveries(at);
 """
 
+# One transaction: one fsync instead of one per statement.
+_DDL_ONCE = "BEGIN;" + _DDL + "COMMIT;"
+
 _ready_guard = threading.Lock()
 _ready: dict[str, str] = {}  # database path -> journal mode, once per process
+
+# Open connections, one per store per thread, reused across operations.
+# Opening a connection rereads the schema and maps the WAL index, and closing
+# the last one checkpoints and deletes the WAL with fsyncs: per operation that
+# cost more than the old whole-document rewrite. Bounded so a process that
+# touches many stores (tests) does not hold their files open.
+_POOL_SIZE = 8
+_pool = threading.local()
+
+
+class _Pooled:
+    __slots__ = ("con", "ident", "busy", "sync")
+
+    def __init__(self, con: sqlite3.Connection, ident: tuple[int, int] | None):
+        self.con, self.ident, self.busy, self.sync = con, ident, False, ""
+
+
+def _file_ident(path: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _thread_pool() -> dict[str, _Pooled]:
+    # A forked child must not use its parent's connections (SQLite forbids
+    # it); it abandons them rather than closing them.
+    if getattr(_pool, "pid", None) != os.getpid():
+        _pool.pid, _pool.cons = os.getpid(), {}
+    return _pool.cons
+
+
+def release_connections() -> None:
+    """Close this thread's cached connections (before moving a database file
+    aside: Windows cannot rename a file that is open)."""
+    cons = _thread_pool()
+    for entry in list(cons.values()):
+        if not entry.busy:
+            entry.con.close()
+    cons.clear()
 
 
 class MigrationError(RuntimeError):
@@ -163,7 +208,7 @@ class FactDB:
                     mode = str(con.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
                     if mode != "wal":
                         raise sqlite3.OperationalError(f"journal mode stayed {mode}")
-                    con.executescript(_DDL)
+                    con.executescript(_DDL_ONCE)
                 except sqlite3.OperationalError as exc:
                     # Network and some FUSE filesystems cannot share WAL's
                     # memory index. The rollback journal needs only locks.
@@ -172,7 +217,7 @@ class FactDB:
                     con.close()
                     con = self._connect()
                     mode = str(con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
-                    con.executescript(_DDL)
+                    con.executescript(_DDL_ONCE)
                 self._migrate(con)
             finally:
                 con.close()
@@ -193,17 +238,62 @@ class FactDB:
         except MigrationError as exc:
             self.failure = str(exc)
             raise
-        con = self._connect(USAGE_TIMEOUT_MS if usage else BUSY_TIMEOUT_MS)
+        entry, cached = self._checkout()
+        con = entry.con
         try:
-            if usage and _ready.get(str(self.path)) == "wal":
-                # Usage rows are best effort: in WAL their commit skips the
-                # fsync (a power cut may lose the last few, never corrupts),
-                # so the write lock is held for microseconds. Fact writes
-                # keep the default FULL sync.
-                con.execute("PRAGMA synchronous=NORMAL")
+            con.execute(f"PRAGMA busy_timeout={USAGE_TIMEOUT_MS if usage else BUSY_TIMEOUT_MS}")
+            # Usage rows are best effort: in WAL their commit skips the fsync
+            # (a power cut may lose the last few, never corrupts), so the
+            # write lock is held for microseconds. Fact writes keep FULL.
+            sync = "NORMAL" if usage and _ready.get(str(self.path)) == "wal" else "FULL"
+            if entry.sync != sync:
+                con.execute(f"PRAGMA synchronous={sync}")
+                entry.sync = sync
             yield con
+        except sqlite3.Error:
+            cached = self._discard(entry, cached)
+            raise
         finally:
-            con.close()
+            entry.busy = False
+            if cached and con.in_transaction:  # never hand on an open transaction
+                try:
+                    con.execute("ROLLBACK")
+                except sqlite3.Error:
+                    cached = self._discard(entry, cached)
+            if not cached:
+                con.close()
+
+    def _checkout(self) -> tuple[_Pooled, bool]:
+        """This thread's connection to the store and whether it is cached.
+        A nested use on the same thread gets a private one."""
+        cons, key = _thread_pool(), str(self.path)
+        ident = _file_ident(self.path)
+        entry = cons.get(key)
+        if entry is not None and entry.busy:
+            return _Pooled(self._connect(), ident), False
+        if entry is not None and (entry.ident != ident or ident is None):
+            entry.con.close()  # the file was replaced or removed under us
+            del cons[key]
+            entry = None
+        if entry is None:
+            entry = _Pooled(self._connect(), ident)
+            if ident is None:
+                return entry, False
+            while len(cons) >= _POOL_SIZE:
+                oldest = next((k for k, e in cons.items() if not e.busy), None)
+                if oldest is None:
+                    break
+                cons.pop(oldest).con.close()
+            cons[key] = entry
+        else:
+            cons[key] = cons.pop(key)  # most recently used last
+        entry.busy = True
+        return entry, True
+
+    def _discard(self, entry: _Pooled, cached: bool) -> bool:
+        if cached and _thread_pool().get(str(self.path)) is entry:
+            del _thread_pool()[str(self.path)]
+        return False
 
     @staticmethod
     @contextmanager
@@ -593,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {len(doc['entries'])} live and {len(doc['archived'])} archived facts to {args.output}")
         return 0
     _write_json(db.legacy, doc)
+    release_connections()
     aside = db.path.with_name(f"{DB_NAME}.downgraded-{int(time.time())}")
     for suffix in ("", "-wal", "-shm"):
         part = Path(f"{db.path}{suffix}")

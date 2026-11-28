@@ -622,7 +622,9 @@ class FactStore:
         delivered = {}
         self.fallback = False
         try:
-            got = self._db.read(create=not read_only)
+            # Only a write creates an empty store (as the file used to be
+            # created by the first save); one with a memories.json imports it.
+            got = self._db.read(create=not read_only and self._db.exists())
         except MigrationError:
             # Fail safe: keep serving what the backup holds (reads, Recall,
             # the snapshot); every write refuses until the import succeeds.

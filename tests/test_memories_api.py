@@ -61,7 +61,10 @@ def remove(client, memory_id, revision, version=None):
 
 
 def contents(root):
-    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    # memory.db-shm is SQLite's shared-memory index; a read updates its read
+    # marks. The database and its write-ahead log are the stored data.
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*")
+            if p.is_file() and not p.name.endswith("-shm")}
 
 
 def test_missing_store_is_empty_without_creating_any_files(world):
