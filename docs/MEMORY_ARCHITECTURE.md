@@ -121,24 +121,33 @@ The part after the colon is the fact's optional `summary`: one imperative
 line of at most 140 characters (`facts.validate_summary`), passed to Remember
 as `summary` or edited in Settings → Memory. It is screened like the text and
 the when-line (injection screen, `looks_like_secret`) on save and on replica
-import, where a summary that fails is dropped rather than refusing the fact.
-It is per-field metadata stamped `summary_at`, merged by replication like
-`triggers`, and never bumps the text revision; an older worker keeps the key
-untouched and an empty summary clears it. Without one, the line uses
-`facts.derived_summary`: the text's first sentence, cut at a word boundary to
-140 characters, with no model call. Remember's receipt for an act-time fact
+import, where a summary that fails is dropped with its `summary_at` stamp, so
+a rejected replica value never wins the merge over a valid local one. The
+whole rendered line, when-line and summary together, is screened too: a save
+whose joined line matches is refused, and a stored or replicated pair that
+matches is listed by its plain when-line. It is per-field metadata stamped
+`summary_at`, merged by replication like `triggers`, and never bumps the text
+revision; an older worker keeps the key untouched and an empty summary clears
+it. Without one, the line uses `facts.derived_summary`: the text's first
+sentence (a leading `- ` or `* ` bullet dropped; no break after e.g., i.e.,
+etc. or vs.; capitals in any script and the CJK terminators 。！？ count), cut
+at a word boundary to 140 characters, with no model call. Remember's receipt for an act-time fact
 saved without a summary shows the derived line and asks for `summary=` with
 the memory ID to correct it. Reflection proposals carry a `summary` too.
 
 The characters summaries add to their when-lines share `ACT_SUMMARY_CHARS`
 (2,400) per snapshot, charged on top of the index budget, so a summary never
-pushes another fact's when-line out. Rules the owner kept take that room
-first, then the most recently active (last save or Recall); a summary too
-long for what is left is skipped for a shorter one. Act-time when-lines claim index room
-ahead of the rest, in rank order; an unconfirmed tool harvest keeps its rank
-position instead, so a recalled fact still outranks it. A rule past the allowance is listed by its
-plain when-line, and memory health's `act_rules` signal (a note, never an
-attention) counts how many did not fit. Both legs render the same section
+pushes another fact's when-line out. Which facts are listed is decided on
+plain when-lines first: act-time when-lines claim index room ahead of the
+rest, in rank order (an unconfirmed tool harvest keeps its rank position
+instead, so a recalled fact still outranks it, and an off-domain rule stays
+out of an unrelated task's index). The allowance is then shared only among
+the listed rules: ones the owner kept first, then the most recently active
+(last save or Recall); a summary too long for what is left is skipped for a
+shorter one, and a summary that adds nothing to its when-line costs nothing.
+A listed rule past the allowance keeps its plain when-line, and memory
+health's `act_rules` signal (a note, never an attention) counts how many did
+not fit; rules left out of the index entirely are not counted. Both legs render the same section
 through the adapter's `_memory_section`.
 
 The app adapter (`app/core/provider/harness_adapter.py`) delivers on two
@@ -157,10 +166,13 @@ events, for native and delegated sessions alike:
   outside its output fence, because a cell may never print an inner call's
   result. A fact counts as delivered only once its gate settles the
   attachment as placed; a dropped one is offered again with the next match. These deliveries are recorded as late,
-  or as `detail` when the fact's summary line was in the index this session
-  was given (the adapter notes each section it renders, and PreCompact clears
-  the note until the index is sent again): the rule was on time and the
-  delivery is its full text. A
+  or as `detail` when the fact was listed with its summary in the index this
+  session holds: the rule was on time and the delivery is its full text. The
+  adapter notes the IDs of the rules a rendered section listed with their
+  summary (the plan's `act_summary_ids`), each new note replacing the last.
+  The native loop keeps `# Memory` verbatim through compaction, so the note
+  survives it there; on the delegated leg PreCompact clears it, and the
+  put-back section is noted only once it lands whole. A
   model reads added context only in its next request, after the call already
   ran, on either leg. Context added at PreToolUse (which the CLI accepts as
   `additionalContext`) arrives in that same request. Reading a fact before

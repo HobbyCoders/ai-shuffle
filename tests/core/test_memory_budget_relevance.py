@@ -164,7 +164,7 @@ async def test_restore_task_without_any_full_snapshot(tmp_path, monkeypatch, sou
     await loop._ensure_session()
     adapter = adapter_for(loop, monkeypatch)
     # The producing path writes real TurnStarted sources, but no snapshot.
-    monkeypatch.setattr(adapter, "_memory_section", lambda: None)
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: None)
     try:
         adapter.set_turn_source(source)
         await adapter.send_query("career biography")

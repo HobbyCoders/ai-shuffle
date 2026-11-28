@@ -119,7 +119,7 @@ async def _adapter(monkeypatch, memory, loop=None):
     adapter._engine = loop
     adapter._options = SessionOptions(model="fake")
     adapter._connected = True
-    monkeypatch.setattr(adapter, "_memory_section", lambda: memory["section"])
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: memory["section"])
     for name in ("_env_note", "_away_note", "_scratch_note"):
         monkeypatch.setattr(adapter, name, lambda: None)
     await loop._ensure_session()
@@ -447,7 +447,7 @@ async def _delegated(monkeypatch, tmp_path, memory):
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(fake)])
     monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "x")
     adapter = HarnessAdapter()
-    monkeypatch.setattr(adapter, "_memory_section", lambda: memory["section"])
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: memory["section"])
     for name in ("_env_note", "_away_note", "_scratch_note"):
         monkeypatch.setattr(adapter, name, lambda: None)
     await adapter.connect(SessionOptions(

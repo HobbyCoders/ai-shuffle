@@ -231,8 +231,9 @@ class SessionDelivery:
     delivered: set[str] = field(default_factory=set)
     named: set[str] = field(default_factory=set)
     pending: set[str] = field(default_factory=set)
-    # Index lines this session was given, by fact id (note_index).
-    index_lines: dict[str, str] = field(default_factory=dict)
+    # Act-time rules listed with their summary in the index this session
+    # was given last (note_index).
+    indexed: set[str] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _restored: bool = field(default=False, repr=False)
 
@@ -251,30 +252,32 @@ class SessionDelivery:
         with self._lock:
             self.delivered.update(given)
 
-    def rearm(self) -> None:
-        """Compaction may have summarised delivered text away: deliver again."""
+    def rearm(self, *, keep_index: bool = False) -> None:
+        """Compaction may have summarised delivered text away: deliver again.
+        ``keep_index``: the compaction keeps the ``# Memory`` index verbatim
+        (the native loop pins it), so its act-time rules are still held."""
         with self._lock:
             self.delivered.clear()
             self.named.clear()
             self.pending.clear()
-            # The index may be summarised away too; the after-compaction
-            # snapshot notes it again (note_index).
-            self.index_lines.clear()
+            if not keep_index:
+                # The index may be summarised away too; the put-back notes
+                # it again once it lands (note_index).
+                self.indexed.clear()
             self._restored = True
         _append(self.store, [{"at": time.time(), "event": "rearm", "session": self.session_id}])
 
-    def note_index(self, section: str | None) -> None:
-        """Take note of the ``# Memory`` section this session was given. A
-        later tool delivery of a fact whose summary line is in it (an
-        act-time rule, listed ``When <when>: <summary>``) is its detail, not
-        a late miss: the rule reached the model before the call."""
-        lines = {}
-        for line in str(section or "").splitlines():
-            found = _INDEX_ID.match(line)
-            if found:
-                lines[found.group(1)] = line
+    def note_index(self, section: str | None, summary_ids: Any = ()) -> None:
+        """Take note of the ``# Memory`` section this session now holds, in
+        place of the last one. ``summary_ids`` are the act-time rules its
+        snapshot plan listed with their summary (``act_summary_ids``); a
+        later tool delivery of one whose line is in ``section`` is its
+        detail, not a late miss: the rule reached the model before the
+        call."""
+        listed = {found.group(1) for line in str(section or "").splitlines()
+                  if (found := _INDEX_ID.match(line))}
         with self._lock:
-            self.index_lines.update(lines)
+            self.indexed = listed.intersection(str(i) for i in summary_ids or ())
 
     def on_tool(self, name: str, tool_input: Mapping[str, Any] | None, *,
                 timing: str = LATE, what: str = "this call") -> Delivery | None:
@@ -330,8 +333,7 @@ class SessionDelivery:
             if not chosen and not listed and not more:
                 return None
             body = head + lines + ([overflow_line] if overflow_line else [])
-            detail = frozenset(i for i in chosen if timing == LATE
-                               and _summary_indexed(prepared.by_id[i], self.index_lines.get(i)))
+            detail = frozenset(i for i in chosen if timing == LATE and i in self.indexed)
             delivery = Delivery("\n".join(body), tuple((i, kinds[i]) for i in chosen),
                                 tuple(listed), more, timing, detail, _session=self)
             self.pending.update(chosen)
@@ -353,15 +355,6 @@ class SessionDelivery:
     def _release(self, delivery: Delivery) -> None:
         with self._lock:
             self.pending.difference_update(i for i, _ in delivery.delivered)
-
-
-def _summary_indexed(entry: Mapping[str, Any], line: str | None) -> bool:
-    """The fact's summary line (written or derived) is in its index line."""
-    if not line:
-        return False
-    from fluid.codemode.facts import summary_line
-    summary = summary_line(entry)
-    return bool(summary) and summary in line
 
 
 def _size(lines: list[str]) -> int:

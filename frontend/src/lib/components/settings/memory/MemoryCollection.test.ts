@@ -245,7 +245,9 @@ describe('Settings > Memory page', () => {
 		const box = (await screen.findByRole('textbox', { name: 'Rule before acting' })) as HTMLInputElement;
 		expect(box.value).toBe('');
 		expect(box.placeholder).toBe('Never deploy while CI is running.');
-		expect(screen.getByText('Taken from the first sentence until you write one.')).toBeTruthy();
+		const derivedNote = screen.getByText('Taken from the first sentence until you write one.');
+		// No empty problem span beside the note while nothing is wrong.
+		expect(derivedNote.parentElement?.querySelector('.mem-problem')).toBeNull();
 		await fireEvent.input(box, { target: { value: 'Not while CI is still running; wait for green first.' } });
 		await fireEvent.click(saveButton());
 		await waitFor(() => expect(http.put).toHaveBeenCalledTimes(1));

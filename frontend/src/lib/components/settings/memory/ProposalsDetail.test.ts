@@ -95,7 +95,8 @@ it('shows the rule line an act-time proposal would be listed with before acting'
 	inbox = [
 		proposal({ act_time: true, summary: 'Run make release only from main.' }),
 		proposal({ id: 'p2', text: 'Run make check first. It catches lint.', act_time: true, summary: null, derived_summary: 'Run make check first.' }),
-		proposal({ id: 'p3', text: 'The owner likes short replies.', act_time: false, summary: null, derived_summary: null })
+		// A words-only fact is never listed as a rule, even with a stray summary.
+		proposal({ id: 'p3', text: 'The owner likes short replies.', act_time: false, summary: 'Keep replies short.', derived_summary: null })
 	];
 	await show('proposals');
 	const items = await screen.findAllByTestId('memory-proposal');

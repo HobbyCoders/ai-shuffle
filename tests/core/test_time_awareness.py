@@ -343,7 +343,7 @@ def test_post_compaction_note_uses_internal_turn_source(monkeypatch, tmp_path, r
         return {"zone": "America/New_York", "last_owner_at": "2026-11-08T23:00:00Z"}
     monkeypatch.setattr(adapter, "_time_context", context)
     for name in ("_memory_section", "_working_record_block", "_away_note", "_scratch_note", "_plan_note"):
-        monkeypatch.setattr(adapter, name, lambda: None)
+        monkeypatch.setattr(adapter, name, lambda **_: None)
     sections = adapter._compact_note()
     assert seen == ["unpark"]
     assert sections[0].name == "environment"

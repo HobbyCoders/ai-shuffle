@@ -34,7 +34,7 @@ async def test_one_scratch_per_segment_and_fallback_after_a_fold(monkeypatch, tm
 @pytest.mark.asyncio
 async def test_hook_receipt_suppresses_next_copy_even_without_memory(monkeypatch, tmp_path):
     adapter = await delegated(monkeypatch, tmp_path)
-    monkeypatch.setattr(adapter, "_memory_section", lambda: None)
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: None)
     try:
         await _delegated_turn(adapter)
         await _delegated_turn(adapter, "go [compact-now]", put_back=True)
@@ -104,7 +104,7 @@ def test_scratch_block_size_and_duplicate_paragraph_guard():
 async def test_partial_hook_does_not_repeat_delivered_scratch(monkeypatch, tmp_path):
     from fluid.engine import delegated as dl
     adapter = await delegated(monkeypatch, tmp_path)
-    monkeypatch.setattr(adapter, "_memory_section", lambda: "# Memory\n" + "large fact " * 3000)
+    monkeypatch.setattr(adapter, "_memory_section", lambda **_: "# Memory\n" + "large fact " * 3000)
     monkeypatch.setattr(dl, "COMPACT_CONTEXT_MAX_CHARS", 2000)
     try:
         await _delegated_turn(adapter)

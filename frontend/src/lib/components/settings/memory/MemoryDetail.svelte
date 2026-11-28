@@ -196,8 +196,9 @@
 									errorId="{uid}-summary"
 								/>
 								<div class="mem-foot" id="{uid}-summary">
-									<span class="mem-problem" role={problems.summary ? 'alert' : undefined}>{dirty ? (problems.summary ?? '') : ''}</span>
-									{#if !dirty && !form.summary && item?.derived_summary}
+									{#if dirty && problems.summary}
+										<span class="mem-problem" role="alert">{problems.summary}</span>
+									{:else if !dirty && !form.summary && item?.derived_summary}
 										<span class="mem-derived">Taken from the first sentence until you write one.</span>
 									{/if}
 									<span class="mem-count" class:over={summaryLength > summaryChars}>{summaryLength.toLocaleString()} / {summaryChars.toLocaleString()}</span>

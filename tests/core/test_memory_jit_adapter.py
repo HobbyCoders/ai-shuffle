@@ -145,6 +145,33 @@ async def test_an_indexed_act_rule_is_logged_as_detail_not_late(jit_adapter):
     assert jit_delivery.counts(store)["totals"] == {"detail": 1, "late": 1, "command": 2}
 
 
+@pytest.mark.asyncio
+async def test_native_compaction_keeps_the_index_and_a_put_back_counts_once_it_lands(
+        jit_adapter, monkeypatch):
+    """The native loop pins # Memory through compaction: its rules stay
+    noted. A delegated put-back may be cut, so it is noted only once the
+    loop reports it delivered."""
+    adapter, store = jit_adapter
+    for name in ("_checkout_env_note", "_working_record_block", "_away_note", "_scratch_note"):
+        monkeypatch.setattr(adapter, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(adapter, "_memory_native", lambda: True)
+    adapter._memory_section()
+    await adapter._hooks.emit(PRE_COMPACT, {})
+    _context(await adapter._hooks.emit(POST_TOOL_USE, PUSH_CALL))
+    assert jit_delivery.counts(store)["totals"] == {"detail": 1, "command": 1}
+
+    monkeypatch.setattr(adapter, "_memory_native", lambda: False)
+    await adapter._hooks.emit(PRE_COMPACT, {})
+    [memory] = [s for s in await adapter._compact_context_note() if s.name == "memory"]
+    _context(await adapter._hooks.emit(POST_TOOL_USE, {**PUSH_CALL, "tool_use_id": "t2"}))
+    assert jit_delivery.counts(store)["totals"] == {"detail": 1, "late": 1, "command": 2}
+    await adapter._hooks.emit(PRE_COMPACT, {})
+    [memory] = [s for s in await adapter._compact_context_note() if s.name == "memory"]
+    memory.on_delivered()
+    _context(await adapter._hooks.emit(POST_TOOL_USE, {**PUSH_CALL, "tool_use_id": "t3"}))
+    assert jit_delivery.counts(store)["totals"] == {"detail": 2, "late": 1, "command": 3}
+
+
 def test_kill_switch_defaults_on_and_is_not_a_setting(monkeypatch):
     monkeypatch.delenv("FLUID_MEMORY_JIT", raising=False)
     assert jit_delivery.switched_on()

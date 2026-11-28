@@ -154,13 +154,31 @@ def derived_when(text: object) -> str:
     return cut.rstrip(" ,;:-") + "…"
 
 
+# A summary's sentence break: a CJK terminator, or . ! ? and a space before
+# a capital (any script), digit, bracket or quote, but not after an
+# abbreviation that is mid-sentence.
+_SUMMARY_BREAK = re.compile(r"[。！？]|[.!?]\s+")
+_ABBREVIATION = re.compile(r"(?<![^\W_])(?:e\.g|i\.e|etc|vs)\.$", re.IGNORECASE)
+
+
+def _first_sentence(text: str) -> str:
+    for match in _SUMMARY_BREAK.finditer(text):
+        if match.group() in "。！？":
+            return text[:match.end()]
+        head, after = text[:match.start() + 1], text[match.end():match.end() + 1]
+        if (after and (after.isupper() or after.isdigit() or after in "(\"'`")
+                and not _ABBREVIATION.search(head)):
+            return head
+    return text
+
+
 def derived_summary(text: object) -> str:
     """An act-time rule's index line for a fact saved without a summary: its
     first sentence, cut at a word boundary to MAX_SUMMARY_CHARS (an ellipsis
     marks a cut). Deterministic, no model call; render-time only, never
     stored."""
-    text = " ".join(str(text or "").split())
-    first = _SENTENCE_END.split(text, 1)[0]
+    text = re.sub(r"^[-*]\s+", "", " ".join(str(text or "").split()))
+    first = _first_sentence(text)
     if len(first) <= MAX_SUMMARY_CHARS:
         return first
     cut = first[:MAX_SUMMARY_CHARS - 1]
@@ -1165,6 +1183,15 @@ class FactStore:
                 # before any write: a correction keeps its when-line unless it
                 # sends one. ``check`` raises ValueError to refuse.
                 check(text, when if when is not None else (old or {}).get("when"))
+            rule_summary = summary if summary is not None else (old or {}).get("summary")
+            if rule_summary:
+                # The when-line and summary render as one index line; each
+                # may pass the screen alone and still read as one directive.
+                from fluid.context.screening import screen_findings
+                rule = {"text": text, "summary": rule_summary,
+                        "when": when if when is not None else written_when(old or {})}
+                if screen_findings(act_line(rule)):
+                    raise ValueError("summary matches an injection pattern")
             now = time.time()
             # A behaviour rule moved to another model family keeps its text but
             # changes its key: that is a revision, not a repeat of the same save.
@@ -1971,8 +1998,12 @@ class FactStore:
                         entry["summary"] = validate_summary(entry["summary"])
                     except ValueError:
                         # A summary that fails the screen is dropped, never
-                        # stored or passed on; the derived line applies.
+                        # stored or passed on; the derived line applies. Its
+                        # stamp goes too, so it cannot win the merge and
+                        # clear a valid local summary. (A deliberate clear
+                        # arrives as "" and still replicates.)
                         entry["summary"] = ""
+                        entry.pop("summary_at", None)
                     if not entry["summary"]:
                         entry.pop("summary")
                 if type(entry.get("always", False)) is not bool:
