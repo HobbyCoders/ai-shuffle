@@ -176,15 +176,17 @@ def _words_only(saved: Any) -> bool:
 def _conflict_note(store: Any, saved: Any, project: str | None = None) -> str:
     """Owner rules that share a trigger with the saved one and disagree on a
     negation (triggers.possible_conflicts), from global rules and this
-    session's project only, as Recall sees them. A hint only, never a verdict."""
+    session's project only (global only without one), as Recall sees them.
+    A hint only, never a verdict."""
     from fluid.codemode import triggers as jit
     live = {m.id: m for m in store.memories()}
     pairs = jit.possible_conflicts([vars(m) for m in live.values()], about=saved.id,
-                                   project=project)
+                                   project=project or "global")
     others = [live[b if a == saved.id else a] for a, b in pairs][:3]
     if not others:
         return ""
-    rows = "; ".join(f"[{m.id} r{m.revision}] {_clip(m.when or m.text)}" for m in others)
+    rows = "; ".join(f"[{m.id} r{m.revision}] {_clip(m.when or m.text)}"
+                     for m in others)
     verb = "fires" if len(others) == 1 else "fire"
     return (f"\nPossible conflict: {rows} {verb} in the same situation as this rule, and only "
             "one side says not or never. If they contradict, ask the user which stands and "

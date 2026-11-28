@@ -436,16 +436,15 @@ def prepare(entries: Iterable[Mapping[str, Any]]) -> list[TriggerFact]:
     return out
 
 
-def _owner_rule(entry: Mapping[str, Any]) -> bool:
+def _owner_rule(entry: Mapping[str, Any], when: str | None) -> bool:
     """A live rule the owner kept, of the kinds a session reads as guidance,
-    whose text and when-line pass memory's injection screen."""
+    whose text and written when-line pass memory's injection screen."""
     from fluid.context.screening import screen_findings
     key = str(entry.get("key") or "")
     return bool(entry.get("protected")) and not (
         is_superseded(entry) or entry.get("conflicted") or entry.get("retired_at")
         or key in IDENTITY_KEYS or is_rule_key(key) or key.startswith(_RECALL_ONLY_PREFIX)
-        or screen_findings(str(entry.get("text") or ""))
-        or screen_findings(str(entry.get("when") or "")))
+        or screen_findings(str(entry.get("text") or "")) or screen_findings(when or ""))
 
 
 def _shared_trigger(a: Triggers, b: Triggers) -> bool:
@@ -470,15 +469,17 @@ def possible_conflicts(entries: Iterable[Mapping[str, Any]], about: str | None =
     overlapping scopes, sharing a trigger, and exactly one of the two texts
     says "not", "never", "avoid" or the like. Deterministic and cheap; a hint
     for the owner, never a verdict. With ``about``, only pairs with that id;
-    with ``project``, only global rules and that project's."""
+    with ``project``, only global rules and that project's (``"global"``:
+    global rules only)."""
     rules = []
     for entry in entries:
         scope = str(entry.get("scope") or "global")
         if project is not None and scope not in ("global", project):
             continue
-        if _owner_rule(entry):
+        when = written_when(dict(entry))
+        if _owner_rule(entry, when):
             text = str(entry.get("text") or "")
-            triggers = with_explicit(derive_triggers(written_when(dict(entry)), text, entry.get("key")),
+            triggers = with_explicit(derive_triggers(when, text, entry.get("key")),
                                      entry.get("triggers"))
             rules.append((str(entry.get("id")), scope,
                           bool(_NEGATION.search(text.translate(_APOSTROPHES))), triggers))
