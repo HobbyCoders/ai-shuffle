@@ -25,7 +25,7 @@ export interface TranscriptRange { readonly start: number; readonly end: number 
  * the mounted slice (its reply is over the content budget) would be shown bare
  * above "Show newer messages". */
 export function jumpTargetMounted(range: TranscriptRange, index: number, count: number): boolean {
-	return index >= range.start && Math.min(count, index + 2) <= range.end;
+	return index >= range.start && index < count && Math.min(count, index + 2) <= range.end;
 }
 
 /** Read the actual native selection before a range shift, including reverse
@@ -198,10 +198,12 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		return { start, end };
 	}
 	function move(start: number): TranscriptRange {
+		jumpPair = null;
 		const next = startingRange(start);
 		return commit(next.start, next.end);
 	}
 	function endingAt(end: number): TranscriptRange {
+		jumpPair = null;
 		const next = endingRange(end);
 		return commit(next.start, next.end);
 	}
@@ -210,8 +212,13 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		// forward fill, so repricing would drop the prompt again at the next turn
 		// boundary of a chat that is still running. Paging that left the range
 		// as it was (no older row fits beside the reply) does not end the pair.
+		// It holds only while it is still that range and still over the budget:
+		// the same indices in another chat, or a reply that has since shrunk,
+		// are priced the normal way.
 		if (jumpPair) {
-			if (range.start === jumpPair.start && range.end === jumpPair.end && range.end <= count && charge(range.start) <= budget) return range;
+			const held = range.start === jumpPair.start && range.end === jumpPair.end && range.end <= count
+				&& charge(range.start) <= budget && charge(range.start) + charge(range.start + 1) > budget;
+			if (held) return range;
 			jumpPair = null;
 		}
 		const next = startingRange(range.start);
@@ -253,6 +260,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		// reading key. Dropping only newer rows is not paging: the next streaming
 		// reprice re-adds them, and the slice then flips every frame at the top.
 		if (preserveReading && paged.start >= previous.start) range = previous;
+		if (range !== previous) jumpPair = null;
 		return range;
 	}
 	return {
@@ -275,6 +283,7 @@ export function createTranscriptWindow({ cap = TRANSCRIPT_WINDOW_CAP, step = 30,
 		extendOlder,
 		loadOlder: extendOlder,
 		extendNewer(): TranscriptRange {
+			jumpPair = null;
 			const previous = range;
 			let next = startingRange(range.start + shift());
 			if (weighted && previous.end < count && (next.end <= previous.end || next.start >= previous.end)) {

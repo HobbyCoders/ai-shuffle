@@ -302,6 +302,30 @@ describe('nested transcript mount budget', () => {
   expect(jumpTargetMounted(range, 8, 20)).toBe(false);
   // The last row of the transcript has nothing after it to wait for.
   expect(jumpTargetMounted(range, 7, 8)).toBe(true);
+  // A row past the end is not there to scroll to.
+  expect(jumpTargetMounted(range, 8, 8)).toBe(false);
+  expect(jumpTargetMounted({ start: 0, end: 0 }, 0, 0)).toBe(false);
+ });
+
+ it('a jump pair from one chat does not hold the same indices of another', () => {
+  let costs = [70, 20000, 70, 300];
+  const window = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  window.setItemCount(costs.length);
+  expect(window.windowAround(0)).toEqual({ start: 0, end: 2 });
+  // The view switches to a short chat that follows its tail: same indices.
+  costs = [70, 300];
+  expect(window.setItemCount(costs.length, { followTail: true })).toEqual({ start: 0, end: 2 });
+  // The reader scrolls up there and a third row arrives: it is mounted.
+  costs.push(70);
+  expect(window.setItemCount(costs.length, { followTail: false })).toEqual({ start: 0, end: 3 });
+  // A held pair whose reply has since shrunk under the budget is released too.
+  costs = [70, 20000, 70];
+  const shrinking = createTranscriptWindow({ cost: i => costs[i], budget: 12000 });
+  shrinking.setItemCount(costs.length);
+  expect(shrinking.windowAround(0)).toEqual({ start: 0, end: 2 });
+  costs[1] = 300;
+  costs.push(70);
+  expect(shrinking.setItemCount(costs.length, { followTail: false })).toEqual({ start: 0, end: 4 });
  });
 
  it('pins the selected span in either direction without accumulating mounted history', () => {
